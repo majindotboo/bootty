@@ -26,6 +26,10 @@ This file describes the current production structure.
 | Application identity and local namespace | `bootty-config` | A conflicting process identity fails startup. |
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |
+| Registered project paths, defaults and disclosure | `bootty-mux::WorkspaceRuntime` and `WorkspaceRepository` | Binding-scoped `workspace_projects` records survive without sessions. Registration, customization and collapse commit before publication. Names, icons and new-session provider/worktree defaults are stored together; custom image paths reference local presentation assets. |
+| Saved session identity, title and task lifecycle | `bootty-mux::WorkspaceRuntime` and `WorkspaceRepository` | Persist state before publication; lifecycle changes never terminate or rename backend processes. |
+| Saved terminal topology and bounded styled history | `bootty-mux::session_snapshot` and `WorkspaceRepository` | Complete, generation-scoped captures commit together; partial captures and failed writes retain the previous checkpoint. Logical identities remain separate from observed backend IDs. |
+| Saved terminal presentation contract | `bootty-control::terminal_history` | Bounded text and SGR styles only; headless and desktop readers reject the same unsafe controls. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
 | Backend processes and native topology | The selected provider under `bootty-mux` | Bootty reports backend failure and does not invent success. |
 | Git project, worktree, branch, and bounded diff facts | `bootty-git` | Git commands run through the owning host runner; remote paths never use local filesystem state. |
@@ -40,10 +44,18 @@ This file describes the current production structure.
 | Desktop command resolution and UI policy | `bootty-ui::commands` | UI adapters resolve intents and delegate domain work to its owner. |
 | Clipboard image transfer | `bootty-host::clipboard_image` | The daemon verifies the complete byte count and SHA-256 digest before publishing a private temporary PNG path. |
 | Local control transport and instance ownership | `bootty-control` | The singleton lease publishes one owner-local endpoint. |
-| Native agent integration state and assets | `bootty-agents` | Native providers own bounded event parsing and integration files. |
+| Terminal agent observation and launch metadata | `bootty-agents::TerminalAgentService` | Observers own exact terminal identity, bounded activity and retained provider session metadata. |
+| Seekable file and media reads | `bootty-host::file_reader` | Files are opened on their owning host with bounded ranges and revision checks; account-scoped history rejects paths outside its captured root. |
+| Private stdio framing and remote endpoint relays | `bootty-host::private_stdio` | Bounded bytes use the owning host's encrypted process stream; tool grants and command authority stay with `bootty-agents`. |
+| Native conversations and provider subprocesses | `bootty-agents::NativeAgentService` | Commit catalog snapshots before publication; resume only the captured task, account and provider conversation. |
+| Persisted agent runs and dispatch attempts | `bootty-agents::OrchestrationService` | Commit before publication; recovery interrupts outstanding attempts without replaying prompts. |
+| Desktop capture and input | `bootty-computer` | Disabled, denied, stale or occluded targets fail before input; the platform helper validates the exact observed process and window. |
+| Native browser views and validated web content | `bootty-browser` | Native window systems report capability errors; navigation and bounded page events pass through the host adapter. |
+| Local browser annotations and credential origin checks | `bootty-browser` | Bounded annotations persist atomically. Retained credential library APIs validate the document and exact origin; platform-store records remain separate from browser-managed passwords. |
+| Browser page identity, selection and saved placement | `bootty-ui::BrowserPanel` and `gpui_dock` | A stale page ID fails rather than navigating another page; page content and placement persist in `native-panels.json`. |
 | Terminal pane topology, ratios, and focus | `bootty-mux::BindingRuntime` | Providers remain authoritative. Hosts consume `MuxPaneLayout` and submit typed pane operations; they never persist a competing terminal tree. |
-| Workspace composition | `bootty-ui::workspace_composition` | Reconciles the binding's terminal projection with Bootty-native panels. The terminal center is one locked singleton leaf retargeted at the selected mux window; it renders the whole split tree from the binding projection and never takes part in Dock drag, tabs, or documents. Documents live in the right dock. Dock never mirrors mux splits, Dock geometry never flows back into mux ratios, and native leaves never enter a backend command. |
-| Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock places native leaves around the reconciled terminal projection; `native-panels.json` stores one versioned layout per window, shared across Spaces. |
+| Workspace composition | `bootty-ui::workspace_composition` | Projects real backend windows and pane layouts. A pane carrying a native conversation identity renders its agent view in that pane's rectangle. Numbered tabs, navigation, splits and close operations use the same backend targets for terminals and agents. Documents live in the right sidebar; the center has no inner tab strip. |
+| Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock composes Sessions on the left, the selected backend window in the center, and tools/documents on the right. `native-panels.json` stores sidebar sizes, visibility and documents. Center projections retain logical task/window keys and resolve through the current binding mapping. Agent placement belongs to real mux panes, never a separate Dock conversation tab or split tree. Transient creation choosers are not saved. |
 | Per-window coordination and GPUI projections | `bootty-ui::{AppState, GpuiWorkspace}` | Views consume snapshots and emit typed intents; they do not become domain owners. |
 | Preserved custom script diagnostics | `bootty-ui` | Existing Lua and Luau files remain on disk and are reported as unsupported. |
 
@@ -67,15 +79,16 @@ Clipboard image pastes run as pending commands. Native clipboard reading stays i
 `bootty-ui::platform`; PNG staging and transfer run on a worker. The command keeps
 the original terminal target and revalidates its generation before inserting the
 path. Switching focus never redirects a pending paste. Cancellation remains
-available until insertion starts. Remote daemon protocol 4 includes bounded document operations and streamed image
-uploads over the existing SSH process transport.
+available until insertion starts. Bounded remote document operations and streamed
+image uploads use the shared host transport.
 
 ## Workspace and mux
 
 `bootty-mux::repository::WorkspaceRepository` owns SQLite access for Spaces and
-backend bindings. It loads one validated `WorkspaceSnapshot`, applies schema
-migrations and legacy import, and records binding-scoped journals before backend
-mutations. A failed commit leaves the accepted snapshot active.
+backend bindings. It creates fresh databases or loads the current schema as one
+validated `WorkspaceSnapshot`, and records binding-scoped journals before backend
+mutations. Unsupported schema revisions return a load error without conversion
+or deletion. A failed commit leaves the accepted snapshot active.
 
 `bootty-mux::workspace::WorkspaceRuntime` owns the live committed workspace and
 its Space bindings. `BindingRuntime` owns one realized binding, its
@@ -107,7 +120,7 @@ intent
 Backend membership cannot share the SQLite transaction. Bootty writes a
 binding-scoped journal before create, rename, or ditch; the next authoritative
 backend snapshot resolves partial completion. Space identity, remote placement,
-selection restore, session membership/order/name records, migration state, and
+selection restore, session membership/order/name records, and
 reconnect policy remain in mux. The UI receives binding session groups and
 immutable projections; it does not traverse or mutate repository storage.
 
@@ -138,8 +151,13 @@ catalog-backed remote Spaces.
 `bootty-mux` delivers rmux live pane bytes through its public `pipe-pane` API.
 A Bootty daemon helper shares each pane's stream over local IPC with bounded
 buffers and exits when its last reader leaves. No output is spooled to disk.
-The SDK keyframe restores the initial text and modes; its bounded recovery ring
-is not used for live image data. Remote pane readers use the same host-side path.
+The SDK keyframe restores the initial text and modes. The pinned rmux v0.10 patch
+gives each pipe a bounded one-MiB byte queue instead of an overwritable cursor.
+PTY publication runs on the blocking pool while a pipe is attached, so pressure
+reaches the producer without holding the server's output-state lock. Pipe closure
+releases blocked publication. A pane closed during helper startup is normal
+teardown, observed through its stable SDK identity. Remote readers use the same
+host-side path. Return to registry dependencies when rmux releases this contract.
 
 ```text
 TerminalSession
@@ -165,7 +183,8 @@ after skipped publications.
 
 `bootty-terminal` owns shell selection, environment construction, PTY creation,
 child cleanup, worker scheduling, command delivery, frame publication, and
-runtime health.
+runtime health. Unix PTY input uses an owned duplicate of the master descriptor;
+closing it sends no synthetic newline or EOF key to a surviving backend pane.
 
 `bootty-ui` owns semantic paint planning, text policy, vector sprite geometry, and GPUI scene
 lowering. `GpuiTerminalView` consumes immutable frames and owns view-local focus, IME, cursor
@@ -262,17 +281,264 @@ Detached tasks and event subscriptions use opaque owner-local capability IDs.
 
 ## Agents
 
-`bootty-agents` owns the native Pi, Codex, and Claude providers: provider state,
-explicit event parsing, command forwarding, lifecycle generations, hook and
-integration file installation, and typed agent snapshots. Providers run in visible
-terminal panes. Pi reports events through its installed adapter; Codex and Claude
-report native command-hook events. The service accepts a narrow pane-scope resolver from the UI and a
-control event publisher; it does not import mux or GPUI.
+`bootty-agents::TerminalAgentService` owns native Pi, Codex and Claude observation,
+exact terminal targets, retained launch metadata and provider account queries.
+The backend owns each interactive TUI, its tabs, splits and process lifetime.
+Codex uses a bounded local app-server relay, Claude queries its exact native
+session identity, and Pi receives events from a per-launch native extension.
+These observers retire with their owner. Hook installation is no longer offered;
+existing integration files and legacy event records are preserved.
 
-`bootty-ui` composes one agent service per desktop owner, exposes its descriptors
-through the desktop command catalog, and projects typed agent facts into chrome
-and panels. Agent workers and event publication remain asynchronous and are
-retired before a replacement can publish stale state.
+`bootty-ui` composes the service into the same command catalog used by the palette,
+CLI and socket. Terminal launch/resume/fork open a backend window in the selected
+task. Terminal actions receive literal argv and return an issued terminal target.
+Nested commands preserve the original caller. Palette and keybinding Open actions
+focus that returned target; other callers remain detached.
+
+`NativeAgentService` owns direct Codex app-server, Pi RPC and Claude stream-JSON
+subprocesses, bounded transcript snapshots, first-hand approvals/questions and a private `conversations.json`
+catalog beside terminal observation state. The full workspace start view submits
+`agents.native.start` with a frozen account/profile, directory and saved task
+identity. Its real backend pane carries the conversation identity and renders the native agent instead of the backing terminal. The backing process supplies scoped terminal tools; it is not an extra visible tab.
+The conversation catalog retains the resolved Bootty profile ID with the account directory;
+resume and fork reuse both even after profile preferences change. Older records keep
+their captured account without borrowing a current profile name.
+Enter opens the conversation; Cmd+Enter leaves current focus alone. Cmd+N opens the
+start view. Two empty Enters create a shell; editing resets that confirmation.
+Codex can defer saving an empty provider thread until its first accepted turn.
+If that empty reservation has no rollout after restart, Bootty creates a fresh
+provider thread under the same conversation identity. Accepted turns and seeded
+side chats retain their captured provider identity; missing history remains an error.
+
+Remote native launches freeze the executable, account directory and canonical project
+on the captured host. Their provider pipes use the same encrypted process transport
+as terminal and control streams; resume never resolves an account on the desktop.
+Per-launch MCP files use a private remote socket relayed to the original local tool
+lease. Credentials stay on the provider host. Pi uses its public MCP registration
+API, or its public tool registration API on versions predating that API. Native
+child spawning creates a real mux task on the same host and starts a fresh native
+provider identity with the parent's captured account, project and configuration.
+`NativeAgentService` persists the exact spawning conversation. Child tool leases
+retain their live ancestor and lose spawning, supervision, sibling reads and capture authority.
+native parents can interrupt or stop only children whose persisted `spawn_parent`
+matches the exact live parent generation. Both operations repeat the private
+attachment, caller, Binding and cancellation checks through the shared command path.
+Cold provider restoration does not renew a parent's former tool grant.
+MCP creation receipts return issued targets and compact child metadata; reusable
+launch configuration, account paths and transcripts remain in the host's records.
+Images travel as provider payloads. Other admitted files use the host's checksummed
+transfer stream into a private directory under the captured provider account. The
+directory is scoped by application identity and a digest of the provider conversation
+identity, so pane numbers and other desktops cannot collide. Repeated uploads verify
+the existing bytes without replacing them. Only the received owning-host path reaches
+the provider; desktop paths are never sent. These copies remain alongside the provider's
+durable history across disconnects, restarts, and deletion of the local conversation.
+Established foreground and background conversations reconnect through the shared resume
+command with bounded backoff. Recovery preserves provider identity and never replays input.
+Stopping a conversation or disabling its provider cancels pending recovery. Failed creation
+returns its exact durable reservation target, so the error remains in its own mux pane.
+
+New tab and split open a chooser in their captured destination before starting a
+process. Agent selects a provider; Terminal and terminal profiles use the same
+shared creation path. Browser and Diff remain right-sidebar tools. The chooser
+captures the focused terminal or conversation, task and Binding, so later focus
+changes cannot redirect its selection. Cancel discards only that empty chooser.
+
+Choosing Agent and the provider submits `agents.native.tab` against an existing
+captured task and Binding, or `agents.native.start` in an empty Space. Each launch
+creates a distinct conversation in a real backend window. Native forks create a real backend split to the right. `MuxPaneAnchor.native_agent` carries the stable conversation ID: native stores it on the pane, tmux stores `@bootty_native_agent` as a pane option, and rmux stores it under the stable pane ID in its server options. Saved terminal checkpoints retain the same marker and reapply it to restored backend pane IDs. Provider credentials and thread IDs remain in the private agent catalog. Closing an agent closes its exact backend pane and stops its provider while preserving its catalog and transcript. Opening it restores its task and resumes that provider identity.
+An Agent created in a split belongs to that backend window and has no duplicate global tab. Cmd+T from an Agent creates a new outer chooser; cancelling restores
+the previous tab. Completing it replaces that chooser in the same destination.
+
+The composer's worktree options edit the starting ref and optional branch/folder
+overrides without leaving the draft. Worktree creation submits `worktree.create`
+against that draft's captured Binding. After Git confirms the checkout, the
+chooser submits session creation in it; failed provider startup retains the
+checkout for retry. Project discovery workers never perform Git mutations.
+
+The GPUI conversation view publishes streamed markdown and tool output. Its request
+view owns approval and question controls and emits responses with the captured
+target through the existing conversation dispatcher. Send,
+interrupt and pending requests use separate command paths so cancellation does
+not wait for prompt acknowledgement. Every operation validates the captured
+conversation generation and Space. Resume retains the original provider thread
+and account. Opening a stopped conversation automatically resumes that exact
+provider identity through the shared focus command. Unexpected remote EOF retries
+the captured conversation with bounded backoff and one pending resume, without
+resending its prompt, stealing focus or repeating error notifications. The transcript gutter indexes
+user turns, with cached virtual-list measurements retained while streaming;
+copy actions and returning to the live tail act on that same transcript. Transcript
+refresh runs on a worker and follows service revisions, without an idle polling loop.
+Active-turn follow-ups use Codex's exact `turn/steer` acknowledgement or Pi's
+`steer` disposition; rejection preserves the active turn and the composer draft.
+Claude's transport currently admits prompts between turns. Context occupancy is
+shown only from reported token counts and provider-advertised capacity. File
+changes render the provider's diff rather than its raw JSON envelope.
+Pi history uses bounded seekable reads on its captured host and rejects files outside
+the captured account's session store. Source revisions are checked across pages.
+Pi's persisted parent tool results restore their bounded nested execution details;
+refreshing or reopening history retains the observed command input and outcome.
+
+`NativeAgentService` also owns per-conversation attachment manifests and private
+file copies. Transcripts retain typed attachment IDs and presentation metadata;
+source paths never enter saved messages. Image previews are bounded reads from
+that store, and deleting a conversation removes its local copies. Inline response
+comments retain the exact assistant message ID, UTF-8 source range, and inline
+prompt token range. Sent quotes stay inline and navigate to the referenced
+response. Provider context includes those references while authored text stays intact.
+
+Codex and Pi model menus use their live protocol catalogs; Claude uses the model
+capabilities advertised by its initialized transport. Creation discovery
+initializes a transient transport without starting a turn, then closes it.
+Selected models and reasoning persist before the next prompt is submitted.
+Provider permission modes are retained in the same conversation configuration.
+The default preserves the captured account/profile policy. Supervised, automatic
+edit acceptance, provider auto review (Codex/Claude), and full access use the
+provider's own policy. Pi uses its public blocking tool hook for supervised
+and edit modes. Changing policy saves it before stopping the idle provider,
+then resumes the exact conversation with a fresh scoped tool lease; it never
+replays a prompt. Provider policy cannot widen Bootty's application/tool grants.
+The private parent tool lease retains at most 128 exact shell targets returned by
+its accepted creations. Terminal input, capture, interruption and close use the
+shared commands against those targets without changing selection. This authority
+is transient: catalog history and terminal listings never grant it, and renewal,
+revocation or disabling child tools removes it. Agent carrier panes are excluded.
+Codex MCP confirmations with an empty form schema use first-hand, once-only
+approval in the conversation. Structured MCP forms and URL/device authentication
+remain pending and can be declined; they never invent answers or terminate the
+provider merely for asking for input.
+Model favorites live in the same agent catalog, scoped to the provider and exact
+account directory and owning host. Both composer pickers read that accepted catalog; starring a
+model commits before publication and does not configure or prompt a conversation.
+Claude applies model and effort changes through its validated control protocol.
+Its CLI-only maximum effort is offered at creation; live pickers expose the
+efforts accepted by flag settings. Loading and retry states retain the draft.
+
+Both Agent composers share retained completion state. Commands and skills come
+from the selected provider/account's live protocol; probing a creation draft does
+not start a conversation. File search runs through `bootty-host::files` on the captured host, with bounded
+ranked Git indexes and ignore rules. Outside Git it completes the typed directory
+without recursively scanning a home tree.
+Selecting a file resolves `files.source` on that same captured binding. The
+seekable host reader verifies its revision while copying at most 50 MB into a
+private local staging directory. The original name and staged bytes stay alive
+until attachment admission; changing the draft's host discards a pending result.
+OS file-picker and clipboard attachments remain local user-selected sources.
+App choices come from current exact local window tokens. Atomic editor tokens
+preserve skill, file, and app references through undo and draft restoration.
+Only authored text can invoke skills; appended browser annotations, files and
+assistant quotes remain reference material. Codex receives typed skill inputs;
+Pi uses its native leading `/skill:` command.
+
+Native launch binds the persisted conversation target to its private tool lease
+before provider initialization. Automatic agent listing reads compact accepted
+activity only in that lease's Binding; status and model discovery use its exact
+conversation and provider account. These reads share terminal/capture cancellation
+and revocation, and never accept caller-supplied commands, targets or account paths.
+Parent terminal and native integrations can inspect their captured Space's name,
+backend and host label through `spaces.inspect`; child tools cannot inspect parent
+Space metadata. `terminal.activities` lists up to 128 observed terminal panes in the
+same captured Space, with names and opaque targets. It excludes native agent
+carriers and process/directory fields, and does not start detached tasks.
+These reads follow the lease rather than the selected Space.
+
+Side chats copy history through a completed assistant response, retain the exact
+project/account/model, and create a fresh provider session. `bootty-agents` owns
+the durable source/boundary, immutable copied transcript and context-delivery receipt. The copied prefix and
+attachment files are saved before publication; historical approvals, app grants
+and provider writer identities are never copied. The first ordinary prompt seeds
+that prefix once per provider identity. Quotes and nested forks read that saved
+prefix even after live history is trimmed. A fork from an older Codex or Pi
+provider page reads through that response without moving the displayed page;
+lookback is bounded to 64 pages and copied context to 2 MiB. Large provider echoes receive extra
+bytes only for the exact history submitted in their owned turn; unrelated fields
+retain the ordinary control budget. `bootty-ui` places the child in its own
+split and keeps source links without modifying the parent transcript.
+
+Provider-reported subagent lifecycle rows preserve identity, model, observed
+status and timestamps across transcript restoration. Child updates may outlive a
+parent turn, but only that parent session can introduce a child. Codex child
+transcripts use `thread/read` after verifying reported ownership; viewing never
+resumes a child or acquires its writer. Pi task IDs are output/lifecycle identities,
+not invented conversation IDs. Claude Agent/Task notifications must name an
+observed parent tool. Unknown or foreign children remain inaccessible.
+
+An explicit application mention grants that conversation access to its selected
+window for the next submission. The lease owns opaque reference IDs, process
+incarnation and geometry. A new prompt replaces that scope; stop/revocation
+cancels pending application work. Grants and pixels are not persisted or inherited
+by subagents. Screenshot, focus and input tools reenter the shared command path;
+the signed helper still checks existing OS permissions, secure input and exact
+window identity. Input requires the selected window to be focused; the focus
+command raises only that window. Global feature defaults cannot widen a mention's
+scope or substitute another application.
+
+The native transcript folds completed thinking and tool work by turn while keeping
+final responses visible. Live work retains its elapsed timer independently of the
+fold. Selected assistant text supports `C` to comment, `R` to choose a reaction
+with arrows and Enter, and `Y` to copy. These shortcuts apply only to the focused
+response selection; the prompt editor keeps ordinary typing. Comments and Pi's
+reaction meanings share the validated citation payload and editable inline tokens.
+
+Native tool attachments expose `get_agent_activity` for the exact captured
+conversation, including stopped retained history. `bootty-agents` projects up to
+32 recent entries, most recent first, with 8 KiB of UTF-8 text per entry and an
+explicit truncation flag. Launch configuration, account paths and tool inputs are
+excluded. It uses the same read grant, generation checks and revocation as status
+and model discovery; it does not load older provider history pages.
+
+`bootty-agents` also owns the path-free provider-selection projection behind
+`agents.native.provider`, `list_providers` and `inspect_provider`. These read the
+captured conversation's persisted model, effort, fast mode and permission choices.
+`agents.native.profiles` and the root-only `list_profiles` tool project at most
+sixteen configured profile IDs and display names for that provider, alongside the
+retained profile ID. Names do not grant account access; paths and launch arguments
+stay with the host.
+The tool catalog covers only the attached provider/account; it does not broaden
+the launch grant or inspect authentication.
+
+Native conversations support local Codex, Pi and Claude on Unix. Resume keeps
+Codex's thread ID, Pi's exact session file or Claude's observed session UUID, plus
+the frozen account and directory. Claude retains recent transcript snapshots;
+its protocol provides no full-history query. Remote conversations and other providers
+require a supported direct protocol implementation;
+unsupported requests fail before shell creation. Native conversations receive
+their private Bootty tool attachment under the existing provider policy. Each
+attachment retains its exact terminal, caller, Binding, account and captured launch;
+a sibling terminal observer cannot substitute its own identity. Closing the
+associated terminal or revoking its authority invalidates inherited child
+authority without widening grants. A failed provider launch retains the saved task
+and conversation; opening it retries the captured resume path. Failed launches
+are never reported as successful.
+
+Ordinary creation, forks and spawned children publish the reserved `Starting`
+conversation into its real mux pane before provider initialization. Placement
+and provider failures retain that identity and report an error; they cannot
+substitute a shell or change the parent conversation.
+
+Provider account inspection uses the selected account store and supported native
+protocols. Codex's read-only `account/read` reports account type and ChatGPT plan;
+Claude's JSON account status reports authentication and subscription metadata.
+Pi reports only readiness and authentication type for the selected model provider.
+Unavailable metadata remains unknown. Checks never sign in, refresh credentials
+or infer subscription tiers from credential presence.
+
+Agent prompt, follow-up and interrupt commands require a live observation in
+Idle, Working, Waiting, Approval or Input state. Restored metadata is readable but cannot authorize
+input. Explicit stop still closes its exact retained terminal. Worker-side
+`shutdown_and_wait` joins currently owned observations without closing backend
+terminals; the GPUI teardown path remains nonblocking.
+
+`OrchestrationService` owns bounded dependent runs and immutable snapshots.
+`bootty-ui` freezes provider, account, caller and destination at creation, then
+dispatches through the shared mailbox. Each accepted node retains its
+exact native conversation generation and first-turn receipt ID. Only that receipt's
+Succeeded outcome releases dependencies; idle, later turns, failed or interrupted
+turns and unavailable observations never imply success. Failed initial prompts
+retain their created conversation and error for explicit recovery.
+Explicit restart requires the original durable window, Space and caller; it
+obtains a fresh binding target without expanding tool authority. Old runs lacking
+that destination metadata remain interrupted rather than using current focus.
 
 Bootty does not infer agent state from process names, terminal output, screen
 contents, or transcripts. The service persists what agents reported to a
@@ -291,7 +557,8 @@ per-window private file injected by `bootty-ui` and restores it, marked
   persistence, mux, Git, host, and agent operations to their owners.
 - `bootty-control` owns command descriptors and invocation envelopes,
   cancellation, mailbox backpressure, local transport, detached task and event
-  subscription capabilities, discovery, and the singleton lease. It has no
+  subscription capabilities, discovery, the singleton lease, and validation of
+  the shared saved terminal presentation format. It has no
   product command implementations.
 - `bootty-config` owns product configuration, defaults, includes, validation,
   writeback, identity namespaces, keymap JSONC parsing/editing/matching, and
@@ -373,73 +640,70 @@ small interface. File size is a signal for review. It is not proof of depth.
 
 ### Native tool panels
 
-`bootty-ui::gpui_dock` composes one terminal workspace, documents, and tools into a
-GPUI Kit Dock. The terminal stays in the center; the binding owns its backend
-windows, pane topology, processes, and input. Documents initially open in the right
-dock. Typed panel preferences select each tool's home dock and optional top or bottom
-status button. All panel toggles use the same command path.
-Opaque client attachments retain their backend-owned
-layout. Builders resolve existing panel entities by Dock-area identity; they cannot
-restore another window's host or editor. Registration is removed when its workspace
-is released. Layout reads run off the UI thread. One application-owned writer orders
-atomic, locked saves across windows. Unknown panel names use
-the library's placeholder and retain their saved state.
+`bootty-ui::gpui_dock` composes fixed homes: Sessions on the left, a terminal
+singleton in the center, and one labeled tool/document tab group on the right.
+Dock edges resize; panels cannot relocate or create nested groups. The binding
+owns terminal windows, panes, processes and input. Native panels never reconstruct
+mux topology. One application-owned writer persists dimensions, visibility and
+content in the window's `native-panels.json`.
 
-One DockArea owns geometry across Space and session switches. Files, Changes, and
-Diff follow the selected terminal and its directory. Captured Git drafts and
-in-flight writes retain their original context; late replies cannot open panels
-in another context. Open documents retain their own host and path identities.
-Layout version 8 removes the retired Jobs, Transfers, Recovery, and Shell panels.
+Files, Changes and Diff follow the selected terminal and directory. Captured Git
+operations retain their original binding and repository; late replies cannot
+retarget another context. Documents retain their own host and path identities.
+Each browser page is a peer tab in this same right group, with an exact page ID;
+there is no nested browser tab strip. The browser owner hides native views when
+the dock or page is hidden and while GPUI overlays require keyboard focus.
 
-Sessions includes the compact Space switcher; Agents includes the usage and quota
-meters. Neither section is a standalone Dock leaf, so neither inherits the split
-minimum height. Saved standalone Spaces and CodexBar panels merge into those owners;
-existing destination panels keep their locations. Legacy `show_spaces` and
-`show_codexbar` invocations open Sessions and Agents respectively.
+`browser.snapshot` reads bounded visible text for an exact page ID and host window.
+An optional document-start token pins the read to an earlier host observation;
+without it, the owner captures the current document before reading. It never
+focuses or navigates. The browser owner rechecks
+the native view, load revision, address and document before publication; cancelled
+or expired reads publish nothing. Form fields and editable content are excluded.
+Traversal stops at 10,000 text nodes or 16,384 UTF-16 units and reports truncation.
+This read API does not itself grant agents access: a browser MCP capture requires
+a host-issued exact window, page and document. URLs and annotation JSON cannot
+issue that grant.
 
-`gpui_dock_skin` presents icon-labelled Kit segmented tabs with per-tab close
-controls and context menus, while Base owns selection, dragging, splitting, and
-close dispatch. Add-panel menus capture the destination group; selecting an
-existing tool panel moves it into that group. The application header reads mux
-window tabs through the shared chrome projection and tab renderer, including scoped
-selection, pane closing, navigation, reordering, and context actions. Window-scoped
-pane actions resolve the binding's retained focus rather than a stale backend anchor.
-Dock groups keep their own native panel tabs; their render order does not determine
-the application header. Open side docks own their title rows and collapse buttons. The left title row
-reserves the native window controls and shows Bootty's mascot and title. The right
-row receives whole status controls that fit its measured width; the center titlebar
-keeps the remaining controls and mux tabs. Closed docks expose their toggle in the
-center titlebar. Dock edges use an inset grab area and Base's clamped dock geometry; the workspace skin applies the first
-motion and final drop and saves the completed resize. Terminal dividers also commit
-the drop position, including when one motion starts and ends the drag.
-Bottom status segments, including mux tabs, occupy the center dock's footer; side
-docks keep their full height. On Linux, the window-level title bar and resize frame
-sit outside this dock layout, with Bootty controls whenever client decorations are
-selected or required by the compositor.
-Dock toggles, panel opening, and tab visibility use registered `CommandInvocation`s.
-Context menus supply the live destination node ID as an optional argument. The
-window completes these requests after applying them, or reports a stale group;
-requests arriving during layout restoration wait for it to finish.
-Single-panel groups hide their tabs automatically. Each group's context menu can
-keep tabs visible; this preference follows the live node and is serialized by
-its path alongside the same layout snapshot, then resolved after restoration.
-Dock and mux tab bars both use Kit's tab variants. Bootty supplies panel and mux
-commands, tab content, and close affordances; the shared `gpui::tabs` layout keeps
-close buttons in side padding. Typed chrome settings independently control each
-surface's tab appearance and close-button side and visibility.
-Dock visibility and dimensions belong to the saved layout. Legacy sidebar config
-values only seed unsaved or migrated layouts; live config reload does not show or
-hide Sessions. Legacy sidebar commands submit dock requests.
-`gpui_sidebar_panel` owns Sessions and its Space switcher. `gpui_agents_panel`
-owns the Agents view and usage section; the existing chrome projection retains
-usage data and Space actions. Layout version 7 merges the former standalone
-navigation panels while preserving the destination panels and unrelated geometry. Panel labels and
-dock-button visibility come from typed chrome settings. Each group can override
-automatic tab visibility with always-show or always-hide, including command-only
-switching.
-`status_fit` measures the status controls and prepaints only whole controls that
-fit the available header width. Omitted controls receive no hitboxes.
-The notch inset places the strip's bottom border below the camera exclusion band.
+The native browser's **Attach page** action submits `agents.native.browser-attach`
+for the exact selected conversation. The live tool lease owns one attached
+window/page/document; **Detach page** clears it. Its MCP catalog advertises
+`browser_snapshot` before the first prompt so SDKs can cache the tool, but reads
+fail until explicitly attached. Replacing or detaching a grant cancels queued
+reads and withholds already accepted results from the prior grant. Child leases
+cannot acquire this access. Restoring or resuming a conversation starts without
+browser grants; live UI projections are not serialized in the conversation store.
+
+`browser.input` accepts a positive page ID and a typed click, scroll, type or key
+action. On macOS the browser owner sends native events directly to its visible
+WKWebView content view without activating the application or posting global
+input. Hidden pages, overlays, out-of-bounds points and invalid actions fail.
+Other platforms report that native background input is unavailable.
+Wry's macOS child-view Command-shortcut override also remains unsupported;
+such input returns an error rather than claiming that the shortcut ran.
+
+Built-in browser-managed password save/fill is unsupported through the current
+public webview API. The GUI has no password manager. Existing app-specific
+credential storage and origin-checked library APIs remain intact; native
+platform-store runtime acceptance has not been performed.
+
+The sidebar owns saved task presentation, project grouping/search and the compact
+usage footer. Space switching remains separate from task tabs. Working and
+waiting agent status remains visible on unselected tasks. Lifecycle filters and
+context actions capture the saved identity and Binding; process status never
+changes durable task lifecycle.
+Pinned tasks form a separate section. Manual order remains owned by binding
+membership; recent activity orders accepted terminal input and native prompts.
+Focus, repaint and process output do not stamp activity. The attention filter
+currently includes approvals, unanswered input and failures; unseen completions
+require persisted per-conversation read markers before joining this filter.
+
+Terminal and native panel tabs share `gpui::tabs` and typed visual preferences.
+Every tab has a close action. The right group's Add menu offers unopened tools
+and new browser pages. The terminal Add menu offers shells and enabled native
+providers within the same task. Both menus submit `CommandInvocation`s.
+Dock requests validate captured destination IDs and complete after application;
+stale groups fail rather than using a newly selected destination.
 
 Changes and Diff use `bootty-git::changes` through the shared `git.*` command catalog.
 Invocations capture a binding generation and repository path. Local and SSH runners
@@ -607,9 +871,41 @@ Catalog-backed remote Spaces and remote rmux run the same pane operations in
 the remote daemon with its own backend implementation. The request travels on
 the daemon's stdin, since a paste can exceed a remote command line, and the
 catalog refuses a pane whose session does not carry the Space's tag. Remote
-daemon protocol 14 carries these operations and explicit-create argv. The
-daemon executable path is versioned by that protocol, so a client never reaches
+daemon protocol 19 carries these operations, native-agent pane markers and exact
+pane activation, explicit-create argv, filesystem
+completion and captured working directories for host commands. The daemon
+executable path is versioned by that protocol, so a client never reaches
 an older daemon that would drop a field it does not know.
+
+`bootty-host::remote_link` owns the remote process transport. SSH authenticates
+the host, starts the versioned daemon and exchanges public certificates. The
+daemon and client then require mutual TLS over QUIC; private keys remain in
+memory. If direct UDP is unavailable, the same framing and flow control run over
+HTTP/2 with mutual TLS through one owned SSH TCP tunnel. The TCP listener is
+loopback-only and requires the certificate exchanged during SSH bootstrap. One
+connection carries separate bounded streams for terminal input,
+output, resize, control commands, files and Git. PTY clients enter raw mode so
+single keys do not wait for a newline. A private local relay keeps existing
+process/PTY adapters on this same path. Local clients pin its TLS certificate
+before sending authorization or commands. Its endpoint descriptor is private and
+isolated by application identity and SSH target. Connections are acknowledged
+before relay publication. Development daemon calls inherit the invoking client's
+Development identity and namespace,
+and Development tmux attachments and control queries share their named server;
+explicit daemon caller identities retain their wire values.
+
+A direct connection gets a short head start; an owned SSH tunnel starts while
+a blocked UDP dial is still pending. Only an authenticated readiness reply can
+select the winning transport. If neither connection can be established before
+submission, execution
+falls back to the existing SSH path. Once a request is submitted, connection loss is
+reported rather than replaying a possible mutation. Disconnect terminates the
+execution or attach client; the selected mux backend retains its owned sessions.
+Remote Unix PTY writers also close without injecting input into those sessions.
+Detached macOS commands retain their real stdout, stderr and exit status through
+private launchd capture files, checked against the same 16 MiB output limit.
+The relay expires after five idle minutes and remains alive while streams are
+attached. WSL keeps its local distribution process transport.
 
 `terminal.export <local-path> [format] [scope] [max_lines]` atomically publishes
 a new private file. The destination must be an absolute local path. It never
@@ -629,8 +925,8 @@ Binding's Space, which need not be active. It never changes the selected session
 the selected window or the active Space: it is submitted with
 `CommandSelection::Preserve`, which keeps whatever the binding has selected when
 the result lands. `bootty-mux::workspace` validates the request and journals the
-Space's membership under the caller's name, so generated-name reconciliation never
-renames the session. The name must be free on the binding's server; the create
+Space's membership under a stable identity. The backend name is a locator hint,
+independent of the saved display title. The name must be free on the binding's server; the create
 fails rather than adopt an existing session, locally and in a remote Space. ARGV is a JSON array of strings for
 the first pane: absent or empty starts the default shell, one element runs through
 the backend's default shell, and more elements run directly. It is bounded to 64
@@ -652,10 +948,97 @@ command answers once the pane's process has started. A program that cannot start
 such as one missing from `PATH`, fails the command and closes the session through
 `session.close`, so the name is free again. A native cwd must be an existing
 directory: the PTY layer would otherwise start in the home directory. ARGV is never
-persisted or replayed: a restored native pane starts the default shell.
+persisted or replayed. A saved terminal checkpoint can restore a task after its
+backend process has exited; this starts shells in the recorded directories rather
+than replaying commands. Supported terminal agents resume separately from retained
+provider session metadata.
 
 `session.close` is destructive and kills a session its Space holds, in any Space,
-without Git cleanup and without changing selection. `spaces.list` returns every
+without Git cleanup and without changing selection. Closing its last attachment
+retains its saved identity, title, directory and order in `workspace_sessions`.
+`session.saved` lists those records and their observed attachments in an exact
+Binding. `session.set_title ID TITLE` commits a metadata title before publication
+and never renames a backend session. `session.reopen ID` first selects the exact
+surviving, identity-tagged attachment. When it has exited, a validated checkpoint
+restores the saved windows, panes, titles, directories, layout and focus under the
+same logical identity. Creation is exclusive: a name collision never adopts an
+unrelated session. Restored backend IDs are observed from the accepted creation;
+the binding retains their mapping to the stable saved window and pane keys.
+Without a checkpoint, reopening starts a fresh default shell in the saved project
+directory with the same logical identity, title and order. Unsupported providers
+and inaccessible directories fail without replacing saved data.
+
+Checkpoints retain at most 256 KiB of text and SGR colors/styles per pane and
+8 MiB per session. Oversized captures retain fewer complete recent rows; a single
+row beyond the byte limit fails without replacing the prior checkpoint. Fresh
+captures resolve indexed palette colors to RGB and discard OSC metadata. Saved
+history rejects queries, cursor movement, modes and all
+non-style escapes. History enters an output-only renderer, never shell stdin; styles reset
+before fresh process output. Native history is seeded before the new shell produces
+output. Older plain checkpoints remain valid. Snapshots do not read executable arguments,
+environment variables, credential stores or arbitrary process memory. Remote creation
+carries topology and validated presentation. tmux seeds empty panes through its
+output-only `display-message -I` API before starting fresh login shells; its own
+copy mode and capture retain those rows. Native and rmux readers seed their local
+renderers. Opaque
+attachments without identity stamping cannot restore inner topology.
+
+The GUI captures immutable terminal history on workers and commits it through the
+mux repository. Capture runs independently of optional output archives. Closing
+a started terminal waits for its own complete checkpoint receipt before the
+backend mutation. Creation, tab and pane success also wait for startup and that
+session's committed checkpoint. OSC 7 file URIs are decoded into host paths at
+the persistence adapter; reports that cannot name a supported host path cannot
+replace a prior checkpoint. Shutdown retains capture and persistence owners until the final
+save finishes or the platform shutdown deadline expires. Startup restores only
+the last selected saved task; other tasks restore on activation. Native agent
+resume remains a separate command owned by `NativeAgentService`: it restores the
+captured task attachment, then resumes the same provider conversation and account
+with fresh scoped tools, without replaying its prompt. An older conversation
+without a terminal checkpoint starts a fresh shell in its saved directory before
+resuming the same provider conversation. Failed restoration keeps saved data intact
+and does not replay commands or prompts.
+
+Cold terminal-agent recovery uses `TerminalAgentService`'s retained provider session
+ID, account directory and saved task/window/pane location. That logical location
+survives backend ID changes and interrupted checkpoint/catalog writes. Only a new
+pane created by validated saved-topology
+restoration admits this recovery; live backend reattachments do not restart agents.
+The host prepares the provider-native resume command on a worker, then consumes a
+one-use destination before replacing the process in that same pane. The launch
+uses literal argv through the process owner, never terminal input. Disabled
+providers and changed destinations fail before launch. Recovery does not replay the
+original prompt, copy credentials to a remote host, or recreate child-spawn and
+computer-capture grants. An uncertain launch is reported and never retried.
+
+The private Codex terminal observer starts its provider in an isolated process
+group under a supervisor with a parent-held lifetime pipe. Parent exit closes
+that pipe; the supervisor terminates only its owned group, including launcher
+descendants. This prevents an orphaned observer from retaining the conversation's
+writer lock after an application crash. Ordinary stop also reaps that group.
+
+Saved session lifecycle is independent of process activity. Active and Settled
+are durable task states; archive, hide, soft deletion and an optional UTC snooze
+deadline control discovery. `session.settle`, `activate`, `archive`, `unarchive`,
+`snooze`, `unsnooze`, `hide`, `show`, `delete` and `restore` use the exact Binding
+and saved identity. These commands preserve all terminal attachments and content.
+Soft-deleted sessions must be restored before reopening. The repository updates
+the supported identity schema transactionally; malformed or unsupported formats
+fail without replacing existing records.
+
+Pinning activates a task and clears its snooze deadline; settling clears its pin.
+Archive, snooze and soft deletion retain pin metadata for restoration.
+`session.activity` accepts only host-issued input receipts against an exact
+Binding and saved identity. Its nonnegative UTC timestamp advances monotonically
+and commits before publication; rejected input, stale targets and failed writes
+leave the previous ordering intact.
+
+Sessions attach by their exact identity and Space tag; backend names never recover
+an attachment. Observed backend renames update the locator hint, never the saved
+purpose title. Explicit Space ownership transfers still move membership;
+attachment loss alone never prunes it.
+
+`spaces.list` returns every
 Space with its backend, host, Binding target and the sessions it holds, each with
 its Session target. `pane.close` is destructive and closes one pane by its
 Terminal target, in any Space, without changing selection: tmux and rmux kill
@@ -667,8 +1050,9 @@ window with it.
 
 `bootty-config::config::theme_file` owns bounded theme import and revision-checked
 file replacement. It accepts native TOML and iTerm2 XML/binary plists and keeps
-source/license metadata. `bootty-ui` projects the draft as generic dialog fields
-with the same GPUI color picker used by Settings. Loading, import, save, preview,
+source/license metadata. The Settings window has Settings, Keymap and Theme tabs.
+Theme groups workspace colors and named-theme authoring beside a live preview,
+using the same draft and color picker as Settings. Loading, import, save, preview,
 apply and restore travel through `CommandInvocation`; apply uses the existing
 configuration commit owner. Preview is temporary and closing the editor restores
 the accepted appearance. A save conflict leaves the editable draft visible.
@@ -685,14 +1069,12 @@ are configured at creation and refreshed only when the requested material change
 
 ### Native agent launch context
 
-`bootty-agents::AgentLaunch` owns bounded argv, session operation syntax and
-shell serialization. The app captures the exact source pane, parent mux session,
-working directory and host shell before dispatch. Start, resume and fork create
-or use a visible terminal, then submit through `terminal.paste` and
-`terminal.submit`. Hook adapters return session/cwd and a sanitized launch
-context. Resume/fork always use a new tab and fail before mutation without an
-explicit or pane-reported session. Mailbox callers receive the same authoritative
-mux completion target as CLI/socket callers.
+`bootty-agents::AgentLaunch` owns bounded literal argv and provider session syntax.
+The host captures the exact binding/session and host cwd before dispatch. Native
+panes start their explicit command before being shown; rmux and tmux create the
+process through their supported backend interfaces. A failed tab launch closes
+only its newly created pane. Resume and fork require an observed session identity;
+retained metadata strips credentials and initial prompts.
 
 Agent attention sequences and acknowledgement cursors belong to `bootty-agents`.
 `bootty-ui` projects only panes found in live bindings, captures generation-scoped
@@ -750,3 +1132,41 @@ new-tab/paste/submit commands after host fingerprint validation.
 `bootty-git` owns history, local-branch and stash validation and mutations. The
 Git Dock panel presents them, while every local or remote action still enters the
 shared command path and runs on the captured binding host.
+
+Agent executable, enabled state and named account/launch profile preferences belong to `bootty-config`. `bootty-agents` owns bounded installation/readiness inspection and live observation; provider credential stores remain external. All provider starts, account flows, updates and resume use shared command invocations and backend-owned terminal tabs.
+
+## GitHub review
+
+`bootty-git::GitHub` owns repository-host identity, viewer permissions, source diff
+anchors, review submission and PR metadata/lifecycle operations. Remote Git work
+uses the same host-bound runner as local Changes. `bootty-ui::gpui_git_panel` owns
+only retained presentation and draft edits. Review comments capture old/new file
+side and source line ranges independently of rendered editor rows. Submission
+rechecks the head and selected source quote. Accepted writes remove only the
+submitted draft IDs and unchanged text; newer edits and failures retain drafts.
+Native GitHub stack actions capture every affected layer's revision. Rebase
+checks branch permissions before the first write, then checks preceding heads
+before each next layer. A partial failure reports completed layers; merge
+requests preserve GitHub's pending/enqueued distinction. Pending merges
+are observed through the read-only `git.github.merge-status` command after a
+pending merge acknowledgement. The review view retains its repository, PR and
+operation identity, polls with bounded backoff, and disables another merge
+until the operation completes. A timeout or failed read retains that identity;
+Refresh continues observing it rather than repeating the merge write. Fork workflow approvals
+verify both commit identity and unique PR ownership before approving actual runs.
+Large diff preparation runs off the UI thread. Missing or truncated host data is
+reported rather than represented as a complete review.
+
+Repository selection runs `gh repo view` in the captured local, SSH or WSL
+checkout, preserving gh's default/upstream/fork policy. PR creation captures both
+the base repository and origin's head repository, branch and commit. A normal
+push names that exact commit on origin, and creation verifies its published revision. The
+creation form retains its draft on failure. Full-file expansion reads immutable
+base/head revisions, rejects binary and oversized contents, and compares private
+temporary copies without changing either checkout or object database. Review
+submission rechecks both revisions after validating source quotes.
+
+PR review checkout captures both the displayed PR revision and local HEAD,
+fetches GitHub's PR head, then rechecks both before switching. It uses a detached
+checkout to preserve local branches, rejects dirty worktrees, and refuses to
+overwrite ignored files. Branch creation remains an explicit separate command.

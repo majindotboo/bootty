@@ -34,6 +34,7 @@ pub(super) struct DialogRuntime {
     modal: Option<Box<ModalDialog>>,
     creation: Option<Box<ModalDialog>>,
     pub empty_creation_scope: Option<bootty_mux::controller::SpaceId>,
+    pub project_settings: Option<crate::presentation::project_editor::ProjectSettingsEditor>,
     pub session_names: Vec<PendingSessionName>,
     pub creation_replies: Vec<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>,
     pub(super) new_session_draft: Option<crate::presentation::new_session_form::NewSessionDraft>,

@@ -22,11 +22,47 @@ pub struct Args {
 /// Returns workspace discovery, development packaging, or application launch errors.
 pub fn run(args: Args) -> Result<()> {
     let binary = build_launch_binary()?;
+    let names = crate::development_names()?;
     let mut command = Command::new(&binary);
-    command.args(args.arguments).env(
-        DEVELOPMENT_NAMESPACE_ENV,
-        crate::development_names()?.namespace(),
-    );
+    #[cfg(target_os = "macos")]
+    if args
+        .arguments
+        .iter()
+        .find(|arg| !matches!(arg.to_str(), Some("--json" | "--start")))
+        .is_none_or(|arg| arg == "app")
+    {
+        let bundle = binary
+            .parent()
+            .and_then(std::path::Path::parent)
+            .and_then(std::path::Path::parent)
+            .context("development app bundle unavailable")?;
+        // Launch Services publishes the bundle/process identity used by exact-window computer use.
+        // Command invocations keep their direct stdin, stdout and observed exit status.
+        let logs = bundle
+            .parent()
+            .context("development log directory unavailable")?;
+        let stdout = logs.join("launch.stdout.log");
+        let stderr = logs.join("launch.stderr.log");
+        eprintln!(
+            "Development app logs: {} and {}",
+            stdout.display(),
+            stderr.display()
+        );
+        command = Command::new("/usr/bin/open");
+        command
+            .args(["-n", "-W"])
+            .arg(bundle)
+            .arg("--stdout")
+            .arg(stdout)
+            .arg("--stderr")
+            .arg(stderr)
+            .arg("--env")
+            .arg(format!("{DEVELOPMENT_NAMESPACE_ENV}={}", names.namespace()))
+            .arg("--args");
+    }
+    command
+        .args(args.arguments)
+        .env(DEVELOPMENT_NAMESPACE_ENV, names.namespace());
     // Cargo's test-only bundle lookup override must not replace the app's identity.
     #[cfg(target_os = "macos")]
     command.env_remove("CFProcessPath");

@@ -12,6 +12,7 @@ use crate::{command, filesystem};
 
 const BINARY: &str = "bootty";
 const DAEMON: &str = "bootty-daemon";
+const COMPUTER: &str = "bootty-computer";
 
 pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
     let zig_path = ensure_project_zig(&layout.app_name)?;
@@ -223,6 +224,7 @@ fn package_macos(layout: &Layout, host_daemon: &Path) -> Result<()> {
         &binary,
     )?;
     filesystem::copy_executable(host_daemon, &macos.join(DAEMON))?;
+    compile_computer_helper(&macos.join(COMPUTER))?;
     copy_bundled_daemons(layout, &resources.join("daemons"))?;
     if layout.linkage == Linkage::Dynamic {
         copy_dynamic_libraries(&binary, &contents.join("Frameworks"), layout)?;
@@ -242,6 +244,21 @@ fn package_macos(layout: &Layout, host_daemon: &Path) -> Result<()> {
             .args(["-q", "-r", "-y"])
             .arg(archive_name)
             .arg(format!("{}.app", layout.app_name)),
+    )
+}
+
+fn compile_computer_helper(destination: &Path) -> Result<()> {
+    let architecture = match env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x86_64",
+        architecture => bail!("unsupported computer helper architecture: {architecture}"),
+    };
+    command::run(
+        Command::new("xcrun")
+            .args(["swiftc", "-O", "-parse-as-library", "-target"])
+            .arg(format!("{architecture}-apple-macosx13.0"))
+            .args(["crates/bootty-computer/native/main.swift", "-o"])
+            .arg(destination),
     )
 }
 
@@ -376,6 +393,22 @@ fn sign_macos_bundle(layout: &Layout, bundle: &Path, contents: &Path, macos: &Pa
             .args(["--force", "--sign", &identity])
             .arg(macos.join(DAEMON)),
     )?;
+    // Each app identity owns its helper permission identity, including per-worktree Dev bundles.
+    let helper_identifier = format!("{}.computer", layout.bundle_identifier);
+    let mut helper_sign = Command::new("codesign");
+    helper_sign.args([
+        "--force",
+        "--sign",
+        &identity,
+        "--identifier",
+        &helper_identifier,
+    ]);
+    if crate::signing::is_adhoc(&identity) {
+        helper_sign
+            .arg("--requirements")
+            .arg(format!("=designated => identifier \"{helper_identifier}\""));
+    }
+    command::run(helper_sign.arg(macos.join(COMPUTER)))?;
     let mut sign = Command::new("codesign");
     sign.args(["--force", "--sign", &identity]);
     // A certificate-backed signature gets codesign's default designated requirement, which

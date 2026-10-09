@@ -7,6 +7,7 @@ command_actions! {
     SessionAction {
         ListProjects => ("project.list", "List registered projects", [], Read),
         RegisterProject => ("project.register", "Register project", ["cwd"], Write),
+        EditProject => ("project.edit", "Project settings", ["cwd"], Read),
         ConfigureProject => ("project.configure", "Configure project", ["cwd", "settings"], Write),
         ToggleProjectCollapsed => ("project.toggle_collapsed", "Toggle project disclosure", ["cwd"], Write),
         ListSaved => ("session.saved", "List saved sessions", [], Read),
@@ -65,6 +66,7 @@ impl SessionAction {
         let (description, target) = match self {
             Self::ListProjects => ("List projects registered on the exact Space's host, including empty projects.".to_owned(), Some(ResourceKind::Binding)),
             Self::RegisterProject => ("Register an absolute project path on the exact Space's host without starting a session.".to_owned(), Some(ResourceKind::Binding)),
+            Self::EditProject => ("Edit the registered project's name, icon and new-session defaults.".to_owned(), Some(ResourceKind::Binding)),
             Self::ConfigureProject => ("Commit project settings JSON on the exact Space; applies to new sessions and worktrees.".to_owned(), Some(ResourceKind::Binding)),
             Self::ToggleProjectCollapsed => ("Toggle the registered project's sidebar disclosure without changing its sessions.".to_owned(), Some(ResourceKind::Binding)),
             Self::ListSaved => ("List saved identities, purpose titles, project directories and observed attachments in the exact Space. Attachment is not agent or process status.".to_owned(), Some(ResourceKind::Binding)),

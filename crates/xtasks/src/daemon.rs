@@ -13,7 +13,8 @@ use crate::filesystem::{copy_file, recreate_dir};
 
 const PACKAGE: &str = "bootty-daemon";
 const PROFILE: &str = "daemon-release";
-pub const MAX_DAEMON_BYTES: u64 = 13_631_488;
+// Includes the embedded TLS/QUIC transport; larger growth needs a dependency/size review.
+pub const MAX_DAEMON_BYTES: u64 = 14 * 1024 * 1024;
 
 pub const TARGETS: [DaemonTarget; 5] = [
     DaemonTarget::Aarch64AppleDarwin,

@@ -1805,6 +1805,9 @@ impl SidebarRows {
                     row.text
                 ))
                 .child(element);
+            let settings_owner = self.owner.clone();
+            let settings_path = path.clone();
+            let settings_target = target.clone();
             let disclosure = super::button::activated_button(
                 div().w_full().h(gpui_kit::rems(row_height)),
                 button,
@@ -1825,6 +1828,32 @@ impl SidebarRows {
                 .w_full()
                 .min_w_0()
                 .child(div().flex_1().min_w_0().child(disclosure))
+                .child(
+                    Button::new(SharedString::from(format!("project-settings-{}", row.key)))
+                        .ghost()
+                        .xsmall()
+                        .icon(gpui_kit::component::IconName::Ellipsis)
+                        .tooltip("Project actions")
+                        .accessibility_label(format!("Project actions for {}", row.text))
+                        .dropdown_menu(move |menu, _, _| {
+                            let owner = settings_owner.clone();
+                            let path = settings_path.clone();
+                            let target = settings_target.clone();
+                            menu.item(PopupMenuItem::new("Project settings…").on_click(
+                                move |_, _, cx| {
+                                    _ = owner.update(cx, |_, cx| {
+                                        let mut invocation = bootty_control::CommandInvocation::new(
+                                            "project.edit",
+                                            vec![path.clone()],
+                                            bootty_control::Caller::Internal,
+                                        );
+                                        invocation.target = Some(target.clone());
+                                        cx.emit(ChromeIntent::Command(invocation));
+                                    });
+                                },
+                            ))
+                        }),
+                )
                 .into_any_element()
         } else if row.selectable {
             self.row_activation(element, row, accessible_label, row_height)

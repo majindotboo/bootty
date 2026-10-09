@@ -41,6 +41,35 @@ bootty app --defaults --backend native --fullscreen non-native --titlebar hidden
 
 Run `bootty --help` for the full flag list.
 
+The Permissions settings page and `[computer]` table control local desktop computer use. `enabled`,
+`capture-enabled`, and `input-enabled` default to `false`. Capture requires both
+`enabled` and `capture-enabled`, plus an existing macOS Screen Recording grant.
+Input requires both `enabled` and `input-enabled`, plus an existing Accessibility
+grant. Changing these settings does not request or grant OS permission.
+`computer.status` and `computer.targets` remain readable while disabled.
+Manual browser screenshot attachments use the existing Screen Recording grant
+independently of these agent-command switches.
+
+Computer commands use an exact window token returned by `computer.targets`;
+input requires that window to remain focused and pointer coordinates to remain
+uncovered. Window or process changes invalidate the token. The helper never
+activates another app or redirects input. Capture supports macOS 14 or later;
+input supports macOS 13 or later. Other platforms return `Unsupported`.
+`computer.snapshot` writes a bounded PNG to the supplied absolute local path
+and never replaces an existing file. Capture needs a packaged app with its
+signed helper; runtime does not install one.
+
+```toml
+[computer]
+enabled = false
+capture-enabled = false
+input-enabled = false
+```
+
+The `[browser]` table chooses the search engine used for address-bar queries
+and whether browser site data persists between launches. The defaults are
+`duckduckgo` and `true`.
+
 ## Example
 
 See `docs/sample-config.toml` for a complete sample with every supported
@@ -56,6 +85,10 @@ cli_default_open_behavior = "existing_window"
 default_open_behavior = "existing_window"
 when_closing_with_no_tabs = "platform_default"
 on_last_window_closed = "platform_default"
+
+[browser]
+search-engine = "duckduckgo" # duckduckgo, google, bing, or brave
+persist-site-data = true
 
 [window]
 title = "Agent Shell"
@@ -80,8 +113,6 @@ fit-cell-height = true
 tabs-use-session-color = true
 top-bar = true
 bottom-bar = false
-panel-tab-style = "icons"
-panel-tabs = "automatic"
 status-height = 30
 status-background = "#1e1e2e"
 notched-fullscreen-black-chrome = true
@@ -89,15 +120,11 @@ gap = 0
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.0
 
-[chrome.dock-tabs]
+[chrome.tabs]
+# Terminal and sidebar tabs share one appearance and close-button setting.
 appearance = "segmented" # classic, underline, pill, outline, segmented
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover" # always, hover, hidden
-
-[chrome.terminal-tabs]
-appearance = "pill"
-close-position = "left" # macOS default; right elsewhere
-close-button = "hover"
+close-position = "right" # left or right
+close-button = "always" # always, hover, hidden
 
 [multiplexer]
 backend = "rmux"
@@ -135,6 +162,7 @@ host = "devbox" # ~/.ssh/config alias, hostname, or address
 # `args` come first on the command line, so any of these can be set differently.
 
 [input]
+# Every preset opens the command palette with Cmd+K (Ctrl+Shift+K outside macOS).
 preset = "ghostty" # ghostty (default), bootty, or tmux — which built-in default keybind set to use
 prefix = "ctrl+space" # leader for prefixed chords (bootty/tmux presets); defaults to ctrl+space / ctrl+b
 keybind = ["cmd+alt+shift+r=reload_config"]
@@ -184,6 +212,12 @@ model. A workspace is a durable Bootty Space. `last_session` restores the Space 
 application window's persistence key, `last_workspace` restores the primary window's selected
 Space, and `none` opens the first persisted Space. Backend session/window selection remains owned
 by each mux backend's restore policy.
+
+A cold session restore retains its layout, directories and bounded styled history.
+Supported terminal agents resume their saved provider conversation in the original
+pane, using the captured account and current provider enablement. Live mux processes
+reattach instead. Automatic terminal-agent resume is limited to the local POSIX
+host; it does not transfer credentials or permission grants to remote bindings.
 
 Only set values you want to override. Unknown fields are rejected.
 
@@ -345,11 +379,23 @@ Each section accepts only `context`, `use_key_equivalents`,
 `use_builtin_defaults`, `unbind`, and `bindings`:
 
 - `context` defaults to `Global`. Supported contexts are `Global`, `Sidebar`, `Command`,
-  `Terminal`, `Herdr`, `Native`, `rmux`, and `tmux`. Backend contexts apply only
+  `SurfaceChooser`, `ComposerCompletion`, `Terminal`, `Herdr`, `Native`, `rmux`, and `tmux`. Backend contexts apply only
   while a terminal is focused. The Zed-style forms
   `Terminal && backend == herdr|native|rmux|tmux` are aliases.
   `Command` applies to the active command palette or picker; underlying workspace
   shortcuts are inactive while that modal surface is open.
+  `SurfaceChooser` applies only to the new tab or split chooser. Every choice and
+  navigation command is editable here or in the Keymap tab: `ui.surface.agent`,
+  `terminal`, `claude`, `codex`, `pi`, `edit_profiles`, `previous`, `next`, `first`,
+  `last`, `confirm`, and `cancel` (each with the `ui.surface.` prefix).
+  Defaults include arrows and Tab/Shift-Tab, Vim J/K and gg/G, Emacs Ctrl-N/P,
+  Alt-</>, Ctrl-M and Ctrl-G. A/T choose Agent/Terminal, 1–3 choose terminal
+  profiles, E edits profiles, and Escape cancels. Inline keycaps show the effective
+  bindings; removing a shortcut does not reveal a hidden hard-coded fallback.
+  `ComposerCompletion` applies while an Agent composer has an active suggestion menu.
+  `ui.composer.previous`, `next`, `confirm`, and `cancel` use the same editable keymap.
+  Defaults include Up/Down, Emacs Ctrl-P/N, Ctrl-K/J and Vim Alt-K/J, Enter/Tab to
+  insert, and Escape/Ctrl-G to dismiss. These shortcuts leave normal typing intact.
 - `use_key_equivalents` is optional, defaults to `false`, and is preserved as
   Zed-compatible section metadata.
 - `use_builtin_defaults` is optional and defaults to `true`. Set it to `false`
@@ -510,9 +556,9 @@ An explicit `[window].fullscreen-top-offset` overrides the reserved height.
 Tab strips reveal a newly selected or keyboard-focused tab and show scroll
 buttons only in directions with more tabs. Terminal tab widths grow as needed,
 then wait for the title to remain unchanged for one second before shrinking.
-Close buttons default to the left on macOS and the right elsewhere. Override
-`close-position = "left"` or `"right"` under `[chrome.terminal-tabs]` or
-`[chrome.dock-tabs]` independently.
+Terminal and sidebar tabs share `[chrome.tabs]` for appearance, close-button side,
+and visibility. Close buttons default to always visible on the right. Set
+`close-position = "left"` or `close-button = "hover"` to change both strips.
 
 `chrome.tabs-use-session-color` defaults to `true`: active terminal and dock tabs
 use a muted tint of the selected session color. Set it to `false` to use the theme
@@ -580,6 +626,36 @@ Connection tests report results for both saved profiles and unsaved drafts.
 - Bootty config is TOML with Ghostty-inspired vocabulary; it is not Ghostty's
   config syntax.
 
+## Session list
+
+`sidebar.group-by-project` defaults to `true`. The sidebar view button and
+`ui.sidebar.toggle_grouping` switch between project groups and a flat list.
+Each session owns its branch and agent marks; switching views preserves sessions,
+selection and terminal contents. Sessions are grouped into Pinned, Needs attention,
+Working, Sessions and Settled. Archive retains saved work; Delete permanently
+removes a closed session's saved record and requires confirmation.
+
+Choose **Project settings…** from a project's menu to open its settings page.
+The page edits its name, icon or local image, default agent, and defaults for
+creating worktrees (branch prefix and starting ref).
+Project settings live in the workspace database and apply to new sessions.
+Existing sessions keep their selected provider and model.
+
+`settle_session` settles the exact current saved session without closing its
+terminal. It is available in the palette and keybinding presets; on macOS the
+standard shortcut is `Cmd+Shift+W`. `session.settle` accepts an explicit saved
+identity with its Binding target for detached work and other Spaces.
+
+`sidebar.sort-order` defaults to `"manual"`. Choose **Manual** or **Recent activity**
+from the sidebar view menu or Sidebar settings. Recent activity uses persisted
+accepted session input and native prompts; equal or undated sessions keep their
+manual order. The shared commands are `ui.sidebar.sort_manual` and
+`ui.sidebar.sort_recent_activity`.
+
+`sidebar.animate-working` defaults to `true`. Turn off **Animate Working ring**
+on the Sidebar settings page to keep the Working ring still. Reduced motion also
+keeps it still. Changes apply when configuration reloads.
+
 ## Workspace docks
 
 `toggle_left_dock` and `toggle_right_dock` show or hide their respective docks.
@@ -588,23 +664,21 @@ header buttons. Panel commands are `show_sidebar`, `show_files`, `show_changes`,
 and `show_agents`.
 For example, `[input].keybind = ["ctrl+shift+l=toggle_left_dock"]` binds the left dock.
 
-Right-click a tab or empty group header and choose **Add panel** to open or move a
-panel into that group. Panel commands accept an optional live `group` ID; an expired
-ID reports a stale target. Without a group, a panel opens in its existing location,
-or its default dock if closed. Document and diff tabs open from their file actions.
+Sessions occupy the left sidebar. Files, Changes, Diff and documents open as
+labeled peer tabs in the right tool area. Its plus menu and empty state open
+tools; closing the last tab returns to the empty state. Tools cannot be dragged
+into another region or split into nested groups. The mux owns terminal tabs,
+splits and ratios independently.
 
-The Appearance → Docks settings control each dock button independently and select
-icons only (default), icons and text, or text-only tab labels. `chrome.left-dock-toggle`
-and `chrome.right-dock-toggle` hide only their buttons; commands still work.
-`chrome.panel-tab-style` accepts `icons`, `icons-and-text`, or `text` for fixed left/right docks;
-the default is `icons`. Main and bottom Dock groups use icons and text. `chrome.panel-tabs` accepts
-`automatic`, `always`, or `never` for fixed docks. Main and bottom Dock groups keep their tabs
-visible unless that individual group is switched to command-only navigation.
-
-Single-panel groups hide their tabs automatically. **Always show tabs** in the group
-context menu overrides this; **Always hide tabs** enables command-only panel switching for that group; `toggle_tab_bar` toggles the same preference for the
-focused group and also accepts a group ID. Layout and tab preferences persist per
-window, shared across Spaces. `toggle_hidden_tabs` toggles the per-group hidden override. `show_codexbar` opens Agents with usage meters; `show_spaces` opens Sessions with the Space switcher. Dock controls and the status row remain available when tabs hide.
+`chrome.left-dock-toggle` and `chrome.right-dock-toggle` control the header
+buttons; their commands remain available. Side visibility, widths, tool tabs
+and document positions persist per window, shared across Spaces. Older layouts
+are flattened into these fixed homes while retaining their documents.
+The retired `chrome.panel-tab-style`, `chrome.panel-tabs`, `toggle_tab_bar` and
+`toggle_hidden_tabs` no longer hide tool labels or navigation.
+`show_agents` still provides the existing agent controls through the palette;
+Agents has no primary navigation entry. `show_spaces` opens the left sidebar,
+whose Space switcher remains at the bottom.
 
 ## Panel controls
 
@@ -619,23 +693,9 @@ the macOS Ghostty preset and Cmd+Shift+E in the macOS Bootty/Tmux presets.
 Toggle Right Dock defaults to Cmd+Option+B on macOS and Ctrl+Alt+B elsewhere.
 Existing custom keybindings are preserved.
 
-Settings → Panels offers a dock dropdown (left, right, bottom) and a status bar
-button dropdown (none, top, bottom) for each tool panel. For example:
-
-```toml
-[panels.sessions]
-dock = "left"
-button = "top"
-
-[panels.agents]
-dock = "right"
-button = "bottom"
-```
-
-Sessions defaults to the left dock and the other tool panels to the right, with
-no status buttons. Selecting a dock moves an open panel there; hidden panels use
-that dock when reopened. Dragging can override placement for the current workspace; explicit dock
-settings apply again when reopening it. Status buttons also make their chosen bar visible.
+Settings → Panels offers an optional status bar button (none, top, bottom) for
+Sessions, Files, Changes and Diff. Panel placement is fixed. Legacy `dock`
+preferences and Agents button preferences remain loadable but have no effect.
 
 The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
 underline, pill, outline, or segmented tabs; close-button side (left/right); and
@@ -643,17 +703,15 @@ close-button visibility (always/on hover/hidden). Hover buttons occupy the tab's
 side padding without reserving a separate column. Hiding a close button keeps the
 close command and context menu available.
 
-Dock visibility and widths are saved in the workspace layout. Use each panel's
-Dock setting for placement and drag dock edges to resize. The legacy
-`chrome.sidebar`, `chrome.sidebar-width`, and `sidebar.position` keys are accepted
-only to seed an unsaved layout or migrate an older layout; changing them does not
-alter an open workspace. They are no longer settings controls.
+Side visibility and widths are saved in `native-panels.json`; drag a side edge
+to resize. The legacy `chrome.sidebar` and `chrome.sidebar-width` keys seed an
+unsaved layout. `sidebar.position` no longer moves the sidebar.
 
 ## Git tool panels
 
 Use **Show Git Changes** in the palette (`show_changes`) or click a sidebar diff
-count. Changes and Diff are native Dock panels: drag their tabs to split or combine
-groups, resize the split, close panels, or toggle the right dock. Opening Changes again
+count. Changes and Diff are peer tabs in the right tool area: switch or close their
+tabs, resize the side, or toggle its visibility. Opening Changes again
 restores closed Changes; selecting a file restores and activates Diff. Layouts are
 saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
 Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.
@@ -708,6 +766,9 @@ Files commands also expose `files.list PATH [OFFSET]`, `files.read PATH`, and
 `files.save PATH EXPECTED_SHA256 CONTENT_BASE64` for the CLI and control socket.
 `files.format PATH CONTENT_BASE64` returns formatted document bytes without
 writing the host file.
+`files.source PATH ROOT` returns a seekable source descriptor after checking that
+the regular file stays inside the captured root. File mentions use this command
+and read the bytes on that same host before admitting an attachment.
 All paths belong to the selected binding's host, including remote paths.
 
 Shell completion notifications require live OSC 133 command-start and finish
@@ -744,6 +805,18 @@ product dialogs and OS-owned UI still need extraction before a complete addition
 language can ship. Terminal output, paths, editable contents, command IDs, config
 keys and backend diagnostics retain their original bytes. Chinese/Japanese Bootty
 translations are not bundled yet.
+
+### SSH transport
+
+Packaged SSH workspaces authenticate and bootstrap through the configured SSH
+client, then prefer a persistent QUIC connection with mutual TLS for terminals
+and host commands. No separate login or permanent transport key is needed.
+When the remote address is unreachable directly or UDP is blocked, Bootty uses
+one persistent SSH TCP tunnel carrying HTTP/2 streams with mutual TLS. This
+requires no firewall changes. If both setups fail, the existing SSH command path
+remains available; failed persistent setup is cached for one minute. Requests
+already sent
+are never replayed after an ambiguous connection loss.
 
 ### WSL workspaces (Windows)
 
@@ -802,3 +875,66 @@ and **Copy setting link**. macOS packages register links such as `bootty://setti
 at that configuration path. The equivalent CLI command is `bootty command open_setting font.size`. Development packages use their own namespace as the
 URL scheme. Fractional number controls use two decimal places; integer controls
 remain integral.
+
+## Agent providers
+
+Settings → Providers owns agent executable paths, enabled state and named account/launch profiles. The default account uses the provider's existing store. A named profile can select an absolute account directory and literal launch arguments. Credentials and conversation history remain provider-owned; Bootty never imports or copies them.
+
+Pi profiles retain literal `--extension` / `-e` paths on creation and resume.
+Provider credentials, prompt arguments and prior session selectors are still
+excluded from reusable launch metadata.
+
+```toml
+[agents.codex]
+enabled = true
+program = "codex"
+selected = "work"
+
+[agents.codex.profiles.work]
+name = "Work"
+directory = "/absolute/path/to/codex-work"
+arguments = ["--model", "gpt-6.1-sol"]
+```
+
+The same keys apply to `agents.claude` and `agents.pi`. Account directories use `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `PI_CODING_AGENT_DIR`, respectively. Directory selection currently requires a local POSIX terminal; remote accounts belong to the remote host. It does not change provider permission or credential-store policies. Leaving the directory empty reuses the default account with different launch arguments.
+
+Start and resume open terminal tabs in the selected session. Changes affect future launches. Sign-in opens the provider's own terminal flow; Pi uses `/login`. Refresh status runs bounded, read-only version and account queries on a worker. Codex reports its account type and plan through its app server; Claude reports its own login state and subscription type; Pi reports the selected provider's existing authentication without inferring a subscription. An older refresh cannot replace a newer account selection. Update runs the proven owning native, Bun-global or npm-global installer in a local POSIX terminal tab. Its exit result stays visible until Enter closes the tab. Unknown installations require a manual update; active agent tabs prevent updates. Bootty does not update agents automatically.
+
+`agents.quick-model` selects the Codex model for session and worktree names. It defaults
+to `gpt-6-luna` and uses the selected Codex account. Naming runs only after submission,
+in an ephemeral read-only process, and does not create a conversation.
+
+`agents.allow-spawn = false` is the default. Enabling it in Settings → Permissions
+allows an attached agent to create child sessions only in its captured workspace,
+project directory, provider and account. Native parents can interrupt or stop only
+native children created under that exact live grant; stopping retains the history
+and backend pane. Children from an older parent generation remain outside the grant.
+Parents can read, paste, submit, interrupt and close only shell panes created under
+their current grant. Listed terminals and agent carrier panes do not receive input
+authority. Closing, revoking or renewing the parent removes that shell authority;
+historical creation receipts cannot restore it. At most 128 shells are retained
+per live grant, including queued creations.
+Child tools retain their own terminal read access and lose spawning, supervision
+and capture access. Closing or disabling the parent revokes the inherited tool
+authority; existing sessions and processes remain.
+Native parents create native children on either their local or remote host.
+A restored child keeps its provider identity and account but does not regain the
+former parent's tool grant.
+Native conversations retain their resolved profile ID with the account directory.
+Resuming or forking after a profile preference changes keeps that captured pair;
+`inspect_provider` reports the captured ID without exposing account paths. Older
+conversations keep their account and report no profile ID.
+The root-only `list_profiles` tool lists the captured provider's configured IDs
+and display names. It does not switch profiles or authorize another account.
+
+`agents.default-provider` selects the provider for a fresh composer. Each provider's
+`default-model` and `default-effort` prefer advertised selections; empty values resolve
+to the provider's configured model and supported effort. The Settings pickers use
+the same account catalog as the composer. Retained drafts keep their
+explicit selection. `agents.codex.fast-mode` requests Codex's fast service tier;
+`agents.claude.fast-mode` enables Claude's fast mode. Pi has no fast-mode setting.
+
+Composer controls have bindable commands: `ui.composer.focus-space`,
+`ui.composer.focus-provider`, `ui.composer.focus-model`, `ui.composer.focus-effort`,
+`ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.
+Their default shortcuts are Ctrl+Alt+S/V/M/E/P/W/A respectively.
