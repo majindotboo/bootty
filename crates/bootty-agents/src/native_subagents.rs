@@ -60,7 +60,11 @@ impl NativeSessionSnapshot {
         }
         if let Some(old) = old {
             agent.started_at = agent.started_at.or(old.started_at);
-            if agent.title.is_empty() {
+            if agent.title.is_empty()
+                || agent.title.starts_with("/root/")
+                    && !old.title.is_empty()
+                    && !old.title.starts_with("/root/")
+            {
                 agent.title = old.title;
             }
             if agent.prompt.is_empty() {
@@ -132,7 +136,13 @@ impl NativeSessionSnapshot {
                     _ => NativeToolStatus::Running,
                 }
             };
-            let title = text(field(item, "agentPath"), 256);
+            let title = text(
+                item.get("agentNickname")
+                    .or_else(|| item.get("agentName"))
+                    .filter(|value| value.as_str().is_some_and(|name| !name.trim().is_empty()))
+                    .unwrap_or_else(|| field(item, "agentPath")),
+                256,
+            );
             updated = true;
             self.subagent(
                 NativeSubagent {

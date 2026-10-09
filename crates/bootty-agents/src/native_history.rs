@@ -16,6 +16,30 @@ pub struct NativeHistoryPage {
     pub at_latest: bool,
 }
 
+impl NativeHistoryPage {
+    /// Retain already loaded turns while admitting an adjacent provider page.
+    pub fn retain_loaded(&mut self, loaded: &Self) {
+        let incoming_ids = self
+            .transcript
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let retained = loaded
+            .transcript
+            .iter()
+            .filter(|item| !incoming_ids.contains(item.id.as_str()))
+            .cloned();
+        self.transcript = if self.at_latest {
+            self.has_older = loaded.has_older;
+            retained.chain(self.transcript.iter().cloned()).collect()
+        } else {
+            self.transcript.iter().cloned().chain(retained).collect()
+        };
+        self.has_newer &= loaded.has_newer;
+        self.at_latest |= loaded.at_latest;
+    }
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct HistoryPosition {
     pub(crate) older: Option<String>,
@@ -42,8 +66,11 @@ impl NativeAgentSession {
         previous: Option<&HistoryPosition>,
         direction: &str,
     ) -> Result<(HistoryPosition, NativeHistoryPage), String> {
-        if current.status != NativeSessionStatus::Idle {
-            return Err("Wait for the current turn before reading earlier history".into());
+        if !matches!(
+            current.status,
+            NativeSessionStatus::Idle | NativeSessionStatus::Working | NativeSessionStatus::Waiting
+        ) {
+            return Err("Resume the conversation before reading earlier history".into());
         }
         if self.config.provider == AgentKind::Pi {
             return self.history_page_pi(current, previous, direction);
@@ -230,8 +257,10 @@ impl NativeAgentSession {
         page: NativeHistoryPage,
     ) -> Result<NativeHistoryPage, String> {
         let current_after_read = lock(&self.snapshot);
-        if current_after_read.status != NativeSessionStatus::Idle
-            || current_after_read.session_id != current.session_id
+        if !matches!(
+            current_after_read.status,
+            NativeSessionStatus::Idle | NativeSessionStatus::Working | NativeSessionStatus::Waiting
+        ) || current_after_read.session_id != current.session_id
         {
             return Err("The conversation changed while reading history".into());
         }

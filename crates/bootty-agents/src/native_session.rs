@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use crate::{
     AgentKind, AgentLaunch, NativeAgentRequest, NativeSessionSnapshot, NativeSessionStatus,
-    native_protocol::{NativeTurnOutcome, bounded_text, field, string},
+    native_protocol::{NativeTurnOutcome, field, string},
 };
 
 const FRAME_LIMIT: usize = 1024 * 1024;
@@ -60,7 +60,6 @@ pub struct NativeRemote {
 }
 
 struct NativeLaunchResources {
-    _permission_extension: Option<tempfile::NamedTempFile>,
     _remote_tools: Option<bootty_host::private_stdio::relay::RemoteStdioRelay>,
 }
 
@@ -95,6 +94,38 @@ pub struct NativeSessionConfig {
 }
 
 impl NativeSessionConfig {
+    /// Keep the provider's saved handle, separate from Bootty's task identity.
+    /// # Errors
+    /// Rejects a saved conversation from another provider, account or directory.
+    pub fn resume_saved(&mut self, entry: &crate::TerminalHistoryEntry) -> Result<(), String> {
+        if self.remote.is_some()
+            || self.provider != entry.provider
+            || self.cwd != entry.cwd
+            || self.account_directory.as_deref().map(Path::new)
+                != Some(entry.account_directory.as_path())
+            || !crate::terminal_history::valid_id(&entry.session_id)
+        {
+            return Err(
+                "The saved conversation does not match the captured provider account and directory"
+                    .into(),
+            );
+        }
+        let mut candidate = self.clone();
+        if self.provider == AgentKind::Pi {
+            if !crate::terminal_history::valid_path(Path::new(&entry.resume_id)) {
+                return Err("Pi requires its exact saved session file".into());
+            }
+            candidate.session_file = Some(entry.resume_id.clone());
+        } else if entry.resume_id != entry.session_id {
+            return Err("The provider session identity changed".into());
+        }
+        candidate.session_id = Some(entry.session_id.clone());
+        candidate.fresh_session_id = None;
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
     #[must_use]
     pub const fn supports_provider(provider: AgentKind) -> bool {
         matches!(
@@ -453,9 +484,9 @@ impl NativeAgentSession {
                 )
             });
             if !intentional {
-                snapshot.error = Some(bounded_text(error.clone()));
+                snapshot.set_provider_error(&error);
             }
-            snapshot.status = if intentional {
+            snapshot.status = if intentional || snapshot.provider_writer_blocked() {
                 NativeSessionStatus::Stopped
             } else {
                 NativeSessionStatus::Error
@@ -504,6 +535,14 @@ impl NativeAgentSession {
         &self,
         can_recreate_empty_thread: bool,
     ) -> Result<(), String> {
+        self.initialize_with_recovery(can_recreate_empty_thread, false)
+    }
+
+    pub(crate) fn initialize_with_recovery(
+        &self,
+        can_recreate_empty_thread: bool,
+        unarchive: bool,
+    ) -> Result<(), String> {
         if self.config.provider == AgentKind::Pi {
             return self.initialize_pi();
         }
@@ -531,6 +570,15 @@ impl NativeAgentSession {
             return Ok(());
         }
         self.initialize_codex_transport()?;
+        if unarchive {
+            let id = self
+                .config
+                .session_id
+                .as_deref()
+                .ok_or("Saved conversation has no provider identity")?;
+            self.rpc("thread/unarchive", json!({"threadId":id}))?;
+            lock(&self.snapshot).provider_archive = crate::NativeProviderArchiveState::Available;
+        }
         let method = if self.config.session_id.is_some() {
             "thread/resume"
         } else {
@@ -580,6 +628,7 @@ impl NativeAgentSession {
         }
         let mut snapshot = lock(&self.snapshot);
         snapshot.session_id = Some(id);
+        snapshot.provider_archive = crate::NativeProviderArchiveState::Available;
         if let Some(turns) = field(field(&result, "thread"), "turns").as_array() {
             for turn in turns {
                 snapshot.history_turn(turn);
@@ -746,7 +795,7 @@ impl NativeAgentSession {
             if snapshot.status != NativeSessionStatus::Stopped {
                 snapshot.status = NativeSessionStatus::Error;
                 snapshot.working_since = None;
-                snapshot.error = Some(bounded_text(error.clone()));
+                snapshot.set_provider_error(error);
             }
             snapshot.changed();
             drop(snapshot);
@@ -843,7 +892,7 @@ impl NativeAgentSession {
         {
             snapshot.status = NativeSessionStatus::Error;
             snapshot.working_since = None;
-            snapshot.error = Some(bounded_text(error.clone()));
+            snapshot.set_provider_error(error);
         }
         if let Some(item) = snapshot
             .transcript
@@ -891,7 +940,7 @@ impl NativeAgentSession {
             let mut snapshot = lock(&self.snapshot);
             if snapshot.status != NativeSessionStatus::Stopped {
                 snapshot.status = NativeSessionStatus::Error;
-                snapshot.error = Some(bounded_text(error.clone()));
+                snapshot.set_provider_error(&error);
                 snapshot.working_since = None;
             }
             snapshot.changed();
@@ -1575,7 +1624,7 @@ fn read_frames(
                         return;
                     }
                     let mut snapshot = lock(&shared_snapshot);
-                    snapshot.error = Some(bounded_text(error));
+                    snapshot.set_provider_error(&error);
                     snapshot.changed();
                     drop(snapshot);
                 } else {
@@ -2204,51 +2253,37 @@ fn spawn_native_child(
     }) {
         return Err("Native tools require this provider's exact bound task terminal".to_owned());
     }
-    let permission_extension = config.permissions.pi_extension(config.provider, tools)?;
-    let (tool_arguments, remote_tools, permission_path) = if let Some(remote) = &config.remote
+    let (tool_arguments, remote_tools) = if let Some(remote) = &config.remote
         && let Some(tools) = tools
     {
-        let (arguments, relay, permission_path) = tools.remote_arguments(
+        let (arguments, relay) = tools.remote_arguments(
             &bootty_host::remote::RemoteHost::new(remote.host.clone()),
             &remote.daemon,
-            permission_extension
-                .as_ref()
-                .map(tempfile::NamedTempFile::path),
         )?;
-        (arguments, Some(relay), permission_path)
+        (arguments, Some(relay))
     } else {
         (
             tools.map_or_else(Vec::new, crate::ToolBridge::arguments),
             None,
-            permission_extension
-                .as_ref()
-                .map(|file| file.path().to_path_buf()),
         )
     };
-    native_command(
-        config,
-        &tool_arguments,
-        attachment_directory,
-        permission_path.as_deref(),
-    )?
-    .spawn()
-    .map(|child| {
-        (
-            child,
-            NativeLaunchResources {
-                _permission_extension: permission_extension,
-                _remote_tools: remote_tools,
-            },
-        )
-    })
-    .map_err(|error| format!("Cannot start {}: {error}", config.provider))
+    native_command(config, &tool_arguments, attachment_directory)?
+        .spawn()
+        .map(|child| {
+            (
+                child,
+                NativeLaunchResources {
+                    _remote_tools: remote_tools,
+                },
+            )
+        })
+        .map_err(|error| format!("Cannot start {}: {error}", config.provider))
 }
 
 fn native_command(
     config: &NativeSessionConfig,
     tool_arguments: &[String],
     attachment_directory: Option<&std::path::Path>,
-    permission_extension: Option<&Path>,
 ) -> Result<Command, String> {
     config.validate()?;
     #[cfg(not(unix))]
@@ -2259,9 +2294,6 @@ fn native_command(
         crate::terminal_process::configure_group(&mut command);
         if config.provider == AgentKind::Pi {
             command.args(tool_arguments).args(&config.arguments);
-            if let Some(extension) = permission_extension {
-                command.arg("--extension").arg(extension);
-            }
             command.args(["--mode", "rpc"]);
             if let Some(file) = &config.session_file {
                 command.args(["--session", file]);

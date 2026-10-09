@@ -83,6 +83,25 @@ impl std::error::Error for NativeCreationError {}
 
 impl NativeSessionRecord {
     fn restore_stopped(&mut self) {
+        if let Some(error) = &self.snapshot.error {
+            if self.config.provider == crate::AgentKind::Codex
+                && crate::native_protocol::codex_session_archived(
+                    error,
+                    self.config.session_id.as_deref(),
+                )
+            {
+                self.snapshot.provider_archive = crate::NativeProviderArchiveState::Archived;
+            }
+            self.snapshot.error = Some(if self.snapshot.provider_archived() {
+                "This conversation is archived in Codex.".into()
+            } else {
+                crate::native_error_message(error)
+            });
+        }
+        if let Some(error) = self.snapshot.error.clone() {
+            self.snapshot.session_id.clone_from(&self.config.session_id);
+            self.snapshot.set_provider_error(&error);
+        }
         self.snapshot.status = NativeSessionStatus::Stopped;
         if self.config.account_directory.is_none() {
             self.snapshot.error = Some("This saved conversation predates captured accounts. Its history is retained; start a new session to continue with your selected account.".into());
@@ -220,6 +239,10 @@ impl NativeAgentService {
         validate_model_catalog_cache(&store)?;
         let mut identities = std::collections::BTreeSet::new();
         for record in &mut store.records {
+            // Older catalogs assigned Pi a policy it never supported. Migrate before validation.
+            if record.config.provider == crate::AgentKind::Pi {
+                record.config.permissions = crate::NativePermissionMode::ProviderDefault;
+            }
             record.config.validate_stored()?;
             validate_pending_message(
                 record.pending_initial_message.as_deref(),
@@ -1266,7 +1289,7 @@ impl NativeAgentService {
                 target: Some(record.target()),
             });
         }
-        self.launch(&record.id, tools)
+        self.launch(&record.id, tools, false)
             .map_err(|message| NativeCreationError {
                 message,
                 target: Some(record.target()),
@@ -1277,6 +1300,7 @@ impl NativeAgentService {
         &self,
         id: &str,
         tools: Option<Arc<crate::ToolBridge>>,
+        unarchive: bool,
     ) -> Result<NativeSessionRecord, String> {
         let record = lock(&self.store)
             .records
@@ -1333,7 +1357,8 @@ impl NativeAgentService {
                     .side_chat
                     .as_ref()
                     .is_none_or(|fork| fork.seeded_identity.is_none());
-            session.initialize_with_empty_restore(empty_reservation)?;
+            lock(&session.snapshot).provider_archive = record.snapshot.provider_archive;
+            session.initialize_with_recovery(empty_reservation && !unarchive, unarchive)?;
             Ok(session)
         });
         match started {
@@ -1360,24 +1385,60 @@ impl NativeAgentService {
                 }
                 Ok(result)
             }
-            Err(error) => {
-                lock(&self.live).remove(id);
-                let mut candidate = lock(&self.store).clone();
-                if let Some(record) = candidate.records.iter_mut().find(|record| record.id == id) {
-                    record.snapshot.error = Some(bounded_text(error.clone()));
-                    record.snapshot.status = NativeSessionStatus::Error;
-                    record.snapshot.working_since = None;
-                }
-                self.commit(candidate)?;
-                Err(error)
-            }
+            Err(error) => Err(self.record_launch_failure(&record, &error)?),
         }
+    }
+
+    fn record_launch_failure(
+        &self,
+        record: &NativeSessionRecord,
+        error: &str,
+    ) -> Result<String, String> {
+        let id = record.id.as_str();
+        let archive_error = record.config.provider == crate::AgentKind::Codex
+            && crate::native_protocol::codex_session_archived(
+                error,
+                record.config.session_id.as_deref(),
+            );
+        let archived = record.config.provider == crate::AgentKind::Codex
+            && (archive_error
+                || lock(&self.live).get(id).map_or_else(
+                    || record.snapshot.provider_archived(),
+                    |session| session.snapshot().provider_archived(),
+                ));
+        let error = if archive_error {
+            "This conversation is archived in Codex.".to_owned()
+        } else {
+            crate::native_error_message(error)
+        };
+        lock(&self.live).remove(id);
+        let mut candidate = lock(&self.store).clone();
+        if let Some(record) = candidate.records.iter_mut().find(|record| record.id == id) {
+            record
+                .snapshot
+                .session_id
+                .clone_from(&record.config.session_id);
+            record.snapshot.set_provider_error(&error);
+            record.snapshot.provider_archive = if archived {
+                crate::NativeProviderArchiveState::Archived
+            } else {
+                crate::NativeProviderArchiveState::Unknown
+            };
+            record.snapshot.status = if archived || record.snapshot.provider_writer_blocked() {
+                NativeSessionStatus::Stopped
+            } else {
+                NativeSessionStatus::Error
+            };
+            record.snapshot.working_since = None;
+        }
+        self.commit(candidate)?;
+        Ok(error)
     }
 
     /// # Errors
     /// Returns an unknown/live-session error or provider resume failure.
     pub fn resume(&self, target: &CommandTarget) -> Result<NativeSessionRecord, String> {
-        self.resume_captured(target, None)
+        self.resume_captured(target, None, false)
     }
 
     /// Resume using a fresh host-issued attachment; stopped runtime configuration is never reused.
@@ -1388,13 +1449,25 @@ impl NativeAgentService {
         target: &CommandTarget,
         tools: Arc<crate::ToolBridge>,
     ) -> Result<NativeSessionRecord, String> {
-        self.resume_captured(target, Some(tools))
+        self.resume_captured(target, Some(tools), false)
+    }
+
+    /// Unarchive the captured Codex conversation and resume its existing identity.
+    /// # Errors
+    /// Returns stale targets, unsupported providers, persistence or provider failures.
+    pub fn unarchive(
+        &self,
+        target: &CommandTarget,
+        tools: Option<Arc<crate::ToolBridge>>,
+    ) -> Result<NativeSessionRecord, String> {
+        self.resume_captured(target, tools, true)
     }
 
     fn resume_captured(
         &self,
         target: &CommandTarget,
         tools: Option<Arc<crate::ToolBridge>>,
+        unarchive: bool,
     ) -> Result<NativeSessionRecord, String> {
         let _mutation = lock(&self.mutation);
         if self.shutdown.load(Ordering::Acquire) {
@@ -1407,6 +1480,9 @@ impl NativeAgentService {
             .map(|record| record.config.provider)
             .ok_or("Native session target is unknown or stale")?;
         validate_tools(provider, tools.as_deref())?;
+        if unarchive && provider != crate::AgentKind::Codex {
+            return Err("This provider does not support unarchiving conversations".into());
+        }
         {
             let mut live = lock(&self.live);
             if let Some(session) = live.get(&target.handle) {
@@ -1439,7 +1515,7 @@ impl NativeAgentService {
         record.snapshot.pending_user_item = None;
         record.snapshot.first_turn = None;
         self.commit(candidate)?;
-        self.launch(&target.handle, tools)
+        self.launch(&target.handle, tools, unarchive)
     }
 
     #[must_use]

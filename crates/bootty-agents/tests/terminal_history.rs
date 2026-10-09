@@ -526,3 +526,24 @@ fn codex_malformed_history_reaps_the_owned_process_and_redacts_provider_errors()
             .success()
     );
 }
+
+#[rstest]
+fn claude_bookkeeping_files_do_not_block_resumable_conversations() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    saved(
+        directory.path(),
+        AgentKind::Claude,
+        "bookkeeping",
+        &[json!({"type":"queue-operation", "sessionId":"bookkeeping", "operation":"enqueue"})],
+        20,
+    )
+    .unwrap();
+    saved(directory.path(), AgentKind::Claude, "saved-id", &[
+        json!({"type":"user", "sessionId":"saved-id", "cwd":"/workspace", "message":{"content":"Hello"}}),
+    ], 10).unwrap();
+    let entries =
+        terminal_provider_history(&query(AgentKind::Claude, directory.path(), None)).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].session_id, "saved-id");
+    assert_eq!(entries[0].cwd, PathBuf::from("/workspace"));
+}

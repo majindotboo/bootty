@@ -10,7 +10,15 @@ use bootty_control::{
 pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
     let launch_arguments = launch_arguments();
     [
-        ("start", launch_arguments.clone(), ResourceKind::Binding),
+        (
+            "start",
+            launch_arguments
+                .iter()
+                .copied()
+                .chain(["projectless", "saved_session"])
+                .collect(),
+            ResourceKind::Binding,
+        ),
         ("tab", launch_arguments.clone(), ResourceKind::Binding),
         (
             "pane",
@@ -110,6 +118,7 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             ResourceKind::Session,
         ),
         ("resume", vec!["id", "generation"], ResourceKind::Session),
+        ("unarchive", vec!["id", "generation"], ResourceKind::Session),
         ("models", vec!["id", "generation"], ResourceKind::Session),
         (
             "models-info",
@@ -207,6 +216,8 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                     required: !(matches!(
                         name,
                         "expected_account"
+                            | "projectless"
+                            | "saved_session"
                             | "refresh"
                             | "expected_title"
                             | "annotations"

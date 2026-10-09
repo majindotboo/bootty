@@ -173,12 +173,10 @@ impl ToolBridge {
         &self,
         remote: &bootty_host::remote::RemoteHost,
         daemon: &str,
-        permission_extension: Option<&Path>,
     ) -> Result<
         (
             Vec<String>,
             bootty_host::private_stdio::relay::RemoteStdioRelay,
-            Option<std::path::PathBuf>,
         ),
         String,
     > {
@@ -214,15 +212,6 @@ impl ToolBridge {
             name: "connection.json".into(),
             bytes: self.transport.remote_connection(&directory)?,
         });
-        let permission_path = if let Some(path) = permission_extension {
-            files.push(bootty_host::private_stdio::relay::PrivateFile {
-                name: "permissions.ts".into(),
-                bytes: std::fs::read(path).map_err(|error| error.to_string())?,
-            });
-            Some(directory.join("permissions.ts"))
-        } else {
-            None
-        };
         let relay = bootty_host::private_stdio::relay::RemoteStdioRelay::start(
             remote,
             daemon,
@@ -231,7 +220,7 @@ impl ToolBridge {
             self.transport.directory.join("tools.sock"),
         )
         .map_err(|error| error.to_string())?;
-        Ok((arguments, relay, permission_path))
+        Ok((arguments, relay))
     }
 
     pub fn stop(&self) {

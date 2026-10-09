@@ -61,6 +61,25 @@ pub enum NativePermissionMode {
 }
 
 impl NativePermissionMode {
+    #[must_use]
+    pub const fn choices(provider: AgentKind) -> &'static [Self] {
+        match provider {
+            AgentKind::Codex => &[Self::Supervised, Self::Auto, Self::FullAccess],
+            AgentKind::Claude => &[Self::Supervised, Self::AutoAcceptEdits, Self::FullAccess],
+            AgentKind::Pi => &[],
+        }
+    }
+
+    #[must_use]
+    pub const fn description(self) -> &'static str {
+        match self {
+            Self::ProviderDefault => "Use the provider's configured policy",
+            Self::Supervised => "Ask before actions that require approval",
+            Self::AutoAcceptEdits => "Accept edits; ask before other protected actions",
+            Self::Auto => "Review actions automatically; ask when review requires it",
+            Self::FullAccess => "Unrestricted access to files and the internet",
+        }
+    }
     pub const ALL: [Self; 5] = [
         Self::ProviderDefault,
         Self::Supervised,
@@ -89,7 +108,7 @@ impl NativePermissionMode {
 
     #[must_use]
     pub const fn supports(self, provider: AgentKind) -> bool {
-        !matches!((self, provider), (Self::Auto, AgentKind::Pi))
+        !matches!(provider, AgentKind::Pi) || matches!(self, Self::ProviderDefault)
     }
 
     #[must_use]
@@ -106,10 +125,11 @@ impl NativePermissionMode {
     #[must_use]
     pub const fn icon(self) -> &'static str {
         match self {
-            Self::ProviderDefault | Self::Supervised => "lock",
+            Self::ProviderDefault => "lock",
+            Self::Supervised => "hand",
             Self::AutoAcceptEdits => "pencil",
-            Self::Auto => "sparkles",
-            Self::FullAccess => "lock-open",
+            Self::Auto => "shield-check",
+            Self::FullAccess => "shield-alert",
         }
     }
 
@@ -132,38 +152,6 @@ impl NativePermissionMode {
             Self::FullAccess => ("never", "user", "dangerFullAccess"),
         };
         json!({"approvalPolicy":approval,"approvalsReviewer":reviewer,"sandboxPolicy":{"type":sandbox}})
-    }
-
-    pub(crate) fn pi_extension(
-        self,
-        provider: AgentKind,
-        tools: Option<&crate::ToolBridge>,
-    ) -> Result<Option<tempfile::NamedTempFile>, String> {
-        use std::io::Write as _;
-        if provider != AgentKind::Pi || self == Self::ProviderDefault {
-            return Ok(None);
-        }
-        if !self.supports(provider) {
-            return Err("Pi does not support automatic approval review".into());
-        }
-        let mut file = tempfile::Builder::new()
-            .prefix("bootty-pi-permissions-")
-            .suffix(".mjs")
-            .tempfile()
-            .map_err(|e| e.to_string())?;
-        let mode = serde_json::to_string(&self).map_err(|e| e.to_string())?;
-        let source = include_str!("assets/pi-native-permissions.mjs")
-            .replace("__BOOTTY_PERMISSION_MODE__", &mode)
-            .replace(
-                "__BOOTTY_PERMISSION_TOOLS__",
-                &tools.map_or_else(
-                    || Ok("{}".to_owned()),
-                    crate::ToolBridge::pi_permission_tools,
-                )?,
-            );
-        file.write_all(source.as_bytes())
-            .map_err(|e| e.to_string())?;
-        Ok(Some(file))
     }
 }
 

@@ -60,7 +60,20 @@ for line in sys.stdin:
   continue
  if method == 'initialized': continue
  if method == 'initialize': reply(ident,{})
+ elif method == 'thread/unarchive':
+  with open('unarchive-request.json','w') as output: json.dump(params,output)
+  if os.path.exists('unarchive-fail'):
+   emit({'id':ident,'error':{'code':-32603,'message':'Restore service unavailable'}})
+   continue
+  os.unlink('archived')
+  reply(ident,{'thread':{'id':params['threadId']}})
  elif method in ['thread/start','thread/resume']:
+  if method=='thread/resume' and os.path.exists('writer-blocked'):
+   emit({'id':ident,'error':{'code':-32600,'message':'thread '+params['threadId']+' already has an active writer'}})
+   continue
+  if method=='thread/resume' and os.path.exists('archived'):
+   emit({'id':ident,'error':{'code':-32600,'message':'session '+params['threadId']+' is archived. Run `codex unarchive '+params['threadId']+'` to unarchive it first.'}})
+   continue
   if method=='thread/resume' and os.path.exists('missing-rollout'):
    emit({'id':ident,'error':{'code':-32600,'message':'no rollout found for thread id '+params['threadId']}})
    continue
@@ -232,6 +245,74 @@ fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
     config.program = fixture(root)?;
     config.account_directory = Some(root.join("account").to_string_lossy().into_owned());
     Ok(config)
+}
+
+#[rstest]
+#[case::success(false, false)]
+#[case::retry_after_failure(true, false)]
+#[case::legacy_catalog(false, true)]
+fn archived_conversation_can_unarchive_the_same_provider_identity(
+    #[case] fail_first: bool,
+    #[case] legacy: bool,
+) {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let mut launch = config(root.path()).unwrap();
+    launch.session_id = Some("native-thread".into());
+    let record = service
+        .create("binding", "Saved conversation", launch)
+        .unwrap();
+    service.stop(&record.target()).unwrap();
+    fs::write(root.path().join("archived"), "").unwrap();
+    let error = service.resume(&record.target()).unwrap_err();
+    assert_eq!(error, "This conversation is archived in Codex.");
+    let saved = service.sessions().remove(0);
+    assert!(saved.snapshot.provider_archived());
+    assert_eq!(saved.snapshot.transcript, record.snapshot.transcript);
+    service.shutdown().unwrap();
+    drop(service);
+    if legacy {
+        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        catalog["records"][0]["snapshot"]
+            .as_object_mut()
+            .unwrap()
+            .remove("provider_archive");
+        catalog["records"][0]["snapshot"]["error"] = json!(json!({"code":-32600,"message":"session native-thread is archived. Run `codex unarchive native-thread` to unarchive it first."}).to_string());
+        fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    }
+    let restored = NativeAgentService::open(&path).unwrap();
+    let mut saved = restored.sessions().remove(0);
+    assert!(saved.snapshot.provider_archived());
+    if fail_first {
+        fs::write(root.path().join("unarchive-fail"), "").unwrap();
+        assert_eq!(
+            restored.unarchive(&saved.target(), None).unwrap_err(),
+            "Restore service unavailable"
+        );
+        saved = restored.sessions().remove(0);
+        assert!(saved.snapshot.provider_archived());
+        assert_eq!(saved.config.session_id, record.config.session_id);
+        fs::remove_file(root.path().join("unarchive-fail")).unwrap();
+    }
+    let resumed = restored.unarchive(&saved.target(), None).unwrap();
+    assert_eq!(resumed.id, record.id);
+    assert_eq!(resumed.config.session_id, record.config.session_id);
+    assert_eq!(
+        resumed.config.account_directory,
+        record.config.account_directory
+    );
+    assert_eq!(resumed.snapshot.transcript, record.snapshot.transcript);
+    assert_eq!(resumed.snapshot.status, NativeSessionStatus::Idle);
+    assert!(!resumed.snapshot.provider_archived());
+    assert_eq!(
+        serde_json::from_slice::<Value>(
+            &fs::read(root.path().join("unarchive-request.json")).unwrap()
+        )
+        .unwrap(),
+        json!({"threadId":"native-thread"})
+    );
+    restored.shutdown().unwrap();
 }
 
 fn barrier(session: &NativeAgentSession) -> Result<Value, String> {
@@ -861,6 +942,36 @@ fn captures_account_and_profile_and_resumes_exact_thread() {
             .status,
         NativeSessionStatus::Idle
     );
+}
+
+#[rstest]
+fn external_saved_session_resumes_its_provider_identity_and_transcript() {
+    let root = TempDir::new().unwrap();
+    let mut config = config(root.path()).unwrap();
+    let entry = bootty_agents::TerminalHistoryEntry {
+        provider: AgentKind::Codex,
+        session_id: "external-conversation".into(),
+        resume_id: "external-conversation".into(),
+        title: Some("Previous work".into()),
+        created_at: None,
+        updated_at: None,
+        cwd: root.path().into(),
+        account_directory: config.account_directory.as_deref().unwrap().into(),
+    };
+    config.resume_saved(&entry).unwrap();
+    let session = NativeAgentSession::spawn(config).unwrap();
+    let before = session.snapshot();
+    assert_eq!(before.session_id.as_deref(), Some("external-conversation"));
+    assert!(
+        before
+            .transcript
+            .iter()
+            .any(|item| item.text == "resumed history")
+    );
+    session.send_prompt("Continue this conversation").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(session.snapshot().session_id, before.session_id);
+    session.stop();
 }
 
 #[rstest]
@@ -1735,7 +1846,10 @@ fn prompt_failure_persists_observed_state_without_inventing_an_accepted_turn(
     assert!(!published.snapshot.completed_turn);
     if expected == NativeSessionStatus::Error {
         assert!(error.contains("captured first prompt rejected"));
-        assert_eq!(published.snapshot.error.as_deref(), Some(error.as_str()));
+        assert_eq!(
+            published.snapshot.error.as_deref(),
+            Some("captured first prompt rejected")
+        );
     } else {
         assert_eq!(published.snapshot.error, None);
     }
@@ -2129,7 +2243,7 @@ fn codex_child_lifecycle_outlives_parent_turn_and_history_reads_do_not_take_a_wr
     let event = |thread: &str, kind: &str, item: Value| json!({"method":kind,"params":{"threadId":thread,"turnId":"turn-1","item":item}});
     fs::write(root.path().join("events.json"), json!([
         event("foreign","item/started",json!({"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["foreign-child"],"prompt":"Wrong"})),
-        event("native-thread","item/started",json!({"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child-thread"],"prompt":"Review this change","model":"gpt-6-sol","agentsStates":{"child-thread":{"status":"running"}}})),
+        event("native-thread","item/started",json!({"type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child-thread"],"agentNickname":"Scout","prompt":"Review this change","model":"gpt-6-sol","agentsStates":{"child-thread":{"status":"running"}}})),
     ]).to_string()).unwrap();
     session.rpc("__barrier", json!({})).unwrap();
     let running = session.snapshot();
@@ -2145,7 +2259,7 @@ fn codex_child_lifecycle_outlives_parent_turn_and_history_reads_do_not_take_a_wr
         .unwrap();
     fs::write(root.path().join("events.json"), json!([
         event("native-thread","item/completed",json!({"type":"collabAgentToolCall","tool":"wait","receiverThreadIds":["child-thread","unreported-child"],"agentsStates":{"child-thread":{"status":"completed","message":"Reviewed"},"unreported-child":{"status":"running"}}})),
-        event("native-thread","item/completed",json!({"type":"subAgentActivity","kind":"interacted","agentThreadId":"child-thread"})),
+        event("native-thread","item/completed",json!({"type":"subAgentActivity","kind":"interacted","agentThreadId":"child-thread","agentPath":"/root/reviewer"})),
     ]).to_string()).unwrap();
     session.rpc("__barrier", json!({})).unwrap();
     let before = session.snapshot();
@@ -2155,6 +2269,7 @@ fn codex_child_lifecycle_outlives_parent_turn_and_history_reads_do_not_take_a_wr
         .find(|item| item.subagent.is_some())
         .unwrap();
     assert_eq!(child.text, "Reviewed");
+    pretty_assertions::assert_eq!(child.subagent.as_ref().unwrap().title, "Scout");
     assert_eq!(
         child.subagent.as_ref().unwrap().status,
         NativeToolStatus::Completed
@@ -2366,4 +2481,34 @@ proptest! {
             item.tool.as_ref().map_or(0, |tool| tool.input.len().saturating_add(tool.name.len()))
         )).fold(0_usize, usize::saturating_add) <= 1024 * 1024);
     }
+}
+
+#[rstest]
+fn writer_owned_elsewhere_is_readable_and_can_retry_without_changing_identity() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let mut launch = config(root.path()).unwrap();
+    launch.session_id = Some("native-thread".into());
+    let record = service
+        .create("binding", "Saved conversation", launch)
+        .unwrap();
+    service.stop(&record.target()).unwrap();
+    fs::write(root.path().join("writer-blocked"), "").unwrap();
+    assert!(service.resume(&record.target()).is_err());
+    let saved = service.sessions().remove(0);
+    assert!(saved.snapshot.provider_writer_blocked());
+    assert_eq!(saved.snapshot.status, NativeSessionStatus::Stopped);
+    assert_eq!(saved.snapshot.error, None);
+    assert_eq!(saved.snapshot.transcript, record.snapshot.transcript);
+    service.shutdown().unwrap();
+    drop(service);
+    let service = NativeAgentService::open(&path).unwrap();
+    assert!(service.sessions()[0].snapshot.provider_writer_blocked());
+    fs::remove_file(root.path().join("writer-blocked")).unwrap();
+    let resumed = service.resume(&saved.target()).unwrap();
+    assert!(!resumed.snapshot.provider_writer_blocked());
+    assert_eq!(resumed.config.session_id, record.config.session_id);
+    assert_eq!(resumed.snapshot.status, NativeSessionStatus::Idle);
+    service.shutdown().unwrap();
 }

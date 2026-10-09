@@ -1,6 +1,4 @@
 //! Pi's public extension APIs attach the same bounded private protocol on both API generations.
-use super::{ToolBridge, ToolProtocol};
-use serde::Serialize;
 
 pub(super) fn tool_name(server: &str, tool: &str) -> String {
     use sha2::{Digest as _, Sha256};
@@ -15,42 +13,6 @@ pub(super) fn tool_name(server: &str, tool: &str) -> String {
         }
     }
     name
-}
-
-#[derive(Serialize)]
-struct PermissionTool<'a> {
-    label: &'a str,
-    read_only: bool,
-}
-
-impl ToolBridge {
-    // Only this launch's host-issued catalog can classify a tool as a permitted read.
-    pub(crate) fn pi_permission_tools(&self) -> Result<String, String> {
-        let catalog = ToolProtocol::new(self.lease().clone()).catalog();
-        let tools = catalog
-            .get("tools")
-            .and_then(serde_json::Value::as_array)
-            .ok_or("Invalid host tool catalog")?;
-        let mut permissions = std::collections::BTreeMap::new();
-        for tool in tools {
-            let label = tool
-                .get("name")
-                .and_then(serde_json::Value::as_str)
-                .ok_or("Missing host tool name")?;
-            permissions.insert(
-                tool_name(self.server_name(), label),
-                PermissionTool {
-                    label,
-                    read_only: tool
-                        .get("annotations")
-                        .and_then(|value| value.get("readOnlyHint"))
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true),
-                },
-            );
-        }
-        serde_json::to_string(&permissions).map_err(|error| error.to_string())
-    }
 }
 
 pub(super) const TOOLS: &str = r"

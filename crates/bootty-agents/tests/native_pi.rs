@@ -147,6 +147,38 @@ fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
 }
 
 #[rstest]
+#[case("supervised")]
+#[case("auto")]
+#[case("full-access")]
+fn legacy_pi_permissions_do_not_block_saved_conversations(#[case] permissions: &str) {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service
+        .create(
+            "binding",
+            "Saved conversation",
+            config(root.path()).unwrap(),
+        )
+        .unwrap();
+    service.shutdown().unwrap();
+    drop(service);
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    catalog["records"][0]["config"]["permissions"] = json!(permissions);
+    fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let restored = NativeAgentService::open(&path).unwrap();
+    let saved = restored.sessions();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].id, record.id);
+    assert_eq!(saved[0].snapshot.transcript, record.snapshot.transcript);
+    assert_eq!(
+        saved[0].config.permissions,
+        bootty_agents::NativePermissionMode::ProviderDefault
+    );
+    restored.shutdown().unwrap();
+}
+
+#[rstest]
 #[case::owned_image("valid", true)]
 #[case::foreign_event("foreign-event", false)]
 #[case::wrong_mime("wrong-mime", false)]
@@ -1442,27 +1474,6 @@ fn pi_rejects_an_unavailable_automatic_review_policy_before_launching() {
     config.permissions = "auto".parse().unwrap();
     assert!(NativeAgentSession::spawn(config).is_err());
     assert!(!root.path().join("launch.json").exists());
-}
-
-#[rstest]
-fn pi_permission_extension_is_private_and_owned_by_the_provider_lifetime() {
-    let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
-    config.permissions = "supervised".parse().unwrap();
-    let session = NativeAgentSession::spawn(config).unwrap();
-    let launch: Value =
-        serde_json::from_slice(&fs::read(root.path().join("launch.json")).unwrap()).unwrap();
-    let args = launch["argv"].as_array().unwrap();
-    let position = args.iter().position(|arg| arg == "--extension").unwrap();
-    let extension =
-        std::path::PathBuf::from(args[position.checked_add(1).unwrap()].as_str().unwrap());
-    assert_eq!(
-        fs::metadata(&extension).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
-    session.stop();
-    drop(session);
-    assert!(!extension.exists());
 }
 
 #[rstest]

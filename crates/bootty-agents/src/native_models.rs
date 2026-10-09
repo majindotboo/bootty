@@ -26,7 +26,7 @@ pub struct NativeProviderCatalog {
 }
 
 /// Durable settings for the next prompt; access permissions remain separately owned.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeModelSelection {
     pub model: String,

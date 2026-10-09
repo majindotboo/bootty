@@ -50,8 +50,11 @@ impl NativeAgentSession {
             return Err("History direction must be older, newer or latest".into());
         }
         self.verify_pi_identity()?;
-        if current.status != NativeSessionStatus::Idle {
-            return Err("Wait for the current Pi run before reading earlier history".into());
+        if !matches!(
+            current.status,
+            NativeSessionStatus::Idle | NativeSessionStatus::Working | NativeSessionStatus::Waiting
+        ) {
+            return Err("Resume Pi before reading earlier history".into());
         }
         let mut reader = open_history(&self.config, current)?;
         let size = reader.get_ref().len();

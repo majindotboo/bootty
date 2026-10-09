@@ -153,6 +153,30 @@ fn records(bytes: &[u8]) -> impl Iterator<Item = Record> + '_ {
         .filter_map(|line| serde_json::from_slice::<Record>(line).ok())
 }
 
+fn session_metadata(
+    provider: AgentKind,
+    path: &Path,
+    id: Option<String>,
+    cwd: Option<PathBuf>,
+) -> Result<Option<(String, PathBuf)>, String> {
+    // Claude also stores bookkeeping-only JSONL files. They cannot be resumed without
+    // identity and cwd metadata; omit them rather than blocking the whole account catalog.
+    if provider == AgentKind::Claude && (id.is_none() || cwd.is_none()) {
+        return Ok(None);
+    }
+    let id = id.ok_or("Provider history session has no supported identity metadata")?;
+    let cwd = cwd.ok_or("Provider history session has no project metadata")?;
+    if !valid_id(&id) || !valid_path(&cwd) {
+        return Err("Provider history session identity or project is invalid".to_owned());
+    }
+    if provider == AgentKind::Claude
+        && path.file_stem().and_then(|stem| stem.to_str()) != Some(id.as_str())
+    {
+        return Err("Claude history identity does not match its saved file".to_owned());
+    }
+    Ok(Some((id, cwd)))
+}
+
 fn parse(
     query: &TerminalHistoryQuery<'_>,
     candidate: &Candidate,
@@ -196,16 +220,9 @@ fn parse(
     if sidechain {
         return Ok(None);
     }
-    let id = id.ok_or("Provider history session has no supported identity metadata")?;
-    let mut cwd = cwd.ok_or("Provider history session has no project metadata")?;
-    if !valid_id(&id) || !valid_path(&cwd) {
-        return Err("Provider history session identity or project is invalid".to_owned());
-    }
-    if query.provider == AgentKind::Claude
-        && candidate.path.file_stem().and_then(|stem| stem.to_str()) != Some(id.as_str())
-    {
-        return Err("Claude history identity does not match its saved file".to_owned());
-    }
+    let Some((id, mut cwd)) = session_metadata(query.provider, &candidate.path, id, cwd)? else {
+        return Ok(None);
+    };
     // In large files only the tail can prove the current stored title. A title in
     // the prefix may have been renamed or cleared in the unsampled transcript.
     for record in records(if complete { &first } else { &last }) {

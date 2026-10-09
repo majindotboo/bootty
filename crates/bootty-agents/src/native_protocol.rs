@@ -9,6 +9,54 @@ use sha2::{Digest as _, Sha256};
 
 use crate::AgentKind;
 
+/// Extract a readable provider failure without exposing its protocol envelope.
+#[must_use]
+pub fn native_error_message(error: &str) -> String {
+    bounded_text(serde_json::from_str::<Value>(error).map_or_else(
+        |_| error.to_owned(),
+        |value| {
+            value
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("The provider could not complete this request.")
+                .to_owned()
+        },
+    ))
+}
+
+/// Recognize the archive failure for exactly the captured provider identity.
+#[must_use]
+pub fn codex_session_archived(error: &str, session_id: Option<&str>) -> bool {
+    session_id.is_some_and(|id| {
+        serde_json::from_str::<Value>(error).is_ok_and(|error| {
+            error.get("code").and_then(Value::as_i64) == Some(-32600)
+                && error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .is_some_and(|message| {
+                        message.starts_with(&format!("session {id} is archived."))
+                    })
+        })
+    })
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeProviderArchiveState {
+    #[default]
+    Unknown,
+    Available,
+    Archived,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeProviderWriterState {
+    #[default]
+    Available,
+    Blocked,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeSessionStatus {
@@ -228,6 +276,12 @@ pub struct NativeSessionSnapshot {
     pub requests: Vec<NativeAgentRequest>,
     pub usage: Option<Value>,
     pub error: Option<String>,
+    /// The provider refused its exclusive writer lease; history remains readable.
+    #[serde(default)]
+    pub provider_writer: NativeProviderWriterState,
+    /// Observed provider archive state; independent of Bootty's task archive.
+    #[serde(default)]
+    pub provider_archive: NativeProviderArchiveState,
     pub revision: u64,
     #[serde(skip)]
     pub(crate) pending_user_item: Option<String>,
@@ -249,6 +303,34 @@ pub struct NativeSessionSnapshot {
 }
 
 impl NativeSessionSnapshot {
+    #[must_use]
+    pub const fn provider_archived(&self) -> bool {
+        matches!(self.provider_archive, NativeProviderArchiveState::Archived)
+    }
+    #[must_use]
+    pub const fn provider_writer_blocked(&self) -> bool {
+        matches!(self.provider_writer, NativeProviderWriterState::Blocked)
+    }
+
+    pub(crate) fn set_provider_error(&mut self, error: &str) {
+        let message = native_error_message(error);
+        let blocked = self.provider == AgentKind::Codex
+            && self.session_id.as_ref().is_some_and(|id| {
+                message.eq_ignore_ascii_case(&format!("thread {id} already has an active writer"))
+                    || message
+                        .eq_ignore_ascii_case(&format!("thread {id} already has an active writer."))
+            });
+        self.provider_writer = if blocked {
+            NativeProviderWriterState::Blocked
+        } else {
+            NativeProviderWriterState::Available
+        };
+        self.error = (!blocked).then_some(message);
+        if blocked {
+            self.status = NativeSessionStatus::Stopped;
+            self.working_since = None;
+        }
+    }
     /// Elapsed live turn time; restored or inactive snapshots have no clock origin.
     #[must_use]
     pub fn working_elapsed(&self, now: Instant) -> Option<Duration> {
@@ -275,6 +357,8 @@ impl NativeSessionSnapshot {
             requests: Vec::new(),
             usage: None,
             error: None,
+            provider_writer: NativeProviderWriterState::Available,
+            provider_archive: NativeProviderArchiveState::Unknown,
             revision: 0,
             pending_user_item: None,
             image_echo_count: 0,
