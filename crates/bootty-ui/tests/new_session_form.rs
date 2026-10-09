@@ -878,6 +878,77 @@ fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessio
 }
 
 #[rstest]
+#[case::dismissed(true)]
+#[case::another_picker(false)]
+fn project_discovery_waits_for_the_prior_picker(
+    mut form: NewSessionForm,
+    #[case] dismiss_prior: bool,
+) -> anyhow::Result<()> {
+    use assert_fs::{TempDir, prelude::*};
+    use bootty_ui::presentation::dialogs::NewSessionDialog;
+    use std::sync::{Arc, mpsc};
+    use std::time::{Duration, Instant};
+
+    let root = TempDir::new()?;
+    root.child("project").create_dir_all()?;
+    let cwd = root.child("project").path().to_string_lossy().into_owned();
+    let (repository, _) =
+        bootty_mux::repository::WorkspaceRepository::open(&root.child("config.toml"))?;
+    repository.register_project(form.draft.scope, &cwd)?;
+    form.set_directory(cwd.clone());
+    let (sender, wakes) = mpsc::channel();
+    let repaint: bootty_mux::RepaintHandle = Arc::new(move || {
+        let _ = sender.send(());
+    });
+
+    // Hold the real registry so the first picker cannot finish before the second opens.
+    let lock = rusqlite::Connection::open(root.child("session-order.sqlite3"))?;
+    lock.execute_batch("PRAGMA journal_mode=DELETE; BEGIN EXCLUSIVE")?;
+    let prior_form = NewSessionForm::new(
+        form.draft.clone(),
+        vec![form.destination().expect("destination").clone()],
+        AgentProvidersConfig::default(),
+    );
+    let mut prior = Some(NewSessionDialog::open_registered_form(
+        prior_form,
+        &repaint,
+        repository.clone(),
+    ));
+    if dismiss_prior {
+        prior.take();
+    }
+    let mut dialog = NewSessionDialog::open_registered_form(form, &repaint, repository);
+    anyhow::ensure!(
+        !dialog.spec().rows[0].enabled,
+        "Pending discovery blocks submit"
+    );
+    while dialog.poll().is_some() {}
+    anyhow::ensure!(
+        !dialog.spec().rows[0].enabled,
+        "Polling retains pending discovery"
+    );
+    lock.execute_batch("ROLLBACK")?;
+
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(2))
+        .ok_or_else(|| anyhow::anyhow!("discovery deadline overflow"))?;
+    while !dialog.spec().rows[0].enabled {
+        if let Some(prior) = &mut prior {
+            prior.poll();
+        }
+        if dialog.poll().is_some() {
+            continue;
+        }
+        if !dialog.spec().rows[0].enabled {
+            wakes.recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        }
+    }
+    assert_eq!(dialog.spec().projects[0].path, cwd);
+    assert_eq!(dialog.spec().hint, None);
+    Ok(())
+}
+
+#[rstest]
 fn permission_choices_reset_with_provider_and_use_the_shared_invocation(mut form: NewSessionForm) {
     form.change_text("Keep this prompt");
     form.change_field("permissions", "Auto");

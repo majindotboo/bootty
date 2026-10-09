@@ -36,6 +36,7 @@ pub struct NewSessionWorker {
     repaint: RepaintHandle,
     task: Option<NewSessionTask>,
     pending_target: Option<NewSessionTarget>,
+    pending_effect: Option<NewSessionEffect>,
     registry: Option<(
         bootty_mux::repository::WorkspaceRepository,
         bootty_mux::controller::SpaceId,
@@ -51,6 +52,7 @@ impl NewSessionWorker {
             repaint,
             task: None,
             pending_target: None,
+            pending_effect: None,
             registry: None,
         };
         owner.start(NewSessionEffect::ListProjects);
@@ -63,6 +65,7 @@ impl NewSessionWorker {
             repaint,
             task: None,
             pending_target: None,
+            pending_effect: None,
             registry: None,
         };
         owner.start(NewSessionEffect::ListProjects);
@@ -86,6 +89,7 @@ impl NewSessionWorker {
             repaint,
             task: None,
             pending_target: None,
+            pending_effect: None,
             registry: Some((repository, scope)),
         };
         owner.start(NewSessionEffect::ListProjects);
@@ -93,7 +97,7 @@ impl NewSessionWorker {
     }
 
     pub(crate) const fn is_busy(&self) -> bool {
-        self.task.is_some()
+        self.task.is_some() || self.pending_effect.is_some()
     }
 
     pub(crate) const fn is_remote(&self) -> bool {
@@ -117,6 +121,7 @@ impl NewSessionWorker {
         if let Some(task) = &self.task {
             task.cancellation.cancel();
             self.pending_target = Some(target);
+            self.pending_effect = None;
         } else {
             self.target = target;
             self.start(NewSessionEffect::ListProjects);
@@ -124,6 +129,18 @@ impl NewSessionWorker {
     }
 
     pub(crate) fn start(&mut self, effect: NewSessionEffect) {
+        if let Some(task) = &self.task {
+            task.cancellation.cancel();
+            self.pending_effect = Some(effect);
+            return;
+        }
+        // A dismissed picker may still be releasing its worker. Keep one pending request
+        // rather than rejecting the next picker or spawning overlapping Git/SSH work.
+        let Some(permit) = NewSessionWorkerPermit::acquire() else {
+            self.pending_effect = Some(effect);
+            return;
+        };
+        self.pending_effect = None;
         let (sender, receiver) = mpsc::channel();
         let cancellation = CommandCancellation::default();
         let runner = CancellableCommandRunner::new(cancellation.clone());
@@ -134,16 +151,6 @@ impl NewSessionWorker {
             receiver,
             cancellation,
         });
-        let Some(permit) = NewSessionWorkerPermit::acquire() else {
-            let error = if self.is_remote() {
-                ErrorNotice::RemoteProjectOperationStopping.to_string()
-            } else {
-                "the previous local project operation is still stopping".to_owned()
-            };
-            let _ = sender.send(Err(error));
-            repaint();
-            return;
-        };
         std::thread::spawn(move || {
             let result = if matches!(effect, NewSessionEffect::ListProjects) {
                 if let Some((repository, scope)) = registry {
@@ -176,6 +183,12 @@ impl NewSessionWorker {
     }
 
     pub(crate) fn poll(&mut self) -> Option<Result<NewSessionOutcome, String>> {
+        if self.task.is_none() {
+            if let Some(effect) = self.pending_effect.take() {
+                self.start(effect);
+            }
+            return None;
+        }
         let result = match self.task.as_ref()?.receiver.try_recv() {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
@@ -191,7 +204,12 @@ impl NewSessionWorker {
         self.task = None;
         if let Some(target) = self.pending_target.take() {
             self.target = target;
+            self.pending_effect = None;
             self.start(NewSessionEffect::ListProjects);
+            return None;
+        }
+        if let Some(effect) = self.pending_effect.take() {
+            self.start(effect);
             return None;
         }
         Some(result)
@@ -208,7 +226,8 @@ fn run_effect(
             NewSessionOutcome::Projects(project::discover_project_picker_entries(home.as_deref()))
         }
         (NewSessionTarget::Local { .. }, NewSessionEffect::ListWorktrees(project, open_cwds)) => {
-            let mut worktrees = project::discover_worktree_picker_entries(&project);
+            let mut worktrees = project::Git::with_runner(runner.clone())
+                .discover_worktree_picker_entries(&project);
             project::mark_occupied_worktrees(&mut worktrees, &open_cwds);
             NewSessionOutcome::Worktrees(worktrees)
         }
