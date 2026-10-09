@@ -1,14 +1,14 @@
 use super::load::{ConfigLoadError, ConfigResult};
 use super::model::{
-    AppearanceBranchConfig, AppearanceConfig, BackendKeybindConfig, BoottyConfig, ChromeConfig,
-    ColorConfig, CursorConfig, DiagnosticsConfig, FontConfig, InputConfig, MultiplexerConfig,
-    ResolvedTheme, SessionConfig, SidebarConfig, SshAuthenticationConfig, SshProfileConfig,
-    WindowConfig,
+    AppearanceBranchConfig, AppearanceConfig, BackendKeybindConfig, BoottyConfig, BrowserConfig,
+    ChromeConfig, ColorConfig, ComputerConfig, CursorConfig, DiagnosticsConfig, FontConfig,
+    InputConfig, MultiplexerConfig, ResolvedTheme, SessionConfig, SidebarConfig,
+    SshAuthenticationConfig, SshProfileConfig, WindowConfig,
 };
 use super::raw::{
-    AppearanceBranchPatch, AppearancePatch, BackendKeybindPatch, ChromePatch, ColorPatch,
-    CursorPatch, DiagnosticsPatch, FontPatch, InputPatch, MultiplexerPatch, RawConfig,
-    SessionPatch, SidebarPatch, WindowPatch,
+    AppearanceBranchPatch, AppearancePatch, BackendKeybindPatch, BrowserPatch, ChromePatch,
+    ColorPatch, ComputerPatch, CursorPatch, DiagnosticsPatch, FontPatch, InputPatch,
+    MultiplexerPatch, RawConfig, SessionPatch, SidebarPatch, WindowPatch,
 };
 use super::theme_catalog::{load_builtin_theme, parse_theme_source};
 use crate::FontFeature;
@@ -84,11 +84,15 @@ impl ConfigResolver<'_> {
         apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer)?;
         config.ssh_profiles = raw.ssh_profiles;
+        raw.agents.validate()?;
+        config.agents = raw.agents;
         config.extensions = raw.extensions;
         for (id, profile) in &config.ssh_profiles {
             profile.validate(id)?;
         }
         apply_partial_input(&mut config.input, raw.input);
+        apply_partial_browser(&mut config.browser, raw.browser);
+        apply_partial_computer(&mut config.computer, raw.computer);
         apply_partial_session(&mut config.session, raw.session);
         apply_partial_diagnostics(&mut config.diagnostics, raw.diagnostics);
         apply_partial_window(&mut config.window, raw.window);
@@ -194,17 +198,16 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
         panel_tabs,
         tabs_use_session_color,
     );
-    for (tabs, patch) in [
-        (&mut chrome.dock_tabs, partial.dock_tabs),
-        (&mut chrome.terminal_tabs, partial.terminal_tabs),
-    ] {
-        if let Some(patch) = patch {
-            apply_fields!(tabs, patch;
-                appearance,
-                close_position,
-                close_button,
-            );
-        }
+    for patch in [partial.dock_tabs, partial.terminal_tabs, partial.tabs]
+        .into_iter()
+        .flatten()
+    {
+        let tabs = &mut chrome.tabs;
+        apply_fields!(tabs, patch;
+            appearance,
+            close_position,
+            close_button,
+        );
     }
 
     apply_fields!(chrome, partial;
@@ -234,6 +237,9 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
 
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
     apply_fields!(sidebar, partial;
+        group_by_project,
+        sort_order,
+        animate_working,
         position,
         background,
         foreground,
@@ -354,6 +360,21 @@ fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
         max_scrollback,
         scrollbar,
         glyph_protocol,
+    );
+}
+
+fn apply_partial_computer(computer: &mut ComputerConfig, partial: ComputerPatch) {
+    apply_fields!(computer, partial;
+        enabled,
+        capture_enabled,
+        input_enabled,
+    );
+}
+
+fn apply_partial_browser(browser: &mut BrowserConfig, partial: BrowserPatch) {
+    apply_fields!(browser, partial;
+        search_engine,
+        persist_site_data,
     );
 }
 

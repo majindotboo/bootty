@@ -58,11 +58,9 @@ impl TmuxControlRunner {
 
     #[must_use]
     pub fn for_remote(remote: RemoteHost) -> Self {
-        Self {
-            clients: Arc::default(),
-            prefix_args: Arc::default(),
-            remote: Some(remote),
-        }
+        let mut runner = Self::for_identity(bootty_config::ApplicationIdentity::for_process());
+        runner.remote = Some(remote);
+        runner
     }
 
     /// Inject already-encoded terminal bytes into a target pane without asking tmux to interpret
@@ -84,7 +82,7 @@ impl TmuxControlRunner {
             return Ok(());
         }
 
-        let (program, args) = self.spawned(program, &args);
+        let (program, args) = self.spawned(program, &args)?;
         let output = SystemCommandRunner.run(&program, &args)?;
         if output.success {
             Ok(())
@@ -109,7 +107,7 @@ impl CommandRunner for TmuxControlRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
         self.control_query(program, args).map_or_else(
             || {
-                let (program, args) = self.spawned(program, args);
+                let (program, args) = self.spawned(program, args)?;
                 SystemCommandRunner.run(&program, &args)
             },
             Ok,
@@ -117,7 +115,7 @@ impl CommandRunner for TmuxControlRunner {
     }
 
     fn run_disowned(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
-        let (program, args) = self.spawned(program, args);
+        let (program, args) = self.spawned(program, args)?;
         SystemCommandRunner.run_disowned(&program, &args)
     }
 
@@ -128,7 +126,7 @@ impl CommandRunner for TmuxControlRunner {
         args: &[String],
         input: Vec<u8>,
     ) -> Result<CommandOutput> {
-        let (program, args) = self.spawned(program, args);
+        let (program, args) = self.spawned(program, args)?;
         SystemCommandRunner.run_with_input(&program, &args, input)
     }
 }
@@ -160,7 +158,7 @@ impl TmuxControlClient {
             .cloned()
             .chain(["-C", "attach-session", "-f", "ignore-size,no-output"].map(str::to_owned))
             .collect::<Vec<_>>();
-        let (program, args) = spawn_argv(program, &tmux_args, remote);
+        let (program, args) = spawn_argv(program, &tmux_args, remote)?;
         let mut child = Command::new(program)
             .args(args)
             .stdin(Stdio::piped())
@@ -266,7 +264,7 @@ struct ClientSlot {
 impl TmuxControlRunner {
     /// argv for running `program args...` as its own process: an SSH invocation for a remote
     /// server, and the command itself for a local one.
-    fn spawned(&self, program: &str, args: &[String]) -> (String, Vec<String>) {
+    fn spawned(&self, program: &str, args: &[String]) -> Result<(String, Vec<String>)> {
         let args = self
             .prefix_args
             .iter()
@@ -352,10 +350,24 @@ fn spawn_argv(
     program: &str,
     args: &[String],
     remote: Option<&RemoteHost>,
-) -> (String, Vec<String>) {
+) -> Result<(String, Vec<String>)> {
     remote.map_or_else(
-        || (program.to_owned(), args.to_vec()),
-        |remote| remote.command(program, args),
+        || {
+            // The UI host may inherit automation-only color suppression. A new local
+            // server must not retain that variable in its global pane environment.
+            Ok((
+                "/usr/bin/env".to_owned(),
+                ["-u", "NO_COLOR", program]
+                    .map(str::to_owned)
+                    .into_iter()
+                    .chain(args.iter().cloned())
+                    .collect(),
+            ))
+        },
+        |remote| {
+            remote.ensure_daemon()?;
+            remote.proxy_command(program, args)
+        },
     )
 }
 

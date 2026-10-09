@@ -2,8 +2,9 @@ use std::ffi::OsString;
 
 use assert_fs::{TempDir, prelude::*};
 use bootty_git::project::{
-    WorktreePickerEntry, discover_project_picker_entries, discover_worktree_picker_entries,
-    home_dir_from, mark_occupied_worktrees, toggle_favorite_project_path,
+    WorktreePickerEntry, add_favorite_project_path, discover_project_picker_entries,
+    discover_worktree_picker_entries, home_dir_from, mark_occupied_worktrees,
+    toggle_favorite_project_path,
 };
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
@@ -63,6 +64,114 @@ fn favorite_toggle_and_discovery_share_the_same_file(
     );
     assert!(!toggle_favorite_project_path(Some(home.path()), &project_path).expect("unfavorite"));
     home.child(".config/tmux/.session-favorites").assert("");
+}
+
+#[rstest]
+fn adding_a_favorite_is_idempotent_and_does_not_rewrite_existing_bookmarks(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
+    let project = home.child("projects/bootty");
+    project.create_dir_all().expect("project");
+    let project_path = project.path().to_string_lossy().into_owned();
+
+    assert!(add_favorite_project_path(Some(home.path()), &project_path).expect("add project"));
+    let favorites = home.child(".config/tmux/.session-favorites");
+    let content = std::fs::read(favorites.path()).expect("favorite bytes");
+
+    assert!(
+        !add_favorite_project_path(Some(home.path()), &project_path).expect("existing project")
+    );
+    assert_eq!(
+        std::fs::read(favorites.path()).expect("favorite bytes"),
+        content
+    );
+    assert!(
+        discover_project_picker_entries(Some(home.path()))
+            .iter()
+            .any(|entry| entry.path == project_path && entry.favorite)
+    );
+}
+
+#[rstest]
+fn adding_a_missing_directory_fails_without_creating_a_bookmark_file(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
+    let project_path = home.path().join("missing").to_string_lossy().into_owned();
+
+    assert_eq!(
+        add_favorite_project_path(Some(home.path()), &project_path)
+            .expect_err("missing project must fail")
+            .kind(),
+        std::io::ErrorKind::NotFound
+    );
+    assert!(!home.path().join(".config/tmux/.session-favorites").exists());
+}
+
+#[rstest]
+fn adding_a_project_reports_favorite_storage_failures(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
+    let project = home.child("projects/bootty");
+    project.create_dir_all().expect("project");
+    home.child(".config/tmux").create_dir_all().expect("config");
+    home.child(".config/tmux/.session-favorites")
+        .create_dir_all()
+        .expect("invalid favorites file");
+
+    assert!(
+        add_favorite_project_path(Some(home.path()), &project.path().to_string_lossy()).is_err()
+    );
+}
+
+#[rstest]
+fn adding_a_project_rejects_ambiguous_paths_without_changing_existing_favorites(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
+    let project = home.child("projects/bootty");
+    project.create_dir_all().expect("project");
+    let path = project.path().to_string_lossy().into_owned();
+    let favorites = home.child(".config/tmux/.session-favorites");
+    home.child(".config/tmux").create_dir_all().expect("config");
+    favorites
+        .write_str(&format!("{path}\n"))
+        .expect("existing favorite");
+    let original = std::fs::read(favorites.path()).expect("favorite bytes");
+
+    for invalid_path in [
+        "relative/path".to_owned(),
+        format!("{path}\n{path}"),
+        format!("{path}\r"),
+        format!("{path}\t"),
+    ] {
+        assert_eq!(
+            add_favorite_project_path(Some(home.path()), &invalid_path)
+                .expect_err("favorite paths must be absolute and unambiguous")
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            std::fs::read(favorites.path()).expect("favorite bytes"),
+            original
+        );
+    }
+}
+
+#[rstest]
+fn adding_a_project_preserves_spaces_and_quotes_in_absolute_paths(
+    home: Result<TempDir, assert_fs::fixture::FixtureError>,
+) {
+    let home = home.expect("home fixture");
+    let project = home.child("projects/project with \"quotes\"");
+    project.create_dir_all().expect("project");
+    let path = project.path().to_string_lossy().into_owned();
+
+    assert!(add_favorite_project_path(Some(home.path()), &path).expect("add project"));
+    home.child(".config/tmux/.session-favorites")
+        .assert(format!("{path}\n").as_str());
 }
 
 #[rstest]

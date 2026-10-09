@@ -7,6 +7,7 @@ mod plane;
 mod protocol;
 mod server;
 mod state;
+pub mod terminal_history;
 mod wait;
 
 pub use catalog::{CommandCatalogSource, ControlCatalog};

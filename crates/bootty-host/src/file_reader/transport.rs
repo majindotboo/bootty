@@ -1,5 +1,5 @@
 use super::{
-    MAX_MEDIA_CHUNK, MediaCancellation, MediaDescriptor, check_revision, open_file, read_range,
+    FileCancellation, FileDescriptor, MAX_FILE_CHUNK, check_revision, open_file, read_range,
     validate_descriptor,
 };
 use crate::{CancellableCommandRunner, CommandCancellation, remote::RemoteHost};
@@ -39,7 +39,7 @@ fn line<T: serde::de::DeserializeOwned>(input: &mut impl BufRead) -> Result<Opti
     }
     ensure!(
         size < usize::try_from(HEADER_LIMIT)? && line.ends_with('\n'),
-        "Invalid media frame header"
+        "Invalid file frame header"
     );
     Ok(Some(serde_json::from_str(&line)?))
 }
@@ -50,23 +50,30 @@ fn write_line(value: &impl Serialize, output: &mut impl Write) -> Result<()> {
     Ok(())
 }
 
-/// Serve one open media source until request EOF. Bodies are raw, bounded binary ranges.
+/// Serve one open file source until request EOF. Bodies are raw, bounded binary ranges.
 /// # Errors
 /// Returns malformed requests, changed files, or stream errors.
 pub fn serve(payload: &str, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+    ensure!(payload.len() <= 32 * 1024, "File request exceeds its bound");
+    let descriptor: FileDescriptor = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
+    serve_descriptor(&descriptor, &mut input, &mut output)
+}
+
+/// Serve bounded ranges from an already decoded source descriptor.
+/// # Errors
+/// Returns malformed requests, changed files, or stream errors.
+pub fn serve_descriptor(
+    descriptor: &FileDescriptor,
+    mut input: impl BufRead,
+    mut output: impl Write,
+) -> Result<()> {
     let opened = (|| {
-        ensure!(
-            payload.len() <= 32 * 1024,
-            "Media request exceeds its bound"
-        );
-        let descriptor: MediaDescriptor =
-            serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
-        validate_descriptor(&descriptor)?;
+        validate_descriptor(descriptor)?;
         let file = open_file(&descriptor.path)?;
-        check_revision(&file, &descriptor)?;
-        Ok((descriptor, file))
+        check_revision(&file, descriptor)?;
+        Ok(file)
     })();
-    let (descriptor, mut file) = report_error(opened, &mut output)?;
+    let mut file = report_error(opened, &mut output)?;
     write_line(
         &Response::Ready {
             len: descriptor.len,
@@ -74,16 +81,16 @@ pub fn serve(payload: &str, mut input: impl BufRead, mut output: impl Write) -> 
         },
         &mut output,
     )?;
-    let mut bytes = Vec::with_capacity(MAX_MEDIA_CHUNK);
+    let mut bytes = Vec::with_capacity(MAX_FILE_CHUNK);
     loop {
         let requested = (|| {
             let Some(request) = line::<Range>(&mut input)? else {
                 return Ok(None);
             };
             let length = usize::try_from(request.length)?;
-            ensure!(length <= MAX_MEDIA_CHUNK, "Media range exceeds its bound");
+            ensure!(length <= MAX_FILE_CHUNK, "File range exceeds its bound");
             bytes.resize(length, 0);
-            read_range(&mut file, &descriptor, request.offset, &mut bytes)?;
+            read_range(&mut file, descriptor, request.offset, &mut bytes)?;
             Ok(Some(request.length))
         })();
         let Some(length) = report_error(requested, &mut output)? else {
@@ -107,22 +114,24 @@ pub(super) struct RemoteReader {
     child: ProcessTreeChild,
     input: ChildStdin,
     output: BufReader<ChildStdout>,
-    cancellation: MediaCancellation,
+    cancellation: FileCancellation,
     deadline: mpsc::SyncSender<Option<Instant>>,
     watchdog: Option<JoinHandle<()>>,
     errors: Option<JoinHandle<()>>,
 }
 impl RemoteReader {
-    pub(super) fn open(descriptor: &MediaDescriptor, remote: &RemoteHost) -> Result<Self> {
+    pub(super) fn open(descriptor: &FileDescriptor, remote: &RemoteHost) -> Result<Self> {
         remote.ensure_daemon_with(&CancellableCommandRunner::with_deadline(
             CommandCancellation::default(),
             Instant::now()
                 .checked_add(IO_TIMEOUT)
-                .context("Media deadline overflow")?,
+                .context("File deadline overflow")?,
         ))?;
         let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(descriptor)?);
-        let (program, args) =
-            remote.proxy_command(crate::REMOTE_DAEMON_PROGRAM, &["media".to_owned(), payload])?;
+        let (program, args) = remote.proxy_command(
+            crate::REMOTE_DAEMON_PROGRAM,
+            &["file-reader".to_owned(), payload],
+        )?;
         let mut command = Command::new(program);
         command
             .args(args)
@@ -133,27 +142,27 @@ impl RemoteReader {
             &mut command,
             ConsoleWindowBehavior::Suppress,
         )?;
-        let input = child.child_mut().stdin.take().context("media input")?;
-        let output = BufReader::new(child.child_mut().stdout.take().context("media output")?);
+        let input = child.child_mut().stdin.take().context("file input")?;
+        let output = BufReader::new(child.child_mut().stdout.take().context("file output")?);
         let mut stderr = child
             .child_mut()
             .stderr
             .take()
-            .context("media diagnostics")?;
+            .context("file diagnostics")?;
         // Drain diagnostics without retaining an unbounded remote output buffer.
         let errors = thread::Builder::new()
-            .name("media-stderr".to_owned())
+            .name("file-stderr".to_owned())
             .spawn(move || {
                 let _ = io::copy(&mut stderr, &mut io::sink());
             })?;
-        let cancellation = MediaCancellation {
+        let cancellation = FileCancellation {
             cancelled: Arc::default(),
             process: Some(child.controller()),
         };
         let watchdog_cancel = cancellation.clone();
         let (deadline, receive) = mpsc::sync_channel::<Option<Instant>>(1);
         let watchdog = thread::Builder::new()
-            .name("media-deadline".to_owned())
+            .name("file-deadline".to_owned())
             .spawn(move || {
                 let mut until: Option<Instant> = None;
                 loop {
@@ -189,21 +198,21 @@ impl RemoteReader {
         reader.deadline.send(Some(
             Instant::now()
                 .checked_add(IO_TIMEOUT)
-                .context("Media deadline overflow")?,
+                .context("File deadline overflow")?,
         ))?;
-        let response = line::<Response>(&mut reader.output)?.context("Missing media handshake")?;
+        let response = line::<Response>(&mut reader.output)?.context("Missing file handshake")?;
         match response {
             Response::Ready { len, revision } => ensure!(
                 len == descriptor.len && revision == descriptor.revision,
-                "Media handshake revision mismatch"
+                "File handshake revision mismatch"
             ),
             Response::Error { message } => anyhow::bail!("{message}"),
-            Response::Data { .. } => anyhow::bail!("Unexpected media handshake"),
+            Response::Data { .. } => anyhow::bail!("Unexpected file handshake"),
         }
         reader.deadline.send(None)?;
         Ok(reader)
     }
-    pub(super) const fn cancellation(&self) -> &MediaCancellation {
+    pub(super) const fn cancellation(&self) -> &FileCancellation {
         &self.cancellation
     }
     pub(super) fn read_range(&mut self, offset: u64, bytes: &mut [u8]) -> Result<()> {
@@ -211,7 +220,7 @@ impl RemoteReader {
         self.deadline.send(Some(
             Instant::now()
                 .checked_add(IO_TIMEOUT)
-                .context("Media deadline overflow")?,
+                .context("File deadline overflow")?,
         ))?;
         let result = (|| {
             write_line(
@@ -221,17 +230,15 @@ impl RemoteReader {
                 },
                 &mut self.input,
             )?;
-            match line::<Response>(&mut self.output)?.context("Media transport closed")? {
+            match line::<Response>(&mut self.output)?.context("File transport closed")? {
                 Response::Data { length } => ensure!(
                     usize::try_from(length)? == bytes.len(),
-                    "Media response length mismatch"
+                    "File response length mismatch"
                 ),
                 Response::Error { message } => anyhow::bail!("{message}"),
-                Response::Ready { .. } => anyhow::bail!("Unexpected media response"),
+                Response::Ready { .. } => anyhow::bail!("Unexpected file response"),
             }
-            self.output
-                .read_exact(bytes)
-                .context("Truncated media body")
+            self.output.read_exact(bytes).context("Truncated file body")
         })();
         if result.is_err() {
             self.cancellation.cancel();

@@ -5,6 +5,15 @@ edition.workspace = true
 
 [dependencies]
 notify.workspace = true
+bytes.workspace = true
+h2.workspace = true
+http.workspace = true
+tokio-rustls.workspace = true
+quinn.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
+portable-pty.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process"] }
 anyhow.workspace = true
 base64.workspace = true
 bootty-config = { path = "../bootty-config" }
@@ -19,7 +28,11 @@ ureq.workspace = true
 url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "=1.1.4", features = ["fs"] }
+filedescriptor.workspace = true
+rustix = { version = "=1.1.4", features = ["fs", "process", "termios"] }
+
+[target.'cfg(windows)'.dependencies]
+crossterm.workspace = true
 
 [dev-dependencies]
 rstest.workspace = true

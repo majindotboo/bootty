@@ -23,6 +23,7 @@ use crate::{
 struct NativePane {
     id: String,
     cwd: PathBuf,
+    native_agent: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -88,7 +89,11 @@ impl NativeMuxState {
             index: 1,
             name: default_window_name(),
             active_pane_id: pane_id.clone(),
-            panes: vec![NativePane { id: pane_id, cwd }],
+            panes: vec![NativePane {
+                id: pane_id,
+                cwd,
+                native_agent: None,
+            }],
         };
         self.sessions.push(NativeSession {
             next_window: 2,
@@ -99,6 +104,71 @@ impl NativeMuxState {
             tag,
         });
         session_id.clone_into(&mut self.active_session_id);
+        Ok(())
+    }
+
+    fn restore_session(
+        &mut self,
+        id: &str,
+        tag: MuxSessionTag,
+        snapshot: &crate::session_snapshot::SavedTerminalSession,
+    ) -> Result<()> {
+        snapshot.validate().map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(
+            tag.identity.as_deref() == Some(snapshot.session_id.as_str()) && tag.space.is_some(),
+            "restored identity does not match its checkpoint"
+        );
+        if self.sessions.iter().any(|session| {
+            session.id == id
+                || session.name == id
+                || (tag.identity.is_some()
+                    && session.tag.identity == tag.identity
+                    && session.tag.space == tag.space)
+        }) {
+            bail!("restored session already exists");
+        }
+        let mut windows = Vec::new();
+        let mut active_window_id = String::new();
+        for (position, saved) in snapshot.windows.iter().enumerate() {
+            let window_id = format!("tab-{}", position.saturating_add(1));
+            let mut panes = Vec::new();
+            let mut active_pane_id = String::new();
+            for pane in &saved.panes {
+                let id = self.next_pane_id()?;
+                if pane.id == saved.focused_pane_id {
+                    active_pane_id.clone_from(&id);
+                }
+                panes.push(NativePane {
+                    id,
+                    cwd: PathBuf::from(&pane.cwd),
+                    native_agent: pane.native_agent.clone(),
+                });
+            }
+            if snapshot.active_window_id.as_deref() == Some(saved.id.as_str())
+                || (active_window_id.is_empty() && position == 0)
+            {
+                active_window_id.clone_from(&window_id);
+            }
+            windows.push(NativeWindow {
+                id: window_id,
+                index: u32::try_from(position.saturating_add(1))?,
+                name: saved.title.clone(),
+                active_pane_id,
+                panes,
+            });
+        }
+        let next_window = u64::try_from(windows.len())?
+            .checked_add(1)
+            .context("native window capacity exhausted")?;
+        self.sessions.push(NativeSession {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            next_window,
+            active_window_id,
+            windows,
+            tag,
+        });
+        id.clone_into(&mut self.active_session_id);
         Ok(())
     }
 
@@ -182,7 +252,11 @@ impl NativeMuxState {
                 index,
                 name: default_window_name(),
                 active_pane_id: pane_id.clone(),
-                panes: vec![NativePane { id: pane_id, cwd }],
+                panes: vec![NativePane {
+                    id: pane_id,
+                    cwd,
+                    native_agent: None,
+                }],
             };
             session.active_window_id.clone_from(&window.id);
             session.windows.push(window);
@@ -267,7 +341,11 @@ impl NativeMuxState {
             .window_mut(session_id, &window_id)
             .context("window no longer exists")?;
         window.active_pane_id.clone_from(&pane_id);
-        window.panes.push(NativePane { id: pane_id, cwd });
+        window.panes.push(NativePane {
+            id: pane_id,
+            cwd,
+            native_agent: None,
+        });
         self.activate_window(session_id, &window_id);
         Ok(())
     }
@@ -368,7 +446,13 @@ impl NativeMuxState {
             }
             target_was_active
         };
-        if changed_active_session {
+        if self
+            .sessions
+            .iter()
+            .any(|session| session.id == session_id && session.windows.is_empty())
+        {
+            self.kill_session(session_id);
+        } else if changed_active_session {
             session_id.clone_into(&mut self.active_session_id);
         }
         Ok(())
@@ -418,6 +502,7 @@ impl NativeMuxState {
             .or_else(|| windows.first())
             .map_or_else(
                 || MuxPaneAnchor {
+                    native_agent: None,
                     session_id: session.id.clone(),
                     pane_id: None,
                     pane_pid: None,
@@ -463,6 +548,7 @@ fn anchor_for_pane(session_id: &str, pane: &NativePane) -> MuxPaneAnchor {
 
 fn anchor_for_optional_pane(session_id: &str, pane: Option<&NativePane>) -> MuxPaneAnchor {
     MuxPaneAnchor {
+        native_agent: pane.and_then(|pane| pane.native_agent.clone()),
         session_id: session_id.to_owned(),
         pane_id: pane.map(|pane| pane.id.clone()),
         pane_pid: None,
@@ -775,13 +861,81 @@ impl MuxBackend for NativeBackend {
 }
 
 impl NativeMuxState {
+    fn activate_pane(&mut self, session_id: &str, window_id: &str, pane_id: String) -> Result<()> {
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .context("native pane session is unavailable")?;
+        let window = session
+            .windows
+            .iter_mut()
+            .find(|window| {
+                window.id == window_id && window.panes.iter().any(|pane| pane.id == pane_id)
+            })
+            .context("native pane window is unavailable")?;
+        window.active_pane_id = pane_id;
+        let session_id = session.id.clone();
+        self.activate_window(&session_id, window_id);
+        Ok(())
+    }
+
+    fn set_native_agent(
+        &mut self,
+        session_id: &str,
+        pane_id: &str,
+        agent_id: Option<String>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            agent_id
+                .as_deref()
+                .is_none_or(crate::snapshot::native_agent_identity_is_valid),
+            "invalid native conversation identity"
+        );
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id || session.name == session_id)
+            .context("native panel session is unavailable")?;
+        anyhow::ensure!(
+            !session
+                .windows
+                .iter()
+                .flat_map(|window| &window.panes)
+                .any(|pane| pane.id != pane_id
+                    && agent_id.is_some()
+                    && pane.native_agent == agent_id),
+            "the native conversation already occupies another pane"
+        );
+        let pane = session
+            .windows
+            .iter_mut()
+            .flat_map(|window| &mut window.panes)
+            .find(|pane| pane.id == pane_id)
+            .context("native panel pane is unavailable")?;
+        pane.native_agent = agent_id;
+        Ok(())
+    }
+
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
         match command {
+            MuxCommand::ActivatePane {
+                session_id,
+                window_id,
+                pane_id,
+            } => self.activate_pane(&session_id, &window_id, pane_id)?,
+            MuxCommand::SetPaneNativeAgent {
+                session_id,
+                pane_id,
+                agent_id,
+            } => self.set_native_agent(&session_id, &pane_id, agent_id)?,
             MuxCommand::ActivateWindow {
                 session_id,
                 window_id,
             } => self.activate_window(&session_id, &window_id),
-            MuxCommand::NewWindow { session_id, cwd } => {
+            MuxCommand::NewWindow {
+                session_id, cwd, ..
+            } => {
                 self.new_window(&session_id, cwd.map(PathBuf::from))?;
             }
             MuxCommand::RenameWindow {
@@ -841,6 +995,11 @@ impl NativeMuxState {
                 }
                 self.ensure_session(&session_id, cwd, tag)?;
             }
+            MuxCommand::RestoreSession {
+                session_id,
+                tag,
+                snapshot,
+            } => self.restore_session(&session_id, tag, &snapshot)?,
             MuxCommand::CreateWorktreeSession {
                 session_id,
                 cwd,
@@ -865,6 +1024,24 @@ impl NativeMuxState {
                 pane_id,
                 ..
             } => self.split_pane(&session_id, pane_id.as_deref())?,
+            MuxCommand::CreatePane {
+                session_id,
+                pane_id,
+                cwd,
+                ..
+            } => {
+                self.split_pane(&session_id, pane_id.as_deref())?;
+                if let Some(cwd) = cwd {
+                    let window = self
+                        .active_window_mut(&session_id)
+                        .context("created pane window is unavailable")?;
+                    let pane = window
+                        .panes
+                        .last_mut()
+                        .context("created pane is unavailable")?;
+                    pane.cwd = PathBuf::from(cwd);
+                }
+            }
             MuxCommand::MergeWindows {
                 session_id,
                 source_window_id,
@@ -960,6 +1137,36 @@ impl BackendPanePolicy for NativePanePolicy {
             request.target.cwd().map(Path::new).map(Path::to_path_buf);
         config.launch.pane_id = request.target.pane_id().map(str::to_owned);
         config.side_effect_pane_id = request.target.side_effect_pane_id();
+        // Apply a single env assignment directly so the actual executable's errors propagate.
+        // Other env forms keep their behavior until the launch contract explicitly supports them.
+        #[cfg(unix)]
+        if config.launch.command_is_argv
+            && config
+                .launch
+                .command
+                .first()
+                .is_some_and(|program| program == "env")
+            && config.launch.command.get(2).is_some_and(|program| {
+                !program.is_empty() && !program.starts_with('-') && !program.contains('=')
+            })
+            && let Some((name, value)) = config
+                .launch
+                .command
+                .get(1)
+                .and_then(|assignment| assignment.split_once('='))
+                .filter(|(name, _)| {
+                    name.as_bytes()
+                        .first()
+                        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
+                        && name
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+                })
+                .map(|(name, value)| (name.to_owned(), value.to_owned()))
+        {
+            config.launch.env.push((name, value));
+            drop(config.launch.command.drain(..2));
+        }
         // A tmux or rmux the app itself was started under is not this pane's server. Agent hooks
         // read `$TMUX_PANE` before `$BOOTTY_PANE`, so its pane and socket must not leak in.
         config

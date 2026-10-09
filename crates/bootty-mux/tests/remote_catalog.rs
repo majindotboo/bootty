@@ -328,3 +328,70 @@ fn a_pre_journal_catalog_reopens_without_protocol_or_order_changes() -> Result<(
     assert_eq!(CATALOG_VERSION, 3);
     Ok(())
 }
+
+#[rstest::rstest]
+#[case::valid(false, false, false, true)]
+#[case::foreign_space(true, false, false, false)]
+#[case::wrong_identity(false, true, false, false)]
+#[case::unsafe_presentation(false, false, true, false)]
+fn restored_sessions_require_the_captured_space_identity_and_safe_history(
+    #[case] foreign: bool,
+    #[case] wrong_identity: bool,
+    #[case] unsafe_history: bool,
+    #[case] accepted: bool,
+) -> Result<()> {
+    use bootty_mux::session_snapshot::{
+        SavedTerminalPane, SavedTerminalSession, SavedTerminalWindow,
+    };
+    let directory = assert_fs::TempDir::new()?;
+    let mut catalog = open_catalog(&directory.path().join("daemon.sqlite"))?;
+    let space = catalog.create("Own", Backend::Rmux)?;
+    let snapshot = SavedTerminalSession {
+        captured_at: 1,
+        session_id: "task".into(),
+        backend_id: "$old".into(),
+        active_window_id: Some("window".into()),
+        windows: vec![SavedTerminalWindow {
+            id: "window".into(),
+            backend_id: "@old".into(),
+            title: "Work".into(),
+            focused_pane_id: "pane".into(),
+            layout: None,
+            panes: vec![SavedTerminalPane {
+                id: "pane".into(),
+                backend_id: "%old".into(),
+                cwd: "/tmp".into(),
+                cols: 80,
+                rows: 24,
+                text: if unsafe_history {
+                    "\x1b[6n".into()
+                } else {
+                    "Saved 🥟".into()
+                },
+                omitted_lines: 0,
+                native_agent: None,
+            }],
+        }],
+    };
+    let mut backend = ScriptedBackend::default();
+    let result = catalog.execute_with_backend(
+        &space.id,
+        Backend::Rmux,
+        MuxCommand::RestoreSession {
+            session_id: "restored".into(),
+            tag: MuxSessionTag {
+                identity: Some(if wrong_identity { "other" } else { "task" }.into()),
+                space: Some(if foreign {
+                    "other-space".into()
+                } else {
+                    space.id.clone()
+                }),
+            },
+            snapshot,
+        },
+        &mut backend,
+    );
+    assert_eq!(result.is_ok(), accepted);
+    assert_eq!(backend.execute_calls, usize::from(accepted));
+    Ok(())
+}

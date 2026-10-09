@@ -7,7 +7,7 @@ use bootty_config::config::{
 };
 use bootty_config::{KeymapProgram, legacy_keymap_bindings};
 use bootty_mux::repository::WorkspaceRepository;
-use bootty_mux::session_membership::{SessionMembership, WorkspaceSession};
+use bootty_mux::session_membership::{SessionMembership, SessionState, WorkspaceSession};
 use bootty_ui::input::resolve_modifier_remaps;
 use criterion::Criterion;
 
@@ -172,6 +172,8 @@ fn session_membership(
             display_name: String::new(),
             explicit: false,
             cwd: "/repo".to_owned(),
+            state: SessionState::default(),
+            terminal_snapshot: None,
         });
     }
     Ok(sessions)
@@ -275,20 +277,6 @@ fn bench_config_load(c: &mut Criterion) -> Result<()> {
 
 fn bench_session_order(c: &mut Criterion) -> Result<()> {
     let sessions = session_names(384);
-    let alive = (0..sessions.len())
-        .map(|index| format!("id-{index:03}"))
-        .collect::<Vec<_>>();
-    let alive_refs = alive
-        .iter()
-        .map(String::as_str)
-        .collect::<std::collections::HashSet<_>>();
-
-    let steady_dir = BenchDir::new("session-order-steady")?;
-    let mut steady = session_membership(&steady_dir.path("config.toml"), &sessions)?;
-    c.bench_function("session_order_steady_sync_384", |b| {
-        b.iter(|| black_box(steady.retain_alive(black_box(&alive_refs))));
-    });
-
     let move_dir = BenchDir::new("session-order-move")?;
     let mut moving = session_membership(&move_dir.path("config.toml"), &sessions)?;
     c.bench_function("session_order_move_session_persist_384", |b| {
@@ -306,8 +294,8 @@ fn bench_session_order(c: &mut Criterion) -> Result<()> {
             cold_index = cold_index.wrapping_add(1);
             let result = (|| -> Result<_> {
                 let dir = BenchDir::new(&format!("session-order-cold-{cold_index}"))?;
-                let mut store = session_membership(&dir.path("config.toml"), &sessions)?;
-                Ok(store.retain_alive(&alive_refs))
+                let store = session_membership(&dir.path("config.toml"), &sessions)?;
+                Ok(store.sessions().len())
             })();
             match result {
                 Ok(value) => {

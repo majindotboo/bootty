@@ -116,7 +116,8 @@ fn assert_mouse_silent(
     input: MouseInput,
 ) -> Result<()> {
     engine.encode_mouse_to_vec(input, out)?;
-    assert_eq!(out.as_slice(), []);
+    let expected: &[u8] = &[];
+    assert_eq!(out.as_slice(), expected);
     Ok(())
 }
 

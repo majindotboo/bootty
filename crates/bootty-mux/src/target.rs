@@ -105,7 +105,14 @@ pub fn exact_mux_target(
         // generation and the complete, canonical wire target comparison below.
         let path: Vec<String> = serde_json::from_str(&target.handle).ok()?;
         match (target.kind, path.as_slice()) {
-            (ResourceKind::Session, [binding, session]) if binding == binding_handle => {
+            (ResourceKind::Terminal, [binding, active])
+                if binding == binding_handle && active == "active_terminal" =>
+            {
+                ExactMuxTarget::Binding(scope)
+            }
+            (ResourceKind::Session | ResourceKind::Terminal, [binding, session])
+                if binding == binding_handle =>
+            {
                 ExactMuxTarget::Session(scope, session.clone())
             }
             (ResourceKind::MuxWindow, [binding, session, window]) if binding == binding_handle => {

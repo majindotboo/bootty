@@ -210,6 +210,28 @@ impl LockedWriteTarget {
         bytes: &[u8],
         new_file_mode: NewFileMode,
     ) -> Result<CommitOutcome, CommitError> {
+        self.commit(bytes, new_file_mode, true)
+    }
+
+    /// Atomically create a complete new file without replacing any existing entry.
+    ///
+    /// # Errors
+    /// Returns an already-exists error if another writer wins, or a failed commit phase.
+    /// Directory-sync failure after publication returns a committed durability warning.
+    pub fn create(
+        &self,
+        bytes: &[u8],
+        new_file_mode: NewFileMode,
+    ) -> Result<CommitOutcome, CommitError> {
+        self.commit(bytes, new_file_mode, false)
+    }
+
+    fn commit(
+        &self,
+        bytes: &[u8],
+        new_file_mode: NewFileMode,
+        overwrite: bool,
+    ) -> Result<CommitOutcome, CommitError> {
         let parent = self.path.parent().ok_or_else(|| {
             CommitError::new(
                 "prepare",
@@ -249,10 +271,16 @@ impl LockedWriteTarget {
             .sync_all()
             .map_err(|error| CommitError::new("sync", error))?;
 
-        let (temporary_file, temporary_path) = temporary.into_parts();
-        drop(temporary_file);
-        replace_file(temporary_path.as_ref(), &self.path, existing.is_some())
-            .map_err(|error| CommitError::new("replace", error))?;
+        if overwrite {
+            let (temporary_file, temporary_path) = temporary.into_parts();
+            drop(temporary_file);
+            replace_file(temporary_path.as_ref(), &self.path, existing.is_some())
+                .map_err(|error| CommitError::new("replace", error))?;
+        } else {
+            temporary
+                .persist_noclobber(&self.path)
+                .map_err(|error| CommitError::new("create", error.error))?;
+        }
 
         #[cfg(unix)]
         if let Err(error) = File::open(parent).and_then(|directory| directory.sync_all()) {

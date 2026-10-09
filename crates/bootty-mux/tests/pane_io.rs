@@ -18,9 +18,9 @@ use bootty_mux::{
     command::MuxCommand,
     controller::{MuxCommandError, SpaceId},
     provider::{
-        GeneratedSessionNamePolicy, MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider,
-        MuxBackendRegistry, MuxCommandDispatch, PaneBehavior, PaneTopology, PersistedSessionPolicy,
-        SelectionPublicationPolicy, TerminalProgressPolicy, TerminalResidency,
+        MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider, MuxBackendRegistry,
+        MuxCommandDispatch, PaneBehavior, PaneTopology, SelectionPublicationPolicy,
+        TerminalProgressPolicy, TerminalResidency,
     },
     repository::{SpaceMuxOverride, SpaceRemoteOverride},
     snapshot::MuxSnapshot,
@@ -137,8 +137,7 @@ impl MuxAppBackendProvider for ScriptedProvider {
                 resize_cached_terminals: false,
             },
             progress: TerminalProgressPolicy::BackendSnapshot,
-            persisted_sessions: PersistedSessionPolicy::Never,
-            generated_session_names: GeneratedSessionNamePolicy::PreserveBackend,
+
             terminal_residency: TerminalResidency::BindingScoped,
             selection_publication: SelectionPublicationPolicy::Direct,
         }

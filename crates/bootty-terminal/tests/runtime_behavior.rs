@@ -1106,7 +1106,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
     let output_path = directory.path().join("launch.txt");
     let script = vec![
         "-c".to_owned(),
-        "temporary_output=${BOOTTY_TEST_OUTPUT}.tmp.$$; printf '%s' \"$TERM|$COLORTERM|$TERM_PROGRAM|$TERM_PROGRAM_VERSION|${TERMINFO-unset}|${REMOVE_ME-unset}|$PWD|$1|$BOOTTY_PANE\" > \"$temporary_output\" && mv \"$temporary_output\" \"$BOOTTY_TEST_OUTPUT\""
+        "temporary_output=${BOOTTY_TEST_OUTPUT}.tmp.$$; printf '%s' \"$TERM|$COLORTERM|$TERM_PROGRAM|$TERM_PROGRAM_VERSION|${TERMINFO-unset}|${REMOVE_ME-unset}|$PWD|$1|$BOOTTY_PANE|${NO_COLOR-unset}\" > \"$temporary_output\" && mv \"$temporary_output\" \"$BOOTTY_TEST_OUTPUT\""
             .to_owned(),
         "bootty-runtime-test".to_owned(),
         "argument".to_owned(),
@@ -1126,6 +1126,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
             shell: Some(shell.to_owned()),
             args,
             command,
+            command_is_argv: false,
             working_directory: Some(working_directory.clone()),
             pane_id: Some("%7".to_owned()),
             env: vec![
@@ -1140,6 +1141,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
                 ("BOOTTY_PANE".to_owned(), "wrong".to_owned()),
                 ("TERMINFO".to_owned(), "wrong".to_owned()),
                 ("REMOVE_ME".to_owned(), "present".to_owned()),
+                ("NO_COLOR".to_owned(), "explicit".to_owned()),
             ],
             env_remove: vec!["REMOVE_ME".to_owned()],
             term: "bootty-runtime-term".to_owned(),
@@ -1153,7 +1155,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
 
     let output = wait_for_file(&output_path).expect("child fixture ready");
     let fields = output.split('|').collect::<Vec<_>>();
-    assert_eq!(fields.len(), 9, "launch output: {output}");
+    assert_eq!(fields.len(), 10, "launch output: {output}");
     assert_eq!(fields[0], "bootty-runtime-term");
     assert_eq!(fields[1], "bootty-runtime-color");
     assert_eq!(fields[2], "Ghostty");
@@ -1169,6 +1171,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
     );
     assert_eq!(fields[7], "argument");
     assert_eq!(fields[8], "%7");
+    assert_eq!(fields[9], "explicit");
 }
 
 #[cfg(unix)]
@@ -1181,7 +1184,7 @@ fn terminal_launch_reports_initial_host_cell_metrics() {
             shell: Some("/bin/bash".to_owned()),
             args: vec![
                 "-c".to_owned(),
-                "printf '\\033[16t'; IFS= read -r -d t reply; printf '%st' \"$reply\" > \"$BOOTTY_TEST_OUTPUT\""
+                "printf '\\033[16t'; IFS= read -r -d t reply; printf '%st' \"$reply\" > \"$BOOTTY_TEST_OUTPUT.pending\"; mv \"$BOOTTY_TEST_OUTPUT.pending\" \"$BOOTTY_TEST_OUTPUT\""
                     .to_owned(),
             ],
             env: vec![(

@@ -190,3 +190,18 @@ fn candidate_is_verified_before_publication() -> Result<()> {
     );
     Ok(())
 }
+
+#[rstest::rstest]
+#[case("Permission denied (publickey)")]
+#[case("Connection timed out")]
+fn failed_remote_probe_preserves_the_connection_error(#[case] reason: &'static str) {
+    struct Unreachable(&'static str);
+    impl CommandRunner for Unreachable {
+        fn run(&self, _: &str, _: &[String]) -> Result<CommandOutput> {
+            Ok(output(false, self.0))
+        }
+    }
+    let remote = SshRemote::new(SshTarget::for_host("unreachable"));
+    let error = remote.ensure_daemon_with(&Unreachable(reason)).unwrap_err();
+    assert!(error.to_string().contains(reason), "{error:#}");
+}

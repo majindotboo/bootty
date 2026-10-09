@@ -42,6 +42,7 @@ fn rmux_backend_forwards_every_control_command_unchanged() {
         MuxCommand::NewWindow {
             session_id: "project".into(),
             cwd: None,
+            argv: None,
         },
         MuxCommand::RenameWindow {
             session_id: "project".into(),

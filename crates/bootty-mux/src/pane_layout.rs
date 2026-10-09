@@ -96,11 +96,38 @@ impl PaneLayout {
                     MuxPaneSplitDirection::Right => SplitDirection::Right,
                     MuxPaneSplitDirection::Down => SplitDirection::Down,
                 },
-                ratio: (f32::from(*ratio_millis) / 1000.0).clamp(0.05, 0.95),
+                ratio: (f32::from(*ratio_millis) / 1000.0).clamp(0.001, 0.999),
                 first: Box::new(Self::node_from_mux_layout(first)?),
                 second: Box::new(Self::node_from_mux_layout(second)?),
             }),
         }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> MuxPaneLayout {
+        fn node_snapshot(node: &Node) -> MuxPaneLayout {
+            match node {
+                Node::Leaf(id) => MuxPaneLayout::Pane(id.clone()),
+                Node::Split {
+                    direction,
+                    ratio,
+                    first,
+                    second,
+                } => MuxPaneLayout::Split {
+                    direction: match direction {
+                        SplitDirection::Right => MuxPaneSplitDirection::Right,
+                        SplitDirection::Down => MuxPaneSplitDirection::Down,
+                    },
+                    ratio_millis: num_traits::ToPrimitive::to_u16(
+                        &(*ratio * 1000.0).round().clamp(1.0, 999.0),
+                    )
+                    .unwrap_or(500),
+                    first: Box::new(node_snapshot(first)),
+                    second: Box::new(node_snapshot(second)),
+                },
+            }
+        }
+        node_snapshot(&self.root)
     }
 
     #[must_use]

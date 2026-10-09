@@ -51,6 +51,45 @@ pub fn toggle_favorite_project_path_at(
     Ok(selected)
 }
 
+pub fn add_favorite_project_path_at(
+    favorites_file: &Path,
+    home: Option<&Path>,
+    project_path: &str,
+) -> io::Result<bool> {
+    if let Some(parent) = favorites_file
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let target = resolve_favorite_target(favorites_file)?.lock()?;
+    let content = match fs::read_to_string(target.path()) {
+        Ok(content) => content,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    let selected = PathBuf::from(project_path);
+    let mut lines = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if lines
+        .iter()
+        .any(|line| same_project_path(&expand_home_path(home, line), &selected))
+    {
+        return Ok(false);
+    }
+    lines.push(project_path.to_owned());
+    let content = format!("{}\n", lines.join("\n"));
+    target
+        .replace(content.as_bytes(), NewFileMode::Private)
+        .map_err(bootty_write::CommitError::into_io)?;
+    drop(target);
+    Ok(true)
+}
+
 fn resolve_favorite_target(path: &Path) -> io::Result<WriteTarget> {
     WriteTarget::resolve(path).map_err(|error| match error {
         ResolveTargetError::SymlinkCycle => io::Error::new(

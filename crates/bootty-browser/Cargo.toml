@@ -1,0 +1,35 @@
+[package]
+name = "bootty-browser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+image = { workspace = true, features = ["png"] }
+async-channel.workspace = true
+thiserror.workspace = true
+url.workspace = true
+sha2.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bootty-write = { path = "../bootty-write" }
+wry.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { workspace = true, features = ["NSGraphicsContext", "objc2-core-graphics"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["CGEvent", "CGEventTypes", "CGEventSource", "CGGeometry"] }
+objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
+security-framework = "3.7.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+num-traits.workspace = true
+webkit2gtk = "2"
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+proptest.workspace = true
+rstest.workspace = true
+assert_fs.workspace = true
+
+[lints]
+workspace = true

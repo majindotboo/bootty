@@ -1,3 +1,5 @@
+mod agents;
+pub use agents::{AgentProfileConfig, AgentProviderConfig, AgentProvidersConfig};
 mod defaults;
 mod keybind_presets;
 mod load;
@@ -18,16 +20,17 @@ pub use load::{
 };
 pub use model::{
     AppearanceBranchConfig, AppearanceConfig, AppearanceMode, AppearanceVariant,
-    BackendKeybindConfig, BackgroundMaterial, BellMode, BoottyConfig, ChromeConfig, ColorConfig,
-    CursorConfig, CursorStyleConfig, DiagnosticsConfig, ExtensionSettingValue, FontConfig,
-    InputConfig, KeybindPreset, MacosOptionAsAltConfig, MacosTitlebarStyle,
-    MultiplexerBackendConfig, MultiplexerConfig, MultiplexerConfigError, NotificationPolicy,
-    OnLastWindowClosed, OpenBehavior, PanelButton, PanelConfig, PanelDock, PanelKind,
-    PanelTabStyle, PanelTabs, ResolvedTheme, RestoreOnStartup, SegmentAlign, SessionConfig,
-    SidebarConfig, SidebarPosition, SshAuthenticationConfig, SshHostKeyPolicyConfig,
-    SshProfileConfig, SshRemoteConfig, StatusSegment, TabAppearance, TabCloseButton,
-    TabClosePosition, TabConfig, TerminalScrollbar, ThemeInfo, WhenClosingWithNoTabs, WindowConfig,
-    WindowDecoration, WindowFullscreen, config_token,
+    BackendKeybindConfig, BackgroundMaterial, BellMode, BoottyConfig, BrowserConfig,
+    BrowserSearchEngine, ChromeConfig, ColorConfig, ComputerConfig, CursorConfig,
+    CursorStyleConfig, DiagnosticsConfig, ExtensionSettingValue, FontConfig, InputConfig,
+    KeybindPreset, MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig,
+    MultiplexerConfig, MultiplexerConfigError, NotificationPolicy, OnLastWindowClosed,
+    OpenBehavior, PanelButton, PanelConfig, PanelDock, PanelKind, PanelTabStyle, PanelTabs,
+    ResolvedTheme, RestoreOnStartup, SegmentAlign, SessionConfig, SidebarConfig, SidebarPosition,
+    SidebarSortOrder, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
+    SshRemoteConfig, StatusSegment, TabAppearance, TabCloseButton, TabClosePosition, TabConfig,
+    TerminalScrollbar, ThemeInfo, WhenClosingWithNoTabs, WindowConfig, WindowDecoration,
+    WindowFullscreen, config_token,
 };
 pub use resolve::{available_theme_names, resolve_theme};
 pub use theme_catalog::{

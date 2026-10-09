@@ -1,8 +1,8 @@
 use super::model::{
-    AppearanceMode, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
+    AppearanceMode, BrowserSearchEngine, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
     MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig, OnLastWindowClosed,
-    OpenBehavior, PanelTabStyle, PanelTabs, RestoreOnStartup, SidebarPosition, SshProfileConfig,
-    StatusSegment, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
+    OpenBehavior, PanelTabStyle, PanelTabs, RestoreOnStartup, SidebarPosition, SidebarSortOrder,
+    SshProfileConfig, StatusSegment, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 use crate::color::Color;
 use serde::{Deserialize, Deserializer};
@@ -36,8 +36,11 @@ pub(super) struct RawConfig {
     pub(super) sidebar: SidebarPatch,
     pub(super) multiplexer: MultiplexerPatch,
     pub(super) ssh_profiles: BTreeMap<String, SshProfileConfig>,
+    pub(super) agents: super::AgentProvidersConfig,
     pub(super) extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
     pub(super) input: InputPatch,
+    pub(super) browser: BrowserPatch,
+    pub(super) computer: ComputerPatch,
     pub(super) session: SessionPatch,
     pub(super) diagnostics: DiagnosticsPatch,
     pub(super) window: WindowPatch,
@@ -100,6 +103,8 @@ pub(super) struct ChromePatch {
     pub(super) panel_tab_style: Option<PanelTabStyle>,
     pub(super) panel_tabs: Option<PanelTabs>,
     pub(super) tabs_use_session_color: Option<bool>,
+    pub(super) tabs: Option<TabPatch>,
+    // Legacy input is normalized into the single shared tab appearance.
     pub(super) dock_tabs: Option<TabPatch>,
     pub(super) terminal_tabs: Option<TabPatch>,
     pub(super) sidebar: Option<bool>,
@@ -128,6 +133,9 @@ pub(super) struct ChromePatch {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct SidebarPatch {
+    pub(super) group_by_project: Option<bool>,
+    pub(super) sort_order: Option<SidebarSortOrder>,
+    pub(super) animate_working: Option<bool>,
     pub(super) position: Option<SidebarPosition>,
     pub(super) background: Option<Color>,
     #[serde(rename = "fullscreen-background")]
@@ -164,6 +172,21 @@ pub(super) struct InputPatch {
     pub(super) keybind: Option<Vec<String>>,
     pub(super) sidebar_keybind: Option<Vec<String>>,
     pub(super) backend_keybind: Option<BackendKeybindPatch>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct ComputerPatch {
+    pub(super) enabled: Option<bool>,
+    pub(super) capture_enabled: Option<bool>,
+    pub(super) input_enabled: Option<bool>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub(super) struct BrowserPatch {
+    pub(super) search_engine: Option<BrowserSearchEngine>,
+    pub(super) persist_site_data: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

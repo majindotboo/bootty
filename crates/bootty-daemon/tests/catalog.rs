@@ -2,6 +2,7 @@
 #![cfg(unix)]
 
 use std::{
+    io::Write as _,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
@@ -131,8 +132,24 @@ fn a_real_daemon_round_trips_a_session_tag_through_rmux_helper() -> Result<()> {
     } else {
         "bootty"
     };
-    let run = |args: &[String]| {
-        std::process::Command::new(daemon)
+    let run = |args: &[String]| -> std::io::Result<std::process::Output> {
+        // Exercise stdin for rename while retaining legacy encoded requests for create/close.
+        let payload = args
+            .iter()
+            .position(|arg| arg == "--payload")
+            .and_then(|index| args.get(index.saturating_add(1)))
+            .and_then(|payload| bootty_mux::remote_space::decode_command(payload).ok())
+            .filter(|command| matches!(command, MuxCommand::RenameSession { .. }))
+            .map(|command| serde_json::to_vec(&command))
+            .transpose()?;
+        let mut args = args.to_vec();
+        if payload.is_some()
+            && let Some(last) = args.last_mut()
+        {
+            "-".clone_into(last);
+        }
+        let mut process = std::process::Command::new(daemon);
+        process
             .args(["--application-identity", &identity])
             .env(bootty_config::APPLICATION_IDENTITY_ENV, inherited_identity)
             .env("BOOTTY_DAEMON_BINARY", &launcher)
@@ -144,8 +161,8 @@ fn a_real_daemon_round_trips_a_session_tag_through_rmux_helper() -> Result<()> {
             .env("PATH", &empty_path)
             .env("SHELL", "/bin/sh")
             .env("BOOTTY_SHELL", "/bin/sh")
-            .args(args)
-            .output()
+            .args(&args);
+        run_with_payload(&mut process, payload)
     };
     let remote_space = |command: &str, options: &[(&str, &str)]| {
         let mut args = vec!["remote-space".to_owned(), command.to_owned()];
@@ -173,6 +190,27 @@ fn a_real_daemon_round_trips_a_session_tag_through_rmux_helper() -> Result<()> {
         &mut cleanup,
     )?;
     Ok(())
+}
+
+fn run_with_payload(
+    process: &mut std::process::Command,
+    payload: Option<Vec<u8>>,
+) -> std::io::Result<std::process::Output> {
+    let Some(payload) = payload else {
+        return process.output();
+    };
+    let mut child = process
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("fixture stdin is unavailable"))?;
+    stdin.write_all(&payload)?;
+    drop(stdin);
+    child.wait_with_output()
 }
 
 fn round_trip_session(

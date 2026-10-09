@@ -271,9 +271,11 @@ impl bootty_host::CommandRunner for &RemoteFiles {
         );
         let mut request: FileRequest = serde_json::from_slice(&input)?;
         let original_path = match &mut request {
-            FileRequest::Resolve { path, .. }
+            FileRequest::Complete { base: path, .. }
+            | FileRequest::Resolve { path, .. }
             | FileRequest::List { path, .. }
             | FileRequest::Read { path }
+            | FileRequest::OpenReader { path, .. }
             | FileRequest::Save { path, .. }
             | FileRequest::Format { path, .. } => {
                 let original = path.clone();

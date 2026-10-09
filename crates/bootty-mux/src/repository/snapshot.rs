@@ -11,7 +11,7 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<LoadedSpaces
     let mut statement = tx.prepare(
         "SELECT id, remote_id, name, icon, color, tint_sidebar, position,
                 backend, hide_tmux_status, unavailable,
-                selected_session_id, selected_window_id, remote
+                selected_session_id, selected_window_id, remote, selected_session_identity
          FROM workspace_spaces
          ORDER BY position, id",
     )?;
@@ -58,6 +58,7 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<LoadedSpaces
                         session_id,
                         window_id,
                     }),
+                    selected_session_identity: row.get(13)?,
                     sessions: SessionMembership::default(),
                 },
             }),
@@ -97,7 +98,7 @@ fn load_session_membership(
     let mut sessions = HashMap::<i64, Vec<WorkspaceSession>>::new();
     let mut identities = HashSet::new();
     let mut statement = tx.prepare(
-        "SELECT identity, space_id, backend_name, display_name, explicit, cwd, position
+        "SELECT identity, space_id, backend_name, display_name, explicit, cwd, position, session_state, terminal_snapshot
          FROM workspace_sessions ORDER BY space_id, position",
     )?;
     for row in statement.query_map([], |row| {
@@ -110,6 +111,13 @@ fn load_session_membership(
                 display_name: row.get(3)?,
                 explicit: bool_from_storage(row.get::<_, i64>(4)?)?,
                 cwd: row.get(5)?,
+                terminal_snapshot: row
+                    .get::<_, Option<String>>(8)?
+                    .map(|text| serde_json::from_str(&text).map(std::sync::Arc::new))
+                    .transpose()
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                state: serde_json::from_str(&row.get::<_, String>(7)?)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
             },
         ))
     })? {
@@ -117,8 +125,15 @@ fn load_session_membership(
         if unsupported_ids.contains(&space_id) {
             continue;
         }
+        if session.terminal_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.validate().is_err() || snapshot.session_id != session.identity
+        }) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
         if session.identity.is_empty()
             || session.backend_name.is_empty()
+            || session.state.snoozed_until.is_some_and(|until| until < 0)
+            || session.state.last_activity_at.is_some_and(|at| at < 0)
             || position < 0
             || !space_ids.contains(&space_id)
             || !identities.insert(session.identity.clone())

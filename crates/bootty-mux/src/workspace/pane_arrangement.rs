@@ -1,7 +1,7 @@
 //! Capture native placement before dispatch; publish it only after authoritative completion.
 use super::{BindingRuntime, ScopedWindowId};
 use crate::{
-    command::{MuxCommand, MuxDirection},
+    command::{MuxCommand, MuxDirection, MuxSplitDirection},
     pane_layout::{Direction, PaneLayout, SplitDirection},
     provider::PaneTopology,
 };
@@ -11,6 +11,7 @@ use std::collections::HashMap;
 pub struct PreparedPaneArrangement {
     layouts: HashMap<ScopedWindowId, PaneLayout>,
     extracted: Option<(String, String)>,
+    split: Option<(ScopedWindowId, String, SplitDirection)>,
 }
 
 impl BindingRuntime {
@@ -21,38 +22,11 @@ impl BindingRuntime {
         if self.backend_policy.panes.topology != PaneTopology::ProcessLocal {
             return None;
         }
-        if let MuxCommand::MergeWindows {
-            session_id,
-            source_window_id,
-            target_window_id,
-        } = command
-        {
-            let session = self
-                .mux
-                .all_sessions()
-                .iter()
-                .find(|session| session.id == *session_id)?;
-            let first_pane = |id: &str| {
-                session
-                    .windows
-                    .iter()
-                    .find(|window| window.id == id)?
-                    .panes
-                    .first()?
-                    .pane_id
-                    .as_ref()
-            };
-            let (source_key, source) =
-                self.layout_for_pane(session_id, first_pane(source_window_id)?)?;
-            let (target_key, mut target) =
-                self.layout_for_pane(session_id, first_pane(target_window_id)?)?;
-            if !target.merge(source.clone()) {
-                return None;
-            }
-            return Some(PreparedPaneArrangement {
-                layouts: HashMap::from([(source_key, source), (target_key, target)]),
-                extracted: None,
-            });
+        if let Some(split) = self.prepare_pane_split(command) {
+            return Some(split);
+        }
+        if let Some(merged) = self.prepare_window_merge(command) {
+            return Some(merged);
         }
         let (session, source, target) = match command {
             MuxCommand::SwapPanes {
@@ -111,7 +85,83 @@ impl BindingRuntime {
             extracted = Some((session.clone(), source.clone()));
         }
         layouts.insert(source_key, source_layout);
-        Some(PreparedPaneArrangement { layouts, extracted })
+        Some(PreparedPaneArrangement {
+            layouts,
+            extracted,
+            split: None,
+        })
+    }
+
+    fn prepare_window_merge(&self, command: &MuxCommand) -> Option<PreparedPaneArrangement> {
+        let MuxCommand::MergeWindows {
+            session_id,
+            source_window_id,
+            target_window_id,
+        } = command
+        else {
+            return None;
+        };
+        let session = self
+            .mux
+            .all_sessions()
+            .iter()
+            .find(|session| session.id == *session_id)?;
+        let first_pane = |id: &str| {
+            session
+                .windows
+                .iter()
+                .find(|window| window.id == id)?
+                .panes
+                .first()?
+                .pane_id
+                .as_ref()
+        };
+        let (source_key, source) =
+            self.layout_for_pane(session_id, first_pane(source_window_id)?)?;
+        let (target_key, mut target) =
+            self.layout_for_pane(session_id, first_pane(target_window_id)?)?;
+        if !target.merge(source.clone()) {
+            return None;
+        }
+        Some(PreparedPaneArrangement {
+            layouts: HashMap::from([(source_key, source), (target_key, target)]),
+            extracted: None,
+            split: None,
+        })
+    }
+
+    fn prepare_pane_split(&self, command: &MuxCommand) -> Option<PreparedPaneArrangement> {
+        let (session_id, pane_id, direction) = match command {
+            MuxCommand::CreatePane {
+                session_id,
+                pane_id,
+                direction,
+                ..
+            }
+            | MuxCommand::SplitPane {
+                session_id,
+                pane_id,
+                direction,
+            } => (session_id, pane_id.as_deref(), direction),
+            _ => return None,
+        };
+        let source = pane_id.or_else(|| {
+            self.mux
+                .backend_session_by_id_or_name(session_id)?
+                .anchor
+                .pane_id
+                .as_deref()
+        })?;
+        let (key, layout) = self.layout_for_pane(session_id, source)?;
+        let direction = match direction {
+            MuxSplitDirection::Right => SplitDirection::Right,
+            MuxSplitDirection::Down => SplitDirection::Down,
+        };
+        Some(PreparedPaneArrangement {
+            layouts: HashMap::from([(key.clone(), layout)]),
+            extracted: None,
+            split: Some((key, source.to_owned(), direction)),
+        })
     }
 
     fn layout_for_pane(
@@ -168,8 +218,18 @@ impl BindingRuntime {
                 .iter()
                 .filter_map(|pane| pane.pane_id.as_ref())
                 .collect::<Vec<_>>();
+            let mut layout = layout.clone();
+            if let Some((split_key, source, direction)) = &prepared.split
+                && split_key == key
+                && ids.len() == layout.panes().len().saturating_add(1)
+                && layout.panes().iter().all(|pane| ids.contains(&pane))
+                && let Some(new_pane) = ids.iter().find(|pane| !layout.contains(pane))
+                && layout.set_focus(source)
+            {
+                layout.split_focused((*new_pane).clone(), *direction);
+            }
             if ids.len() == layout.panes().len() && ids.iter().all(|pane| layout.contains(pane)) {
-                self.pane_layouts.insert(key.clone(), layout.clone());
+                self.pane_layouts.insert(key.clone(), layout);
             }
         }
         if let Some((session, pane)) = &prepared.extracted
