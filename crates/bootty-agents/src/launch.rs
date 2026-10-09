@@ -28,6 +28,8 @@ pub struct AgentLaunch {
     pub arguments: Vec<String>,
     #[serde(default)]
     pub ephemeral: bool,
+    #[serde(default)]
+    pub account_directory: Option<String>,
 }
 
 impl AgentLaunch {
@@ -41,6 +43,12 @@ impl AgentLaunch {
                 ),
                 ("arguments".to_owned(), self.arguments.clone().into()),
                 ("ephemeral".to_owned(), self.ephemeral.into()),
+                (
+                    "account_directory".to_owned(),
+                    self.account_directory
+                        .clone()
+                        .map_or(serde_json::Value::Null, Into::into),
+                ),
             ]
             .into_iter()
             .collect(),
@@ -48,10 +56,17 @@ impl AgentLaunch {
     }
 
     /// # Errors
-    /// Returns an error for an invalid program, oversized arguments, or control characters in launch values.
+    /// Returns invalid program/cwd controls, oversized values, or NUL in literal arguments.
     pub fn validate(&self) -> Result<(), String> {
         if self.program.is_empty() || self.program.starts_with('-') {
             return Err("Agent program must be an executable name or path".to_owned());
+        }
+        if self
+            .account_directory
+            .as_ref()
+            .is_some_and(|directory| !std::path::Path::new(directory).is_absolute())
+        {
+            return Err("Agent account directory must be an absolute path".to_owned());
         }
         if self.arguments.len() > 64 {
             return Err("Agent launch accepts at most 64 arguments".to_owned());
@@ -59,7 +74,8 @@ impl AgentLaunch {
         let total = self.arguments.iter().map(String::len).fold(
             self.program
                 .len()
-                .saturating_add(self.cwd.as_ref().map_or(0, String::len)),
+                .saturating_add(self.cwd.as_ref().map_or(0, String::len))
+                .saturating_add(self.account_directory.as_ref().map_or(0, String::len)),
             usize::saturating_add,
         );
         if total > 64 * 1024 {
@@ -67,7 +83,7 @@ impl AgentLaunch {
         }
         for value in std::iter::once(&self.program)
             .chain(self.cwd.iter())
-            .chain(self.arguments.iter())
+            .chain(self.account_directory.iter())
         {
             if value.len() > 8192 || value.chars().any(char::is_control) {
                 return Err(
@@ -76,15 +92,29 @@ impl AgentLaunch {
                 );
             }
         }
+        if self
+            .arguments
+            .iter()
+            .any(|value| value.len() > 8192 || value.contains('\0'))
+        {
+            return Err("Agent arguments must be at most 8192 bytes without NUL".to_owned());
+        }
         Ok(())
     }
 
     /// Only reusable configuration options are retained. Prompts, credentials, arbitrary
-    /// config overrides and session selectors must not enter hook state or be replayed.
+    /// config overrides and session selectors must not enter retained metadata or be replayed.
     #[must_use]
     pub fn retained(&self, provider: AgentKind) -> Self {
         let valued: &[&str] = match provider {
-            AgentKind::Pi => &["--provider", "--model", "--thinking", "--session-dir"],
+            AgentKind::Pi => &[
+                "--provider",
+                "--model",
+                "--thinking",
+                "--session-dir",
+                "--extension",
+                "-e",
+            ],
             AgentKind::Codex => &[
                 "--model",
                 "-m",
@@ -133,6 +163,7 @@ impl AgentLaunch {
             cwd: self.cwd.clone(),
             arguments,
             ephemeral,
+            account_directory: self.account_directory.clone(),
         }
     }
 
@@ -195,8 +226,20 @@ impl AgentLaunch {
                     .map(|value| quote_posix(value))
                     .collect::<Vec<_>>()
                     .join(" ");
+                let account =
+                    self.account_directory
+                        .as_ref()
+                        .map_or_else(String::new, |directory| {
+                            format!(
+                                " {}",
+                                quote_posix(&format!(
+                                    "{}={directory}",
+                                    provider.account_directory_variable()
+                                ))
+                            )
+                        });
                 let launch = format!(
-                    "exec env BOOTTY_AGENT_LAUNCH_CONTEXT={} {argv}",
+                    "exec env BOOTTY_AGENT_LAUNCH_CONTEXT={}{account} {argv}",
                     quote_posix(&context)
                 );
                 Ok(self.cwd.as_ref().filter(|cwd| !cwd.is_empty()).map_or_else(
@@ -218,8 +261,18 @@ impl AgentLaunch {
                     .map_or_else(String::new, |cwd| {
                         format!("Set-Location -LiteralPath {}; ", quote(cwd))
                     });
+                let account =
+                    self.account_directory
+                        .as_ref()
+                        .map_or_else(String::new, |directory| {
+                            format!(
+                                "$env:{}={}; ",
+                                provider.account_directory_variable(),
+                                quote(directory)
+                            )
+                        });
                 let script = format!(
-                    "$ErrorActionPreference='Stop'; {cwd}$env:BOOTTY_AGENT_LAUNCH_CONTEXT={}; & {argv}; exit $LASTEXITCODE",
+                    "$ErrorActionPreference='Stop'; {cwd}{account}$env:BOOTTY_AGENT_LAUNCH_CONTEXT={}; & {argv}; exit $LASTEXITCODE",
                     quote(&context)
                 );
                 let bytes = script

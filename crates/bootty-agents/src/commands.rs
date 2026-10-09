@@ -15,6 +15,17 @@ pub trait AgentCommandExecutor: Send + Sync {
         deadline: Instant,
         cancellation: CommandCancellation,
     ) -> CommandOutcome;
+
+    /// Forward a fresh host-issued mutation token unchanged to the command's final queue gate.
+    /// Adapters that normally replace already-started outer cancellation must override this seam.
+    fn execute_pending(
+        &self,
+        invocation: CommandInvocation,
+        deadline: Instant,
+        cancellation: CommandCancellation,
+    ) -> CommandOutcome {
+        self.execute(invocation, deadline, cancellation)
+    }
 }
 
 impl<F> AgentCommandExecutor for F

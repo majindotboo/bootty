@@ -4,11 +4,21 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+tempfile.workspace = true
+anstyle-parse.workspace = true
 base64.workspace = true
+chrono.workspace = true
+getrandom.workspace = true
+png.workspace = true
+image = { workspace = true, features = ["png", "jpeg", "webp"] }
+bootty-computer = { path = "../bootty-computer" }
 bootty-control = { path = "../bootty-control" }
+bootty-host = { path = "../bootty-host" }
+bootty-config = { path = "../bootty-config" }
 bootty-write = { path = "../bootty-write" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
