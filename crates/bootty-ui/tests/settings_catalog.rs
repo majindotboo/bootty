@@ -36,7 +36,7 @@ fn native_settings_catalog_keeps_the_zed_page_snapshot() {
             (SettingsCategory::Panels, "panels", "Panels"),
             (SettingsCategory::Terminal, "terminal", "Terminal"),
             (SettingsCategory::Browser, "browser", "Browser"),
-            (SettingsCategory::Providers, "providers", "Providers"),
+            (SettingsCategory::Ai, "ai", "AI"),
             (SettingsCategory::Permissions, "permissions", "Permissions"),
             (SettingsCategory::Remotes, "remotes", "Remotes"),
             (SettingsCategory::Advanced, "advanced", "Advanced"),
@@ -286,6 +286,7 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
             ("ssh-profiles.*.args".to_owned(), "remotes"),
             ("agents.*.enabled".to_owned(), "providers"),
             ("agents.*.program".to_owned(), "providers"),
+            ("agents.*.available-efforts".to_owned(), "providers"),
             ("agents.*.selected".to_owned(), "providers"),
             ("agents.*.profiles.*.name".to_owned(), "providers"),
             ("agents.*.profiles.*.directory".to_owned(), "providers"),
@@ -497,6 +498,14 @@ fn ui_terminal_font_selection_does_not_hide_unrelated_font_metrics(#[case] id: &
 #[case("when_closing_with_no_tabs", "general", SettingsCategory::General)]
 #[case("on_last_window_closed", "general", SettingsCategory::General)]
 #[case("multiplexer.backend", "general", SettingsCategory::General)]
+#[case("agents.default-provider", "general", SettingsCategory::Ai)]
+#[case("agents.response-streaming", "general", SettingsCategory::Ai)]
+#[case("agents.follow-up-behavior", "general", SettingsCategory::Ai)]
+#[case("agents.codex.default-model", "providers", SettingsCategory::Ai)]
+#[case("agents.allow-spawn", "permissions", SettingsCategory::Ai)]
+#[case("session.agent-notifications", "general", SettingsCategory::Ai)]
+#[case("session.command-notifications", "general", SettingsCategory::General)]
+#[case("computer.enabled", "permissions", SettingsCategory::Permissions)]
 #[case("appearance.mode", "colors", SettingsCategory::Theme)]
 #[case("font.ui-family", "text", SettingsCategory::Appearance)]
 #[case("font.family", "text", SettingsCategory::Appearance)]

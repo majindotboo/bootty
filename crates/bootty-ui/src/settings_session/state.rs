@@ -499,7 +499,7 @@ impl SettingsSession {
             self.writeback.reject(format!("unknown setting {id}"));
             return false;
         }
-        if values.is_empty() {
+        if values.is_empty() && !id.ends_with(".available-efforts") {
             self.writeback.remove(&path);
         } else {
             self.writeback.set_strings(&path, values);
@@ -556,7 +556,7 @@ impl SettingsSession {
         if id == "appearance.dark.colors.palette" {
             self.writeback.remove(&["colors", "palette"]);
         }
-        if values.is_empty() {
+        if values.is_empty() && !id.ends_with(".available-efforts") {
             self.writeback.remove(&path);
         } else {
             self.writeback.set_strings(&path, values);
@@ -855,6 +855,9 @@ fn custom_scalar(config: &BoottyConfig, id: &str) -> Option<SettingValue> {
 
 fn custom_list<'a>(config: &'a BoottyConfig, id: &str) -> Option<&'a [String]> {
     Some(match id {
+        "agents.codex.available-efforts" => &config.agents.codex.available_efforts,
+        "agents.claude.available-efforts" => &config.agents.claude.available_efforts,
+        "agents.pi.available-efforts" => &config.agents.pi.available_efforts,
         "font.family" => &config.font.family,
         "font.ui-family" => &config.font.ui_family,
         "sidebar.session-modules" => &config.sidebar.session_modules,

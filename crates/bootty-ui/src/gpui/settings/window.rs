@@ -414,7 +414,7 @@ impl GpuiSettings {
     }
 
     fn update_active_section(&mut self, logical_index: usize) {
-        if self.category == SettingsCategory::Providers {
+        if self.category == SettingsCategory::Ai {
             return;
         }
         if self.root_navigation_active {

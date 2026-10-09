@@ -263,10 +263,10 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 12] = [
         search_terms: "browser|search engine|cookies|site data|private",
     },
     SettingsCatalogPage {
-        category: SettingsCategory::Providers,
-        id: SettingsCategory::Providers.id(),
-        label: SettingsCategory::Providers.label(),
-        search_terms: "providers|agents|codex|claude|pi|account|profile|sign in|installation|update",
+        category: SettingsCategory::Ai,
+        id: SettingsCategory::Ai.id(),
+        label: SettingsCategory::Ai.label(),
+        search_terms: "ai|providers|agents|codex|claude|pi|account|profile|sign in|installation|update|default provider|composer|send|follow-up|queue|steer|streaming|subagents",
     },
     SettingsCatalogPage {
         category: SettingsCategory::Permissions,
@@ -333,6 +333,9 @@ pub fn setting_is_visible_in_native_settings(id: &str) -> bool {
 #[must_use]
 pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
     match id {
+        id if id.starts_with("agents.") || id == "session.agent-notifications" => {
+            SettingsCategory::Ai
+        }
         id if id == "theme"
             || id == "appearance.mode"
             || id.starts_with("appearance.light.")
@@ -385,7 +388,7 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
             "window" => SettingsCategory::WindowAndLayout,
             "panels" | "sidebar" | "status" => SettingsCategory::Panels,
             "remotes" => SettingsCategory::Remotes,
-            "providers" => SettingsCategory::Providers,
+            "providers" => SettingsCategory::Ai,
             "general" => SettingsCategory::General,
             // Keep unknown schema pages accessible in Advanced.
             _ => SettingsCategory::Advanced,
@@ -401,6 +404,15 @@ pub fn settings_section<'a>(
     source_section: &'a str,
 ) -> &'a str {
     match category {
+        SettingsCategory::Ai => match id {
+            "agents.default-provider" => "NEW SESSIONS",
+            "agents.response-streaming"
+            | "agents.collapse-composer-on-scroll"
+            | "agents.send-shortcut"
+            | "agents.follow-up-behavior" => "CONVERSATION",
+            "agents.allow-spawn" => "AGENT TOOLS",
+            _ => source_section,
+        },
         SettingsCategory::General => match id {
             "restore_on_startup" => "STARTUP",
             "cli_default_open_behavior" | "default_open_behavior" => "OPENING",
@@ -453,6 +465,16 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
             "when_closing_with_no_tabs" => 20,
             "on_last_window_closed" => 21,
             "multiplexer.backend" => 30,
+            _ => 100,
+        },
+        SettingsCategory::Ai => match id {
+            "agents.default-provider" => 0,
+            "agents.response-streaming" => 10,
+            "agents.collapse-composer-on-scroll" => 11,
+            "agents.send-shortcut" => 12,
+            "agents.follow-up-behavior" => 13,
+            "session.agent-notifications" => 20,
+            "agents.allow-spawn" => 30,
             _ => 100,
         },
         SettingsCategory::Appearance | SettingsCategory::Theme => match id {

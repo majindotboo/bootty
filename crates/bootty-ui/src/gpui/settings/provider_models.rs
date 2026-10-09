@@ -105,6 +105,30 @@ impl GpuiSettings {
         }
     }
 
+    pub(crate) fn provider_effort_options(&self, id: &str) -> Option<Vec<String>> {
+        let name = id
+            .strip_prefix("agents.")?
+            .strip_suffix(".available-efforts")?;
+        let provider = AgentKind::ALL
+            .into_iter()
+            .find(|provider| provider.to_string() == name)?;
+        let catalog = self.provider_catalogs.get(&provider)?;
+        if catalog.models.is_empty() {
+            return None;
+        }
+        let mut efforts = Vec::new();
+        for effort in catalog
+            .models
+            .iter()
+            .flat_map(|model| &model.reasoning_efforts)
+        {
+            if !efforts.contains(effort) {
+                efforts.push(effort.clone());
+            }
+        }
+        Some(efforts)
+    }
+
     pub(crate) fn reset_unsupported_provider_effort(&mut self, id: &str) {
         let Some(provider) = id
             .strip_prefix("agents.")
@@ -208,7 +232,7 @@ impl GpuiSettings {
         .detach();
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn render_provider_default(
         &self,
         id: &str,
@@ -288,11 +312,21 @@ impl GpuiSettings {
                 description: Some(model.id.clone()),
             }));
         } else if let Some(model) = current_model {
-            choices.extend(model.reasoning_efforts.iter().map(|effort| SettingsChoice {
-                token: effort.clone(),
-                label: crate::gpui_agent_session::reasoning_label(effort),
-                description: None,
-            }));
+            let available = self
+                .draft
+                .string_list(&format!("agents.{provider}.available-efforts"))
+                .unwrap_or_default();
+            choices.extend(
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .filter(|effort| available.is_empty() || available.contains(effort))
+                    .map(|effort| SettingsChoice {
+                        token: effort.clone(),
+                        label: crate::gpui_agent_session::reasoning_label(effort),
+                        description: None,
+                    }),
+            );
         }
         let current = value.as_str().unwrap_or_default();
         if !current.is_empty() && !choices.iter().any(|choice| choice.token == current) {

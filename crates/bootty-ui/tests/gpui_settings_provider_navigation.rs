@@ -50,15 +50,12 @@ fn provider_subsections_select_and_expand_their_matching_cards(cx: &mut TestAppC
 
     assert_provider_root_selected(cx);
 
-    let disclosure = "settings-disclosure-settings-category-providers";
+    let disclosure = "settings-disclosure-settings-category-ai";
     let bounds = cx.debug_bounds(disclosure).expect("Providers disclosure");
     cx.simulate_click(bounds_center(bounds), Modifiers::none());
     cx.refresh().expect("collapse provider subsections");
     assert!(cx.debug_bounds("settings-section-providers:pi").is_none());
-    assert!(
-        cx.debug_bounds("settings-active-category-providers")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("settings-active-category-ai").is_some());
     let bounds = cx.debug_bounds(disclosure).expect("collapsed disclosure");
     cx.simulate_click(bounds_center(bounds), Modifiers::none());
     cx.refresh().expect("expand provider subsections");
@@ -77,8 +74,7 @@ fn provider_subsections_select_and_expand_their_matching_cards(cx: &mut TestAppC
             .is_some()
     );
     assert!(
-        cx.debug_bounds("settings-active-category-providers")
-            .is_none(),
+        cx.debug_bounds("settings-active-category-ai").is_none(),
         "selecting a provider subsection moves selection off the Providers root"
     );
 
@@ -123,10 +119,7 @@ fn assert_provider_root_selected(cx: &mut VisualTestContext) {
             "the {provider} subsection is not selected at the category root"
         );
     }
-    assert!(
-        cx.debug_bounds("settings-active-category-providers")
-            .is_some()
-    );
+    assert!(cx.debug_bounds("settings-active-category-ai").is_some());
     if let Some(tree) = cx.update(|window, _| window.debug_a11y_tree_json()) {
         for label in ["Pi", "Codex", "Claude"] {
             assert!(tree.contains(&format!(r#""label": "{label}""#)));
@@ -177,10 +170,10 @@ fn provider_snapshot() -> GpuiSettingsSnapshot {
         .collect();
 
     GpuiSettingsSnapshot {
-        category: SettingsCategory::Providers,
+        category: SettingsCategory::Ai,
         pages: vec![SettingsPage {
-            category: SettingsCategory::Providers,
-            title: "Providers".to_owned(),
+            category: SettingsCategory::Ai,
+            title: "AI".to_owned(),
             search_terms: "agents accounts".to_owned(),
             items,
         }],

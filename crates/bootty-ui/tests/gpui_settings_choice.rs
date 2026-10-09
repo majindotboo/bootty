@@ -174,8 +174,8 @@ fn modifier_remaps_use_two_stable_selects_and_emit_typed_edits(cx: &mut TestAppC
         .expect("source modifier Select is rendered");
     let source_width: f32 = source.size.width.into();
     assert!(
-        (source_width - 118.0).abs() <= 1.0,
-        "modifier Selects use the compact 118px width, got {source_width}px"
+        source_width >= 118.0,
+        "modifier Selects retain a compact minimum without clipping longer names, got {source_width}px"
     );
     assert!(
         cx.debug_bounds("settings-select-settings-modifier-remap-0-source")
@@ -229,6 +229,94 @@ fn modifier_remaps_use_two_stable_selects_and_emit_typed_edits(cx: &mut TestAppC
             .is_none(),
         "clicking outside dismisses the modifier Select"
     );
+}
+
+#[gpui_kit::test]
+fn settings_choices_fit_complete_labels_in_the_active_font_and_zoom(cx: &mut TestAppContext) {
+    use gpui_kit::component::ActiveTheme as _;
+    use gpui_kit::{TextRun, size};
+
+    init_zed_ui(cx);
+    let choices: Vec<SettingsChoice> = [
+        ("live", "Show text as it arrives"),
+        ("paragraph", "Show finished paragraphs"),
+        ("complete", "Show finished responses"),
+    ]
+    .into_iter()
+    .map(|(token, label)| SettingsChoice {
+        token: token.into(),
+        label: label.into(),
+        description: None,
+    })
+    .collect();
+    let mut snapshot = choice_snapshot();
+    snapshot.pages[0].items[1] = SettingsPageItem::Setting(SettingsRow::Value {
+        id: "agents.response-streaming".into(),
+        label: "Response streaming".into(),
+        help: "Choose when responses appear.".into(),
+        value: ScalarValue::Token("live".into()),
+        control: SettingsControl::Choice(choices.clone()),
+        enabled: true,
+    });
+    let (_, visual) = cx.add_window_view(|_, cx| ChoiceProbe::with_snapshot(snapshot, cx));
+    for (font, rem, width) in [
+        ("Menlo", 16.0, 1000.0),
+        ("Menlo", 16.0, 720.0),
+        ("Menlo", 24.0, 1500.0),
+        (".SystemUIFont", 16.0, 800.0),
+    ] {
+        visual.update(|window, cx| {
+            update_ui_font(&[font.into()], rem, cx);
+            window.set_rem_size(px(rem));
+        });
+        visual.simulate_resize(size(px(width), px(900.0)));
+        visual.refresh().expect("settings rendered at current zoom");
+        let trigger = visual
+            .debug_bounds("settings-choice-agents.response-streaming")
+            .expect("streaming select");
+        assert!(trigger.left() >= px(0.0) && trigger.right() <= px(width));
+        visual.simulate_click(trigger.center(), Modifiers::none());
+        visual.run_until_parked();
+        for (choice, selector) in choices.iter().zip([
+            "settings-picker-option-live",
+            "settings-picker-option-paragraph",
+            "settings-picker-option-complete",
+        ]) {
+            let text_width = visual.update(|window, cx| {
+                window
+                    .text_system()
+                    .shape_line(
+                        choice.label.clone().into(),
+                        px(rem * 0.875),
+                        &[TextRun {
+                            len: choice.label.len(),
+                            font: gpui_kit::font(cx.theme().font_family.clone()),
+                            color: cx.theme().foreground,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        None,
+                    )
+                    .width
+            });
+            assert!(
+                f32::from(trigger.size.width) >= rem.mul_add(2.0, f32::from(text_width)),
+                "selected value must fit with its caret: {}",
+                choice.label
+            );
+            let option = visual.debug_bounds(selector).expect("streaming option");
+            assert!(
+                option.size.width >= text_width,
+                "menu must show the complete label: {} ({:?} available, {text_width:?} needed at {rem})",
+                choice.label,
+                option.size.width
+            );
+            assert!(option.left() >= px(0.0) && option.right() <= px(width));
+        }
+        visual.simulate_keystrokes("escape");
+        visual.run_until_parked();
+    }
 }
 
 #[gpui_kit::test]
@@ -337,6 +425,17 @@ fn font_weight_pickers_submit_the_selected_face(cx: &mut TestAppContext) {
         ("font.ui-family", "settings-font-weight-font.ui-family-0"),
     ] {
         let trigger = cx.debug_bounds(selector).expect("font weight trigger");
+        let family_selector = match id {
+            "font.family" => "settings-font-family-font.family-0",
+            _ => "settings-font-family-font.ui-family-0",
+        };
+        let family = cx
+            .debug_bounds(family_selector)
+            .expect("font family trigger");
+        assert!(
+            family.right() <= trigger.left() || family.bottom() <= trigger.top(),
+            "font family and weight controls must not overlap"
+        );
         cx.simulate_click(bounds_center(trigger), Modifiers::none());
         cx.run_until_parked();
         let bold = cx
@@ -362,7 +461,7 @@ fn terminal_and_ui_font_stacks_use_the_searchable_picker_for_large_font_catalogs
     let (_, cx) = cx.add_window_view(|_, cx| ChoiceProbe::with_snapshot(font_stack_snapshot(), cx));
 
     let terminal = cx
-        .debug_bounds("settings-string-list-font.family-0")
+        .debug_bounds("settings-font-family-font.family-0")
         .expect("terminal font entry is rendered");
     cx.simulate_click(bounds_center(terminal), Modifiers::none());
     cx.run_until_parked();
@@ -375,7 +474,7 @@ fn terminal_and_ui_font_stacks_use_the_searchable_picker_for_large_font_catalogs
     cx.run_until_parked();
 
     let ui = cx
-        .debug_bounds("settings-string-list-font.ui-family-0")
+        .debug_bounds("settings-font-family-font.ui-family-0")
         .expect("UI font entry is rendered");
     cx.simulate_click(bounds_center(ui), Modifiers::none());
     cx.run_until_parked();
@@ -399,7 +498,7 @@ fn empty_font_fallback_uses_a_real_searchable_trigger(cx: &mut TestAppContext) {
 
     let (_, cx) = cx.add_window_view(|_, cx| ChoiceProbe::with_snapshot(snapshot, cx));
     let trigger = cx
-        .debug_bounds("settings-string-list-font.family-1")
+        .debug_bounds("settings-font-family-font.family-1")
         .expect("empty font fallback still renders a searchable trigger");
     cx.simulate_click(bounds_center(trigger), Modifiers::none());
     cx.run_until_parked();

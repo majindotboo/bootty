@@ -121,7 +121,7 @@ impl GpuiSettings {
                         });
                     }
                     SettingsPageItem::Dependent { parent, .. }
-                        if page.category == SettingsCategory::Providers
+                        if page.category == SettingsCategory::Ai
                             && let Some(provider) = provider_kind_for_settings_row(parent)
                             && let SettingsRow::Value { label, .. } = parent =>
                     {
@@ -922,7 +922,12 @@ impl GpuiSettings {
                 add_label,
                 enabled,
                 ..
-            } => Self::render_string_list(id, items, options, add_label, *enabled, window, cx),
+            } => {
+                let choices = self
+                    .provider_effort_options(id)
+                    .unwrap_or_else(|| options.clone());
+                Self::render_string_list(id, items, &choices, add_label, *enabled, window, cx)
+            }
             SettingsRow::ModifierRemaps {
                 mappings,
                 choices,
@@ -1372,11 +1377,12 @@ impl GpuiSettings {
         div()
             .flex()
             .flex_row()
+            .flex_wrap()
             .items_center()
             .gap_2()
             .w_full()
-            .child(div().flex_1().min_w_0().child(family))
-            .child(div().w_32().flex_none().child(weight))
+            .child(family)
+            .child(weight)
             .into_any_element()
     }
 
@@ -2617,7 +2623,7 @@ fn render_setting_label(
     title.into_any_element()
 }
 
-/// Copied from Zed's shared settings item layout (`settings_ui.rs:1381-1452`).
+/// Keep controls readable; narrow windows place them below the setting description.
 fn render_settings_item_layout(
     id: &str,
     label: &str,
@@ -2628,18 +2634,19 @@ fn render_settings_item_layout(
 ) -> AnyElement {
     gpui_kit::div()
         .flex()
+        .flex_wrap()
         .items_center()
         .id(SharedString::from(format!("settings-item-{id}")))
         .min_w_0()
         .justify_between()
+        .gap_3()
         .child(
             gpui_kit::div()
                 .flex()
                 .flex_col()
                 .relative()
-                .w_full()
-                .max_w_2_3()
-                .min_w_0()
+                .flex_1()
+                .min_w(rems(16.0))
                 .child(render_setting_label(id, label, draft, cx))
                 .child(
                     gpui_kit::component::text::TextView::markdown(

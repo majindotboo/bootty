@@ -115,7 +115,7 @@ fn gpui_color(color: crate::gpui::chrome::Rgba) -> Hsla {
 
 struct BoottyErrorNotification;
 
-fn schedule_focus(focus: FocusHandle, window: &Window, cx: &mut Context<GpuiWorkspace>) {
+fn schedule_focus<T: 'static>(focus: FocusHandle, window: &Window, cx: &mut Context<T>) {
     cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
 }
 

@@ -14,7 +14,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
     ParentElement as _, Role, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, rems,
+    Subscription, TextRun, Window, div, px, rems,
 };
 
 use super::model::SettingsChoice;
@@ -258,6 +258,41 @@ fn searchable_picker_placeholder(catalog_name: &str) -> &'static str {
     }
 }
 
+fn choice_width(
+    choices: &[SettingsChoice],
+    minimum: gpui_kit::Rems,
+    window: &Window,
+    cx: &App,
+) -> gpui_kit::Rems {
+    let rem = f32::from(window.rem_size());
+    let mut font = window.text_style().font();
+    font.family = cx.theme().font_family.clone();
+    let widest = choices
+        .iter()
+        .map(|choice| {
+            window
+                .text_system()
+                .shape_line(
+                    choice.label.clone().into(),
+                    px(rem * 0.875),
+                    &[TextRun {
+                        len: choice.label.len(),
+                        font: font.clone(),
+                        color: cx.theme().foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                )
+                .width
+        })
+        .map(f32::from)
+        .fold(0.0, f32::max);
+    // Leave room for the control insets, caret, and the menu's selected checkmark.
+    rems(minimum.0.max(widest / rem + 4.0))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_select(
     selector: String,
@@ -293,11 +328,28 @@ fn render_select(
     let debug_selector = selector.clone();
     let component_selector = format!("settings-select-{selector}");
     let component_debug_selector = component_selector.clone();
+    let option_width = choice_width(choices, width, window, cx);
+    // Search catalogs can have unusually long names. Fit the chosen value in the
+    // control while giving the menu enough room for the entire catalog.
+    let width = if searchable {
+        choice_width(
+            choices
+                .iter()
+                .find(|choice| choice.token == current)
+                .map_or(&[], std::slice::from_ref),
+            width,
+            window,
+            cx,
+        )
+    } else {
+        option_width
+    };
     let menu_width = if choices.iter().any(|choice| choice.description.is_some()) {
         gpui_kit::rems(320.0 / 16.0)
     } else {
-        gpui_kit::rems(210.0 / 16.0)
+        option_width
     };
+    let menu_width = rems(menu_width.0.max(option_width.0));
     let component = Select::new(&select)
         .with_size(Size::Medium)
         .menu_width(menu_width)

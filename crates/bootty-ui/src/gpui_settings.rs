@@ -393,6 +393,18 @@ impl GpuiSettings {
 
     fn new_string_list_item(&self, id: &str) -> String {
         match id {
+            id if id.ends_with(".available-efforts") => self
+                .provider_effort_options(id)
+                .and_then(|options| {
+                    options.into_iter().find(|effort| {
+                        !self
+                            .draft
+                            .string_list(id)
+                            .unwrap_or_default()
+                            .contains(effort)
+                    })
+                })
+                .unwrap_or_else(|| "medium".to_owned()),
             id if id.starts_with("agents.") => String::new(),
             "input.modifier-remap" => "right_alt=left_ctrl".to_owned(),
             "sidebar.session-modules" | "sidebar.modules" => "module".to_owned(),
@@ -575,6 +587,25 @@ fn settings_catalogs(font_families: Arc<[String]>) -> Catalogs {
     }
 }
 
+fn ai_settings_page(
+    source: &crate::gpui_settings_catalog::SettingsCatalogPage,
+    state: &AppState,
+    session: &SettingsSession,
+    rows: Vec<SettingsRow>,
+    integration_rows: &[ModuleIntegrationsSnapshot],
+) -> SettingsPage {
+    let mut page = settings_page(source, rows);
+    page.items
+        .extend(provider_settings_page(source, state, session).items);
+    let mut rows = vec![SettingsRow::Section("AGENT INTEGRATIONS".to_owned())];
+    rows.extend(integration_rows.iter().cloned().map(|mut row| {
+        row.error = session.integration_error(&row.identity).map(str::to_owned);
+        SettingsRow::ModuleIntegrations(row)
+    }));
+    page.items.extend(settings_page(source, rows).items);
+    page
+}
+
 fn provider_settings_page(
     source: &crate::gpui_settings_catalog::SettingsCatalogPage,
     state: &AppState,
@@ -649,7 +680,7 @@ fn provider_settings_page(
 #[allow(clippy::too_many_lines)]
 fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<SettingsRow> {
     let home = crate::strings::home_dir();
-    let mut rows = provider_scalar_settings(state, session, "agents.");
+    let mut rows = Vec::new();
     let remote = state
         .workspace
         .active
@@ -689,6 +720,17 @@ fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<Se
             session,
             &format!("{base}."),
         ));
+        rows.push(SettingsRow::StringList {
+            id: format!("{base}.available-efforts"),
+            label: "Available thinking levels".to_owned(),
+            help: "Choose levels for the picker and effort shortcuts. Empty shows all supported levels; each model still determines which levels it supports.".to_owned(),
+            items: session.string_list(&format!("{base}.available-efforts"))
+                .unwrap_or_else(|| preferences.available_efforts.clone()),
+            options: ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+                .into_iter().map(str::to_owned).collect(),
+            add_label: "Add thinking level".to_owned(),
+            enabled: true,
+        });
         rows.push(provider_text_row(
             format!("{base}.program"),
             "Executable",
@@ -869,8 +911,17 @@ fn provider_scalar_settings(
         .iter()
         .filter_map(|spec| {
             let id = spec.id();
-            let leaf = id.strip_prefix(prefix)?;
-            if leaf.contains('.') || matches!(spec.kind, SettingKind::Custom(_)) {
+            if settings_category_for(&id, spec.page.as_ref()) != SettingsCategory::Ai {
+                return None;
+            }
+            // The naming model keeps its existing TOML path but belongs to Codex's account.
+            if !(id == "agents.quick-model" && prefix == "agents.codex.") {
+                let leaf = id.strip_prefix(prefix)?;
+                if leaf.contains('.') {
+                    return None;
+                }
+            }
+            if matches!(spec.kind, SettingKind::Custom(_)) {
                 return None;
             }
             let (label, help) = setting_copy(spec);
@@ -917,9 +968,6 @@ fn settings_content(
     let mut pages: Vec<_> = settings_catalog_pages()
         .iter()
         .map(|category| {
-            if category.category == SettingsCategory::Providers {
-                return provider_settings_page(category, state, session);
-            }
             let mut rows = Vec::new();
             let mut section = if category.category == SettingsCategory::Advanced {
                 rows.extend(advanced_configuration_rows(
@@ -937,6 +985,9 @@ fn settings_content(
                 .iter()
                 .filter(|spec| {
                     setting_is_visible_in_native_settings(&spec.id())
+                        && (category.category != SettingsCategory::Ai
+                            || !spec.id().starts_with("agents.")
+                            || (spec.path.len() == 2 && spec.id() != "agents.quick-model"))
                         && settings_category_for(&spec.id(), spec.page.as_ref())
                             == category.category
                 })
@@ -997,12 +1048,8 @@ fn settings_content(
                 });
             } else if category.category == SettingsCategory::Remotes {
                 rows = remote_settings_rows(session, state);
-            } else if category.category == SettingsCategory::Advanced {
-                rows.push(SettingsRow::Section("AGENT INTEGRATIONS".to_owned()));
-                rows.extend(integration_rows.iter().cloned().map(|mut row| {
-                    row.error = session.integration_error(&row.identity).map(str::to_owned);
-                    SettingsRow::ModuleIntegrations(row)
-                }));
+            } else if category.category == SettingsCategory::Ai {
+                return ai_settings_page(category, state, session, rows, integration_rows);
             }
             settings_page(category, rows)
         })

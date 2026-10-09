@@ -878,7 +878,14 @@ remain integral.
 
 ## Agent providers
 
-Settings → Providers owns agent executable paths, enabled state and named account/launch profiles. The default account uses the provider's existing store. A named profile can select an absolute account directory and literal launch arguments. Credentials and conversation history remain provider-owned; Bootty never imports or copies them.
+Settings → AI groups new-session defaults and shared conversation behavior,
+including the default provider, response streaming, composer collapse, send shortcut
+and follow-up behavior, agent notifications and child-agent access. AI also
+contains each provider's executable, enabled state, model and
+thinking defaults, available thinking levels and named account/launch profiles.
+The default account uses the provider's existing store. A named profile can select
+an absolute account directory and literal launch arguments. Credentials and
+conversation history remain provider-owned; Bootty never imports or copies them.
 
 Pi profiles retain literal `--extension` / `-e` paths on creation and resume.
 Provider credentials, prompt arguments and prior session selectors are still
@@ -900,7 +907,8 @@ The same keys apply to `agents.claude` and `agents.pi`. Account directories use 
 
 Start and resume open terminal tabs in the selected session. Changes affect future launches. Sign-in opens the provider's own terminal flow; Pi uses `/login`. Refresh status runs bounded, read-only version and account queries on a worker. Codex reports its account type and plan through its app server; Claude reports its own login state and subscription type; Pi reports the selected provider's existing authentication without inferring a subscription. An older refresh cannot replace a newer account selection. Update runs the proven owning native, Bun-global or npm-global installer in a local POSIX terminal tab. Its exit result stays visible until Enter closes the tab. Unknown installations require a manual update; active agent tabs prevent updates. Bootty does not update agents automatically.
 
-`agents.quick-model` selects the Codex model for session and worktree names. It defaults
+Codex's **Session naming model** (`agents.quick-model`) selects the model for session
+and worktree names. It defaults
 to `gpt-6-luna` and uses the selected Codex account. Naming runs only after submission,
 in an ephemeral read-only process, and does not create a conversation.
 

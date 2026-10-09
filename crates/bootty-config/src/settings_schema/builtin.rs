@@ -158,7 +158,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(agent_defaults_specs());
     specs.push(spec(
         &["agents", "quick-model"],
-        "Quick model",
+        "Session naming model",
         "Codex model used to name sessions and worktrees from their first prompt.",
         "providers",
         "PROVIDERS",
@@ -1767,8 +1767,8 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
         &["agents", "default-provider"],
         "Default provider",
         "Provider selected for a fresh agent draft.",
-        "providers",
-        "DEFAULTS",
+        "general",
+        "NEW SESSIONS",
         SettingKind::Choice {
             options: [("codex", "Codex"), ("claude", "Claude"), ("pi", "Pi")]
                 .into_iter()

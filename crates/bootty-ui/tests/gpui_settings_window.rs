@@ -343,7 +343,7 @@ fn settings_expose_the_product_pages_in_order(cx: &mut TestAppContext) {
         ("settings-category-window-and-layout", "Window & Layout"),
         ("settings-category-panels", "Panels"),
         ("settings-category-terminal", "Terminal"),
-        ("settings-category-providers", "Providers"),
+        ("settings-category-ai", "AI"),
         ("settings-category-remotes", "Remotes"),
         ("settings-category-advanced", "Advanced"),
     ];
@@ -948,7 +948,7 @@ fn snapshot_with_category(category: SettingsCategory) -> GpuiSettingsSnapshot {
                 )],
             ),
             page(
-                SettingsCategory::Providers,
+                SettingsCategory::Ai,
                 vec![section(
                     "providers:codex",
                     "Codex",
@@ -1176,10 +1176,10 @@ fn provider_accounts_snapshot() -> GpuiSettingsSnapshot {
         })
         .collect();
     GpuiSettingsSnapshot {
-        category: SettingsCategory::Providers,
+        category: SettingsCategory::Ai,
         pages: vec![SettingsPage {
-            category: SettingsCategory::Providers,
-            title: "Providers".to_owned(),
+            category: SettingsCategory::Ai,
+            title: "AI".to_owned(),
             search_terms: "agents accounts".to_owned(),
             items,
         }],

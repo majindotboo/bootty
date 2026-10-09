@@ -19,7 +19,7 @@ pub enum SettingsCategory {
     Terminal,
     Browser,
     Permissions,
-    Providers,
+    Ai,
     Remotes,
     Advanced,
 }
@@ -38,7 +38,7 @@ impl SettingsCategory {
             Self::Terminal => "terminal",
             Self::Browser => "browser",
             Self::Permissions => "permissions",
-            Self::Providers => "providers",
+            Self::Ai => "ai",
             Self::Remotes => "remotes",
             Self::Advanced => "advanced",
         }
@@ -55,7 +55,7 @@ impl SettingsCategory {
             Self::Terminal => "Terminal",
             Self::Browser => "Browser",
             Self::Permissions => "Permissions",
-            Self::Providers => "Providers",
+            Self::Ai => "AI",
             Self::Remotes => "Remotes",
             Self::Advanced => "Advanced",
         }

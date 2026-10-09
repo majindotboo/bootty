@@ -1,5 +1,7 @@
 //! Native settings window, file tabs, and their save/close lifecycle.
 
+mod projects;
+
 use super::{GpuiWorkspace, schedule_focus};
 use crate::gpui::{
     FileEditor, FileEditorEvent, GpuiKeymapEditor, GpuiSettings, GpuiThemeEditor,
@@ -23,6 +25,8 @@ use std::{path::PathBuf, sync::Arc};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsWindowTab {
     Settings,
+    Projects,
+    Project(gpui_kit::EntityId),
     Theme,
     Keymap,
     File(EditorFileKind),
@@ -70,10 +74,17 @@ pub(super) struct GpuiSettingsWindow {
     keymap_file_editor: Option<EditorFileTab>,
     editor_close_after_save: Option<EditorCloseTarget>,
     workspace: WeakEntity<GpuiWorkspace>,
+    sender: Option<bootty_control::BoundAppCommandSender>,
     close_prompt_pending: bool,
     close_after_theme_restore: bool,
-    project: Option<Entity<super::project_settings::ProjectSettingsView>>,
-    project_subscription: Option<Subscription>,
+    projects: Vec<ProjectSettingsTab>,
+    project_error: Option<String>,
+    _workspace_subscription: Option<Subscription>,
+}
+
+struct ProjectSettingsTab {
+    view: Entity<super::project_settings::ProjectSettingsView>,
+    _observe: Subscription,
 }
 
 const SETTINGS_CONTENT_MIN_WIDTH_REMS: f32 = 25.0;
@@ -104,13 +115,15 @@ fn activate_settings_window(
     establish_settings_window_shadow(window);
     match root.active_tab {
         SettingsWindowTab::Settings => {
-            if let Some(project) = &root.project {
-                project.update(cx, |project, cx| project.focus(window, cx));
-            } else {
-                root.settings.update(cx, |settings, cx| {
-                    settings.show_settings(cx);
-                    settings.focus(window, cx);
-                });
+            root.settings.update(cx, |settings, cx| {
+                settings.show_settings(cx);
+                settings.focus(window, cx);
+            });
+        }
+        SettingsWindowTab::Projects => {}
+        SettingsWindowTab::Project(id) => {
+            if let Some(tab) = root.projects.iter().find(|tab| tab.view.entity_id() == id) {
+                tab.view.update(cx, |view, cx| view.focus(window, cx));
             }
         }
         SettingsWindowTab::Theme => {
@@ -138,6 +151,12 @@ impl GpuiSettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let sender = workspace.upgrade().map(|workspace| {
+            workspace
+                .read(cx)
+                .state
+                .app_command_sender(bootty_control::Caller::Internal)
+        });
         let theme = workspace.upgrade().map(|workspace| {
             let state = &workspace.read(cx).state;
             let variant = state.active_appearance_variant();
@@ -155,6 +174,14 @@ impl GpuiSettingsWindow {
         let root = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             root.update(cx, |root, cx| {
+                if root
+                    .projects
+                    .iter()
+                    .any(|tab| tab.view.read(cx).is_dirty(cx) || tab.view.read(cx).saving())
+                {
+                    root.request_close(window, cx);
+                    return false;
+                }
                 if root.first_dirty_editor(cx).is_none() {
                     let restored = root.restore_theme_preview(cx);
                     if !restored {
@@ -181,6 +208,9 @@ impl GpuiSettingsWindow {
             });
         })
         .detach();
+        let workspace_subscription = workspace
+            .upgrade()
+            .map(|workspace| cx.observe(&workspace, |_, _, cx| cx.notify()));
         Self {
             settings,
             keymap,
@@ -192,10 +222,12 @@ impl GpuiSettingsWindow {
             keymap_file_editor: None,
             editor_close_after_save: None,
             workspace,
+            sender,
             close_prompt_pending: false,
             close_after_theme_restore: false,
-            project: None,
-            project_subscription: None,
+            projects: Vec::new(),
+            project_error: None,
+            _workspace_subscription: workspace_subscription,
         }
     }
 
@@ -237,8 +269,6 @@ impl GpuiSettingsWindow {
         }
         match target {
             SettingsWindowTarget::Settings => {
-                self.project = None;
-                self.project_subscription = None;
                 self.active_tab = SettingsWindowTab::Settings;
                 self.settings.update(cx, |settings, cx| {
                     settings.show_settings(cx);
@@ -280,26 +310,26 @@ impl GpuiSettingsWindow {
                 });
             }
             SettingsWindowTarget::Project(project) => {
-                self.active_tab = SettingsWindowTab::Settings;
-                if let Some(workspace) = self.workspace.upgrade() {
-                    let sender = workspace
-                        .read(cx)
-                        .state
-                        .app_command_sender(bootty_control::Caller::Internal);
+                if let Some(tab) = self.projects.iter().find(|tab| {
+                    tab.view.read(cx).cwd() == project.cwd()
+                        && tab.view.read(cx).target() == project.target()
+                }) {
+                    self.active_tab = SettingsWindowTab::Project(tab.view.entity_id());
+                    tab.view.update(cx, |view, cx| view.focus(window, cx));
+                } else if let Some(sender) = self.sender.clone() {
                     let view = cx.new(|cx| {
                         super::project_settings::ProjectSettingsView::new(
                             *project, sender, window, cx,
                         )
                     });
-                    self.project_subscription = Some(cx.subscribe_in(
-                        &view,
-                        window,
-                        |this, _, _: &gpui_kit::DismissEvent, window, cx| {
-                            this.focus_target(SettingsWindowTarget::Settings, window, cx);
-                        },
-                    ));
+                    let id = view.entity_id();
                     view.update(cx, |view, cx| view.focus(window, cx));
-                    self.project = Some(view);
+                    self.active_tab = SettingsWindowTab::Project(id);
+                    let observe = cx.observe(&view, |_, _, cx| cx.notify());
+                    self.projects.push(ProjectSettingsTab {
+                        view,
+                        _observe: observe,
+                    });
                 }
             }
         }
@@ -330,6 +360,15 @@ impl GpuiSettingsWindow {
             return;
         }
         self.close_after_theme_restore = false;
+        if let Some(id) = self
+            .projects
+            .iter()
+            .find(|tab| tab.view.read(cx).is_dirty(cx) || tab.view.read(cx).saving())
+            .map(|tab| tab.view.entity_id())
+        {
+            self.confirm_project_close(id, true, window, cx);
+            return;
+        }
         if let Some(kind) = self.first_dirty_editor(cx) {
             self.prompt_to_close_editor(kind, EditorCloseTarget::Window, window, cx);
         } else {
@@ -696,12 +735,27 @@ impl GpuiSettingsWindow {
             SettingsWindowTab::Settings => 0,
             SettingsWindowTab::Keymap => 1,
             SettingsWindowTab::Theme => 2,
+            SettingsWindowTab::Projects => 3,
+            SettingsWindowTab::Project(id) => self
+                .projects
+                .iter()
+                .position(|tab| tab.view.entity_id() == id)
+                .map_or(3, |index| {
+                    4_usize
+                        .saturating_add(file_kinds.len())
+                        .saturating_add(index)
+                }),
             SettingsWindowTab::File(kind) => file_kinds
                 .iter()
                 .position(|candidate| *candidate == kind)
-                .map_or(0, |index| index.saturating_add(3)),
+                .map_or(0, |index| index.saturating_add(4)),
         };
         let click_file_kinds = Arc::clone(&file_kinds);
+        let project_ids: Vec<_> = self
+            .projects
+            .iter()
+            .map(|tab| tab.view.entity_id())
+            .collect();
         let mut tabs = TabBar::new("settings-window-tab-bar")
             .with_size(Size::Medium)
             .segmented()
@@ -712,15 +766,26 @@ impl GpuiSettingsWindow {
                 if *index != 2 && !this.restore_theme_preview(cx) {
                     return;
                 }
-                this.active_tab = match *index {
-                    0 => SettingsWindowTab::Settings,
-                    1 => SettingsWindowTab::Keymap,
-                    2 => SettingsWindowTab::Theme,
-                    index => click_file_kinds
-                        .get(index.saturating_sub(3))
-                        .copied()
-                        .map_or(SettingsWindowTab::Settings, SettingsWindowTab::File),
-                };
+                this.active_tab =
+                    match *index {
+                        0 => SettingsWindowTab::Settings,
+                        1 => SettingsWindowTab::Keymap,
+                        2 => SettingsWindowTab::Theme,
+                        3 => SettingsWindowTab::Projects,
+                        index => click_file_kinds
+                            .get(index.saturating_sub(4))
+                            .copied()
+                            .map(SettingsWindowTab::File)
+                            .or_else(|| {
+                                project_ids
+                                    .get(index.saturating_sub(
+                                        4_usize.saturating_add(click_file_kinds.len()),
+                                    ))
+                                    .copied()
+                                    .map(SettingsWindowTab::Project)
+                            })
+                            .unwrap_or(SettingsWindowTab::Settings),
+                    };
                 activate_settings_window(this, window, cx);
                 cx.notify();
             }))
@@ -742,10 +807,14 @@ impl GpuiSettingsWindow {
                 .aria_label("Bootty theme editor")
                 .debug_selector(|| "settings-window-tab-theme".to_owned()),
         );
+        tabs = tabs.child(Tab::new().label("Projects").aria_label("Manage projects"));
         for kind in file_kinds.iter().copied() {
             if let Some(tab) = self.editor_tab(kind) {
                 tabs = tabs.child(Self::render_editor_tab(kind, tab, cx));
             }
+        }
+        for tab in &self.projects {
+            tabs = tabs.child(Self::render_project_tab(tab, cx));
         }
         if let Some(editor) = active_editor {
             tabs = tabs.suffix(Self::save_editor_button(editor, cx));
@@ -830,9 +899,11 @@ impl Render for GpuiSettingsWindow {
         let active_tab = self.active_tab;
         let active_editor = match active_tab {
             SettingsWindowTab::File(kind) => self.editor_tab(kind).map(|tab| tab.editor.clone()),
-            SettingsWindowTab::Settings | SettingsWindowTab::Keymap | SettingsWindowTab::Theme => {
-                None
-            }
+            SettingsWindowTab::Settings
+            | SettingsWindowTab::Projects
+            | SettingsWindowTab::Project(_)
+            | SettingsWindowTab::Keymap
+            | SettingsWindowTab::Theme => None,
         };
         let tabs = self.render_tabs(active_editor.as_ref(), cx);
         let tab_strip = SettingsTitleBar::new(
@@ -842,10 +913,15 @@ impl Render for GpuiSettingsWindow {
         );
 
         let body = match (active_tab, active_editor) {
-            (SettingsWindowTab::Settings, _) => self.project.as_ref().map_or_else(
-                || self.settings.clone().into_any_element(),
-                |project| project.clone().into_any_element(),
-            ),
+            (SettingsWindowTab::Projects, _) => self.render_projects(cx),
+            (SettingsWindowTab::Project(id), _) => self
+                .projects
+                .iter()
+                .find(|tab| tab.view.entity_id() == id)
+                .map_or_else(
+                    || self.settings.clone().into_any_element(),
+                    |tab| tab.view.clone().into_any_element(),
+                ),
             (SettingsWindowTab::File(_), Some(editor)) => editor.into_any_element(),
             (SettingsWindowTab::Keymap, _) => self.keymap.clone().into_any_element(),
             (SettingsWindowTab::Theme, _) => self.theme.as_ref().map_or_else(
@@ -874,7 +950,9 @@ impl Render for GpuiSettingsWindow {
             ))
             .on_action(cx.listener(
                 |this, _: &crate::gpui_actions::CloseSettingsWindow, window, cx| {
-                    if let SettingsWindowTab::File(kind) = this.active_tab {
+                    if let SettingsWindowTab::Project(id) = this.active_tab {
+                        this.request_close_project_tab(id, window, cx);
+                    } else if let SettingsWindowTab::File(kind) = this.active_tab {
                         this.request_close_file_tab(kind, window, cx);
                     } else {
                         this.request_close(window, cx);

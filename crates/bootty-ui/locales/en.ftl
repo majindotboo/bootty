@@ -57,6 +57,7 @@ git-amend-action = Amend
 page-advanced-title = Advanced
 page-appearance-title = Appearance
 page-general-title = General
+page-ai-title = AI
 page-keymap-title = Keyboard
 page-panels-title = Panels
 page-remotes-title = Remotes

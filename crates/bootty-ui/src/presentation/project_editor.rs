@@ -12,6 +12,16 @@ pub struct ProjectSettingsEditor {
 
 impl ProjectSettingsEditor {
     #[must_use]
+    pub const fn target(&self) -> &CommandTarget {
+        &self.target
+    }
+
+    #[must_use]
+    pub fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    #[must_use]
     pub fn name(&self) -> &str {
         if self.settings.name.is_empty() {
             self.cwd
