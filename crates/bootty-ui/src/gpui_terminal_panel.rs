@@ -118,9 +118,16 @@ impl TerminalPanel {
         self
     }
 
-    pub(crate) fn focus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
-        _ = self.owner.update(cx, |owner, cx| {
-            owner.focus_terminal_window(&self.binding_target, &self.window_id, window, cx);
+    pub(crate) fn focus_terminal(&self, window: &Window, cx: &mut Context<Self>) {
+        let owner = self.owner.clone();
+        let binding = self.binding_target.clone();
+        let window_id = self.window_id.clone();
+        // Focus can be handed back while a dock or panel is updating. Release those
+        // leases before the workspace reconciles its panels and native conversation.
+        window.defer(cx, move |window, cx| {
+            _ = owner.update(cx, |owner, cx| {
+                owner.focus_terminal_window(&binding, &window_id, window, cx);
+            });
         });
     }
 
