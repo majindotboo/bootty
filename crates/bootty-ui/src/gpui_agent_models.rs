@@ -199,6 +199,9 @@ impl NativeAgentSessionView {
                         );
                     }
                 }
+                // Existing conversations keep their provider fixed; only the new-session
+                // composer supplies provider choices to the shared picker.
+                ModelPickerEvent::SelectProvider(_) => {}
             },
         );
         self.model_picker_subscription = Some(subscription);

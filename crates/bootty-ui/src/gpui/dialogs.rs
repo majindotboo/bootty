@@ -10,8 +10,10 @@ use gpui_kit::component::{
     command::{Command, CommandEntry, CommandGroup, CommandItem, CommandState},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    kbd::Kbd,
     menu::{DropdownMenu as _, PopupMenuItem},
     switch::Switch,
+    tooltip::Tooltip,
     v_flex,
 };
 use gpui_kit::{
@@ -212,6 +214,51 @@ pub enum CommandAction {
     Cancel,
     ToggleFavorite,
     Focus(ComposerControl),
+}
+
+fn composer_focus_action(
+    control: ComposerControl,
+    focus: FocusHandle,
+) -> (crate::gpui_actions::InvokeCommand, FocusHandle) {
+    let command = format!("ui.composer.{}", control.command());
+    (
+        crate::gpui_actions::InvokeCommand::new(bootty_control::CommandInvocation::from_action(
+            &command,
+            bootty_control::Caller::Keybinding,
+        )),
+        focus,
+    )
+}
+
+fn with_composer_tooltip(
+    id: impl Into<SharedString>,
+    control: impl IntoElement,
+    description: impl Into<SharedString>,
+    actions: Vec<(crate::gpui_actions::InvokeCommand, FocusHandle)>,
+) -> gpui_kit::AnyElement {
+    let id = id.into();
+    let description = description.into();
+    div()
+        .id(id.to_string())
+        .child(control)
+        .tooltip(move |window, cx| {
+            let description = description.clone();
+            let actions = actions.clone();
+            Tooltip::element(move |window, _cx| {
+                let bindings = actions
+                    .iter()
+                    .filter_map(|(action, focus)| Kbd::binding_for_action_in(action, focus, window))
+                    .collect::<Vec<_>>();
+                v_flex()
+                    .gap_1()
+                    .child(div().child(description.clone()))
+                    .when(!bindings.is_empty(), |tooltip| {
+                        tooltip.child(h_flex().gap_1().children(bindings))
+                    })
+            })
+            .build(window, cx)
+        })
+        .into_any_element()
 }
 
 /// Dialog interactions retain the values captured by their rendered controls.
@@ -536,6 +583,7 @@ pub struct DialogView {
     /// Stable focus target for a confirm surface before its buttons render.
     confirm_focus: FocusHandle,
     control_focus: std::collections::BTreeMap<&'static str, FocusHandle>,
+    provider_focus: FocusHandle,
     command_keybindings: Option<Vec<(CommandAction, String)>>,
     find_input: Entity<InputState>,
     suppress_query: Option<String>,
@@ -549,41 +597,26 @@ pub struct DialogView {
 }
 
 impl DialogView {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let find_input = cx.new(|cx| InputState::new(window, cx));
-        let find_input_subscription = cx.subscribe_in(
-            &find_input,
-            window,
-            |this, _, event: &InputEvent, _window, cx| match event {
-                InputEvent::Change => {
-                    let value = this.find_input.read(cx).value().to_string();
-                    this.change_text(value, cx);
-                }
-                InputEvent::PressEnter { shift, .. } => {
-                    let query = this.find_input.read(cx).value().to_string();
-                    this.submit_query(&query, *shift, cx);
-                }
-                InputEvent::Focus | InputEvent::Blur => {}
-            },
-        );
-        let prompt_input = cx.new(|cx| InputState::new(window, cx));
-        let prompt_input_subscription = cx.subscribe_in(
-            &prompt_input,
-            window,
-            |this, _, event: &InputEvent, _window, cx| match event {
-                InputEvent::Change => {
-                    let value = this.prompt_input.read(cx).value().to_string();
-                    this.change_text(value, cx);
-                }
-                // The prompt's Confirm action owns submission and blocks Root's default close.
-                InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
-            },
-        );
-        let prompt_textarea = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 8));
-        let prompt_textarea_subscription =
-            Self::subscribe_prompt_content(&prompt_textarea, window, cx);
+    fn composer_control_focus(
+        cx: &Context<Self>,
+    ) -> (
+        std::collections::BTreeMap<&'static str, FocusHandle>,
+        FocusHandle,
+    ) {
+        let control_focus = ComposerControl::ALL
+            .into_iter()
+            .map(|control| (control.field(), cx.focus_handle()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        let provider_focus = control_focus
+            .get("provider")
+            .cloned()
+            .unwrap_or_else(|| cx.focus_handle());
+        (control_focus, provider_focus)
+    }
+
+    fn command_interceptor(cx: &mut Context<Self>) -> Subscription {
         let owner = cx.weak_entity();
-        let command_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+        cx.intercept_keystrokes(move |event, window, cx| {
             let (command_surface_focused, redirect_typing) = owner
                 .read_with(cx, |this, app| this.command_focus_state(window, app))
                 .unwrap_or((false, false));
@@ -621,7 +654,44 @@ impl DialogView {
                 }
                 cx.stop_propagation();
             }
-        });
+        })
+    }
+
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let find_input = cx.new(|cx| InputState::new(window, cx));
+        let find_input_subscription = cx.subscribe_in(
+            &find_input,
+            window,
+            |this, _, event: &InputEvent, _window, cx| match event {
+                InputEvent::Change => {
+                    let value = this.find_input.read(cx).value().to_string();
+                    this.change_text(value, cx);
+                }
+                InputEvent::PressEnter { shift, .. } => {
+                    let query = this.find_input.read(cx).value().to_string();
+                    this.submit_query(&query, *shift, cx);
+                }
+                InputEvent::Focus | InputEvent::Blur => {}
+            },
+        );
+        let prompt_input = cx.new(|cx| InputState::new(window, cx));
+        let prompt_input_subscription = cx.subscribe_in(
+            &prompt_input,
+            window,
+            |this, _, event: &InputEvent, _window, cx| match event {
+                InputEvent::Change => {
+                    let value = this.prompt_input.read(cx).value().to_string();
+                    this.change_text(value, cx);
+                }
+                // The prompt's Confirm action owns submission and blocks Root's default close.
+                InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
+            },
+        );
+        let prompt_textarea = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 8));
+        let prompt_textarea_subscription =
+            Self::subscribe_prompt_content(&prompt_textarea, window, cx);
+        let command_interceptor = Self::command_interceptor(cx);
+        let (control_focus, provider_focus) = Self::composer_control_focus(cx);
         Self {
             spec: None,
             command: cx.new(|cx| CommandState::new(window, cx)),
@@ -635,10 +705,8 @@ impl DialogView {
             completion: None,
             completion_subscriptions: Vec::new(),
             confirm_focus: cx.focus_handle().tab_stop(true),
-            control_focus: ComposerControl::ALL
-                .into_iter()
-                .map(|control| (control.field(), cx.focus_handle()))
-                .collect(),
+            control_focus,
+            provider_focus,
             command_keybindings: None,
             find_input,
             suppress_query: None,
@@ -1423,7 +1491,9 @@ impl DialogView {
                     .gap_2()
                     .when_some(
                         spec.rows.iter().find(|row| row.id.0 == "choose-project"),
-                        |row, project| row.child(self.render_new_project_picker(spec, project, cx)),
+                        |row, project| {
+                            row.child(self.render_new_project_picker(spec, project, window, cx))
+                        },
                     )
                     .when_some(mode, |row, mode| {
                         row.child(Self::new_session_mode(spec, mode, cx))
@@ -1469,7 +1539,7 @@ impl DialogView {
                     )
                     .children(spec.fields.iter().filter_map(|field| {
                         if field.id == "isolation" {
-                            Some(Self::new_session_worktree(spec, field, cx))
+                            Some(self.new_session_worktree(spec, field, cx))
                         } else {
                             self.new_session_choice(spec, field, false, cx)
                         }
@@ -1533,7 +1603,7 @@ impl DialogView {
             .min_w_0()
             .items_center()
             .gap_4()
-            .child(self.agent_session_header(spec, cx))
+            .child(self.agent_session_header(spec, window, cx))
             .child(
                 v_flex()
                     .w_full()
@@ -1600,30 +1670,70 @@ impl DialogView {
         let rem = f32::from(window.rem_size());
         spec.fields
             .iter()
-            .filter(|field| !matches!(field.id.as_str(), "isolation" | "mode"))
+            .filter(|field| {
+                !(matches!(field.id.as_str(), "isolation" | "mode")
+                    || field.id == "provider"
+                        && spec.fields.iter().any(|candidate| candidate.id == "model"))
+            })
             .filter_map(|field| {
-                // Space and permission labels yield before the provider and effort labels.
+                // Keep the access policy readable after combining provider and model.
                 let compact = width
                     < rem
-                        * if matches!(field.id.as_str(), "host" | "permissions") {
-                            50.
-                        } else {
-                            40.
+                        * match field.id.as_str() {
+                            "host" => 50.,
+                            "permissions" => 32.,
+                            _ => 40.,
                         };
                 let choice = self.new_session_choice(spec, field, compact, cx)?;
-                Some(
-                    div()
-                        .flex_shrink_0()
-                        .min_w_0()
-                        .when_some(self.control_focus.get(field.id.as_str()), |view, focus| {
-                            view.track_focus(focus)
-                        })
-                        .child(public_selector(
-                            format!("dialog-field-choice-control-{}", field.id),
-                            choice,
-                        ))
-                        .into_any_element(),
-                )
+                let control = div()
+                    .flex_shrink_0()
+                    .min_w_0()
+                    .when_some(self.control_focus.get(field.id.as_str()), |view, focus| {
+                        view.track_focus(focus)
+                    })
+                    .child(public_selector(
+                        format!("dialog-field-choice-control-{}", field.id),
+                        choice,
+                    ));
+                let (description, focus_controls) = match field.id.as_str() {
+                    "host" => (
+                        "Choose where the agent will run.",
+                        vec![ComposerControl::Space],
+                    ),
+                    "provider" | "model" => (
+                        "Choose a provider and model.",
+                        vec![ComposerControl::Provider, ComposerControl::Model],
+                    ),
+                    "reasoning" => (
+                        "Choose the model's reasoning effort.",
+                        vec![ComposerControl::Effort],
+                    ),
+                    "permissions" => (
+                        "Choose how the agent can access your system.",
+                        vec![ComposerControl::Permissions],
+                    ),
+                    _ => ("Choose an agent setting.", Vec::new()),
+                };
+                let focus = self
+                    .model_picker
+                    .as_ref()
+                    .map(|picker| picker.state.focus_handle(cx));
+                let actions = focus_controls
+                    .into_iter()
+                    .filter_map(|control| {
+                        let focus = match control {
+                            ComposerControl::Provider | ComposerControl::Model => focus.clone(),
+                            _ => self.control_focus.get(control.field()).cloned(),
+                        }?;
+                        Some(composer_focus_action(control, focus))
+                    })
+                    .collect();
+                Some(with_composer_tooltip(
+                    format!("dialog-field-tooltip-{}", field.id),
+                    control,
+                    description,
+                    actions,
+                ))
             })
             .collect::<Vec<_>>()
     }
@@ -1685,7 +1795,12 @@ impl DialogView {
             .into_any_element()
     }
 
-    fn agent_session_header(&self, spec: &DialogSpec, cx: &Context<Self>) -> gpui_kit::AnyElement {
+    fn agent_session_header(
+        &self,
+        spec: &DialogSpec,
+        window: &mut Window,
+        cx: &Context<Self>,
+    ) -> gpui_kit::AnyElement {
         let project = Self::agent_project_name(spec);
         let project_choice = spec.rows.iter().find(|row| row.id.0 == "choose-project");
         h_flex()
@@ -1706,7 +1821,7 @@ impl DialogView {
             .when_some(project, |row, name| {
                 row.child(project_choice.map_or_else(
                     || div().child(name.to_owned()).into_any_element(),
-                    |choice| self.render_new_project_picker(spec, choice, cx),
+                    |choice| self.render_new_project_picker(spec, choice, window, cx),
                 ))
                 .child("?")
             })
@@ -1796,7 +1911,7 @@ impl DialogView {
                             .when_some(self.control_focus.get("isolation"), |view, focus| {
                                 view.track_focus(focus)
                             })
-                            .child(Self::new_session_worktree(spec, field, cx)),
+                            .child(self.new_session_worktree(spec, field, cx)),
                     )
                 },
             )
@@ -1936,7 +2051,10 @@ impl DialogView {
         if field.id == "mode" || (field.id == "profile" && options.len() < 2) {
             return None;
         }
-        if field.id == "model" {
+        if field.id == "model"
+            || (field.id == "provider"
+                && !spec.fields.iter().any(|candidate| candidate.id == "model"))
+        {
             return self.render_new_model_picker(spec, field, cx);
         }
         let owner = cx.weak_entity();
@@ -1956,7 +2074,6 @@ impl DialogView {
             .dropdown_caret(true)
             .disabled(spec.busy)
             .accessibility_label(format!("{}: {}", field.label, field.value))
-            .tooltip(format!("{}: {}", field.label, field.value))
             .child(Self::new_session_choice_content(
                 &field.id,
                 &field.value,
@@ -2005,13 +2122,14 @@ impl DialogView {
     }
 
     fn new_session_worktree(
+        &self,
         spec: &DialogSpec,
         field: &DialogField,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let owner = cx.weak_entity();
         let dialog = spec.id.clone();
-        Switch::new("new-session-worktree")
+        let switch = Switch::new("new-session-worktree")
             .small()
             .label("Worktree")
             .checked(field.value == "New worktree")
@@ -2029,8 +2147,20 @@ impl DialogView {
                         .to_owned(),
                     });
                 });
-            })
-            .into_any_element()
+            });
+        let actions = self
+            .control_focus
+            .get("isolation")
+            .cloned()
+            .map_or_else(Vec::new, |focus| {
+                vec![composer_focus_action(ComposerControl::Worktree, focus)]
+            });
+        with_composer_tooltip(
+            "new-session-worktree-tooltip",
+            switch,
+            "Create this session in a new Git worktree.",
+            actions,
+        )
     }
 
     fn new_session_choice_content(

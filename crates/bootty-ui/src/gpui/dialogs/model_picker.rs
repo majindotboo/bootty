@@ -4,29 +4,32 @@ use crate::gpui::{ModelPickerEvent, ModelPickerView};
 
 pub(super) struct NewModelPicker {
     pub(super) state: Entity<ModelPickerView>,
-    provider: String,
     _subscription: Subscription,
 }
 
 impl DialogView {
     pub(super) fn sync_new_model_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(spec) = &self.spec else {
+            self.control_focus
+                .insert("provider", self.provider_focus.clone());
             return;
         };
-        if !spec.fields.iter().any(|field| field.id == "model") {
+        let Some(provider_field) = spec.fields.iter().find(|field| field.id == "provider") else {
             self.model_picker = None;
+            self.control_focus
+                .insert("provider", self.provider_focus.clone());
             return;
-        }
-        let provider = spec
-            .fields
-            .iter()
-            .find(|field| field.id == "provider")
-            .map_or_else(String::new, |field| field.value.clone());
-        let kind = match provider.as_str() {
-            "Codex" => bootty_agents::AgentKind::Codex,
-            "Claude" => bootty_agents::AgentKind::Claude,
-            "Pi" => bootty_agents::AgentKind::Pi,
-            _ => return,
+        };
+        let provider = provider_field.value.clone();
+        let Some(kind) = provider_kind(&provider) else {
+            self.model_picker = None;
+            self.control_focus
+                .insert("provider", self.provider_focus.clone());
+            return;
+        };
+        let providers = match &provider_field.kind {
+            DialogFieldKind::Choice(providers) => providers.clone(),
+            DialogFieldKind::Text | DialogFieldKind::Color => vec![provider],
         };
         let selected = spec.selected_model.clone().or_else(|| {
             spec.models
@@ -34,16 +37,33 @@ impl DialogView {
                 .find(|model| model.is_default)
                 .map(|model| model.id.clone())
         });
-        if let Some(picker) = &self.model_picker
-            && picker.provider == provider
-        {
+        if let Some(picker) = &self.model_picker {
             picker.state.update(cx, |picker, cx| {
-                picker.set_models(&spec.models, selected.as_deref(), !spec.busy, window, cx);
+                picker.set_provider_models(
+                    crate::gpui_model_picker::ProviderModelCatalog {
+                        provider: kind,
+                        models: &spec.models,
+                        current: selected.as_deref(),
+                        providers: &providers,
+                        enabled: !spec.busy,
+                    },
+                    window,
+                    cx,
+                );
             });
+            self.control_focus
+                .insert("provider", picker.state.focus_handle(cx));
             return;
         }
         let state = cx.new(|cx| {
-            ModelPickerView::new(kind, spec.models.clone(), selected.as_deref(), window, cx)
+            ModelPickerView::new_with_providers(
+                kind,
+                spec.models.clone(),
+                selected.as_deref(),
+                providers,
+                window,
+                cx,
+            )
         });
         let subscription = cx.subscribe_in(
             &state,
@@ -54,6 +74,7 @@ impl DialogView {
                 };
                 let (field, value) = match event {
                     ModelPickerEvent::Select(id) => ("model", id),
+                    ModelPickerEvent::SelectProvider(provider) => ("provider", provider),
                     ModelPickerEvent::Favorite(id) => ("model-favorite", id),
                 };
                 cx.emit(DialogIntent::FieldChanged {
@@ -63,9 +84,10 @@ impl DialogView {
                 });
             },
         );
+        self.control_focus
+            .insert("provider", state.focus_handle(cx));
         self.model_picker = Some(NewModelPicker {
             state,
-            provider,
             _subscription: subscription,
         });
     }
@@ -115,5 +137,14 @@ impl DialogView {
         _: &Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         Some(self.model_picker.as_ref()?.state.clone().into_any_element())
+    }
+}
+
+fn provider_kind(provider: &str) -> Option<bootty_agents::AgentKind> {
+    match provider.to_ascii_lowercase().as_str() {
+        "codex" => Some(bootty_agents::AgentKind::Codex),
+        "claude" => Some(bootty_agents::AgentKind::Claude),
+        "pi" => Some(bootty_agents::AgentKind::Pi),
+        _ => None,
     }
 }

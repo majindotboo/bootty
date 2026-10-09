@@ -136,31 +136,48 @@ impl DialogView {
         &self,
         spec: &DialogSpec,
         choice: &DialogRow,
+        _window: &mut Window,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let Some(picker) = &self.project_picker else {
             return div().child(choice.label.clone()).into_any_element();
         };
-        public_selector(
-            "new-session-header-project",
-            Select::new(&picker.state)
-                .when(Self::is_agent_session_spec(spec), |select| {
-                    select.text_xl().h_auto().text_color(cx.theme().foreground)
-                })
-                .appearance(false)
-                .placeholder(choice.label.trim_end_matches('…').to_owned())
-                .search_placeholder("Find project…")
-                .accessibility_label("Project")
-                .menu_width(rems(24.0))
-                .menu_max_h(rems(18.0))
-                .empty(|_, cx| {
-                    div()
-                        .p_3()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("No registered projects")
-                })
-                .disabled(spec.busy || !choice.enabled),
+        let selector_id = "new-session-header-project".to_owned();
+        let debug_selector = selector_id.clone();
+        let picker_control = div()
+            .id(SharedString::from(selector_id))
+            .debug_selector(move || debug_selector)
+            .flex()
+            .rounded(cx.theme().radius)
+            .hover(|style| style.bg(cx.theme().list_hover))
+            .child(
+                Select::new(&picker.state)
+                    .when(Self::is_agent_session_spec(spec), |select| {
+                        select.text_xl().h_auto().text_color(cx.theme().foreground)
+                    })
+                    .appearance(false)
+                    .placeholder(choice.label.trim_end_matches('…').to_owned())
+                    .search_placeholder("Find project…")
+                    .accessibility_label(format!("Project: {}", choice.label))
+                    .menu_width(rems(24.0))
+                    .menu_max_h(rems(18.0))
+                    .empty(|_, cx| {
+                        div()
+                            .p_3()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("No registered projects")
+                    })
+                    .disabled(spec.busy || !choice.enabled),
+            )
+            .into_any_element();
+        super::with_composer_tooltip(
+            "new-session-project-tooltip",
+            picker_control,
+            "Choose a registered project for this session.",
+            vec![super::composer_focus_action(
+                super::ComposerControl::Project,
+                picker.state.focus_handle(cx),
+            )],
         )
-        .into_any_element()
     }
 }

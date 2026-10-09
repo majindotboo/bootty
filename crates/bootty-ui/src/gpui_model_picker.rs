@@ -35,6 +35,7 @@ pub fn init(cx: &mut App) {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelPickerEvent {
     Select(String),
+    SelectProvider(String),
     Favorite(String),
 }
 
@@ -59,6 +60,15 @@ struct ModelList {
     expanded_legacy: bool,
     rows: Vec<Row>,
     selected: Option<IndexPath>,
+}
+
+#[derive(Clone, Copy)]
+pub struct ProviderModelCatalog<'a> {
+    pub(crate) provider: AgentKind,
+    pub(crate) models: &'a [NativeModelOption],
+    pub(crate) current: Option<&'a str>,
+    pub(crate) providers: &'a [String],
+    pub(crate) enabled: bool,
 }
 
 impl ModelList {
@@ -250,6 +260,7 @@ pub struct ModelPickerView {
     trigger_focus: FocusHandle,
     open: bool,
     enabled: bool,
+    providers: Vec<String>,
     groups: Vec<String>,
     _subscriptions: Vec<Subscription>,
 }
@@ -259,6 +270,17 @@ impl ModelPickerView {
         provider: AgentKind,
         models: Vec<NativeModelOption>,
         current: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_providers(provider, models, current, Vec::new(), window, cx)
+    }
+
+    pub fn new_with_providers(
+        provider: AgentKind,
+        models: Vec<NativeModelOption>,
+        current: Option<&str>,
+        providers: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -306,6 +328,7 @@ impl ModelPickerView {
             trigger_focus: cx.focus_handle().tab_stop(true),
             open: false,
             enabled: true,
+            providers,
             groups,
             _subscriptions: vec![events, dismiss, layout],
         }
@@ -319,17 +342,74 @@ impl ModelPickerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let provider = self.list.read(cx).delegate().provider;
+        let providers = self.providers.clone();
+        self.set_provider_models(
+            ProviderModelCatalog {
+                provider,
+                models,
+                current,
+                providers: &providers,
+                enabled,
+            },
+            window,
+            cx,
+        );
+    }
+
+    pub fn set_provider_models(
+        &mut self,
+        catalog: ProviderModelCatalog<'_>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ProviderModelCatalog {
+            provider,
+            models,
+            current,
+            providers,
+            enabled,
+        } = catalog;
         let changed_enabled = self.enabled != enabled;
         self.enabled = enabled;
+        let changed_providers = self.providers != providers;
+        self.providers = providers.to_vec();
         let changed_models = self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
-            if delegate.models != models || delegate.current.as_deref() != current {
+            let changed_provider = delegate.provider != provider;
+            let selected = models
+                .iter()
+                .find(|model| Some(model.id.as_str()) == current)
+                .or_else(|| models.iter().find(|model| model.is_default))
+                .map(|model| model.id.clone());
+            if changed_provider || delegate.models != models || delegate.current != selected {
+                delegate.provider = provider;
                 delegate.models = models.to_vec();
-                delegate.current = models
-                    .iter()
-                    .find(|model| Some(model.id.as_str()) == current)
-                    .or_else(|| models.iter().find(|model| model.is_default))
-                    .map(|model| model.id.clone());
+                delegate.current = selected;
+                let available_groups = model_groups(delegate);
+                let preferred_group = delegate.current.as_deref().map_or_else(
+                    || provider.to_string(),
+                    |id| model_group(provider, id),
+                );
+                if changed_provider
+                    || matches!(&delegate.group, Group::Provider(group) if !available_groups.contains(group))
+                {
+                    delegate.group = Group::Provider(
+                        available_groups
+                            .iter()
+                            .find(|group| group.as_str() == preferred_group.as_str())
+                            .cloned()
+                            .or_else(|| available_groups.first().cloned())
+                            .unwrap_or_else(|| provider.to_string()),
+                    );
+                }
+                if changed_provider {
+                    delegate.expanded_legacy = delegate
+                        .current
+                        .as_ref()
+                        .and_then(|current| models.iter().find(|model| &model.id == current))
+                        .is_some_and(|model| model.is_legacy);
+                }
                 delegate.rebuild();
                 cx.notify();
                 return true;
@@ -342,9 +422,21 @@ impl ModelPickerView {
         if !enabled && self.open {
             self.close(window, cx);
         }
-        if changed_models || changed_enabled {
+        if changed_models || changed_enabled || changed_providers {
             cx.notify();
         }
+    }
+
+    pub(crate) fn open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.enabled {
+            return;
+        }
+        self.open = true;
+        self.list.update(cx, |list, cx| {
+            list.set_selected_index(Some(IndexPath::default()), window, cx);
+            list.focus(window, cx);
+        });
+        cx.notify();
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -390,51 +482,77 @@ impl ModelPickerView {
         }
     }
 
-    fn render_content(&self, _: &Window, cx: &Context<Self>) -> impl IntoElement {
+    fn render_provider_rail(&self, cx: &Context<Self>) -> impl IntoElement {
         let owner = cx.entity().downgrade();
         let delegate = self.list.read(cx).delegate();
         let group = delegate.group.clone();
         let provider = delegate.provider;
-        let rows = u8::try_from(delegate.rows.len().clamp(2, 7)).unwrap_or(7);
+        let active_provider = provider_kind_label(provider);
+        let providers = self.providers.clone();
+        let groups = self.groups.clone();
         div()
-            .debug_selector(|| "model-picker-content".into())
-            .key_context("BoottyModelPicker")
-            .on_action(cx.listener(Self::select_jump_action))
+            .id("model-provider-rail")
+            .w(rems(2.75))
+            .flex_shrink_0()
+            .p_1()
             .flex()
-            .items_stretch()
-            .w(rems(22.5))
-            .h(rems(3.0f32.mul_add(f32::from(rows), 3.0)))
+            .flex_col()
+            .gap_1()
+            .overflow_y_scroll()
+            .bg(cx.theme().muted.opacity(0.35))
             .child(
-                div()
-                    .id("model-provider-rail")
-                    .w(rems(2.75))
+                Button::new("model-favorites")
+                    .debug_selector(|| "model-favorites".into())
+                    .ghost()
+                    .small()
+                    .w_8()
+                    .h_8()
                     .flex_shrink_0()
-                    .p_1()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .overflow_y_scroll()
-                    .bg(cx.theme().muted.opacity(0.35))
-                    .child(
-                        Button::new("model-favorites")
-                            .debug_selector(|| "model-favorites".into())
-                            .ghost()
-                            .small()
-                            .w_8()
-                            .h_8()
-                            .flex_shrink_0()
-                            .icon(IconName::Star)
-                            .selected(group == Group::Favorites)
-                            .accessibility_label("Favorite models")
-                            .tooltip("Favorite models")
-                            .on_click(move |_, window, cx| {
-                                _ = owner.update(cx, |this, cx| {
-                                    this.select_group(Group::Favorites, window, cx);
-                                });
-                            }),
-                    )
-                    .child(div().h_px().bg(cx.theme().border.opacity(0.5)).my_1())
-                    .children(self.groups.iter().map(|id| {
+                    .icon(IconName::Star)
+                    .selected(group == Group::Favorites)
+                    .accessibility_label("Favorite models")
+                    .tooltip("Favorite models")
+                    .on_click(move |_, window, cx| {
+                        _ = owner.update(cx, |this, cx| {
+                            this.select_group(Group::Favorites, window, cx);
+                        });
+                    }),
+            )
+            .child(div().h_px().bg(cx.theme().border.opacity(0.5)).my_1())
+            .children(providers.iter().map(|provider| {
+                let owner = cx.entity().downgrade();
+                let provider = provider.clone();
+                let selected = provider.eq_ignore_ascii_case(active_provider);
+                let label = provider.clone();
+                Button::new(SharedString::from(format!(
+                    "model-agent-provider:{provider}"
+                )))
+                .debug_selector({
+                    let provider = provider.clone();
+                    move || format!("model-agent-provider:{provider}")
+                })
+                .ghost()
+                .small()
+                .w_8()
+                .h_8()
+                .flex_shrink_0()
+                .selected(selected)
+                .accessibility_label(format!("{label} provider"))
+                .tooltip(format!("{label} provider"))
+                .child(crate::gpui::sized_icon(
+                    provider_icon(&provider),
+                    crate::gpui::IconSize::Medium,
+                    crate::gpui::provider_color(&provider, cx),
+                ))
+                .on_click(move |_, _, cx| {
+                    _ = owner.update(cx, |_, cx| {
+                        cx.emit(ModelPickerEvent::SelectProvider(provider.clone()));
+                    });
+                })
+            }))
+            .when(provider == AgentKind::Pi && !groups.is_empty(), |rail| {
+                rail.child(div().h_px().bg(cx.theme().border.opacity(0.5)).my_1())
+                    .children(groups.iter().map(|id| {
                         let owner = cx.entity().downgrade();
                         let id = id.clone();
                         let label = group_label(&id);
@@ -461,8 +579,22 @@ impl ModelPickerView {
                                     this.select_group(Group::Provider(id.clone()), window, cx);
                                 });
                             })
-                    })),
-            )
+                    }))
+            })
+    }
+
+    fn render_content(&self, _: &Window, cx: &Context<Self>) -> impl IntoElement {
+        let delegate = self.list.read(cx).delegate();
+        let rows = u8::try_from(delegate.rows.len().clamp(2, 7)).unwrap_or(7);
+        div()
+            .debug_selector(|| "model-picker-content".into())
+            .key_context("BoottyModelPicker")
+            .on_action(cx.listener(Self::select_jump_action))
+            .flex()
+            .items_stretch()
+            .w(rems(22.5))
+            .h(rems(3.0f32.mul_add(f32::from(rows), 3.0)))
+            .child(self.render_provider_rail(cx))
             .child(
                 List::new(&self.list)
                     .search_placeholder("Search models…")
@@ -492,6 +624,23 @@ impl ModelPickerView {
     }
 }
 
+const fn provider_kind_label(provider: AgentKind) -> &'static str {
+    match provider {
+        AgentKind::Codex => "Codex",
+        AgentKind::Claude => "Claude",
+        AgentKind::Pi => "Pi",
+    }
+}
+
+fn provider_icon(provider: &str) -> &'static str {
+    match provider.to_ascii_lowercase().as_str() {
+        "codex" => AgentKind::Codex.icon(),
+        "claude" => AgentKind::Claude.icon(),
+        "pi" => AgentKind::Pi.icon(),
+        _ => "bot",
+    }
+}
+
 impl EventEmitter<ModelPickerEvent> for ModelPickerView {}
 
 impl Focusable for ModelPickerView {
@@ -511,19 +660,28 @@ impl Render for ModelPickerView {
             || delegate.provider.to_string(),
             |model| model.display_name.clone(),
         );
-        let icon = current.map_or_else(
-            || delegate.provider.icon(),
-            |model| {
-                group_icon(
-                    &model_group(delegate.provider, &model.id),
-                    delegate.provider,
-                )
-            },
-        );
-        let group = current.map_or_else(
-            || delegate.provider.to_string(),
-            |model| model_group(delegate.provider, &model.id),
-        );
+        let integrated = !self.providers.is_empty();
+        let group = if integrated {
+            delegate.provider.to_string()
+        } else {
+            current.map_or_else(
+                || delegate.provider.to_string(),
+                |model| model_group(delegate.provider, &model.id),
+            )
+        };
+        let icon = if integrated {
+            delegate.provider.icon()
+        } else {
+            current.map_or_else(
+                || delegate.provider.icon(),
+                |model| {
+                    group_icon(
+                        &model_group(delegate.provider, &model.id),
+                        delegate.provider,
+                    )
+                },
+            )
+        };
         let owner = cx.entity().downgrade();
         let content = cx.entity().downgrade();
         let focus = self.list.read(cx).focus_handle(cx);
@@ -540,7 +698,11 @@ impl Render for ModelPickerView {
                     .max_w(rems(20.))
                     .dropdown_caret(true)
                     .disabled(!self.enabled)
-                    .accessibility_label(format!("Model: {label}"))
+                    .accessibility_label(if integrated {
+                        format!("{} model: {label}", provider_kind_label(delegate.provider))
+                    } else {
+                        format!("Model: {label}")
+                    })
                     .child(crate::gpui::sized_icon(
                         icon,
                         crate::gpui::IconSize::Small,
