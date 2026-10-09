@@ -2,8 +2,8 @@
 
 use super::{GpuiWorkspace, schedule_focus};
 use crate::gpui::{
-    FileEditor, FileEditorEvent, GpuiKeymapEditor, GpuiSettings, KeymapEditorIntent,
-    SettingsTitleBar, setup_ui_font,
+    FileEditor, FileEditorEvent, GpuiKeymapEditor, GpuiSettings, GpuiThemeEditor,
+    KeymapEditorIntent, SettingsTitleBar, setup_ui_font,
 };
 use crate::gpui_keymap_editor::{
     self, editor_snapshot as keymap_editor_snapshot, persisted_edit as persisted_keymap_edit,
@@ -14,15 +14,16 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
 };
 use gpui_kit::{
-    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, TitlebarOptions,
-    WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div, point,
-    prelude::*, px, size,
+    Context, Entity, Focusable as _, IntoElement, ParentElement, Render, Styled, Subscription,
+    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
+    WindowOptions, div, point, prelude::*, px, size,
 };
 use std::{path::PathBuf, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsWindowTab {
     Settings,
+    Theme,
     Keymap,
     File(EditorFileKind),
 }
@@ -36,6 +37,7 @@ enum EditorFileKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum SettingsWindowTarget {
     Settings,
+    Theme,
     Setting(String),
     Keymap(Option<String>),
 }
@@ -59,6 +61,7 @@ struct EditorFileTab {
 pub(super) struct GpuiSettingsWindow {
     settings: Entity<GpuiSettings>,
     keymap: Entity<GpuiKeymapEditor>,
+    theme: Option<Entity<GpuiThemeEditor>>,
     active_tab: SettingsWindowTab,
     focus_initialized: bool,
     pending_target: Option<SettingsWindowTarget>,
@@ -67,6 +70,7 @@ pub(super) struct GpuiSettingsWindow {
     editor_close_after_save: Option<EditorCloseTarget>,
     workspace: WeakEntity<GpuiWorkspace>,
     close_prompt_pending: bool,
+    close_after_theme_restore: bool,
 }
 
 const SETTINGS_CONTENT_MIN_WIDTH_REMS: f32 = 25.0;
@@ -96,9 +100,17 @@ fn activate_settings_window(
     window.activate_window();
     establish_settings_window_shadow(window);
     match root.active_tab {
-        SettingsWindowTab::Settings => root
-            .settings
-            .update(cx, |settings, cx| settings.focus(window, cx)),
+        SettingsWindowTab::Settings => {
+            root.settings.update(cx, |settings, cx| {
+                settings.show_settings(cx);
+                settings.focus(window, cx);
+            });
+        }
+        SettingsWindowTab::Theme => {
+            if let Some(theme) = &root.theme {
+                theme.update(cx, |theme, cx| theme.focus(window, cx));
+            }
+        }
         SettingsWindowTab::Keymap => root
             .keymap
             .update(cx, |keymap, cx| keymap.focus(window, cx)),
@@ -116,14 +128,32 @@ impl GpuiSettingsWindow {
         settings: Entity<GpuiSettings>,
         keymap: Entity<GpuiKeymapEditor>,
         workspace: WeakEntity<GpuiWorkspace>,
-        window: &Window,
-        cx: &Context<Self>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let theme = workspace.upgrade().map(|workspace| {
+            let state = &workspace.read(cx).state;
+            let variant = state.active_appearance_variant();
+            let name = state
+                .config()
+                .theme_for_appearance(variant)
+                .unwrap_or("Bootty")
+                .to_owned();
+            let colors = state.config().colors_for_appearance(variant).clone();
+            let sender = state.app_command_sender(bootty_control::Caller::Internal);
+            cx.new(|cx| {
+                GpuiThemeEditor::new(settings.clone(), sender, name, variant, colors, window, cx)
+            })
+        });
         let root = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             root.update(cx, |root, cx| {
                 if root.first_dirty_editor(cx).is_none() {
-                    return true;
+                    let restored = root.restore_theme_preview(cx);
+                    if !restored {
+                        root.close_after_theme_restore = root.theme_restore_pending(cx);
+                    }
+                    return restored;
                 }
                 root.request_close(window, cx);
                 false
@@ -136,7 +166,10 @@ impl GpuiSettingsWindow {
                 workspace.settings_window = None;
                 workspace.settings_window_opening = false;
                 window.activate_window();
-                schedule_focus(workspace.focus.clone(), window, cx);
+                let focus = workspace
+                    .native_conversation_view(cx)
+                    .map_or_else(|| workspace.focus.clone(), |view| view.focus_handle(cx));
+                schedule_focus(focus, window, cx);
                 cx.notify();
             });
         })
@@ -144,6 +177,7 @@ impl GpuiSettingsWindow {
         Self {
             settings,
             keymap,
+            theme,
             active_tab: SettingsWindowTab::Settings,
             focus_initialized: false,
             pending_target: None,
@@ -152,6 +186,7 @@ impl GpuiSettingsWindow {
             editor_close_after_save: None,
             workspace,
             close_prompt_pending: false,
+            close_after_theme_restore: false,
         }
     }
 
@@ -164,10 +199,14 @@ impl GpuiSettingsWindow {
         keep_settings_windowed(window);
         window.activate_window();
         establish_settings_window_shadow(window);
+        if target != SettingsWindowTarget::Theme && !self.restore_theme_preview(cx) {
+            return;
+        }
         self.active_tab = match &target {
             SettingsWindowTarget::Settings | SettingsWindowTarget::Setting(_) => {
                 SettingsWindowTab::Settings
             }
+            SettingsWindowTarget::Theme => SettingsWindowTab::Theme,
             SettingsWindowTarget::Keymap(_) => SettingsWindowTab::Keymap,
         };
         if !self.focus_initialized {
@@ -184,15 +223,37 @@ impl GpuiSettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if target != SettingsWindowTarget::Theme && !self.restore_theme_preview(cx) {
+            return;
+        }
         match target {
             SettingsWindowTarget::Settings => {
                 self.active_tab = SettingsWindowTab::Settings;
-                self.settings
-                    .update(cx, |settings, cx| settings.focus(window, cx));
+                self.settings.update(cx, |settings, cx| {
+                    settings.show_settings(cx);
+                    settings.focus(window, cx);
+                });
+            }
+            SettingsWindowTarget::Theme => {
+                self.active_tab = SettingsWindowTab::Theme;
+                if let Some(theme) = &self.theme {
+                    theme.update(cx, |theme, cx| theme.begin_authoring(window, cx));
+                }
             }
             SettingsWindowTarget::Setting(id) => {
-                self.active_tab = SettingsWindowTab::Settings;
+                let category = crate::gpui_settings_catalog::settings_category_for(&id, "");
+                self.active_tab = if category == crate::gpui::SettingsCategory::Theme {
+                    SettingsWindowTab::Theme
+                } else {
+                    SettingsWindowTab::Settings
+                };
+                if let Some(theme) = &self.theme {
+                    theme.update(cx, GpuiThemeEditor::show_workspace);
+                }
                 self.settings.update(cx, |settings, cx| {
+                    if category == crate::gpui::SettingsCategory::Theme {
+                        settings.focus_theme_setting(&id, cx);
+                    }
                     settings.apply_search(&id, cx);
                     settings.focus(window, cx);
                 });
@@ -211,7 +272,30 @@ impl GpuiSettingsWindow {
         cx.notify();
     }
 
+    fn restore_theme_preview(&mut self, cx: &mut Context<Self>) -> bool {
+        let restored = self
+            .theme
+            .as_ref()
+            .is_none_or(|theme| theme.update(cx, GpuiThemeEditor::restore_preview));
+        if !restored {
+            self.active_tab = SettingsWindowTab::Theme;
+            cx.notify();
+        }
+        restored
+    }
+
+    fn theme_restore_pending(&self, cx: &Context<Self>) -> bool {
+        self.theme
+            .as_ref()
+            .is_some_and(|theme| theme.read(cx).preview_restored().is_none())
+    }
+
     fn request_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.restore_theme_preview(cx) {
+            self.close_after_theme_restore = self.theme_restore_pending(cx);
+            return;
+        }
+        self.close_after_theme_restore = false;
         if let Some(kind) = self.first_dirty_editor(cx) {
             self.prompt_to_close_editor(kind, EditorCloseTarget::Window, window, cx);
         } else {
@@ -227,6 +311,9 @@ impl GpuiSettingsWindow {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.restore_theme_preview(cx) {
+            return;
+        }
         if let Some(editor) = self.editor_tab(kind).map(|tab| tab.editor.clone()) {
             self.active_tab = SettingsWindowTab::File(kind);
             self.reconcile_file_editor(kind, window, cx);
@@ -504,7 +591,10 @@ impl GpuiSettingsWindow {
         let Some(tab) = self.editor_tab(kind) else {
             return;
         };
-        let detail = tab.path.display().to_string();
+        let detail = bootty_git::project::display_path(
+            &tab.path.to_string_lossy(),
+            crate::strings::home_dir().as_deref(),
+        );
         let title = tab
             .path
             .file_name()
@@ -571,10 +661,11 @@ impl GpuiSettingsWindow {
         let selected_index = match active_tab {
             SettingsWindowTab::Settings => 0,
             SettingsWindowTab::Keymap => 1,
+            SettingsWindowTab::Theme => 2,
             SettingsWindowTab::File(kind) => file_kinds
                 .iter()
                 .position(|candidate| *candidate == kind)
-                .map_or(0, |index| index.saturating_add(2)),
+                .map_or(0, |index| index.saturating_add(3)),
         };
         let click_file_kinds = Arc::clone(&file_kinds);
         let mut tabs = TabBar::new("settings-window-tab-bar")
@@ -584,11 +675,15 @@ impl GpuiSettingsWindow {
             .bg(gpui_kit::component::Theme::global(cx).colors.sidebar)
             .selected_index(selected_index)
             .on_click(cx.listener(move |this, index: &usize, window, cx| {
+                if *index != 2 && !this.restore_theme_preview(cx) {
+                    return;
+                }
                 this.active_tab = match *index {
                     0 => SettingsWindowTab::Settings,
                     1 => SettingsWindowTab::Keymap,
+                    2 => SettingsWindowTab::Theme,
                     index => click_file_kinds
-                        .get(index.saturating_sub(2))
+                        .get(index.saturating_sub(3))
                         .copied()
                         .map_or(SettingsWindowTab::Settings, SettingsWindowTab::File),
                 };
@@ -607,6 +702,12 @@ impl GpuiSettingsWindow {
                     .aria_label("Bootty keymap editor")
                     .debug_selector(|| "settings-window-tab-keymap".to_owned()),
             );
+        tabs = tabs.child(
+            Tab::new()
+                .label("Theme")
+                .aria_label("Bootty theme editor")
+                .debug_selector(|| "settings-window-tab-theme".to_owned()),
+        );
         for kind in file_kinds.iter().copied() {
             if let Some(tab) = self.editor_tab(kind) {
                 tabs = tabs.child(Self::render_editor_tab(kind, tab, cx));
@@ -695,7 +796,9 @@ impl Render for GpuiSettingsWindow {
         let active_tab = self.active_tab;
         let active_editor = match active_tab {
             SettingsWindowTab::File(kind) => self.editor_tab(kind).map(|tab| tab.editor.clone()),
-            SettingsWindowTab::Settings | SettingsWindowTab::Keymap => None,
+            SettingsWindowTab::Settings | SettingsWindowTab::Keymap | SettingsWindowTab::Theme => {
+                None
+            }
         };
         let tabs = self.render_tabs(active_editor.as_ref(), cx);
         let tab_strip = SettingsTitleBar::new(
@@ -705,8 +808,13 @@ impl Render for GpuiSettingsWindow {
         );
 
         let body = match (active_tab, active_editor) {
+            (SettingsWindowTab::Settings, _) => self.settings.clone().into_any_element(),
             (SettingsWindowTab::File(_), Some(editor)) => editor.into_any_element(),
             (SettingsWindowTab::Keymap, _) => self.keymap.clone().into_any_element(),
+            (SettingsWindowTab::Theme, _) => self.theme.as_ref().map_or_else(
+                || self.settings.clone().into_any_element(),
+                |theme| theme.clone().into_any_element(),
+            ),
             _ => self.settings.clone().into_any_element(),
         };
         let title_bar = crate::platform::client_title_bar("Bootty — Settings", window).map(|bar| {
@@ -715,6 +823,7 @@ impl Render for GpuiSettingsWindow {
             }))
         });
         div()
+            .key_context("BoottySettingsWindow")
             .relative()
             .size_full()
             .min_h_0()
@@ -724,6 +833,16 @@ impl Render for GpuiSettingsWindow {
             .on_action(cx.listener(
                 |_, _: &crate::gpui_actions::CycleApplicationWindow, window, cx| {
                     crate::gpui_actions::cycle_application_window(window, cx);
+                },
+            ))
+            .on_action(cx.listener(
+                |this, _: &crate::gpui_actions::CloseSettingsWindow, window, cx| {
+                    if let SettingsWindowTab::File(kind) = this.active_tab {
+                        this.request_close_file_tab(kind, window, cx);
+                    } else {
+                        this.request_close(window, cx);
+                    }
+                    cx.stop_propagation();
                 },
             ))
             .children(title_bar)
@@ -776,7 +895,45 @@ fn settings_window_options(
 
 impl GpuiWorkspace {
     pub(super) fn open_settings_window(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.refresh_terminal_provider_statuses();
         self.open_settings_window_target(SettingsWindowTarget::Settings, window, cx);
+    }
+
+    pub(super) fn refresh_terminal_provider_statuses(&mut self) {
+        if self
+            .state
+            .workspace
+            .active
+            .binding
+            .multiplexer()
+            .remote
+            .is_none()
+        {
+            let caller = bootty_control::Caller::Internal;
+            let sender = self.state.app_command_sender(caller);
+            let now = std::time::Instant::now();
+            let deadline = now
+                .checked_add(std::time::Duration::from_secs(20))
+                .unwrap_or(now);
+            for provider in bootty_agents::AgentKind::ALL {
+                let command = format!("agents.{provider}.provider.status");
+                let mut invocation =
+                    bootty_control::CommandInvocation::new(command, Vec::new(), caller);
+                invocation.target = self.state.current_command_target_for(
+                    &invocation.command,
+                    bootty_control::ResourceKind::Binding,
+                );
+                if let Err(error) = sender.submit(
+                    invocation,
+                    deadline,
+                    bootty_control::CommandCancellation::new(),
+                ) {
+                    self.state
+                        .record_error(format!("Provider status could not refresh: {error:?}"));
+                }
+            }
+            (self.repaint)();
+        }
     }
 
     pub(super) fn open_settings_window_target(
@@ -985,6 +1142,33 @@ impl GpuiWorkspace {
             self.last_settings_revision = None;
             self.last_keymap_editor_revision = None;
             return;
+        }
+        if let Some(settings_window) = self.settings_window.clone() {
+            let colors = self
+                .state
+                .config()
+                .colors_for_appearance(self.state.active_appearance_variant())
+                .clone();
+            cx.defer(move |cx| {
+                let _ = settings_window.update_in(cx, |root, window, cx| {
+                    if let Some(theme) = &root.theme {
+                        theme.update(cx, |theme, cx| {
+                            theme.set_colors(colors);
+                            theme.poll(window, cx);
+                        });
+                    }
+                    if root.close_after_theme_restore && !root.theme_restore_pending(cx) {
+                        root.close_after_theme_restore = false;
+                        if root
+                            .theme
+                            .as_ref()
+                            .is_none_or(|theme| theme.read(cx).preview_restored() == Some(true))
+                        {
+                            root.request_close(window, cx);
+                        }
+                    }
+                });
+            });
         }
         if self.last_config_file_editor_revision != Some(config_revision) {
             self.last_config_file_editor_revision = Some(config_revision);

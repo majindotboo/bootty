@@ -17,8 +17,52 @@ use crate::{
 use bootty_mux::workspace::ScopedWindowId;
 use bootty_terminal::geometry::TerminalGeometry;
 
+#[derive(Clone, PartialEq, Eq)]
+pub enum WorkspacePaneView {
+    Terminal(CachedTerminalView),
+    NativeAgent(Entity<crate::gpui_agent_session::NativeAgentSessionView>),
+    NativePlaceholder {
+        loading: bool,
+        background: gpui_kit::Hsla,
+        foreground: gpui_kit::Hsla,
+    },
+}
+
+impl IntoElement for WorkspacePaneView {
+    type Element = gpui_kit::AnyElement;
+
+    fn into_element(self) -> Self::Element {
+        match self {
+            Self::Terminal(view) => view.into_any_element(),
+            Self::NativeAgent(view) => view.into_any_element(),
+            Self::NativePlaceholder {
+                loading,
+                background,
+                foreground,
+            } => div()
+                .size_full()
+                .bg(background)
+                .text_color(foreground)
+                .flex()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .when(loading, |view| {
+                    view.child(gpui_kit::component::spinner::Spinner::new())
+                })
+                .child(if loading {
+                    "Loading conversation…"
+                } else {
+                    "Conversation unavailable"
+                })
+                .into_any_element(),
+        }
+    }
+}
+
 /// Dock owns placement. The binding owns the window and all of its terminal runtimes.
 pub struct TerminalPanel {
+    origin: Option<crate::gpui_dock::surfaces::TerminalSurfaceOrigin>,
     binding_target: bootty_control::CommandTarget,
     pub(crate) window_id: ScopedWindowId,
     pub(crate) bounds: Option<Bounds<Pixels>>,
@@ -28,8 +72,9 @@ pub struct TerminalPanel {
     owner: WeakEntity<GpuiWorkspace>,
     focus: FocusHandle,
     prepared: Option<(TerminalGeometry, Vec<String>)>,
-    snapshot: Option<GpuiPaneWorkspaceSnapshot<CachedTerminalView>>,
+    snapshot: Option<GpuiPaneWorkspaceSnapshot<WorkspacePaneView>>,
     _focus_subscription: Subscription,
+    _owner_subscription: Option<Subscription>,
 }
 
 impl TerminalPanel {
@@ -42,13 +87,14 @@ impl TerminalPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         let focus = cx.focus_handle();
-        let focus_subscription = cx.on_focus_in(&focus, window, |this, window, cx| {
-            let id = this.window_id.clone();
-            _ = this.owner.update(cx, |owner, cx| {
-                owner.focus_terminal_window(&this.binding_target, &id, window, cx);
-            });
+        let focus_subscription = cx.on_focus(&focus, window, |this, window, cx| {
+            this.focus_terminal(window, cx);
         });
+        let owner_subscription = owner
+            .upgrade()
+            .map(|owner| cx.observe(&owner, |_, _, cx| cx.notify()));
         Self {
+            origin: None,
             binding_target,
             window_id,
             title: title.into(),
@@ -60,7 +106,22 @@ impl TerminalPanel {
             snapshot: None,
             prepared: None,
             _focus_subscription: focus_subscription,
+            _owner_subscription: owner_subscription,
         }
+    }
+
+    pub(crate) fn with_origin(
+        mut self,
+        origin: crate::gpui_dock::surfaces::TerminalSurfaceOrigin,
+    ) -> Self {
+        self.origin = Some(origin);
+        self
+    }
+
+    pub(crate) fn focus_terminal(&self, window: &mut Window, cx: &mut Context<Self>) {
+        _ = self.owner.update(cx, |owner, cx| {
+            owner.focus_terminal_window(&self.binding_target, &self.window_id, window, cx);
+        });
     }
 
     pub(crate) fn set_title(&mut self, title: String, cx: &mut Context<Self>) {
@@ -120,7 +181,7 @@ impl TerminalPanel {
     pub(crate) fn publish(
         &mut self,
         title: String,
-        snapshot: GpuiPaneWorkspaceSnapshot<CachedTerminalView>,
+        snapshot: GpuiPaneWorkspaceSnapshot<WorkspacePaneView>,
         cx: &mut Context<Self>,
     ) {
         let title: SharedString = title.into();
@@ -148,7 +209,11 @@ impl BasePanel for TerminalPanel {
         self.visible
     }
     fn panel_name(&self) -> &'static str {
-        "bootty.terminal"
+        if self.origin.is_some() {
+            "bootty.terminal-window"
+        } else {
+            "bootty.terminal"
+        }
     }
     fn closable(&self, _: &App) -> bool {
         false
@@ -168,12 +233,18 @@ impl BasePanel for TerminalPanel {
         });
     }
     fn dump(&self, _: &App) -> PanelState {
+        let info = self.origin.as_ref().map_or_else(
+            || {
+                serde_json::json!({
+                    "session": self.window_id.session_id(), "window": self.window_id.window_id(),
+                })
+            },
+            |origin| serde_json::json!(origin),
+        );
         PanelState {
             panel_name: self.panel_name().to_owned(),
             children: Vec::new(),
-            info: PanelInfo::panel(serde_json::json!({
-                "session": self.window_id.session_id(), "window": self.window_id.window_id(),
-            })),
+            info: PanelInfo::panel(info),
         }
     }
 }
@@ -225,23 +296,22 @@ impl Panel for TerminalPanel {
 }
 impl Render for TerminalPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let content = self.snapshot.clone().and_then(|snapshot| {
+        let terminal = self.snapshot.clone().map(|snapshot| {
             let owner = self.owner.clone();
             let target = self.binding_target.clone();
             let id = self.window_id.clone();
-            let terminal = GpuiPaneWorkspace::new(snapshot, move |intent, window, cx| {
+            GpuiPaneWorkspace::new(snapshot, move |intent, window, cx| {
                 _ = owner.update(cx, |owner, cx| {
                     owner.apply_terminal_window_intent(&target, &id, intent, window, cx);
                 });
             })
             .with_single_pane_handle(true)
-            .into_any_element();
-            self.owner
-                .update(cx, |owner, cx| {
-                    owner.terminal_panel_content(Some(terminal), cx)
-                })
-                .ok()
+            .into_any_element()
         });
+        let content = self
+            .owner
+            .update(cx, |owner, cx| owner.terminal_panel_content(terminal, cx))
+            .ok();
         let weak = cx.weak_entity();
         div()
             .size_full()
@@ -269,19 +339,42 @@ pub struct TerminalAttachmentPanel {
     title: SharedString,
     terminal: Entity<GpuiTerminalView>,
     owner: WeakEntity<GpuiWorkspace>,
+    _owner_subscription: Option<Subscription>,
+    native_revision: u64,
+    native_panes: Vec<(String, String, bootty_terminal::geometry::SurfaceRect)>,
 }
 
 impl TerminalAttachmentPanel {
     pub(crate) fn new(
         terminal: Entity<GpuiTerminalView>,
         owner: WeakEntity<GpuiWorkspace>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let owner_subscription = owner
+            .upgrade()
+            .map(|owner| cx.observe(&owner, |_, _, cx| cx.notify()));
         Self {
             bounds: None,
             active: false,
             title: "Terminal".into(),
             terminal,
             owner,
+            _owner_subscription: owner_subscription,
+            native_revision: 0,
+            native_panes: Vec::new(),
+        }
+    }
+
+    pub(crate) fn publish_native_layout(
+        &mut self,
+        revision: u64,
+        panes: Vec<(String, String, bootty_terminal::geometry::SurfaceRect)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.native_revision != revision || self.native_panes != panes {
+            self.native_revision = revision;
+            self.native_panes = panes;
+            cx.notify();
         }
     }
 
@@ -325,7 +418,7 @@ impl Panel for TerminalAttachmentPanel {
     }
 }
 impl Render for TerminalAttachmentPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let terminal = CachedTerminalView(self.terminal.clone()).into_any_element();
         let content = self
             .owner
@@ -334,7 +427,15 @@ impl Render for TerminalAttachmentPanel {
             })
             .ok();
         let weak = cx.weak_entity();
+        let overlays = self.bounds.map_or_default(|bounds| {
+            self.owner
+                .update(cx, |owner, cx| {
+                    owner.native_agent_pane_overlays(bounds, &self.native_panes, window, cx)
+                })
+                .unwrap_or_default()
+        });
         div()
+            .relative()
             .size_full()
             .overflow_hidden()
             .on_prepaint(move |bounds, _, cx| {
@@ -349,5 +450,6 @@ impl Render for TerminalAttachmentPanel {
                 });
             })
             .children(content)
+            .children(overlays)
     }
 }

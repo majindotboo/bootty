@@ -41,8 +41,34 @@ impl AppState {
         let (sender, result) = mpsc::channel();
         let repaint = self.repaint.clone();
         let scope = exact.scope();
+        let records_activity = match &input {
+            PaneInput::Write(bytes) => !bytes.is_empty(),
+            PaneInput::Paste(text) => !text.is_empty(),
+            PaneInput::Submit => true,
+        };
+        let receipt = records_activity
+            .then(|| exact.ids().0)
+            .flatten()
+            .and_then(|session| self.workspace.session_identity(scope, session))
+            .and_then(|identity| {
+                self.saved_session_invocation(
+                    scope,
+                    "session.activity",
+                    vec![identity, "0".to_owned()],
+                )
+            });
+        let commands = self.commands.sender.clone();
         self.workspace
             .send_pane_input(scope, pane, input, execution, move |outcome| {
+                if outcome.is_ok()
+                    && let Some(receipt) = receipt
+                {
+                    super::sessions::submit_activity_receipt(
+                        &commands,
+                        receipt,
+                        crate::clock::ClockSnapshot::now().epoch,
+                    );
+                }
                 let _ = sender.send(outcome.map_or_else(command_outcome_for_mux_error, |()| {
                     CommandOutcome::success()
                 }));

@@ -3,6 +3,7 @@ mod agent_tray;
 pub mod ansi_palette;
 pub mod app_actions;
 pub mod assets;
+pub mod attachment_source;
 mod chrome_frame;
 mod chrome_projection;
 pub mod clock;
@@ -16,8 +17,13 @@ pub mod font_mapping;
 pub mod frame_facts;
 pub mod gpui;
 pub mod gpui_actions;
+mod gpui_agent_session;
 mod gpui_agents_panel;
 mod gpui_background;
+mod gpui_composer_completion;
+pub use gpui_composer_completion::CompletionScope;
+pub mod completion;
+mod gpui_browser_panel;
 mod gpui_dock;
 mod gpui_dock_skin;
 mod gpui_document_panel;
@@ -25,8 +31,11 @@ mod gpui_files_panel;
 mod gpui_git_panel;
 mod gpui_input;
 mod gpui_keymap_editor;
+mod gpui_model_picker;
+mod gpui_prompt_attachments;
 mod gpui_settings;
 mod gpui_settings_catalog;
+mod gpui_surface_chooser;
 mod gpui_terminal_panel;
 mod gpui_terminal_view;
 #[cfg(target_os = "macos")]
@@ -45,11 +54,13 @@ pub mod paint_plan;
 pub mod platform;
 pub mod presentation;
 pub mod product_dialogs;
+pub mod project_artwork;
 mod remote_catalog;
 mod settings_runtime;
 pub mod settings_session;
 mod state;
 pub mod strings;
+pub mod surface_creation;
 mod switch_benchmark;
 pub mod terminal_cell_metrics;
 mod terminal_config;
@@ -78,3 +89,7 @@ pub use state::{
 pub mod recovery;
 
 mod gpui_sidebar_panel;
+
+pub use gpui_surface_chooser::{SurfaceCommand, SurfacePanel};
+
+pub use gpui_agent_session::NativeAgentSessionView;

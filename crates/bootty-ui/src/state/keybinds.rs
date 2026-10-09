@@ -57,12 +57,22 @@ impl AppState {
                     self.record_error(format!("Unknown setting: {id}"));
                 }
             }
+            KeybindAction::SettleSession => {
+                self.commands
+                    .queue(bootty_control::CommandInvocation::from_action(
+                        "settle_session",
+                        bootty_control::Caller::Internal,
+                    ));
+            }
             KeybindAction::Mux(action) => {
                 self.apply_mux_key_action(action);
                 effects.push(AppEffect::RequestRepaint);
             }
             KeybindAction::Scroll(action) => self.apply_terminal_scroll_action(action),
             KeybindAction::Write(bytes) => {
+                if !bytes.is_empty() {
+                    self.revoke_current_terminal_agent_recovery();
+                }
                 if let Err(error) = self
                     .workspace
                     .active
@@ -105,8 +115,14 @@ impl AppState {
             }
             AppAction::Ignore => {}
             AppAction::NewWindow => effects.push(AppEffect::OpenWindow),
+            AppAction::AddProject => {
+                self.open_add_project_dialog();
+            }
             AppAction::NewMuxSession => {
                 self.open_new_mux_session_dialog();
+            }
+            AppAction::NewNativeAgentTab => {
+                self.open_native_agent_tab_dialog();
             }
 
             AppAction::SessionPicker => {
@@ -134,10 +150,6 @@ impl AppState {
             }
             AppAction::RenameTab => {
                 self.open_rename_tab_dialog();
-                effects.push(AppEffect::RequestRepaint);
-            }
-            AppAction::DitchSession => {
-                self.open_ditch_session_dialog();
                 effects.push(AppEffect::RequestRepaint);
             }
             AppAction::EditSpace => {
@@ -173,7 +185,7 @@ impl AppState {
                 effects.push(AppEffect::RequestRepaint);
             }
             AppAction::Close => effects.push(AppEffect::CloseWindow),
-            AppAction::EditTheme => self.open_theme_editor(),
+            AppAction::EditTheme => effects.push(AppEffect::OpenThemeSettings),
             AppAction::ExportTerminal => self.open_capture_dialog(),
             AppAction::Dock(action) => {
                 effects.push(AppEffect::Dock(crate::commands::DockRequest::local(action)));
@@ -254,15 +266,20 @@ impl AppState {
         effects.extend(outcome.effects);
     }
     pub(super) fn apply_session_navigation_action(&mut self, action: MuxKeyAction) -> bool {
+        if let MuxKeyAction::SelectSession(index) = action {
+            let targets = self
+                .displayed_sessions
+                .clone()
+                .unwrap_or_else(|| self.sidebar_navigation_targets());
+            if let Some(target) =
+                targets.get(usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX))
+            {
+                self.sidebar_hovered_session = Some(target.clone());
+                self.activate_sidebar_hovered_session();
+            }
+            return true;
+        }
         let target = match action {
-            MuxKeyAction::SelectSession(index) => self
-                .workspace
-                .active
-                .binding
-                .mux()
-                .sessions()
-                .get(usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX))
-                .map(|session| session.id.clone()),
             MuxKeyAction::NextSession => self.relative_session(true),
             MuxKeyAction::PreviousSession => self.relative_session(false),
             MuxKeyAction::LastSession => self

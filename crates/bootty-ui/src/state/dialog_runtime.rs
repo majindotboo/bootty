@@ -6,7 +6,8 @@ use crate::presentation::dialogs::{
 
 /// The one product workflow presented as a floating modal in an application window.
 pub enum ModalDialog {
-    NewSession(NewSessionDialog),
+    NewSession(Box<NewSessionDialog>),
+    TerminalHistory(Box<crate::presentation::terminal_history::TerminalHistoryDialog>),
     ThemeEditor(crate::presentation::theme_editor::ThemeEditorDialog),
     Capture(crate::presentation::capture::CaptureDialog),
     SpaceEditor(SpaceEditorDialog),
@@ -20,18 +21,70 @@ pub enum ModalDialog {
     SpacePicker(SpacePickerDialog),
 }
 
+pub(super) struct PendingSessionName {
+    pub scope: bootty_mux::controller::SpaceId,
+    pub identity: String,
+    pub initial_title: String,
+    pub native: Option<(bootty_control::CommandTarget, String)>,
+    pub reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
+}
+
 #[derive(Default)]
 pub(super) struct DialogRuntime {
     modal: Option<Box<ModalDialog>>,
+    creation: Option<Box<ModalDialog>>,
+    pub empty_creation_scope: Option<bootty_mux::controller::SpaceId>,
+    pub session_names: Vec<PendingSessionName>,
+    pub creation_replies: Vec<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>,
+    pub(super) new_session_draft: Option<crate::presentation::new_session_form::NewSessionDraft>,
+    pub(super) new_session_isolated: bool,
+    pub(super) command_palette_native_parent: Option<bootty_control::CommandTarget>,
 }
 
 impl DialogRuntime {
     pub(super) fn open(&mut self, dialog: ModalDialog) {
+        let overlays_creation = !matches!(dialog, ModalDialog::NewSession(_))
+            && matches!(self.modal.as_deref(), Some(ModalDialog::NewSession(_)));
+        if !self.is_dismissible() && !overlays_creation {
+            return;
+        }
+        if overlays_creation {
+            self.creation = self.modal.take();
+        }
+        if !matches!(dialog, ModalDialog::CommandPalette(_)) {
+            self.command_palette_native_parent = None;
+        }
         self.modal = Some(Box::new(dialog));
     }
 
     pub(super) fn clear(&mut self) {
-        self.modal = None;
+        if !self.is_dismissible() {
+            return;
+        }
+        if let Some(ModalDialog::NewSession(dialog)) = self.modal.as_deref()
+            && dialog.retains_creation_draft()
+            && let Some(draft) = dialog.draft()
+        {
+            self.new_session_isolated = draft.isolation_preference;
+            self.new_session_draft = Some(draft.clone());
+        }
+        self.modal = self.creation.take();
+        self.command_palette_native_parent = None;
+    }
+
+    pub(super) fn creation_spec(&self) -> Option<crate::gpui::DialogSpec> {
+        match self.creation.as_deref() {
+            Some(ModalDialog::NewSession(dialog)) => Some(dialog.spec()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn is_dismissible(&self) -> bool {
+        match self.modal.as_deref() {
+            Some(ModalDialog::NewSession(dialog)) => !dialog.is_in_flight(),
+            Some(ModalDialog::TerminalHistory(dialog)) => !dialog.is_in_flight(),
+            _ => true,
+        }
     }
 
     pub(super) const fn take(&mut self) -> Option<Box<ModalDialog>> {
@@ -78,6 +131,7 @@ impl DialogRuntime {
             self.modal.as_deref(),
             Some(
                 ModalDialog::NewSession(_)
+                    | ModalDialog::TerminalHistory(_)
                     | ModalDialog::SpaceEditor(_)
                     | ModalDialog::SessionPicker(_)
                     | ModalDialog::RenameSession(_)
@@ -85,7 +139,7 @@ impl DialogRuntime {
                     | ModalDialog::DitchSession(_)
             )
         ) {
-            self.modal = None;
+            self.clear();
         }
     }
 }

@@ -92,6 +92,25 @@ fn split_panes_keep_the_focused_pane_indicator(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn pane_content_fills_the_current_viewport_before_the_next_measured_frame(cx: &mut TestAppContext) {
+    let (_, cx) = cx.add_window_view(|_, _| PaneProbe { count: 2 });
+    let area = cx
+        .debug_bounds("terminal-pane-workspace")
+        .expect("pane area");
+    let left = cx
+        .debug_bounds("terminal-pane-surface-pane-0")
+        .expect("left pane");
+    let right = cx
+        .debug_bounds("terminal-pane-surface-pane-1")
+        .expect("right pane");
+
+    pretty_assertions::assert_eq!(left.origin, area.origin);
+    pretty_assertions::assert_eq!(left.bottom(), area.bottom());
+    pretty_assertions::assert_eq!(right.bottom_right(), area.bottom_right());
+    pretty_assertions::assert_eq!(left.right(), right.left());
+}
+
 struct PaneLayerProbe;
 
 impl Render for PaneLayerProbe {
@@ -184,7 +203,7 @@ impl Render for PanePointerProbe {
             })
             .collect();
         let intents = Rc::clone(&self.intents);
-        GpuiPaneWorkspace::new(
+        div().w(px(200.0)).h(px(80.0)).child(GpuiPaneWorkspace::new(
             GpuiPaneWorkspaceSnapshot {
                 arrangement_target: None,
                 area: PaneRect::new(0.0, 0.0, 200.0, 80.0),
@@ -210,7 +229,7 @@ impl Render for PanePointerProbe {
                 empty_message: None,
             },
             move |intent, _, _| intents.borrow_mut().push(intent),
-        )
+        ))
     }
 }
 

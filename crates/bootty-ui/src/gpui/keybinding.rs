@@ -114,9 +114,9 @@ pub fn keybinding_element(key: &Keystroke) -> AnyElement {
     raised_kbd(Kbd::new(key.clone())).into_any_element()
 }
 
-/// Keep keycap depth consistent without replacing Kbd's themed presentation.
+/// Keep keycaps quiet without replacing Kbd's themed presentation.
 pub(super) fn raised_kbd(key: Kbd) -> Kbd {
-    key.outline().border_b_2().shadow_sm()
+    key.outline().border_b_1()
 }
 
 /// Translate Bootty's durable modifier and special-key aliases into GPUI syntax.
@@ -154,4 +154,29 @@ pub fn gpui_keystroke_text(step: &str) -> String {
         modifier => modifier,
     });
     modifiers.chain([key]).collect::<Vec<_>>().join("-")
+}
+
+/// Focus the first real tab stop inside a retained control container.
+pub fn focus_control_child(
+    parent: &gpui_kit::FocusHandle,
+    window: &mut gpui_kit::Window,
+    cx: &mut gpui_kit::App,
+) -> bool {
+    let previous = window.focused(cx);
+    parent.focus(window, cx);
+    window.focus_next(cx);
+    let first = window.focused(cx);
+    loop {
+        if !parent.is_focused(window) && parent.contains_focused(window, cx) {
+            return true;
+        }
+        window.focus_next(cx);
+        if window.focused(cx) == first {
+            break;
+        }
+    }
+    if let Some(previous) = previous {
+        previous.focus(window, cx);
+    }
+    false
 }

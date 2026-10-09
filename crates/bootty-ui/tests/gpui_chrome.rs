@@ -1,11 +1,46 @@
 #![cfg(test)]
 
+use std::time::Duration;
+
 use bootty_ui::gpui::chrome::{
     ChromeLayout, SidebarPosition, StatusIntent, TabDragGesture, TabInsertionTarget,
     WindowDragGesture, tab_insertion_target,
 };
 use pretty_assertions::assert_eq;
+use proptest::prelude::*;
 use rstest::rstest;
+
+#[rstest]
+#[case(Duration::ZERO, "0s")]
+#[case(Duration::from_secs(7), "7s")]
+#[case(Duration::from_millis(59_999), "59s")]
+#[case(Duration::from_secs(60), "1m")]
+#[case(Duration::from_millis(299_999), "4m 59s")]
+#[case(Duration::from_secs(300), "5m")]
+#[case(Duration::from_secs(3_599), "59m 59s")]
+#[case(Duration::from_secs(3_600), "1h")]
+#[case(Duration::from_mins(90), "1h 30m")]
+#[case(Duration::from_secs(3_661), "1h 1m 1s")]
+#[case(Duration::from_mins(1_501), "25h 1m")]
+fn agent_working_duration_uses_compact_seconds_minutes_and_hours(
+    #[case] elapsed: Duration,
+    #[case] expected: &str,
+) {
+    assert_eq!(bootty_ui::clock::format_working_duration(elapsed), expected);
+}
+
+proptest! {
+    #[test]
+    fn fractional_seconds_do_not_advance_working_labels(
+        seconds in 0_u64..60,
+        nanos in 0_u32..1_000_000_000,
+    ) {
+        prop_assert_eq!(
+            bootty_ui::clock::format_working_duration(Duration::new(seconds, nanos)),
+            format!("{seconds}s"),
+        );
+    }
+}
 
 #[rstest]
 fn a_tab_press_cancels_the_pending_window_drag() {
@@ -92,8 +127,7 @@ fn sidebar_width_matches_zed_bounds_without_starving_the_center(
         right_dock_toggle: true,
         panel_tab_style: bootty_config::config::PanelTabStyle::default(),
         panel_tabs: bootty_config::config::PanelTabs::default(),
-        dock_tabs: bootty_config::config::ChromeConfig::default().tabs,
-        terminal_tabs: bootty_config::config::ChromeConfig::default().tabs,
+        tabs: bootty_config::config::ChromeConfig::default().tabs,
         width: window_width,
         height: 800.0,
         sidebar_position: SidebarPosition::Left,

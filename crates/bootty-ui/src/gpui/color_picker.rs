@@ -63,7 +63,10 @@ impl ColorPickerViewState {
         }
 
         // Owner acknowledgement of the picker's own edit must preserve its open popover.
-        if self.picker.read(cx).value() == parse_hex_color(value) {
+        let picker_value = self.picker.read(cx).value();
+        if picker_value == parse_hex_color(value)
+            || picker_value.is_some_and(|color| serialize_color(color) == value)
+        {
             value.clone_into(&mut self.external_value);
             return;
         }

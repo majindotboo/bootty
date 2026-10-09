@@ -1707,6 +1707,11 @@ impl GpuiKeymapEditor {
                     } else {
                         "Record search keystrokes"
                     })
+                    .tooltip(if recording {
+                        "Stop recording"
+                    } else {
+                        "Record keystrokes"
+                    })
                     .text_color(if recording {
                         cx.theme().danger
                     } else {
@@ -1723,6 +1728,7 @@ impl GpuiKeymapEditor {
                 Button::new("kit-keymap-search-exact")
                     .icon(Icon::new(IconName::CaseSensitive))
                     .accessibility_label("Toggle exact keystroke matching")
+                    .tooltip("Toggle exact keystroke matching")
                     .selected(self.exact_keystroke_search)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_exact_keystroke_search(!this.exact_keystroke_search, cx);
@@ -1734,6 +1740,7 @@ impl GpuiKeymapEditor {
                     Button::new("kit-keymap-keystroke-clear")
                         .icon(Icon::new(IconName::Delete))
                         .accessibility_label("Clear search keystrokes")
+                        .tooltip("Clear search keystrokes")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.keystroke_query.clear();
                             this.reselect_first_visible();
@@ -1882,7 +1889,8 @@ impl GpuiKeymapEditor {
                         this.open_row(row.clone(), window, cx);
                         cx.stop_propagation();
                     }))
-                    .accessibility_label(action_label)
+                    .accessibility_label(action_label.clone())
+                    .tooltip(action_label)
                     .xsmall()
                     .when(conflict_count > 0, |button| {
                         button.text_color(cx.theme().warning).tooltip(format!(
@@ -2048,6 +2056,11 @@ impl GpuiKeymapEditor {
                     } else {
                         "Record a keybinding"
                     })
+                    .tooltip(if recording {
+                        "Stop recording"
+                    } else {
+                        "Record keystrokes"
+                    })
                     .text_color(if recording {
                         cx.theme().danger
                     } else {
@@ -2069,6 +2082,7 @@ impl GpuiKeymapEditor {
                     Button::new("kit-keymap-modal-clear")
                         .icon(Icon::new(IconName::Delete))
                         .accessibility_label("Clear keybinding")
+                        .tooltip("Clear keybinding")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.clear_modal_keystrokes(cx);
                         })),

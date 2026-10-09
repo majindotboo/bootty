@@ -183,7 +183,7 @@ command_catalog! {
         "toggle_diff_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
     ToggleAgentsPanel:
         "Toggle Agents panel", "Show or hide the agents panel",
-        "toggle_agents_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
+        "toggle_agents_panel", "panel-left", Layout, hidden, Write, ApplicationWindow, DockGroup;
     ToggleLeftDock:
         "Toggle left dock", "Show or hide the left dock",
         "toggle_left_dock", "panel-left", Layout, shown, Write, ApplicationWindow, None;
@@ -194,17 +194,17 @@ command_catalog! {
         "Show Sessions", "Open the Sessions panel",
         "show_sidebar", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowCodexBar:
-        "Show agent usage", "Open usage and quota meters in Agents",
+        "Show agent usage", "Show the quota footer in Sessions",
         "show_codexbar", "chart-no-axes-column", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowSpaces:
         "Show Spaces", "Open the Space switcher in Sessions",
         "show_spaces", "layout-grid", Layout, shown, Write, ApplicationWindow, DockGroup;
     ToggleHiddenTabs:
-        "Toggle always hide tabs", "Toggle command-only panel switching for the focused group",
-        "toggle_hidden_tabs", "panel-top", Layout, shown, Write, ApplicationWindow, DockGroup;
+        "Toggle always hide tabs", "Retired: tool tabs always remain visible",
+        "toggle_hidden_tabs", "panel-top", Layout, hidden, Write, ApplicationWindow, DockGroup;
     ToggleTabBar:
-        "Toggle always show tabs", "Toggle single-panel tabs for the focused tab group",
-        "toggle_tab_bar", "panel-top", Layout, shown, Write, ApplicationWindow, DockGroup;
+        "Toggle always show tabs", "Retired: tool tabs always remain visible",
+        "toggle_tab_bar", "panel-top", Layout, hidden, Write, ApplicationWindow, DockGroup;
     EditTheme:
         "Edit Theme", "Import, duplicate, preview and save terminal colors",
         "edit_theme", "paintbrush", Application, shown, Write, ApplicationWindow, None;
@@ -213,7 +213,7 @@ command_catalog! {
         "export_terminal", "download", Terminal, shown, Write, ApplicationWindow, None;
     ShowAgents:
         "Show Agents", "Open agent attention, session and navigation controls",
-        "show_agents", "bot", Application, shown, Write, ApplicationWindow, DockGroup;
+        "show_agents", "bot", Application, hidden, Write, ApplicationWindow, DockGroup;
     ShowFiles:
         "Browse Files", "Open the Files panel for the terminal directory",
         "show_files", "folder", Application, shown, Write, ApplicationWindow, DockGroup;
@@ -223,19 +223,22 @@ command_catalog! {
     ShowDiff:
         "Show Git Diff", "Open the Git Diff panel",
         "show_diff", "git-compare", Application, shown, Write, ApplicationWindow, DockGroup;
+    AddProject:
+        "Add Project", "Bookmark a directory for future sessions",
+        "add_project", "folder-plus", Sessions, shown, Write, Binding, None;
     NewSession:
         "New Session",
         "Pick a directory or worktree and start a session",
-        "new_mux_session", "square-plus", Sessions, shown, Write, Binding, None;
+        "new_mux_session", "square-plus", Sessions, shown, Write, ApplicationWindow, None;
     SwitchSession:
         "Switch Session", "Fuzzy-find and jump to an open session",
         "session_picker", "terminal", Sessions, shown, Write, Binding, None;
+    SettleSession:
+        "Settle Session", "Mark current saved work settled without closing its terminal",
+        "settle_session", "circle-check", Sessions, shown, Write, Session, None;
     RenameSession:
         "Rename Session", "Rename the current session",
         "rename_session", "pencil", Sessions, shown, Write, Session, None;
-    DitchSession:
-        "Ditch Session", "Close the session and optionally remove its worktree",
-        "ditch_session", "trash-2", Sessions, shown, Destructive, Session, None;
     MoveSessionToSpace:
         "Move Session to Space", "Hand the current session to another space, or to no space",
         "move_session_to_space", "shapes", Sessions, shown, Write, Session, None;
@@ -263,6 +266,9 @@ command_catalog! {
     LastSession:
         "Last Session", "Toggle back to the most recent session",
         "last_session", "history", Sessions, shown, Write, Binding, None;
+    NewNativeAgentTab:
+        "New agent tab…", "Choose a provider and account for an agent tab",
+        "agents.native.open", "bot", Layout, shown, Write, ApplicationWindow, None;
     NewTab:
         "New Tab", "Open a new tab in the current session",
         "new_tab", "plus", Layout, shown, Write, Session, None;

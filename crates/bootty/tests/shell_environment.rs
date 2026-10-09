@@ -3,6 +3,7 @@
 
 use std::{
     env,
+    os::unix::fs::PermissionsExt as _,
     path::Path,
     process::{Command, Output},
 };
@@ -42,13 +43,55 @@ fn initialize_shell_environment_advertises_the_configured_shell(shell_dir: TempD
     );
 }
 
+#[rstest]
+#[case("")]
+#[case("Welcome to the shell\n")]
+fn finder_launch_loads_interactive_tool_paths_and_ignores_greetings(
+    shell_dir: TempDir,
+    #[case] greeting: &str,
+) {
+    let shell = shell_dir.child("login-shell");
+    let bin = shell_dir.child("tools");
+    std::fs::create_dir(bin.path()).expect("tool directory");
+    let script = format!(
+        "#!/bin/sh\n[ \"$1:$2:$3\" = '-l:-i:-c' ] || exit 27\nprintf '%s' '{}'\nexport PATH='{}:/usr/bin:/bin'\nexec /bin/sh -c \"$4\"\n",
+        greeting,
+        bin.path().display()
+    );
+    std::fs::write(shell.path(), script).expect("interactive login shell");
+    std::fs::set_permissions(shell.path(), std::fs::Permissions::from_mode(0o700))
+        .expect("executable shell");
+    let output = run_child("path", shell.path());
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value = String::from_utf8(output.stdout).expect("child output");
+    assert!(
+        value.lines().any(|line| line
+            == format!(
+                "BOOTTY_SHELL_TEST_PATH={}:/usr/bin:/bin",
+                bin.path().display()
+            )),
+        "{value}"
+    );
+}
+
 #[test]
 fn shell_environment_child() {
-    if env::var(CHILD_MODE).as_deref() == Ok(ALIGN_MODE) {
+    let mode = env::var(CHILD_MODE);
+    if matches!(mode.as_deref(), Ok(ALIGN_MODE | "path")) {
         assert_eq!(
             initialize_shell_environment().expect("initialize shell environment"),
             None
         );
+        if mode.as_deref() == Ok("path") {
+            println!(
+                "BOOTTY_SHELL_TEST_PATH={}",
+                env::var("PATH").expect("login PATH")
+            );
+        }
         println!(
             "{SHELL_OUTPUT_PREFIX}{}",
             env::var("SHELL").expect("initialize_shell_environment must set SHELL")
@@ -62,6 +105,7 @@ fn run_child(mode: &str, shell: &Path) -> Output {
         .env(CHILD_MODE, mode)
         .env("BOOTTY_SHELL", shell)
         .env("SHELL", "/bin/sh")
+        .env("PATH", "/usr/bin:/bin")
         .output()
         .expect("run isolated shell environment child")
 }

@@ -8,11 +8,15 @@ use std::{
 
 use super::{
     ChromeIntent, ChromeSnapshot, Rgba, SessionContextSnapshot, SessionTarget, SidebarPosition,
-    SpaceSnapshot, TabContextSnapshot, TabDragGesture, TabInsertionTarget, WindowDragGesture,
-    sidebar, space_switcher, status_bar,
+    SidebarTask, SpaceSnapshot, TabContextSnapshot, TabDragGesture, TabInsertionTarget, TaskView,
+    WindowDragGesture, sidebar, space_switcher, status_bar,
 };
 
-use gpui_kit::component::{ActiveTheme as _, menu::PopupMenuItem};
+use gpui_kit::component::{
+    ActiveTheme as _,
+    input::{InputEvent, InputState},
+    menu::{PopupMenu, PopupMenuItem},
+};
 use gpui_kit::{
     App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, IntoElement,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
@@ -23,17 +27,32 @@ use gpui_kit::{
 ///
 /// Semantic icons, session progress, ports, labels, colors, and actions are rendered here while
 /// product mutations remain behind typed [`ChromeIntent`] values.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "Independent dock, drag, attention and hover interaction state"
+)]
 pub struct GpuiChrome {
     pub(super) snapshot: ChromeSnapshot,
+    pub(super) navigation_hints: Vec<(String, gpui_kit::Keystroke)>,
+    pub(super) hint_modifiers: gpui_kit::Modifiers,
     docked_status: bool,
     keymap_context: String,
     pub(super) focus: FocusHandle,
     pub(super) status_tab_focus_handles: HashMap<String, FocusHandle>,
     pub(super) pointer_hovered_session: Option<SessionTarget>,
+    pub(super) sidebar_project: Option<String>,
+    pub(super) sidebar_task_view: TaskView,
+    pub(super) sidebar_search: gpui_kit::Entity<InputState>,
     pub(super) sidebar_dragging: bool,
+    sidebar_drag_focus: Option<FocusHandle>,
+    pub(super) sidebar_drag_order: Option<(String, Option<String>)>,
+    pub(super) sidebar_attention_only: bool,
     pub(super) sidebar_reconcile_hover: bool,
     pub(super) sidebar_reveal_current: Rc<Cell<bool>>,
+    pub(super) sidebar_animation_epoch: std::time::Instant,
+    pub(super) sidebar_animation_task: Option<gpui_kit::Task<()>>,
     pub(super) sidebar_row_bounds: sidebar::SidebarRowBounds,
+    pub(super) sidebar_scroll: gpui_kit::ScrollHandle,
     pub(super) window_drag: WindowDragGesture,
     pub(super) tab_drag: TabDragGesture,
     pub(super) tab_bounds: TabBounds,
@@ -54,6 +73,17 @@ pub(super) enum ContextMenu {
     Session {
         target: SessionTarget,
         options: SessionContextSnapshot,
+        task: Option<SidebarTask>,
+        now: i64,
+    },
+    DetachedSession {
+        target: SessionTarget,
+        task: Option<SidebarTask>,
+        now: i64,
+    },
+    SavedSession {
+        task: SidebarTask,
+        now: i64,
     },
     Space(SpaceSnapshot),
     Tab(TabContextSnapshot),
@@ -72,18 +102,37 @@ fn current_sidebar_session(snapshot: &ChromeSnapshot) -> Option<&SessionTarget> 
 
 impl GpuiChrome {
     #[must_use]
-    pub fn new(snapshot: ChromeSnapshot, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(snapshot: ChromeSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let sidebar_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
+        cx.subscribe(&sidebar_search, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.sidebar_reveal_current.set(false);
+                cx.notify();
+            }
+        })
+        .detach();
         let mut chrome = Self {
             snapshot,
+            navigation_hints: Vec::new(),
+            hint_modifiers: gpui_kit::Modifiers::default(),
             docked_status: false,
             keymap_context: crate::gpui_actions::WORKSPACE_KEY_CONTEXT.to_owned(),
             focus: cx.focus_handle(),
             status_tab_focus_handles: HashMap::new(),
             pointer_hovered_session: None,
+            sidebar_project: None,
+            sidebar_task_view: TaskView::Active,
+            sidebar_search,
             sidebar_dragging: false,
+            sidebar_drag_focus: None,
+            sidebar_drag_order: None,
+            sidebar_attention_only: false,
             sidebar_reconcile_hover: false,
             sidebar_reveal_current: Rc::new(Cell::new(true)),
+            sidebar_animation_epoch: std::time::Instant::now(),
+            sidebar_animation_task: None,
             sidebar_row_bounds: Rc::new(RefCell::new(Vec::new())),
+            sidebar_scroll: gpui_kit::ScrollHandle::new(),
             window_drag: WindowDragGesture::default(),
             tab_drag: TabDragGesture::default(),
             tab_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -120,7 +169,7 @@ impl GpuiChrome {
             .retain(|segment| segment.surface != "windows");
         Some(status_bar::render(
             status_bar::RenderParams {
-                tab_config: self.snapshot.layout.terminal_tabs,
+                tab_config: self.snapshot.layout.tabs,
                 keymap_context: &self.keymap_context,
                 snapshot: &status,
                 row_height: self
@@ -136,9 +185,45 @@ impl GpuiChrome {
                 tab_bounds: self.tab_bounds.clone(),
                 insertion_target: None,
                 tab_focus_handles: &self.status_tab_focus_handles,
+                navigation_hints: &self.navigation_hints,
+                hint_modifiers: self.hint_modifiers,
             },
             cx,
         ))
+    }
+
+    pub(crate) fn set_navigation_hints(
+        &mut self,
+        hints: Vec<(String, gpui_kit::Keystroke)>,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigation_hints = hints;
+        cx.notify();
+    }
+
+    pub(crate) fn set_hint_modifiers(
+        &mut self,
+        modifiers: gpui_kit::Modifiers,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hint_modifiers != modifiers {
+            self.hint_modifiers = modifiers;
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn displayed_sessions(&self) -> Vec<SessionTarget> {
+        let mut rows = self.sidebar_row_bounds.borrow().clone();
+        rows.sort_by(|(_, left), (_, right)| {
+            f32::from(left.origin.y).total_cmp(&f32::from(right.origin.y))
+        });
+        let mut targets = Vec::new();
+        for (target, _) in rows {
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
     }
 
     pub(crate) fn dock_tabs(
@@ -161,21 +246,39 @@ impl GpuiChrome {
 
     pub(crate) fn dock_sidebar(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let snapshot = self.snapshot.sidebar.clone()?;
-        Some(sidebar::render(
-            &snapshot,
-            &self.snapshot.titlebar,
-            self.pointer_hovered_session.as_ref(),
-            &self.snapshot.spaces,
-            self.snapshot.space_transition,
-            &self.snapshot.layout,
-            0.0,
-            true,
-            self.snapshot.palette,
-            &self.sidebar_row_bounds,
-            &self.sidebar_reveal_current,
-            self.sidebar_reconcile_hover,
-            cx,
-        ))
+        Some(
+            div()
+                .size_full()
+                .min_w_0()
+                .min_h_0()
+                .when(self.docked_status && !self.sidebar_dragging, |element| {
+                    element.track_focus(&self.focus)
+                })
+                .child(sidebar::render(
+                    &snapshot,
+                    &self.sidebar_search,
+                    self.sidebar_project.as_deref(),
+                    self.sidebar_task_view,
+                    self.sidebar_attention_only,
+                    self.sidebar_drag_order.as_ref(),
+                    &self.snapshot.titlebar,
+                    self.pointer_hovered_session.as_ref(),
+                    &self.snapshot.spaces,
+                    self.snapshot.space_transition,
+                    &self.snapshot.layout,
+                    0.0,
+                    true,
+                    self.snapshot.palette,
+                    &self.sidebar_row_bounds,
+                    &self.sidebar_scroll,
+                    &self.sidebar_reveal_current,
+                    self.sidebar_reconcile_hover,
+                    &self.navigation_hints,
+                    self.hint_modifiers,
+                    cx,
+                ))
+                .into_any_element(),
+        )
     }
 
     pub(crate) fn dock_codexbar(&self) -> Option<gpui_kit::AnyElement> {
@@ -225,7 +328,7 @@ impl GpuiChrome {
     }
 
     pub(crate) const fn dock_tabs_config(&self) -> bootty_config::config::TabConfig {
-        self.snapshot.layout.dock_tabs
+        self.snapshot.layout.tabs
     }
 
     pub(crate) fn sidebar_defaults(&self) -> (SidebarPosition, f32, bool) {
@@ -240,7 +343,7 @@ impl GpuiChrome {
     pub fn update(
         &mut self,
         snapshot: &ChromeSnapshot,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if &self.snapshot == snapshot {
@@ -250,9 +353,7 @@ impl GpuiChrome {
             self.tab_drag.cancel();
         }
         if !snapshot.window_focused {
-            self.sidebar_dragging = false;
-            self.sidebar_reconcile_hover = false;
-            self.pointer_hovered_session = None;
+            self.finish_sidebar_drag(window, cx, false);
         }
         if current_sidebar_session(&self.snapshot) != current_sidebar_session(snapshot) {
             self.sidebar_reveal_current.set(true);
@@ -316,9 +417,65 @@ impl GpuiChrome {
 
     fn menu_rows(menu: &ContextMenu) -> Vec<MenuRow> {
         match menu {
-            ContextMenu::Session { target, options } => sidebar::session_menu(target, *options),
+            ContextMenu::Session {
+                target,
+                options,
+                task,
+                now,
+            } => {
+                let mut rows = sidebar::session_menu(target, *options);
+                if let Some(task) = task {
+                    rows.extend(sidebar::saved_session_menu(task, *now));
+                }
+                rows
+            }
+            ContextMenu::DetachedSession { target, task, now } => {
+                let mut rows = sidebar::detached_session_menu(target);
+                if let Some(task) = task {
+                    rows.extend(sidebar::saved_session_menu(task, *now));
+                }
+                rows
+            }
+            ContextMenu::SavedSession { task, now } => sidebar::saved_session_menu(task, *now),
             ContextMenu::Space(space) => space_switcher::space_menu(space),
             ContextMenu::Tab(tab) => status_bar::tab_menu(tab.clone()),
+        }
+    }
+
+    pub(super) fn begin_sidebar_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.sidebar_dragging {
+            self.sidebar_drag_focus = window.focused(cx);
+            self.sidebar_dragging = true;
+            self.focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn finish_sidebar_drag(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        reconcile_hover: bool,
+    ) {
+        let was_dragging = self.sidebar_dragging;
+        let changed = was_dragging
+            || self.sidebar_drag_order.is_some()
+            || self.pointer_hovered_session.is_some()
+            || self.sidebar_reconcile_hover != reconcile_hover;
+        self.sidebar_dragging = false;
+        self.sidebar_drag_order = None;
+        self.sidebar_reconcile_hover = reconcile_hover;
+        self.pointer_hovered_session = None;
+        let previous = self.sidebar_drag_focus.take();
+        if was_dragging && self.focus.is_focused(window) {
+            if let Some(previous) = previous {
+                previous.focus(window, cx);
+            } else {
+                window.blur(cx);
+            }
+        }
+        if changed {
+            cx.notify();
         }
     }
 
@@ -330,9 +487,7 @@ impl GpuiChrome {
             }
             let sidebar_cancelled = self.sidebar_dragging;
             if sidebar_cancelled {
-                self.sidebar_dragging = false;
-                self.sidebar_reconcile_hover = false;
-                self.pointer_hovered_session = None;
+                self.finish_sidebar_drag(window, cx, false);
             }
             if tab_cancelled || sidebar_cancelled {
                 cx.stop_active_drag(window);
@@ -453,7 +608,7 @@ impl GpuiChrome {
                 |element, status| {
                     element.child(status_bar::render(
                         status_bar::RenderParams {
-                            tab_config: self.snapshot.layout.terminal_tabs,
+                            tab_config: self.snapshot.layout.tabs,
                             keymap_context: &self.keymap_context,
                             snapshot: &status,
                             row_height: layout.status_height,
@@ -474,6 +629,8 @@ impl GpuiChrome {
                             tab_bounds: self.tab_bounds.clone(),
                             insertion_target: insertion_target.as_ref(),
                             tab_focus_handles: &self.status_tab_focus_handles,
+                            navigation_hints: &self.navigation_hints,
+                            hint_modifiers: self.hint_modifiers,
                         },
                         cx,
                     ))
@@ -485,7 +642,7 @@ impl GpuiChrome {
             .when_some(bottom_status, |element, status| {
                 element.child(status_bar::render(
                     status_bar::RenderParams {
-                        tab_config: self.snapshot.layout.terminal_tabs,
+                        tab_config: self.snapshot.layout.tabs,
                         keymap_context: &self.keymap_context,
                         snapshot: &status,
                         row_height: layout.status_height,
@@ -497,6 +654,8 @@ impl GpuiChrome {
                         tab_bounds: self.tab_bounds.clone(),
                         insertion_target: insertion_target.as_ref(),
                         tab_focus_handles: &self.status_tab_focus_handles,
+                        navigation_hints: &self.navigation_hints,
+                        hint_modifiers: self.hint_modifiers,
                     },
                     cx,
                 ))
@@ -542,6 +701,11 @@ impl GpuiChrome {
                 |element, sidebar| {
                     element.child(sidebar::render(
                         sidebar,
+                        &self.sidebar_search,
+                        self.sidebar_project.as_deref(),
+                        self.sidebar_task_view,
+                        self.sidebar_attention_only,
+                        self.sidebar_drag_order.as_ref(),
                         &titlebar,
                         pointer_hovered_session.as_ref(),
                         &spaces,
@@ -551,8 +715,11 @@ impl GpuiChrome {
                         false,
                         colors,
                         &self.sidebar_row_bounds,
+                        &self.sidebar_scroll,
                         &self.sidebar_reveal_current,
                         sidebar_reconcile_hover,
+                        &self.navigation_hints,
+                        self.hint_modifiers,
                         cx,
                     ))
                 },
@@ -565,6 +732,11 @@ impl GpuiChrome {
                 |element, sidebar| {
                     element.child(sidebar::render(
                         sidebar,
+                        &self.sidebar_search,
+                        self.sidebar_project.as_deref(),
+                        self.sidebar_task_view,
+                        self.sidebar_attention_only,
+                        self.sidebar_drag_order.as_ref(),
                         &titlebar,
                         pointer_hovered_session.as_ref(),
                         &spaces,
@@ -574,8 +746,11 @@ impl GpuiChrome {
                         false,
                         colors,
                         &self.sidebar_row_bounds,
+                        &self.sidebar_scroll,
                         &self.sidebar_reveal_current,
                         sidebar_reconcile_hover,
+                        &self.navigation_hints,
+                        self.hint_modifiers,
                         cx,
                     ))
                 },
@@ -606,31 +781,26 @@ impl Render for GpuiChrome {
             .relative()
             // Docked controls own their focus. This transparent overlay must not
             // intercept clicks intended for the panels beneath it.
+            .when(!self.docked_status || self.sidebar_dragging, |element| {
+                element.track_focus(&self.focus)
+            })
             .when(!self.docked_status, |element| {
-                element
-                    .track_focus(&self.focus)
-                    .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+                element.on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             })
             .on_key_down(cx.listener(Self::on_key_down))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                cx.listener(|this, _: &MouseUpEvent, window, cx| {
                     if this.sidebar_dragging {
-                        this.sidebar_dragging = false;
-                        this.sidebar_reconcile_hover = false;
-                        this.pointer_hovered_session = None;
-                        cx.notify();
+                        this.finish_sidebar_drag(window, cx, false);
                     }
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                cx.listener(|this, _: &MouseUpEvent, window, cx| {
                     if this.sidebar_dragging {
-                        this.sidebar_dragging = false;
-                        this.sidebar_reconcile_hover = false;
-                        this.pointer_hovered_session = None;
-                        cx.notify();
+                        this.finish_sidebar_drag(window, cx, false);
                     }
                 }),
             )
@@ -688,6 +858,7 @@ impl Render for GpuiChrome {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct MenuRow {
     pub label: String,
     pub enabled: bool,
@@ -697,46 +868,154 @@ pub(super) struct MenuRow {
 }
 
 pub(super) fn popup_menu(
-    menu: gpui_kit::component::menu::PopupMenu,
+    menu: PopupMenu,
     context: &ContextMenu,
     owner: &gpui_kit::WeakEntity<GpuiChrome>,
-) -> gpui_kit::component::menu::PopupMenu {
+) -> PopupMenu {
     GpuiChrome::menu_rows(context)
         .into_iter()
-        .fold(menu, |menu, row| {
+        .fold(menu, |menu, row| append_menu_row(menu, row, owner))
+}
+
+pub(super) fn popup_session_menu(
+    mut menu: PopupMenu,
+    context: &ContextMenu,
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    menu = popup_focus_context(menu, owner, cx);
+    let (task, now) = match context {
+        ContextMenu::Session { task, now, .. } | ContextMenu::DetachedSession { task, now, .. } => {
+            (task.as_ref(), *now)
+        }
+        ContextMenu::SavedSession { task, now } => (Some(task), *now),
+        _ => return popup_menu(menu, context, owner),
+    };
+    let mut snooze = task.map_or_else(Vec::new, |task| sidebar::saved_snooze_menu(task, now));
+    for row in GpuiChrome::menu_rows(context) {
+        if matches!(&row.intent, ChromeIntent::Command(invocation) if matches!(invocation.command.as_str(), "session.hide" | "session.show"))
+            && !snooze.is_empty()
+        {
+            let rows = std::mem::take(&mut snooze);
             let owner = owner.clone();
-            let intent = row.intent;
-            let enabled = row.enabled;
-            let label = row.label;
-            let item = if row.destructive {
-                PopupMenuItem::element(move |_, cx| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .id(SharedString::from(format!(
-                            "destructive-popup-item-{label}"
-                        )))
-                        .role(gpui_kit::Role::MenuItem)
-                        .aria_label(label.clone())
-                        .text_color(cx.theme().danger)
-                        .child(label.clone())
-                })
+            menu = if rows.iter().all(|row| !row.enabled) {
+                menu.item(
+                    PopupMenuItem::new("Snooze")
+                        .icon(gpui_kit::assets::IconName::Clock)
+                        .disabled(true),
+                )
             } else {
-                PopupMenuItem::new(label)
-            }
-            .disabled(!enabled)
-            .on_click(move |_, _, cx| {
-                if !enabled {
-                    return;
-                }
-                _ = owner.update(cx, |_, cx| cx.emit(intent.clone()));
-            });
-            if row.starts_group {
-                menu.separator().item(item)
-            } else {
-                menu.item(item)
-            }
+                menu.submenu_with_icon(
+                    Some(gpui_kit::component::Icon::new(
+                        gpui_kit::assets::IconName::Clock,
+                    )),
+                    "Snooze",
+                    window,
+                    cx,
+                    move |menu, _, _| {
+                        rows.iter()
+                            .cloned()
+                            .fold(menu, |menu, row| append_menu_row(menu, row, &owner))
+                    },
+                )
+            };
+        }
+        menu = append_menu_row(menu, row, owner);
+    }
+    menu
+}
+
+pub(super) fn popup_focus_context(
+    menu: PopupMenu,
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+    cx: &App,
+) -> PopupMenu {
+    if let Some(owner) = owner.upgrade() {
+        menu.action_context(owner.read(cx).focus_handle(cx))
+    } else {
+        menu
+    }
+}
+
+fn append_menu_row(
+    menu: PopupMenu,
+    row: MenuRow,
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+) -> PopupMenu {
+    let icon = menu_icon(&row.intent);
+    let owner = owner.clone();
+    let intent = row.intent;
+    let enabled = row.enabled;
+    let label = row.label;
+    let item = if row.destructive {
+        PopupMenuItem::element(move |_, cx| {
+            div()
+                .id(SharedString::from(format!("session-menu-{label}")))
+                .role(gpui_kit::Role::MenuItem)
+                .aria_label(label.clone())
+                .text_color(cx.theme().danger)
+                .child(label.clone())
         })
+    } else {
+        PopupMenuItem::new(label)
+    }
+    .when_some(icon, PopupMenuItem::icon)
+    .disabled(!enabled)
+    .on_click(move |_, window, cx| {
+        if !enabled { return; }
+        if matches!(&intent, ChromeIntent::Command(invocation) if invocation.command == "session.delete") {
+            let receiver = crate::gpui::dialogs::prompt(
+                "Delete this session permanently?",
+                Some("This removes its saved history from Bootty. Archive keeps it recoverable instead. Close the session before deleting it."),
+                &[gpui_kit::PromptButton::Cancel("Cancel".into()), gpui_kit::PromptButton::Other("Delete permanently".into())],
+                window, cx,
+            );
+            let owner = owner.clone();
+            let intent = intent.clone();
+            cx.spawn(async move |cx| {
+                if receiver.await == Ok(1) {
+                    _ = owner.update(cx, |_, cx| cx.emit(intent));
+                }
+            }).detach();
+        } else {
+            _ = owner.update(cx, |_, cx| cx.emit(intent.clone()));
+        }
+    });
+    if row.starts_group {
+        menu.separator().item(item)
+    } else {
+        menu.item(item)
+    }
+}
+
+fn menu_icon(intent: &ChromeIntent) -> Option<gpui_kit::assets::IconName> {
+    use gpui_kit::assets::IconName as I;
+    match intent {
+        ChromeIntent::RenameSavedSession(_)
+        | ChromeIntent::SessionContext {
+            action: super::SessionContextAction::Rename,
+            ..
+        } => Some(I::Pencil),
+        ChromeIntent::SessionContext {
+            action: super::SessionContextAction::MoveToSpace,
+            ..
+        } => Some(I::FolderInput),
+        ChromeIntent::Command(invocation) => match invocation.command.as_str() {
+            "session.pin" => Some(I::Pin),
+            "session.unpin" => Some(I::PinOff),
+            "session.settle" | "session.activate" => Some(I::CircleCheck),
+            "session.snooze" | "session.unsnooze" => Some(I::Clock),
+            "session.archive" => Some(I::Archive),
+            "session.unarchive" => Some(I::ArchiveRestore),
+            "session.delete" => Some(I::Trash),
+            "session.restore" => Some(I::Undo2),
+            "session.show" => Some(I::Eye),
+            "session.hide" => Some(I::EyeOff),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 pub(super) fn color(value: Rgba) -> gpui_kit::Hsla {
@@ -747,4 +1026,19 @@ pub(super) fn color(value: Rgba) -> gpui_kit::Hsla {
         a: f32::from(value.alpha) / 255.0,
     }
     .into()
+}
+
+pub(super) fn navigation_hint(
+    hints: &[(String, gpui_kit::Keystroke)],
+    modifiers: gpui_kit::Modifiers,
+    action: &str,
+    index: usize,
+) -> Option<gpui_kit::AnyElement> {
+    let name = format!("{action}:{index}");
+    let (_, key) = hints.iter().find(|(action, key)| {
+        action == &name
+            && key.modifiers == modifiers
+            && key.modifiers != gpui_kit::Modifiers::default()
+    })?;
+    Some(gpui_kit::component::kbd::Kbd::new(key.clone()).into_any_element())
 }

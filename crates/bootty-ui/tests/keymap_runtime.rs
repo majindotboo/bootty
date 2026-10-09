@@ -129,7 +129,10 @@ fn user_keymap_is_published_after_the_toml_compatibility_layer() {
     let global = snapshot
         .effective_bindings
         .iter()
-        .filter(|binding| binding.context == KeymapContext::Global)
+        .filter(|binding| {
+            binding.context == KeymapContext::Global
+                && matches!(binding.action.name(), Some("open_settings" | "new_window"))
+        })
         .collect::<Vec<_>>();
     assert_eq!(global.len(), 2);
     assert_eq!(global[0].source, KeymapBindingSource::BuiltIn);

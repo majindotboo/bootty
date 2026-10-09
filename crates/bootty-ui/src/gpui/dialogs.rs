@@ -5,11 +5,13 @@
 
 use super::{OverlayPlacement, OverlayView};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, WindowExt as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _, WindowExt as _,
+    button::{Button, ButtonGroup, ButtonVariants as _},
     command::{Command, CommandEntry, CommandGroup, CommandItem, CommandState},
     h_flex,
-    input::{Input, InputEvent, InputState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    menu::{DropdownMenu as _, PopupMenuItem},
+    switch::Switch,
     v_flex,
 };
 use gpui_kit::{
@@ -18,6 +20,11 @@ use gpui_kit::{
     Subscription, Window, div, prelude::*, px, rems,
 };
 use std::{cell::RefCell, rc::Rc};
+
+mod attachments;
+mod completion;
+mod model_picker;
+mod project_picker;
 
 /// A themed confirmation. Answers retain their caller order; dismissing cancels the receiver.
 pub fn prompt(
@@ -135,6 +142,64 @@ pub enum FindDirection {
     Next,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposerControl {
+    Space,
+    Provider,
+    Model,
+    Effort,
+    Project,
+    Worktree,
+    Permissions,
+}
+impl ComposerControl {
+    pub const ALL: [Self; 7] = [
+        Self::Space,
+        Self::Provider,
+        Self::Model,
+        Self::Effort,
+        Self::Project,
+        Self::Worktree,
+        Self::Permissions,
+    ];
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::Space => "host",
+            Self::Provider => "provider",
+            Self::Model => "model",
+            Self::Effort => "reasoning",
+            Self::Project => "project",
+            Self::Worktree => "isolation",
+            Self::Permissions => "permissions",
+        }
+    }
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Space => "focus-space",
+            Self::Provider => "focus-provider",
+            Self::Model => "focus-model",
+            Self::Effort => "focus-effort",
+            Self::Project => "focus-project",
+            Self::Worktree => "focus-worktree",
+            Self::Permissions => "focus-permissions",
+        }
+    }
+    #[must_use]
+    pub const fn title(self) -> &'static str {
+        match self {
+            Self::Space => "Choose Space",
+            Self::Provider => "Choose Provider",
+            Self::Model => "Choose Model",
+            Self::Effort => "Choose Reasoning Effort",
+            Self::Project => "Choose Project",
+            Self::Worktree => "Focus Worktree Control",
+            Self::Permissions => "Choose Permissions",
+        }
+    }
+}
+
 /// Actions the application can dispatch to the active command surface.
 ///
 /// The command runtime owns keybinding resolution; this enum is the small
@@ -146,10 +211,11 @@ pub enum CommandAction {
     Confirm,
     Cancel,
     ToggleFavorite,
+    Focus(ComposerControl),
 }
 
 /// Dialog interactions retain the values captured by their rendered controls.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum DialogIntent {
     Dismiss {
         dialog: DialogId,
@@ -174,6 +240,14 @@ pub enum DialogIntent {
         dialog: DialogId,
         field: String,
         value: String,
+    },
+    ApplicationsChanged {
+        dialog: DialogId,
+        applications: Vec<bootty_agents::NativeApplicationMention>,
+    },
+    AttachmentsChanged {
+        dialog: DialogId,
+        attachments: Vec<crate::presentation::new_session_form::NewSessionAttachment>,
     },
     SelectionChanged {
         dialog: DialogId,
@@ -205,6 +279,8 @@ impl DialogIntent {
             | Self::Preview { dialog, .. }
             | Self::TextChanged { dialog, .. }
             | Self::FieldChanged { dialog, .. }
+            | Self::ApplicationsChanged { dialog, .. }
+            | Self::AttachmentsChanged { dialog, .. }
             | Self::SelectionChanged { dialog, .. }
             | Self::CycleScope { dialog }
             | Self::ToggleFavorite { dialog, .. }
@@ -321,8 +397,15 @@ pub enum DialogFieldKind {
     Color,
 }
 
-/// An owned, disposable projection of an app-owned dialog model.
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogSpaceChoice {
+    pub label: String,
+    pub icon: String,
+    pub color: [u8; 3],
+}
+
+/// An owned, disposable projection of an app-owned dialog model.
+#[derive(Clone, Debug, PartialEq)]
 pub struct DialogSpec {
     pub id: DialogId,
     pub role: DialogRole,
@@ -334,7 +417,20 @@ pub struct DialogSpec {
     pub text_hint: Option<String>,
     pub text_label: Option<String>,
     pub fields: Vec<DialogField>,
+    pub spaces: Vec<DialogSpaceChoice>,
+    pub attachments: Vec<crate::presentation::new_session_form::NewSessionAttachment>,
+    pub applications: Vec<bootty_agents::NativeApplicationMention>,
+    pub completion: Option<crate::CompletionScope>,
+    pub models: Vec<bootty_agents::NativeModelOption>,
+    pub projects: Vec<bootty_git::ProjectPickerEntry>,
+    pub project_labels: std::collections::BTreeMap<String, String>,
+    pub selected_project: Option<String>,
+    pub models_loading: bool,
+    pub model_error: Option<String>,
+    pub selected_model: Option<String>,
     pub busy: bool,
+    /// Multiline prompts use Enter for a newline and require the explicit submit button.
+    pub multiline: bool,
     pub rows: Vec<DialogRow>,
     pub empty_text: String,
     pub placement: DialogPlacement,
@@ -359,7 +455,19 @@ impl DialogSpec {
             text: Some(text.into()),
             text_label: None,
             fields: Vec::new(),
+            spaces: Vec::new(),
+            attachments: Vec::new(),
+            applications: Vec::new(),
+            completion: None,
+            models: Vec::new(),
+            projects: Vec::new(),
+            project_labels: std::collections::BTreeMap::new(),
+            selected_project: None,
+            models_loading: false,
+            model_error: None,
+            selected_model: None,
             busy: false,
+            multiline: false,
             text_hint: Some("filter…".to_owned()),
             rows,
             empty_text: "no matching items".to_owned(),
@@ -382,7 +490,19 @@ impl DialogSpec {
             text: Some(value.into()),
             text_label: None,
             fields: Vec::new(),
+            spaces: Vec::new(),
+            attachments: Vec::new(),
+            applications: Vec::new(),
+            completion: None,
+            models: Vec::new(),
+            projects: Vec::new(),
+            project_labels: std::collections::BTreeMap::new(),
+            selected_project: None,
+            models_loading: false,
+            model_error: None,
+            selected_model: None,
             busy: false,
+            multiline: false,
             text_hint: Some(value_hint.into()),
             hint: Some("Enter confirm   Esc close".to_owned()),
             icon: None,
@@ -401,9 +521,21 @@ pub struct DialogView {
     /// Prompts own a real editor instead of focusing a hidden `CommandState` query.
     prompt_input: Entity<InputState>,
     prompt_input_focus: FocusHandle,
+    prompt_textarea: Entity<TextareaState>,
+    attachment_imports: usize,
+    attachment_error: Option<String>,
+    attachment_epoch: u64,
+    new_session_content: Option<gpui_kit::component::input::InputContent>,
+    _prompt_textarea_subscription: Subscription,
     fields: std::collections::HashMap<String, (Entity<InputState>, Subscription)>,
+    model_picker: Option<model_picker::NewModelPicker>,
+    project_picker: Option<project_picker::NewProjectPicker>,
+    completion_sender: Option<bootty_control::BoundAppCommandSender>,
+    completion: Option<Entity<crate::gpui_composer_completion::ComposerCompletion>>,
+    completion_subscriptions: Vec<Subscription>,
     /// Stable focus target for a confirm surface before its buttons render.
     confirm_focus: FocusHandle,
+    control_focus: std::collections::BTreeMap<&'static str, FocusHandle>,
     command_keybindings: Option<Vec<(CommandAction, String)>>,
     find_input: Entity<InputState>,
     suppress_query: Option<String>,
@@ -413,6 +545,7 @@ pub struct DialogView {
     _find_input_subscription: Subscription,
     _prompt_input_subscription: Subscription,
     _command_interceptor: Subscription,
+    _new_session_interceptor: Subscription,
 }
 
 impl DialogView {
@@ -446,6 +579,9 @@ impl DialogView {
                 InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
             },
         );
+        let prompt_textarea = cx.new(|cx| TextareaState::new(window, cx).auto_grow(4, 8));
+        let prompt_textarea_subscription =
+            Self::subscribe_prompt_content(&prompt_textarea, window, cx);
         let owner = cx.weak_entity();
         let command_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             let (command_surface_focused, redirect_typing) = owner
@@ -493,7 +629,16 @@ impl DialogView {
             prompt_input_focus: prompt_input.read(cx).focus_handle(cx),
             prompt_input,
             fields: std::collections::HashMap::new(),
+            model_picker: None,
+            project_picker: None,
+            completion_sender: None,
+            completion: None,
+            completion_subscriptions: Vec::new(),
             confirm_focus: cx.focus_handle().tab_stop(true),
+            control_focus: ComposerControl::ALL
+                .into_iter()
+                .map(|control| (control.field(), cx.focus_handle()))
+                .collect(),
             command_keybindings: None,
             find_input,
             suppress_query: None,
@@ -502,8 +647,67 @@ impl DialogView {
             suppress_initial_selection: false,
             _find_input_subscription: find_input_subscription,
             _prompt_input_subscription: prompt_input_subscription,
+            prompt_textarea,
+            attachment_imports: 0,
+            attachment_error: None,
+            attachment_epoch: 0,
+            new_session_content: None,
+            _prompt_textarea_subscription: prompt_textarea_subscription,
             _command_interceptor: command_interceptor,
+            _new_session_interceptor: Self::new_session_interceptor(cx),
         }
+    }
+
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "GPUI subscribe_in requires a mutable Context"
+    )]
+    fn subscribe_prompt_content(
+        prompt_textarea: &Entity<TextareaState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe_in(
+            prompt_textarea,
+            window,
+            |this, input, event: &InputEvent, _, cx| match event {
+                InputEvent::Change => this.change_prompt_content(input, cx),
+                InputEvent::Focus | InputEvent::Blur => cx.notify(),
+                InputEvent::PressEnter { .. } => {}
+            },
+        )
+    }
+
+    fn new_session_interceptor(cx: &mut Context<Self>) -> Subscription {
+        let owner = cx.weak_entity();
+        cx.intercept_keystrokes(move |event, window, cx| {
+            let new_session_enter = owner
+                .read_with(cx, |this, app| {
+                    !this.completion_active(window, app)
+                        && this.spec.as_ref().is_some_and(|spec| {
+                            spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID
+                                && spec.multiline
+                        })
+                        && this
+                            .prompt_textarea
+                            .read(app)
+                            .focus_handle(app)
+                            .is_focused(window)
+                        && event.keystroke.key.eq_ignore_ascii_case("enter")
+                        && !event.keystroke.modifiers.shift
+                        && !event.keystroke.modifiers.alt
+                })
+                .unwrap_or(false);
+            if new_session_enter {
+                let action = if event.keystroke.modifiers.platform {
+                    "start-session-background"
+                } else {
+                    "enter-session"
+                };
+                _ = owner.update(cx, |this, cx| this.new_session_submit(action, cx));
+                cx.stop_propagation();
+            }
+        })
     }
 
     fn command_focus_state(&self, window: &Window, cx: &App) -> (bool, bool) {
@@ -557,6 +761,10 @@ impl DialogView {
     /// next turn so actions arriving while the dialog's retained container is
     /// focused still use the component's selection and callback paths.
     pub fn perform(&mut self, action: CommandAction, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(action, CommandAction::Focus(_)) {
+            self.perform_completion(action, window, cx);
+            return;
+        }
         match action {
             CommandAction::Previous if self.is_command_surface() => {
                 self.dispatch_command_action(
@@ -586,7 +794,8 @@ impl DialogView {
             CommandAction::Confirm
             | CommandAction::Previous
             | CommandAction::Next
-            | CommandAction::ToggleFavorite => {}
+            | CommandAction::ToggleFavorite
+            | CommandAction::Focus(_) => {}
         }
     }
 
@@ -611,6 +820,48 @@ impl DialogView {
             .is_some_and(|spec| spec.role == DialogRole::Confirm)
     }
 
+    fn change_prompt_content(&mut self, input: &Entity<TextareaState>, cx: &mut Context<Self>) {
+        if self
+            .spec
+            .as_ref()
+            .is_some_and(|spec| spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID)
+        {
+            self.new_session_content = Some(input.read(cx).content());
+            if let Some(spec) = self.spec.as_mut() {
+                let applications = input
+                    .read(cx)
+                    .tokens()
+                    .iter()
+                    .filter_map(|span| {
+                        let mut mention = spec
+                            .applications
+                            .iter()
+                            .find(|mention| mention.id == span.token().id().as_ref())?
+                            .clone();
+                        mention.prompt_range = span.range();
+                        Some(mention)
+                    })
+                    .fold(
+                        std::collections::BTreeMap::new(),
+                        |mut mentions, mention| {
+                            mentions.insert(mention.id.clone(), mention);
+                            mentions
+                        },
+                    )
+                    .into_values()
+                    .collect::<Vec<_>>();
+                if applications != spec.applications {
+                    spec.applications.clone_from(&applications);
+                    cx.emit(DialogIntent::ApplicationsChanged {
+                        dialog: spec.id.clone(),
+                        applications,
+                    });
+                }
+            }
+        }
+        self.change_text(input.read(cx).value().to_string(), cx);
+    }
+
     fn dispatch_command_action(
         &self,
         action: Box<dyn gpui_kit::Action>,
@@ -632,6 +883,10 @@ impl DialogView {
 
     fn confirm(&self, row: &DialogRow, shift: bool, cx: &mut Context<Self>) {
         let Some(spec) = &self.spec else { return };
+        if spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && self.attachment_imports > 0
+        {
+            return;
+        }
         if spec.role == DialogRole::TerminalFind {
             cx.emit(DialogIntent::Find {
                 dialog: spec.id.clone(),
@@ -643,6 +898,9 @@ impl DialogView {
                 },
             });
         } else if let Some(action) = &row.action {
+            if row.id.0 == "submit" {
+                self.publish_active_attachments(cx);
+            }
             cx.emit(DialogIntent::Activate {
                 dialog: spec.id.clone(),
                 row: row.id.clone(),
@@ -660,6 +918,22 @@ impl DialogView {
         if row.enabled {
             self.confirm(row, false, cx);
         }
+    }
+
+    fn new_session_submit(&self, action: &str, cx: &mut Context<Self>) {
+        if self.attachment_imports > 0 {
+            return;
+        }
+        let Some(spec) = self.spec.as_ref().filter(|spec| !spec.busy) else {
+            return;
+        };
+        self.publish_active_attachments(cx);
+        cx.emit(DialogIntent::Activate {
+            dialog: spec.id.clone(),
+            row: RowId::new("submit"),
+            action: ActionId::new(action),
+            payload: DialogPayload::default(),
+        });
     }
 
     fn confirm_first_action(&self, cx: &mut Context<Self>) {
@@ -732,6 +1006,10 @@ impl DialogView {
         }
         if changed {
             self.fields.clear();
+            self.model_picker = None;
+            self.project_picker = None;
+            self.attachment_epoch = self.attachment_epoch.wrapping_add(1);
+            self.attachment_error = None;
         }
         self.preserve_selected_row = preserve_selected_row;
         self.spec = spec;
@@ -761,7 +1039,7 @@ impl DialogView {
                 }
                 self.command
                     .update(cx, |state, cx| state.set_query(query, window, cx));
-            } else if spec.role == DialogRole::Prompt {
+            } else if spec.role == DialogRole::Prompt && !spec.multiline {
                 let value = spec.text.clone().unwrap_or_default();
                 let sync_value = self.prompt_input.read(cx).value().as_ref() != value;
                 if sync_value {
@@ -779,8 +1057,44 @@ impl DialogView {
                 });
             }
         }
+        self.sync_prompt_textarea(window, cx);
         self.sync_fields(window, cx);
+        self.sync_new_model_picker(window, cx);
+        self.sync_new_project_picker(window, cx);
+        self.sync_completion(window, cx);
         cx.notify();
+    }
+
+    fn sync_prompt_textarea(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(spec) = &self.spec
+            && spec.role == DialogRole::Prompt
+            && spec.multiline
+        {
+            let value = spec.text.clone().unwrap_or_default();
+            if self.prompt_textarea.read(cx).value().as_ref() != value {
+                self.suppress_query = Some(value.clone());
+                let content = self
+                    .new_session_content
+                    .clone()
+                    .filter(|content| {
+                        spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID
+                            && content.text().as_ref() == value
+                            && content.tokens().iter().all(|span| {
+                                span.token().id().starts_with("skill:")
+                                    || spec.attachments.iter().any(|attachment| {
+                                        span.token().id().as_ref()
+                                            == attachment.path.to_string_lossy()
+                                    })
+                            })
+                    })
+                    .unwrap_or_else(|| value.into());
+                self.prompt_textarea
+                    .update(cx, |input, cx| input.set_value(content, window, cx));
+            }
+            self.prompt_textarea.update(cx, |input, cx| {
+                input.set_placeholder(spec.text_hint.clone().unwrap_or_default(), window, cx);
+            });
+        }
     }
 
     fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -847,6 +1161,7 @@ impl DialogView {
     pub fn root_title(&self) -> Option<String> {
         self.spec.as_ref().and_then(|spec| match spec.role {
             DialogRole::SearchableList | DialogRole::TerminalFind => None,
+            DialogRole::Prompt if Self::is_agent_session_spec(spec) => None,
             DialogRole::Prompt | DialogRole::Confirm | DialogRole::ThemePicker => {
                 Some(spec.title.clone())
             }
@@ -896,7 +1211,13 @@ impl DialogView {
         match event.keystroke.key.as_str() {
             // Root owns Escape for modal dialogs. Anchored TerminalFind still needs a local
             // dismissal path because it is intentionally outside Root's modal layer.
-            "escape" if role == DialogRole::TerminalFind => self.cancel(cx),
+            "escape"
+                if role == DialogRole::TerminalFind
+                    || (dialog.0 == crate::presentation::dialogs::NEW_SESSION_ID
+                        && role == DialogRole::Prompt) =>
+            {
+                self.cancel(cx);
+            }
             "enter" if role == DialogRole::Confirm && self.confirm_focus.is_focused(window) => {
                 self.confirm_first_action(cx);
             }
@@ -976,13 +1297,16 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
+        if spec.multiline && spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID {
+            return self.new_session_panel(spec, window, cx);
+        }
         let colors = gpui_kit::component::Theme::global(cx).colors;
         let destructive = gpui_kit::component::Theme::global(cx)
             .semantic_tokens()
             .colors
             .destructive;
         let submit = spec.rows.iter().find(|row| row.id.0 == "submit");
-        let submit_enabled = submit.is_some_and(|row| row.enabled);
+        let submit_enabled = !spec.busy && submit.is_some_and(|row| row.enabled);
         let submit_detail = submit.and_then(|row| row.detail.clone());
         let invalid = submit_detail.is_some();
         let submit_row = submit.cloned();
@@ -999,14 +1323,9 @@ impl DialogView {
                     });
                 }
             });
-        let input = crate::gpui::focus_input(
-            &self.prompt_input,
-            Input::new(&self.prompt_input)
-                .disabled(spec.busy)
-                .w_full()
-                .when(invalid, |input| input.border_color(destructive)),
-        );
+        let input = self.prompt_text_control(spec, invalid, cx);
         let cancel_button = Button::new("dialog-prompt-cancel")
+            .disabled(spec.multiline && spec.busy)
             .ghost()
             .label("Cancel")
             .on_click(cx.listener(move |_, _, _, cx| {
@@ -1025,18 +1344,12 @@ impl DialogView {
             .debug_selector(|| "dialog-prompt-panel".to_owned())
             .w_full()
             .gap_3()
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_1()
-                    .when_some(spec.text_label.clone(), |this, label| {
-                        this.child(div().text_sm().child(label))
-                    })
-                    .child(public_selector(
-                        "dialog-prompt-input",
-                        div().w_full().child(input),
-                    )),
-            )
+            .child(Self::prompt_control_row(
+                spec,
+                "dialog-value",
+                spec.text_label.as_deref(),
+                public_selector("dialog-prompt-input", input),
+            ))
             .when(!fields.is_empty(), |this| {
                 this.child(
                     v_flex()
@@ -1076,6 +1389,736 @@ impl DialogView {
             .into_any_element()
     }
 
+    fn new_session_panel(
+        &self,
+        spec: &DialogSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let owner = cx.weak_entity();
+        let submit = spec.rows.iter().find(|row| row.id.0 == "submit");
+        let error = submit.and_then(|row| row.detail.clone());
+        if Self::is_agent_session_spec(spec) {
+            return self.agent_session_panel(spec, submit, error, window, cx);
+        }
+        let mode = spec.fields.iter().find(|field| field.id == "mode");
+        let details = spec
+            .fields
+            .iter()
+            .filter(|field| matches!(field.kind, DialogFieldKind::Text))
+            .filter_map(|field| self.prompt_field(spec, field, window, cx))
+            .map(|control| div().flex_1().min_w(rems(8.0)).child(control))
+            .collect::<Vec<_>>();
+        v_flex()
+            .id("dialog-prompt-panel")
+            .debug_selector(|| "dialog-prompt-panel".to_owned())
+            .w_full()
+            .gap_3()
+            .child(div().text_xl().child(spec.title.clone()))
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .justify_between()
+                    .gap_2()
+                    .when_some(
+                        spec.rows.iter().find(|row| row.id.0 == "choose-project"),
+                        |row, project| row.child(self.render_new_project_picker(spec, project, cx)),
+                    )
+                    .when_some(mode, |row, mode| {
+                        row.child(Self::new_session_mode(spec, mode, cx))
+                    }),
+            )
+            .child(public_selector(
+                "dialog-prompt-input",
+                Textarea::new(&self.prompt_textarea)
+                    .token(crate::gpui_prompt_attachments::render)
+                    .on_paste(move |item, window, cx| {
+                        owner
+                            .update(cx, |this, cx| {
+                                this.paste_new_session_attachments(item, window, cx)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .aria_label(
+                        spec.text_label
+                            .clone()
+                            .unwrap_or_else(|| "Prompt".to_owned()),
+                    )
+                    .disabled(spec.busy)
+                    .w_full()
+                    .when(error.is_some(), |input| {
+                        input.border_color(cx.theme().danger)
+                    }),
+            ))
+            .when(
+                !spec.attachments.is_empty()
+                    || self.attachment_imports > 0
+                    || self.attachment_error.is_some(),
+                |row| row.child(self.render_new_session_attachments(spec, cx)),
+            )
+            .child(
+                h_flex()
+                    .id("dialog-prompt-fields")
+                    .w_full()
+                    .gap_1()
+                    .flex_wrap()
+                    .when(
+                        spec.fields.iter().any(|field| field.id == "provider"),
+                        |row| row.child(self.new_session_attachment_picker(spec, cx)),
+                    )
+                    .children(spec.fields.iter().filter_map(|field| {
+                        if field.id == "isolation" {
+                            Some(Self::new_session_worktree(spec, field, cx))
+                        } else {
+                            self.new_session_choice(spec, field, false, cx)
+                        }
+                    })),
+            )
+            .when(!details.is_empty(), |this| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .items_start()
+                        .gap_2()
+                        .flex_wrap()
+                        .children(details),
+                )
+            })
+            .child(self.new_session_footer(spec, submit, error, cx))
+            .into_any_element()
+    }
+
+    fn is_agent_session_spec(spec: &DialogSpec) -> bool {
+        // Cmd+N can switch between modes; an Agent tab fixes the mode and omits its selector.
+        let agent_mode = spec
+            .fields
+            .iter()
+            .any(|field| field.id == "mode" && field.value == "Agent");
+        let fixed_agent_tab = !spec.fields.iter().any(|field| field.id == "mode")
+            && spec.fields.iter().any(|field| field.id == "provider");
+        spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID
+            && spec.multiline
+            && (agent_mode || fixed_agent_tab)
+    }
+
+    fn agent_session_panel(
+        &self,
+        spec: &DialogSpec,
+        submit: Option<&DialogRow>,
+        error: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let owner = cx.weak_entity();
+        let prompt_focused = self
+            .prompt_textarea
+            .read(cx)
+            .focus_handle(cx)
+            .is_focused(window);
+        let prompt_border = if error.is_some() {
+            cx.theme().danger
+        } else if prompt_focused {
+            cx.theme().ring
+        } else {
+            cx.theme().border
+        };
+        let choices = self.agent_session_choices(spec, window, cx);
+
+        v_flex()
+            .id("dialog-prompt-panel")
+            .debug_selector(|| "dialog-prompt-panel".to_owned())
+            .w_full()
+            .max_w(rems(48.0))
+            .min_w_0()
+            .items_center()
+            .gap_4()
+            .child(self.agent_session_header(spec, cx))
+            .child(
+                v_flex()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        v_flex()
+                            .id("agent-session-composer")
+                            .relative()
+                            .when(self.completion_active(window, cx), |view| {
+                                view.key_context("ComposerCompletion")
+                            })
+                            .w_full()
+                            .min_w_0()
+                            .gap_2()
+                            .p_3()
+                            .rounded(cx.theme().radius)
+                            .bg(cx.theme().muted.opacity(0.35))
+                            .border_1()
+                            .border_color(prompt_border)
+                            .when(
+                                !spec.attachments.is_empty()
+                                    || self.attachment_imports > 0
+                                    || self.attachment_error.is_some(),
+                                |row| row.child(self.render_new_session_attachments(spec, cx)),
+                            )
+                            .child(public_selector(
+                                "dialog-prompt-input",
+                                Textarea::new(&self.prompt_textarea)
+                                    .token(crate::gpui_prompt_attachments::render)
+                                    .on_paste(move |item, window, cx| {
+                                        owner
+                                            .update(cx, |this, cx| {
+                                                this.paste_new_session_attachments(item, window, cx)
+                                            })
+                                            .unwrap_or(false)
+                                    })
+                                    .aria_label(
+                                        spec.text_label
+                                            .clone()
+                                            .unwrap_or_else(|| "Prompt".to_owned()),
+                                    )
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .disabled(spec.busy)
+                                    .w_full(),
+                            ))
+                            .child(self.agent_session_controls(spec, choices, submit, cx))
+                            .children(self.completion.clone()),
+                    )
+                    .child(self.agent_session_project_footer(spec, window, cx)),
+            )
+            .children(Self::new_model_error(spec, cx))
+            .child(self.new_session_footer(spec, submit, error, cx))
+            .into_any_element()
+    }
+
+    fn agent_session_choices(
+        &self,
+        spec: &DialogSpec,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> Vec<gpui_kit::AnyElement> {
+        let width = f32::from(self.prompt_textarea.read(cx).input_bounds().size.width);
+        let rem = f32::from(window.rem_size());
+        spec.fields
+            .iter()
+            .filter(|field| !matches!(field.id.as_str(), "isolation" | "mode"))
+            .filter_map(|field| {
+                // Space and permission labels yield before the provider and effort labels.
+                let compact = width
+                    < rem
+                        * if matches!(field.id.as_str(), "host" | "permissions") {
+                            50.
+                        } else {
+                            40.
+                        };
+                let choice = self.new_session_choice(spec, field, compact, cx)?;
+                Some(
+                    div()
+                        .flex_shrink_0()
+                        .min_w_0()
+                        .when_some(self.control_focus.get(field.id.as_str()), |view, focus| {
+                            view.track_focus(focus)
+                        })
+                        .child(public_selector(
+                            format!("dialog-field-choice-control-{}", field.id),
+                            choice,
+                        ))
+                        .into_any_element(),
+                )
+            })
+            .collect::<Vec<_>>()
+    }
+
+    fn agent_session_controls(
+        &self,
+        spec: &DialogSpec,
+        choices: Vec<gpui_kit::AnyElement>,
+        submit: Option<&DialogRow>,
+        cx: &Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        h_flex()
+            .id("dialog-prompt-fields")
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .child(
+                h_flex()
+                    .id("composer-control-options")
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .text_sm()
+                    .whitespace_nowrap()
+                    .overflow_x_scroll()
+                    .gap_2()
+                    .when_some(
+                        spec.fields.iter().find(|field| field.id == "mode"),
+                        |row, mode| row.child(Self::new_session_mode(spec, mode, cx)),
+                    )
+                    .children(choices)
+                    .when(spec.models_loading, |row| {
+                        row.child(
+                            h_flex()
+                                .debug_selector(|| "new-session-model-loading".to_owned())
+                                .items_center()
+                                .gap_2()
+                                .child(gpui_kit::component::spinner::Spinner::new().small())
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child("Loading models…"),
+                                ),
+                        )
+                    }),
+            )
+            .child(public_selector(
+                "dialog-prompt-attach",
+                self.new_session_attachment_picker(spec, cx),
+            ))
+            .when_some(submit, |row, submit| {
+                row.child(
+                    Self::new_agent_session_start(spec, submit, cx)
+                        .disabled(!submit.enabled || spec.busy || self.attachment_imports > 0),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn agent_session_header(&self, spec: &DialogSpec, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        let project = Self::agent_project_name(spec);
+        let project_choice = spec.rows.iter().find(|row| row.id.0 == "choose-project");
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .items_center()
+            .justify_center()
+            .flex_wrap()
+            .gap_1()
+            .text_xl()
+            .font_weight(gpui_kit::FontWeight::MEDIUM)
+            .text_color(cx.theme().foreground)
+            .child(if project.is_some() {
+                "What should we build in"
+            } else {
+                "What should we build?"
+            })
+            .when_some(project, |row, name| {
+                row.child(project_choice.map_or_else(
+                    || div().child(name.to_owned()).into_any_element(),
+                    |choice| self.render_new_project_picker(spec, choice, cx),
+                ))
+                .child("?")
+            })
+            .into_any_element()
+    }
+
+    fn agent_project_name(spec: &DialogSpec) -> Option<&str> {
+        let from_project_choice = spec
+            .rows
+            .iter()
+            .find(|row| row.id.0 == "choose-project")
+            .map(|row| row.label.strip_suffix('…').unwrap_or(&row.label))
+            .filter(|name| !name.is_empty());
+        from_project_choice.or_else(|| {
+            spec.footer
+                .as_deref()
+                .map(|path| path.trim_end_matches(['/', '\\']))
+                .and_then(|path| path.rsplit(['/', '\\']).next())
+                .filter(|name| !name.is_empty())
+        })
+    }
+
+    fn new_session_footer(
+        &self,
+        spec: &DialogSpec,
+        submit: Option<&DialogRow>,
+        error: Option<String>,
+        cx: &Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let agent_session = Self::is_agent_session_spec(spec);
+        v_flex()
+            .w_full()
+            .gap_2()
+            .when_some(error, |this, error| {
+                this.child(public_selector(
+                    "dialog-prompt-validation",
+                    div().text_sm().text_color(cx.theme().danger).child(error),
+                ))
+            })
+            .when_some(spec.hint.clone(), |this, hint| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(hint),
+                )
+            })
+            .child(h_flex().w_full().justify_end().gap_2().flex_wrap().when(
+                !agent_session,
+                |row| {
+                    row.when_some(submit, |row, submit| {
+                        row.child(
+                            Self::new_session_start(spec, submit, cx).disabled(
+                                !submit.enabled || spec.busy || self.attachment_imports > 0,
+                            ),
+                        )
+                    })
+                },
+            ))
+            .into_any_element()
+    }
+
+    fn agent_session_project_footer(
+        &self,
+        spec: &DialogSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        h_flex()
+            .id("dialog-prompt-footer")
+            .min_w_0()
+            .items_center()
+            .justify_between()
+            .mx_3()
+            .px_2()
+            .py_1()
+            .bg(cx.theme().muted.opacity(0.35))
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_b(cx.theme().radius)
+            .gap_2()
+            .when_some(
+                spec.fields.iter().find(|field| field.id == "isolation"),
+                |row, field| {
+                    row.child(
+                        div()
+                            .when_some(self.control_focus.get("isolation"), |view, focus| {
+                                view.track_focus(focus)
+                            })
+                            .child(Self::new_session_worktree(spec, field, cx)),
+                    )
+                },
+            )
+            .when(
+                !spec.fields.iter().any(|field| field.id == "isolation"),
+                |row| {
+                    row.child(
+                        h_flex()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(super::sized_icon(
+                                "folder",
+                                super::IconSize::Small,
+                                cx.theme().muted_foreground,
+                            ))
+                            .child("Current checkout"),
+                    )
+                },
+            )
+            .when_some(
+                self.new_session_worktree_options(spec, window, cx),
+                ParentElement::child,
+            )
+            .into_any_element()
+    }
+
+    fn new_session_worktree_options(
+        &self,
+        spec: &DialogSpec,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui_kit::component::popover::Popover> {
+        let starting = spec.fields.iter().find(|field| field.id == "start-ref")?;
+        let (input, _) = self.fields.get(&starting.id)?;
+        let focus = input.read(cx).focus_handle(cx);
+        let start_ref = if starting.value.trim().is_empty() {
+            "HEAD"
+        } else {
+            starting.value.trim()
+        };
+        let fields = ["start-ref", "branch", "folder"]
+            .into_iter()
+            .filter_map(|id| {
+                let mut field = spec.fields.iter().find(|field| field.id == id)?.clone();
+                if id != "start-ref" {
+                    field.label.push_str(" (optional)");
+                }
+                self.prompt_field(spec, &field, window, cx)
+            })
+            .collect::<Vec<_>>();
+        Some(gpui_kit::component::popover::Popover::new("dialog-worktree-options")
+            .anchor(gpui_kit::Anchor::BottomRight)
+            .track_focus(&focus)
+            .trigger(Button::new("dialog-worktree-options-trigger")
+                .debug_selector(|| "dialog-worktree-options-trigger".into())
+                .ghost()
+                .small()
+                .min_w_0()
+                .max_w(rems(18.))
+                .disabled(spec.busy)
+                .dropdown_caret(true)
+                .child(div().min_w_0().text_ellipsis().child(format!("Start from {start_ref}")))
+                .accessibility_label("Worktree options")
+                .tooltip("Choose the starting branch, tag or commit. Branch and folder names are generated from your prompt unless overridden."))
+            .child(v_flex().w(rems(22.)).gap_3().children(fields)))
+    }
+
+    fn new_session_start(spec: &DialogSpec, row: &DialogRow, cx: &Context<Self>) -> Button {
+        let owner = cx.weak_entity();
+        let submit = row.clone();
+        Button::new("dialog-prompt-submit")
+            .primary()
+            .loading(spec.busy)
+            .disabled(!row.enabled || spec.busy)
+            .label(row.label.clone())
+            .on_click(move |_, _, cx| {
+                _ = owner.update(cx, |this, cx| this.confirm(&submit, false, cx));
+            })
+    }
+
+    fn new_agent_session_start(spec: &DialogSpec, row: &DialogRow, cx: &Context<Self>) -> Button {
+        let owner = cx.weak_entity();
+        let submit = row.clone();
+        Button::new("dialog-prompt-submit")
+            .icon(gpui_kit::component::IconName::ArrowUp)
+            .small()
+            .primary()
+            .rounded_full()
+            .loading(spec.busy)
+            .disabled(!row.enabled || spec.busy)
+            .accessibility_label(row.label.clone())
+            .tooltip(row.label.clone())
+            .on_click(move |_, _, cx| {
+                _ = owner.update(cx, |this, cx| this.confirm(&submit, false, cx));
+            })
+    }
+
+    fn new_session_mode(spec: &DialogSpec, field: &DialogField, cx: &Context<Self>) -> ButtonGroup {
+        let DialogFieldKind::Choice(options) = &field.kind else {
+            return ButtonGroup::new("new-session-mode");
+        };
+        ButtonGroup::new("new-session-mode")
+            .small()
+            .outline()
+            .children(options.iter().map(|value| {
+                let owner = cx.weak_entity();
+                let dialog = spec.id.clone();
+                let field_id = field.id.clone();
+                let value = value.clone();
+                Button::new(SharedString::from(format!("new-session-mode-{value}")))
+                    .label(value.clone())
+                    .selected(value == field.value)
+                    .disabled(spec.busy)
+                    .on_click(move |_, _, cx| {
+                        _ = owner.update(cx, |_, cx| {
+                            cx.emit(DialogIntent::FieldChanged {
+                                dialog: dialog.clone(),
+                                field: field_id.clone(),
+                                value: value.clone(),
+                            });
+                        });
+                    })
+            }))
+    }
+
+    fn new_session_choice(
+        &self,
+        spec: &DialogSpec,
+        field: &DialogField,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> Option<gpui_kit::AnyElement> {
+        let DialogFieldKind::Choice(options) = &field.kind else {
+            return None;
+        };
+        if field.id == "mode" || (field.id == "profile" && options.len() < 2) {
+            return None;
+        }
+        if field.id == "model" {
+            return self.render_new_model_picker(spec, field, cx);
+        }
+        let owner = cx.weak_entity();
+        let dialog = spec.id.clone();
+        let field = field.clone();
+        let options = options.clone();
+        let spaces = spec.spaces.clone();
+        Some(
+            Button::new(SharedString::from(format!(
+                "dialog-field-choice-{}",
+                field.id
+            )))
+            .ghost()
+            .small()
+            .min_w_0()
+            .max_w(rems(16.0))
+            .dropdown_caret(true)
+            .disabled(spec.busy)
+            .accessibility_label(format!("{}: {}", field.label, field.value))
+            .tooltip(format!("{}: {}", field.label, field.value))
+            .child(Self::new_session_choice_content(
+                &field.id,
+                &field.value,
+                &spec.spaces,
+                compact,
+                cx,
+            ))
+            .dropdown_menu(move |mut menu, _, _| {
+                if field.id == "reasoning" {
+                    menu = menu.label("Reasoning");
+                }
+                for value in &options {
+                    let owner = owner.clone();
+                    let dialog = dialog.clone();
+                    let field_id = field.id.clone();
+                    let label = value.clone();
+                    let spaces = spaces.clone();
+                    let item = PopupMenuItem::element(move |_, cx| {
+                        div()
+                            .id(SharedString::from(format!(
+                                "new-session-choice-{field_id}-{label}"
+                            )))
+                            .role(gpui_kit::Role::MenuItem)
+                            .aria_label(label.clone())
+                            .child(Self::new_session_choice_content(
+                                &field_id, &label, &spaces, false, cx,
+                            ))
+                    })
+                    .checked(value == &field.value);
+                    let field_id = field.id.clone();
+                    let value = value.clone();
+                    menu = menu.item(item.on_click(move |_, _, cx| {
+                        _ = owner.update(cx, |_, cx| {
+                            cx.emit(DialogIntent::FieldChanged {
+                                dialog: dialog.clone(),
+                                field: field_id.clone(),
+                                value: value.clone(),
+                            });
+                        });
+                    }));
+                }
+                menu
+            })
+            .into_any_element(),
+        )
+    }
+
+    fn new_session_worktree(
+        spec: &DialogSpec,
+        field: &DialogField,
+        cx: &Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let owner = cx.weak_entity();
+        let dialog = spec.id.clone();
+        Switch::new("new-session-worktree")
+            .small()
+            .label("Worktree")
+            .checked(field.value == "New worktree")
+            .disabled(spec.busy)
+            .on_click(move |checked, _, cx| {
+                _ = owner.update(cx, |_, cx| {
+                    cx.emit(DialogIntent::FieldChanged {
+                        dialog: dialog.clone(),
+                        field: "isolation".to_owned(),
+                        value: if *checked {
+                            "New worktree"
+                        } else {
+                            "Current checkout"
+                        }
+                        .to_owned(),
+                    });
+                });
+            })
+            .into_any_element()
+    }
+
+    fn new_session_choice_content(
+        field: &str,
+        value: &str,
+        spaces: &[DialogSpaceChoice],
+        compact: bool,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let space = (field == "host")
+            .then(|| spaces.iter().find(|space| space.label == value))
+            .flatten();
+        let icon = match (field, value) {
+            ("permissions", value) => bootty_agents::NativePermissionMode::ALL
+                .into_iter()
+                .find(|mode| mode.label() == value)
+                .map_or("lock", bootty_agents::NativePermissionMode::icon),
+            ("provider", "Codex") => bootty_agents::AgentKind::Codex.icon(),
+            ("provider", "Claude") => bootty_agents::AgentKind::Claude.icon(),
+            ("provider", "Pi") => bootty_agents::AgentKind::Pi.icon(),
+            ("provider", _) => "bot",
+            ("icon", "Automatic") => "folder",
+            ("icon", value) => value,
+            ("host", _) => space.map_or("folder", |space| space.icon.as_str()),
+            ("profile", _) => "circle-user",
+            ("model", _) => "cpu",
+            ("reasoning", _) => "brain",
+            ("isolation", _) => "git-branch",
+            _ => "settings-2",
+        };
+        let tint = if field == "provider" {
+            super::theme::provider_color(value, cx)
+        } else {
+            cx.theme().foreground
+        };
+        h_flex()
+            .min_w_0()
+            .gap_1()
+            .text_color(tint)
+            .child(super::sized_icon(
+                icon,
+                super::IconSize::Small,
+                space.map_or(tint, |space| {
+                    let [red, green, blue] = space.color;
+                    gpui_kit::rgb(u32::from(red) << 16 | u32::from(green) << 8 | u32::from(blue))
+                        .into()
+                }),
+            ))
+            .when(!compact, |row| {
+                row.child(div().min_w_0().text_sm().text_ellipsis().child(
+                    if field == "reasoning" {
+                        crate::gpui_agent_session::reasoning_label(value)
+                    } else {
+                        value.to_owned()
+                    },
+                ))
+            })
+            .into_any_element()
+    }
+
+    fn prompt_text_control(
+        &self,
+        spec: &DialogSpec,
+        invalid: bool,
+        cx: &Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let destructive = gpui_kit::component::Theme::global(cx)
+            .semantic_tokens()
+            .colors
+            .destructive;
+        if spec.multiline {
+            Textarea::new(&self.prompt_textarea)
+                .token(crate::gpui_prompt_attachments::render)
+                .disabled(spec.busy)
+                .w_full()
+                .into_any_element()
+        } else {
+            crate::gpui::focus_input(
+                &self.prompt_input,
+                Input::new(&self.prompt_input)
+                    .disabled(spec.busy)
+                    .w_full()
+                    .when(invalid, |input| input.border_color(destructive)),
+            )
+            .into_any_element()
+        }
+    }
+
     fn prompt_extra_actions(spec: &DialogSpec, cx: &Context<Self>) -> Vec<Button> {
         spec.rows
             .iter()
@@ -1105,7 +2148,13 @@ impl DialogView {
                 let (input, _) = self.fields.get(&field.id)?;
                 public_selector(
                     format!("dialog-field-input-{}", field.id),
-                    crate::gpui::focus_input(input, Input::new(input).disabled(spec.busy).w_full()),
+                    crate::gpui::focus_input(
+                        input,
+                        Input::new(input)
+                            .aria_label(field.label.clone())
+                            .disabled(spec.busy)
+                            .w_full(),
+                    ),
                 )
             }
             DialogFieldKind::Choice(options) => {
@@ -1166,15 +2215,29 @@ impl DialogView {
                 )
             }
         };
-        Some(
-            v_flex()
-                .id(SharedString::from(format!("dialog-field-{}", field.id)))
-                .w_full()
-                .gap_1()
-                .child(div().text_sm().child(field.label.clone()))
-                .child(control)
-                .into_any_element(),
-        )
+        Some(Self::prompt_control_row(
+            spec,
+            &format!("dialog-field-{}", field.id),
+            Some(&field.label),
+            control,
+        ))
+    }
+
+    fn prompt_control_row(
+        _: &DialogSpec,
+        id: &str,
+        label: Option<&str>,
+        control: gpui_kit::AnyElement,
+    ) -> gpui_kit::AnyElement {
+        v_flex()
+            .id(SharedString::from(id.to_owned()))
+            .w_full()
+            .gap_1()
+            .when_some(label, |row, label| {
+                row.child(div().text_sm().child(label.to_owned()))
+            })
+            .child(control)
+            .into_any_element()
     }
 
     fn confirm_panel(spec: &DialogSpec, cx: &Context<Self>) -> gpui_kit::AnyElement {
@@ -1931,6 +2994,9 @@ impl Focusable for DialogView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self.spec.as_ref().map(|spec| spec.role) {
             Some(DialogRole::TerminalFind) => self.find_input.read(cx).focus_handle(cx),
+            Some(DialogRole::Prompt) if self.spec.as_ref().is_some_and(|spec| spec.multiline) => {
+                self.prompt_textarea.read(cx).focus_handle(cx)
+            }
             Some(DialogRole::Prompt) => self.prompt_input_focus.clone(),
             Some(DialogRole::Confirm) => self.confirm_focus.clone(),
             Some(DialogRole::SearchableList | DialogRole::ThemePicker) | None => {
@@ -1949,12 +3015,20 @@ impl Focusable for DialogView {
 impl Render for DialogView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(spec) = self.spec.clone() else {
-            return div();
+            return div().into_any_element();
         };
         let command_focus = self.command_focus.clone();
-        let prompt_input_focus = self.prompt_input_focus.clone();
+        let prompt_input_focus = if spec.multiline {
+            self.prompt_textarea.read(cx).focus_handle(cx)
+        } else {
+            self.prompt_input_focus.clone()
+        };
         let confirm_focus = self.confirm_focus.clone();
-        div()
+        let panel = self.panel(&spec, window, cx);
+        let body = div()
+            .when(Self::is_agent_session_spec(&spec), |this| {
+                this.w_full().max_w(rems(44.0)).max_h_full().min_h_0()
+            })
             .when(spec.role == DialogRole::ThemePicker, |this| {
                 this.key_context("Command BoottyThemePicker")
             })
@@ -1977,9 +3051,12 @@ impl Render for DialogView {
             .when(spec.role == DialogRole::Prompt, |this| {
                 this.key_context("Input")
                     .track_focus(&prompt_input_focus)
+                    .on_action(cx.listener(Self::on_cancel_action))
                     .on_action(
                         cx.listener(|this, _: &gpui_kit::base::actions::Confirm, _, cx| {
-                            this.prompt_submit(cx);
+                            if !this.spec.as_ref().is_some_and(|spec| spec.multiline) {
+                                this.prompt_submit(cx);
+                            }
                             cx.stop_propagation();
                         }),
                     )
@@ -1994,7 +3071,14 @@ impl Render for DialogView {
                     )
             })
             .on_key_down(cx.listener(Self::on_key_down))
-            .child(self.panel(&spec, window, cx))
+            .child(panel);
+        if Self::is_agent_session_spec(&spec) {
+            body.id("dialog-agent-form")
+                .overflow_y_scroll()
+                .into_any_element()
+        } else {
+            body.into_any_element()
+        }
     }
 }
 

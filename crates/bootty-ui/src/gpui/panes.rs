@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use gpui_kit::{
     AnyElement, App, Empty, Hsla, IntoElement, MouseButton, ParentElement, Pixels, Point,
-    SharedString, Styled, Window, div, prelude::*, px, rgba,
+    SharedString, Styled, Window, div, prelude::*, px, relative, rgba,
 };
 
 const MIN_PANE_PX: f32 = 80.0;
@@ -344,10 +344,12 @@ impl<T: IntoElement + 'static> GpuiPaneWorkspace<T> {
         div()
             .id(SharedString::from(format!("terminal-pane-{pane_id}")))
             .absolute()
-            .left(px(pane_rect.x))
-            .top(px(pane_rect.y))
-            .w(px(pane_rect.width))
-            .h(px(pane_rect.height))
+            // A resize can paint before the owner publishes its next measured frame.
+            // Keep pane content inside the current container during that first paint.
+            .left(relative(pane_rect.x / area.width.max(1.0)))
+            .top(relative(pane_rect.y / area.height.max(1.0)))
+            .w(relative(pane_rect.width / area.width.max(1.0)))
+            .h(relative(pane_rect.height / area.height.max(1.0)))
             // Focus at press time so terminal selection/input targets the clicked pane on
             // the same event. The workspace host owns terminal input; this intent owns pane
             // selection, so it must not stop propagation here.
@@ -571,10 +573,10 @@ impl<T: IntoElement + 'static> GpuiPaneWorkspace<T> {
             .id(group.clone())
             .group(group.clone())
             .absolute()
-            .left(px(handle.x))
-            .top(px(handle.y))
-            .w(px(handle.width))
-            .h(px(handle.height))
+            .left(relative(handle.x / area.width.max(1.0)))
+            .top(relative(handle.y / area.height.max(1.0)))
+            .w(relative(handle.width / area.width.max(1.0)))
+            .h(relative(handle.height / area.height.max(1.0)))
             .child(
                 div()
                     .debug_selector(move || visual_id)

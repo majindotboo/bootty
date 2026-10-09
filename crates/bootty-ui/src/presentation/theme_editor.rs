@@ -34,6 +34,7 @@ pub struct ThemeEditorDialog {
     error: Option<String>,
     notice: Option<String>,
     pending: Option<(String, Receiver<CommandOutcome>, CommandCancellation)>,
+    preview_active: bool,
 }
 
 pub enum ThemeEditorEvent {
@@ -58,6 +59,7 @@ impl ThemeEditorDialog {
             error: None,
             notice: None,
             pending: None,
+            preview_active: false,
         }
     }
 
@@ -70,6 +72,73 @@ impl ThemeEditorDialog {
     #[must_use]
     pub fn load(&self) -> ThemeEditorEvent {
         Self::command("theme.read", vec![self.load_name.clone()])
+    }
+
+    #[must_use]
+    pub const fn is_busy(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    #[must_use]
+    pub const fn preview_active(&self) -> bool {
+        self.preview_active
+    }
+
+    /// Use the same validated document editing path for the dedicated native editor.
+    pub fn edit_field(&mut self, field: &str, value: String) -> Option<ThemeEditorEvent> {
+        let intent = if field == "name" {
+            DialogIntent::TextChanged {
+                dialog: crate::gpui::DialogId("theme-editor".to_owned()),
+                value,
+            }
+        } else {
+            DialogIntent::FieldChanged {
+                dialog: crate::gpui::DialogId("theme-editor".to_owned()),
+                field: field.to_owned(),
+                value,
+            }
+        };
+        let _ = self.apply(&intent);
+        if COLORS.contains(&field) || field.starts_with("palette-") {
+            self.activate("preview")
+        } else {
+            None
+        }
+    }
+
+    pub fn activate(&mut self, action: &str) -> Option<ThemeEditorEvent> {
+        let action = DialogAction::new(action);
+        self.apply(&DialogIntent::Activate {
+            dialog: crate::gpui::DialogId("theme-editor".to_owned()),
+            row: crate::gpui::RowId(action.id.0.clone()),
+            action: action.id,
+            payload: action.payload,
+        })
+    }
+
+    pub fn restore_preview(&mut self) -> Option<ThemeEditorEvent> {
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|(action, _, _)| action == "theme.restore")
+        {
+            return None;
+        }
+        if !self.preview_active
+            && self
+                .pending
+                .as_ref()
+                .is_none_or(|(action, _, _)| action != "theme.preview")
+        {
+            return None;
+        }
+        if let Some((_, _, cancellation)) = self.pending.take() {
+            let _ = cancellation.cancel();
+        }
+        // A pending preview may already have been applied. Keep restoration required
+        // through queue rejection and command failure until the owner confirms it.
+        self.preview_active = true;
+        Some(Self::command("theme.restore", Vec::new()))
     }
 
     pub fn spec(&self) -> DialogSpec {
@@ -330,12 +399,20 @@ impl ThemeEditorDialog {
                     }
                     self.notice = None;
                 }
-                "theme.apply" => self.notice = Some(format!("Saved and applied {}", self.name)),
+                "theme.apply" => {
+                    self.preview_active = false;
+                    self.notice = Some(format!("Saved and applied {}", self.name));
+                }
                 "theme.preview" => {
+                    self.preview_active = true;
                     self.notice = Some(
                         "Preview active. Close to restore, or Save and Apply to keep it."
                             .to_owned(),
                     );
+                }
+                "theme.restore" => {
+                    self.preview_active = false;
+                    self.notice = None;
                 }
                 _ => {}
             },
@@ -347,7 +424,10 @@ impl ThemeEditorDialog {
 
 impl Drop for ThemeEditorDialog {
     fn drop(&mut self) {
-        if let Some((_, _, cancellation)) = &self.pending {
+        if let Some((action, _, cancellation)) = &self.pending
+            && action != "theme.restore"
+        {
+            // Restoring a temporary preview must survive closing its editor.
             let _ = cancellation.cancel();
         }
     }

@@ -509,9 +509,9 @@ impl DocumentPanel {
                 }
             }
             Ok(
-                FileResponse::Completions(_)
-                | FileResponse::Source(_)
+                FileResponse::Source(_)
                 | FileResponse::Directory(_)
+                | FileResponse::Completions(_)
                 | FileResponse::Location { .. }
                 | FileResponse::Formatted { .. },
             ) => self.fail(

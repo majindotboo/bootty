@@ -112,7 +112,8 @@ pub fn run(
             &app_reopen_context,
             cx,
         );
-        if result.is_err() {
+        if let Err(error) = &result {
+            eprintln!("Bootty startup failed: {error:#}");
             cx.quit();
         }
         app_launch_result.replace(Some(result));
@@ -163,6 +164,68 @@ pub fn run(
         .unwrap_or_else(|| Err(anyhow!("GPUI exited before Bootty finished launching")))
 }
 
+#[cfg(target_os = "macos")]
+fn register_menu_actions(localizer: &crate::i18n::Localizer, cx: &mut App) {
+    // A native browser can own first responder outside GPUI's focus tree.
+    // Application menu actions still use the frontmost workspace's command path.
+    cx.on_action(|action: &crate::gpui_actions::InvokeCommand, cx| {
+        if !matches!(
+            action.invocation().command.as_str(),
+            "open_settings" | "quit" | "new_mux_session"
+        ) {
+            return;
+        }
+        let invocation = action.invocation().clone();
+        let windows = cx
+            .window_stack()
+            .filter(|windows| !windows.is_empty())
+            .unwrap_or_else(|| cx.windows());
+        // Menu dispatch can already hold the active window's update lease.
+        cx.defer(move |cx| {
+            for handle in windows {
+                let handled = handle.update(cx, |root, window, cx| {
+                    let Ok(root) = root.downcast::<Root>() else {
+                        return false;
+                    };
+                    let Ok(workspace) = workspace_view(root.read(cx)) else {
+                        return false;
+                    };
+                    workspace.update(cx, |workspace, cx| {
+                        workspace.invoke_gpui_command(invocation.clone(), window, cx);
+                    });
+                    true
+                });
+                if handled.unwrap_or(false) {
+                    break;
+                }
+            }
+        });
+    });
+    let about_title = localizer.message("menu-about", None);
+    let about_version = format!("Version {}", env!("CARGO_PKG_VERSION"));
+    cx.on_action(move |_: &crate::menu::About, cx| {
+        let window = cx
+            .window_stack()
+            .and_then(|windows| windows.into_iter().next())
+            .or_else(|| cx.windows().into_iter().next());
+        if let Some(window) = window {
+            let title = about_title.clone();
+            let version = about_version.clone();
+            cx.defer(move |cx| {
+                let _ = window.update(cx, |_, window, cx| {
+                    drop(window.prompt(
+                        gpui_kit::PromptLevel::Info,
+                        &title,
+                        Some(&version),
+                        &["Close"],
+                        cx,
+                    ));
+                });
+            });
+        }
+    });
+}
+
 fn launch(
     config: BoottyConfig,
     window_state_key: String,
@@ -188,7 +251,8 @@ fn launch(
     let localizer = crate::i18n::Localizer::new(&config.locale)?;
     crate::i18n::publish(&localizer, cx);
     crate::gpui_document_panel::init(cx);
-    app_menu.replace(crate::menu::install(&localizer));
+    #[cfg(target_os = "macos")]
+    register_menu_actions(&localizer, cx);
     #[cfg(target_os = "macos")]
     cx.bind_keys([KeyBinding::new(
         "cmd-`",
@@ -214,6 +278,7 @@ fn launch(
         cx,
     )
     .context("open Bootty window")?;
+    app_menu.replace(Some(crate::menu::install(&localizer, cx)));
     cx.activate(true);
     window
         .update(cx, |_, window, _| window.activate_window())

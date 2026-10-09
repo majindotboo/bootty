@@ -1,109 +1,74 @@
-//! Native application menu, built with `muda`.
+//! Native application menu, owned by GPUI.
 //!
-//! The menu is installed as the macOS application menu (`NSApp.mainMenu`); its `Settings…`
-//! accelerator (cmd+,) is dispatched by `AppKit` and clicks arrive on `muda`'s global event channel,
-//! which the app drains each frame via [`settings_requested`]. The keybind path opens the same
-//! window, so the menu is an additional entry point rather than the only one.
-//!
-//! Other platforms fall back to the keybind only; their native menu integration is a follow-up.
+//! Edit actions use GPUI's typed input actions so native responder selectors and focused GPUI
+//! inputs share one dispatch path. Muda remains the event source for the agent tray.
 
 #[cfg(target_os = "macos")]
 mod platform_menu {
-    use std::sync::{Arc, Mutex, OnceLock, Weak, mpsc::Receiver, mpsc::SyncSender};
+    use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
+    use gpui_kit::{Menu, MenuItem, OsAction};
+    use muda::MenuEvent;
 
-    use muda::{
-        Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
-        accelerator::{Accelerator, Code, Modifiers},
-    };
+    const SETTINGS_COMMAND: &str = "open_settings";
+    const QUIT_COMMAND: &str = "quit";
 
-    const SETTINGS_ID: &str = "bootty.settings";
+    #[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
+    #[action(namespace = bootty_menu, no_json)]
+    pub struct About;
 
-    /// Holds the menu alive for the process lifetime; dropping it would tear down the menu.
-    pub struct AppMenu {
-        _menu: Menu,
-    }
-
-    type MenuEvents = (SyncSender<MenuEvent>, Mutex<Receiver<MenuEvent>>);
-    type MenuWake = dyn Fn() + Send + Sync;
-    type MenuWakes = Mutex<Vec<Weak<MenuWake>>>;
-    static EVENTS: OnceLock<MenuEvents> = OnceLock::new();
-    static WAKES: OnceLock<MenuWakes> = OnceLock::new();
-
-    fn events() -> &'static MenuEvents {
-        EVENTS.get_or_init(|| {
-            let (sender, receiver) = std::sync::mpsc::sync_channel(16);
-            (sender, Mutex::new(receiver))
-        })
-    }
-
-    fn wakes() -> &'static MenuWakes {
-        WAKES.get_or_init(|| Mutex::new(Vec::new()))
-    }
+    /// Keeps the app menu installation in the native host's lifetime slot.
+    pub struct AppMenu;
 
     #[must_use]
-    pub fn install(localizer: &crate::i18n::Localizer) -> Option<AppMenu> {
-        let sender = events().0.clone();
-        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            if crate::agent_tray::dispatch(&event.id.0) {
-                return;
-            }
-            let _ = sender.try_send(event);
-            if let Ok(mut wakes) = wakes().lock() {
-                wakes.retain(|wake| {
-                    let Some(wake) = wake.upgrade() else {
-                        return false;
-                    };
-                    wake();
-                    true
-                });
-            }
+    pub fn install(localizer: &crate::i18n::Localizer, cx: &mut gpui_kit::App) -> AppMenu {
+        MenuEvent::set_event_handler(Some(|event: MenuEvent| {
+            crate::agent_tray::dispatch(&event.id.0);
         }));
-        let menu = Menu::new();
-        let app_menu = Submenu::new("Bootty", true);
-        let settings = MenuItem::with_id(
-            SETTINGS_ID,
-            localizer.message("menu-settings", None),
-            true,
-            Some(Accelerator::new(Modifiers::META, Code::Comma)),
-        );
-        app_menu
-            .append_items(&[
-                &PredefinedMenuItem::about(Some(&localizer.message("menu-about", None)), None),
-                &PredefinedMenuItem::separator(),
-                &settings,
-                &PredefinedMenuItem::separator(),
-                &PredefinedMenuItem::quit(Some(&localizer.message("menu-quit", None))),
-            ])
-            .ok()?;
-        menu.append(&app_menu).ok()?;
-        menu.init_for_nsapp();
-        Some(AppMenu { _menu: menu })
+        refresh(localizer, cx);
+        AppMenu
     }
 
-    /// Register a GPUI wake edge so a native menu click is observed even while the app is idle.
-    pub fn set_wake(wake: &Arc<dyn Fn() + Send + Sync>) {
-        if let Ok(mut wakes) = wakes().lock() {
-            wakes.push(Arc::downgrade(wake));
-            wakes.retain(|wake| wake.strong_count() > 0);
-        }
-    }
-
-    /// Drain pending menu events; returns `true` if the Settings item was activated.
-    #[must_use]
-    pub fn settings_requested(window_active: bool) -> bool {
-        if !window_active {
-            return false;
-        }
-        let mut requested = false;
-        let Ok(events) = events().1.lock() else {
-            return false;
+    pub fn refresh(localizer: &crate::i18n::Localizer, cx: &gpui_kit::App) {
+        let command = |name| {
+            crate::gpui_actions::InvokeCommand::new(bootty_control::CommandInvocation::from_action(
+                name,
+                bootty_control::Caller::Keybinding,
+            ))
         };
-        while let Ok(event) = events.try_recv() {
-            if event.id == MenuId::new(SETTINGS_ID) {
-                requested = true;
-            }
-        }
-        requested
+        cx.set_menus([
+            Menu::new("Bootty").items([
+                MenuItem::action(localizer.message("menu-about", None), About),
+                MenuItem::separator(),
+                MenuItem::action(
+                    localizer.message("menu-settings", None),
+                    command(SETTINGS_COMMAND),
+                ),
+                MenuItem::separator(),
+                MenuItem::action(localizer.message("menu-quit", None), command(QUIT_COMMAND)),
+            ]),
+            Menu::new(localizer.text("menu-file", "File")).items([MenuItem::action(
+                localizer.text("menu-new-session", "New Session"),
+                command("new_mux_session"),
+            )]),
+            Menu::new(localizer.text("menu-edit", "Edit")).items([
+                MenuItem::os_action(localizer.text("menu-undo", "Undo"), Undo, OsAction::Undo),
+                MenuItem::os_action(localizer.text("menu-redo", "Redo"), Redo, OsAction::Redo),
+                MenuItem::separator(),
+                MenuItem::os_action(localizer.text("menu-cut", "Cut"), Cut, OsAction::Cut),
+                MenuItem::os_action(localizer.text("menu-copy", "Copy"), Copy, OsAction::Copy),
+                MenuItem::os_action(
+                    localizer.text("menu-paste", "Paste"),
+                    Paste,
+                    OsAction::Paste,
+                ),
+                MenuItem::separator(),
+                MenuItem::os_action(
+                    localizer.text("menu-select-all", "Select All"),
+                    SelectAll,
+                    OsAction::SelectAll,
+                ),
+            ]),
+        ]);
     }
 }
 
@@ -112,16 +77,11 @@ mod platform_menu {
     pub struct AppMenu;
 
     #[must_use]
-    pub const fn install(_: &crate::i18n::Localizer) -> Option<AppMenu> {
-        None
-    }
-
-    pub fn set_wake(_: &std::sync::Arc<dyn Fn() + Send + Sync>) {}
-
-    #[must_use]
-    pub const fn settings_requested(_: bool) -> bool {
-        false
+    pub const fn install(_: &crate::i18n::Localizer, _: &mut gpui_kit::App) -> AppMenu {
+        AppMenu
     }
 }
 
-pub use platform_menu::{AppMenu, install, set_wake, settings_requested};
+#[cfg(target_os = "macos")]
+pub use platform_menu::{About, refresh};
+pub use platform_menu::{AppMenu, install};
