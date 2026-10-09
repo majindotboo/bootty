@@ -63,7 +63,7 @@ fn a_snapshot_carries_the_bootty_tag_and_leaves_untagged_sessions_unclaimed(
     let listing = concat!(
         "s\x1f$0\x1fwork\x1f9f3a\x1fspace-7\x1f1\x1f2\x1f%1\x1f4242\x1f/repo\x1fzsh\n",
         "s\x1f$1\x1fscratch\x1f\x1f\x1f0\x1f1\x1f%2\x1f4243\x1f/tmp\x1fbash\n",
-        "p\x1f$0\x1f@0\x1f0\x1feditor\x1f1\x1f1\x1f%1\x1f\x1f\x1f/repo\x1fzsh\n",
+        "p\x1f$0\x1f@0\x1f0\x1feditor\x1f1\x1f1\x1f%1\x1f\x1f\x1f/repo\x1fzsh\x1f\x1f\x1f4242\n",
     )
     .replace('\x1f', separator);
     let snapshot = backend(&listing)
@@ -82,6 +82,10 @@ fn a_snapshot_carries_the_bootty_tag_and_leaves_untagged_sessions_unclaimed(
     assert!(!snapshot.sessions[1].active);
     assert_eq!(snapshot.sessions[0].anchor.cwd.as_deref(), Some("/repo"));
     assert_eq!(snapshot.sessions[0].anchor.pane_pid, Some(4242));
+    assert_eq!(
+        snapshot.sessions[0].windows[0].panes[0].pane_pid,
+        Some(4242)
+    );
     assert_eq!(snapshot.sessions[1].anchor.process.as_deref(), Some("bash"));
 }
 

@@ -42,7 +42,7 @@ fn start_embedded_rmux_daemon_for_tests() -> Result<()> {
     static STARTED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
     STARTED
         .get_or_init(|| {
-            let socket = endpoint_path_for(ApplicationIdentity::Production)
+            let socket = endpoint_path_for(ApplicationIdentity::for_process())
                 .map_err(|error| error.to_string())?;
             let (ready_tx, ready_rx) = mpsc::sync_channel(1);
             thread::spawn(move || {
@@ -364,7 +364,7 @@ mod scenario {
         second_terminal.write_input(b"printf 'BOOTTY_RMUX_SECOND_READER\\n'\r")?;
         wait_for_terminal_text(&mut second_terminal, "BOOTTY_RMUX_SECOND_READER")?;
 
-        let endpoint = endpoint_path_for(ApplicationIdentity::Production)?;
+        let endpoint = endpoint_path_for(ApplicationIdentity::for_process())?;
         let rmux_root = endpoint.parent().context("embedded rmux endpoint parent")?;
         let spool_files = std::fs::read_dir(rmux_root)?
             .filter_map(Result::ok)
@@ -1430,7 +1430,7 @@ if expected in data:
                 })?;
             }
         }
-        let endpoint = endpoint_path_for(ApplicationIdentity::Production)?;
+        let endpoint = endpoint_path_for(ApplicationIdentity::for_process())?;
         let runtime = Builder::new_current_thread().enable_all().build()?;
         let mut sizes = None;
         for _ in 0..32 {
@@ -1483,7 +1483,7 @@ if expected in data:
         };
         run_remote_rmux_command(&request.encode()?)?;
 
-        let endpoint = endpoint_path_for(ApplicationIdentity::Production)?;
+        let endpoint = endpoint_path_for(ApplicationIdentity::for_process())?;
         let reported_size = Builder::new_current_thread()
             .enable_all()
             .build()?
@@ -1785,7 +1785,7 @@ if expected in data:
         std::thread::sleep(std::time::Duration::from_millis(100));
         wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_BOUND_END")?;
         let spool_files = std::fs::read_dir(
-            endpoint_path_for(ApplicationIdentity::Production)?
+            endpoint_path_for(ApplicationIdentity::for_process())?
                 .parent()
                 .context("embedded rmux endpoint parent")?,
         )?
@@ -1823,7 +1823,8 @@ if expected in data:
 /// Run one scenario in a child process with its own rmux daemon and a pane
 /// environment that is the same on every machine.
 fn run_embedded_scenario(scenario: &str) -> Result<()> {
-    let directory = assert_fs::TempDir::new()?;
+    // The socket path includes the development namespace and must fit Unix socket limits.
+    let directory = assert_fs::TempDir::new_in("/tmp")?;
     let helper = directory.path().join("bootty-daemon");
     std::fs::write(
         &helper,
@@ -1838,7 +1839,6 @@ fn run_embedded_scenario(scenario: &str) -> Result<()> {
         .env(SCENARIO_ENV, scenario)
         .env("BOOTTY_DAEMON_BINARY", helper)
         .env("RMUX_TMPDIR", directory.path())
-        .env("BOOTTY_APPLICATION_IDENTITY", "bootty")
         .env("PATH", ISOLATED_PATH)
         // Panes inherit the daemon's environment. Pin the shell and its rc file
         // so a developer's login shell does not decide how long every pane takes

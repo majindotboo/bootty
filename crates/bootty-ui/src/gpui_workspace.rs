@@ -964,6 +964,7 @@ impl GpuiWorkspace {
         }
         let native_close = self
             .selected_native_conversation_target(cx)
+            .filter(|_| self.state.modal_dialog().is_none())
             .and_then(|target| {
                 crate::gpui_actions::native_conversation_close_invocation(
                     &invocation,

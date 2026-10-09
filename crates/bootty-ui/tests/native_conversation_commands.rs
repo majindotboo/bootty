@@ -473,12 +473,35 @@ impl Drop for Host {
         if let Some(service) = self.state.native_agent_service() {
             let _ = service.shutdown();
         }
+        // Shared backends expose other fixtures too; the private cwd proves ownership.
+        let root = self
+            .directory
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| self.directory.path().to_owned());
+        let owned = WorkspaceRepository::open(&self.state.config().config_path).map_or_else(
+            |_| std::collections::HashSet::new(),
+            |(_, snapshot)| {
+                snapshot
+                    .spaces()
+                    .iter()
+                    .flat_map(|space| space.binding().sessions().sessions())
+                    .filter(|session| Path::new(&session.cwd).starts_with(&root))
+                    .map(|session| session.backend_name.clone())
+                    .collect::<std::collections::HashSet<_>>()
+            },
+        );
         if let Ok(spaces) = self.spaces() {
             for session in spaces
                 .as_array()
                 .into_iter()
                 .flatten()
                 .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
+                .filter(|session| {
+                    session["name"]
+                        .as_str()
+                        .is_some_and(|name| owned.contains(name))
+                })
             {
                 if let Ok(target) =
                     serde_json::from_value::<CommandTarget>(session["target"].clone())
@@ -3538,5 +3561,81 @@ fn model_catalog_and_favorites_reuse_the_captured_provider_discovery() -> TestRe
         assert_eq!(models[0]["is_favorite"], selected);
     }
     assert_eq!(success(host.submit(query)?)?, models);
+    Ok(())
+}
+
+#[rstest]
+fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let started = host.start(&binding, "creation-parent", "creation-parent-task", "")?;
+    let parent = record(&started)?;
+    let mut open = CommandInvocation::from_action("new_tab", Caller::Keybinding);
+    open.target = Some(parent.target());
+    success(host.submit(open)?)?;
+    let request = host
+        .state
+        .pending_new_surface()
+        .ok_or("surface request")?
+        .clone();
+    host.state.open_surface_agent_form(&request);
+    let invocation = CommandInvocation::new(
+        "surface.create_agent",
+        vec![
+            request.id.to_string(),
+            "codex".into(),
+            request.cwd.clone(),
+            host.program.clone(),
+            "[]".into(),
+            "New conversation".into(),
+            "captured".into(),
+            request.task_identity.clone(),
+            "New conversation".into(),
+            String::new(),
+        ],
+        Caller::Internal,
+    );
+    host.state
+        .apply_picker_event(NewSessionPickerEvent::Submit(invocation));
+    // Projection precedes command execution: the existing same-task record is already placed.
+    let _ = host.state.dialog_projection();
+    assert!(matches!(
+        host.state.modal_dialog(),
+        Some(bootty_ui::ModalDialog::NewSession(_))
+    ));
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .ok_or("deadline")?;
+    while host.state.pending_new_surface().is_some() || host.state.modal_dialog().is_some() {
+        host.tick();
+        let _ = host.state.dialog_projection();
+        if host.state.pending_new_surface().is_none() && host.state.modal_dialog().is_none() {
+            break;
+        }
+        host.wakes
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+    }
+    host.tick();
+    let selected = host
+        .state
+        .mux()
+        .selected_session_anchor()
+        .ok_or("selected pane")?;
+    let selected_agent = selected
+        .native_agent
+        .as_deref()
+        .ok_or("selected conversation")?;
+    assert_ne!(selected_agent, parent.id);
+    let records = host
+        .state
+        .native_agent_service()
+        .ok_or("native owner")?
+        .sessions();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.id == selected_agent
+                && record.task_identity == parent.task_identity)
+    );
     Ok(())
 }

@@ -1036,6 +1036,48 @@ impl AppState {
         }
     }
 
+    fn dispatch_creation_close(
+        &mut self,
+        command: &crate::commands::ResolvedCommandInvocation,
+        target_supplied: bool,
+        execution: Option<&(Instant, CommandCancellation)>,
+        effects: &mut Vec<AppEffect>,
+    ) -> Option<CommandDispatch> {
+        // Closing an unsubmitted composer must never close the pane behind it.
+        if target_supplied
+            || !matches!(
+                command.invocation.caller,
+                Caller::Keybinding | Caller::BuiltinKeybinding | Caller::CommandPalette
+            )
+            || !matches!(
+                command.executor,
+                CommandExecutor::Core(CoreCommandExecutor::Keybind(KeybindAction::Mux(
+                    MuxKeyAction::ClosePane
+                )))
+            )
+            || !matches!(
+                self.modal_dialog(),
+                Some(crate::state::ModalDialog::NewSession(_))
+            )
+        {
+            return None;
+        }
+        if let Err(error) = executor::begin_synchronous_command(execution.cloned()) {
+            return Some(CommandDispatch::Complete(command_outcome_for_mux_error(
+                error,
+            )));
+        }
+        // The empty workspace keeps its creation surface; dismissing it would leave no tab.
+        if self.mux().selected_session_anchor().is_some() {
+            self.dismiss_session_creation();
+            if self.modal_dialog().is_none() {
+                effects.push(AppEffect::FocusTerminal);
+            }
+        }
+        effects.push(AppEffect::RequestRepaint);
+        Some(CommandDispatch::Complete(CommandOutcome::success()))
+    }
+
     fn dispatch_command_with_execution(
         &mut self,
         invocation: CommandInvocation,
@@ -1049,6 +1091,11 @@ impl AppState {
             Ok(resolved) => resolved,
             Err(outcome) => return self.reject_command(outcome),
         };
+        if let Some(dispatch) =
+            self.dispatch_creation_close(&resolved, target_supplied, execution.as_ref(), effects)
+        {
+            return dispatch;
+        }
         match &resolved.executor {
             CommandExecutor::Core(CoreCommandExecutor::Surface(command)) => {
                 return self.dispatch_surface_command(

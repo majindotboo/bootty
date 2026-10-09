@@ -76,10 +76,10 @@ fn identities_use_separate_local_rmux_endpoint_names() {
 }
 
 #[test]
-fn an_uninitialized_process_uses_production_identity() {
+fn an_uninitialized_process_uses_its_build_identity() {
     assert_eq!(
         ApplicationIdentity::for_process(),
-        ApplicationIdentity::Production
+        ApplicationIdentity::current()
     );
 }
 

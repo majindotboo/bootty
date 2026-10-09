@@ -54,11 +54,11 @@ fn proxied_commands_preserve_hostile_arguments_without_remote_shell_parsing() {
         .expect("remote command")
         .split_whitespace()
         .collect::<Vec<_>>();
-    assert_eq!(
-        (fields[0].contains("bootty-daemon"), fields[1], fields.len()),
-        (true, "remote-exec", 3)
-    );
-    assert_eq!(run_remote_command(fields[2]).unwrap(), 0);
+    // Development invocations also carry their isolated namespace in the environment.
+    let [method, payload] = fields.last_chunk::<2>().unwrap();
+    assert!(fields.iter().any(|field| field.contains("bootty-daemon")));
+    assert_eq!(*method, "remote-exec");
+    assert_eq!(run_remote_command(payload).unwrap(), 0);
 }
 
 #[test]

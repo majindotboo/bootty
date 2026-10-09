@@ -5558,3 +5558,64 @@ fn sidebar_navigation_skips_sessions_in_collapsed_projects() {
         first_id
     );
 }
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn close_surface_on_creation_preserves_the_underlying_workspace(
+    #[case] has_session: bool,
+    #[values(Caller::Keybinding, Caller::BuiltinKeybinding, Caller::CommandPalette)] caller: Caller,
+) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let mut state = native_state(directory.path());
+    if has_session {
+        open_native_session(&mut state, directory.path(), Instant::now());
+    }
+    let pane = state
+        .mux()
+        .selected_session_anchor()
+        .and_then(|anchor| anchor.pane_id.clone());
+    let count = state.mux().sessions().len();
+    let opened = submit_action(
+        &mut state,
+        "new_mux_session",
+        Caller::Keybinding,
+        Instant::now(),
+    );
+    assert!(
+        matches!(opened, CommandOutcome::Success { .. }),
+        "{opened:?}"
+    );
+    assert!(matches!(
+        state.modal_dialog(),
+        Some(ModalDialog::NewSession(_))
+    ));
+    let started = Instant::now();
+    let outcomes = state
+        .app_command_sender(caller)
+        .submit(
+            CommandInvocation::from_action("close_surface", caller),
+            started.checked_add(Duration::from_secs(1)).unwrap(),
+            CommandCancellation::new(),
+        )
+        .unwrap();
+    state.update_frame(frames::idle_frame(started));
+    let closed = outcomes.try_recv().expect("composer close is synchronous");
+    assert!(
+        matches!(closed, CommandOutcome::Success { .. }),
+        "{closed:?}"
+    );
+    assert_eq!(state.mux().sessions().len(), count);
+    assert_eq!(
+        state
+            .mux()
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.pane_id.clone()),
+        pane
+    );
+    assert_eq!(
+        matches!(state.modal_dialog(), Some(ModalDialog::NewSession(_))),
+        !has_session
+    );
+    assert_eq!(state.last_error(), None);
+}

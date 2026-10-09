@@ -787,7 +787,7 @@ impl<R: CommandRunner> TmuxBackend<R> {
             "list-panes",
             "-a",
             "-F",
-            "p\x1f#{session_id}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{pane_active}\x1f#{pane_id}\x1f#{pane_pb_state}\x1f#{pane_pb_progress}\x1f#{pane_current_path}\x1f#{pane_current_command}\x1f#{window_layout}\x1f#{@bootty_native_agent}",
+            "p\x1f#{session_id}\x1f#{window_id}\x1f#{window_index}\x1f#{window_name}\x1f#{window_active}\x1f#{pane_active}\x1f#{pane_id}\x1f#{pane_pb_state}\x1f#{pane_pb_progress}\x1f#{pane_current_path}\x1f#{pane_current_command}\x1f#{window_layout}\x1f#{@bootty_native_agent}\x1f#{pane_pid}",
         ])? else {
             return Ok(MuxSnapshot::default());
         };
@@ -1671,6 +1671,7 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
             .and_then(|value| parse_with_checksum(&value).ok());
 
         let native_agent = fields.next().and_then(nonempty);
+        let pane_process_id = fields.next().and_then(|value| value.parse().ok());
         let Some(session) = sessions.iter_mut().find(|session| session.id == session_id) else {
             continue;
         };
@@ -1685,10 +1686,10 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
             let anchor = MuxPaneAnchor {
                 session_id,
                 pane_id,
-                pane_pid: None,
-                native_agent,
+                pane_pid: pane_process_id,
                 cwd,
                 process,
+                native_agent,
             };
             if pane_active || window.anchor.pane_id.is_none() {
                 window.anchor = anchor.clone();
@@ -1701,10 +1702,10 @@ fn add_tmux_windows(sessions: &mut [MuxSession], pane_listing: &str) {
         let anchor = MuxPaneAnchor {
             session_id,
             pane_id,
-            pane_pid: None,
-            native_agent,
+            pane_pid: pane_process_id,
             cwd,
             process,
+            native_agent,
         };
         session.windows.push(MuxWindow {
             id: window_id,

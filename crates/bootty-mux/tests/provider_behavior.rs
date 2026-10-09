@@ -555,6 +555,31 @@ impl ResourceIds {
 
 proptest! {
     #[test]
+    fn terminal_targets_follow_the_pane_process_not_its_foreground_command(
+        ids in any::<ResourceIds>(), pid in 1_u32..u32::MAX, command in ".{0,32}"
+    ) {
+        let provider = Provider::new(MuxBackendKind::Tmux, usize::MAX);
+        provider.caller_thread.store(true, Ordering::SeqCst);
+        let mut controller = controller(Arc::clone(&provider), 5).unwrap();
+        let scope = SpaceId::from_persistence(5);
+        let repaint: RepaintHandle = Arc::new(|| {});
+        let mut snapshot = ids.snapshot();
+        snapshot.sessions[0].windows[0].anchor.pane_pid = Some(pid);
+        *provider.calls.snapshot.lock().unwrap() = snapshot.clone();
+        controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
+        let pane = ExactMuxTarget::Pane(scope, ids.session, ids.window, ids.pane);
+        let target = pane.command_target(ResourceKind::Terminal, &controller, "binding").unwrap();
+        snapshot.sessions[0].windows[0].anchor.process = Some(command);
+        *provider.calls.snapshot.lock().unwrap() = snapshot.clone();
+        controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
+        prop_assert_eq!(exact_mux_target(scope, &controller, &target, "binding"), Some(pane));
+        snapshot.sessions[0].windows[0].anchor.pane_pid = Some(pid.saturating_add(1));
+        *provider.calls.snapshot.lock().unwrap() = snapshot;
+        controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
+        prop_assert_eq!(exact_mux_target(scope, &controller, &target, "binding"), None);
+    }
+
+    #[test]
     fn live_targets_round_trip_and_cannot_retarget_recreated_resources(ids in any::<ResourceIds>()) {
         let provider = Provider::new(MuxBackendKind::Tmux, usize::MAX);
         provider.caller_thread.store(true, Ordering::SeqCst);

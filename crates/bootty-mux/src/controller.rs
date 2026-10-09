@@ -664,7 +664,10 @@ impl MuxController {
                             window.id.clone(),
                             pane_id.clone(),
                         ),
-                        format!("{:?}:{:?}", pane.pane_pid, pane.process),
+                        pane.pane_pid.map_or_else(
+                            || format!("process:{:?}", pane.process),
+                            |pid| format!("pid:{pid}"),
+                        ),
                     );
                 }
             }
