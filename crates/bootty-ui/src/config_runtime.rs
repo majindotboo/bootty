@@ -93,6 +93,10 @@ impl AppConfigRuntime {
         self.runtime.configured_font_size()
     }
 
+    pub(super) const fn configured_ui_font_size(&self) -> f32 {
+        self.runtime.configured_ui_font_size()
+    }
+
     pub(super) const fn revision(&self) -> u64 {
         self.runtime.revision()
     }
@@ -213,6 +217,10 @@ impl AppConfigRuntime {
 
     pub(super) fn replace_preview_config(&mut self, config: BoottyConfig) {
         self.runtime.replace_preview_config(config);
+    }
+
+    pub(super) fn set_ui_font_size(&mut self, size: f32) {
+        self.runtime.set_ui_font_size(size);
     }
 
     pub(super) fn set_font_size(&mut self, size: f32) {

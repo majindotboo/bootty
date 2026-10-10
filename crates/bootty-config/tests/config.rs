@@ -1522,3 +1522,63 @@ fn session_grouping_preference(#[case] source: &str, #[case] expected: bool) {
         expected
     );
 }
+
+#[rstest]
+#[case("bootty")]
+#[case("tmux")]
+#[case("ghostty")]
+fn every_preset_zooms_all_fonts_and_leaves_specific_font_actions_unbound(#[case] preset: &str) {
+    let config = load_config_source(&format!("[input]\npreset = '{preset}'\n")).unwrap();
+    let modifier = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    for backend in [
+        MultiplexerBackendConfig::Native,
+        MultiplexerBackendConfig::Rmux,
+        MultiplexerBackendConfig::Tmux,
+    ] {
+        let entries = config.input.keybinds_for_backend(backend);
+        for (key, action) in [
+            (format!("{modifier}+="), "increase_all_font_sizes:1"),
+            (format!("{modifier}++"), "increase_all_font_sizes:1"),
+            (format!("{modifier}+-"), "decrease_all_font_sizes:1"),
+            (format!("{modifier}+0"), "reset_all_font_sizes"),
+            (
+                "alt+shift+scroll_up".to_owned(),
+                "increase_all_font_sizes:0.25",
+            ),
+            (
+                "alt+shift+scroll_down".to_owned(),
+                "decrease_all_font_sizes:0.25",
+            ),
+        ] {
+            let matching: Vec<_> = entries
+                .iter()
+                .filter_map(|entry| split_keybind_entry(entry))
+                .filter(|(trigger, _)| *trigger == key)
+                .map(|(_, action)| action)
+                .collect();
+            assert_eq!(matching, vec![action]);
+        }
+        for entry in entries {
+            let (_, action) = split_keybind_entry(&entry).unwrap();
+            let name = action.split(':').next().unwrap();
+            assert!(
+                ![
+                    "increase_font_size",
+                    "decrease_font_size",
+                    "reset_font_size",
+                    "set_font_size",
+                    "increase_ui_font_size",
+                    "decrease_ui_font_size",
+                    "reset_ui_font_size",
+                    "set_ui_font_size"
+                ]
+                .contains(&name),
+                "{entry}"
+            );
+        }
+    }
+}

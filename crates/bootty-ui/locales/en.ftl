@@ -243,7 +243,7 @@ command-create_space-title = New Space
 command-csi-description = Write a CSI escape sequence to the terminal
 command-csi-title = Send CSI
 command-decrease_font_size-description = Make the terminal text smaller
-command-decrease_font_size-title = Decrease Font Size
+command-decrease_font_size-title = Decrease Terminal Font Size
 command-settle_session-description = Mark current saved work settled without closing its terminal
 command-settle_session-title = Settle Session
 command-edit_space-description = Edit the active space
@@ -255,7 +255,7 @@ command-esc-title = Send ESC
 command-ignore-description = Do nothing — mask a default binding so the keys pass through
 command-ignore-title = Ignore
 command-increase_font_size-description = Make the terminal text larger
-command-increase_font_size-title = Increase Font Size
+command-increase_font_size-title = Increase Terminal Font Size
 command-kill_pane-description = Close the focused pane
 command-kill_pane-title = Kill Pane
 command-last_session-description = Toggle back to the most recent session
@@ -310,8 +310,8 @@ command-rename_session-description = Rename the current session
 command-rename_session-title = Rename Session
 command-rename_tab-description = Rename the current tab
 command-rename_tab-title = Rename Tab
-command-reset_font_size-description = Restore the configured font size
-command-reset_font_size-title = Reset Font Size
+command-reset_font_size-description = Restore the configured terminal font size
+command-reset_font_size-title = Reset Terminal Font Size
 command-scroll_page_down-description = Scroll down one page
 command-scroll_page_down-title = Scroll Page Down
 command-scroll_page_lines-description = Scroll by N lines (negative scrolls up)
@@ -336,8 +336,8 @@ command-select_tab-description = Jump to tab N (value 1–9)
 command-select_tab-title = Select Tab
 command-session_picker-description = Fuzzy-find and jump to an open session
 command-session_picker-title = Switch Session
-command-set_font_size-description = Set the font size to N points
-command-set_font_size-title = Set Font Size
+command-set_font_size-description = Set the terminal font size to N points
+command-set_font_size-title = Set Terminal Font Size
 command-show_changes-description = Open the Changes and Diff tool panels
 command-show_changes-title = Show Git Changes
 command-show_files-description = Open the Files panel for the terminal directory
@@ -382,3 +382,27 @@ panel-transfers = Transfers
 panel-recovery = Previous sessions
 panel-menu = Panels
 panel-hide = Hide panels
+
+command-increase_ui_font_size-title = Increase UI Font Size
+command-increase_ui_font_size-description = Make the UI text larger
+
+command-decrease_ui_font_size-title = Decrease UI Font Size
+command-decrease_ui_font_size-description = Make the UI text smaller
+
+command-reset_ui_font_size-title = Reset UI Font Size
+command-reset_ui_font_size-description = Restore the configured UI font size
+
+command-set_ui_font_size-title = Set UI Font Size
+command-set_ui_font_size-description = Set the UI font size to N points
+
+command-increase_all_font_sizes-title = Increase All Font Sizes
+command-increase_all_font_sizes-description = Make the terminal and UI text larger
+
+command-decrease_all_font_sizes-title = Decrease All Font Sizes
+command-decrease_all_font_sizes-description = Make the terminal and UI text smaller
+
+command-reset_all_font_sizes-title = Reset All Font Sizes
+command-reset_all_font_sizes-description = Restore the configured terminal and UI font sizes
+
+command-set_all_font_sizes-title = Set All Font Sizes
+command-set_all_font_sizes-description = Set the terminal and UI font sizes to N points

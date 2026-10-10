@@ -356,16 +356,40 @@ command_catalog! {
         "Copy Mode", "Enter tmux-style scrollback navigation and text selection",
         "copy_mode", "copy", Terminal, shown, Write, Terminal, None;
     IncreaseFontSize:
-        "Increase Font Size", "Make the terminal text larger",
+        "Increase Terminal Font Size", "Make the terminal text larger",
         "increase_font_size", "zoom-in", Terminal, "increase_font_size:1", Write,
         ApplicationWindow, FontSize;
     DecreaseFontSize:
-        "Decrease Font Size", "Make the terminal text smaller",
+        "Decrease Terminal Font Size", "Make the terminal text smaller",
         "decrease_font_size", "zoom-out", Terminal, "decrease_font_size:1", Write,
         ApplicationWindow, FontSize;
     ResetFontSize:
-        "Reset Font Size", "Restore the configured font size",
+        "Reset Terminal Font Size", "Restore the configured terminal font size",
         "reset_font_size", "type", Terminal, shown, Write, ApplicationWindow, None;
+    IncreaseAllFontSizes:
+        "Increase All Font Sizes", "Make the terminal and UI text larger",
+        "increase_all_font_sizes", "zoom-in", Appearance, "increase_all_font_sizes:1", Write,
+        ApplicationWindow, FontSize;
+    DecreaseAllFontSizes:
+        "Decrease All Font Sizes", "Make the terminal and UI text smaller",
+        "decrease_all_font_sizes", "zoom-out", Appearance, "decrease_all_font_sizes:1", Write,
+        ApplicationWindow, FontSize;
+    ResetAllFontSizes:
+        "Reset All Font Sizes", "Restore the configured terminal and UI font sizes",
+        "reset_all_font_sizes", "type", Appearance, shown, Write,
+        ApplicationWindow, None;
+    IncreaseUiFontSize:
+        "Increase UI Font Size", "Make the UI text larger",
+        "increase_ui_font_size", "zoom-in", Appearance, "increase_ui_font_size:1", Write,
+        ApplicationWindow, FontSize;
+    DecreaseUiFontSize:
+        "Decrease UI Font Size", "Make the UI text smaller",
+        "decrease_ui_font_size", "zoom-out", Appearance, "decrease_ui_font_size:1", Write,
+        ApplicationWindow, FontSize;
+    ResetUiFontSize:
+        "Reset UI Font Size", "Restore the configured UI font size",
+        "reset_ui_font_size", "type", Appearance, shown, Write,
+        ApplicationWindow, None;
     Find:
         "Find in Terminal", "Search the terminal scrollback",
         "start_search", "search", Terminal, shown, Write, Terminal, None;
@@ -436,8 +460,14 @@ command_catalog! {
         "Scroll Lines", "Scroll by N lines (negative scrolls up)",
         "scroll_page_lines", "list", Terminal, hidden, Write, Terminal, ScrollDelta;
     SetFontSize:
-        "Set Font Size", "Set the font size to N points",
+        "Set Terminal Font Size", "Set the terminal font size to N points",
         "set_font_size", "type", Terminal, hidden, Write, ApplicationWindow, FontSize;
+    SetAllFontSizes:
+        "Set All Font Sizes", "Set the terminal and UI font sizes to N points",
+        "set_all_font_sizes", "type", Appearance, hidden, Write, ApplicationWindow, FontSize;
+    SetUiFontSize:
+        "Set UI Font Size", "Set the UI font size to N points",
+        "set_ui_font_size", "type", Appearance, hidden, Write, ApplicationWindow, FontSize;
     Search:
         "Search Terminal", "Search the terminal scrollback for text",
         "search", "search", Terminal, hidden, Write, Terminal, Value;

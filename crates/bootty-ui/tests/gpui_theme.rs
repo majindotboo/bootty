@@ -53,6 +53,10 @@ fn live_font_updates_preserve_fallbacks_and_window_scale(cx: &TestAppContext) {
                 changed_font.family
             );
             assert_eq!(gpui_kit::component::Theme::global(cx).font_size, px(19.0));
+            assert_eq!(
+                gpui_kit::component::Theme::global(cx).mono_font_size,
+                px(19.0)
+            );
             update_ui_font(&[], 17.0, cx);
             let font = setup_ui_font(window, cx);
             assert_eq!(font.weight, FontWeight::NORMAL);

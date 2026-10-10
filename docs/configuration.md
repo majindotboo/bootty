@@ -486,10 +486,24 @@ The default shortcut is Command-Shift-J on macOS and Ctrl-Shift-J on Linux and
 Windows. Escape returns from Sessions panel navigation to the terminal; Escape
 in the terminal remains terminal input.
 
+Default zoom shortcuts change terminal and UI fonts together: Command-Plus/Minus
+on macOS and Ctrl-Plus/Minus on Linux and Windows. Command-0/Ctrl-0 restores each
+configured size. These bind `increase_all_font_sizes:1`,
+`decrease_all_font_sizes:1`, and `reset_all_font_sizes` in every preset.
+The UI size also scales monospace editors. Zoom is temporary and does not write
+the config.
+
+Terminal-only `increase_font_size`, `decrease_font_size`, `reset_font_size`, and
+`set_font_size` retain their existing behavior. UI-only equivalents use
+`ui_font_size` (for example, `increase_ui_font_size:1`). Both sets are unbound
+by default. Increase, decrease, and reset are available in the palette; all
+font actions are available in the keymap editor.
+`set_all_font_sizes:N` sets both sizes to N points.
+
 Wheel triggers use `scroll_up` and `scroll_down`; the default `alt+shift+scroll`
-bindings adjust font size in quarter-point steps. The settings keybind recorder
-captures the wheel as well as the keyboard, so wheel triggers can be bound
-without hand-editing the config.
+bindings adjust both font sizes in quarter-point steps. The settings keybind
+recorder captures the wheel as well as the keyboard, so wheel triggers can be
+bound without hand-editing the config.
 
 Reload validates the full effective config first. If parsing, theme resolution,
 modifier remap parsing, keybind parsing, or live terminal color/cursor

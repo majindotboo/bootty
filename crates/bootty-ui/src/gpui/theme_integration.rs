@@ -10,7 +10,6 @@ use std::sync::Arc;
 const UI_FONT_FAMILY: &str = "IBM Plex Sans";
 const UI_FONT_SIZE: f32 = 16.0;
 const BUFFER_FONT_FAMILY: &str = "Lilex";
-const BUFFER_FONT_SIZE: f32 = 15.0;
 
 pub fn init_theme(palette: UiPalette, cx: &mut App) {
     init_ui_theme(UiTheme { palette }, cx);
@@ -87,7 +86,7 @@ fn update_gpui_component_theme(palette: UiPalette, cx: &mut App) {
         component.font_family = ui_font_family;
         component.font_size = ui_font_size;
         component.mono_font_family = mono_font_family;
-        component.mono_font_size = px(BUFFER_FONT_SIZE);
+        component.mono_font_size = ui_font_size;
         component.radius = px(f32::from(palette.radius));
         component.shadow = false;
         // Keep keyboard focus visible through the ring-colored border without the outer glow.
@@ -368,6 +367,7 @@ fn sync_component_ui_font(cx: &mut App) {
     component.font_family = family;
     component.mono_font_family = mono_family;
     component.font_size = size;
+    component.mono_font_size = size;
     gpui_kit::component::Theme::sync_base(cx);
     cx.refresh_windows();
 }

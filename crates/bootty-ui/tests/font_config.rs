@@ -198,3 +198,182 @@ fn ui_weight_reload_publishes_the_accepted_assignment(
         Some(&expected)
     );
 }
+
+fn font_command(
+    state: &mut AppState,
+    action: &str,
+    caller: bootty_control::Caller,
+) -> Vec<AppEffect> {
+    use bootty_control::{
+        AppCommandRequest, CommandCancellation, CommandInvocation, CommandOutcome,
+    };
+    let (response, outcomes) = std::sync::mpsc::channel();
+    let now = Instant::now();
+    state
+        .app_command_sender(caller)
+        .try_send(AppCommandRequest {
+            creation_receipt: None,
+            invocation: CommandInvocation::from_action(action, caller),
+            deadline: now.checked_add(std::time::Duration::from_secs(1)).unwrap(),
+            cancellation: CommandCancellation::new(),
+            response,
+        })
+        .unwrap();
+    let effects = state.update_frame(frame_inputs::frame(now, Vec::new()));
+    let outcome = outcomes
+        .try_recv()
+        .expect("font command completes synchronously");
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    effects
+}
+
+#[rstest::rstest]
+#[case("increase_font_size:2", 17.0, 18.0)]
+#[case("decrease_font_size:2", 13.0, 18.0)]
+#[case("set_font_size:23", 23.0, 18.0)]
+#[case("increase_ui_font_size:2", 15.0, 20.0)]
+#[case("decrease_ui_font_size:2", 15.0, 16.0)]
+#[case("set_ui_font_size:23", 15.0, 23.0)]
+#[case("increase_all_font_sizes:2", 17.0, 20.0)]
+#[case("decrease_all_font_sizes:2", 13.0, 16.0)]
+#[case("set_all_font_sizes:23", 23.0, 23.0)]
+fn font_commands_publish_only_the_requested_sizes(
+    #[case] action: &str,
+    #[case] terminal: f32,
+    #[case] ui: f32,
+    #[values(
+        bootty_control::Caller::CommandPalette,
+        bootty_control::Caller::Keybinding,
+        bootty_control::Caller::BuiltinKeybinding,
+        bootty_control::Caller::Cli,
+        bootty_control::Caller::Socket,
+        bootty_control::Caller::Internal
+    )]
+    caller: bootty_control::Caller,
+) {
+    let (_directory, config, mut state) = state_with_config("[font]\nsize = 15\nui-size = 18\n");
+    let persisted = std::fs::read_to_string(config.path()).unwrap();
+    let effects = font_command(&mut state, action, caller);
+    assert_eq!(state.config().font.size.to_bits(), terminal.to_bits());
+    assert_eq!(state.config().font.ui_size.to_bits(), ui.to_bits());
+    let terminal_effects: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            AppEffect::SetTerminalTextConfig(config) => Some(config.font_size.to_bits()),
+            _ => None,
+        })
+        .collect();
+    let ui_effects: Vec<_> = effects
+        .iter()
+        .filter_map(|effect| match effect {
+            AppEffect::SetUiFontSize(size) => Some(size.to_bits()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        terminal_effects,
+        if terminal.to_bits() == 15.0_f32.to_bits() {
+            vec![]
+        } else {
+            vec![terminal.to_bits()]
+        }
+    );
+    assert_eq!(
+        ui_effects,
+        if ui.to_bits() == 18.0_f32.to_bits() {
+            vec![]
+        } else {
+            vec![ui.to_bits()]
+        }
+    );
+    assert_eq!(std::fs::read_to_string(config.path()).unwrap(), persisted);
+}
+
+#[rstest::rstest]
+#[case("reset_font_size", 15.0, 23.0)]
+#[case("reset_ui_font_size", 23.0, 18.0)]
+#[case("reset_all_font_sizes", 15.0, 18.0)]
+fn font_resets_restore_independent_configured_sizes(
+    #[case] action: &str,
+    #[case] terminal: f32,
+    #[case] ui: f32,
+    #[values(false, true)] reload: bool,
+) {
+    let (_directory, config, mut state) = state_with_config(if reload {
+        "[font]\nsize = 12\nui-size = 14\n"
+    } else {
+        "[font]\nsize = 15\nui-size = 18\n"
+    });
+    if reload {
+        font_command(
+            &mut state,
+            "set_all_font_sizes:30",
+            bootty_control::Caller::Socket,
+        );
+        config
+            .write_str("[font]\nsize = 15\nui-size = 18\n")
+            .unwrap();
+        assert!(state.reload_config(&mut Vec::new()));
+    }
+    font_command(
+        &mut state,
+        "set_all_font_sizes:23",
+        bootty_control::Caller::Socket,
+    );
+    font_command(&mut state, action, bootty_control::Caller::Socket);
+    assert_eq!(state.config().font.size.to_bits(), terminal.to_bits());
+    assert_eq!(state.config().font.ui_size.to_bits(), ui.to_bits());
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config::with_cases(32))]
+    #[test]
+    fn combined_zoom_changes_each_size_by_the_same_delta_with_a_one_point_floor(
+        terminal in 1_u16..100,
+        ui in 1_u16..100,
+        delta in -100_i16..100,
+    ) {
+        let (_directory, _config, mut state) = state_with_config(&format!(
+            "[font]\nsize = {terminal}\nui-size = {ui}\n"
+        ));
+        font_command(&mut state, &format!("increase_all_font_sizes:{delta}"), bootty_control::Caller::Socket);
+        assert_eq!(state.config().font.size.to_bits(), (f32::from(terminal) + f32::from(delta)).max(1.0).to_bits());
+        assert_eq!(state.config().font.ui_size.to_bits(), (f32::from(ui) + f32::from(delta)).max(1.0).to_bits());
+    }
+}
+
+#[rstest::rstest]
+#[case("bootty")]
+#[case("tmux")]
+#[case("ghostty")]
+fn preset_zoom_keys_change_both_fonts_and_reset_each_baseline(#[case] preset: &str) {
+    let (_directory, _config, mut state) = state_with_config(&format!(
+        "[font]\nsize = 15\nui-size = 18\n[input]\npreset = '{preset}'\n"
+    ));
+    let modifiers = Modifiers {
+        platform: cfg!(target_os = "macos"),
+        control: !cfg!(target_os = "macos"),
+        ..Modifiers::default()
+    };
+    for (key, terminal, ui) in [
+        (Key::Equals, 16.0_f32, 19.0_f32),
+        (Key::Plus, 17.0, 20.0),
+        (Key::Minus, 16.0, 19.0),
+        (Key::Digit(0), 15.0, 18.0),
+    ] {
+        state.update_frame(frame_inputs::frame(
+            Instant::now(),
+            vec![InputEvent::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+        ));
+        assert_eq!(state.config().font.size.to_bits(), terminal.to_bits());
+        assert_eq!(state.config().font.ui_size.to_bits(), ui.to_bits());
+    }
+}

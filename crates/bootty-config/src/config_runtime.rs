@@ -49,6 +49,7 @@ pub enum ConfigRuntimeError {
 pub struct ConfigRuntime {
     current: BoottyConfig,
     configured_font_size: f32,
+    configured_ui_font_size: f32,
     document: ConfigDocument,
     hot_reload: ConfigHotReload,
     revision: u64,
@@ -64,6 +65,7 @@ impl ConfigRuntime {
         let hot_reload = ConfigHotReload::new(&config.config_path);
         Ok(Self {
             configured_font_size: config.font.size,
+            configured_ui_font_size: config.font.ui_size,
             current: config,
             document,
             hot_reload,
@@ -82,6 +84,11 @@ impl ConfigRuntime {
     #[must_use]
     pub const fn configured_font_size(&self) -> f32 {
         self.configured_font_size
+    }
+
+    #[must_use]
+    pub const fn configured_ui_font_size(&self) -> f32 {
+        self.configured_ui_font_size
     }
 
     #[must_use]
@@ -136,6 +143,7 @@ impl ConfigRuntime {
     fn accept(&mut self, next: BoottyConfig) -> ConfigChange {
         self.revision = self.revision.wrapping_add(1);
         self.configured_font_size = next.font.size;
+        self.configured_ui_font_size = next.font.ui_size;
         let previous = std::mem::replace(&mut self.current, next);
         let current = self.current.clone();
         ConfigChange { previous, current }
@@ -161,6 +169,11 @@ impl ConfigRuntime {
     /// baseline.
     pub fn set_font_size(&mut self, size: f32) {
         self.revise_current(|config| config.font.size = size);
+    }
+
+    /// Apply a live UI zoom size while retaining the configured reset baseline.
+    pub fn set_ui_font_size(&mut self, size: f32) {
+        self.revise_current(|config| config.font.ui_size = size);
     }
 
     fn revise_current(&mut self, mutate: impl FnOnce(&mut BoottyConfig)) {

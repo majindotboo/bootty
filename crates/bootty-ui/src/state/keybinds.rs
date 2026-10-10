@@ -86,6 +86,11 @@ impl AppState {
                 }
             }
             KeybindAction::Font(action) => self.apply_font_size_action(action, effects),
+            KeybindAction::UiFont(action) => self.apply_ui_font_size_action(action, effects),
+            KeybindAction::AllFonts(action) => {
+                self.apply_font_size_action(action, effects);
+                self.apply_ui_font_size_action(action, effects);
+            }
             KeybindAction::Find(action) => self.apply_terminal_find_action(action, effects),
             KeybindAction::CopyToClipboard(format) => {
                 self.copy_terminal_selection_or_request_copy(format, effects);
@@ -381,16 +386,27 @@ impl AppState {
             self.record_error(error);
         }
     }
+    fn apply_ui_font_size_action(&mut self, action: FontSizeAction, effects: &mut Vec<AppEffect>) {
+        let current_size = self.config().font.ui_size;
+        let default_size = self.config_runtime.configured_ui_font_size();
+        let next_size = font_size_after_action(action, current_size, default_size);
+        if (next_size - current_size).abs() <= f32::EPSILON {
+            return;
+        }
+        self.config_runtime.set_ui_font_size(next_size);
+        if let Some(existing) = effects.iter_mut().rev().find_map(|effect| match effect {
+            AppEffect::SetUiFontSize(existing) => Some(existing),
+            _ => None,
+        }) {
+            *existing = next_size;
+        } else {
+            effects.push(AppEffect::SetUiFontSize(next_size));
+        }
+    }
     fn apply_font_size_action(&mut self, action: FontSizeAction, effects: &mut Vec<AppEffect>) {
         let default_size = self.config_runtime.configured_font_size();
         let current_size = self.config().font.size;
-        let next_size = match action {
-            FontSizeAction::Increase(delta) => current_size + delta,
-            FontSizeAction::Decrease(delta) => current_size - delta,
-            FontSizeAction::Reset => default_size,
-            FontSizeAction::Set(size) => size,
-        }
-        .max(1.0);
+        let next_size = font_size_after_action(action, current_size, default_size);
         if (next_size - current_size).abs() <= f32::EPSILON {
             return;
         }
@@ -466,4 +482,14 @@ const fn next_non_native_fullscreen_state(
     } else {
         !viewport_maximized
     }
+}
+
+fn font_size_after_action(action: FontSizeAction, current: f32, configured: f32) -> f32 {
+    match action {
+        FontSizeAction::Increase(delta) => current + delta,
+        FontSizeAction::Decrease(delta) => current - delta,
+        FontSizeAction::Reset => configured,
+        FontSizeAction::Set(size) => size,
+    }
+    .max(1.0)
 }
