@@ -1319,6 +1319,7 @@ impl DitchSessionDialog {
             spaces: Vec::new(),
             completion: None,
             applications: Vec::new(),
+            provider_mentions: Vec::new(),
             attachments: Vec::new(),
             models: Vec::new(),
             available_efforts: Vec::new(),

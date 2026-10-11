@@ -84,7 +84,11 @@ impl NativeAgentSessionView {
         self.completion_subscriptions.push(cx.subscribe_in(
             &completion,
             window,
-            |this, _, selection, window, cx| match &selection.source {
+            |this,
+             _,
+             selection: &crate::gpui_composer_completion::CompletionSelection,
+             window,
+             cx| match &selection.source {
                 CompletionSource::File(_) => {
                     this.stage_project_attachment(selection.clone(), window, cx);
                 }
@@ -126,8 +130,53 @@ impl NativeAgentSessionView {
                 CompletionSource::Provider(_) | CompletionSource::Directory(_) => {}
             },
         ));
+        self.completion_subscriptions.push(cx.subscribe_in(
+            &completion,
+            window,
+            |this, _, action: &crate::gpui_composer_completion::ComposerAddAction, window, cx| {
+                this.composer_add_action(action, window, cx);
+            },
+        ));
         self.completion = Some(completion);
         cx.notify();
+    }
+
+    fn composer_add_action(
+        &mut self,
+        action: &crate::gpui_composer_completion::ComposerAddAction,
+        window: &Window,
+        cx: &Context<Self>,
+    ) {
+        match action {
+            crate::gpui_composer_completion::ComposerAddAction::Plan(plan) => {
+                if let Some(model) = self.models.iter().flatten().find(|model| {
+                    self.record
+                        .config
+                        .model
+                        .as_ref()
+                        .map_or(model.is_default, |selected| selected == &model.id)
+                }) {
+                    self.select_model(
+                        &bootty_agents::NativeModelSelection {
+                            plan_mode: Some(*plan),
+                            fast_mode: None,
+                            model: model.id.clone(),
+                            reasoning_effort: self
+                                .record
+                                .config
+                                .reasoning_effort
+                                .clone()
+                                .or_else(|| model.default_reasoning_effort.clone()),
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            }
+            crate::gpui_composer_completion::ComposerAddAction::Goal(objective) => {
+                self.model_command("goal", vec![objective.clone()], window, cx);
+            }
+        }
     }
 
     fn stage_project_attachment(

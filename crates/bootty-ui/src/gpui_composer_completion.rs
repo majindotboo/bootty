@@ -16,6 +16,11 @@ use gpui_kit::{
     App, Context, Entity, EventEmitter, Focusable as _, IntoElement, ParentElement as _, Render,
     Styled as _, Subscription, Task, Window, deferred, div, prelude::*,
 };
+#[path = "gpui_composer_add.rs"]
+mod add;
+pub use add::ComposerAddAction;
+pub use add::ComposerFileActions;
+
 use std::{
     collections::BTreeMap,
     time::{Duration, Instant},
@@ -60,6 +65,13 @@ pub struct ComposerCompletion {
     dismissed: Option<(CompletionKind, usize)>,
     catalog: Option<NativeCompletionCatalog>,
     applications: Option<Vec<bootty_computer::ComputerTarget>>,
+    provider_mentions: BTreeMap<String, NativeCompletionOption>,
+    plan_mode: bool,
+    draft_goal: Option<String>,
+    add_menus: Vec<(
+        gpui_kit::WeakEntity<gpui_kit::component::menu::PopupMenu>,
+        ComposerFileActions,
+    )>,
     files: Vec<CompletionItem>,
     file_snapshot: Option<(Instant, String, bootty_host::files::FileCompletionPage)>,
     items: Vec<CompletionItem>,
@@ -97,6 +109,10 @@ impl ComposerCompletion {
             dismissed: None,
             catalog: None,
             applications: None,
+            provider_mentions: BTreeMap::new(),
+            add_menus: Vec::new(),
+            plan_mode: false,
+            draft_goal: None,
             files: Vec::new(),
             file_snapshot: None,
             items: Vec::new(),
@@ -110,6 +126,38 @@ impl ComposerCompletion {
             error: None,
             _subscription: subscription,
         }
+    }
+
+    pub(super) fn restore_provider_mentions(
+        &mut self,
+        mentions: &[bootty_agents::NativeProviderMention],
+    ) {
+        self.provider_mentions = mentions
+            .iter()
+            .map(|mention| (mention.id(), mention.option.clone()))
+            .collect();
+    }
+
+    pub(super) fn provider_mentions(
+        &self,
+        cx: &App,
+    ) -> Result<Vec<bootty_agents::NativeProviderMention>, String> {
+        let mut mentions = Vec::new();
+        for span in self.editor.read(cx).tokens() {
+            let id = span.token().id().as_ref();
+            if !id.starts_with("provider:") {
+                continue;
+            }
+            let option = self
+                .provider_mentions
+                .get(id)
+                .ok_or("Remove or reattach the app or plugin after changing accounts")?;
+            mentions.push(bootty_agents::NativeProviderMention {
+                option: option.clone(),
+                prompt_range: span.range(),
+            });
+        }
+        Ok(mentions)
     }
 
     pub(super) const fn scope(&self) -> &CompletionScope {
@@ -169,7 +217,7 @@ impl ComposerCompletion {
         };
         if matches!(
             trigger.kind,
-            CompletionKind::Command | CompletionKind::Skill
+            CompletionKind::Command | CompletionKind::Skill | CompletionKind::Mention
         ) && self.catalog.is_none()
             && !self.pending.contains_key("catalog")
         {
@@ -268,6 +316,7 @@ impl ComposerCompletion {
                     Err(_) => this.error = Some("Completion host disconnected".into()),
                 }
                 this.rebuild(window, cx);
+                this.refresh_add_menus(window, cx);
             });
         })
         .detach();
@@ -345,6 +394,30 @@ impl ComposerCompletion {
             .collect();
     }
 
+    fn integration_candidates(&self) -> Vec<CompletionItem> {
+        self.catalog
+            .as_ref()
+            .into_iter()
+            .flat_map(|catalog| &catalog.options)
+            .filter(|option| {
+                matches!(
+                    option.kind,
+                    NativeCompletionKind::App | NativeCompletionKind::Plugin
+                )
+            })
+            .map(|option| CompletionItem {
+                label: format!("@{}", option.display_name),
+                detail: option.description.clone().unwrap_or_default(),
+                icon: if option.kind == NativeCompletionKind::App {
+                    "app-window"
+                } else {
+                    "plug"
+                },
+                source: CompletionSource::Provider(option.clone()),
+            })
+            .collect()
+    }
+
     fn rebuild(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(trigger) = self.trigger.clone() else {
             self.items.clear();
@@ -356,49 +429,14 @@ impl ComposerCompletion {
             trigger.kind,
             CompletionKind::Command | CompletionKind::Skill
         ) {
-            candidates.extend(
-                self.catalog
-                    .as_ref()
-                    .into_iter()
-                    .flat_map(|catalog| &catalog.options)
-                    .filter(|option| {
-                        trigger.kind != CompletionKind::Skill
-                            || option.kind == NativeCompletionKind::Skill
-                    })
-                    .cloned()
-                    .map(|option| {
-                        let skill = option.kind == NativeCompletionKind::Skill;
-                        CompletionItem {
-                            label: format!("{}{}", if skill { "$" } else { "/" }, option.name),
-                            detail: option
-                                .description
-                                .clone()
-                                .or_else(|| option.argument_hint.clone())
-                                .unwrap_or_else(|| {
-                                    if skill {
-                                        "Skill".into()
-                                    } else {
-                                        "Command".into()
-                                    }
-                                }),
-                            icon: if skill { "sparkles" } else { "terminal" },
-                            source: CompletionSource::Provider(option),
-                        }
-                    }),
-            );
-        }
-        if trigger.kind == CompletionKind::Mention {
+            candidates.extend(self.integration_candidates());
             candidates.extend(
                 self.applications
                     .as_ref()
                     .into_iter()
                     .flatten()
                     .map(|target| {
-                        let name = target
-                            .bundle_id
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or(&target.bundle_id);
+                        let name = application_name(target);
                         CompletionItem {
                             label: format!("@{name}"),
                             detail: target
@@ -577,19 +615,40 @@ impl ComposerCompletion {
             return;
         }
         if let CompletionSource::Provider(option) = &item.source {
-            self.editor.update(cx, |input, cx| {
-                input.set_selected_range(trigger.range.clone(), cx);
-                if option.kind == NativeCompletionKind::Skill {
-                    let token = InlineToken::new(
-                        format!("skill:{}", option.name),
-                        format!("${}", option.name),
+            if matches!(
+                option.kind,
+                NativeCompletionKind::App | NativeCompletionKind::Plugin
+            ) {
+                let mention = bootty_agents::NativeProviderMention {
+                    option: option.clone(),
+                    prompt_range: trigger.range.clone(),
+                };
+                let id = mention.id();
+                self.provider_mentions.insert(id.clone(), option.clone());
+                self.editor.update(cx, |input, cx| {
+                    input.set_selected_range(trigger.range.clone(), cx);
+                    _ = input.replace_with_token(
+                        InlineToken::new(id, format!("@{}", option.display_name)),
+                        window,
+                        cx,
                     );
-                    _ = input.replace_with_token(token, window, cx);
-                } else {
-                    input.replace(format!("/{} ", option.name), window, cx);
-                }
-                input.focus_handle(cx).focus(window, cx);
-            });
+                    input.focus_handle(cx).focus(window, cx);
+                });
+            } else {
+                self.editor.update(cx, |input, cx| {
+                    input.set_selected_range(trigger.range.clone(), cx);
+                    if option.kind == NativeCompletionKind::Skill {
+                        let token = InlineToken::new(
+                            format!("skill:{}", option.name),
+                            format!("${}", option.name),
+                        );
+                        _ = input.replace_with_token(token, window, cx);
+                    } else {
+                        input.replace(format!("/{} ", option.name), window, cx);
+                    }
+                    input.focus_handle(cx).focus(window, cx);
+                });
+            }
         } else {
             cx.emit(CompletionSelection {
                 source: item.source,
@@ -692,4 +751,18 @@ impl Render for ComposerCompletion {
         .with_priority(1)
         .into_any_element()
     }
+}
+
+fn application_name(target: &bootty_computer::ComputerTarget) -> &str {
+    target
+        .application_name
+        .as_deref()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| {
+            target
+                .bundle_id
+                .rsplit('.')
+                .next()
+                .unwrap_or(&target.bundle_id)
+        })
 }

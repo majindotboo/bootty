@@ -2703,68 +2703,19 @@ impl NativeAgentSessionView {
             .justify_start()
             .gap_2()
             .child(
-                Button::new("native-attach")
-                    .debug_selector(|| "native-attach".into())
-                    .icon(IconName::Plus)
-                    .ghost()
-                    .small()
-                    .accessibility_label("Add to message")
-                    .tooltip("Add to message")
-                    .disabled(inactive || !self.provider_enabled())
-                    .dropdown_menu({
+                crate::gpui_composer_completion::ComposerCompletion::add_button(
+                    self.completion.as_ref(),
+                    "native-attach",
+                    inactive || !self.provider_enabled(),
+                    self.record.config.plan_mode.unwrap_or(false),
+                    None,
+                    crate::gpui_composer_completion::ComposerFileActions::new(&self.composer, {
                         let owner = cx.weak_entity();
-                        move |menu, _, _| {
-                            let files = owner.clone();
-                            let reference = owner.clone();
-                            let paste = owner.clone();
-                            menu.label("Add to message")
-                                .item(
-                                    gpui_kit::component::menu::PopupMenuItem::new("Attach files…")
-                                        .icon(gpui_kit::assets::IconName::Paperclip)
-                                        .on_click(move |_, window, cx| {
-                                            _ = files.update(cx, |this, cx| {
-                                                this.choose_attachments(window, cx);
-                                            });
-                                        }),
-                                )
-                                .item(
-                                    gpui_kit::component::menu::PopupMenuItem::new(
-                                        "Reference files and folders…",
-                                    )
-                                    .icon(IconName::Folder)
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            _ = reference.update(cx, |this, cx| {
-                                                this.composer.focus_handle(cx).focus(window, cx);
-                                                this.composer.update(cx, |input, cx| {
-                                                    input.replace_text_in_range(
-                                                        None, "@", window, cx,
-                                                    );
-                                                });
-                                            });
-                                        },
-                                    ),
-                                )
-                                .separator()
-                                .item(
-                                    gpui_kit::component::menu::PopupMenuItem::new(
-                                        "Paste image or text",
-                                    )
-                                    .icon(gpui_kit::assets::IconName::Clipboard)
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            _ = paste.update(cx, |this, cx| {
-                                                this.composer.focus_handle(cx).focus(window, cx);
-                                                window.dispatch_action(
-                                                    Box::new(gpui_kit::component::input::Paste),
-                                                    cx,
-                                                );
-                                            });
-                                        },
-                                    ),
-                                )
+                        move |window, cx| {
+                            _ = owner.update(cx, |this, cx| this.choose_attachments(window, cx));
                         }
                     }),
+                ),
             )
             .child(options)
             .child(

@@ -307,59 +307,26 @@ impl DialogView {
         spec: &DialogSpec,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
-        Button::new("new-session-attach")
-            .icon(gpui_kit::assets::IconName::Plus)
-            .small()
-            .ghost()
-            .accessibility_label("Add to message")
-            .tooltip("Add to message")
-            .disabled(spec.busy || self.attachment_imports > 0)
-            .dropdown_menu({
+        crate::gpui_composer_completion::ComposerCompletion::add_button(
+            self.completion.as_ref(),
+            "new-session-attach",
+            spec.busy || self.attachment_imports > 0,
+            spec.fields
+                .iter()
+                .any(|field| field.id == "plan-mode" && field.value == "true"),
+            spec.fields
+                .iter()
+                .find(|field| field.id == "goal")
+                .map(|field| field.value.clone()),
+            crate::gpui_composer_completion::ComposerFileActions::new(&self.prompt_textarea, {
                 let owner = cx.weak_entity();
-                move |menu, _, _| {
-                    use gpui_kit::{assets::IconName, component::menu::PopupMenuItem};
-                    let files = owner.clone();
-                    let reference = owner.clone();
-                    let paste = owner.clone();
-                    menu.label("Add to message")
-                        .item(
-                            PopupMenuItem::new("Attach files…")
-                                .icon(IconName::Paperclip)
-                                .on_click(move |_, window, cx| {
-                                    _ = files.update(cx, |this, cx| {
-                                        this.choose_new_session_attachments(window, cx);
-                                    });
-                                }),
-                        )
-                        .item(
-                            PopupMenuItem::new("Reference files and folders…")
-                                .icon(IconName::Folder)
-                                .on_click(move |_, window, cx| {
-                                    _ = reference.update(cx, |this, cx| {
-                                        this.prompt_textarea.focus_handle(cx).focus(window, cx);
-                                        this.prompt_textarea.update(cx, |input, cx| {
-                                            input.replace_text_in_range(None, "@", window, cx);
-                                        });
-                                    });
-                                }),
-                        )
-                        .separator()
-                        .item(
-                            PopupMenuItem::new("Paste image or text")
-                                .icon(IconName::Clipboard)
-                                .on_click(move |_, window, cx| {
-                                    _ = paste.update(cx, |this, cx| {
-                                        this.prompt_textarea.focus_handle(cx).focus(window, cx);
-                                        window.dispatch_action(
-                                            Box::new(gpui_kit::component::input::Paste),
-                                            cx,
-                                        );
-                                    });
-                                }),
-                        )
+                move |window, cx| {
+                    _ = owner.update(cx, |this, cx| {
+                        this.choose_new_session_attachments(window, cx);
+                    });
                 }
-            })
-            .into_any_element()
+            }),
+        )
     }
 
     pub(super) fn render_new_session_attachments(

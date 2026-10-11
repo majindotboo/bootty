@@ -2204,6 +2204,14 @@ fn initial_native_input(
             }
         }
     }
+    if let Some(goal) = invocation
+        .arguments
+        .get(18)
+        .filter(|goal| !goal.trim().is_empty())
+        && let Err(error) = service.set_goal(&record.target(), goal)
+    {
+        return Some(error);
+    }
     if message.trim().is_empty() && attachment_ids.is_empty() {
         return None;
     }
@@ -2251,7 +2259,8 @@ fn initial_native_input(
             }
             prompt
                 .with_attachment_ranges(attachment_ids.iter().cloned().zip(ranges).collect())?
-                .with_applications(applications)
+                .with_applications(applications)?
+                .with_provider_mentions(prompt_provider_mentions(invocation, 17)?)
         })
         .and_then(|prompt| {
             check_native_input(deadline, cancellation)?;
@@ -2422,6 +2431,7 @@ fn prepare_native_launch(
         account_directory: config.account_directory.clone(),
     };
     if let Some(selection) = selection {
+        config.plan_mode = selection.plan_mode.or(config.plan_mode);
         if let Some(fast) = selection.fast_mode {
             if fast && provider == AgentKind::Pi {
                 return Err("Pi does not support fast mode".into());
@@ -2772,6 +2782,7 @@ fn invoke(
                     .map(Value::Bool)
             },
         ),
+        "goal" => service.set_goal(target, arg(2)).map(|()| Value::Null),
         "completions" => service
             .completions(target)
             .and_then(|catalog| serde_json::to_value(catalog).map_err(|e| e.to_string())),
@@ -3116,5 +3127,22 @@ fn append_prompt_applications(
     prompt
         .with_attachment_ranges(ranges)?
         .with_applications(applications)?
-        .with_authored_prefix(authored_bytes)
+        .with_authored_prefix(authored_bytes)?
+        .with_provider_mentions(prompt_provider_mentions(invocation, 9)?)
+}
+
+fn prompt_provider_mentions(
+    invocation: &CommandInvocation,
+    index: usize,
+) -> Result<Vec<bootty_agents::NativeProviderMention>, String> {
+    invocation
+        .arguments
+        .get(index)
+        .filter(|value| !value.is_empty())
+        .map_or(Ok(Vec::new()), |value| {
+            if invocation.caller != Caller::Internal || value.len() > 64 * 1024 {
+                return Err("App and plugin references require an internal user submission".into());
+            }
+            serde_json::from_str(value).map_err(|error| error.to_string())
+        })
 }

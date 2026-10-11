@@ -297,6 +297,10 @@ pub enum DialogIntent {
         field: String,
         value: String,
     },
+    ProviderMentionsChanged {
+        dialog: DialogId,
+        mentions: Vec<bootty_agents::NativeProviderMention>,
+    },
     ApplicationsChanged {
         dialog: DialogId,
         applications: Vec<bootty_agents::NativeApplicationMention>,
@@ -336,6 +340,7 @@ impl DialogIntent {
             | Self::TextChanged { dialog, .. }
             | Self::FieldChanged { dialog, .. }
             | Self::ApplicationsChanged { dialog, .. }
+            | Self::ProviderMentionsChanged { dialog, .. }
             | Self::AttachmentsChanged { dialog, .. }
             | Self::SelectionChanged { dialog, .. }
             | Self::CycleScope { dialog }
@@ -477,6 +482,7 @@ pub struct DialogSpec {
     pub spaces: Vec<DialogSpaceChoice>,
     pub attachments: Vec<crate::presentation::new_session_form::NewSessionAttachment>,
     pub applications: Vec<bootty_agents::NativeApplicationMention>,
+    pub provider_mentions: Vec<bootty_agents::NativeProviderMention>,
     pub completion: Option<crate::CompletionScope>,
     pub models: Vec<bootty_agents::NativeModelOption>,
     pub available_efforts: Vec<String>,
@@ -516,6 +522,7 @@ impl DialogSpec {
             spaces: Vec::new(),
             attachments: Vec::new(),
             applications: Vec::new(),
+            provider_mentions: Vec::new(),
             completion: None,
             models: Vec::new(),
             projects: Vec::new(),
@@ -552,6 +559,7 @@ impl DialogSpec {
             spaces: Vec::new(),
             attachments: Vec::new(),
             applications: Vec::new(),
+            provider_mentions: Vec::new(),
             completion: None,
             models: Vec::new(),
             projects: Vec::new(),
@@ -970,7 +978,25 @@ impl DialogView {
             .is_some_and(|spec| spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID)
         {
             self.new_session_content = Some(input.read(cx).content());
+            let provider_mentions = self
+                .completion
+                .as_ref()
+                .map(|completion| completion.read(cx).provider_mentions(cx))
+                .transpose();
             if let Some(spec) = self.spec.as_mut() {
+                match provider_mentions {
+                    Ok(mentions) => {
+                        let mentions = mentions.unwrap_or_default();
+                        if mentions != spec.provider_mentions {
+                            spec.provider_mentions.clone_from(&mentions);
+                            cx.emit(DialogIntent::ProviderMentionsChanged {
+                                dialog: spec.id.clone(),
+                                mentions,
+                            });
+                        }
+                    }
+                    Err(error) => self.attachment_error = Some(error),
+                }
                 let applications = input
                     .read(cx)
                     .tokens()
@@ -1748,7 +1774,7 @@ impl DialogView {
             .filter(|field| {
                 !(matches!(
                     field.id.as_str(),
-                    "isolation" | "mode" | "reasoning" | "fast-mode"
+                    "isolation" | "mode" | "reasoning" | "fast-mode" | "plan-mode"
                 ) || field.id == "provider"
                     && spec.fields.iter().any(|candidate| candidate.id == "model"))
             })
@@ -2139,7 +2165,9 @@ impl DialogView {
         let DialogFieldKind::Choice(options) = &field.kind else {
             return None;
         };
-        if field.id == "mode" || (field.id == "profile" && options.len() < 2) {
+        if matches!(field.id.as_str(), "mode" | "plan-mode")
+            || (field.id == "profile" && options.len() < 2)
+        {
             return None;
         }
         if field.id == "model"

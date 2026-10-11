@@ -66,7 +66,7 @@ impl NativeAgentSessionView {
         self.model_command("models-info", Vec::new(), window, cx);
     }
 
-    fn model_command(
+    pub(super) fn model_command(
         &mut self,
         operation: &str,
         arguments: Vec<String>,
@@ -148,6 +148,7 @@ impl NativeAgentSessionView {
                             }
                         }
                     }
+                    Ok(CommandOutcome::Success { .. }) if operation == "goal" => this.error = None,
                     Ok(CommandOutcome::Success { value, .. }) => {
                         if operation == "permissions" {
                             if let Ok(record) = serde_json::from_value(value) {
@@ -175,7 +176,7 @@ impl NativeAgentSessionView {
         .detach();
     }
 
-    fn select_model(
+    pub(super) fn select_model(
         &mut self,
         selection: &NativeModelSelection,
         window: &Window,

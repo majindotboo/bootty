@@ -71,6 +71,8 @@ pub struct NewSessionDraft {
     pub prompt: String,
     pub attachments: Vec<NewSessionAttachment>,
     pub applications: Vec<bootty_agents::NativeApplicationMention>,
+    pub provider_mentions: Vec<bootty_agents::NativeProviderMention>,
+    pub goal: String,
     pub command: String,
     pub provider: String,
     pub profiles: BTreeMap<String, String>,
@@ -313,7 +315,10 @@ impl NewSessionForm {
                     .profiles
                     .insert(self.draft.provider.clone(), selected);
             }
-            "model" | "reasoning" | "fast-mode" => self.change_model_field(field, value),
+            "model" | "reasoning" | "fast-mode" | "plan-mode" => {
+                self.change_model_field(field, value);
+            }
+            "goal" => value.trim().clone_into(&mut self.draft.goal),
             "permissions" => {
                 self.draft.permissions = bootty_agents::NativePermissionMode::from_choice(value)
                     .unwrap_or(self.draft.permissions);
@@ -360,6 +365,23 @@ impl NewSessionForm {
         }
     }
 
+    fn change_plan_mode(&mut self, value: &str, fast: Option<bool>) {
+        if self.draft.provider == "codex"
+            && let Ok(plan) = value.parse::<bool>()
+        {
+            if let Some(selection) = &mut self.draft.model_selection {
+                selection.plan_mode = Some(plan);
+            } else if let Some(model) = self.model_options.iter().find(|model| model.is_default) {
+                self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                    plan_mode: Some(plan),
+                    fast_mode: fast,
+                    model: model.id.clone(),
+                    reasoning_effort: model.default_reasoning_effort.clone(),
+                });
+            }
+        }
+    }
+
     fn change_model_field(&mut self, field: &str, value: &str) {
         let available = self
             .providers
@@ -370,7 +392,13 @@ impl NewSessionForm {
             .model_selection
             .as_ref()
             .and_then(|selection| selection.fast_mode);
+        let plan = self
+            .draft
+            .model_selection
+            .as_ref()
+            .and_then(|selection| selection.plan_mode);
         match field {
+            "plan-mode" => self.change_plan_mode(value, fast),
             "fast-mode" => {
                 if self.draft.provider != "pi"
                     && let Ok(fast) = value.parse::<bool>()
@@ -380,7 +408,7 @@ impl NewSessionForm {
                             self.model_options.iter().find(|model| model.is_default)
                     {
                         self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
-                            plan_mode: None,
+                            plan_mode: plan,
                             model: model.id.clone(),
                             reasoning_effort: model.default_reasoning_effort.clone(),
                             fast_mode: Some(fast),
@@ -395,7 +423,7 @@ impl NewSessionForm {
                     option.id == value || model_label(option, &self.model_options) == value
                 }) {
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
-                        plan_mode: None,
+                        plan_mode: plan,
                         fast_mode: fast,
                         model: option.id.clone(),
                         reasoning_effort: option
@@ -431,7 +459,7 @@ impl NewSessionForm {
                     .any(|effort| effort == value)
                 {
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
-                        plan_mode: None,
+                        plan_mode: plan,
                         fast_mode: fast,
                         model: option.id.clone(),
                         reasoning_effort: Some(value.to_owned()),
@@ -563,15 +591,18 @@ impl NewSessionForm {
         };
         self.append_native_options(&mut invocation)?;
         if self.draft.projectless {
+            let index: usize = if self.draft.mode == NewSessionMode::Agent {
+                15
+            } else {
+                5
+            };
             invocation.arguments.resize(
-                if self.draft.mode == NewSessionMode::Agent {
-                    15
-                } else {
-                    5
-                },
+                invocation.arguments.len().max(index.saturating_add(1)),
                 String::new(),
             );
-            invocation.arguments.push("true".into());
+            if let Some(projectless) = invocation.arguments.get_mut(index) {
+                "true".clone_into(projectless);
+            }
         }
         invocation.target = Some(destination.target.clone());
         Ok(invocation)
@@ -638,6 +669,21 @@ impl NewSessionForm {
                 .arguments
                 .push(self.draft.permissions.id().to_owned());
         }
+        if self.draft.mode == NewSessionMode::Agent && !self.draft.provider_mentions.is_empty() {
+            invocation.arguments.resize(17, String::new());
+            invocation.arguments.push(
+                serde_json::to_string(&self.draft.provider_mentions)
+                    .map_err(|error| error.to_string())?,
+            );
+        }
+        if self.draft.mode == NewSessionMode::Agent
+            && self.draft.provider == "codex"
+            && !self.draft.goal.is_empty()
+        {
+            invocation.arguments.resize(18, String::new());
+            invocation.arguments.push(self.draft.goal.clone());
+        }
+
         Ok(())
     }
 
@@ -897,7 +943,11 @@ impl NewSessionForm {
                                 .cloned()
                         });
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
-                        plan_mode: None,
+                        plan_mode: self
+                            .draft
+                            .model_selection
+                            .as_ref()
+                            .and_then(|selection| selection.plan_mode),
                         fast_mode: self
                             .draft
                             .model_selection
@@ -1131,6 +1181,8 @@ impl NewSessionForm {
         spec.busy = busy;
         if self.draft.mode == NewSessionMode::Agent {
             spec.applications.clone_from(&self.draft.applications);
+            spec.provider_mentions
+                .clone_from(&self.draft.provider_mentions);
             spec.attachments.clone_from(&self.draft.attachments);
             spec.models.clone_from(&self.model_options);
             spec.available_efforts = self
@@ -1291,6 +1343,27 @@ impl NewSessionForm {
                     option.reasoning_efforts.clone(),
                 ));
             }
+        }
+        if self.draft.mode == NewSessionMode::Agent && self.draft.provider == "codex" {
+            fields.push(DialogField {
+                id: "goal".into(),
+                label: "Goal".into(),
+                value: self.draft.goal.clone(),
+                placeholder: String::new(),
+                kind: DialogFieldKind::Text,
+            });
+            fields.push(choice(
+                "plan-mode",
+                "Plan mode",
+                &self
+                    .draft
+                    .model_selection
+                    .as_ref()
+                    .and_then(|selection| selection.plan_mode)
+                    .unwrap_or(false)
+                    .to_string(),
+                vec!["false".into(), "true".into()],
+            ));
         }
         if self.draft.mode == NewSessionMode::Agent && self.draft.provider != "pi" {
             let fast = self

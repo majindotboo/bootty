@@ -1195,6 +1195,8 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
             mode: NewSessionMode::Agent,
             prompt: "dialog prompt".to_owned(),
             applications: Vec::new(),
+            provider_mentions: Vec::new(),
+            goal: String::new(),
             attachments: Vec::new(),
             command: String::new(),
             provider: "codex".to_owned(),

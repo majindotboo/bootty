@@ -24,14 +24,26 @@ impl DialogView {
             return;
         }
         let editor = self.prompt_textarea.clone();
-        let completion = cx.new(|cx| ComposerCompletion::new(scope, sender, editor, window, cx));
+        let mentions = self
+            .spec
+            .as_ref()
+            .map_or_default(|spec| spec.provider_mentions.clone());
+        let completion = cx.new(|cx| {
+            let mut completion = ComposerCompletion::new(scope, sender, editor, window, cx);
+            completion.restore_provider_mentions(&mentions);
+            completion
+        });
         self.completion_subscriptions.clear();
         self.completion_subscriptions
             .push(cx.observe(&completion, |_, _, cx| cx.notify()));
         self.completion_subscriptions.push(cx.subscribe_in(
             &completion,
             window,
-            |this, _, selection, window, cx| match &selection.source {
+            |this,
+             _,
+             selection: &crate::gpui_composer_completion::CompletionSelection,
+             window,
+             cx| match &selection.source {
                 CompletionSource::File(_) => {
                     this.stage_project_attachment(selection.clone(), window, cx);
                 }
@@ -83,8 +95,42 @@ impl DialogView {
                 CompletionSource::Provider(_) | CompletionSource::Directory(_) => {}
             },
         ));
+        self.completion_subscriptions.push(cx.subscribe_in(
+            &completion,
+            window,
+            |this, _, action: &crate::gpui_composer_completion::ComposerAddAction, _, cx| {
+                this.composer_add_action(action, cx);
+            },
+        ));
         self.completion = Some(completion);
     }
+    fn composer_add_action(
+        &self,
+        action: &crate::gpui_composer_completion::ComposerAddAction,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            crate::gpui_composer_completion::ComposerAddAction::Plan(plan) => {
+                if let Some(spec) = &self.spec {
+                    cx.emit(DialogIntent::FieldChanged {
+                        dialog: spec.id.clone(),
+                        field: "plan-mode".into(),
+                        value: plan.to_string(),
+                    });
+                }
+            }
+            crate::gpui_composer_completion::ComposerAddAction::Goal(objective) => {
+                if let Some(spec) = &self.spec {
+                    cx.emit(DialogIntent::FieldChanged {
+                        dialog: spec.id.clone(),
+                        field: "goal".into(),
+                        value: objective.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     fn stage_project_attachment(
         &mut self,
         selection: crate::gpui_composer_completion::CompletionSelection,

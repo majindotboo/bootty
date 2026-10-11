@@ -822,12 +822,7 @@ impl NewSessionDialog {
         });
         if self.purpose == NewSessionPurpose::NativeAgentTab {
             "Agent".clone_into(&mut spec.title);
-            spec.fields.retain(|field| {
-                matches!(
-                    field.id.as_str(),
-                    "provider" | "profile" | "model" | "reasoning" | "permissions" | "fast-mode"
-                )
-            });
+            spec.fields.retain(|field| native_tab_field(&field.id));
             spec.rows.retain(|row| row.id.0 != "choose-project");
             let project = form
                 .draft
@@ -1022,17 +1017,7 @@ impl NewSessionDialog {
                     invocation.arguments.push(value.clone());
                     return Some(NewSessionPickerEvent::Catalog(invocation));
                 }
-                if self.purpose == NewSessionPurpose::NativeAgentTab
-                    && !matches!(
-                        field.as_str(),
-                        "provider"
-                            | "profile"
-                            | "model"
-                            | "reasoning"
-                            | "permissions"
-                            | "fast-mode"
-                    )
-                {
+                if self.purpose == NewSessionPurpose::NativeAgentTab && !native_tab_field(field) {
                     return None;
                 }
                 self.empty_enter_armed = false;
@@ -1045,6 +1030,12 @@ impl NewSessionDialog {
                         form.draft.scope,
                     );
                 }
+                None
+            }
+            DialogIntent::ProviderMentionsChanged { mentions, .. } if !self.is_in_flight() => {
+                let form = self.form.as_mut()?;
+                form.draft.provider_mentions.clone_from(mentions);
+                self.empty_enter_armed = false;
                 None
             }
             DialogIntent::ApplicationsChanged { applications, .. } if !self.is_in_flight() => {
@@ -1675,4 +1666,18 @@ fn refresh_invocation(
     invocation.arguments.truncate(6);
     invocation.arguments.push("refresh".to_owned());
     invocation
+}
+
+fn native_tab_field(field: &str) -> bool {
+    matches!(
+        field,
+        "provider"
+            | "profile"
+            | "model"
+            | "reasoning"
+            | "permissions"
+            | "fast-mode"
+            | "plan-mode"
+            | "goal"
+    )
 }

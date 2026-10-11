@@ -49,6 +49,15 @@ impl NativeAgentSessionView {
                 .map_err(|error| error.to_string())?,
             authored_bytes.to_string(),
             serde_json::to_string(&ranges).map_err(|error| error.to_string())?,
+            serde_json::to_string(
+                &self
+                    .completion
+                    .as_ref()
+                    .map(|completion| completion.read(cx).provider_mentions(cx))
+                    .transpose()?
+                    .unwrap_or_default(),
+            )
+            .map_err(|error| error.to_string())?,
         ])
     }
 

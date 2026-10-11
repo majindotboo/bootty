@@ -48,6 +48,8 @@ fn form() -> NewSessionForm {
             mode: NewSessionMode::Agent,
             prompt: String::new(),
             applications: Vec::new(),
+            provider_mentions: Vec::new(),
+            goal: String::new(),
             attachments: Vec::new(),
             command: String::new(),
             provider: "codex".to_owned(),
@@ -662,7 +664,7 @@ fn explicit_native_launcher_starts_without_a_prompt_and_keeps_account_and_termin
     let spec = dialog.spec();
     assert!(spec.fields.iter().all(|field| matches!(
         field.id.as_str(),
-        "provider" | "profile" | "permissions" | "fast-mode"
+        "provider" | "profile" | "permissions" | "fast-mode" | "plan-mode" | "goal"
     )));
     assert!(spec.fields.iter().any(|field| field.id == "permissions"));
     dialog.apply(
@@ -1333,4 +1335,147 @@ fn no_project_keeps_launch_directory_separate_from_assignment(
     );
     form.set_directory("/registered/project".into());
     assert!(!form.draft.projectless);
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn provider_references_and_goals_keep_the_existing_launch_slots(
+    mut form: NewSessionForm,
+    #[case] projectless: bool,
+) {
+    use bootty_agents::{NativeCompletionKind, NativeCompletionOption, NativeProviderMention};
+    form.draft.prompt = "@Mail next task".into();
+    form.draft.provider_mentions = vec![NativeProviderMention {
+        option: NativeCompletionOption {
+            icon_url: None,
+            kind: NativeCompletionKind::App,
+            name: "mail".into(),
+            display_name: "Mail".into(),
+            description: None,
+            argument_hint: None,
+            path: Some("app://mail".into()),
+            scope: None,
+        },
+        prompt_range: 0..5,
+    }];
+    form.change_field("goal", "Improve the application");
+    if projectless {
+        form.set_no_project("/host/home".into());
+    }
+    let invocation = form.invocation(&form.draft.cwd).unwrap();
+    assert_eq!(
+        invocation.arguments.get(15).map(String::as_str),
+        Some(if projectless { "true" } else { "" })
+    );
+    assert_eq!(invocation.arguments.get(16).map(String::as_str), Some(""));
+    let mentions: Vec<NativeProviderMention> =
+        serde_json::from_str(invocation.arguments.get(17).unwrap()).unwrap();
+    assert_eq!(mentions, form.draft.provider_mentions);
+    assert_eq!(
+        invocation.arguments.get(18).map(String::as_str),
+        Some("Improve the application")
+    );
+}
+
+#[rstest]
+fn codex_goal_survives_provider_changes_without_blocking_other_providers(mut form: NewSessionForm) {
+    form.change_text("Improve the composer");
+    form.change_field("goal", "Improve the application");
+    form.change_field("provider", "claude");
+    assert_eq!(form.draft.provider, "claude");
+    let invocation = form.invocation(&form.draft.cwd).unwrap();
+    assert!(invocation.arguments.get(18).is_none_or(String::is_empty));
+    form.change_field("provider", "codex");
+    let invocation = form.invocation(&form.draft.cwd).unwrap();
+    assert_eq!(
+        invocation.arguments.get(18).map(String::as_str),
+        Some("Improve the application")
+    );
+}
+
+#[rstest]
+fn changing_model_effort_and_catalog_preserves_plan_mode(mut form: NewSessionForm) {
+    let models = vec![bootty_agents::NativeModelOption {
+        id: "available".into(),
+        display_name: "Available".into(),
+        reasoning_efforts: vec!["medium".into(), "high".into()],
+        default_reasoning_effort: Some("medium".into()),
+        is_default: true,
+        is_legacy: false,
+        is_favorite: false,
+    }];
+    form.set_model_catalog(Ok(models.clone()));
+    form.change_field("plan-mode", "true");
+    form.change_field("model", "available");
+    form.change_field("reasoning", "high");
+    form.change_field("fast-mode", "true");
+    form.set_model_catalog(Ok(models));
+    assert_eq!(
+        form.draft.model_selection.as_ref().unwrap().plan_mode,
+        Some(true)
+    );
+    let invocation = form.invocation(&form.draft.cwd).unwrap();
+    let selection: bootty_agents::NativeModelSelection =
+        serde_json::from_str(invocation.arguments.get(11).unwrap()).unwrap();
+    assert_eq!(selection.plan_mode, Some(true));
+    assert_eq!(selection.reasoning_effort.as_deref(), Some("high"));
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn add_menu_task_controls_reach_creation_and_native_tab_drafts(
+    mut form: NewSessionForm,
+    #[case] native_tab: bool,
+) {
+    form.change_field("model", "configured-model");
+    form.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+        model: "configured-model".into(),
+        reasoning_effort: None,
+        fast_mode: None,
+        plan_mode: None,
+    });
+    let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
+    let mut dialog = if native_tab {
+        bootty_ui::presentation::dialogs::NewSessionDialog::open_native_form(form, &repaint)
+    } else {
+        bootty_ui::presentation::dialogs::NewSessionDialog::open_form(form, &repaint)
+    };
+    for (field, value) in [("plan-mode", "true"), ("goal", "Improve the composer")] {
+        dialog.apply(
+            &bootty_ui::gpui::DialogIntent::FieldChanged {
+                dialog: bootty_ui::gpui::DialogId::new(
+                    bootty_ui::presentation::dialogs::NEW_SESSION_ID,
+                ),
+                field: field.into(),
+                value: value.into(),
+            },
+            &[],
+        );
+    }
+    let draft = dialog.draft().expect("retained draft");
+    assert_eq!(
+        draft
+            .model_selection
+            .as_ref()
+            .and_then(|selection| selection.plan_mode),
+        Some(true)
+    );
+    assert_eq!(draft.goal, "Improve the composer");
+    let spec = dialog.spec();
+    assert_eq!(
+        spec.fields
+            .iter()
+            .find(|field| field.id == "plan-mode")
+            .map(|field| field.value.as_str()),
+        Some("true")
+    );
+    assert_eq!(
+        spec.fields
+            .iter()
+            .find(|field| field.id == "goal")
+            .map(|field| field.value.as_str()),
+        Some("Improve the composer")
+    );
 }

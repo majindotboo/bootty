@@ -1203,6 +1203,8 @@ impl AppState {
                     projectless: false,
                     prompt: String::new(),
                     applications: Vec::new(),
+                    provider_mentions: Vec::new(),
+                    goal: String::new(),
                     attachments: Vec::new(),
                     command: String::new(),
                     provider: provider.to_owned(),
