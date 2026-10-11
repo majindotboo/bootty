@@ -15,14 +15,25 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             launch_arguments
                 .iter()
                 .copied()
-                .chain(["projectless", "saved_session"])
+                .chain(["projectless", "saved_session", "provider_mentions", "goal"])
                 .collect(),
             ResourceKind::Binding,
         ),
-        ("tab", launch_arguments.clone(), ResourceKind::Binding),
+        (
+            "tab",
+            launch_arguments
+                .iter()
+                .copied()
+                .chain(["projectless", "saved_session", "provider_mentions", "goal"])
+                .collect(),
+            ResourceKind::Binding,
+        ),
         (
             "pane",
-            launch_arguments.into_iter().chain(["direction"]).collect(),
+            launch_arguments
+                .into_iter()
+                .chain(["direction", "saved_session", "provider_mentions", "goal"])
+                .collect(),
             ResourceKind::Terminal,
         ),
         ("list", vec![], ResourceKind::Binding),
@@ -126,6 +137,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         ),
         ("resume", vec!["id", "generation"], ResourceKind::Session),
         ("unarchive", vec!["id", "generation"], ResourceKind::Session),
+        (
+            "goal",
+            vec!["id", "generation", "objective"],
+            ResourceKind::Session,
+        ),
         ("models", vec!["id", "generation"], ResourceKind::Session),
         (
             "models-info",
@@ -234,6 +250,8 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                             | "attachment_ranges"
                             | "applications"
                             | "selection"
+                            | "provider_mentions"
+                            | "goal"
                     ) || name == "permissions" && operation != "permissions"
                         || name == "response" && operation == "fork"),
                     choices: if name == "direction" && operation == "pane" {
@@ -270,6 +288,7 @@ fn prompt_arguments() -> Vec<&'static str> {
         "applications",
         "authored_bytes",
         "attachment_ranges",
+        "provider_mentions",
     ]
 }
 

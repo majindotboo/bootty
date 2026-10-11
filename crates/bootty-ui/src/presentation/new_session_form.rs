@@ -380,6 +380,7 @@ impl NewSessionForm {
                             self.model_options.iter().find(|model| model.is_default)
                     {
                         self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                            plan_mode: None,
                             model: model.id.clone(),
                             reasoning_effort: model.default_reasoning_effort.clone(),
                             fast_mode: Some(fast),
@@ -394,6 +395,7 @@ impl NewSessionForm {
                     option.id == value || model_label(option, &self.model_options) == value
                 }) {
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                        plan_mode: None,
                         fast_mode: fast,
                         model: option.id.clone(),
                         reasoning_effort: option
@@ -429,6 +431,7 @@ impl NewSessionForm {
                     .any(|effort| effort == value)
                 {
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                        plan_mode: None,
                         fast_mode: fast,
                         model: option.id.clone(),
                         reasoning_effort: Some(value.to_owned()),
@@ -894,6 +897,7 @@ impl NewSessionForm {
                                 .cloned()
                         });
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+                        plan_mode: None,
                         fast_mode: self
                             .draft
                             .model_selection

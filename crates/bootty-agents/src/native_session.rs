@@ -91,6 +91,8 @@ pub struct NativeSessionConfig {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub fast_mode: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_mode: Option<bool>,
     #[serde(default)]
     pub permissions: crate::NativePermissionMode,
     /// Captured Bootty profile ID; older records retain their account without inferring an alias.
@@ -182,6 +184,7 @@ impl NativeSessionConfig {
             model: None,
             reasoning_effort: None,
             fast_mode: false,
+            plan_mode: None,
             permissions: crate::NativePermissionMode::default(),
             profile: None,
             account_directory,
@@ -277,6 +280,9 @@ impl NativeSessionConfig {
     }
 
     pub(crate) fn validate_stored(&self) -> Result<(), String> {
+        if self.plan_mode == Some(true) && self.provider != AgentKind::Codex {
+            return Err("Collaboration Plan mode requires Codex".into());
+        }
         if self.profile.as_ref().is_some_and(|profile| {
             profile.is_empty()
                 || profile.len() > 64
@@ -740,6 +746,7 @@ impl NativeAgentSession {
             .model
             .as_ref()
             .map(|model| crate::NativeModelSelection {
+                plan_mode: self.config.plan_mode,
                 fast_mode: Some(self.config.fast_mode),
                 model: model.clone(),
                 reasoning_effort: self.config.reasoning_effort.clone(),
@@ -764,9 +771,14 @@ impl NativeAgentSession {
         if self.closing.load(Ordering::Acquire) {
             return Err("Native agent session is stopped".to_owned());
         }
+        if prompt.has_provider_mentions() && self.config.provider != AgentKind::Codex {
+            return Err("Apps and plugin mentions require the captured Codex account".into());
+        }
         let resolved_prompt =
             if self.config.provider != AgentKind::Claude && prompt.needs_skill_catalog() {
-                prompt.with_advertised_skills(&self.completions()?)
+                let catalog = self.completions()?;
+                prompt.validate_provider_mentions(&catalog)?;
+                prompt.with_advertised_skills(&catalog)
             } else {
                 prompt.clone()
             };
@@ -869,21 +881,13 @@ impl NativeAgentSession {
             .snapshot()
             .session_id
             .ok_or("Agent has no native thread")?;
-        let mut parameters = json!({"threadId":id,"input":prompt.codex_input()?,"model":selection.map(|selection| &selection.model),"effort":selection.and_then(|selection| selection.reasoning_effort.as_ref())});
-        if let Some(fast) = selection
-            .and_then(|selection| selection.fast_mode)
-            .or_else(|| self.config.fast_mode.then_some(true))
-            && let Some(parameters) = parameters.as_object_mut()
-        {
-            // A null tier clears Codex's sticky fast tier on later turns.
-            parameters.insert("serviceTier".to_owned(), json!(fast.then_some("fast")));
-        }
-        if let (Some(parameters), Some(policy)) = (
-            parameters.as_object_mut(),
-            self.config.permissions.codex().as_object(),
-        ) {
-            parameters.extend(policy.clone());
-        }
+        let parameters = codex_turn_parameters(
+            &id,
+            &prompt.codex_input()?,
+            selection,
+            self.config.fast_mode,
+            self.config.permissions,
+        );
         let result = self.rpc_prompt("turn/start", parameters, prompt.requires_large_envelope());
         let result = result.and_then(|reply| {
             let turn = string(field(field(&reply, "turn"), "id"))
@@ -2092,6 +2096,37 @@ fn capture_request(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Resul
     snapshot.status = NativeSessionStatus::Waiting;
     snapshot.changed();
     Ok(())
+}
+
+fn codex_turn_parameters(
+    thread: &str,
+    input: &Value,
+    selection: Option<&crate::NativeModelSelection>,
+    fast_mode: bool,
+    permissions: crate::NativePermissionMode,
+) -> Value {
+    let mut parameters = json!({"threadId":thread,"input":input,"model":selection.map(|selection| &selection.model),"effort":selection.and_then(|selection| selection.reasoning_effort.as_ref())});
+    if let Some(parameters) = parameters.as_object_mut() {
+        if let Some(plan) = selection.and_then(|selection| selection.plan_mode)
+            && let Some(selection) = selection
+        {
+            parameters.insert("collaborationMode".into(), json!({
+                "mode": if plan { "plan" } else { "default" },
+                "settings": {"model": selection.model, "reasoning_effort": selection.reasoning_effort, "developer_instructions": null}
+            }));
+        }
+        if let Some(fast) = selection
+            .and_then(|selection| selection.fast_mode)
+            .or_else(|| fast_mode.then_some(true))
+        {
+            // A null tier clears Codex's sticky fast tier on later turns.
+            parameters.insert("serviceTier".into(), json!(fast.then_some("fast")));
+        }
+        if let Some(policy) = permissions.codex().as_object() {
+            parameters.extend(policy.clone());
+        }
+    }
+    parameters
 }
 
 fn validate_answers(parameters: &Value, response: &Value) -> Result<(), String> {

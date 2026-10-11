@@ -29,6 +29,9 @@ pub struct NativeProviderCatalog {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct NativeModelSelection {
+    /// Omission preserves the current collaboration mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_mode: Option<bool>,
     /// Omission preserves speed for existing callers; explicit false selects normal speed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fast_mode: Option<bool>,

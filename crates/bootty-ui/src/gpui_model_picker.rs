@@ -763,6 +763,7 @@ impl ModelPickerView {
             .gap_1()
             .children(options.iter().map(|effort| {
                 let selection = bootty_agents::NativeModelSelection {
+                    plan_mode: None,
                     fast_mode: None,
                     model: model.id.clone(),
                     reasoning_effort: Some(effort.clone()),
@@ -826,6 +827,7 @@ impl ModelPickerView {
             return false;
         };
         let selection = bootty_agents::NativeModelSelection {
+            plan_mode: None,
             fast_mode: None,
             model: model.id.clone(),
             reasoning_effort: Some(effort.clone()),
@@ -1160,6 +1162,7 @@ fn step_reasoning_effort(
         choices.rfind(|(candidate, _)| index.is_none_or(|index| *candidate < index))
     }?;
     Some(bootty_agents::NativeModelSelection {
+        plan_mode: None,
         fast_mode: None,
         model: model.id.clone(),
         reasoning_effort: Some(next.1.clone()),

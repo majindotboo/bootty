@@ -421,7 +421,12 @@ Its CLI-only maximum effort is offered at creation; live pickers expose the
 efforts accepted by flag settings. Loading and retry states retain the draft.
 
 Both Agent composers share retained completion state. Commands and skills come
-from the selected provider/account's live protocol; probing a creation draft does
+from the selected provider/account's live protocol. The shared Add menu also reads
+Codex's installed callable apps and enabled plugins, enriches them with provider
+metadata, and inserts typed mentions. Submission revalidates these references
+against the captured account, including queued messages. Plan mode is an explicit
+provider collaboration selection; conversation goals stay owned by Codex through
+its thread goal API. Unsupported actions are omitted. Probing a creation draft does
 not start a conversation. File search runs through `bootty-host::files` on the captured host, with bounded
 ranked Git indexes and ignore rules. Outside Git it completes the typed directory
 without recursively scanning a home tree.

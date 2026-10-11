@@ -20,6 +20,7 @@ claude='--input-format' in sys.argv
 identity=sys.argv[sys.argv.index('--resume' if '--resume' in sys.argv else '--session-id')+1] if claude else None
 model={'provider':'configured','id':'available','name':'Available','reasoning':True,'thinkingLevelMap':{'xhigh':None,'max':'high'}}
 effort=sys.argv[sys.argv.index('--effort')+1] if '--effort' in sys.argv else 'medium'
+goal=None
 fast=any(json.loads(sys.argv[i+1]).get('fastMode',False) for i,arg in enumerate(sys.argv[:-1]) if arg=='--settings')
 def emit(value): print(json.dumps(value),flush=True)
 def reply(value,data):
@@ -45,6 +46,30 @@ for line in sys.stdin:
   with open('thread-started','w') as output: output.write(method)
   reply(value,{'thread':{'id':'thread','turns':[]}})
  elif method=='skills/list': reply(value,{'data':[{'cwd':os.getcwd(),'skills':[{'name':'project-skill','path':os.path.join(os.getcwd(),'SKILL.md'),'enabled':True,'description':'Project work','scope':'project'},{'name':'disabled','path':'/disabled','enabled':False}]}]})
+ elif method=='app/installed':
+  apps=[{'id':'mail','runtimeName':'Mail','enabled':True,'callable':True},{'id':'disabled-app','enabled':False,'callable':False},{'id':'uncallable','enabled':True,'callable':False}]
+  if os.path.exists('apps.json'):
+   with open('apps.json') as source: apps=json.load(source)
+  reply(value,{'apps':apps})
+ elif method=='app/read': reply(value,{'apps':[{'id':'mail','name':'Mail','description':'Read and manage mail'}]})
+ elif method=='app/list':
+  if os.path.exists('apps.json'):
+   with open('apps.json') as source: apps=json.load(source)
+  else: apps=[{'id':'mail','name':'Mail','isAccessible':True,'isEnabled':True},{'id':'disabled-app','name':'Disabled','isAccessible':True,'isEnabled':False},{'id':'inaccessible','name':'Private','isAccessible':False,'isEnabled':True}]
+  reply(value,{'data':apps,'nextCursor':None})
+ elif method=='plugin/installed': reply(value,{'marketplaces':[{'name':'market','plugins':[{'id':'review@market','name':'review','installed':True,'enabled':True,'interface':{'displayName':'Code review','shortDescription':'Review changes'}},{'id':'disabled-plugin','installed':True,'enabled':False},{'id':'uninstalled','installed':False,'enabled':True},{'id':'admin-blocked','installed':True,'enabled':True,'availability':'DISABLED_BY_ADMIN'}]}]})
+ elif method=='collaborationMode/list': reply(value,{'data':[{'name':'Plan','mode':'plan'}]})
+ elif method=='experimentalFeature/list': reply(value,{'data':[{'name':'goals','enabled':True}]})
+ elif method=='thread/goal/get': reply(value,{'goal':goal})
+ elif method=='thread/goal/set':
+  assert params['origin']=='user' and params['threadId']=='thread'
+  goal={'objective':params['objective'],'status':'active'}
+  reply(value,{'goal':goal})
+ elif method=='thread/goal/clear':
+  assert params['origin']=='user' and params['threadId']=='thread'
+  goal=None
+  reply(value,{'cleared':True})
+
  elif method=='get_commands': reply(value,{'commands':[{'name':'review','description':'Review work','source':'extension'},{'name':'skill:project-skill','source':'skill','description':'Project work','sourceInfo':{'path':os.path.join(os.getcwd(),'SKILL.md'),'scope':'project'}}]})
  elif method=='model/list': reply(value,{'data':[{'id':'catalog-id','model':'available','displayName':'Available','supportedReasoningEfforts':[{'reasoningEffort':'medium'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'medium','isDefault':True}],'nextCursor':None})
  elif method=='config/read':
@@ -71,7 +96,10 @@ for line in sys.stdin:
   if os.path.exists('claude-settings.json'):
    with open('claude-settings.json') as source: settings=json.load(source)
   reply(value,settings)
- elif method in ['turn/start','prompt']:
+ elif method in ['turn/start','turn/steer','prompt']:
+  if method=='turn/start':
+   emit({'method':'turn/started','params':{'threadId':'thread','turn':{'id':'turn','status':'inProgress','items':[]}}})
+   emit({'method':'item/completed','params':{'threadId':'thread','turnId':'turn','item':{'id':'provider-user','type':'userMessage','content':params['input']}}})
   with open('prompt.json','w') as output: json.dump({'params':params,'model':model,'effort':effort,'fast':fast},output)
   if pi: reply(value,{'disposition':'handled'})
   else: reply(value,{'turn':{'id':'turn'}})
@@ -179,6 +207,7 @@ fn committed_selection_drives_the_next_provider_prompt(
         assert!(!models[0].reasoning_efforts.contains(&"xhigh".to_owned()));
     }
     let selection = NativeModelSelection {
+        plan_mode: None,
         fast_mode: Some(fast),
         model: model.to_owned(),
         reasoning_effort: Some("high".to_owned()),
@@ -245,6 +274,7 @@ proptest! {
         let record = service.create("binding", "Session", config(root.path(), AgentKind::Codex).unwrap()).unwrap();
         let before: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         let selection = NativeModelSelection {
+                plan_mode: None,
 fast_mode: None,
             model: if invalid_model { selector.clone() } else { "available".to_owned() },
             reasoning_effort: if invalid_model { None } else { Some(selector) },
@@ -275,6 +305,7 @@ fn failed_configuration_write_keeps_the_prior_prompt_settings() {
             .configure(
                 &record.target(),
                 &NativeModelSelection {
+                    plan_mode: None,
                     fast_mode: Some(true),
                     model: "available".to_owned(),
                     reasoning_effort: Some("high".to_owned())
@@ -501,6 +532,7 @@ fn claude_discovery_keeps_launch_efforts_and_live_controls_offer_only_supported_
             .configure(
                 &record.target(),
                 &NativeModelSelection {
+                    plan_mode: None,
                     fast_mode: None,
                     model: "available".to_owned(),
                     reasoning_effort: Some("max".to_owned()),
@@ -571,4 +603,193 @@ fn claude_catalog_resolves_model_and_account_effort_without_a_placeholder(
     assert!(models[0].is_default);
     assert_eq!(models[0].default_reasoning_effort.as_deref(), expected);
     assert!(!root.path().join("prompt.json").exists());
+}
+
+#[rstest]
+fn provider_references_use_the_advertised_account_catalog() {
+    use bootty_agents::{
+        NativeAgentSession, NativeCompletionKind, NativePrompt, NativeProviderMention,
+    };
+    let root = TempDir::new().unwrap();
+    let session =
+        NativeAgentSession::spawn(config(root.path(), AgentKind::Codex).unwrap()).unwrap();
+    let catalog = session.completions().unwrap();
+    let options: Vec<_> = catalog
+        .options
+        .iter()
+        .filter(|option| {
+            matches!(
+                option.kind,
+                NativeCompletionKind::App | NativeCompletionKind::Plugin
+            )
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        options
+            .iter()
+            .map(|option| option.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mail", "review@market"]
+    );
+    assert!(catalog.plan_mode);
+    assert!(catalog.goals);
+    let text = "@Mail @Code review";
+    let prompt = NativePrompt::text(text)
+        .unwrap()
+        .with_provider_mentions(vec![
+            NativeProviderMention {
+                option: options[0].clone(),
+                prompt_range: 0..5,
+            },
+            NativeProviderMention {
+                option: options[1].clone(),
+                prompt_range: 6..18,
+            },
+        ])
+        .unwrap();
+    session.send_prompt_input(&prompt).unwrap();
+    let wire: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(
+        wire["params"]["input"][1],
+        json!({"type":"mention","name":"Mail","path":"app://mail"})
+    );
+    assert_eq!(
+        wire["params"]["input"][2],
+        json!({"type":"mention","name":"Code review","path":"plugin://review@market"})
+    );
+    session.stop();
+}
+
+#[rstest]
+fn a_disabled_app_cannot_be_submitted_using_an_old_chip() {
+    use bootty_agents::{
+        NativeAgentSession, NativeCompletionKind, NativePrompt, NativeProviderMention,
+    };
+    let root = TempDir::new().unwrap();
+    let session =
+        NativeAgentSession::spawn(config(root.path(), AgentKind::Codex).unwrap()).unwrap();
+    let option = session
+        .completions()
+        .unwrap()
+        .options
+        .into_iter()
+        .find(|option| option.kind == NativeCompletionKind::App)
+        .unwrap();
+    fs::write(root.path().join("apps.json"), "[]").unwrap();
+    let prompt = NativePrompt::text("@Mail")
+        .unwrap()
+        .with_provider_mentions(vec![NativeProviderMention {
+            option,
+            prompt_range: 0..5,
+        }])
+        .unwrap();
+    assert!(
+        session
+            .send_prompt_input(&prompt)
+            .unwrap_err()
+            .contains("no longer available")
+    );
+    assert!(!root.path().join("prompt.json").exists());
+    session.stop();
+}
+
+#[rstest]
+fn queued_provider_references_restore_as_typed_mentions() {
+    use bootty_agents::{NativeCompletionKind, NativeProviderMention};
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("store.json")).unwrap();
+    let record = service
+        .create(
+            "binding",
+            "Mention queue",
+            config(root.path(), AgentKind::Codex).unwrap(),
+        )
+        .unwrap();
+    let target = record.target();
+    let option = service
+        .completions(&target)
+        .unwrap()
+        .options
+        .into_iter()
+        .find(|option| option.kind == NativeCompletionKind::App)
+        .unwrap();
+    service.prompt(&target, "start working").unwrap();
+    let prompt = bootty_agents::NativePrompt::text("@Mail")
+        .unwrap()
+        .with_provider_mentions(vec![NativeProviderMention {
+            option,
+            prompt_range: 0..5,
+        }])
+        .unwrap();
+    let queued = service.queue_input(&target, &prompt).unwrap();
+    service.steer_followup(&target, &queued.id).unwrap();
+    let wire: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(
+        wire["params"]["input"][1],
+        json!({"type":"mention","name":"Mail","path":"app://mail"})
+    );
+    assert_eq!(
+        service
+            .sessions()
+            .iter()
+            .find(|record| record.target() == target)
+            .unwrap()
+            .queued_messages,
+        Vec::<bootty_agents::NativeQueuedMessage>::new()
+    );
+    service.stop(&target).unwrap();
+}
+
+#[rstest]
+#[case(true)]
+#[case(false)]
+fn plan_mode_is_persisted_and_sent_as_a_provider_collaboration_mode(#[case] plan: bool) {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("store.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service
+        .create(
+            "binding",
+            "Planning",
+            config(root.path(), AgentKind::Codex).unwrap(),
+        )
+        .unwrap();
+    let target = record.target();
+    let selection = NativeModelSelection {
+        plan_mode: Some(plan),
+        fast_mode: None,
+        model: "available".into(),
+        reasoning_effort: Some("high".into()),
+    };
+    service.configure(&target, &selection).unwrap();
+    service.prompt(&target, "next turn").unwrap();
+    let wire: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(
+        wire["params"]["collaborationMode"],
+        json!({"mode":if plan {"plan"} else {"default"},"settings":{"model":"available","reasoning_effort":"high","developer_instructions":null}})
+    );
+    let persisted: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(persisted["records"][0]["config"]["plan_mode"], plan);
+    service.stop(&target).unwrap();
+}
+
+#[rstest]
+fn user_goal_controls_update_and_clear_the_provider_goal_without_sending_a_turn() {
+    let root = TempDir::new().unwrap();
+    let session =
+        bootty_agents::NativeAgentSession::spawn(config(root.path(), AgentKind::Codex).unwrap())
+            .unwrap();
+    session.set_goal("Improve the composer").unwrap();
+    assert_eq!(
+        session.completions().unwrap().goal.as_deref(),
+        Some("Improve the composer")
+    );
+    session.set_goal("").unwrap();
+    assert_eq!(session.completions().unwrap().goal, None);
+    assert!(!root.path().join("prompt.json").exists());
+    session.stop();
 }

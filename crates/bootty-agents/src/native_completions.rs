@@ -13,6 +13,8 @@ use crate::{
 pub enum NativeCompletionKind {
     Command,
     Skill,
+    App,
+    Plugin,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -24,11 +26,38 @@ pub struct NativeCompletionOption {
     pub argument_hint: Option<String>,
     pub path: Option<String>,
     pub scope: Option<String>,
+    #[serde(default)]
+    pub icon_url: Option<String>,
+}
+
+/// An explicit app or plugin chip in authored input, resolved against the captured account.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct NativeProviderMention {
+    pub option: NativeCompletionOption,
+    pub prompt_range: std::ops::Range<usize>,
+}
+
+impl NativeProviderMention {
+    #[must_use]
+    pub fn id(&self) -> String {
+        format!(
+            "provider:{}",
+            self.option.path.as_deref().unwrap_or_default()
+        )
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub struct NativeCompletionCatalog {
     pub options: Vec<NativeCompletionOption>,
+    #[serde(default)]
+    pub plan_mode: bool,
+    #[serde(default)]
+    pub goals: bool,
+    #[serde(default)]
+    pub goal: Option<String>,
+    #[serde(default)]
+    pub unavailable: Vec<NativeCompletionKind>,
 }
 
 impl NativeAgentSession {
@@ -56,6 +85,9 @@ impl NativeAgentSession {
     /// # Errors
     /// Returns malformed capability data, stale Pi identity or transport failures.
     pub fn completions(&self) -> Result<NativeCompletionCatalog, String> {
+        if self.config.provider == AgentKind::Codex {
+            *lock(&self.completion_catalog) = None;
+        }
         self.completion_catalog(true)
     }
 
@@ -79,13 +111,261 @@ impl NativeAgentSession {
                     std::fs::canonicalize(&self.config.cwd).map_err(|e| e.to_string())?
                 };
                 let response = self.rpc("skills/list", json!({"cwds":[cwd]}))?;
-                decode_codex(&response, &cwd.to_string_lossy())?
+                let mut catalog = decode_codex(&response, &cwd.to_string_lossy())?;
+                let thread = bound.then(|| self.snapshot().session_id).flatten();
+                self.append_installed_apps(&mut catalog, thread.as_deref());
+                match self.rpc("plugin/installed", json!({"cwds":[cwd]})) {
+                    Ok(response) => match decode_codex_plugins(&response) {
+                        Ok(options) => catalog.options.extend(options),
+                        Err(_) => catalog.unavailable.push(NativeCompletionKind::Plugin),
+                    },
+                    Err(error) if unsupported_catalog(&error) => {}
+                    Err(_) => catalog.unavailable.push(NativeCompletionKind::Plugin),
+                }
+                catalog.plan_mode = self
+                    .rpc("collaborationMode/list", json!({}))
+                    .ok()
+                    .and_then(|response| field(&response, "data").as_array().cloned())
+                    .is_some_and(|modes| modes.iter().any(|mode| field(mode, "mode") == "plan"));
+                catalog.goals = self
+                    .rpc("experimentalFeature/list", json!({}))
+                    .ok()
+                    .and_then(|response| field(&response, "data").as_array().cloned())
+                    .is_some_and(|features| {
+                        features.iter().any(|feature| {
+                            field(feature, "name") == "goals" && field(feature, "enabled") == true
+                        })
+                    });
+                if catalog.goals
+                    && let Some(thread) = &thread
+                {
+                    catalog.goal = self
+                        .rpc("thread/goal/get", json!({"threadId":thread}))
+                        .ok()
+                        .and_then(|response| text(field(field(&response, "goal"), "objective")));
+                }
+                bounded(&catalog.options)?;
+                catalog
             }
             AgentKind::Claude => return Err("Claude did not advertise its command catalog".into()),
         };
         *lock(&self.completion_catalog) = Some(catalog.clone());
         Ok(catalog)
     }
+
+    /// Set or clear a goal through the public provider protocol with user provenance.
+    /// # Errors
+    /// Returns unsupported accounts, invalid objectives, stopped sessions, or provider rejection.
+    pub fn set_goal(&self, objective: &str) -> Result<(), String> {
+        if self.config.provider != AgentKind::Codex || !self.completions()?.goals {
+            return Err("Goals are not available for this provider account".into());
+        }
+        if objective.len() > 8192 || objective.contains('\0') {
+            return Err("Goal must be at most 8192 bytes".into());
+        }
+        let thread = self
+            .snapshot()
+            .session_id
+            .ok_or("This conversation has no provider thread")?;
+        let objective = objective.trim();
+        let result = if objective.is_empty() {
+            self.rpc(
+                "thread/goal/clear",
+                json!({"threadId":thread,"origin":"user"}),
+            )
+        } else {
+            self.rpc(
+                "thread/goal/set",
+                json!({"threadId":thread,"origin":"user","objective":objective}),
+            )
+        }
+        .map_err(|_| "Couldn’t update this conversation’s goal. Try again.".to_owned())?;
+        if objective.is_empty() {
+            if !field(&result, "cleared").is_boolean() {
+                return Err("The provider did not clear the goal".into());
+            }
+        } else if field(field(&result, "goal"), "objective") != objective {
+            return Err("The provider did not confirm the requested goal".into());
+        }
+        *lock(&self.completion_catalog) = None;
+        Ok(())
+    }
+
+    fn append_installed_apps(&self, catalog: &mut NativeCompletionCatalog, thread: Option<&str>) {
+        // Match Codex's installed, callable snapshot; the list fallback supports older servers.
+        let response = match self.rpc(
+            "app/installed",
+            json!({"threadId":thread,"forceRefresh":true}),
+        ) {
+            Ok(response) => response,
+            Err(error) if unsupported_catalog(&error) => {
+                self.append_codex_apps(catalog, thread);
+                return;
+            }
+            Err(_) => {
+                catalog.unavailable.push(NativeCompletionKind::App);
+                return;
+            }
+        };
+        let Some(apps) = field(&response, "apps")
+            .as_array()
+            .filter(|apps| bounded(apps).is_ok())
+        else {
+            catalog.unavailable.push(NativeCompletionKind::App);
+            return;
+        };
+        let mut options: Vec<_> = apps
+            .iter()
+            .filter(|app| field(app, "enabled") == true && field(app, "callable") == true)
+            .filter_map(|app| {
+                let id = name(field(app, "id"))?;
+                Some(NativeCompletionOption {
+                    kind: NativeCompletionKind::App,
+                    display_name: text(field(app, "runtimeName")).unwrap_or_else(|| id.clone()),
+                    name: id.clone(),
+                    path: Some(format!("app://{id}")),
+                    description: None,
+                    argument_hint: None,
+                    scope: None,
+                    icon_url: None,
+                })
+            })
+            .collect();
+        for batch in options.chunks_mut(100) {
+            let ids: Vec<_> = batch.iter().map(|option| &option.name).collect();
+            let Ok(metadata) = self.rpc(
+                "app/read",
+                json!({"appIds":ids,"threadId":thread,"includeTools":false}),
+            ) else {
+                continue;
+            };
+            let Some(apps) = field(&metadata, "apps")
+                .as_array()
+                .filter(|apps| bounded(apps).is_ok())
+            else {
+                continue;
+            };
+            for option in batch {
+                if let Some(app) = apps
+                    .iter()
+                    .find(|app| field(app, "id") == option.name.as_str())
+                {
+                    if let Some(label) = text(field(app, "name")) {
+                        option.display_name = label;
+                    }
+                    option.description = text(field(app, "description"));
+                    option.icon_url = icon_url(field(app, "iconUrl"));
+                }
+            }
+        }
+        catalog.options.extend(options);
+    }
+
+    fn append_codex_apps(&self, catalog: &mut NativeCompletionCatalog, thread: Option<&str>) {
+        let mut cursor = None::<String>;
+        let mut seen = std::collections::HashSet::new();
+        // Bound catalog pagination; a larger provider catalog needs a server-side search UI.
+        for _ in 0..32 {
+            let response = match self.rpc(
+                "app/list",
+                json!({"threadId":thread,"cursor":cursor,"limit":100}),
+            ) {
+                Ok(response) => response,
+                Err(error) if unsupported_catalog(&error) => return,
+                Err(_) => {
+                    catalog.unavailable.push(NativeCompletionKind::App);
+                    return;
+                }
+            };
+            if let Ok(options) = decode_codex_apps(&response) {
+                catalog.options.extend(options);
+            } else {
+                catalog.unavailable.push(NativeCompletionKind::App);
+                return;
+            }
+            cursor = text(field(&response, "nextCursor"));
+            let Some(next) = &cursor else { return };
+            if !seen.insert(next.clone()) {
+                break;
+            }
+        }
+        catalog.unavailable.push(NativeCompletionKind::App);
+    }
+}
+
+fn icon_url(value: &Value) -> Option<String> {
+    text(value).filter(|url| url.starts_with("https://"))
+}
+
+fn unsupported_catalog(error: &str) -> bool {
+    error.contains("-32601")
+        || error.to_ascii_lowercase().contains("unknown method")
+        || error.to_ascii_lowercase().contains("unknown variant")
+}
+
+fn decode_codex_apps(value: &Value) -> Result<Vec<NativeCompletionOption>, String> {
+    let apps = field(value, "data")
+        .as_array()
+        .ok_or("Malformed app catalog")?;
+    bounded(apps)?;
+    Ok(apps
+        .iter()
+        .filter(|app| field(app, "isAccessible") == true && field(app, "isEnabled") != false)
+        .filter_map(|app| {
+            let id = name(field(app, "id"))?;
+            let label = text(field(app, "name"))?;
+            Some(NativeCompletionOption {
+                icon_url: icon_url(field(app, "logoUrl")),
+                kind: NativeCompletionKind::App,
+                name: id.clone(),
+                display_name: label,
+                description: text(field(app, "description")),
+                argument_hint: None,
+                path: Some(format!("app://{id}")),
+                scope: None,
+            })
+        })
+        .collect())
+}
+
+fn decode_codex_plugins(value: &Value) -> Result<Vec<NativeCompletionOption>, String> {
+    let marketplaces = field(value, "marketplaces")
+        .as_array()
+        .ok_or("Malformed plugin catalog")?;
+    bounded(marketplaces)?;
+    let mut options = Vec::new();
+    for marketplace in marketplaces {
+        let plugins = field(marketplace, "plugins")
+            .as_array()
+            .ok_or("Malformed plugin catalog")?;
+        bounded(plugins)?;
+        for plugin in plugins.iter().filter(|plugin| {
+            field(plugin, "installed") == true
+                && field(plugin, "enabled") == true
+                && field(plugin, "availability") != "DISABLED_BY_ADMIN"
+                && field(plugin, "disabledReason").is_null()
+        }) {
+            let Some(id) = name(field(plugin, "id")) else {
+                continue;
+            };
+            let Some(label) = text(field(plugin, "name")) else {
+                continue;
+            };
+            let interface = field(plugin, "interface");
+            options.push(NativeCompletionOption {
+                icon_url: icon_url(field(interface, "composerIconUrl")),
+                kind: NativeCompletionKind::Plugin,
+                name: id.clone(),
+                display_name: text(field(interface, "displayName")).unwrap_or(label),
+                description: text(field(interface, "shortDescription")),
+                argument_hint: None,
+                path: Some(format!("plugin://{id}")),
+                scope: text(field(marketplace, "name")),
+            });
+        }
+    }
+    bounded(&options)?;
+    Ok(options)
 }
 
 pub fn decode_claude(value: &Value) -> Result<NativeCompletionCatalog, String> {
@@ -97,6 +377,7 @@ pub fn decode_claude(value: &Value) -> Result<NativeCompletionCatalog, String> {
     for command in commands {
         if let Some(name) = name(field(command, "name")) {
             options.push(NativeCompletionOption {
+                icon_url: None,
                 kind: NativeCompletionKind::Command,
                 display_name: name.clone(),
                 name,
@@ -107,7 +388,10 @@ pub fn decode_claude(value: &Value) -> Result<NativeCompletionCatalog, String> {
             });
         }
     }
-    Ok(NativeCompletionCatalog { options })
+    Ok(NativeCompletionCatalog {
+        options,
+        ..NativeCompletionCatalog::default()
+    })
 }
 
 fn decode_pi(value: &Value) -> Result<NativeCompletionCatalog, String> {
@@ -116,6 +400,7 @@ fn decode_pi(value: &Value) -> Result<NativeCompletionCatalog, String> {
         .ok_or("Pi returned no command catalog")?;
     bounded(commands)?;
     let mut options = vec![NativeCompletionOption {
+        icon_url: None,
         kind: NativeCompletionKind::Command,
         name: "compact".into(),
         display_name: "compact".into(),
@@ -146,6 +431,7 @@ fn decode_pi(value: &Value) -> Result<NativeCompletionCatalog, String> {
         let source = field(command, "sourceInfo");
         let interface = field(command, "interface");
         options.push(NativeCompletionOption {
+            icon_url: None,
             kind: if skill {
                 NativeCompletionKind::Skill
             } else {
@@ -168,7 +454,10 @@ fn decode_pi(value: &Value) -> Result<NativeCompletionCatalog, String> {
             name,
         });
     }
-    Ok(NativeCompletionCatalog { options })
+    Ok(NativeCompletionCatalog {
+        options,
+        ..NativeCompletionCatalog::default()
+    })
 }
 
 fn decode_codex(value: &Value, cwd: &str) -> Result<NativeCompletionCatalog, String> {
@@ -177,6 +466,7 @@ fn decode_codex(value: &Value, cwd: &str) -> Result<NativeCompletionCatalog, Str
         .ok_or("Codex returned no skill catalog")?;
     bounded(entries)?;
     let mut options = vec![NativeCompletionOption {
+        icon_url: None,
         kind: NativeCompletionKind::Command,
         name: "compact".into(),
         display_name: "compact".into(),
@@ -199,6 +489,7 @@ fn decode_codex(value: &Value, cwd: &str) -> Result<NativeCompletionCatalog, Str
             };
             let interface = field(skill, "interface");
             options.push(NativeCompletionOption {
+                icon_url: None,
                 kind: NativeCompletionKind::Skill,
                 display_name: text(field(interface, "displayName")).unwrap_or_else(|| name.clone()),
                 description: text(field(skill, "shortDescription"))
@@ -212,7 +503,10 @@ fn decode_codex(value: &Value, cwd: &str) -> Result<NativeCompletionCatalog, Str
         }
     }
     bounded(&options)?;
-    Ok(NativeCompletionCatalog { options })
+    Ok(NativeCompletionCatalog {
+        options,
+        ..NativeCompletionCatalog::default()
+    })
 }
 
 fn bounded<T>(items: &[T]) -> Result<(), String> {

@@ -116,7 +116,7 @@ pub use native_attachments::{
 pub use native_citations::{NATIVE_CITATION_TEXT_LIMIT, NativeResponseCitation};
 pub use native_commands::native_command_descriptors;
 pub use native_completions::{
-    NativeCompletionCatalog, NativeCompletionKind, NativeCompletionOption,
+    NativeCompletionCatalog, NativeCompletionKind, NativeCompletionOption, NativeProviderMention,
 };
 pub use native_models::{NativeModelOption, NativeModelSelection, NativeProviderCatalog};
 mod native_permissions;

@@ -1092,6 +1092,7 @@ fn project_defaults_apply_to_creation_and_survive_a_created_worktree(mut form: N
     assert!(form.draft.isolated);
     assert_eq!(form.draft.start_ref, "main");
     let selection = bootty_agents::NativeModelSelection {
+        plan_mode: None,
         fast_mode: None,
         model: "chosen".to_owned(),
         reasoning_effort: None,

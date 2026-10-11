@@ -591,6 +591,7 @@ impl NativeAgentService {
             .model
             .as_ref()
             .map(|model| crate::NativeModelSelection {
+                plan_mode: record.config.plan_mode,
                 fast_mode: Some(record.config.fast_mode),
                 model: model.clone(),
                 reasoning_effort: record.config.reasoning_effort.clone(),
@@ -689,6 +690,13 @@ impl NativeAgentService {
         target: &CommandTarget,
     ) -> Result<crate::NativeCompletionCatalog, String> {
         self.resolve(target)?.completions()
+    }
+
+    /// Mutate the goal of the exact captured conversation with explicit user provenance.
+    /// # Errors
+    /// Returns stale targets, unavailable goals, or provider rejection.
+    pub fn set_goal(&self, target: &CommandTarget, objective: &str) -> Result<(), String> {
+        self.resolve(target)?.set_goal(objective)
     }
 
     /// Read history through the exact provider/account owner; pages do not overwrite live state.
@@ -925,6 +933,14 @@ impl NativeAgentService {
         {
             return Err("Selected reasoning effort is not supported by this model".to_owned());
         }
+        if let Some(plan) = selection.plan_mode {
+            if session.config.provider != crate::AgentKind::Codex {
+                return Err("This provider does not support collaboration Plan mode".into());
+            }
+            if plan && !session.completions()?.plan_mode {
+                return Err("Plan mode is not available for this account".into());
+            }
+        }
         let _mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();
         let record = candidate
@@ -932,6 +948,9 @@ impl NativeAgentService {
             .iter_mut()
             .find(|record| record.target() == *target)
             .ok_or("Native session target is unknown or stale")?;
+        if let Some(plan) = selection.plan_mode {
+            record.config.plan_mode = Some(plan);
+        }
         if let Some(fast) = selection.fast_mode {
             if fast && record.config.provider == crate::AgentKind::Pi {
                 return Err("Pi does not support fast mode".to_owned());

@@ -254,6 +254,7 @@ impl NativeAgentSessionView {
                 }) {
                     self.select_model(
                         &NativeModelSelection {
+                            plan_mode: None,
                             model: model.id.clone(),
                             reasoning_effort: self
                                 .record
@@ -302,6 +303,7 @@ impl NativeAgentSessionView {
                         });
                     self.select_model(
                         &NativeModelSelection {
+                            plan_mode: None,
                             fast_mode: None,
                             model: id.clone(),
                             reasoning_effort: effort,

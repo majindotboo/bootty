@@ -172,6 +172,7 @@ pub struct NativePrompt {
     citations: Vec<crate::NativeResponseCitation>,
     skills: Vec<crate::NativeCompletionOption>,
     applications: Vec<crate::NativeApplicationMention>,
+    provider_mentions: Vec<crate::NativeProviderMention>,
     history_context: Option<String>,
 }
 
@@ -185,6 +186,8 @@ pub struct SavedNativePrompt {
     pub(crate) attachments: Vec<crate::NativeAttachmentReference>,
     citations: Vec<crate::NativeResponseCitation>,
     applications: Vec<crate::NativeApplicationMention>,
+    #[serde(default)]
+    provider_mentions: Vec<crate::NativeProviderMention>,
 }
 
 impl SavedNativePrompt {
@@ -214,6 +217,7 @@ impl SavedNativePrompt {
             attachments: prompt.attachment_references.clone(),
             citations: prompt.citations.clone(),
             applications: prompt.applications.clone(),
+            provider_mentions: prompt.provider_mentions.clone(),
         }
     }
 
@@ -244,6 +248,7 @@ impl SavedNativePrompt {
                 .collect(),
         )?
         .with_applications(self.applications.clone())?
+        .with_provider_mentions(self.provider_mentions.clone())?
         .with_authored_prefix(self.authored_bytes)
     }
 }
@@ -291,6 +296,7 @@ impl NativePrompt {
             citations,
             skills: Vec::new(),
             applications: Vec::new(),
+            provider_mentions: Vec::new(),
             history_context: None,
         }
         .with_attachments(attachments)?;
@@ -437,11 +443,94 @@ impl NativePrompt {
         Ok(self)
     }
 
+    /// Attach provider references without enabling or installing anything.
+    /// # Errors
+    /// Rejects invalid chips, paths, overlapping ranges, or input outside authored text.
+    pub fn with_provider_mentions(
+        mut self,
+        mentions: Vec<crate::NativeProviderMention>,
+    ) -> Result<Self, String> {
+        if mentions.len() > 32 {
+            return Err("Mention at most 32 apps and plugins".into());
+        }
+        let mut ranges: Vec<_> = self
+            .attachment_references
+            .iter()
+            .flat_map(|attachment| attachment.prompt_ranges.iter().cloned())
+            .chain(
+                self.citations
+                    .iter()
+                    .filter_map(|citation| citation.prompt_range.clone()),
+            )
+            .chain(
+                self.applications
+                    .iter()
+                    .map(|mention| mention.prompt_range.clone()),
+            )
+            .collect();
+        for mention in &mentions {
+            let prefix = match mention.option.kind {
+                crate::NativeCompletionKind::App => "app://",
+                crate::NativeCompletionKind::Plugin => "plugin://",
+                _ => return Err("Invalid provider mention kind".into()),
+            };
+            if !mention
+                .option
+                .path
+                .as_deref()
+                .is_some_and(|path| path.starts_with(prefix) && path.len() > prefix.len())
+                || mention.prompt_range.end > self.authored_bytes
+                || self.text.get(mention.prompt_range.clone())
+                    != Some(format!("@{}", mention.option.display_name).as_str())
+            {
+                return Err("Provider mention no longer matches authored input".into());
+            }
+            ranges.push(mention.prompt_range.clone());
+        }
+        ranges.sort_by_key(|range| range.start);
+        if ranges
+            .windows(2)
+            .any(|pair| matches!(pair, [left, right] if left.end > right.start))
+        {
+            return Err("Provider mentions overlap".into());
+        }
+        self.provider_mentions = mentions;
+        Ok(self)
+    }
+
+    pub(crate) const fn has_provider_mentions(&self) -> bool {
+        !self.provider_mentions.is_empty()
+    }
+
+    pub(crate) fn validate_provider_mentions(
+        &self,
+        catalog: &crate::NativeCompletionCatalog,
+    ) -> Result<(), String> {
+        for mention in &self.provider_mentions {
+            if catalog.unavailable.contains(&mention.option.kind) {
+                return Err("Couldn’t verify an attached app or plugin. Refresh the Add menu and try again.".into());
+            }
+            if !catalog.options.iter().any(|option| {
+                option.kind == mention.option.kind
+                    && option.name == mention.option.name
+                    && option.path == mention.option.path
+            }) {
+                return Err("An attached app or plugin is no longer available for this account. Remove it or refresh the Add menu.".into());
+            }
+        }
+        Ok(())
+    }
+
     /// The UI separates authored text from appended reference material.
     /// # Errors
     /// Rejects a non-source byte boundary outside this prompt.
     pub fn with_authored_prefix(mut self, bytes: usize) -> Result<Self, String> {
-        if self.text.get(..bytes).is_none() {
+        if self.text.get(..bytes).is_none()
+            || self
+                .provider_mentions
+                .iter()
+                .any(|mention| mention.prompt_range.end > bytes)
+        {
             return Err("Invalid authored prompt range".into());
         }
         self.authored_bytes = bytes;
@@ -464,6 +553,7 @@ impl NativePrompt {
             || !self.files.is_empty()
             || !self.citations.is_empty()
             || !self.applications.is_empty()
+            || !self.provider_mentions.is_empty()
         {
             return Err("Send references in a message before compacting the conversation".into());
         }
@@ -471,9 +561,11 @@ impl NativePrompt {
     }
 
     pub(crate) fn needs_skill_catalog(&self) -> bool {
-        self.authored_text()
-            .split_whitespace()
-            .any(|token| token.starts_with('$'))
+        !self.provider_mentions.is_empty()
+            || self
+                .authored_text()
+                .split_whitespace()
+                .any(|token| token.starts_with('$'))
     }
 
     pub(crate) fn with_advertised_skills(&self, catalog: &crate::NativeCompletionCatalog) -> Self {
@@ -543,6 +635,7 @@ impl NativePrompt {
                 .as_ref()
                 .map(|path| json!({"type":"skill","name":skill.name,"path":path}))
         }));
+        input.extend(self.provider_mentions.iter().map(|mention| json!({"type":"mention","name":mention.option.display_name,"path":mention.option.path})) );
         input.extend(self.images.iter().map(|image| json!({"type":"image","url":format!("data:image/png;base64,{}", image.base64())})));
         Ok(input.into())
     }
