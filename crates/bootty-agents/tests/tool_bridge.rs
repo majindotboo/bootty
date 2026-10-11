@@ -992,6 +992,7 @@ fn app_mention() -> bootty_agents::NativeApplicationMention {
             window_id: 42,
             process_id: 19,
             bundle_id: "test.App".into(),
+            application_name: None,
             launch_time: 1.,
             bounds: bootty_computer::DisplayBounds {
                 x: 0.,

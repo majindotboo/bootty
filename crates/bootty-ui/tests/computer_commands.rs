@@ -13,6 +13,7 @@ fn target() -> ComputerTarget {
         window_id: 42,
         process_id: 123,
         bundle_id: "dev.bootty.test-target".into(),
+        application_name: None,
         launch_time: 1000.0,
         bounds: DisplayBounds {
             x: 0.0,

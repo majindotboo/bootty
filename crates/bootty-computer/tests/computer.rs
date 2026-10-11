@@ -13,6 +13,7 @@ fn target() -> ComputerTarget {
         window_id: 42,
         process_id: 123,
         bundle_id: "dev.bootty.test-target".into(),
+        application_name: None,
         launch_time: 1_000.0,
         bounds: DisplayBounds {
             x: 0.0,
@@ -555,4 +556,17 @@ mod macos {
         assert_eq!(helper.calls()?, "status\nexecute\n");
         Ok(())
     }
+}
+
+#[rstest]
+#[case(None, true)]
+#[case(Some("🥟".repeat(256)), true)]
+#[case(Some("🥟".repeat(257)), false)]
+fn application_presentation_metadata_is_bounded(
+    mut target: ComputerTarget,
+    #[case] name: Option<String>,
+    #[case] valid: bool,
+) {
+    target.application_name = name;
+    pretty_assertions::assert_eq!(target.validate().is_ok(), valid);
 }

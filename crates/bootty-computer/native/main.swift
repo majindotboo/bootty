@@ -84,6 +84,9 @@ func target(_ window: [String: Any]) -> [String: Any]? {
           let bundle = app.bundleIdentifier, let launch = app.launchDate else { return nil }
     var result: [String: Any] = ["window_id": id, "process_id": pid, "bundle_id": bundle,
         "launch_time": launch.timeIntervalSince1970, "bounds": boundsDictionary(bounds)]
+    if let name = app.localizedName {
+        result["application_name"] = String(name.prefix(256))
+    }
     if let title = window[kCGWindowName as String] as? String {
         result["title"] = String(title.prefix(512))
     }

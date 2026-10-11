@@ -317,6 +317,9 @@ pub struct ComputerTarget {
     pub window_id: u32,
     pub process_id: i32,
     pub bundle_id: String,
+    /// Presentation metadata; it does not authorize or identify a window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_name: Option<String>,
     pub launch_time: f64,
     pub bounds: DisplayBounds,
     pub title: Option<String>,
@@ -341,6 +344,10 @@ impl ComputerTarget {
             || bounds.width <= 0.0
             || bounds.height <= 0.0
             || self.title.as_ref().is_some_and(|title| title.len() > 2048)
+            || self
+                .application_name
+                .as_ref()
+                .is_some_and(|name| name.len() > 1024)
         {
             return Err(ComputerError::InvalidTarget);
         }
