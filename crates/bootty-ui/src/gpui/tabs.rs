@@ -597,8 +597,10 @@ impl RenderOnce for ScrollRow {
                 let maximum = observe_scroll.max_offset().x;
                 let offset = observe_scroll.offset().x;
                 // Compare with the full row so adding the chevrons cannot sustain overflow.
+                // Match layout's device-pixel rounding of the row's px_1 padding.
+                let padding = f32::from(window.pixel_snap(px(rem * 0.25))) * 2.0;
                 let overflow = f32::from(width) + f32::from(maximum)
-                    > rem.mul_add(-0.5, f32::from(bounds.size.width)) + 0.5;
+                    > f32::from(bounds.size.width) - padding + 0.5;
                 let next = (
                     overflow,
                     offset < px(-0.5),

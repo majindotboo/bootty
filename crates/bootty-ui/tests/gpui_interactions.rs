@@ -2288,6 +2288,32 @@ fn update_chrome(
 }
 
 #[gpui_kit::test]
+fn fitting_tabs_keep_their_position_across_redraws(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    snapshot.layout.tabs.appearance = bootty_config::config::TabAppearance::Segmented;
+    let (probe, cx) = cx.add_window_view(|window, cx| {
+        window.set_rem_size(px(16.0));
+        ChromeProbe::with_snapshot(snapshot, window, cx)
+    });
+    cx.simulate_scale_factor_change(1.1);
+    draw_chrome(cx);
+    let tab = cx.debug_bounds("status-tab-top-1-tab-one").expect("tab");
+    let plus = cx.debug_bounds("status-new-tab-top-1").expect("new tab");
+    for _ in 0..8 {
+        cx.update(|window, app| {
+            probe.update(app, |_, cx| cx.notify());
+            window.refresh();
+            window.draw(app).clear(app);
+        });
+        assert_eq!(cx.debug_bounds("status-tab-top-1-tab-one"), Some(tab));
+        assert_eq!(cx.debug_bounds("status-new-tab-top-1"), Some(plus));
+        assert!(cx.debug_bounds("mux-tabs-top-1-scroll-left").is_none());
+        assert!(cx.debug_bounds("mux-tabs-top-1-scroll-right").is_none());
+    }
+}
+
+#[gpui_kit::test]
 fn tab_strip_reveals_selection_and_preserves_manual_scrolling(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = overflowing_tabs();
