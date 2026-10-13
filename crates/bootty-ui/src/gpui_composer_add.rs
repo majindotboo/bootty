@@ -270,7 +270,15 @@ fn application_menu(
                 let app = owner.clone();
                 let target = target.clone();
                 let name = super::application_name(&target);
-                let label = format!("Attach {name}");
+                // Several windows of one app must stay distinguishable.
+                let label = target
+                    .title
+                    .as_deref()
+                    .filter(|title| !title.trim().is_empty())
+                    .map_or_else(
+                        || format!("Attach {name}"),
+                        |title| format!("Attach {name} — {title}"),
+                    );
                 menu = menu.item(PopupMenuItem::new(label).icon(IconName::Monitor).on_click(
                     move |_, _, cx| {
                         _ = app.update(cx, |this, cx| {

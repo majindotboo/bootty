@@ -785,7 +785,8 @@ impl Render for ComposerCompletion {
     }
 }
 
-fn application_name(target: &bootty_computer::ComputerTarget) -> &str {
+/// The readable application name, falling back to the bundle identifier's last segment.
+pub fn application_name(target: &bootty_computer::ComputerTarget) -> &str {
     target
         .application_name
         .as_deref()

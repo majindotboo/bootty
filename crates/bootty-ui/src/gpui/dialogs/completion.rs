@@ -60,11 +60,7 @@ impl DialogView {
                     let id = format!("application:{}:{}", target.process_id, target.window_id);
                     let label = format!(
                         "@{}",
-                        target
-                            .bundle_id
-                            .rsplit('.')
-                            .next()
-                            .unwrap_or(&target.bundle_id)
+                        crate::gpui_composer_completion::application_name(target)
                     );
                     spec.applications.retain(|mention| mention.id != id);
                     spec.applications
