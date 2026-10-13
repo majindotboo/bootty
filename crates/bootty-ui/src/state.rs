@@ -828,6 +828,18 @@ impl AppState {
             .map(str::to_owned)
             .or_else(|| self.last_error.as_ref().map(ErrorNotice::raw_message))
     }
+    /// The failure to present. A binding's raw error is untrusted text; Bootty's own notices keep
+    /// their typed wording instead of being parsed back from text.
+    #[must_use]
+    pub fn last_error_notice(&self) -> Option<ErrorNotice> {
+        self.workspace
+            .active
+            .binding
+            .mux()
+            .last_error()
+            .map(ErrorNotice::from_text)
+            .or_else(|| self.last_error.clone())
+    }
     #[expect(
         clippy::needless_pass_by_value,
         reason = "Reporting consumes errors at the application boundary while accepting borrowed diagnostics"

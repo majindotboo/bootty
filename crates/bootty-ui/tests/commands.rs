@@ -3789,6 +3789,18 @@ fn session_create_refuses_a_bad_request_before_the_backend(
     );
 }
 
+/// Bootty's own notices keep their wording instead of collapsing into a generic sentence.
+#[test]
+fn closing_the_last_space_says_why() {
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let mut state = native_state(directory.path());
+    assert!(!state.close_space_from_ui(state.active_space_id()));
+    assert_eq!(
+        state.last_error_notice(),
+        Some(bootty_ui::error_catalog::ErrorNotice::LastSpaceCannotClose)
+    );
+}
+
 fn selection(state: &AppState) -> (Option<String>, Option<String>) {
     (
         state.mux().selected_session().map(str::to_owned),

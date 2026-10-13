@@ -2357,8 +2357,51 @@ impl GpuiWorkspace {
         match error {
             Some(error) => {
                 let workspace = cx.weak_entity();
+                let notice = self
+                    .state
+                    .last_error_notice()
+                    .unwrap_or_else(|| ErrorNotice::from_text(error));
+                let summary = gpui_kit::SharedString::from(notice.to_string());
+                // Diagnostics stay out of interface copy but remain one click away.
+                let details = notice
+                    .details()
+                    .filter(|details| *details != summary.as_ref())
+                    .map(str::to_owned);
                 window.push_notification(
-                    Notification::error(ErrorNotice::from_text(error).to_string())
+                    // Bootty lays out the icon itself so it stays centred at every UI size.
+                    Notification::new()
+                        .content(move |_, _, cx| {
+                            gpui_kit::div()
+                                .flex()
+                                .items_center()
+                                .gap_3()
+                                .child(
+                                    gpui_kit::component::Icon::new(
+                                        gpui_kit::component::IconName::CircleX,
+                                    )
+                                    .text_color(cx.theme().danger),
+                                )
+                                .child(
+                                    gpui_kit::div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .child(summary.clone()),
+                                )
+                                .into_any_element()
+                        })
+                        .when_some(details, |notification, details| {
+                            notification.action(move |_, _, _| {
+                                let details = details.clone();
+                                gpui_kit::component::button::Button::new("copy-error-details")
+                                    .label("Copy details")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            details.clone(),
+                                        ));
+                                    })
+                            })
+                        })
                         .id::<BoottyErrorNotification>()
                         .autohide(false)
                         .on_close(move |_, cx| {
