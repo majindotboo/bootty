@@ -372,13 +372,24 @@ fn fallback_bold_uses_its_own_base_weight() {
         vec![36, 127, 255],
         "fallback's real heavier face must keep native coverage without a synthetic duplicate"
     );
+    // The real heavier face is the bundled SemiBold, or a heavier installed Plex face.
+    let database = bootty_ui::font_database::system_font_database();
+    let heavier = database
+        .query(&fontdb::Query {
+            families: &[fontdb::Family::Name("IBM Plex Sans")],
+            weight: fontdb::Weight::BOLD,
+            ..fontdb::Query::default()
+        })
+        .and_then(|id| database.face(id))
+        .map(|face| face.post_script_name.clone());
+    assert_ne!(heavier.as_deref(), Some("IBMPlexSans-Regular"));
     let fonts = system.fonts.lock().unwrap();
     let font = fonts
         .last()
         .expect("Plex's heavier face needs no synthetic bold raster");
     assert_eq!(
         font.family.strip_prefix(".Bootty-Face:"),
-        Some("IBMPlexSans-SmBld")
+        heavier.as_deref()
     );
     drop(fonts);
 }

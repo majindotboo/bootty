@@ -72,7 +72,8 @@ impl FakeRemote {
     fn environment(&self) -> String {
         let value = |path: &Path| shell_quote(&path.to_string_lossy());
         format!(
-            "unset TMUX TMUX_PANE\nexport HOME={} TMUX_TMPDIR={} BOOTTY_DAEMON_STATE={} SHELL=/bin/sh",
+            // XDG paths would otherwise lead the daemon to the developer's real configuration.
+            "unset TMUX TMUX_PANE XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME\nexport HOME={} TMUX_TMPDIR={} BOOTTY_DAEMON_STATE={} SHELL=/bin/sh",
             value(&self.home()),
             value(&self.tmux_tmpdir()),
             value(&self.root.path().join("state/daemon.sqlite")),
