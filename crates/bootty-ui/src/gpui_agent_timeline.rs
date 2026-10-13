@@ -97,6 +97,10 @@ fn append_turn(
                 .is_some_and(|item| visible(item) && !(current_turn && item.subagent.is_some()))
         })
         .collect::<Vec<_>>();
+    if live {
+        append_live_turn(rows, transcript, &indices, expanded);
+        return;
+    }
     let final_message = indices.iter().rev().copied().find(|ix| {
         transcript
             .get(*ix)
@@ -115,11 +119,9 @@ fn append_turn(
                 })
         })
         .collect::<Vec<_>>();
-    let has_work = members.iter().any(|ix| {
-        transcript.get(*ix).is_some_and(|item| {
-            matches!(item.role.as_str(), "thinking" | "reasoning" | "tool") || item.tool.is_some()
-        })
-    });
+    let has_work = members
+        .iter()
+        .any(|ix| transcript.get(*ix).is_some_and(is_work));
     if !has_work {
         rows.extend(indices.into_iter().filter_map(|index| {
             transcript.get(index).map(|item| TranscriptRow::Message {
@@ -159,6 +161,68 @@ fn append_turn(
                 id: item.id.clone(),
             });
         }
+    }
+}
+
+fn is_work(item: &NativeTranscriptItem) -> bool {
+    matches!(item.role.as_str(), "thinking" | "reasoning" | "tool") || item.tool.is_some()
+}
+
+/// While a turn streams, every message stays readable in order; only the runs of thinking and
+/// tools between messages fold. The settled turn folds into one summary afterwards.
+fn append_live_turn(
+    rows: &mut Vec<TranscriptRow>,
+    transcript: &[NativeTranscriptItem],
+    indices: &[usize],
+    expanded: &BTreeMap<String, bool>,
+) {
+    let mut run = Vec::new();
+    for &index in indices {
+        let Some(item) = transcript.get(index) else {
+            continue;
+        };
+        if is_work(item) {
+            run.push(index);
+            continue;
+        }
+        push_work_run(rows, transcript, std::mem::take(&mut run), expanded, false);
+        rows.push(TranscriptRow::Message {
+            index,
+            id: item.id.clone(),
+        });
+    }
+    // Only the trailing run can still be working.
+    push_work_run(rows, transcript, run, expanded, true);
+}
+
+fn push_work_run(
+    rows: &mut Vec<TranscriptRow>,
+    transcript: &[NativeTranscriptItem],
+    members: Vec<usize>,
+    expanded: &BTreeMap<String, bool>,
+    live: bool,
+) {
+    let Some(id) = members
+        .first()
+        .and_then(|ix| transcript.get(*ix))
+        .map(|item| item.id.clone())
+    else {
+        return;
+    };
+    let open = expanded.get(&id).copied().unwrap_or(false);
+    rows.push(TranscriptRow::Work {
+        id,
+        members: members.clone(),
+        open,
+        live,
+    });
+    if open {
+        rows.extend(members.into_iter().filter_map(|index| {
+            transcript.get(index).map(|item| TranscriptRow::Message {
+                index,
+                id: item.id.clone(),
+            })
+        }));
     }
 }
 

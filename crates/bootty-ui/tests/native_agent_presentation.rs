@@ -1472,6 +1472,57 @@ fn first_live_user_message_keeps_a_readable_width(cx: &mut TestAppContext) {
     }
 }
 
+/// While a turn streams, every assistant message stays visible in order; only the work between
+/// messages folds.
+#[gpui_kit::test]
+fn live_turn_keeps_every_message_visible(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("working");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Audit this", "complete": true},
+        {"id": "first-tool", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Bash", "input": "{\"command\":\"ls\"}", "status": "completed"}},
+        {"id": "status", "role": "assistant", "text": "Found the cause.", "complete": true},
+        {"id": "second-tool", "role": "tool", "text": "", "complete": false,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cargo test\"}", "status": "running"}},
+        {"id": "latest", "role": "assistant", "text": "Running the tests.", "complete": false}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let status = visual
+        .debug_bounds("native-message-status")
+        .expect("an earlier message stays visible while the turn streams");
+    let latest = visual
+        .debug_bounds("native-message-latest")
+        .expect("latest message");
+    let between = visual
+        .debug_bounds("native-work-group-second-tool")
+        .expect("work between messages folds");
+    assert!(status.top() < between.top() && between.top() < latest.top());
+    assert!(
+        visual
+            .debug_bounds("native-work-group-first-tool")
+            .is_some()
+    );
+}
+
 /// Pasting more images than one prompt carries stops at the limit instead of failing at send.
 #[gpui_kit::test]
 fn pasted_images_stop_at_the_prompt_image_limit(cx: &mut TestAppContext) {
