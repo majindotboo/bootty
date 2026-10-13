@@ -1479,14 +1479,21 @@ impl GpuiSettings {
             }
             rows.push(row.into_any_element());
         }
-        gpui_kit::div()
+        // The flex row sizes the list to its widest row, such as a font family with a long
+        // weight name, and still lets it shrink so rows wrap only when the page is too narrow.
+        div()
             .flex()
-            .flex_col()
-            .w(rems(27.5))
-            .max_w_full()
-            .gap_1()
-            .children(rows)
-            .children(add_button.map(|button| div().flex().justify_end().child(button)))
+            .w_full()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .min_w(rems(27.5))
+                    .max_w_full()
+                    .gap_1()
+                    .children(rows)
+                    .children(add_button.map(|button| div().flex().justify_end().child(button))),
+            )
             .into_any_element()
     }
 

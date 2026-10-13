@@ -149,9 +149,13 @@ fn font_name(database: &fontdb::Database, id: fontdb::ID, name_ids: &[u16]) -> O
         .with_face_data(id, |data, index| {
             let font = rustybuzz::ttf_parser::Face::parse(data, index).ok()?;
             name_ids.iter().find_map(|id| {
-                font.names()
-                    .into_iter()
-                    .filter(|name| name.name_id == *id)
+                let names = || font.names().into_iter().filter(|name| name.name_id == *id);
+                // Localized records can precede English ones, e.g. Helvetica Neue lists Chinese first.
+                names()
+                    .filter(|name| {
+                        name.language() == rustybuzz::ttf_parser::Language::English_UnitedStates
+                    })
+                    .chain(names())
                     .find_map(|name| name.to_string().filter(|name| !name.is_empty()))
             })
         })

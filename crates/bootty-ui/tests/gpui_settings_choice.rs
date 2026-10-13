@@ -453,6 +453,70 @@ fn font_weight_pickers_submit_the_selected_face(cx: &mut TestAppContext) {
     }
 }
 
+/// Wide weight names, such as Helvetica Neue's "Condensed Black", keep the family, weight, and
+/// row actions on one line when the page has room. Measuring them needs Bootty's native text
+/// system and a monospace UI font, which gives every name its full advance.
+#[cfg(target_os = "macos")]
+#[test]
+fn font_stack_rows_fit_wide_weight_names_on_one_line() {
+    use bootty_ui::{
+        assets::BoottyAssets,
+        font_mapping::{FontMappings, wrap_text_system},
+        gpui::update_ui_font,
+    };
+    use std::sync::Arc;
+
+    let mappings = FontMappings::default();
+    let text_system = wrap_text_system(Arc::new(gpui_kit::NoopTextSystem), mappings.clone());
+    BoottyAssets
+        .load_fonts(&gpui_kit::TextSystem::new(text_system.clone()))
+        .unwrap();
+    let mut cx =
+        TestAppContext::build_with_text_system(gpui_kit::TestDispatcher::new(0), None, text_system);
+    cx.update(|cx| {
+        cx.set_global(mappings);
+        init_theme(UiPalette::default(), cx);
+        update_ui_font(&["MapleMono-NF-Regular".to_owned()], 16.0, cx);
+    });
+    let mut snapshot = font_stack_snapshot();
+    for item in &mut snapshot.pages[0].items {
+        if let SettingsPageItem::Setting(SettingsRow::StringList { items, .. }) = item {
+            *items = vec!["HelveticaNeue".to_owned()];
+        }
+    }
+    let (_, cx) = cx.add_window_view(|_, cx| ChoiceProbe::with_snapshot(snapshot, cx));
+    for (family, weight, remove) in [
+        (
+            "settings-font-family-font.family-0",
+            "settings-font-weight-font.family-0",
+            "settings-string-list-font.family-0-remove",
+        ),
+        (
+            "settings-font-family-font.ui-family-0",
+            "settings-font-weight-font.ui-family-0",
+            "settings-string-list-font.ui-family-0-remove",
+        ),
+    ] {
+        let family_bounds = cx.debug_bounds(family).expect("font family trigger");
+        let weight_bounds = cx.debug_bounds(weight).expect("font weight trigger");
+        let remove_bounds = cx.debug_bounds(remove).expect("remove button");
+        assert_eq!(
+            family_bounds.top(),
+            weight_bounds.top(),
+            "{weight} wrapped below {family}"
+        );
+        assert!(
+            family_bounds.right() <= weight_bounds.left(),
+            "{family} overlaps {weight}"
+        );
+        let gap = remove_bounds.left() - weight_bounds.right();
+        assert!(
+            px(0.0) <= gap && gap <= px(16.0),
+            "{remove} should sit beside {weight}, found a {gap:?} gap"
+        );
+    }
+}
+
 #[gpui_kit::test]
 fn terminal_and_ui_font_stacks_use_the_searchable_picker_for_large_font_catalogs(
     cx: &mut TestAppContext,
