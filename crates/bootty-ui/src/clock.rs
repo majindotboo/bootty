@@ -25,6 +25,24 @@ pub fn format_working_duration(elapsed: Duration) -> String {
     parts.join(" ")
 }
 
+/// Coarse age of past activity: now, 5m, 3h, 2d, 3w, 4mo, 1y.
+#[must_use]
+pub fn format_age(elapsed: Duration) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    let seconds = elapsed.as_secs();
+    match seconds {
+        0..MINUTE => "now".to_owned(),
+        MINUTE..HOUR => format!("{}m", seconds / MINUTE),
+        HOUR..DAY => format!("{}h", seconds / HOUR),
+        _ if seconds < 7 * DAY => format!("{}d", seconds / DAY),
+        _ if seconds < 30 * DAY => format!("{}w", seconds / (7 * DAY)),
+        _ if seconds < 365 * DAY => format!("{}mo", seconds / (30 * DAY)),
+        _ => format!("{}y", seconds / (365 * DAY)),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClockSnapshot {
     pub date: String,

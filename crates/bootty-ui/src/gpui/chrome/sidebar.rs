@@ -998,8 +998,10 @@ impl SidebarRows {
             .as_ref()
             .and_then(|task| task.state.last_activity_at)
             .map(|last| {
-                let days = self.snapshot.now_utc.saturating_sub(last).max(0) / 86400;
-                format!("{days}d")
+                let seconds = self.snapshot.now_utc.saturating_sub(last).max(0);
+                crate::clock::format_age(std::time::Duration::from_secs(
+                    u64::try_from(seconds).unwrap_or_default(),
+                ))
             });
         div()
             .w_full()

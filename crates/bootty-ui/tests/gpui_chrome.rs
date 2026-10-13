@@ -29,6 +29,24 @@ fn agent_working_duration_uses_compact_seconds_minutes_and_hours(
     assert_eq!(bootty_ui::clock::format_working_duration(elapsed), expected);
 }
 
+#[rstest]
+#[case(Duration::ZERO, "now")]
+#[case(Duration::from_secs(59), "now")]
+#[case(Duration::from_secs(60), "1m")]
+#[case(Duration::from_mins(59), "59m")]
+#[case(Duration::from_hours(1), "1h")]
+#[case(Duration::from_hours(23), "23h")]
+#[case(Duration::from_hours(24), "1d")]
+#[case(Duration::from_hours(24 * 6), "6d")]
+#[case(Duration::from_hours(24 * 7), "1w")]
+#[case(Duration::from_hours(24 * 29), "4w")]
+#[case(Duration::from_hours(24 * 30), "1mo")]
+#[case(Duration::from_hours(24 * 364), "12mo")]
+#[case(Duration::from_hours(24 * 365), "1y")]
+fn activity_age_reads_at_a_glance(#[case] elapsed: Duration, #[case] expected: &str) {
+    assert_eq!(bootty_ui::clock::format_age(elapsed), expected);
+}
+
 proptest! {
     #[test]
     fn fractional_seconds_do_not_advance_working_labels(
