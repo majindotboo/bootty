@@ -1155,6 +1155,7 @@ fn sidebar_native_activity(
             match activity.status {
                 S::Error => 8,
                 S::Working => 7,
+                S::Idle | S::Stopped if activity.running_subagents > 0 => 7,
                 S::Waiting => 6,
                 S::Starting => 5,
                 S::Idle | S::Stopped if activity.completed_turn => 3,
@@ -1168,7 +1169,9 @@ fn sidebar_native_activity(
         .filter(|activity| priority(activity) >= terminal_priority)
     {
         row.needs_attention = activity.approval || activity.input || activity.status == S::Error;
-        row.working = matches!(activity.status, S::Starting | S::Working);
+        // Subagents keep a conversation working after its own turn ends.
+        row.working =
+            matches!(activity.status, S::Starting | S::Working) || activity.running_subagents > 0;
         let badge = if activity.approval {
             Some(("Approval", "shield-question-mark", theme.warning))
         } else if activity.input {
@@ -1176,6 +1179,9 @@ fn sidebar_native_activity(
         } else {
             match activity.status {
                 S::Starting | S::Working => Some(("Working", "circle-dashed", theme.accent)),
+                S::Idle | S::Stopped if activity.running_subagents > 0 => {
+                    Some(("Working", "circle-dashed", theme.accent))
+                }
                 S::Waiting => Some(("Waiting", "clock", theme.muted)),
                 S::Error => Some(("Failed", "circle-alert", theme.destructive)),
                 S::Idle | S::Stopped if activity.completed_turn => {

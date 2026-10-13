@@ -150,6 +150,9 @@ pub struct NativeSessionActivity {
     pub input: bool,
     /// Elapsed time from this live turn's accepted prompt; absent outside `Working`.
     pub working_elapsed: Option<Duration>,
+    /// Subagents still running for this live process, including after its own turn ended.
+    #[serde(default)]
+    pub running_subagents: usize,
 }
 
 /// Captured provider choices without executable, account, project or credential paths.
@@ -1606,6 +1609,7 @@ impl NativeAgentService {
         record.snapshot.error = None;
         record.snapshot.pending_user_item = None;
         record.snapshot.first_turn = None;
+        record.snapshot.interrupt_unfinished_work();
         self.commit(candidate)?;
         self.launch(&target.handle, tools, unarchive)
     }
@@ -1676,6 +1680,7 @@ impl NativeAgentService {
                         )
                 }),
                 working_elapsed: record.snapshot.working_elapsed(now),
+                running_subagents: record.snapshot.running_subagents(),
             })
             .collect()
     }

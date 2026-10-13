@@ -544,6 +544,39 @@ fn claude_subagent_tasks_preserve_reported_results_and_reject_foreign_sessions(
     session.stop();
 }
 
+/// Subagents keep a conversation working after its own turn ends. A stopped process has none,
+/// and a relaunch interrupts what the previous process left running.
+#[test]
+fn running_subagents_outlive_the_turn_but_not_the_process() {
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let session = service.resolve(&record.target()).unwrap();
+    service
+        .prompt(&record.target(), "subagent-running")
+        .unwrap();
+    barrier(&session).unwrap();
+    service.checkpoint().unwrap();
+    let activity = service.activities().remove(0);
+    assert_eq!(
+        (activity.status, activity.running_subagents),
+        (NativeSessionStatus::Idle, 1)
+    );
+    service.stop(&record.target()).unwrap();
+    assert_eq!(service.activities()[0].running_subagents, 0);
+    let resumed = service.resume(&record.target()).unwrap();
+    let child = resumed
+        .snapshot
+        .transcript
+        .iter()
+        .find_map(|item| item.subagent.as_ref())
+        .unwrap();
+    assert_eq!(child.status, NativeToolStatus::Interrupted);
+    service.shutdown().unwrap();
+}
+
 #[rstest]
 #[case("supervised", "default", false)]
 #[case("auto-accept-edits", "acceptEdits", false)]

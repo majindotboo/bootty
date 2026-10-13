@@ -46,6 +46,46 @@ fn text(value: &Value, limit: usize) -> String {
 }
 
 impl NativeSessionSnapshot {
+    /// Subagents this live session still reports as running. A stopped or failed process has
+    /// none, even when its last reported state said otherwise.
+    #[must_use]
+    pub fn running_subagents(&self) -> usize {
+        if matches!(
+            self.status,
+            crate::NativeSessionStatus::Stopped | crate::NativeSessionStatus::Error
+        ) {
+            return 0;
+        }
+        self.transcript
+            .iter()
+            .filter_map(|item| item.subagent.as_ref())
+            .filter(|agent| {
+                agent.status == NativeToolStatus::Running
+                    && agent
+                        .owner_session
+                        .as_deref()
+                        .is_none_or(|owner| self.session_id.as_deref() == Some(owner))
+            })
+            .count()
+    }
+
+    /// A relaunched provider cannot continue tools or subagents its previous process started.
+    pub(crate) fn interrupt_unfinished_work(&mut self) {
+        for item in &mut self.transcript {
+            let statuses = item
+                .tool
+                .as_mut()
+                .map(|tool| &mut tool.status)
+                .into_iter()
+                .chain(item.subagent.as_mut().map(|agent| &mut agent.status));
+            for status in statuses {
+                if *status == NativeToolStatus::Running {
+                    *status = NativeToolStatus::Interrupted;
+                }
+            }
+        }
+    }
+
     fn subagent(&mut self, mut agent: NativeSubagent, mut output: String) {
         let id = format!("subagent:{}", agent.id);
         let old = self

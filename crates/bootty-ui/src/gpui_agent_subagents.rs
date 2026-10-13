@@ -258,6 +258,14 @@ impl NativeAgentSessionView {
                                     ),
                                 )
                                 .child(div().text_sm().child(label))
+                                .when(working > 0, |pill| {
+                                    pill.child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().foreground)
+                                            .child(format!("· {working} running")),
+                                    )
+                                })
                                 .when(failed > 0, |pill| {
                                     pill.child(
                                         div()
