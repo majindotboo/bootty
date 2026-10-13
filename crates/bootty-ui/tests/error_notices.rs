@@ -7,8 +7,13 @@ use rstest::rstest;
     "%14: rmux pane output ended: TransportLost",
     "The terminal connection was lost. Try reopening this pane."
 )]
+// A local rmux daemon is not a remote workspace; only SSH failures say so.
 #[case(
     "connect to rmux daemon: connection refused",
+    "The connection was lost. Try again."
+)]
+#[case(
+    "ssh: connect to host forge port 22: Operation timed out",
     "Could not reach the remote workspace."
 )]
 #[case("command deadline expired", "The command took too long. Try again.")]
@@ -38,9 +43,14 @@ use rstest::rstest;
     "Not logged in · /login",
     "Sign in to the selected provider account, then retry."
 )]
+// Provider and dictation keys share one neutral instruction.
 #[case(
     "Missing OpenAI API key",
-    "Configure an OpenAI API key to use dictation and voice."
+    "Add the missing API key in Settings, then retry."
+)]
+#[case(
+    "Invalid API key · Fix external API key",
+    "Add the missing API key in Settings, then retry."
 )]
 fn technical_errors_have_useful_window_messages(#[case] raw: &str, #[case] message: &str) {
     let notice = ErrorNotice::from_text(raw);

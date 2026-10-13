@@ -144,7 +144,7 @@ fn technical_summary(message: &str) -> String {
         return "Sign in to the selected provider account, then retry.".into();
     }
     if lower.contains("api key") {
-        return "Configure an OpenAI API key to use dictation and voice.".into();
+        return "Add the missing API key in Settings, then retry.".into();
     }
     if lower.contains("rate limit") || lower.contains("usage limit") {
         return "The provider's usage limit was reached. Retry when it resets.".into();
@@ -158,8 +158,11 @@ fn technical_summary(message: &str) -> String {
     if lower.contains("rmux pane output ended: transportlost") {
         return "The terminal connection was lost. Try reopening this pane.".to_owned();
     }
-    if lower.contains("ssh") || lower.contains("connection") {
+    if lower.contains("ssh") {
         return "Could not reach the remote workspace.".to_owned();
+    }
+    if lower.contains("connection") {
+        return "The connection was lost. Try again.".to_owned();
     }
     if lower.contains("target is stale") {
         return "That pane or session no longer exists.".to_owned();
