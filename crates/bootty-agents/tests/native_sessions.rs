@@ -2080,9 +2080,11 @@ fn side_chat_copies_a_completed_response_without_reusing_the_parent_provider_ses
     assert_eq!(second["input"][0]["text"], "Follow up");
     let copied = child.side_chat.as_ref().unwrap().transcript.clone();
     let long = service.prompt(&child.target(), "bounded").unwrap();
+    // The live view keeps user prompts as turn boundaries; copied replies are evicted.
     assert!(
         long.transcript
             .iter()
+            .filter(|item| item.role != "user")
             .all(|item| !item.id.starts_with("fork:"))
     );
     assert_eq!(
