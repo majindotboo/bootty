@@ -14,10 +14,8 @@ impl AppState {
             return;
         }
         self.last_settlement_check = Some(now);
+        // Busy sessions are stamped even with auto-settle off; "Recent activity" sorts by it.
         let days = self.config().sidebar.auto_settle_after_days;
-        if days == 0 {
-            return;
-        }
         effects.push(AppEffect::RepaintAfter(interval));
         let epoch = chrono::Utc::now().timestamp();
         let native = self
@@ -63,9 +61,10 @@ impl AppState {
                 // startup is not evidence of when they last worked.
                 let command = if busy {
                     "session.activity"
-                } else if saved
-                    .state
-                    .should_auto_settle(epoch, i64::from(days).saturating_mul(86_400))
+                } else if days > 0
+                    && saved
+                        .state
+                        .should_auto_settle(epoch, i64::from(days).saturating_mul(86_400))
                 {
                     "session.settle"
                 } else {

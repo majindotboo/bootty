@@ -893,6 +893,9 @@ impl SidebarRows {
     fn section(&self, row: &SidebarRow) -> SessionSection {
         if row_is_pinned(row, self.snapshot.now_utc) {
             SessionSection::Pinned
+        } else if row.needs_attention {
+            // An approval, question or failure surfaces even from a settled session.
+            SessionSection::Attention
         } else if row_view(row, self.snapshot.now_utc) == TaskView::Settled
             && !row
                 .task
@@ -900,8 +903,6 @@ impl SidebarRows {
                 .is_some_and(|task| task.state.is_overdue(self.snapshot.now_utc))
         {
             SessionSection::Settled
-        } else if row.needs_attention {
-            SessionSection::Attention
         } else if row.working {
             SessionSection::Working
         } else {
@@ -2624,7 +2625,8 @@ fn saved_state_invocation(
     Some(invocation)
 }
 
-pub(super) fn saved_session_menu(task: &SidebarTask, now: i64) -> Vec<MenuRow> {
+/// `live` sessions still hold a terminal; the store only deletes closed ones.
+pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, live: bool) -> Vec<MenuRow> {
     use bootty_mux::session_membership::SessionLifecycle;
     let row = |label: &str, command, starts_group| {
         saved_state_invocation(task, command, Vec::new()).map(|invocation| MenuRow {
@@ -2707,7 +2709,10 @@ pub(super) fn saved_session_menu(task: &SidebarTask, now: i64) -> Vec<MenuRow> {
         },
         true,
     ));
-    rows.extend(row("Delete…", "session.delete", false));
+    rows.extend(row("Delete…", "session.delete", false).map(|mut delete| {
+        delete.enabled &= !live;
+        delete
+    }));
     rows
 }
 

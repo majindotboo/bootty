@@ -428,18 +428,20 @@ impl GpuiChrome {
             } => {
                 let mut rows = sidebar::session_menu(target, *options);
                 if let Some(task) = task {
-                    rows.extend(sidebar::saved_session_menu(task, *now));
+                    rows.extend(sidebar::saved_session_menu(task, *now, true));
                 }
                 rows
             }
             ContextMenu::DetachedSession { target, task, now } => {
                 let mut rows = sidebar::detached_session_menu(target);
                 if let Some(task) = task {
-                    rows.extend(sidebar::saved_session_menu(task, *now));
+                    rows.extend(sidebar::saved_session_menu(task, *now, false));
                 }
                 rows
             }
-            ContextMenu::SavedSession { task, now } => sidebar::saved_session_menu(task, *now),
+            ContextMenu::SavedSession { task, now } => {
+                sidebar::saved_session_menu(task, *now, false)
+            }
             ContextMenu::Space(space) => space_switcher::space_menu(space),
             ContextMenu::Tab(tab) => status_bar::tab_menu(tab.clone()),
         }
@@ -977,7 +979,7 @@ fn append_menu_row(
         if matches!(&intent, ChromeIntent::Command(invocation) if invocation.command == "session.delete") {
             let receiver = crate::gpui::dialogs::prompt(
                 "Delete this session permanently?",
-                Some("This removes its saved history from Bootty. Archive keeps it recoverable instead. Close the session before deleting it."),
+                Some("This removes its saved history from Bootty. Archive keeps it recoverable instead."),
                 &[gpui_kit::PromptButton::Cancel("Cancel".into()), gpui_kit::PromptButton::Other("Delete permanently".into())],
                 window, cx,
             );

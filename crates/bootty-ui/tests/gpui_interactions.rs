@@ -2717,6 +2717,24 @@ fn selected_task_settle_button_uses_its_saved_binding(cx: &mut TestAppContext) {
     );
 }
 
+/// A settled session that asks for approval or input surfaces instead of hiding in the shelf.
+#[gpui_kit::test]
+fn settled_session_that_needs_attention_leaves_the_shelf(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState {
+        lifecycle: SessionLifecycle::Settled,
+        ..SessionState::default()
+    });
+    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+    row.needs_attention = true;
+    row.trailing = Some("Approval".to_owned());
+    let (_, cx) = cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("sidebar-attention-section").is_some());
+    assert_eq!(cx.debug_bounds("sidebar-settled-section"), None);
+}
+
 #[gpui_kit::test]
 fn saved_task_without_a_terminal_has_no_connection_status(cx: &mut TestAppContext) {
     use bootty_mux::session_membership::{SessionLifecycle, SessionState};
