@@ -85,12 +85,6 @@ impl NativeAgentSessionView {
                             .border_t_1()
                             .border_color(cx.theme().border)
                             .pt_3()
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Related conversations"),
-                            )
                             .child(self.render_related_conversations(cx)),
                     )
                 },

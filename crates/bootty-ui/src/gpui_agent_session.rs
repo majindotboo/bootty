@@ -169,6 +169,7 @@ struct WorkingIndicator {
     tick: Option<gpui_kit::Task<()>>,
     animate: bool,
     subagents_expanded: bool,
+    side_chats_expanded: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -390,6 +391,7 @@ impl NativeAgentSessionView {
             work_disclosures: BTreeMap::new(),
             working_indicator: WorkingIndicator {
                 subagents_expanded: false,
+                side_chats_expanded: false,
                 tick: None,
                 animate: true,
             },
@@ -2059,15 +2061,27 @@ impl NativeAgentSessionView {
             .iter()
             .filter(|related| related.subagent.is_none())
             .collect::<Vec<_>>();
+        let open = self.working_indicator.side_chats_expanded;
         div().px_4().when(!related.is_empty(), |view| {
             view.child(
                 Collapsible::new()
-                    .open(false)
+                    .open(open)
                     .child(
-                        div()
-                            .text_xs()
+                        Button::new("side-chats-toggle")
+                            .ghost()
+                            .xsmall()
+                            .justify_start()
+                            .icon(if open {
+                                gpui_kit::component::IconName::ChevronDown
+                            } else {
+                                gpui_kit::component::IconName::ChevronRight
+                            })
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("Side chats · {}", related.len())),
+                            .label(format!("Side chats · {}", related.len()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.working_indicator.side_chats_expanded ^= true;
+                                cx.notify();
+                            })),
                     )
                     .content(
                         div()
