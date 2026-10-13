@@ -121,10 +121,10 @@ impl AgentTray {
                 format!(
                     "{}{} · {} · {} · {}",
                     if entry.unread { "● " } else { "" },
-                    entry.provider,
+                    entry.provider.display_name(),
                     entry.host,
                     entry.title,
-                    entry.status
+                    crate::gpui_agents_panel::status_label(entry)
                 ),
             ));
         }

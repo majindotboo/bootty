@@ -573,7 +573,7 @@ impl ModelPickerView {
         let delegate = self.list.read(cx).delegate();
         let group = delegate.group.clone();
         let provider = delegate.provider;
-        let active_provider = provider_kind_label(provider);
+        let active_provider = provider.display_name();
         let providers = self.providers.clone();
         let groups = self.groups.clone();
         div()
@@ -862,14 +862,6 @@ impl ModelPickerView {
     }
 }
 
-const fn provider_kind_label(provider: AgentKind) -> &'static str {
-    match provider {
-        AgentKind::Codex => "Codex",
-        AgentKind::Claude => "Claude",
-        AgentKind::Pi => "Pi",
-    }
-}
-
 fn provider_icon(provider: &str) -> &'static str {
     match provider.to_ascii_lowercase().as_str() {
         "codex" => AgentKind::Codex.icon(),
@@ -929,7 +921,7 @@ impl Render for ModelPickerView {
                     .dropdown_caret(true)
                     .disabled(!self.enabled)
                     .accessibility_label(if integrated {
-                        format!("{} model: {label}", provider_kind_label(delegate.provider))
+                        format!("{} model: {label}", delegate.provider.display_name())
                     } else {
                         format!("Model: {label}")
                     })

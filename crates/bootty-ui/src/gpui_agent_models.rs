@@ -333,7 +333,7 @@ impl NativeAgentSessionView {
                     .config
                     .model
                     .clone()
-                    .unwrap_or_else(|| provider_name(self.record.config.provider).to_owned())
+                    .unwrap_or_else(|| self.record.config.provider.display_name().to_owned())
             },
             |model| model.display_name.clone(),
         );

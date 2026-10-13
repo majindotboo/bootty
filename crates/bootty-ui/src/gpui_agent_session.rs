@@ -275,7 +275,7 @@ impl NativeAgentSessionView {
                 .auto_grow(1, 10)
                 .placeholder(format!(
                     "Message {}…",
-                    provider_name(record.config.provider)
+                    record.config.provider.display_name()
                 ))
         });
         let subscription = cx.subscribe_in(&composer, window, |this, _, event, _, cx| {
@@ -2100,7 +2100,7 @@ impl NativeAgentSessionView {
                                 let state = match related.status {
                                     NativeSessionStatus::Working => "Working…",
                                     NativeSessionStatus::Waiting => "Needs input",
-                                    NativeSessionStatus::Error => "Error",
+                                    NativeSessionStatus::Error => "Failed",
                                     _ => "",
                                 };
                                 Button::new(format!("related:{}", target.handle))
@@ -2506,7 +2506,7 @@ impl NativeAgentSessionView {
                 .justify_start()
                 .label(format!(
                     "Message {}…",
-                    provider_name(self.record.config.provider)
+                    self.record.config.provider.display_name()
                 ))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.composer.read(cx).focus_handle(cx).focus(window, cx);
@@ -2636,7 +2636,7 @@ impl NativeAgentSessionView {
             })
             .aria_label(format!(
                 "Message to {}",
-                provider_name(self.record.config.provider)
+                self.record.config.provider.display_name()
             ))
     }
 
@@ -2710,7 +2710,7 @@ impl NativeAgentSessionView {
                             } else {
                                 format!(
                                     "{} is disabled in Settings",
-                                    provider_name(self.record.config.provider)
+                                    self.record.config.provider.display_name()
                                 )
                             }),
                     )
@@ -3431,13 +3431,6 @@ fn annotation_selection_details(annotation: &Annotation) -> String {
     }
 }
 
-const fn provider_name(provider: AgentKind) -> &'static str {
-    match provider {
-        AgentKind::Codex => "Codex",
-        AgentKind::Pi => "Pi",
-        AgentKind::Claude => "Claude",
-    }
-}
 impl EventEmitter<gpui_kit::component::dock::PanelEvent> for NativeAgentSessionView {}
 impl gpui_kit::component::dock::BasePanel for NativeAgentSessionView {
     fn panel_name(&self) -> &'static str {
@@ -3514,14 +3507,20 @@ pub fn subagent_avatar(agent: &bootty_agents::NativeSubagent, cx: &App) -> gpui_
         .child(initials)
 }
 
-fn subagent_header(agent: &bootty_agents::NativeSubagent, open: bool, cx: &App) -> gpui_kit::Div {
-    let status = match agent.status {
+/// One status vocabulary for subagents wherever they are listed.
+#[must_use]
+pub const fn subagent_status_label(status: bootty_agents::NativeToolStatus) -> &'static str {
+    match status {
         bootty_agents::NativeToolStatus::Running => "Working…",
-        bootty_agents::NativeToolStatus::Completed => "Completed",
+        bootty_agents::NativeToolStatus::Completed => "Done",
         bootty_agents::NativeToolStatus::Failed => "Failed",
         bootty_agents::NativeToolStatus::Interrupted => "Interrupted",
         bootty_agents::NativeToolStatus::Declined => "Declined",
-    };
+    }
+}
+
+fn subagent_header(agent: &bootty_agents::NativeSubagent, open: bool, cx: &App) -> gpui_kit::Div {
+    let status = subagent_status_label(agent.status);
     let title = subagent_label(agent);
     let elapsed = agent
         .started_at

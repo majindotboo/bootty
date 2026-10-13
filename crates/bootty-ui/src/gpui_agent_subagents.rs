@@ -168,13 +168,7 @@ impl NativeAgentSessionView {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let id = agent.id.clone();
-        let status = match agent.status {
-            NativeToolStatus::Running => "Working…",
-            NativeToolStatus::Completed => "Done",
-            NativeToolStatus::Failed => "Failed",
-            NativeToolStatus::Interrupted => "Interrupted",
-            NativeToolStatus::Declined => "Declined",
-        };
+        let status = super::subagent_status_label(agent.status);
         Button::new(format!("subagent-open:{id}"))
             .debug_selector({
                 let id = id.clone();
@@ -187,11 +181,11 @@ impl NativeAgentSessionView {
             .accessibility_label(format!("Open subagent {}", subagent_label(agent)))
             .child(subagent_avatar(agent, cx))
             .when_some(agent.provider, |row, provider| {
-                let label = provider.to_string();
+                let label = provider.display_name();
                 row.child(
                     div()
                         .text_xs()
-                        .text_color(crate::gpui::provider_color(&label, cx))
+                        .text_color(crate::gpui::provider_color(label, cx))
                         .child(label),
                 )
             })
@@ -314,7 +308,7 @@ impl NativeAgentSessionView {
         div().w_full().flex().flex_col().gap_4()
             .child(div().debug_selector({ let status = agent.status; move || format!("subagent-status:{status:?}") })
                 .flex().items_center().gap_2().text_xs().text_color(cx.theme().muted_foreground)
-                .child(if unavailable { "Status unavailable" } else { match agent.status { NativeToolStatus::Running => "Working…", NativeToolStatus::Completed => "Done", NativeToolStatus::Failed => "Failed", NativeToolStatus::Interrupted => "Interrupted", NativeToolStatus::Declined => "Declined" } })
+                .child(if unavailable { "Status unavailable" } else { super::subagent_status_label(agent.status) })
                 .when_some(agent.model.clone(), ParentElement::child))
             .when(!agent.prompt.is_empty(), |view| view.child(div().p_3().rounded_lg()
                 .bg(cx.theme().muted).text_sm().child(agent.prompt.clone())))

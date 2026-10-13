@@ -122,13 +122,8 @@ impl SessionsPanel {
                             .children(view.subagents().into_iter().map(|agent| {
                                 let owner = parent.clone();
                                 let id = agent.id.clone();
-                                let status = match agent.status {
-                                    bootty_agents::NativeToolStatus::Running => "Working…",
-                                    bootty_agents::NativeToolStatus::Completed => "Done",
-                                    bootty_agents::NativeToolStatus::Failed => "Failed",
-                                    bootty_agents::NativeToolStatus::Interrupted => "Interrupted",
-                                    bootty_agents::NativeToolStatus::Declined => "Declined",
-                                };
+                                let status =
+                                    crate::gpui_agent_session::subagent_status_label(agent.status);
                                 Button::new(format!("hub-subagent:{}:{id}", parent.entity_id()))
                                     .ghost()
                                     .small()

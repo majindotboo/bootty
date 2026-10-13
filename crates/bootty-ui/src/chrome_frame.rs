@@ -1143,7 +1143,11 @@ fn sidebar_native_activity(
         .extend(matching.iter().map(|activity| SidebarAgent {
             key: activity.id.clone(),
             icon: activity.provider.icon().to_owned(),
-            description: format!("{} · {:?}", activity.provider, activity.status),
+            description: format!(
+                "{} · {:?}",
+                activity.provider.display_name(),
+                activity.status
+            ),
             model: activity.model.clone(),
         }));
     let priority = |activity: &&bootty_agents::NativeSessionActivity| {
@@ -1211,8 +1215,8 @@ fn sidebar_agent(activity: &bootty_agents::TerminalAgentActivity) -> SidebarAgen
         icon: activity.provider.icon().to_owned(),
         model: None,
         description: format!(
-            "{:?} · {:?}{}",
-            activity.provider,
+            "{} · {:?}{}",
+            activity.provider.display_name(),
             activity.status,
             activity
                 .detail

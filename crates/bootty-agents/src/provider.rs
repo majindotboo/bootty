@@ -32,6 +32,16 @@ pub enum AgentKind {
 }
 
 impl AgentKind {
+    /// The provider's product name for interface copy; `Display` stays the wire identifier.
+    #[must_use]
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+            Self::Pi => "Pi",
+        }
+    }
+
     pub const ALL: [Self; 3] = [Self::Pi, Self::Codex, Self::Claude];
 
     #[must_use]

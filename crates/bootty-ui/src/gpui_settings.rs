@@ -701,11 +701,7 @@ fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<Se
             continue;
         };
         let base = format!("agents.{key}");
-        let label = match provider {
-            bootty_agents::AgentKind::Codex => "Codex",
-            bootty_agents::AgentKind::Claude => "Claude",
-            bootty_agents::AgentKind::Pi => "Pi",
-        };
+        let label = provider.display_name();
         rows.push(SettingsRow::Section(label.to_owned()));
         rows.push(SettingsRow::Value {
             id: format!("{base}.enabled"),

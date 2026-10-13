@@ -195,7 +195,7 @@ fn needs_attention(entry: &AgentOverview) -> bool {
 
 fn agent_group(entry: &AgentOverview) -> (u8, &'static str) {
     match entry.status.as_str() {
-        "waiting" | "error" => (0, "Needs input"),
+        "waiting" | "error" => (0, "Needs attention"),
         "working" => (1, "Working"),
         "complete" => (2, "Ready to review"),
         status if status.starts_with("tool:") => (1, "Working"),
@@ -204,10 +204,11 @@ fn agent_group(entry: &AgentOverview) -> (u8, &'static str) {
     }
 }
 
-fn status_label(entry: &AgentOverview) -> &str {
+/// Status words shared with the sidebar badges.
+pub fn status_label(entry: &AgentOverview) -> &str {
     match entry.status.as_str() {
-        "waiting" => "Waiting for input",
-        "error" => "Error",
+        "waiting" => "Waiting",
+        "error" => "Failed",
         "working" => "Working",
         "complete" => "Finished",
         "idle" => "Idle",
@@ -320,7 +321,11 @@ impl AgentsPanel {
                     .text_xs()
                     .text_color(status_color)
                     .map(|status| {
-                        let text = format!("{} · {}", entry.provider, status_label(entry));
+                        let text = format!(
+                            "{} · {}",
+                            entry.provider.display_name(),
+                            status_label(entry)
+                        );
                         if rank == 1 {
                             status.child(
                                 ShimmerText::new(text)
