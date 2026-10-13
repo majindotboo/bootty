@@ -312,7 +312,7 @@ impl ClaudeProtocol {
                         }
                         Some("thinking_delta") => {
                             if let Some(text) = field(delta, "thinking").as_str() {
-                                snapshot.delta(id, "reasoning", text);
+                                snapshot.delta(id, "thinking", text);
                             }
                         }
                         _ => {}
@@ -705,7 +705,7 @@ fn content_block(snapshot: &mut NativeSessionSnapshot, id: String, block: &Value
         ),
         Some("thinking") => snapshot.message(
             id,
-            "reasoning",
+            "thinking",
             field(block, "thinking")
                 .as_str()
                 .unwrap_or_default()

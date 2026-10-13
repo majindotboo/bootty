@@ -2159,10 +2159,12 @@ fn nested_side_chat_retains_copied_context_after_live_history_eviction(
         .prompt(&child.target(), "Seed copied history")
         .unwrap();
     let evicted = service.prompt(&child.target(), "bounded").unwrap();
+    // The live view keeps user prompts as turn boundaries; copied replies are evicted.
     assert!(
         evicted
             .transcript
             .iter()
+            .filter(|item| item.role != "user")
             .all(|item| !item.id.starts_with("fork:"))
     );
     let recent_history = service.prompt(&child.target(), "Recent context").unwrap();

@@ -471,7 +471,7 @@ impl NativeSessionSnapshot {
         } else {
             // Keep a bounded recent view; the provider's durable transcript owns full history.
             if self.transcript.len() >= 256 {
-                self.transcript.remove(0);
+                self.evict_oldest();
             }
             self.transcript.push(NativeTranscriptItem {
                 id,
@@ -528,8 +528,19 @@ impl NativeSessionSnapshot {
             .fold(0_usize, usize::saturating_add)
             > RECENT_TRANSCRIPT_BYTES
         {
-            self.transcript.remove(0);
+            self.evict_oldest();
         }
+    }
+
+    /// Drop the oldest retained item but keep user prompts: they mark turn boundaries, and a long
+    /// turn must not lose the prompt that started it.
+    fn evict_oldest(&mut self) {
+        let index = self
+            .transcript
+            .iter()
+            .position(|item| item.role != "user")
+            .unwrap_or_default();
+        self.transcript.remove(index);
     }
 
     pub(crate) fn tool_message(

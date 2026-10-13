@@ -56,6 +56,11 @@ for line in sys.stdin:
    if prompt=='cancel': emit({'type':'control_cancel_request','request_id':'permission-id'})
    continue
   if prompt=='hold': continue
+  if prompt=='flood':
+   for i in range(300):
+    emit({'type':'assistant','uuid':'think-'+str(i),'session_id':session,'parent_tool_use_id':None,'message':{'id':'think-message-'+str(i),'content':[{'type':'thinking','thinking':''}]}})
+    emit({'type':'assistant','uuid':'flood-'+str(i),'session_id':session,'parent_tool_use_id':None,'message':{'id':'flood-message-'+str(i),'content':[{'type':'tool_use','id':'flood-call-'+str(i),'name':'Bash','input':{'command':'true'}}]}})
+    emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'flood-call-'+str(i),'content':[{'type':'text','text':'ok'}],'is_error':False}]}})
   if prompt=='tool-hold':
    emit({'type':'assistant','uuid':'tool-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'tool-message','content':[{'type':'tool_use','id':'bash-call','name':'Bash','input':{'command':'sleep 60'}}]}})
    continue
@@ -546,6 +551,29 @@ fn claude_subagent_tasks_preserve_reported_results_and_reject_foreign_sessions(
     assert_eq!(child.model.as_deref(), Some("sonnet"));
     assert_eq!(child.thread_id, None);
     assert_eq!(children[0].text, "Observed result");
+    session.stop();
+}
+
+/// A long turn keeps the prompt that started it, and empty thinking blocks take no slots in the
+/// bounded live view.
+#[test]
+fn long_turns_keep_their_prompt_and_skip_empty_thinking() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("flood").unwrap();
+    barrier(&session).unwrap();
+    let transcript = session.snapshot().transcript;
+    assert!(transcript.len() <= 256, "{} items", transcript.len());
+    assert!(
+        transcript
+            .iter()
+            .any(|item| item.role == "user" && item.text == "flood")
+    );
+    assert!(
+        !transcript
+            .iter()
+            .any(|item| item.role == "thinking" && item.text.is_empty())
+    );
     session.stop();
 }
 
