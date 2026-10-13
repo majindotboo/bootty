@@ -1439,7 +1439,10 @@ impl NativeAgentSessionView {
         .px_0()
         .small()
         .ghost()
-        .accessibility_label(format!("{} {name}", if open { "Hide" } else { "Show" }))
+        .accessibility_label(format!(
+            "{} {name} details",
+            if open { "Hide" } else { "Show" }
+        ))
         .child(Self::render_tool_heading(item, open, cx))
         .on_click(move |_, _, cx| {
             _ = owner.update(cx, |this, cx| {
@@ -1810,10 +1813,14 @@ impl NativeAgentSessionView {
             .flex_col()
             .when(user, gpui_kit::Styled::items_end)
             .child(self.render_message_body(item, owner.clone(), cx))
-            .when(
-                item.complete && matches!(item.role.as_str(), "user" | "assistant"),
-                |row| row.child(self.message_metadata(item, focused, owner, cx)),
-            );
+            .map(|row| match (item.complete, item.role.as_str()) {
+                (true, "user" | "assistant") => {
+                    row.child(self.message_metadata(item, focused, owner, cx))
+                }
+                // Hold the metadata lane while a reply streams so finishing never shifts it.
+                (false, "assistant") => row.child(div().h_8()),
+                _ => row,
+            });
         div()
             .w_full()
             .min_w_0()
@@ -2428,7 +2435,7 @@ impl NativeAgentSessionView {
             .child(
                 Button::new("native-writer-fork")
                     .debug_selector(|| "native-writer-fork".into())
-                    .label("Fork chat")
+                    .label("Start side chat")
                     .ghost()
                     .small()
                     .disabled(!self.provider_enabled() || self.pending.contains("fork"))
@@ -2554,6 +2561,9 @@ impl NativeAgentSessionView {
         }
         if self.presentation.collapse_composer_on_scroll
             && !self.list.is_following_tail()
+            // Collapsing frees height; near the end that would reveal the end again and resume
+            // following, so the composer would flicker back open.
+            && self.distance_from_end() > f32::from(window.rem_size()) * 10.
             && self.composer.read(cx).value().is_empty()
             && !self.composer.read(cx).focus_handle(cx).is_focused(window)
             && self.attachments.is_empty()
@@ -2947,6 +2957,13 @@ fn history_transcript(
         .collect()
 }
 impl NativeAgentSessionView {
+    /// How far the transcript is scrolled above its end, in pixels.
+    fn distance_from_end(&self) -> f32 {
+        let max = f32::from(self.list.max_offset_for_scrollbar().y);
+        let top = -f32::from(self.list.scroll_px_offset_for_scrollbar().y);
+        (max - top).max(0.)
+    }
+
     fn needs_jump_to_latest(&self) -> bool {
         !self.list.is_following_tail()
             || self
@@ -2960,7 +2977,10 @@ impl NativeAgentSessionView {
             Button::new("native-jump-latest")
                 .debug_selector(|| "native-jump-latest".into())
                 .icon(IconName::ChevronDown)
-                .ghost()
+                .label("Latest")
+                .outline()
+                .rounded_full()
+                .bg(cx.theme().background)
                 .small()
                 .accessibility_label("Jump to latest")
                 .tooltip("Jump to latest")
@@ -3061,9 +3081,6 @@ impl Render for NativeAgentSessionView {
                 )
             })
             .child(self.render_transcript(window, cx))
-            .when(self.needs_jump_to_latest(), |body| {
-                body.child(Self::render_jump_to_latest(cx))
-            })
             .when(!self.record.snapshot.requests.is_empty(), |body| {
                 body.child(self.requests.clone())
             })

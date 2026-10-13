@@ -488,6 +488,7 @@ impl NativeAgentSessionView {
             && self.record.pending_initial_message.is_none()
             && !self.pending.contains("history");
         div()
+            .relative()
             .flex_1()
             .min_h_0()
             .min_w_0()
@@ -528,6 +529,17 @@ impl NativeAgentSessionView {
                     )
                 },
             ))
+            // Floats over the list so showing it never resizes the transcript.
+            .when(self.needs_jump_to_latest(), |view| {
+                view.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_0()
+                        .right_0()
+                        .child(Self::render_jump_to_latest(cx)),
+                )
+            })
     }
 
     fn work_group_summary(&self, members: &[usize], live: bool) -> String {
@@ -592,8 +604,8 @@ impl NativeAgentSessionView {
             .px_0()
             .w_full()
             .accessibility_label(format!(
-                "{} transcript",
-                if open { "Collapse" } else { "Expand" }
+                "{} work: {summary}",
+                if open { "Hide" } else { "Show" }
             ))
             .child(
                 div()
