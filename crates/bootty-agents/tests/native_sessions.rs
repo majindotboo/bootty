@@ -152,6 +152,8 @@ for line in sys.stdin:
    notice('item/commandExecution/outputDelta',itemId='typed-command',delta='streamed output')
    notice('item/completed',item={'id':'typed-command','type':'commandExecution','command':'echo typed','status':status,'aggregatedOutput':''})
    notice('item/completed',item={'id':'typed-mcp','type':'mcpToolCall','server':'fixture','tool':'inspect','arguments':{'path':'source.rs'},'status':'failed' if status=='declined' else status,'result':{'content':[{'type':'text','text':'inspection output'}]}})
+  if text in ['retried-error','fatal-error']:
+   notice('error',error={'message':'stream disconnected'},willRetry=text=='retried-error')
   if text == 'bounded':
    for i in range(96): notice('item/agentMessage/delta',itemId='long-'+str(i),delta='界'*6000)
   else:
@@ -689,6 +691,30 @@ fn cached_provider_catalog_retains_permissions_and_uses_exact_account_and_projec
         Some(retained)
     );
     reopened.shutdown().unwrap();
+}
+
+/// An error Codex is already retrying does not end the turn; a final one does.
+#[rstest]
+#[case::retried("retried-error", NativeTurnOutcome::Succeeded, None)]
+#[case::fatal("fatal-error", NativeTurnOutcome::Failed, Some("stream disconnected"))]
+fn codex_errors_end_the_turn_only_when_not_retried(
+    #[case] prompt: &str,
+    #[case] outcome: NativeTurnOutcome,
+    #[case] error: Option<&str>,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt(prompt).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(
+        (
+            snapshot.first_turn.map(|turn| turn.outcome),
+            snapshot.error.as_deref()
+        ),
+        (Some(outcome), error)
+    );
+    session.stop();
 }
 
 #[rstest]

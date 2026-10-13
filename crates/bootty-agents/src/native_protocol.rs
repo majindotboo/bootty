@@ -992,6 +992,8 @@ impl NativeSessionSnapshot {
                     self.usage = Some(usage.clone());
                 }
             }
+            // Codex reports transient failures it is already retrying; the turn continues.
+            "error" if field(params, "willRetry") == true => {}
             "error" => {
                 if let Some(id) = self.turn_id.clone() {
                     self.finish_first_turn(&id, NativeTurnOutcome::Failed);
