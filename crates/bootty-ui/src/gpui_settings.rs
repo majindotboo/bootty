@@ -710,7 +710,7 @@ fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<Se
         rows.push(SettingsRow::Value {
             id: format!("{base}.enabled"),
             label: "Enabled".to_owned(),
-            help: "Allow new agent terminal tabs. Existing terminals remain available.".to_owned(),
+            help: "Allow new conversations and agent tabs. Existing conversations stay readable but cannot send until this is on again.".to_owned(),
             value: ScalarValue::Bool(preferences.enabled),
             control: SettingsControl::Toggle,
             enabled: true,
