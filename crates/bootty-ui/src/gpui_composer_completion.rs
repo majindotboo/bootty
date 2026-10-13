@@ -394,6 +394,33 @@ impl ComposerCompletion {
             .collect();
     }
 
+    /// `/` lists commands and skills; `$` lists only skills. Apps and plugins are `@` mentions.
+    fn command_candidates(&self, kind: CompletionKind) -> Vec<CompletionItem> {
+        self.catalog
+            .as_ref()
+            .into_iter()
+            .flat_map(|catalog| &catalog.options)
+            .filter(|option| match option.kind {
+                NativeCompletionKind::Skill => true,
+                NativeCompletionKind::Command => kind == CompletionKind::Command,
+                NativeCompletionKind::App | NativeCompletionKind::Plugin => false,
+            })
+            .map(|option| {
+                let skill = option.kind == NativeCompletionKind::Skill;
+                CompletionItem {
+                    label: format!("{}{}", if skill { "$" } else { "/" }, option.name),
+                    detail: option
+                        .description
+                        .clone()
+                        .or_else(|| option.argument_hint.clone())
+                        .unwrap_or_else(|| if skill { "Skill" } else { "Command" }.into()),
+                    icon: if skill { "sparkles" } else { "terminal" },
+                    source: CompletionSource::Provider(option.clone()),
+                }
+            })
+            .collect()
+    }
+
     fn integration_candidates(&self) -> Vec<CompletionItem> {
         self.catalog
             .as_ref()
@@ -429,6 +456,9 @@ impl ComposerCompletion {
             trigger.kind,
             CompletionKind::Command | CompletionKind::Skill
         ) {
+            candidates.extend(self.command_candidates(trigger.kind));
+        }
+        if trigger.kind == CompletionKind::Mention {
             candidates.extend(self.integration_candidates());
             candidates.extend(
                 self.applications
