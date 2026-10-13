@@ -376,7 +376,7 @@ impl ClaudeProtocol {
         }
         snapshot.completed_turn = outcome == NativeTurnOutcome::Succeeded;
         snapshot.status = if outcome == NativeTurnOutcome::Failed {
-            snapshot.error = Some("Claude reported a failed turn".to_owned());
+            snapshot.error = Some(failure_reason(value));
             NativeSessionStatus::Error
         } else {
             NativeSessionStatus::Idle
@@ -764,4 +764,23 @@ pub fn valid_session_id(id: &str) -> bool {
 
 fn valid_wire_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 8192 && !id.chars().any(char::is_control)
+}
+
+/// Claude's result names why a turn failed; keep that reason rather than a fixed sentence.
+fn failure_reason(value: &Value) -> String {
+    match field(value, "subtype").as_str() {
+        Some("error_max_turns") => "Claude stopped at its turn limit".to_owned(),
+        Some("error_max_budget_usd") => "Claude stopped at its budget limit".to_owned(),
+        Some("error_max_structured_output_retries") => {
+            "Claude could not produce valid structured output".to_owned()
+        }
+        _ => field(value, "errors")
+            .as_array()
+            .and_then(|errors| errors.iter().find_map(Value::as_str))
+            .filter(|reason| !reason.trim().is_empty())
+            .map_or_else(
+                || "Claude reported a failed turn".to_owned(),
+                |reason| crate::native_protocol::bounded_text(reason.to_owned()),
+            ),
+    }
 }

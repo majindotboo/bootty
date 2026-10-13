@@ -28,8 +28,8 @@ session=sys.argv[sys.argv.index('--resume' if '--resume' in sys.argv else '--ses
 with open('launch.json','w') as output: json.dump({'argv':sys.argv[1:],'account':os.environ.get('CLAUDE_CONFIG_DIR'),'pid':os.getpid()},output)
 def emit(value): print(json.dumps(value),flush=True)
 def control(value): emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'models':[],'account':{},'commands':[{'name':'review','description':'Review changes','argumentHint':'[path]'}]}}})
-def result(reason='completed',subtype='success',identity=None):
- emit({'type':'result','subtype':subtype,'session_id':identity or session,'uuid':'result-uuid-not-user-uuid','is_error':subtype!='success','terminal_reason':reason,'result':'Hello world'})
+def result(reason='completed',subtype='success',identity=None,errors=None):
+ emit({'type':'result','subtype':subtype,'session_id':identity or session,'uuid':'result-uuid-not-user-uuid','is_error':subtype!='success','terminal_reason':reason,'result':'Hello world','errors':errors or []})
 def event(value): emit({'type':'stream_event','session_id':session,'parent_tool_use_id':None,'event':value})
 for line in sys.stdin:
  value=json.loads(line)
@@ -76,6 +76,8 @@ for line in sys.stdin:
    emit({'type':'system','subtype':'task_notification','session_id':session,'task_id':'child','status':status,'summary':'Observed result'})
    emit({'type':'system','subtype':'task_progress','session_id':session,'task_id':'child'})
   if prompt=='failed': result('model_error','error_during_execution')
+  elif prompt=='failed-reason': result('model_error','error_during_execution',errors=['API Error: 529 overloaded'])
+  elif prompt=='failed-turns': result('max_turns','error_max_turns')
   else: result()
  elif value['type']=='control_response':
   with open('answer.json','w') as output: json.dump(value,output)
@@ -544,6 +546,24 @@ fn claude_subagent_tasks_preserve_reported_results_and_reject_foreign_sessions(
     assert_eq!(child.model.as_deref(), Some("sonnet"));
     assert_eq!(child.thread_id, None);
     assert_eq!(children[0].text, "Observed result");
+    session.stop();
+}
+
+/// A failed turn keeps Claude's reported reason; the fixed sentence is only a last resort.
+#[rstest]
+#[case::reported("failed-reason", "API Error: 529 overloaded")]
+#[case::turn_limit("failed-turns", "Claude stopped at its turn limit")]
+#[case::unexplained("failed", "Claude reported a failed turn")]
+fn failed_turns_keep_claudes_reason(#[case] prompt: &str, #[case] reason: &str) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt(prompt).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(
+        (snapshot.status, snapshot.error.as_deref()),
+        (NativeSessionStatus::Error, Some(reason))
+    );
     session.stop();
 }
 
