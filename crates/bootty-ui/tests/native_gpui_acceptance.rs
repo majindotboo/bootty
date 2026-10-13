@@ -25,7 +25,8 @@ use libghostty_vt::style::RgbColor;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
-const FRAME_TIMEOUT: Duration = Duration::from_secs(5);
+// Passing frames arrive in milliseconds; the bound only catches a wedged host on a loaded machine.
+const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const INPUT_MARKER: &str = "BOOTTY_NATIVE_INPUT=accepted";
 const PANE_MARKER: &str = "BOOTTY_NATIVE_PANE=native-pane";
 const SIZE_MARKER: &str = "BOOTTY_NATIVE_SIZE=30 100";

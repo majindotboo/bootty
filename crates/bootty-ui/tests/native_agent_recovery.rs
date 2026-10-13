@@ -15,6 +15,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Bounds waits on real child processes and command replies. Passing tests advance on events;
+/// only a broken fixture reaches this, so it is generous enough for a loaded machine.
+const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
+
 #[path = "support/idle_frames.rs"]
 mod frames;
 #[allow(
@@ -88,7 +92,7 @@ fn submit(
     invocation: CommandInvocation,
 ) -> TestResult<CommandOutcome> {
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(3))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline overflow")?;
     let response = state
         .app_command_sender(invocation.caller)
@@ -250,7 +254,7 @@ fn wait_observed(host: &mut Host, terminal: &CommandTarget) -> TestResult<()> {
         .terminal_agent_service()
         .ok_or("agent owner missing")?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(3))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline overflow")?;
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));
@@ -269,7 +273,7 @@ fn checkpoint(host: &mut Host) -> TestResult<OutputArchive> {
         .checked_add(Duration::from_secs(31))
         .ok_or("checkpoint tick overflow")?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(3))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline overflow")?;
     loop {
         host.state.update_frame(frames::idle_frame(tick));
@@ -660,7 +664,7 @@ fn shared_interrupt_matches_the_native_provider_key(
     let value = success(submit(&mut host.state, &host.wakes, start).unwrap()).unwrap();
     let terminal = target(&value, "terminal").unwrap();
     let service = host.state.terminal_agent_service().unwrap();
-    let deadline = Instant::now().checked_add(Duration::from_secs(3)).unwrap();
+    let deadline = Instant::now().checked_add(FIXTURE_DEADLINE).unwrap();
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));
         if service.live_records().iter().any(|record| {
@@ -708,7 +712,7 @@ fn cancelled_codex_accepts_next_prompt(
         .terminal_agent_service()
         .ok_or("agent owner missing")?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(3))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline overflow")?;
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));
@@ -852,7 +856,7 @@ fn restart_cold_with_checkpoint(
 
 fn restored_agent_target(host: &mut Host) -> TestResult<CommandTarget> {
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(3))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline")?;
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));
@@ -1000,7 +1004,7 @@ fn logical_agent_location_survives_interrupted_checkpoint_catalog_ordering(
     let destination = restored_agent_target(&mut host)?;
     let service = host.state.terminal_agent_service().ok_or("owner")?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(3))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline")?;
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));

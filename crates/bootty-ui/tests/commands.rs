@@ -32,6 +32,10 @@ use bootty_ui::{
 };
 use rusqlite::Connection;
 
+/// Bounds waits on real child processes and command replies. Passing tests advance on events;
+/// only a broken fixture reaches this, so it is generous enough for a loaded machine.
+const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
+
 #[path = "support/idle_frames.rs"]
 mod frames;
 mod support;
@@ -619,7 +623,7 @@ fn wait_for_native_agent_input(
         .terminal_agent_service()
         .ok_or("native agent service is unavailable")?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(2))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("observation deadline does not fit")?;
     loop {
         state.update_frame(frames::idle_frame(Instant::now()));
@@ -3360,7 +3364,7 @@ fn job_events_are_owned_by_the_live_window_registry() {
         if let Ok(event) = receiver.try_recv() {
             break event;
         }
-        wakes.recv_timeout(Duration::from_secs(2)).unwrap();
+        wakes.recv_timeout(FIXTURE_DEADLINE).unwrap();
     };
     assert_eq!(event.topic, "jobs.changed");
     let mut published = false;
@@ -4725,7 +4729,7 @@ fn wait_for_finished_native_agent(
         .terminal_agent_service()
         .ok_or("agent service unavailable")?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(2))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline overflow")?;
     loop {
         fixture
@@ -5241,7 +5245,7 @@ fn completed_live_turn_accepts_next_prompt_on_exact_captured_terminal(
         }
         fixture
             .wakes
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(FIXTURE_DEADLINE)
             .expect("submitted next prompt arrives");
     }
     close_native_spawn_fixture(&mut fixture).unwrap();

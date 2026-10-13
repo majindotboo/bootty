@@ -36,6 +36,10 @@ use pretty_assertions::{assert_eq, assert_ne};
 use rstest::rstest;
 use serde_json::{Value, json};
 
+/// Bounds waits on real child processes and command replies. Passing tests advance on events;
+/// only a broken fixture reaches this, so it is generous enough for a loaded machine.
+const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
+
 #[path = "support/idle_frames.rs"]
 mod frames;
 #[allow(
@@ -329,7 +333,7 @@ impl Host {
             let _ = wake.send(());
         });
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
+            .checked_add(FIXTURE_DEADLINE)
             .ok_or("Deadline")?;
         success(self.receive(&receiver, deadline)?)
     }
@@ -382,7 +386,7 @@ impl Host {
 
     fn submit(&mut self, invocation: CommandInvocation) -> TestResult<CommandOutcome> {
         let deadline = Instant::now()
-            .checked_add(Duration::from_secs(5))
+            .checked_add(FIXTURE_DEADLINE)
             .ok_or("deadline overflow")?;
         let response = self
             .state
@@ -848,7 +852,7 @@ fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() ->
     let record = record(&host.start(&binding, "conversation", "task-cancel", "")?)?;
     let target = record.target();
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline overflow")?;
     let waiting = host
         .state
@@ -1043,7 +1047,7 @@ fn checkpointing_a_shared_backend_saves_only_each_spaces_own_sessions() -> TestR
         .checkpoint_sessions(chrono::Utc::now().timestamp());
     assert_eq!(host.state.last_error(), None);
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("checkpoint deadline")?;
     while host.state.session_checkpoint_pending() {
         host.tick();
@@ -1230,7 +1234,7 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
     });
     let mut dialog = NewSessionDialog::open_form(form, &repaint);
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("dialog deadline overflow")?;
     // The public dialog starts discovery and enables Start only after observing its completion.
     let spec = loop {
@@ -1816,7 +1820,7 @@ fn concurrent_native_restore_keeps_the_first_launch_and_its_tools() -> TestResul
         .ok_or("Native owner missing")?
         .stop(&saved.target())?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("Resume deadline")?;
     let sender = host.state.app_command_sender(Caller::Socket);
     let first = sender
@@ -1944,7 +1948,7 @@ fn wait_for_native_terminal_read(
     record: &NativeSessionRecord,
 ) -> TestResult<Value> {
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("Deadline")?;
     loop {
         match host.native_tool(record, "terminal_read", json!({}))? {
@@ -2084,7 +2088,7 @@ fn opening_without_a_checkpoint_starts_a_shell_and_resumes_the_same_provider() -
     ))?)?;
     host.tick();
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("Resume deadline")?;
     let resumed = loop {
         host.tick();
@@ -2247,7 +2251,7 @@ fn pending_native_lease_revocation_cancels_saved_task_restore_before_acceptance(
     );
     restore.target = Some(binding.clone());
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("Deadline")?;
     let response = host
         .state
@@ -2579,7 +2583,7 @@ fn spawn_guard_preserves_caller_cancellation_at_durable_creation_acceptance() ->
     );
     create.target = Some(binding.clone());
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("Deadline")?;
     let response = host
         .state
@@ -2663,7 +2667,7 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
         true
     );
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("Child deadline")?;
     let waiting = host
         .state
@@ -2982,7 +2986,7 @@ fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() -> TestResult<()
         json!({"terminal":terminal}),
     )?)?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("Shell deadline")?;
     loop {
         let captured = success(host.native_tool(
@@ -3488,7 +3492,7 @@ fn closing_a_native_pane_through_the_terminal_command_also_retires_its_provider(
     close.confirmation = Some(close.confirmation());
     success(host.submit(close)?)?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("retirement deadline")?;
     loop {
         host.tick();
@@ -3524,7 +3528,7 @@ fn native_mux_placement_is_published_before_provider_initialization() -> TestRes
     let ready =
         std::os::unix::net::UnixListener::bind(host.directory.path().join("start-barrier"))?;
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline")?;
     let mut invocation = CommandInvocation::new(
         "agents.native.start",
@@ -3679,7 +3683,7 @@ fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestRe
         Some(bootty_ui::ModalDialog::NewSession(_))
     ));
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("deadline")?;
     while host.state.pending_new_surface().is_some() || host.state.modal_dialog().is_some() {
         host.tick();

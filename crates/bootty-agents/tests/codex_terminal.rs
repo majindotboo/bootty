@@ -5,7 +5,11 @@ use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
 use serde_json::{Value, json};
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
+
+/// Bounds waits on real child processes and command replies. Passing tests advance on events;
+/// only a broken fixture reaches this, so it is generous enough for a loaded machine.
+const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 fn frame(value: &Value, masked: bool) -> Vec<u8> {
     let payload = value.to_string().into_bytes();
@@ -482,7 +486,6 @@ fn real_transport_forwards_bytes_and_reaps_its_provider(#[case] disconnect: bool
     use std::os::unix::fs::PermissionsExt as _;
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     let directory = assert_fs::TempDir::new().unwrap();
     let executable = directory.child("provider.py");
@@ -587,9 +590,7 @@ finally:
     let arguments = observer.arguments();
     let endpoint = arguments[1].strip_prefix("unix://").unwrap();
     let mut terminal = UnixStream::connect(endpoint).unwrap();
-    terminal
-        .set_read_timeout(Some(Duration::from_secs(2)))
-        .unwrap();
+    terminal.set_read_timeout(Some(FIXTURE_DEADLINE)).unwrap();
     terminal
         .write_all(b"GET / HTTP/1.1\r\nUpgrade: websocket\r\n\r\n")
         .unwrap();
@@ -623,7 +624,7 @@ finally:
         ]
     );
 
-    let observation = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let observation = receiver.recv_timeout(FIXTURE_DEADLINE).unwrap();
     assert_eq!(observation.session_id.as_deref(), Some("exact"));
     // The provider gates consumption on a second socket. More than both OS
     // buffers can hold must cross the relay after that deterministic release.
@@ -640,12 +641,9 @@ finally:
         Err(mpsc::TryRecvError::Empty)
     ));
     let mut gate = UnixStream::connect(directory.child("gate.sock").path()).unwrap();
-    gate.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    gate.set_read_timeout(Some(FIXTURE_DEADLINE)).unwrap();
     gate.write_all(b"g").unwrap();
-    completion
-        .recv_timeout(Duration::from_secs(2))
-        .unwrap()
-        .unwrap();
+    completion.recv_timeout(FIXTURE_DEADLINE).unwrap().unwrap();
     let mut drained = [0; 1];
     gate.read_exact(&mut drained).unwrap();
     assert_eq!(drained, [b'd']);
@@ -666,7 +664,7 @@ finally:
         serde_json::from_slice::<Value>(&completed).unwrap(),
         expected_completed
     );
-    let observed = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let observed = receiver.recv_timeout(FIXTURE_DEADLINE).unwrap();
     assert_eq!(observed.status, TerminalAgentStatus::Finished);
     assert_eq!(observed.session_id.as_deref(), Some("exact"));
     if disconnect {
@@ -674,7 +672,7 @@ finally:
     } else {
         observer.stop();
     }
-    let stopped = receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+    let stopped = receiver.recv_timeout(FIXTURE_DEADLINE).unwrap();
     assert_eq!(stopped.status, TerminalAgentStatus::Unavailable);
     assert_eq!(
         stopped.detail.as_deref(),
@@ -709,9 +707,7 @@ fn exited_provider_cannot_leave_an_input_ready_observation() {
         }),
     )
     .unwrap();
-    let observation = receiver
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .unwrap();
+    let observation = receiver.recv_timeout(FIXTURE_DEADLINE).unwrap();
     assert_eq!(observation.status, TerminalAgentStatus::Unavailable);
     assert!(observation.detail.as_deref().unwrap().contains("exited"));
     observer.stop_and_wait().unwrap();

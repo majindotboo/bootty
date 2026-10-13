@@ -140,8 +140,9 @@ fn older_refresh_cannot_replace_a_newer_request_or_notify_consumers(
         )
     });
     // The deadline bounds a broken fixture; successful coordination advances by pipe messages.
+    // Process startup under a loaded full suite can exceed a second, so the bound is generous.
     receiver
-        .recv_timeout(Duration::from_secs(1))
+        .recv_timeout(Duration::from_secs(30))
         .unwrap()
         .unwrap();
     arrival.join().unwrap();

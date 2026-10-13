@@ -17,6 +17,10 @@ use pretty_assertions::{assert_eq, assert_ne};
 use rstest::{fixture, rstest};
 use serde_json::json;
 
+/// Bounds waits on real child processes and command replies. Passing tests advance on events;
+/// only a broken fixture reaches this, so it is generous enough for a loaded machine.
+const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
+
 #[path = "support/idle_frames.rs"]
 mod frames;
 #[allow(
@@ -197,7 +201,7 @@ fn submit(
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let command = invocation.command.clone();
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(2))
+        .checked_add(FIXTURE_DEADLINE)
         .ok_or("test deadline overflow")?;
     let response = state
         .app_command_sender(invocation.caller)
@@ -484,7 +488,7 @@ fn queued_creation_cancelled_before_owner_acceptance_creates_no_terminal(
     let service = host.state.orchestration_service().unwrap();
     let claims = service.claim_ready(&run, 1).unwrap();
     let guard = service.begin_dispatch(&claims[0].token).unwrap();
-    let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now().checked_add(FIXTURE_DEADLINE).unwrap();
     let create = bound(
         CommandInvocation::new(
             "session.create",
@@ -664,7 +668,7 @@ fn two_provider_workers_observe_dependency_order_without_idle_success(
         "{result:?}"
     );
     let service = fixture.host.state.orchestration_service().unwrap();
-    let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now().checked_add(FIXTURE_DEADLINE).unwrap();
     loop {
         fixture
             .host
@@ -866,7 +870,7 @@ fn native_dependent_work_uses_exact_first_turn_without_creating_another_saved_ta
         "{dispatched:?}"
     );
     let service = host.state.orchestration_service().unwrap();
-    let deadline = Instant::now().checked_add(Duration::from_secs(2)).unwrap();
+    let deadline = Instant::now().checked_add(FIXTURE_DEADLINE).unwrap();
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));
         let snapshot = service.snapshot_arc();
