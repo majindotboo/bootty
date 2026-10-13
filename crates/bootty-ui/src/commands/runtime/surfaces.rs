@@ -954,6 +954,25 @@ impl AppState {
         Ok(())
     }
 
+    /// Cancel a chooser bound to a Space that is no longer active. The workspace closes its
+    /// presentation once this request is gone; an accepted creation still finishes in its Space.
+    pub(crate) fn cancel_surface_chooser_outside_active_space(&mut self) {
+        let Some(request) = &self.pending_new_surface else {
+            return;
+        };
+        if self
+            .surface_binding_target(self.workspace.active.binding.scope())
+            .is_ok_and(|active| active == request.binding)
+        {
+            return;
+        }
+        let id = request.id;
+        if self.cancel_surface_creation(id) {
+            self.pending_new_surface = None;
+            self.close_surface_agent_form(id);
+        }
+    }
+
     fn cancel_surface_creation(&self, request_id: u64) -> bool {
         self.creating_surface_request
             .as_ref()

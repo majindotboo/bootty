@@ -342,15 +342,23 @@ impl GpuiWorkspace {
         }
     }
 
-    pub(super) fn close_dismissed_surface_form(
+    /// Close a chooser whose agent form was dismissed or whose request state no longer holds,
+    /// such as one abandoned by a Space switch.
+    pub(super) fn close_stale_surface_chooser(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.native_conversations.surface_agent_form
-            && let Some(request) = &self.native_conversations.surface_request
-            && self.state.surface_agent_form_request_id() != Some(request.id)
-        {
+        let Some(request) = &self.native_conversations.surface_request else {
+            return;
+        };
+        let dismissed_form = self.native_conversations.surface_agent_form
+            && self.state.surface_agent_form_request_id() != Some(request.id);
+        let abandoned = self
+            .state
+            .pending_new_surface()
+            .is_none_or(|pending| pending.id != request.id);
+        if dismissed_form || abandoned {
             self.close_surface_chooser(request.id, window, cx);
         }
     }

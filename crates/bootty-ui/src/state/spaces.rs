@@ -185,6 +185,7 @@ impl AppState {
     }
     fn clear_space_context_dialogs(&mut self) {
         self.dialogs.clear_space_context();
+        self.cancel_surface_chooser_outside_active_space();
         self.sidebar_hovered_session = None;
     }
     pub fn reconnect_space_from_ui(&mut self, space_id: SpaceId) -> bool {

@@ -237,6 +237,9 @@ pub struct GpuiWorkspace {
     input: crate::gpui::InputAccumulator,
     workspace: WeakEntity<Self>,
     focus: FocusHandle,
+    /// Transition key of the terminal surface `focus` was last requested for. Spaces and
+    /// sessions can present a new surface behind the same handle, which still needs focus.
+    focused_surface: Option<String>,
     focus_initialized: bool,
     _window_activation_subscription: Subscription,
     _window_appearance_subscription: Subscription,
@@ -351,9 +354,7 @@ impl GpuiWorkspace {
         let terminal_cell = terminal_cell_metrics(&terminal_text, window);
         let font_families = Self::window_font_families(window);
         Self::watch_workspace_work(repaint_rx, window, cx);
-        let mut input = crate::gpui::InputAccumulator::default();
-        input.set_wake(repaint.clone());
-        input.window_focused(window_focused);
+        let input = Self::window_input(&repaint, window_focused);
         state.set_appearance_variant(startup_variant);
         let settings_runtime = SettingsRuntime::default();
         settings_runtime.request_catalog(&state.config().config_path, &repaint);
@@ -402,6 +403,7 @@ impl GpuiWorkspace {
             input,
             workspace,
             focus,
+            focused_surface: None,
             focus_initialized: false,
             _window_activation_subscription: window_activation_subscription,
             _window_appearance_subscription: window_appearance_subscription,
@@ -436,6 +438,17 @@ impl GpuiWorkspace {
             last_pane_layouts: Vec::new(),
             repaint,
         }
+    }
+
+    /// Window input that wakes the workspace and starts from the window's focus.
+    fn window_input(
+        repaint: &bootty_mux::RepaintHandle,
+        window_focused: bool,
+    ) -> crate::gpui::InputAccumulator {
+        let mut input = crate::gpui::InputAccumulator::default();
+        input.set_wake(repaint.clone());
+        input.window_focused(window_focused);
+        input
     }
 
     fn create_terminal_view(
@@ -591,14 +604,7 @@ impl GpuiWorkspace {
                     terminal.set_window_focused(active, cx);
                 });
             }
-            if active
-                && window.focused(cx).is_none()
-                && !window.has_active_dialog(cx)
-                && !this
-                    .tools
-                    .as_ref()
-                    .is_some_and(|tools| tools.read(cx).browser_page_active(cx))
-            {
+            if active && window.focused(cx).is_none() && this.can_reclaim_focus(window, cx) {
                 // Reactivation preserves the current component focus, including modal traps.
                 schedule_focus(this.focus.clone(), window, cx);
             } else if !active {
@@ -609,11 +615,36 @@ impl GpuiWorkspace {
         })
     }
 
+    /// Reclaim keyboard focus when its element leaves the tree.
+    ///
+    /// Switching a Space, session, tab, or pane can unmount the focused element (a chooser,
+    /// composer, or another Space's panel). GPUI keeps that stale focus, so keys reach no
+    /// key context: typing and Bootty's own bindings stop until a click. The workspace root
+    /// always tracks `focus`, so reclaiming it restores bindings and, when visible, the terminal.
+    fn observe_workspace_focus_loss(window: &mut Window, cx: &mut Context<Self>) {
+        cx.on_focus_lost(window, |this, window, cx| {
+            if this.can_reclaim_focus(window, cx) {
+                this.focus.focus(window, cx);
+            }
+        })
+        .detach();
+    }
+
+    /// Modal dialogs and an active browser page own focus outside the workspace tree.
+    fn can_reclaim_focus(&self, window: &mut Window, cx: &mut gpui_kit::App) -> bool {
+        !window.has_active_dialog(cx)
+            && !self
+                .tools
+                .as_ref()
+                .is_some_and(|tools| tools.read(cx).browser_page_active(cx))
+    }
+
     fn observe_workspace_window(
         keymap_context: &str,
         window: &mut Window,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) -> (Subscription, Option<u32>) {
+        Self::observe_workspace_focus_loss(window, cx);
         let keymap_context_for_release = keymap_context.to_owned();
         cx.on_app_quit(|this, cx| {
             let owner = cx.entity();
@@ -2350,7 +2381,7 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_dismissed_surface_form(window, cx);
+        self.close_stale_surface_chooser(window, cx);
         if let Some(project) = self.state.take_project_settings() {
             self.open_settings_window_target(
                 SettingsWindowTarget::Project(Box::new(project)),
@@ -2976,7 +3007,7 @@ impl GpuiWorkspace {
         GpuiTerminalView::publish(
             view,
             TerminalPresentation {
-                transition_key,
+                transition_key: transition_key.clone(),
                 surface,
                 frame,
                 text_cell_height: self.terminal_base_cell.height,
@@ -2989,8 +3020,9 @@ impl GpuiWorkspace {
         );
         if focused {
             let focus = view.focus_handle(cx);
-            if self.focus != focus {
+            if self.focus != focus || self.focused_surface != transition_key {
                 self.focus = focus.clone();
+                self.focused_surface = transition_key;
                 schedule_focus(focus, window, cx);
             }
             self.state.record_surface(surface);

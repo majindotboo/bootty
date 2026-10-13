@@ -7,6 +7,7 @@ use std::{
 
 use bootty_config::config::MultiplexerBackendConfig;
 use bootty_control::{Caller, CommandCancellation, CommandInvocation, CommandOutcome};
+use bootty_mux::repository::{SpaceMuxOverride, WorkspaceRepository};
 use bootty_ui::{
     AppEffect, AppState,
     surface_creation::{SurfaceParent, SurfacePlacement},
@@ -84,6 +85,50 @@ fn new_tab_captures_an_empty_space_without_starting_a_terminal(
             .binding_session_groups()
             .iter()
             .all(|group| group.sessions.is_empty())
+    );
+}
+
+#[rstest]
+#[case(Caller::Socket)]
+#[case(Caller::BuiltinKeybinding)]
+fn switching_spaces_cancels_a_chooser_bound_to_the_previous_space(#[case] caller: Caller) {
+    let directory = assert_fs::TempDir::new().expect("private workspace");
+    let config_path = directory.path().join("config.toml");
+    WorkspaceRepository::open(&config_path)
+        .expect("workspace")
+        .0
+        .create_space(
+            "Second",
+            "2",
+            [1, 2, 3],
+            false,
+            SpaceMuxOverride::default(),
+            false,
+        )
+        .expect("create Space")
+        .expect("valid Space");
+    let mut config = test_config::config(config_path, MultiplexerBackendConfig::Native);
+    config.session.working_directory = Some(directory.path().to_owned());
+    let mut state =
+        AppState::new(config, support::backends(), Arc::new(|| {}), None, None).expect("workspace");
+    command(&mut state, "new_tab", Vec::new(), caller);
+    let abandoned = state.pending_new_surface().expect("chooser").id;
+
+    let (switched, _) = command(&mut state, "select_space", vec!["2".to_owned()], caller);
+    assert!(
+        matches!(switched, CommandOutcome::Success { .. }),
+        "{switched:?}"
+    );
+    assert_eq!(state.pending_new_surface(), None);
+    let (stale, _) = command(
+        &mut state,
+        "surface.choose",
+        vec![abandoned.to_string(), "terminal".to_owned()],
+        caller,
+    );
+    assert!(
+        matches!(stale, CommandOutcome::StaleTarget { .. }),
+        "{stale:?}"
     );
 }
 
