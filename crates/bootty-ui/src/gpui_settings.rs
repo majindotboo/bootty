@@ -387,6 +387,7 @@ impl GpuiSettings {
             "input.modifier-remap" => state.config().input.modifier_remap.clone(),
             "sidebar.session-modules" => state.config().sidebar.session_modules.clone(),
             "sidebar.modules" => state.config().sidebar.modules.clone(),
+            "computer.always-allowed-apps" => state.config().computer.always_allowed_apps.clone(),
             _ => Vec::new(),
         })
     }
@@ -405,7 +406,9 @@ impl GpuiSettings {
                     })
                 })
                 .unwrap_or_else(|| "medium".to_owned()),
-            id if id.starts_with("agents.") => String::new(),
+            id if id.starts_with("agents.") || id == "computer.always-allowed-apps" => {
+                String::new()
+            }
             "input.modifier-remap" => "right_alt=left_ctrl".to_owned(),
             "sidebar.session-modules" | "sidebar.modules" => "module".to_owned(),
             _ => self
@@ -1308,6 +1311,19 @@ fn custom_setting_rows(
                     "Add UI fallback"
                 },
             )]
+        }
+        (SettingEditor::Permissions, "computer.always-allowed-apps") => {
+            vec![SettingsRow::StringList {
+                id,
+                label: "Always allowed apps".to_owned(),
+                help: "Agents use these apps in any conversation without asking. Enter bundle ids, such as dev.zed.Zed.".to_owned(),
+                items: session
+                    .string_list("computer.always-allowed-apps")
+                    .unwrap_or_else(|| config.computer.always_allowed_apps.clone()),
+                options: Vec::new(),
+                add_label: "Add app".to_owned(),
+                enabled: true,
+            }]
         }
         (_, "font.cell-width") => vec![optional_metric_row(
             spec,

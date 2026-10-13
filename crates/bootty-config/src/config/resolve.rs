@@ -369,6 +369,7 @@ fn apply_partial_computer(computer: &mut ComputerConfig, partial: ComputerPatch)
         enabled,
         capture_enabled,
         input_enabled,
+        always_allowed_apps,
     );
 }
 

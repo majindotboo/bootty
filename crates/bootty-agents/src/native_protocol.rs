@@ -152,6 +152,10 @@ impl NativeAgentRequest {
     #[must_use]
     pub fn approval_response(&self, decision: crate::NativeApprovalDecision) -> Option<Value> {
         use crate::NativeApprovalDecision as D;
+        if self.method == crate::APPLICATION_ACCESS_METHOD {
+            // An app grant lasts the conversation, so a one-call allowance is not offered.
+            return (decision != D::AllowOnce).then(|| Value::String(decision.id().into()));
+        }
         let value = match decision {
             D::Deny => Value::String("decline".into()),
             D::AllowOnce => Value::String("accept".into()),

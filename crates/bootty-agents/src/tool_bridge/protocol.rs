@@ -129,9 +129,9 @@ impl ToolProtocol {
         }
         if !self.lease.revoked() && self.lease.application_mentions_supported() {
             // Advertise before the first prompt so MCP clients can cache the catalog. Authority
-            // arrives only through a user mention; absent or expired references are rejected.
-            tools.push(json!({"name":"computer_snapshot","description":"Capture a PNG of an application window explicitly mentioned by the user. application is its opaque prompt reference; omitting it captures only the host-granted Bootty window.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
-            tools.push(json!({"name":"computer_input","description":"Focus, click, type, press a key, move or scroll inside an exact application window explicitly mentioned by the user. OS input permission and focused-window checks apply.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
+            // comes from a user mention, an approval card or the user's always-allowed apps.
+            tools.push(json!({"name":"computer_snapshot","description":"Capture a PNG of a macOS app's front window. application is the app's bundle id or name, such as dev.zed.Zed or Zed. The first use of an app in this conversation asks the user to allow it. Omit application to capture only the host-granted Bootty window.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"computer_input","description":"Focus, click, type, press a key, move or scroll in the window from the app's latest computer_snapshot. Take a snapshot first; coordinates refer to that window. Input requires the app to be focused, so focus it first. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.spawn_enabled() {
             let labels = json!({
@@ -341,20 +341,19 @@ impl ToolProtocol {
         };
         let Ok((reference, action)) = parsed else {
             return (
-                tool_error("Expected an application reference and a typed action"),
+                tool_error("Expected an app bundle id or name and a typed action"),
                 false,
             );
         };
         if name == "computer_input" && action.is_capture() {
-            return (
-                tool_error("Use computer_snapshot to capture the mentioned window"),
-                false,
-            );
+            return (tool_error("Use computer_snapshot to capture an app"), false);
         }
         if reference.is_empty() || reference.len() > 256 {
-            return (tool_error("Invalid application reference"), false);
+            return (tool_error("Name an app by bundle id or name"), false);
         }
-        let Some(deadline) = now.checked_add(Duration::from_secs(5)) else {
+        // The call stays open while the user answers an approval card. MCP clients commonly
+        // time out tools after 60 seconds, so the host answers well before that.
+        let Some(deadline) = now.checked_add(Duration::from_secs(50)) else {
             return (tool_error("Tool deadline is unavailable"), false);
         };
         let image = action.is_capture();

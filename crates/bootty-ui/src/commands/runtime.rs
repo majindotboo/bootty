@@ -1482,7 +1482,7 @@ impl AppState {
             crate::commands::BrowserAction::Capture
                 | crate::commands::BrowserAction::CaptureAnnotation(_)
         ) {
-            let policy = self.config().computer;
+            let policy = self.config().computer.clone();
             let local_annotation = caller == Caller::Internal
                 && matches!(action, crate::commands::BrowserAction::CaptureAnnotation(_));
             if !local_annotation && (!policy.enabled || !policy.capture_enabled) {

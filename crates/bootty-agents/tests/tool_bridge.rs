@@ -1005,62 +1005,110 @@ fn app_mention() -> bootty_agents::NativeApplicationMention {
         prompt_range: 0..4,
     }
 }
-#[rstest]
-#[case(false)]
-#[case(true)]
-fn application_input_uses_only_the_prompt_scope_and_discards_revoked_results(
-    binding: CommandTarget,
-    #[case] revoke: bool,
-) {
-    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
-    grant.bind(&binding, terminal()).unwrap();
-    let session = CommandTarget {
+fn conversation() -> CommandTarget {
+    CommandTarget {
         kind: ResourceKind::Session,
         handle: "conversation".into(),
         generation: 3,
-    };
-    let mention = app_mention();
-    grant.grant_applications(&session, &[mention]).unwrap();
+    }
+}
+fn mentioned_app() -> bootty_agents::NativeApplication {
+    bootty_agents::NativeApplication::from(&app_mention().target)
+}
+#[rstest]
+fn application_calls_reach_the_host_only_after_a_prompt(binding: CommandTarget) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
     let protocol = ToolProtocol::new(grant.clone());
     let calls = Arc::new(Mutex::new(Vec::new()));
     let received = calls.clone();
     let commands = |invocation: CommandInvocation, _: Instant, _: CommandCancellation| {
         received.lock().unwrap().push(invocation);
-        if revoke {
-            grant.grant_applications(&session, &[]).unwrap();
-        }
         success()
     };
-    let result=request(&protocol,&json!({"name":"computer_input","arguments":{"application":"mentioned-app","action":{"action":"type_text","text":"hello"}}}),&commands).unwrap();
-    assert_eq!(result["result"]["isError"], revoke);
+    let input = json!({"name":"computer_input","arguments":{"application":"Zed","action":{"action":"type_text","text":"hello"}}});
+    let early = request(&protocol, &input, &commands).unwrap();
+    assert_eq!(early["result"]["isError"], true);
+    assert_eq!(calls.lock().unwrap().len(), 0);
+
+    grant.grant_applications(&conversation(), &[]).unwrap();
+    let result = request(&protocol, &input, &commands).unwrap();
+    assert_eq!(result["result"]["isError"], false);
     let invocation = calls.lock().unwrap()[0].clone();
     assert_eq!(invocation.command, "agents.native.computer");
-    assert_eq!(invocation.target.as_ref(), Some(&session));
-    assert_eq!(invocation.arguments[2], "mentioned-app");
+    assert_eq!(invocation.target, Some(conversation()));
+    assert_eq!(invocation.arguments[2], "Zed");
     assert_eq!(invocation.caller, Caller::Socket);
-    let before = calls.lock().unwrap().len();
-    let invalid=request(&protocol,&json!({"name":"computer_input","arguments":{"application":"other-app","target":app_mention().target,"action":{"action":"type_text","text":"hello"}}}),&commands).unwrap();
-    assert_eq!(invalid["result"]["isError"], true);
-    assert_eq!(calls.lock().unwrap().len(), before);
+
+    let capture = json!({"name":"computer_input","arguments":{"application":"Zed","action":{"action":"snapshot"}}});
+    assert_eq!(
+        request(&protocol, &capture, &commands).unwrap()["result"]["isError"],
+        true
+    );
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }
 #[rstest]
-fn new_prompt_revokes_pending_application_authority(binding: CommandTarget) {
+fn mentioned_apps_stay_granted_for_the_conversation(binding: CommandTarget) {
     let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
     grant.bind(&binding, terminal()).unwrap();
-    let session = CommandTarget {
-        kind: ResourceKind::Session,
-        handle: "conversation".into(),
-        generation: 3,
-    };
     grant
-        .grant_applications(&session, &[app_mention()])
+        .grant_applications(&conversation(), &[app_mention()])
         .unwrap();
-    let access = grant.application_access(&session, "mentioned-app").unwrap();
+    grant.grant_applications(&conversation(), &[]).unwrap();
+    let access = grant
+        .application_access(&conversation(), &mentioned_app())
+        .unwrap()
+        .expect("a later prompt keeps the mention's grant");
+    assert!(access.current());
+}
+#[rstest]
+#[case::allowed(true)]
+#[case::denied(false)]
+fn the_users_answer_wakes_every_waiting_call(binding: CommandTarget, #[case] allowed: bool) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
+    grant.grant_applications(&conversation(), &[]).unwrap();
+    let app = mentioned_app();
+    let first = grant.await_application(&conversation(), &app).unwrap();
+    let second = grant.await_application(&conversation(), &app).unwrap();
+    grant.decide_application(&app, allowed).unwrap();
+    assert_eq!(
+        (first.try_recv(), second.try_recv()),
+        (Ok(allowed), Ok(allowed))
+    );
+    assert_eq!(
+        grant
+            .application_access(&conversation(), &app)
+            .unwrap()
+            .is_some(),
+        allowed
+    );
+}
+#[rstest]
+fn revoking_tools_ends_app_access_and_waiting_requests(binding: CommandTarget) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
+    grant
+        .grant_applications(&conversation(), &[app_mention()])
+        .unwrap();
+    let access = grant
+        .application_access(&conversation(), &mentioned_app())
+        .unwrap()
+        .unwrap();
     let token = CommandCancellation::new();
     let guard = access.begin(token.clone()).unwrap();
-    grant.grant_applications(&session, &[]).unwrap();
+    let other = bootty_agents::NativeApplication {
+        bundle_id: "test.Other".into(),
+        name: "Other".into(),
+    };
+    let waiting = grant.await_application(&conversation(), &other).unwrap();
+    grant.revoke();
     assert!(token.is_cancelled());
     assert!(!access.current());
     assert!(access.begin(CommandCancellation::new()).is_err());
+    assert_eq!(
+        waiting.try_recv(),
+        Err(std::sync::mpsc::TryRecvError::Disconnected)
+    );
     drop(guard);
 }

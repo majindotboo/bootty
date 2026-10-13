@@ -1228,6 +1228,9 @@ impl NativeAgentSession {
             .into_iter()
             .find(|request| request.id == id)
             .ok_or("Agent request is no longer pending")?;
+        if request.method == crate::APPLICATION_ACCESS_METHOD {
+            return self.answer_application_access(&request, decision);
+        }
         let allow = decision == crate::NativeApprovalDecision::AllowOnce;
         if !matches!(
             decision,
@@ -2500,7 +2503,7 @@ impl NativeAgentSession {
                 .lease()
                 .grant_applications(target, prompt.applications())?;
             if !prompt.applications().is_empty() {
-                lock(&self.snapshot).computer_tool_server = Some(tools.server_name().to_owned());
+                self.track_computer_images();
             }
             Ok(())
         } else if prompt.applications().is_empty() {
@@ -2509,12 +2512,17 @@ impl NativeAgentSession {
             Err("Conversation tools are not attached".into())
         }
     }
-    pub(crate) fn application_access(
+    /// Snapshot images from Bootty's tool server are trusted once the conversation holds an app
+    /// grant; before that, oversized tool records stay rejected.
+    fn track_computer_images(&self) {
+        if let Some(tools) = &self.tools {
+            lock(&self.snapshot).computer_tool_server = Some(tools.server_name().to_owned());
+        }
+    }
+    fn application_lease(
         &self,
-        target: &CommandTarget,
-        reference: &str,
         caller: bootty_control::Caller,
-    ) -> Result<crate::NativeApplicationAccess, String> {
+    ) -> Result<&crate::tool_policy::ToolLease, String> {
         let lease = self
             .tools
             .as_ref()
@@ -2525,7 +2533,83 @@ impl NativeAgentSession {
                 "Application access belongs to this conversation's attached tool caller".into(),
             );
         }
-        lease.application_access(target, reference)
+        Ok(lease)
+    }
+    pub(crate) fn application_access(
+        &self,
+        target: &CommandTarget,
+        application: &crate::NativeApplication,
+        preapproved: bool,
+        caller: bootty_control::Caller,
+    ) -> Result<Option<crate::NativeApplicationAccess>, String> {
+        let lease = self.application_lease(caller)?;
+        if preapproved {
+            lease.application_access(target, application)?;
+            lease.decide_application(application, true)?;
+            self.track_computer_images();
+        }
+        lease.application_access(target, application)
+    }
+    /// Ask the user about an app once; concurrent requests for it share one approval card.
+    pub(crate) fn request_application_access(
+        &self,
+        target: &CommandTarget,
+        application: &crate::NativeApplication,
+        caller: bootty_control::Caller,
+    ) -> Result<std::sync::mpsc::Receiver<bool>, String> {
+        let receiver = self
+            .application_lease(caller)?
+            .await_application(target, application)?;
+        let id = format!("computer-access:{}", application.bundle_id);
+        let mut snapshot = lock(&self.snapshot);
+        if !snapshot.requests.iter().any(|request| request.id == id) {
+            snapshot.requests.push(NativeAgentRequest {
+                id,
+                method: crate::APPLICATION_ACCESS_METHOD.into(),
+                parameters: serde_json::to_value(application).map_err(|e| e.to_string())?,
+                from_attached_tools: true,
+                wire_id: Value::Null,
+            });
+            snapshot.status = NativeSessionStatus::Waiting;
+            snapshot.changed();
+        }
+        drop(snapshot);
+        self.publish_input_wait();
+        publish_change(&self.change_handler);
+        Ok(receiver)
+    }
+    /// Bootty owns app access requests; answers never reach the provider.
+    fn answer_application_access(
+        &self,
+        request: &NativeAgentRequest,
+        decision: crate::NativeApprovalDecision,
+    ) -> Result<(), String> {
+        let application: crate::NativeApplication =
+            serde_json::from_value(request.parameters.clone()).map_err(|e| e.to_string())?;
+        request
+            .approval_response(decision)
+            .ok_or("This request does not support that approval scope")?;
+        self.tools
+            .as_ref()
+            .ok_or("Conversation tools are not attached")?
+            .lease()
+            .decide_application(
+                &application,
+                decision != crate::NativeApprovalDecision::Deny,
+            )?;
+        if decision != crate::NativeApprovalDecision::Deny {
+            self.track_computer_images();
+        }
+        let mut snapshot = lock(&self.snapshot);
+        snapshot.requests.retain(|item| item.id != request.id);
+        if snapshot.requests.is_empty() && snapshot.status == NativeSessionStatus::Waiting {
+            snapshot.status = NativeSessionStatus::Working;
+        }
+        snapshot.changed();
+        drop(snapshot);
+        self.publish_input_wait();
+        publish_change(&self.change_handler);
+        Ok(())
     }
 }
 

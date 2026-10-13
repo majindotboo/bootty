@@ -283,7 +283,7 @@ impl AppState {
                 })
                 .collect(),
             computer_capture: computer_capture::computer_launch_capture(
-                self.config().computer,
+                &self.config().computer,
                 invocation.caller,
                 self.current_command_target(ResourceKind::ApplicationWindow),
                 self.native_computer_window,

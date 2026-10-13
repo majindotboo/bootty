@@ -1833,7 +1833,7 @@ impl AppState {
         }
         self.commands.sync_terminal_tools_policy(&change.config);
         self.commands
-            .sync_browser_capture_policy(change.config.computer);
+            .sync_browser_capture_policy(&change.config.computer);
         if self.localizer.locale() != self.config().locale {
             match crate::i18n::Localizer::new(&self.config().locale) {
                 Ok(localizer) => self.localizer = localizer,

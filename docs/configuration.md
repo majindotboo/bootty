@@ -50,6 +50,17 @@ grant. Changing these settings does not request or grant OS permission.
 Manual browser screenshot attachments use the existing Screen Recording grant
 independently of these agent-command switches.
 
+Agents in native conversations use local apps through `computer_snapshot` and
+`computer_input`, naming an app by bundle id or name. The first use of an app in
+a conversation shows an approval card: **Allow for this session** grants it for
+the rest of the conversation, **Always allow** also adds its bundle id to
+`always-allowed-apps`, and **Deny** refuses. An `@` mention of an app window in
+the prompt grants it the same way. This consent replaces the switches above for
+agent app use; macOS Screen Recording and Accessibility grants still apply.
+Input targets the window from the app's latest capture, so an agent captures an
+app before clicking or typing. Agents never use Bootty itself, terminals, or
+System Settings.
+
 Computer commands use an exact window token returned by `computer.targets`;
 input requires that window to remain focused and pointer coordinates to remain
 uncovered. Window or process changes invalidate the token. The helper never
@@ -64,6 +75,7 @@ signed helper; runtime does not install one.
 enabled = false
 capture-enabled = false
 input-enabled = false
+always-allowed-apps = [] # bundle ids, such as "dev.zed.Zed"
 ```
 
 The `[browser]` table chooses the search engine used for address-bar queries

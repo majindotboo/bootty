@@ -6,7 +6,7 @@ use bootty_control::{Caller, CommandInvocation, CommandTarget, ResourceKind};
 
 /// Only the original host window is attached; tools never receive native IDs or output paths.
 pub fn computer_launch_capture(
-    policy: ComputerConfig,
+    policy: &ComputerConfig,
     caller: Caller,
     window: Option<CommandTarget>,
     native_id: Option<NonZeroU32>,

@@ -108,11 +108,13 @@ impl BrowserSearchEngine {
 }
 
 /// User policy for local desktop capture and input, separate from OS permissions.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ComputerConfig {
     pub enabled: bool,
     pub capture_enabled: bool,
     pub input_enabled: bool,
+    /// Bundle ids agents may use in any conversation without asking.
+    pub always_allowed_apps: Vec<String>,
 }
 
 /// Settings for Bootty's built-in browser.

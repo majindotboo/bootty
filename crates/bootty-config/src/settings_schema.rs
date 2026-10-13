@@ -178,6 +178,7 @@ pub enum SettingEditor {
     Shell,
     Window,
     Extensions,
+    Permissions,
 }
 
 impl SettingEditor {
@@ -197,6 +198,7 @@ impl SettingEditor {
             Self::Shell => "shell",
             Self::Window => "window",
             Self::Extensions => "extensions",
+            Self::Permissions => "permissions",
         }
     }
 }

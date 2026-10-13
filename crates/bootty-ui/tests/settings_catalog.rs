@@ -187,7 +187,8 @@ fn custom_setting_surface(spec: &SettingSpec, editor: SettingEditor) -> NativeSe
         | "input.prefix"
         | "session.env"
         | "session.max-scrollback"
-        | "window.fullscreen-top-offset" => NativeSettingsSurface::EditableRow,
+        | "window.fullscreen-top-offset"
+        | "computer.always-allowed-apps" => NativeSettingsSurface::EditableRow,
 
         // Legacy module composition is accepted from existing config, while the native settings
         // surface is driven by the same panel registry as Dock menus and commands.

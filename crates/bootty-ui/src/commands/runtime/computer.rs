@@ -1,4 +1,8 @@
-use std::{path::Path, time::Instant};
+use std::{
+    path::Path,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_computer::{
@@ -8,7 +12,10 @@ use bootty_control::{CommandCancellation, CommandOutcome, CommandWarning};
 use bootty_write::{CommitError, CommitOutcome, NewFileMode, ResolveTargetError, WriteTarget};
 
 use super::CommandDispatch;
-use crate::{AppState, commands::ComputerCommand};
+use crate::{
+    AppState,
+    commands::{ApplicationCommand, ComputerCommand},
+};
 
 mod host_capture;
 
@@ -55,7 +62,7 @@ impl super::CommandRuntime {
     /// Accepted capture revocation cancels only candidates that have not admitted publication.
     pub(crate) fn sync_browser_capture_policy(
         &self,
-        policy: bootty_config::config::ComputerConfig,
+        policy: &bootty_config::config::ComputerConfig,
     ) {
         if !policy.enabled || !policy.capture_enabled {
             let Some(descriptor) = self.catalog.describe("browser.capture") else {
@@ -76,10 +83,7 @@ impl AppState {
         command: ComputerCommand,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        let application_cancellation = execution
-            .as_ref()
-            .map_or_else(CommandCancellation::new, |(_, token)| token.clone());
-        let policy = self.config().computer;
+        let policy = self.config().computer.clone();
         let capture = matches!(
             command,
             ComputerCommand::HostCapture
@@ -113,15 +117,10 @@ impl AppState {
             crate::gpui_workspace::browser_profile_directory().with_file_name("computer-captures");
         self.dispatch_committed_command(execution, move || {
             let run = || -> Result<CommandOutcome, ComputerError> {
-                let executable = std::env::current_exe()?;
-                let directory = executable.parent().ok_or_else(|| ComputerError::Helper("application directory unavailable".into()))?;
-                let helper = directory.join("bootty-computer");
-                if cfg!(target_os = "macos") && !helper.is_file() {
-                    return Ok(CommandOutcome::Unavailable {
-                        message: "Computer use requires the signed helper in a packaged Bootty app".to_owned(),
-                    });
-                }
-                let computer = Computer::new(helper);
+                let computer = match packaged_computer()? {
+                    Ok(computer) => computer,
+                    Err(unavailable) => return Ok(unavailable),
+                };
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
                 match command {
                     ComputerCommand::Status => Ok(super::serialized_command_outcome(serde_json::json!({
@@ -166,7 +165,6 @@ impl AppState {
                         ))?;
                         captured_result(result, Some(path))
                     }
-                    ComputerCommand::Application {access,action}=>execute_application(&computer,&runtime,&access,&action,application_cancellation),
                     ComputerCommand::Execute { target, action, destination } => {
                         let result = runtime.block_on(computer.execute(
                             &ComputerAccess::from_user_setting(policy.enabled), &target, &action,
@@ -293,26 +291,193 @@ pub fn computer_error_outcome(error: ComputerError) -> CommandOutcome {
     }
 }
 
-fn execute_application(
-    computer: &Computer,
-    runtime: &tokio::runtime::Runtime,
-    access: &bootty_agents::NativeApplicationAccess,
-    action: &bootty_computer::ComputerAction,
+/// The signed helper ships beside the packaged app's executable.
+fn packaged_computer() -> Result<Result<Computer, CommandOutcome>, ComputerError> {
+    let executable = std::env::current_exe()?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| ComputerError::Helper("application directory unavailable".into()))?;
+    let helper = directory.join("bootty-computer");
+    if cfg!(target_os = "macos") && !helper.is_file() {
+        return Ok(Err(CommandOutcome::Unavailable {
+            message: "Computer use requires the signed helper in a packaged Bootty app".to_owned(),
+        }));
+    }
+    Ok(Ok(Computer::new(helper)))
+}
+
+impl AppState {
+    /// Agent app use: find the app's window, check or request the conversation grant, then act.
+    /// A prompt mention, an approval card or the always-allowed list is the user's consent, so
+    /// the `[computer]` switches that gate `computer.*` commands do not apply here.
+    pub(super) fn dispatch_application_command(
+        &self,
+        command: ApplicationCommand,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let (deadline, cancellation) = execution.clone().unwrap_or_else(|| {
+            (
+                Instant::now()
+                    .checked_add(APPROVAL_WAIT.saturating_add(ACTION_TIME))
+                    .unwrap_or_else(Instant::now),
+                CommandCancellation::new(),
+            )
+        });
+        let always_allowed = self.config().computer.always_allowed_apps.clone();
+        self.dispatch_committed_command(execution, move || {
+            run_application(&command, &always_allowed, deadline, cancellation)
+                .unwrap_or_else(computer_error_outcome)
+        })
+    }
+}
+
+// The agent's tool call stays open while the user answers. Waiting ends early enough to finish
+// the action inside the bridge's deadline; an unanswered card stays up for a retry.
+const APPROVAL_WAIT: Duration = Duration::from_secs(40);
+const ACTION_TIME: Duration = Duration::from_secs(8);
+
+fn run_application(
+    command: &ApplicationCommand,
+    always_allowed: &[String],
+    deadline: Instant,
     cancellation: CommandCancellation,
 ) -> Result<CommandOutcome, ComputerError> {
-    // Explicit prompt mentions own this grant; the helper checks OS grants and exact identity.
+    let denied = |message: String| Ok(CommandOutcome::Denied { message });
+    let computer = match packaged_computer()? {
+        Ok(computer) => computer,
+        Err(unavailable) => return Ok(unavailable),
+    };
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let targets = runtime.block_on(computer.targets())?;
+    let Some(window) = frontmost_window(&targets, &command.application) else {
+        return Ok(CommandOutcome::Unavailable {
+            message: format!(
+                "No open window belongs to {}. Launch it or bring a window on screen, then try again.",
+                command.application
+            ),
+        });
+    };
+    let application = bootty_agents::NativeApplication::from(window);
+    if !agent_may_use(&application.bundle_id) {
+        return denied(format!(
+            "Bootty does not let agents use {}",
+            application.name
+        ));
+    }
+    let preapproved = always_allowed.contains(&application.bundle_id);
+    let access = match grant(command, &application, preapproved, deadline) {
+        Ok(access) => access,
+        Err(message) => return denied(message),
+    };
     let guard = access.begin(cancellation).map_err(ComputerError::Helper)?;
+    // Captures always see the app's current front window; input targets the captured one so
+    // coordinates keep meaning what the agent saw.
+    let target = if command.action.is_capture() {
+        window.clone()
+    } else if let Some(observed) = access.observed() {
+        observed
+    } else {
+        return denied(format!(
+            "Take a computer_snapshot of {} before sending input",
+            application.name
+        ));
+    };
+    target.validate_action(&command.action)?;
     let result = runtime.block_on(computer.execute(
         &ComputerAccess::from_user_setting(true),
-        access.target(),
-        action,
+        &target,
+        &command.action,
     ))?;
     if !access.current() {
         return Ok(CommandOutcome::StaleTarget {
-            message: "Application access changed".into(),
+            message: format!("Access to {} changed during the command", application.name),
         });
     }
-    let result = captured_result(result, None);
+    let outcome = match result {
+        ComputerResult::Posted => {
+            super::serialized_command_outcome(serde_json::json!({"result": "posted"}))
+        }
+        snapshot @ ComputerResult::Snapshot { .. } => {
+            let snapshot = ComputerResultSnapshot::try_from(snapshot)?;
+            access.observe(snapshot.geometry().0.clone());
+            super::serialized_command_outcome(serde_json::to_value(snapshot)?)
+        }
+    };
     drop(guard);
-    result
+    Ok(outcome)
+}
+
+/// The conversation's grant for the app, asking the user when it has none. Errors are the
+/// denial the agent sees.
+fn grant(
+    command: &ApplicationCommand,
+    application: &bootty_agents::NativeApplication,
+    preapproved: bool,
+    deadline: Instant,
+) -> Result<bootty_agents::NativeApplicationAccess, String> {
+    let lookup = |preapproved| {
+        command.service.application_access(
+            &command.conversation,
+            application,
+            preapproved,
+            command.caller,
+        )
+    };
+    if let Some(access) = lookup(preapproved)? {
+        return Ok(access);
+    }
+    let answer = command.service.request_application_access(
+        &command.conversation,
+        application,
+        command.caller,
+    )?;
+    let wait = deadline
+        .saturating_duration_since(Instant::now())
+        .saturating_sub(ACTION_TIME)
+        .min(APPROVAL_WAIT);
+    match answer.recv_timeout(wait) {
+        Ok(true) => lookup(false)?.ok_or_else(|| format!("Access to {} changed", application.name)),
+        Ok(false) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err(format!("The user did not allow {}", application.name))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "Waiting for the user to allow {}. Try again after they answer.",
+            application.name
+        )),
+    }
+}
+
+/// Window lists run front to back, so the first match is the app's front window.
+fn frontmost_window<'a>(
+    targets: &'a [bootty_computer::ComputerTarget],
+    application: &str,
+) -> Option<&'a bootty_computer::ComputerTarget> {
+    targets.iter().find(|target| {
+        target.bundle_id == application
+            || target
+                .application_name
+                .as_deref()
+                .is_some_and(|name| name.eq_ignore_ascii_case(application))
+    })
+}
+
+/// Agents never drive Bootty, whose windows hold their own approval cards, nor apps that run
+/// shell commands or change OS permissions outside the conversation's own approvals.
+fn agent_may_use(bundle_id: &str) -> bool {
+    // Deliberate limit: a fixed list of well-known terminals. Extend it when users report
+    // another terminal, or replace it with an OS-level category check if macOS offers one.
+    const BLOCKED: [&str; 9] = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty",
+        "dev.warp.Warp-Stable",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "com.github.wez.wezterm",
+        "com.apple.systempreferences",
+        "com.apple.SecurityAgent",
+    ];
+    !bootty_config::is_bootty_bundle_identifier(bundle_id) && !BLOCKED.contains(&bundle_id)
 }

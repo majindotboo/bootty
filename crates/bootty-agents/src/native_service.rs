@@ -2078,16 +2078,31 @@ impl NativeAgentService {
         publish(&self.revision, &self.change_handler);
         Ok(())
     }
+    /// `None` means the user has not allowed this app in this conversation. A `preapproved` app,
+    /// one the user always allows, is granted first.
     /// # Errors
-    /// Rejects stale sessions, unattached tools or an unmentioned application.
+    /// Rejects stale sessions or unattached tools.
     pub fn application_access(
         &self,
         target: &CommandTarget,
-        reference: &str,
+        application: &crate::NativeApplication,
+        preapproved: bool,
         caller: bootty_control::Caller,
-    ) -> Result<crate::NativeApplicationAccess, String> {
+    ) -> Result<Option<crate::NativeApplicationAccess>, String> {
         self.resolve(target)?
-            .application_access(target, reference, caller)
+            .application_access(target, application, preapproved, caller)
+    }
+    /// Show an approval card for the app; the receiver yields the user's answer.
+    /// # Errors
+    /// Rejects stale sessions, unattached tools or too many waiting requests.
+    pub fn request_application_access(
+        &self,
+        target: &CommandTarget,
+        application: &crate::NativeApplication,
+        caller: bootty_control::Caller,
+    ) -> Result<std::sync::mpsc::Receiver<bool>, String> {
+        self.resolve(target)?
+            .request_application_access(target, application, caller)
     }
 }
 

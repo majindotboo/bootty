@@ -13,15 +13,21 @@ pub enum ComputerCommand {
     HostCapture,
     HostSnapshot,
     HostSnapshotRegion(HostCaptureRegion),
-    Application {
-        access: bootty_agents::NativeApplicationAccess,
-        action: ComputerAction,
-    },
     Execute {
         target: ComputerTarget,
         action: ComputerAction,
         destination: Option<PathBuf>,
     },
+}
+
+/// An agent asks to use a local app by bundle id or name. Grants are checked, or requested from
+/// the user, when the command runs.
+pub struct ApplicationCommand {
+    pub service: std::sync::Arc<bootty_agents::NativeAgentService>,
+    pub conversation: bootty_control::CommandTarget,
+    pub caller: bootty_control::Caller,
+    pub application: String,
+    pub action: ComputerAction,
 }
 
 #[allow(

@@ -26,7 +26,8 @@ fn computer_use_is_disabled_when_unspecified(
         ComputerConfig {
             enabled: false,
             capture_enabled: false,
-            input_enabled: false
+            input_enabled: false,
+            always_allowed_apps: Vec::new(),
         }
     );
     Ok(())
@@ -34,9 +35,15 @@ fn computer_use_is_disabled_when_unspecified(
 
 proptest! {
     #[test]
-    fn computer_policy_switches_load_independently(enabled in any::<bool>(), capture_enabled in any::<bool>(), input_enabled in any::<bool>()) {
-        let config = load(&format!("[computer]\nenabled={enabled}\ncapture-enabled={capture_enabled}\ninput-enabled={input_enabled}\n")).map_err(|error| TestCaseError::fail(error.to_string()))?;
-        prop_assert_eq!(config.computer, ComputerConfig { enabled, capture_enabled, input_enabled });
+    fn computer_policy_loads_independently(
+        enabled in any::<bool>(),
+        capture_enabled in any::<bool>(),
+        input_enabled in any::<bool>(),
+        always_allowed_apps in prop::collection::vec("[a-z]{1,8}(\\.[A-Za-z-]{1,8}){1,3}", 0..4),
+    ) {
+        let apps = format!("[{}]", always_allowed_apps.iter().map(|app| format!("\"{app}\"")).collect::<Vec<_>>().join(","));
+        let config = load(&format!("[computer]\nenabled={enabled}\ncapture-enabled={capture_enabled}\ninput-enabled={input_enabled}\nalways-allowed-apps={apps}\n")).map_err(|error| TestCaseError::fail(error.to_string()))?;
+        prop_assert_eq!(config.computer, ComputerConfig { enabled, capture_enabled, input_enabled, always_allowed_apps });
     }
 }
 
@@ -72,6 +79,7 @@ fn computer_switch_has_one_scalar_settings_owner(
 #[case("capture-enabled=1")]
 #[case("input-enabled=\"granted\"")]
 #[case("accessibility-granted=true")]
+#[case("always-allowed-apps=\"dev.zed.Zed\"")]
 fn computer_policy_rejects_invalid_types_and_fake_os_grants(#[case] source: &str) {
     assert!(load(&format!("[computer]\n{source}\n")).is_err());
 }

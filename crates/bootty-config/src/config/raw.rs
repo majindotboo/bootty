@@ -175,12 +175,13 @@ pub(super) struct InputPatch {
     pub(super) backend_keybind: Option<BackendKeybindPatch>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct ComputerPatch {
     pub(super) enabled: Option<bool>,
     pub(super) capture_enabled: Option<bool>,
     pub(super) input_enabled: Option<bool>,
+    pub(super) always_allowed_apps: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize)]

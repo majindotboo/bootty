@@ -406,9 +406,7 @@ pub struct GrantState {
     policy: ToolPolicy,
     pub(crate) pending: Vec<(u64, CommandCancellation)>,
     pub(crate) next_request: u64,
-    pub(crate) application_epoch: u64,
-    pub(crate) application_requests: Vec<u64>,
-    pub(crate) applications: Vec<crate::NativeApplicationMention>,
+    pub(crate) applications: crate::tool_application::ApplicationGrants,
     pub(crate) application_session: Option<CommandTarget>,
 }
 
@@ -592,9 +590,7 @@ impl ToolLease {
                 policy,
                 pending: Vec::new(),
                 next_request: 0,
-                application_epoch: 0,
-                application_requests: Vec::new(),
-                applications: Vec::new(),
+                applications: crate::tool_application::ApplicationGrants::default(),
                 application_session: None,
             })),
         })
@@ -1305,7 +1301,6 @@ impl ToolLease {
         let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.pending.retain(|(id, _)| *id != request_id);
         state.browser_requests.retain(|id| *id != request_id);
-        state.application_requests.retain(|id| *id != request_id);
     }
 
     pub(crate) fn revoked(&self) -> bool {

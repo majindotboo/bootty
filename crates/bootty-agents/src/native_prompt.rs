@@ -719,8 +719,15 @@ impl NativePrompt {
 
     fn provider_message_with_text(&self, mut message: String) -> Result<String, String> {
         if !self.applications.is_empty() {
-            let references=self.applications.iter().map(|mention|serde_json::json!({"reference":mention.id,"application":mention.target.bundle_id,"window":mention.target.title})).collect::<Vec<_>>();
-            message.push_str("\n\n<application_mentions>\nUse computer_snapshot or computer_input only with these granted reference IDs. OS permissions and exact window identity still apply.\n");
+            let references = self
+                .applications
+                .iter()
+                .map(|mention| {
+                    let application = crate::NativeApplication::from(&mention.target);
+                    serde_json::json!({"application": application.bundle_id, "name": application.name, "window": mention.target.title})
+                })
+                .collect::<Vec<_>>();
+            message.push_str("\n\n<application_mentions>\nThe user allowed these apps for this conversation. Pass the bundle id as application to computer_snapshot or computer_input. OS permissions still apply.\n");
             message
                 .push_str(&serde_json::to_string(&references).map_err(|error| error.to_string())?);
             message.push_str("\n</application_mentions>");

@@ -334,7 +334,7 @@ impl AppState {
             return self.dispatch_native_panel(&service, &invocation, execution);
         }
         if operation == "computer" {
-            return self.dispatch_native_computer(&service, &invocation, execution);
+            return self.dispatch_native_computer(service, &invocation, execution);
         }
         if operation == "spawn" {
             return self.dispatch_native_spawn(service, &invocation, execution);
@@ -582,28 +582,34 @@ impl AppState {
     }
     fn dispatch_native_computer(
         &self,
-        service: &NativeAgentService,
+        service: Arc<NativeAgentService>,
         invocation: &CommandInvocation,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        let Some(target) = invocation.target.as_ref() else {
+        let Some(conversation) = invocation.target.clone() else {
             return CommandDispatch::Complete(CommandOutcome::Denied {
                 message: "Choose a conversation".into(),
             });
         };
-        let access = invocation
+        let application = invocation
             .arguments
             .get(2)
-            .ok_or_else(|| "Missing application reference".to_owned())
-            .and_then(|reference| service.application_access(target, reference, invocation.caller));
+            .filter(|application| !application.is_empty() && application.len() <= 256)
+            .ok_or_else(|| "Name an app by bundle id or name".to_owned());
         let action = invocation
             .arguments
             .get(3)
             .ok_or_else(|| "Missing computer action".to_owned())
             .and_then(|action| serde_json::from_str(action).map_err(|e| e.to_string()));
-        match access.and_then(|access| action.map(|action| (access, action))) {
-            Ok((access, action)) => self.dispatch_computer_command(
-                crate::commands::ComputerCommand::Application { access, action },
+        match application.and_then(|application| action.map(|action| (application, action))) {
+            Ok((application, action)) => self.dispatch_application_command(
+                crate::commands::ApplicationCommand {
+                    service,
+                    conversation,
+                    caller: invocation.caller,
+                    application: application.clone(),
+                    action,
+                },
                 execution,
             ),
             Err(error) => CommandDispatch::Complete(CommandOutcome::Denied { message: error }),

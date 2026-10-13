@@ -510,3 +510,5 @@ selected = ""
 enabled = false
 capture-enabled = false
 input-enabled = false
+# Bundle ids agents may use in any conversation without asking.
+always-allowed-apps = []

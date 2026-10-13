@@ -276,7 +276,7 @@ fn panel_specs() -> Vec<SettingSpec> {
     specs
 }
 
-fn computer_specs() -> [SettingSpec; 3] {
+fn computer_specs() -> [SettingSpec; 4] {
     [
         spec(
             &["computer", "enabled"],
@@ -304,6 +304,12 @@ fn computer_specs() -> [SettingSpec; 3] {
             "COMPUTER USE",
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.computer.input_enabled)),
+        ),
+        custom(
+            &["computer", "always-allowed-apps"],
+            "permissions",
+            "COMPUTER USE",
+            SettingEditor::Permissions,
         ),
     ]
 }
