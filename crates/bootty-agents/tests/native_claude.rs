@@ -56,6 +56,9 @@ for line in sys.stdin:
    if prompt=='cancel': emit({'type':'control_cancel_request','request_id':'permission-id'})
    continue
   if prompt=='hold': continue
+  if prompt=='tool-hold':
+   emit({'type':'assistant','uuid':'tool-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'tool-message','content':[{'type':'tool_use','id':'bash-call','name':'Bash','input':{'command':'sleep 60'}}]}})
+   continue
   event({'type':'message_start','message':{'id':'assistant-id'}})
   event({'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}})
   event({'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Hello '}})
@@ -541,6 +544,27 @@ fn claude_subagent_tasks_preserve_reported_results_and_reject_foreign_sessions(
     assert_eq!(child.model.as_deref(), Some("sonnet"));
     assert_eq!(child.thread_id, None);
     assert_eq!(children[0].text, "Observed result");
+    session.stop();
+}
+
+/// An interrupted turn settles the tool it was running instead of leaving it Running.
+#[test]
+fn interrupted_turn_settles_its_running_tool() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let tool_status = || {
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .find_map(|item| item.tool.as_ref().map(|tool| tool.status))
+    };
+    session.send_prompt("tool-hold").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(tool_status(), Some(NativeToolStatus::Running));
+    session.interrupt().unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(tool_status(), Some(NativeToolStatus::Interrupted));
     session.stop();
 }
 

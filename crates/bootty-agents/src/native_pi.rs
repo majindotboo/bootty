@@ -356,6 +356,7 @@ pub fn ingest(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(),
                 NativeSessionStatus::Idle
             };
             snapshot.completed_turn = snapshot.error.is_none() && snapshot.turn_id.is_some();
+            snapshot.settle_running_tools();
             snapshot.turn_id = None;
             snapshot.working_since = None;
             snapshot.pending_user_item = None;

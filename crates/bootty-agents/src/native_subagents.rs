@@ -71,17 +71,14 @@ impl NativeSessionSnapshot {
 
     /// A relaunched provider cannot continue tools or subagents its previous process started.
     pub(crate) fn interrupt_unfinished_work(&mut self) {
-        for item in &mut self.transcript {
-            let statuses = item
-                .tool
-                .as_mut()
-                .map(|tool| &mut tool.status)
-                .into_iter()
-                .chain(item.subagent.as_mut().map(|agent| &mut agent.status));
-            for status in statuses {
-                if *status == NativeToolStatus::Running {
-                    *status = NativeToolStatus::Interrupted;
-                }
+        self.settle_running_tools();
+        for agent in self
+            .transcript
+            .iter_mut()
+            .filter_map(|item| item.subagent.as_mut())
+        {
+            if agent.status == NativeToolStatus::Running {
+                agent.status = NativeToolStatus::Interrupted;
             }
         }
     }

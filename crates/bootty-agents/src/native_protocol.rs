@@ -388,6 +388,19 @@ impl NativeSessionSnapshot {
         }
     }
 
+    /// A turn that ended, by completion, interrupt or steer, cannot still be running tools.
+    pub(crate) fn settle_running_tools(&mut self) {
+        for tool in self
+            .transcript
+            .iter_mut()
+            .filter_map(|item| item.tool.as_mut())
+        {
+            if tool.status == NativeToolStatus::Running {
+                tool.status = NativeToolStatus::Interrupted;
+            }
+        }
+    }
+
     pub(crate) fn finish_first_turn(&mut self, id: &str, outcome: NativeTurnOutcome) {
         if let Some(receipt) = &mut self.first_turn
             && receipt.id == id
@@ -873,6 +886,7 @@ impl NativeSessionSnapshot {
         for item in &mut self.transcript {
             item.complete = true;
         }
+        self.settle_running_tools();
     }
 
     fn codex_item(&mut self, item: &Value, complete: bool) {

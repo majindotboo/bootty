@@ -364,6 +364,7 @@ impl ClaudeProtocol {
         if let Some(dispatch) = self.dispatch.take() {
             snapshot.finish_first_turn(&dispatch.id, outcome);
         }
+        snapshot.settle_running_tools();
         self.dispatch = self.steering.pop_front();
         self.message_id = None;
         self.block_index = None;
