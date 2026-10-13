@@ -318,7 +318,7 @@ impl NativeAgentSessionView {
                         .debug_selector({ let id = item.id.clone(); move || format!("subagent-message:{id}") })
                         .flex().flex_col().gap_1()
                         .child(div().text_xs().text_color(cx.theme().muted_foreground)
-                            .child(item.tool.as_ref().map_or_else(|| item.role.clone(), |tool| tool.name.clone())))
+                            .child(item.tool.as_ref().map_or_else(|| item.role.clone(), |tool| super::tool_label(&tool.name).into_owned())))
                         .child(TextView::new(state).selectable(true))))
             })
             .when(agent.thread_id.is_none(), |view| {

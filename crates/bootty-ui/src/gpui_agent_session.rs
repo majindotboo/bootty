@@ -1421,7 +1421,7 @@ impl NativeAgentSessionView {
         let name = item
             .tool
             .as_ref()
-            .map_or("Execution details", |tool| tool_label(&tool.name));
+            .map_or_else(|| "Execution details".into(), |tool| tool_label(&tool.name));
         Button::new(gpui_kit::SharedString::from(format!(
             "tool-output:{}:{id}",
             self.record.id
@@ -1449,7 +1449,7 @@ impl NativeAgentSessionView {
         let name = item
             .tool
             .as_ref()
-            .map_or("Execution details", |tool| tool_label(&tool.name));
+            .map_or_else(|| "Execution details".into(), |tool| tool_label(&tool.name));
         let status = item
             .tool
             .as_ref()
@@ -1479,7 +1479,7 @@ impl NativeAgentSessionView {
                     .flex_shrink_0()
                     .max_w(gpui_kit::rems(12.0))
                     .truncate()
-                    .child(name.to_owned()),
+                    .child(name.into_owned()),
             )
             .child(div().flex_1().min_w_0().truncate().map(|row| {
                 if item
@@ -3123,8 +3123,22 @@ fn status_name(snapshot: &NativeSessionSnapshot) -> &'static str {
         NativeSessionStatus::Error => "Failed",
     }
 }
-fn tool_label(name: &str) -> &str {
-    match name {
+/// Claude names MCP tools `mcp__<server>__<tool>`; Bootty's own server name carries a lease
+/// suffix (`bootty_<hash>`), so only other servers are named in labels.
+fn tool_parts(name: &str) -> (Option<&str>, &str) {
+    name.strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map_or((None, name), |(server, tool)| {
+            (
+                Some(server).filter(|server| !server.starts_with("bootty_")),
+                tool,
+            )
+        })
+}
+
+fn tool_label(name: &str) -> std::borrow::Cow<'_, str> {
+    let (server, name) = tool_parts(name);
+    std::borrow::Cow::Borrowed(match name {
         "commandExecution" | "Bash" | "bash" | "exec_command" => "Run",
         "Read" | "read" | "read_file" => "Read",
         "fileChange" | "Edit" | "edit" | "Write" | "write" | "apply_patch" => "Edit",
@@ -3153,8 +3167,12 @@ fn tool_label(name: &str) -> &str {
         "spawn_agent" => "Start agent",
         "interrupt_spawned_agent" => "Interrupt child agent",
         "stop_spawned_agent" => "Stop child agent",
-        _ => name,
-    }
+        _ => {
+            return server.map_or(std::borrow::Cow::Borrowed(name), |server| {
+                std::borrow::Cow::Owned(format!("{server} · {name}"))
+            });
+        }
+    })
 }
 
 const fn tool_status_label(status: bootty_agents::NativeToolStatus) -> &'static str {
@@ -3200,9 +3218,10 @@ fn tool_input_summary(
         .as_ref()
         .and_then(|input| input.get("code"))
         .and_then(Value::as_str);
+    let (_, name) = tool_parts(&tool.name);
     let icon = if command.is_some()
         || matches!(
-            tool.name.as_str(),
+            name,
             "commandExecution"
                 | "Bash"
                 | "bash"
@@ -3217,12 +3236,12 @@ fn tool_input_summary(
                 | "close_spawned_terminal"
         ) {
         gpui_kit::assets::IconName::SquareTerminal
-    } else if matches!(tool.name.as_str(), "computer_snapshot" | "computer_input") {
+    } else if matches!(name, "computer_snapshot" | "computer_input") {
         gpui_kit::assets::IconName::Monitor
-    } else if tool.name == "browser_snapshot" {
+    } else if name == "browser_snapshot" {
         gpui_kit::assets::IconName::Globe
     } else if matches!(
-        tool.name.as_str(),
+        name,
         "spawn_agent"
             | "list_agents"
             | "get_agent_status"
@@ -3233,16 +3252,17 @@ fn tool_input_summary(
         gpui_kit::assets::IconName::Bot
     } else if code.is_some() {
         gpui_kit::assets::IconName::SquareCode
-    } else if path.is_some() || tool.name == "fileChange" {
-        gpui_kit::assets::IconName::File
     } else if query.is_some() {
         gpui_kit::assets::IconName::Search
+    } else if path.is_some() || name == "fileChange" {
+        gpui_kit::assets::IconName::File
     } else {
         gpui_kit::assets::IconName::Wrench
     };
+    // A search's pattern says more than the directory it ran in.
     let summary = command
-        .or(path)
         .or(query)
+        .or(path)
         .or(code)
         .unwrap_or_else(|| if input.is_some() { "" } else { &tool.input })
         .lines()
