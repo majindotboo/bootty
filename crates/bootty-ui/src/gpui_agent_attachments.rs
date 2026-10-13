@@ -97,6 +97,7 @@ impl NativeAgentSessionView {
         cx: &mut Context<Self>,
     ) -> bool {
         let mut consumed = false;
+        let mut images = self.active_image_count(cx);
         for entry in item.entries() {
             match entry {
                 gpui_kit::ClipboardEntry::ExternalPaths(paths) => {
@@ -107,15 +108,15 @@ impl NativeAgentSessionView {
                 }
                 gpui_kit::ClipboardEntry::Image(image) => {
                     consumed = true;
-                    if self
-                        .attachments
-                        .len()
-                        .saturating_add(self.attachment_imports)
-                        >= 16
-                    {
+                    if self.attachment_slots_full(cx) {
                         self.error = Some("Attach at most 16 files".into());
                         continue;
                     }
+                    if images >= bootty_agents::MAX_NATIVE_PROMPT_IMAGES {
+                        self.error = Some(too_many_images());
+                        continue;
+                    }
+                    images = images.saturating_add(1);
                     if image.bytes().len() > bootty_agents::MAX_NATIVE_ATTACHMENT_IMAGE_BYTES {
                         self.error = Some("Image exceeds 8 MB".into());
                         continue;
@@ -254,12 +255,7 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if self
-            .attachments
-            .len()
-            .saturating_add(self.attachment_imports)
-            >= 16
-        {
+        if self.attachment_slots_full(cx) {
             self.error = Some("Attach at most 16 files".into());
             cx.notify();
             return;
@@ -310,6 +306,14 @@ impl NativeAgentSessionView {
                         match serde_json::from_value(value) {
                             Ok(reference) => {
                                 let reference: bootty_agents::NativeAttachmentReference = reference;
+                                if reference.kind == bootty_agents::NativeAttachmentKind::Image
+                                    && this.active_image_count(cx)
+                                        >= bootty_agents::MAX_NATIVE_PROMPT_IMAGES
+                                {
+                                    this.error = Some(too_many_images());
+                                    cx.notify();
+                                    return;
+                                }
                                 if let Some(preview) = &preview {
                                     this.attachment_previews
                                         .insert(reference.id.clone(), preview.clone());
@@ -438,6 +442,25 @@ impl NativeAgentSessionView {
                     .any(|attachment| &attachment.reference.id == id)
             })
             .collect()
+    }
+
+    /// Removed chips keep their entries so undo can restore them; only chips in the draft count.
+    fn attachment_slots_full(&self, cx: &App) -> bool {
+        self.active_attachment_ids(cx)
+            .len()
+            .saturating_add(self.attachment_imports)
+            >= 16
+    }
+
+    fn active_image_count(&self, cx: &App) -> usize {
+        let active = self.active_attachment_ids(cx);
+        self.attachments
+            .iter()
+            .filter(|attachment| {
+                attachment.reference.kind == bootty_agents::NativeAttachmentKind::Image
+                    && active.contains(&attachment.reference.id)
+            })
+            .count()
     }
 
     fn remove_attachment(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -667,4 +690,11 @@ pub fn attachment_preview(path: &std::path::Path) -> Option<Arc<gpui_kit::Render
     Some(Arc::new(gpui_kit::RenderImage::new([image::Frame::new(
         pixels,
     )])))
+}
+
+fn too_many_images() -> String {
+    format!(
+        "Attach at most {} images",
+        bootty_agents::MAX_NATIVE_PROMPT_IMAGES
+    )
 }

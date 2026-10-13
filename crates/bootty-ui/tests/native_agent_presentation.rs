@@ -1472,6 +1472,58 @@ fn first_live_user_message_keeps_a_readable_width(cx: &mut TestAppContext) {
     }
 }
 
+/// Pasting more images than one prompt carries stops at the limit instead of failing at send.
+#[gpui_kit::test]
+fn pasted_images_stop_at_the_prompt_image_limit(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 0, 255]))
+        .write_to(&mut png, image::ImageFormat::Png)
+        .unwrap();
+    let editor = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem {
+            entries: (0..=bootty_agents::MAX_NATIVE_PROMPT_IMAGES)
+                .map(|_| {
+                    gpui_kit::ClipboardEntry::Image(gpui_kit::Image::from_bytes(
+                        gpui_kit::ImageFormat::Png,
+                        png.get_ref().clone(),
+                    ))
+                })
+                .collect(),
+        });
+    });
+    visual.simulate_keystrokes("cmd-v");
+    visual.run_until_parked();
+    let imports = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|invocation| invocation.command == "agents.native.import")
+        .count();
+    assert_eq!(imports, bootty_agents::MAX_NATIVE_PROMPT_IMAGES);
+}
+
 /// Enter accepts a suggestion only when one exists; text whose last token merely starts
 /// with a trigger character still sends.
 #[gpui_kit::test]
