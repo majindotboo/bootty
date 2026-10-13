@@ -168,10 +168,10 @@ impl WorkspaceRuntime {
         })
     }
 
-    /// Admit a committed worker receipt only while its exact binding still exists.
+    /// Admit a committed worker receipt while its Space still holds the logical session.
     /// Returns true even for identical data; false means the receipt was not admitted.
     /// # Errors
-    /// Returns malformed receipt data; replaced bindings leave their live snapshot untouched.
+    /// Returns malformed receipt data; a closed session leaves live state untouched.
     pub fn publish_session_checkpoint(
         &mut self,
         receipt: SavedSessionCheckpoint,
@@ -179,9 +179,10 @@ impl WorkspaceRuntime {
         let Some(binding) = self.binding_mut(receipt.scope) else {
             return Ok(false);
         };
-        if binding.mux().binding_generation() != receipt.generation
-            || !binding.sessions.contains(&receipt.identity)
-        {
+        // The receipt is already committed for this Space's logical session. A backend refresh
+        // that recovered meanwhile bumps the binding generation, but live state must still mirror
+        // the stored checkpoint, or every later checkpoint fails its compare-and-swap.
+        if !binding.sessions.contains(&receipt.identity) {
             return Ok(false);
         }
         receipt
