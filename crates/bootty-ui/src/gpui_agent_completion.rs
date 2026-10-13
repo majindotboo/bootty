@@ -34,7 +34,8 @@ impl NativeAgentSessionView {
                 .update(cx, super::super::gpui_speech::SpeechInput::stop);
         }
     }
-    pub(crate) fn set_completion_binding(
+    /// Bind composer completion to the host-issued Binding that resolves files and catalogs.
+    pub fn set_completion_binding(
         &mut self,
         binding: Option<CommandTarget>,
         window: &mut Window,

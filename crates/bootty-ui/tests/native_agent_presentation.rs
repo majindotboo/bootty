@@ -1078,6 +1078,10 @@ fn native_command_sender(
                 };
                 let value = if request.invocation.command == "agents.native.history" {
                     serde_json::json!({"transcript":history,"has_older":false,"has_newer":false,"at_latest":true})
+                } else if request.invocation.command == "agents.native.completions" {
+                    serde_json::json!({"options":[{"kind":"command","name":"compact",
+                        "display_name":"compact","description":"Summarize the context",
+                        "argument_hint":null,"path":null,"scope":null}]})
                 } else {
                     serde_json::json!([])
                 };
@@ -1465,6 +1469,61 @@ fn first_live_user_message_keeps_a_readable_width(cx: &mut TestAppContext) {
             message.size.height < px(180.0),
             "initial message does not become a vertical strip: {message:?}"
         );
+    }
+}
+
+/// Enter accepts a suggestion only when one exists; text whose last token merely starts
+/// with a trigger character still sends.
+#[gpui_kit::test]
+fn enter_submits_trigger_text_only_when_nothing_matches(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for (text, submits) in [
+        ("/new", true),
+        ("costs $5", true),
+        ("ping @alice", true),
+        ("/comp", false),
+    ] {
+        let record = saved_record("idle");
+        let (sender, commands) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                );
+                view.set_completion_binding(
+                    Some(bootty_control::CommandTarget {
+                        kind: bootty_control::ResourceKind::Binding,
+                        handle: "captured-binding".into(),
+                        generation: 1,
+                    }),
+                    window,
+                    cx,
+                );
+                view
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let editor = visual.debug_bounds("native-composer").expect("composer");
+        visual.simulate_click(editor.center(), Modifiers::none());
+        visual.simulate_input(text);
+        visual.run_until_parked();
+        visual.simulate_keystrokes("enter");
+        visual.run_until_parked();
+        let submitted = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|invocation| invocation.command == "agents.native.prompt");
+        assert_eq!(submitted, submits, "Enter after {text:?}");
     }
 }
 

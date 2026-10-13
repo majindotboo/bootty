@@ -207,6 +207,11 @@ impl DialogView {
             .as_ref()
             .is_some_and(|completion| completion.read(cx).active(window, cx))
     }
+    pub(crate) fn completion_blocks_submission(&self, window: &Window, cx: &App) -> bool {
+        self.completion
+            .as_ref()
+            .is_some_and(|completion| completion.read(cx).blocks_submission(window, cx))
+    }
     pub(crate) fn perform_completion(
         &self,
         action: CommandAction,

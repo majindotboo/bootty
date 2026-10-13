@@ -167,8 +167,10 @@ impl ComposerCompletion {
         self.trigger.is_some() && self.editor.focus_handle(cx).is_focused(window)
     }
 
+    /// Enter accepts a suggestion only when one exists. Text whose last token merely starts with
+    /// a trigger character, such as `/new` or `costs $5`, still submits.
     pub(super) fn blocks_submission(&self, window: &Window, cx: &App) -> bool {
-        self.confirming || self.active(window, cx)
+        self.confirming || (self.active(window, cx) && !self.items.is_empty())
     }
 
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {

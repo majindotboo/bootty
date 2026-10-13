@@ -813,7 +813,7 @@ impl DialogView {
         cx.intercept_keystrokes(move |event, window, cx| {
             let new_session_enter = owner
                 .read_with(cx, |this, app| {
-                    !this.completion_active(window, app)
+                    !this.completion_blocks_submission(window, app)
                         && this.spec.as_ref().is_some_and(|spec| {
                             spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID
                                 && spec.multiline
