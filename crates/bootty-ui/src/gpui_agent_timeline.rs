@@ -483,12 +483,29 @@ impl NativeAgentSessionView {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let owner = cx.weak_entity();
+        let empty = self.timeline.is_empty()
+            && self.record.snapshot.status == bootty_agents::NativeSessionStatus::Idle
+            && self.record.pending_initial_message.is_none()
+            && !self.pending.contains("history");
         div()
             .flex_1()
             .min_h_0()
             .min_w_0()
             .flex()
             .child(self.render_history_gutter(window, cx))
+            .when(empty, |view| {
+                view.child(
+                    div()
+                        .debug_selector(|| "native-empty-conversation".into())
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Send a message to start the conversation."),
+                )
+            })
             .child(div().flex_1().min_h_0().min_w_0().flex().flex_col().when(
                 !self.timeline.is_empty(),
                 |body| {

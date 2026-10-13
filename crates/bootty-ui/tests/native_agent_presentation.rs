@@ -1472,6 +1472,40 @@ fn first_live_user_message_keeps_a_readable_width(cx: &mut TestAppContext) {
     }
 }
 
+/// A conversation with no messages says how to start instead of showing a blank pane.
+#[gpui_kit::test]
+fn empty_conversation_explains_how_to_start(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for (transcript_empty, shown) in [(true, true), (false, false)] {
+        let mut record = saved_record("idle");
+        if transcript_empty {
+            record.snapshot.transcript.clear();
+        }
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            visual.debug_bounds("native-empty-conversation").is_some(),
+            shown
+        );
+    }
+}
+
 /// While a turn streams, every assistant message stays visible in order; only the work between
 /// messages folds.
 #[gpui_kit::test]
