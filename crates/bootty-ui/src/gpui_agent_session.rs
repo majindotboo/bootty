@@ -1350,8 +1350,15 @@ impl NativeAgentSessionView {
                                         .small()
                                         .into_any_element()
                                 } else {
+                                    // A paused spinner reads as frozen; waiting on the user is a clock.
                                     gpui_kit::component::Icon::new(
-                                        gpui_kit::assets::IconName::LoaderCircle,
+                                        if self.record.snapshot.status
+                                            == NativeSessionStatus::Waiting
+                                        {
+                                            gpui_kit::assets::IconName::Clock
+                                        } else {
+                                            gpui_kit::assets::IconName::LoaderCircle
+                                        },
                                     )
                                     .small()
                                     .into_any_element()
@@ -2754,7 +2761,7 @@ impl NativeAgentSessionView {
                                 .debug_selector(|| "native-interrupt".into())
                                 .accessibility_label("Interrupt")
                                 .tooltip("Interrupt")
-                                .icon(IconName::Pause)
+                                .icon(gpui_kit::assets::IconName::Square)
                                 .small()
                                 .ghost()
                                 .loading(interrupt_pending)
@@ -2832,15 +2839,17 @@ impl NativeAgentSessionView {
             )
             .unwrap_or(100)
         });
-        let label =
-            percent.map_or_else(|| format!("{used} tokens"), |percent| format!("{percent}%"));
+        let label = percent.map_or_else(
+            || format!("{} tokens", compact_tokens(used)),
+            |percent| format!("{percent}%"),
+        );
         let details = limit.map_or_else(
-            || format!("{used} tokens used"),
+            || format!("{} tokens used", compact_tokens(used)),
             |limit| {
                 format!(
-                    "{}k / {}k tokens used",
-                    used.saturating_add(500).checked_div(1000).unwrap_or(0),
-                    limit.saturating_add(500).checked_div(1000).unwrap_or(0)
+                    "{} / {} tokens used",
+                    compact_tokens(used),
+                    compact_tokens(limit)
                 )
             },
         );
@@ -3068,6 +3077,28 @@ impl Render for NativeAgentSessionView {
             .child(self.render_composer(window, cx))
             .child(self.render_selection_toolbar(window, cx))
             .when(wide, |body| body.child(self.render_context_card(cx)))
+    }
+}
+
+/// Token counts read at a glance: 950, 12k, 1.2M.
+fn compact_tokens(tokens: u64) -> String {
+    if tokens < 1_000 {
+        tokens.to_string()
+    } else if tokens < 1_000_000 {
+        format!(
+            "{}k",
+            tokens.saturating_add(500).checked_div(1000).unwrap_or(0)
+        )
+    } else {
+        let tenths = tokens
+            .saturating_add(50_000)
+            .checked_div(100_000)
+            .unwrap_or(0);
+        format!(
+            "{}.{}M",
+            tenths.checked_div(10).unwrap_or(0),
+            tenths.checked_rem(10).unwrap_or(0)
+        )
     }
 }
 
