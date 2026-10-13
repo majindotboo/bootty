@@ -531,19 +531,19 @@ impl NativeAgentSessionView {
                         })
                         .small(),
                     )
-                    .map(|row| {
+                    .child(div().flex_1().min_w_0().truncate().map(|summary_row| {
                         if live
                             && self.record.snapshot.status
                                 == bootty_agents::NativeSessionStatus::Working
                         {
-                            row.child(
+                            summary_row.child(
                                 ShimmerText::new(summary)
                                     .id(SharedString::from(format!("work-shimmer:{id}"))),
                             )
                         } else {
-                            row.child(summary)
+                            summary_row.child(summary)
                         }
-                    }),
+                    })),
             )
             .on_click(move |_, _, cx| {
                 _ = owner.update(cx, |this, cx| {
