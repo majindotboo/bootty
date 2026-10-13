@@ -249,9 +249,10 @@ family cannot supply a heavier face.
 The same `"auto"` and `false` values apply. UI emphasis remains independent of the
 weight assignment. These controls appear under Interface weights in Settings
 and update all windows immediately.
-Ordinary terminal text uses the host's native text rasterizer. On macOS this
-preserves CoreText's stroke coverage and foreground-dependent font smoothing,
-including the system font-smoothing preference.
+Ordinary terminal text uses the host's native text rasterizer. On macOS,
+terminal and interface text keep CoreText's stroke coverage without font
+smoothing, so light text on dark backgrounds is not thickened and Thin faces
+stay thin.
 By default, cell width and height are derived from the selected font and
 `[font].size`; set `cell-width` or `cell-height` only when you want a fixed
 override. `[font].fit-cell-height = true` is also enabled by default. It keeps

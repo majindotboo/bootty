@@ -32,7 +32,7 @@ use font_kit::{
     font::Font as NativeFont, handle::Handle, source::SystemSource, sources::mem::MemSource,
 };
 use gpui_kit::{
-    Bounds, DevicePixels, Font, FontId, FontMetrics, FontRun, GlyphId, Hsla, LineLayout, Pixels,
+    Bounds, DevicePixels, Font, FontId, FontMetrics, FontRun, GlyphId, LineLayout, Pixels,
     PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ShapedGlyph,
     ShapedRun, Size, TextRenderingMode, point, px, size,
 };
@@ -334,9 +334,6 @@ impl PlatformTextSystem for CoreTextSystem {
     fn recommended_rendering_mode(&self, _: FontId, _: Pixels) -> TextRenderingMode {
         TextRenderingMode::Grayscale
     }
-    fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
-        self.native.glyph_dilation_for_color(color)
-    }
 }
 
 fn attributed_line(
@@ -578,8 +575,10 @@ fn draw_glyph(
     context.set_should_subpixel_position_fonts(true);
     context.set_allows_font_subpixel_quantization(false);
     context.set_should_subpixel_quantize_fonts(false);
-    context.set_should_smooth_fonts(params.dilation > 0);
-    context.set_gray_fill_color(f64::from(params.dilation) * 0.25, 1.0);
+    // CoreGraphics smoothing thickens light-on-dark stems by a fixed device-pixel amount, which
+    // makes light faces read as Regular. Draw the font's own outlines, as Ghostty does by default.
+    context.set_should_smooth_fonts(false);
+    context.set_gray_fill_color(0.0, 1.0);
     font.clone_with_font_size(f64::from(f32::from(params.font_size)))
         .draw_glyphs(
             &[u16::try_from(params.glyph_id.0)?],

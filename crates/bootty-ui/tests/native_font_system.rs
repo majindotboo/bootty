@@ -9,8 +9,8 @@ use bootty_ui::{
     gpui::{UiPalette, init_theme, setup_ui_font, update_ui_font, update_ui_font_weights},
 };
 use gpui_kit::{
-    AppContext as _, Font, FontFeatures, FontId, FontRun, FontWeight, GlyphId, NoopTextSystem,
-    PlatformTextSystem, RenderGlyphParams, TestAppContext, TextSystem, point, px,
+    AppContext as _, Font, FontFeatures, FontId, FontRun, FontWeight, GlyphId, Hsla,
+    NoopTextSystem, PlatformTextSystem, RenderGlyphParams, TestAppContext, TextSystem, point, px,
 };
 use pretty_assertions::{assert_eq, assert_ne};
 use rstest::{fixture, rstest};
@@ -74,7 +74,7 @@ fn assert_face(system: &dyn PlatformTextSystem, descriptor: &Font, expected: &st
     id
 }
 
-fn pixels(system: &dyn PlatformTextSystem, id: FontId, glyph: GlyphId, dilation: u8) -> Vec<u8> {
+fn pixels(system: &dyn PlatformTextSystem, id: FontId, glyph: GlyphId) -> Vec<u8> {
     let params = RenderGlyphParams {
         font_id: id,
         glyph_id: glyph,
@@ -83,7 +83,7 @@ fn pixels(system: &dyn PlatformTextSystem, id: FontId, glyph: GlyphId, dilation:
         subpixel_variant: point(0, 0),
         is_emoji: false,
         subpixel_rendering: false,
-        dilation,
+        dilation: 0,
     };
     let bounds = system.glyph_raster_bounds(&params).unwrap();
     let (size, pixels) = system.rasterize_glyph(&params, bounds).unwrap();
@@ -121,13 +121,11 @@ fn accepted_ui_styles_reach_exact_native_faces_and_keep_old_snapshots(cx: &TestA
                 system.as_ref(),
                 regular_id,
                 system.glyph_for_char(regular_id, 'a').unwrap(),
-                0,
             );
             let bold_pixels = pixels(
                 system.as_ref(),
                 original_bold_id,
                 system.glyph_for_char(original_bold_id, 'a').unwrap(),
-                0,
             );
             assert_ne!(regular_pixels, bold_pixels);
 
@@ -195,7 +193,7 @@ fn assert_additional_installed_faces(
                 descriptor.weight = weight;
                 let name = format!("MapleMono-NF-{expected}");
                 let id = assert_face(system, &descriptor, &name);
-                let mask = pixels(system, id, system.glyph_for_char(id, 'a').unwrap(), 0);
+                let mask = pixels(system, id, system.glyph_for_char(id, 'a').unwrap());
                 if weight == FontWeight::NORMAL
                     && let Some(mask_before) = previous.replace(mask.clone())
                 {
@@ -215,12 +213,7 @@ fn assert_additional_installed_faces(
         update_ui_font(&[name.into()], 16.0, cx);
         let descriptor = setup_ui_font(window, cx);
         let id = assert_face(system, &descriptor, name);
-        sibling_pixels.push(pixels(
-            system,
-            id,
-            system.glyph_for_char(id, 'a').unwrap(),
-            0,
-        ));
+        sibling_pixels.push(pixels(system, id, system.glyph_for_char(id, 'a').unwrap()));
     }
     assert_ne!(sibling_pixels[0], sibling_pixels[1]);
 }
@@ -322,16 +315,14 @@ fn mixed_scripts_keep_native_fallback_handles_and_utf8_indices(
     );
 }
 
+/// CoreGraphics smoothing would thicken light-on-dark stems; every foreground keeps the face's
+/// own outline coverage.
 #[rstest]
-fn native_smoothing_changes_coverage_without_changing_face(
+fn foreground_color_never_thickens_glyphs(
     native_system: Arc<dyn PlatformTextSystem>,
+    #[values(gpui_kit::white(), gpui_kit::black(), gpui_kit::rgb(0x00c0_caf5).into())] color: Hsla,
 ) {
-    let id = native_system.font_id(&gpui_kit::font("Lilex")).unwrap();
-    let glyph = native_system.glyph_for_char(id, 'a').unwrap();
-    assert_ne!(
-        pixels(native_system.as_ref(), id, glyph, 0),
-        pixels(native_system.as_ref(), id, glyph, 4)
-    );
+    assert_eq!(native_system.glyph_dilation_for_color(color), 0);
 }
 
 #[rstest]
