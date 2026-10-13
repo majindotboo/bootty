@@ -44,6 +44,21 @@ proptest! {
         ));
         prop_assert!(matches!(result, Err(ComputerError::InvalidAction(_))));
     }
+
+    // The helper compares window tokens exactly, so the JSON hop must not round floats.
+    #[test]
+    fn window_tokens_survive_json_exactly(
+        launch_time in prop::num::f64::NORMAL,
+        x in prop::num::f64::NORMAL,
+        y in prop::num::f64::NORMAL,
+    ) {
+        let mut token = target();
+        token.launch_time = launch_time;
+        token.bounds.x = x;
+        token.bounds.y = y;
+        let decoded: ComputerTarget = serde_json::from_str(&serde_json::to_string(&token)?)?;
+        prop_assert_eq!(decoded, token);
+    }
 }
 
 #[rstest]
