@@ -45,7 +45,7 @@ pub fn dispatch(id: &str) -> bool {
     true
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct Snapshot {
     unread: usize,
     total: usize,
@@ -147,9 +147,9 @@ impl AgentTray {
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = routes;
-        if snapshot.total == 0 {
-            self.backend = None;
-            self.failed = false;
+        // macOS can deadlock the main thread while connecting a new status item's scene, so the
+        // item is created once and kept, even when no agents remain.
+        if snapshot.total == 0 && self.backend.is_none() {
             return;
         }
         if self.backend.is_none() && !self.failed {
