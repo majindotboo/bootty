@@ -1201,6 +1201,7 @@ impl WorkspaceDock {
 
     fn show_sidebar(&self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_tool(bootty_config::config::PanelKind::Sessions, window, cx);
+        self.sessions.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     /// Layout edits before the saved layout has been read are startup noise (window frame
@@ -1528,10 +1529,8 @@ impl WorkspaceDock {
     }
 
     pub(crate) fn sessions_focused(&self, window: &Window, cx: &App) -> bool {
-        self.sessions
-            .read(cx)
-            .focus_handle(cx)
-            .contains_focused(window, cx)
+        // Bare navigation keys belong to the panel, not its search field or buttons.
+        self.sessions.read(cx).focus_handle(cx).is_focused(window)
     }
 
     pub(crate) fn remember_focus(&mut self, window: &Window, cx: &App) {

@@ -295,10 +295,7 @@ impl AppState {
     }
     pub(super) fn apply_session_navigation_action(&mut self, action: MuxKeyAction) -> bool {
         if let MuxKeyAction::SelectSession(index) = action {
-            let targets = self
-                .displayed_sessions
-                .clone()
-                .unwrap_or_else(|| self.sidebar_navigation_targets());
+            let targets = self.sidebar_navigation_targets();
             if let Some(target) =
                 targets.get(usize::try_from(index.saturating_sub(1)).unwrap_or(usize::MAX))
             {
@@ -307,9 +304,18 @@ impl AppState {
             }
             return true;
         }
+        if matches!(
+            action,
+            MuxKeyAction::NextSession | MuxKeyAction::PreviousSession
+        ) {
+            if let Some(target) = self.relative_session(matches!(action, MuxKeyAction::NextSession))
+            {
+                self.sidebar_hovered_session = Some(target);
+                self.activate_sidebar_hovered_session();
+            }
+            return true;
+        }
         let target = match action {
-            MuxKeyAction::NextSession => self.relative_session(true),
-            MuxKeyAction::PreviousSession => self.relative_session(false),
             MuxKeyAction::LastSession => self
                 .workspace
                 .active
@@ -336,27 +342,37 @@ impl AppState {
         }
         true
     }
-    fn relative_session(&self, forward: bool) -> Option<String> {
-        let sessions = self.workspace.active.binding.mux().sessions();
-        if sessions.is_empty() {
+    fn relative_session(
+        &self,
+        forward: bool,
+    ) -> Option<bootty_mux::workspace::ScopedSessionTarget> {
+        let targets = self.sidebar_navigation_targets();
+        if targets.is_empty() {
             return None;
         }
-        let selected = self.workspace.active.binding.mux().selected_session();
+        let selected = self
+            .workspace
+            .active
+            .binding
+            .mux()
+            .selected_session()
+            .and_then(|selected| self.session_target_matching(selected));
         let current = selected
-            .and_then(|selected| {
-                sessions
-                    .iter()
-                    .position(|session| session.id == selected || session.name == selected)
-            })
-            .unwrap_or(0);
+            .as_ref()
+            .and_then(|selected| targets.iter().position(|target| target == selected));
         let next = if forward {
-            current.saturating_add(1).checked_rem(sessions.len())?
+            current.map_or(0, |current| {
+                current
+                    .saturating_add(1)
+                    .checked_rem(targets.len())
+                    .unwrap_or(0)
+            })
         } else {
             current
-                .checked_sub(1)
-                .unwrap_or_else(|| sessions.len().saturating_sub(1))
+                .and_then(|current| current.checked_sub(1))
+                .unwrap_or_else(|| targets.len().saturating_sub(1))
         };
-        sessions.get(next).map(|session| session.id.clone())
+        targets.get(next).cloned()
     }
     fn apply_terminal_find_action(
         &mut self,

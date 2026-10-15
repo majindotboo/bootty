@@ -5529,7 +5529,9 @@ fn add_project_requests_a_system_folder_chooser_and_registers_any_location(#[cas
 }
 
 #[rstest]
-fn sidebar_navigation_skips_sessions_in_collapsed_projects() {
+fn sidebar_navigation_skips_sessions_in_collapsed_projects(
+    #[values("ui.sidebar.next_session", "next_session", "previous_session")] action: &str,
+) {
     let directory = assert_fs::TempDir::new().unwrap();
     let first = directory.path().join("first");
     let second = directory.path().join("second");
@@ -5558,12 +5560,7 @@ fn sidebar_navigation_skips_sessions_in_collapsed_projects() {
         CommandOutcome::Success { .. }
     ));
     assert!(matches!(
-        submit_action(
-            &mut state,
-            "ui.sidebar.next_session",
-            Caller::Socket,
-            Instant::now()
-        ),
+        submit_action(&mut state, action, Caller::Socket, Instant::now()),
         CommandOutcome::Success { .. }
     ));
     assert_eq!(

@@ -492,6 +492,9 @@ impl AppState {
         true
     }
     pub(super) fn sidebar_navigation_targets(&self) -> Vec<ScopedSessionTarget> {
+        if let Some(targets) = &self.displayed_sessions {
+            return targets.clone();
+        }
         let mut targets = self.session_navigation_targets();
         if self.config().sidebar.group_by_project {
             targets.retain(|target| {

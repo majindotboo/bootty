@@ -847,7 +847,7 @@ impl GpuiWorkspace {
         let backend = self.state.multiplexer_backend();
         let native = !matches!(
             focus,
-            KeymapFocus::SurfaceChooser | KeymapFocus::ComposerCompletion
+            KeymapFocus::Sidebar | KeymapFocus::SurfaceChooser | KeymapFocus::ComposerCompletion
         ) && ((self.state.modal_dialog().is_none()
             && self.selected_mux_pane_is_native())
             || matches!(
@@ -1756,6 +1756,9 @@ impl GpuiWorkspace {
 
     fn focus_terminal_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.sync_selected_native_pane(window, cx) {
+            if let Some(view) = self.native_conversation_view(cx) {
+                view.focus_handle(cx).focus(window, cx);
+            }
             return;
         }
         self.close_native_conversation();
