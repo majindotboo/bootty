@@ -1027,6 +1027,17 @@ fn copy_mode_search_returns_focus_and_terminal_text_reaches_shell() {
     let (_unfocused_pane, focused_pane) = start_two_panes(&mut state);
     wait_for_pane_text(&mut state, &focused_pane, "ready");
     state.terminal_mut().enter_copy_mode().expect("copy mode");
+    let deadline = Instant::now()
+        .checked_add(PANE_BUDGET)
+        .expect("pane deadline fits");
+    while !state
+        .terminal_mut()
+        .copy_mode_active()
+        .expect("published mode")
+    {
+        assert!(Instant::now() < deadline, "copy mode was not published");
+        thread::yield_now();
+    }
 
     state.update_frame(frames::frame(
         Instant::now(),

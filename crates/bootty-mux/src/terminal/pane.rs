@@ -225,8 +225,9 @@ pub trait TerminalRuntime: TerminalFrameSource + Send {
     /// # Errors
     /// Returns terminal worker or copy-mode operation errors.
     fn enter_copy_mode(&mut self) -> Result<()>;
+    /// Read the last published copy-mode state without a worker round trip.
     /// # Errors
-    /// Returns terminal worker or copy-mode operation errors.
+    /// Returns worker or published-frame errors.
     fn copy_mode_active(&mut self) -> Result<bool>;
     /// # Errors
     /// Returns terminal worker or copy-mode operation errors.

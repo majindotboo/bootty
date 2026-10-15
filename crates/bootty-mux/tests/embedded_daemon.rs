@@ -1108,11 +1108,19 @@ mod scenario {
         let mut terminal = open_terminal(registry, &pane, &window_id)?;
 
         terminal.enter_copy_mode()?;
-        anyhow::ensure!(terminal.copy_mode_active()?);
+        let started = std::time::Instant::now();
+        while !terminal.copy_mode_active()? {
+            anyhow::ensure!(
+                started.elapsed() < PANE_TIMEOUT,
+                "copy mode was not published"
+            );
+            thread::yield_now();
+        }
         let outcome = terminal.handle_copy_mode_action(
             bootty_terminal::terminal_engine::TerminalCopyModeAction::Cancel,
         )?;
         anyhow::ensure!(!outcome.active);
+        anyhow::ensure!(!terminal.copy_mode_active()?);
         assert_eq!(
             terminal.format_selection(
                 bootty_terminal::terminal_engine::TerminalSelectionFormat::PlainText

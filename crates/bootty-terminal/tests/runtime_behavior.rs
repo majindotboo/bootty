@@ -1066,15 +1066,31 @@ fn terminal_worker_applies_the_latest_absolute_scroll_target() {
 #[test]
 fn terminal_worker_response_operations_preserve_public_results() {
     let geometry = geometry(20, 8);
-    let mut session = TerminalSession::new_with_repaint_wakeup(geometry, Arc::new(|| {}))
-        .expect("terminal starts");
+    let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
+    let mut session = TerminalSession::new_with_repaint_wakeup(
+        geometry,
+        Arc::new(move || {
+            _ = repaint_tx.send(());
+        }),
+    )
+    .expect("terminal starts");
 
     session.enter_copy_mode().expect("copy mode starts");
+    while session.extract_frame().unwrap().copy_mode.is_none() {
+        repaint_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("copy mode publishes");
+    }
     assert!(session.copy_mode_active().expect("copy mode state reads"));
     let outcome = session
         .handle_copy_mode_action(TerminalCopyModeAction::Cancel)
         .expect("copy mode action completes");
     assert!(!outcome.active);
+    assert!(
+        !session
+            .copy_mode_active()
+            .expect("acknowledged mode is published")
+    );
     assert_eq!(
         session
             .format_selection(TerminalSelectionFormat::PlainText)
@@ -1092,6 +1108,37 @@ fn terminal_worker_response_operations_preserve_public_results() {
     session
         .discard_pending_output()
         .expect("pending output discard completes");
+}
+
+/// Keyboard routing reads the displayed mode even while the worker is occupied.
+#[cfg(unix)]
+#[rstest]
+fn copy_mode_reads_do_not_wait_for_an_occupied_worker() {
+    let park = Arc::new(AtomicUsize::new(0));
+    let worker_park = park.clone();
+    let (parked_tx, parked_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let release_rx = std::sync::Mutex::new(release_rx);
+    let mut session = TerminalSession::new_with_repaint_wakeup(
+        geometry(20, 8),
+        Arc::new(move || {
+            if worker_park.swap(0, Ordering::AcqRel) == 1 {
+                parked_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+            }
+        }),
+    )
+    .unwrap();
+    park.store(1, Ordering::Release);
+    session
+        .restore_history("copy mode publication probe")
+        .unwrap();
+    parked_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("worker parks after publication");
+    let mode = session.copy_mode_active();
+    release_tx.send(()).unwrap();
+    assert!(!mode.unwrap());
 }
 
 /// A shell and a command that runs in its place get the same environment and process policy.

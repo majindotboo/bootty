@@ -131,9 +131,6 @@ enum RmuxTerminalCommand {
         format: TerminalSelectionFormat,
         done: WorkerRequest<std::result::Result<Option<Vec<u8>>, String>>,
     },
-    CopyModeActive {
-        done: WorkerRequest<std::result::Result<bool, String>>,
-    },
     CopyModeAction {
         action: TerminalCopyModeAction,
         done: WorkerRequest<std::result::Result<TerminalCopyModeOutcome, String>>,
@@ -649,14 +646,7 @@ impl TerminalRuntime for RmuxNativeTerminal {
             self.check_worker_error()?;
             return Ok(false);
         }
-        let result = self.request("reporting copy mode", |done| {
-            RmuxTerminalCommand::CopyModeActive { done }
-        });
-        if result.is_err() && self.closed.load(Ordering::Relaxed) {
-            self.check_worker_error()?;
-            return Ok(false);
-        }
-        result
+        Ok(self.extract_frame()?.copy_mode.is_some())
     }
 
     fn handle_copy_mode_action(
@@ -1076,14 +1066,16 @@ impl RmuxWorker {
                 self.respond(done, |worker| worker.engine.format_selection(format));
                 false
             }
-            RmuxTerminalCommand::CopyModeActive { done } => {
-                self.respond(done, |worker| Ok(worker.engine.copy_mode_active()));
+            RmuxTerminalCommand::CopyModeAction { action, done } => {
+                self.respond(done, |worker| {
+                    worker.mark_input_fast_path();
+                    let outcome = worker.engine.handle_copy_mode_action(action)?;
+                    // Cached input routing must see the acknowledged mode.
+                    worker.publish_frame();
+                    Ok(outcome)
+                });
                 false
             }
-            RmuxTerminalCommand::CopyModeAction { action, done } => self.respond(done, |worker| {
-                worker.mark_input_fast_path();
-                worker.engine.handle_copy_mode_action(action)
-            }),
             RmuxTerminalCommand::SearchViewport {
                 options,
                 query,

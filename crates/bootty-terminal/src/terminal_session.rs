@@ -241,7 +241,6 @@ impl PublishedFrame {
 type SelectionFormatResponse = std::result::Result<Option<Vec<u8>>, String>;
 type MouseTrackingResponse = std::result::Result<bool, String>;
 type SearchViewportResponse = std::result::Result<bool, String>;
-type CopyModeActiveResponse = std::result::Result<bool, String>;
 type CopyModeActionResponse = std::result::Result<TerminalCopyModeOutcome, String>;
 
 /// Worker-side half of a single-response request, claimed with [`WorkerRequest::try_claim`] before
@@ -399,7 +398,6 @@ enum TerminalCommand {
         format: TerminalSelectionFormat,
         done: WorkerRequest<SelectionFormatResponse>,
     },
-    CopyModeActive(WorkerRequest<CopyModeActiveResponse>),
     CopyModeAction {
         action: TerminalCopyModeAction,
         done: WorkerRequest<CopyModeActionResponse>,
@@ -737,15 +735,11 @@ impl TerminalSession {
         self.send_command(TerminalCommand::EnterCopyMode)
     }
 
-    ///
+    /// Read copy mode from the published frame without waiting for the worker.
     /// # Errors
-    /// Returns an error if the worker fails, times out, disconnects, or rejects the requested terminal operation.
+    /// Returns worker or published-frame errors.
     pub fn copy_mode_active(&mut self) -> Result<bool> {
-        let (done, response) = worker_request();
-        self.send_command(TerminalCommand::CopyModeActive(done))?;
-        response
-            .receive("reporting copy mode")?
-            .map_err(anyhow::Error::msg)
+        Ok(self.extract_frame()?.copy_mode.is_some())
     }
 
     ///
@@ -1336,11 +1330,6 @@ impl TerminalWorker {
             TerminalCommand::FormatSelection { format, done } => {
                 self.format_selection_command(format, done);
             }
-            TerminalCommand::CopyModeActive(done) => {
-                if done.try_claim() {
-                    done.send(Ok(self.engine.copy_mode_active()));
-                }
-            }
             TerminalCommand::CopyModeAction { action, done } => {
                 self.copy_mode_command(action, done, stats);
             }
@@ -1577,7 +1566,9 @@ impl TerminalWorker {
             .engine
             .handle_copy_mode_action(action)
             .map_err(|error| error.to_string());
-        stats.terminal_changed = true;
+        // Input routing reads the published mode immediately after this acknowledgement.
+        self.publish_frame();
+        stats.terminal_changed = false;
         done.send(response);
     }
 
