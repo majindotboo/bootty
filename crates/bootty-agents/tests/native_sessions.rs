@@ -44,6 +44,8 @@ release_pending=False
 approvals=[]
 declined=[]
 hold_approval=False
+voice_waiting=False
+voice_waiter=None
 writers=[]
 def emit(value): print(json.dumps(value),flush=True)
 def notice(method,**params): emit({'method':method,'params':{'threadId':thread,'turnId':'turn-'+str(turn),**params}})
@@ -100,9 +102,12 @@ for line in sys.stdin:
   with open('compact-request.json','w') as output: json.dump(params,output)
   turn+=1
   started()
+  notice('item/started',item={'id':'compaction-'+str(turn),'type':'contextCompaction'})
   reply(ident,{})
  elif method == '__finish_compaction':
-  completed()
+  status=params.get('status','completed')
+  if status=='completed': notice('item/completed',item={'id':'compaction-'+str(turn),'type':'contextCompaction'})
+  completed(status)
   reply(ident,{})
  elif method == 'turn/start':
   assert params['threadId'] == thread
@@ -212,15 +217,26 @@ for line in sys.stdin:
   # Observed from codex-cli 0.162.1 on a ChatGPT sign-in: an empty result, then the answer.
   with open('realtime.json','w') as output: json.dump(params,output)
   reply(ident,{})
-  if params['transport']['sdp']=='refuse':
+  if params['transport']['sdp']=='hold':
+   voice_waiting=True
+   if voice_waiter is not None: reply(voice_waiter,{})
+  elif params['transport']['sdp']=='refuse':
    emit({'method':'thread/realtime/error','params':{'threadId':thread,'message':'realtime conversation requires API key auth'}})
   else:
    emit({'method':'thread/realtime/started','params':{'threadId':thread,'version':'v3'}})
    emit({'method':'thread/realtime/sdp','params':{'threadId':thread,'sdp':'answer-sdp'}})
+ elif method == '__await_voice_start':
+  if voice_waiting: reply(ident,{})
+  else: voice_waiter=ident
  elif method == 'thread/realtime/stop':
   open('realtime-stopped','w').close()
   reply(ident,{})
+  if os.path.exists('defer-voice-close'):
+   emit({'method':'thread/realtime/sdp','params':{'threadId':thread,'sdp':'stale-answer'}})
+  else: emit({'method':'thread/realtime/closed','params':{'threadId':thread,'reason':'requested'}})
+ elif method == '__finish_voice_stop':
   emit({'method':'thread/realtime/closed','params':{'threadId':thread,'reason':'requested'}})
+  reply(ident,{})
  elif method == 'thread/read':
   with open('read.json','w') as output: json.dump(value,output)
   child=params.get('threadId',thread)
@@ -1650,10 +1666,11 @@ fn codex_reasoning_search_image_and_compaction_items_reach_the_transcript() {
         Some(json!({"path":"/tmp/shot.png"}).to_string())
     );
     assert_eq!(
-        row(&snapshot, "compact").map(|row| (row.0, row.1)),
+        row(&snapshot, "compact").and_then(|row| row.2),
         Some((
-            "notice".into(),
-            "Codex compacted the conversation's context.".into()
+            "contextCompaction".into(),
+            String::new(),
+            NativeToolStatus::Completed
         ))
     );
     session.stop();
@@ -2663,15 +2680,27 @@ fn child_reads_reconcile_status_without_claiming_its_writer(
 }
 
 #[rstest]
-fn codex_compaction_uses_the_provider_operation_and_waits_for_completion() {
+#[case("completed", NativeSessionStatus::Idle, NativeToolStatus::Completed)]
+#[case("failed", NativeSessionStatus::Error, NativeToolStatus::Failed)]
+#[case(
+    "interrupted",
+    NativeSessionStatus::Idle,
+    NativeToolStatus::Interrupted
+)]
+fn codex_compaction_uses_the_provider_operation_and_waits_for_completion(
+    #[case] outcome: &str,
+    #[case] status: NativeSessionStatus,
+    #[case] operation: NativeToolStatus,
+) {
     let root = TempDir::new().unwrap();
     let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
     session.send_prompt("/compact").unwrap();
     barrier(&session).unwrap();
     assert_eq!(session.snapshot().status, NativeSessionStatus::Working);
+    assert_eq!(session.snapshot().transcript.len(), 1);
     assert_eq!(
-        session.snapshot().transcript,
-        Vec::<bootty_agents::NativeTranscriptItem>::new()
+        session.snapshot().transcript[0].compaction_status(),
+        Some(NativeToolStatus::Running)
     );
     assert_eq!(
         serde_json::from_slice::<Value>(
@@ -2686,9 +2715,15 @@ fn codex_compaction_uses_the_provider_operation_and_waits_for_completion() {
             .unwrap_err()
             .contains("Wait")
     );
-    session.rpc("__finish_compaction", json!({})).unwrap();
+    session
+        .rpc("__finish_compaction", json!({"status":outcome}))
+        .unwrap();
     barrier(&session).unwrap();
-    assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
+    assert_eq!(session.snapshot().status, status);
+    assert_eq!(
+        session.snapshot().transcript[0].compaction_status(),
+        Some(operation)
+    );
     session.stop();
 }
 
@@ -2827,6 +2862,38 @@ fn changing_permissions_preserves_identity_without_replaying_a_prompt() {
     service.stop(&resumed.target()).unwrap();
     let reopened = NativeAgentService::open(&catalog).unwrap();
     assert_eq!(reopened.sessions()[0].config.permissions.id(), "supervised");
+}
+
+/// A cancelled offer cannot consume a later call's answer or leave Codex's call running.
+#[rstest]
+fn codex_voice_cancellation_ignores_late_answers_and_waits_for_close_before_retrying() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("defer-voice-close"), "").unwrap();
+    let session =
+        std::sync::Arc::new(NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap());
+    let connecting = session.clone();
+    let call = std::thread::spawn(move || connecting.start_voice("hold"));
+    session.rpc("__await_voice_start", json!({})).unwrap();
+    assert!(
+        session
+            .start_voice("overlap")
+            .unwrap_err()
+            .contains("current voice call")
+    );
+    session.stop_voice().unwrap();
+    barrier(&session).unwrap();
+    assert!(
+        session
+            .start_voice("too-soon")
+            .unwrap_err()
+            .contains("current voice call")
+    );
+    assert_eq!(call.join().unwrap(), Err("Voice call was ended".into()));
+    session.rpc("__finish_voice_stop", json!({})).unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(session.start_voice("offer-sdp"), Ok("answer-sdp".into()));
+    session.stop_voice().unwrap();
+    session.stop();
 }
 
 /// A voice call runs on the conversation's Codex thread: Codex answers the offer, starts the turns

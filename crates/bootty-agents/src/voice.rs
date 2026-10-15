@@ -21,7 +21,7 @@ const FRAME_LIMIT: u64 = 320 * 1024;
 /// What speech this machine offers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SpeechAvailability {
-    /// The Codex sign-in can dictate and hold voice calls.
+    /// The Codex sign-in can dictate. Conversation calls authenticate through Codex separately.
     pub codex: bool,
     /// This Mac can dictate on device.
     pub on_device: bool,

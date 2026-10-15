@@ -134,6 +134,28 @@ pub struct NativeToolCall {
 }
 
 impl NativeTranscriptItem {
+    /// Provider-reported context maintenance uses operation status, not assistant prose.
+    #[must_use]
+    pub fn compaction_status(&self) -> Option<NativeToolStatus> {
+        if let Some(tool) = self
+            .tool
+            .as_ref()
+            .filter(|tool| tool.name == "contextCompaction")
+        {
+            return Some(tool.status);
+        }
+        // Read snapshots saved before compaction became a typed operation.
+        match (self.role.as_str(), self.text.as_str()) {
+            ("notice", "Codex compacted the conversation's context.") => {
+                Some(NativeToolStatus::Completed)
+            }
+            ("notice", "Compacting the conversation's context…") => {
+                Some(NativeToolStatus::Running)
+            }
+            _ => None,
+        }
+    }
+
     /// Plain presentation, including transcripts saved before ANSI sanitation.
     #[must_use]
     pub fn display_text(&self) -> String {
@@ -304,6 +326,8 @@ pub enum RealtimeCall {
     /// Codex answered or refused; whoever started the call hasn't taken it yet.
     Answered(Result<String, String>),
     Live,
+    /// Ignore late answers until Codex confirms the prior call closed.
+    Stopping,
 }
 
 impl RealtimeCall {
@@ -384,6 +408,8 @@ pub struct NativeSessionSnapshot {
     pub(crate) working_since: Option<Instant>,
     #[serde(skip)]
     pub(crate) realtime: RealtimeCall,
+    #[serde(skip)]
+    pub(crate) realtime_epoch: u64,
     #[serde(skip)]
     message_times: (Option<i64>, Option<i64>),
 }
@@ -573,6 +599,7 @@ impl NativeSessionSnapshot {
             computer_tools: BTreeMap::new(),
             working_since: None,
             realtime: RealtimeCall::None,
+            realtime_epoch: 0,
             message_times: (None, None),
         }
     }
@@ -1058,7 +1085,10 @@ impl NativeSessionSnapshot {
                 && (self.turn_id.as_deref() == turn
                     || (self.turn_id.is_none()
                         && (self.status == NativeSessionStatus::Working
-                            || self.realtime != RealtimeCall::None)));
+                            || !matches!(
+                                self.realtime,
+                                RealtimeCall::None | RealtimeCall::Stopping
+                            ))));
         }
         turn.is_some() && turn == self.turn_id.as_deref()
     }
@@ -1119,6 +1149,17 @@ impl NativeSessionSnapshot {
         for item in &mut self.transcript {
             item.complete = true;
         }
+        if self.status == NativeSessionStatus::Error {
+            for tool in self
+                .transcript
+                .iter_mut()
+                .filter_map(|item| item.tool.as_mut())
+            {
+                if tool.name == "contextCompaction" && tool.status == NativeToolStatus::Running {
+                    tool.status = NativeToolStatus::Failed;
+                }
+            }
+        }
         self.settle_running_tools();
     }
 
@@ -1161,16 +1202,16 @@ impl NativeSessionSnapshot {
                 String::new(),
                 codex_tool_status(item, complete),
             ),
-            "contextCompaction" => self.message(
+            "contextCompaction" => self.tool_message(
                 id,
-                "notice",
+                Some("contextCompaction"),
+                None,
+                String::new(),
                 if complete {
-                    "Codex compacted the conversation's context."
+                    NativeToolStatus::Completed
                 } else {
-                    "Compacting the conversation's context…"
-                }
-                .to_owned(),
-                complete,
+                    NativeToolStatus::Running
+                },
             ),
             // The completed plan item is authoritative; its deltas only preview it.
             "plan" => self.message(
@@ -1253,6 +1294,8 @@ impl NativeSessionSnapshot {
                 );
                 self.realtime = if self.realtime == RealtimeCall::Awaiting {
                     RealtimeCall::Answered(Err(bounded_text(message)))
+                } else if self.realtime == RealtimeCall::Stopping {
+                    RealtimeCall::Stopping
                 } else {
                     RealtimeCall::None
                 };

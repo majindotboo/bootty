@@ -835,14 +835,20 @@ impl NativeAgentSession {
         if self.config.provider != AgentKind::Codex {
             return Err("Voice mode runs on Codex conversations".into());
         }
-        let thread = {
+        let (thread, epoch) = {
             let mut snapshot = lock(&self.snapshot);
+            if snapshot.realtime != crate::native_protocol::RealtimeCall::None {
+                return Err(
+                    "Wait for the current voice call to end before starting another".into(),
+                );
+            }
             let thread = snapshot
                 .session_id
                 .clone()
                 .ok_or("Send a message before starting voice mode")?;
             snapshot.realtime = crate::native_protocol::RealtimeCall::Awaiting;
-            thread
+            snapshot.realtime_epoch = snapshot.realtime_epoch.wrapping_add(1);
+            (thread, snapshot.realtime_epoch)
         };
         let answer = self
             .rpc(
@@ -850,20 +856,32 @@ impl NativeAgentSession {
                 json!({"threadId":thread,"outputModality":"audio","version":"v3",
                     "transport":{"type":"webrtc","sdp":offer}}),
             )
-            .and_then(|_| self.realtime_answer());
+            .and_then(|_| self.realtime_answer(epoch));
         if answer.is_err() {
-            lock(&self.snapshot).realtime = crate::native_protocol::RealtimeCall::None;
+            _ = self.stop_voice_call(epoch);
         }
         answer
     }
 
     /// Codex sends its answer in a notification after accepting the call.
-    fn realtime_answer(&self) -> Result<String, String> {
+    fn realtime_answer(&self, epoch: u64) -> Result<String, String> {
         let deadline = Instant::now()
             .checked_add(Duration::from_secs(20))
             .ok_or("Voice deadline exceeds the clock range")?;
         loop {
-            let answer = lock(&self.snapshot).realtime.take_answer();
+            let answer = {
+                let mut snapshot = lock(&self.snapshot);
+                if snapshot.realtime_epoch != epoch
+                    || matches!(
+                        snapshot.realtime,
+                        crate::native_protocol::RealtimeCall::None
+                            | crate::native_protocol::RealtimeCall::Stopping
+                    )
+                {
+                    return Err("Voice call was ended".into());
+                }
+                snapshot.realtime.take_answer()
+            };
             if let Some(answer) = answer {
                 return answer;
             }
@@ -881,12 +899,24 @@ impl NativeAgentSession {
     /// # Errors
     /// Returns Codex's refusal to stop.
     pub fn stop_voice(&self) -> Result<(), String> {
+        let epoch = lock(&self.snapshot).realtime_epoch;
+        self.stop_voice_call(epoch)
+    }
+
+    fn stop_voice_call(&self, epoch: u64) -> Result<(), String> {
         let thread = {
             let mut snapshot = lock(&self.snapshot);
-            if std::mem::take(&mut snapshot.realtime) == crate::native_protocol::RealtimeCall::None
+            if snapshot.realtime_epoch != epoch
+                || matches!(
+                    snapshot.realtime,
+                    crate::native_protocol::RealtimeCall::None
+                        | crate::native_protocol::RealtimeCall::Stopping
+                )
             {
                 return Ok(());
             }
+            snapshot.realtime = crate::native_protocol::RealtimeCall::Stopping;
+            snapshot.realtime_epoch = snapshot.realtime_epoch.wrapping_add(1);
             snapshot.session_id.clone()
         };
         thread.map_or(Ok(()), |thread| {

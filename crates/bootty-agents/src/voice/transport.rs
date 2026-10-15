@@ -250,23 +250,71 @@ impl Session {
                     Sink::OnDevice(recognition) => recognition.append(&bytes),
                 }
             }
-            Some("state") => {
-                if event
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .is_some_and(|state| matches!(state, "connected" | "recording" | "listening"))
-                {
-                    publish(&SpeechEvent::Listening)?;
-                }
+            Some("state") => self.media_state(event.get("state").and_then(Value::as_str)),
+            // Protocol 6 encodes recoverable CPAL Xruns as errors. Use a typed severity when
+            // the audio host exposes one; an output glitch must not tear down a healthy call.
+            Some("error")
+                if self.voice()
+                    && event.get("message").and_then(Value::as_str)
+                        == Some("speaker stream error: A buffer underrun or overrun occurred.") =>
+            {
+                eprintln!("Voice speaker buffer underrun; continuing the audio stream.");
                 Ok(())
             }
-            Some("error") => Err(
-                "The microphone or speaker is unavailable. Check microphone access and retry."
-                    .into(),
-            ),
+            Some("error") => Err(format!(
+                "Voice audio host: {}",
+                media_error(
+                    event.get("message").and_then(Value::as_str),
+                    "The microphone or speaker is unavailable"
+                )
+            )),
+            Some("data")
+                if event.pointer("/message/type").and_then(Value::as_str) == Some("error") =>
+            {
+                Err(format!(
+                    "Voice provider: {}",
+                    media_error(
+                        event
+                            .pointer("/message/error/message")
+                            .and_then(Value::as_str),
+                        "The voice service rejected the call"
+                    )
+                ))
+            }
             _ => Ok(()),
         }
     }
+
+    fn media_state(&mut self, state: Option<&str>) -> Result<(), String> {
+        match state {
+            Some("connected" | "recording" | "listening") => publish(&SpeechEvent::Listening),
+            Some("failed") if self.voice() => {
+                Err("Voice connection failed. Check your network and try again.".into())
+            }
+            Some("disconnected") if self.voice() => {
+                Err("Voice connection was lost. Check your network and try again.".into())
+            }
+            Some("closed") if self.voice() => {
+                self.closed = true;
+                publish(&SpeechEvent::Closed)
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+fn media_error(message: Option<&str>, fallback: &str) -> String {
+    let message = message
+        .filter(|text| !text.trim().is_empty())
+        .unwrap_or(fallback);
+    // Deliberate limit: 8192 chars fit the 64 KiB speech frame after JSON escaping.
+    // Grow both budgets together if the host needs larger diagnostics.
+    let mut characters = message.chars();
+    let mut text = characters.by_ref().take(8192).collect::<String>();
+    if characters.next().is_some() {
+        text.push_str("\n[Audio host diagnostic truncated]");
+    }
+    text
 }
 
 fn dictation_socket(auth: &Auth) -> Result<Socket, String> {

@@ -48,7 +48,7 @@ fn unix_now() -> i64 {
         .unwrap_or_default()
 }
 
-/// Whether the Codex sign-in in `directory` (or the default Codex home) can dictate and call.
+/// Whether the Codex sign-in in `directory` (or the default Codex home) can dictate.
 pub(super) fn signed_in(directory: Option<&Path>) -> bool {
     codex_auth(directory, unix_now()).is_ok()
 }

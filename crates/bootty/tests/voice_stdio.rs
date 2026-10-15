@@ -10,9 +10,7 @@ use std::{
 #[rstest]
 #[case("{\"action\":\"listen\",\"voice\":false}\n")]
 #[case("{\"action\":\"listen\",\"voice\":false,\"unexpected\":true}\n")]
-#[case(
-    "{\"action\":\"account\",\"provider\":\"codex\",\"program\":\"must-not-run\",\"directory\":null}\n{\"action\":\"listen\",\"voice\":true}\n"
-)]
+#[case("{\"action\":\"answer\",\"sdp\":\"no-active-call\"}\n")]
 fn rejected_start_reports_error_and_stops_cleanly(#[case] input: &str) {
     // The default Codex home is empty, so no sign-in is found.
     let codex_home = assert_fs::TempDir::new().unwrap();
@@ -92,4 +90,77 @@ fn dictation_needs_a_current_codex_sign_in(#[case] auth: &str, #[case] message: 
             SpeechEvent::Stopped
         ]
     );
+}
+
+/// Audio-host failures terminate capture and retain their actual diagnostic.
+#[cfg(unix)]
+#[rstest]
+#[case(vec![serde_json::json!({"type":"state","state":"failed"})], SpeechEvent::Error { message: "Voice connection failed. Check your network and try again.".into() })]
+#[case(vec![serde_json::json!({"type":"state","state":"disconnected"})], SpeechEvent::Error { message: "Voice connection was lost. Check your network and try again.".into() })]
+#[case(vec![serde_json::json!({"type":"state","state":"closed"})], SpeechEvent::Closed)]
+#[case(vec![serde_json::json!({"type":"error","message":"Cannot apply the remote SDP"})], SpeechEvent::Error { message: "Voice audio host: Cannot apply the remote SDP".into() })]
+#[case(vec![serde_json::json!({"type":"data","message":{"type":"error","error":{"message":"Voice service unavailable"}}})], SpeechEvent::Error { message: "Voice provider: Voice service unavailable".into() })]
+#[case(
+    vec![serde_json::json!({"type":"error","message":"speaker stream error: A buffer underrun or overrun occurred."}),
+         serde_json::json!({"type":"state","state":"connected"})],
+    SpeechEvent::Listening
+)]
+#[case(
+    vec![serde_json::json!({"type":"error","message":"speaker stream error: A buffer underrun or overrun occurred."}),
+         serde_json::json!({"type":"error","message":"Speaker device was removed"})],
+    SpeechEvent::Error { message: "Voice audio host: Speaker device was removed".into() }
+)]
+fn voice_media_reports_connection_loss_close_and_provider_errors(
+    #[case] events: Vec<serde_json::Value>,
+    #[case] expected: SpeechEvent,
+) {
+    use assert_fs::prelude::*;
+    use std::{
+        io::{BufRead as _, BufReader},
+        os::unix::fs::PermissionsExt as _,
+    };
+    let root = assert_fs::TempDir::new().unwrap();
+    let helper = root.child("bootty-voice");
+    std::fs::copy(env!("CARGO_BIN_EXE_bootty-voice"), helper.path()).unwrap();
+    let host = root.child("voice-host");
+    host.write_str(
+        r#"#!/bin/sh
+printf '%s\n' '{"type":"ready","version":6}'
+IFS= read -r command
+printf '%s\n' "$BOOTTY_TEST_VOICE_EVENT"
+cat >/dev/null
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(host.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut child = Command::new(helper.path())
+        .env(
+            "BOOTTY_TEST_VOICE_EVENT",
+            events
+                .iter()
+                .map(serde_json::Value::to_string)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    writeln!(input, "{{\"action\":\"listen\",\"voice\":true}}").unwrap();
+    let mut output = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut next =
+        || serde_json::from_str::<SpeechEvent>(&output.next().unwrap().unwrap()).unwrap();
+    assert_eq!(next(), SpeechEvent::Ready);
+    assert_eq!(next(), expected);
+    if matches!(expected, SpeechEvent::Error { .. }) {
+        assert_eq!(next(), SpeechEvent::Stopped);
+    }
+    if expected == SpeechEvent::Listening {
+        writeln!(input, "{{\"action\":\"stop\"}}").unwrap();
+        assert_eq!(next(), SpeechEvent::Stopped);
+    }
+    drop(input);
+    assert!(child.wait().unwrap().success());
 }
