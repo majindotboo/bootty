@@ -68,6 +68,32 @@ pub enum NativeSessionStatus {
     Error,
 }
 
+/// A nonblocking question delivered in an assistant message; replies are ordinary user prompts.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NativeAsyncQuestion {
+    pub title: String,
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
+}
+
+// Limit each card to 16 questions and 16 options; raise when provider forms need more.
+fn async_questions(item: &Value) -> Vec<NativeAsyncQuestion> {
+    field(item, "questions")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .take(16)
+        .filter_map(|question| serde_json::from_value::<NativeAsyncQuestion>(question.clone()).ok())
+        .map(|question| NativeAsyncQuestion {
+            title: bounded_text(question.title),
+            options: question
+                .options
+                .map(|options| options.into_iter().take(16).map(bounded_text).collect()),
+        })
+        .filter(|question| !question.title.trim().is_empty())
+        .collect::<Vec<_>>()
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NativeTranscriptItem {
     pub id: String,
@@ -92,6 +118,8 @@ pub struct NativeTranscriptItem {
     /// Apps the user mentioned in this prompt, once each, for presentation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applications: Vec<crate::NativeApplication>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<NativeAsyncQuestion>,
 }
 
 /// One step of the plan the agent is following.
@@ -193,6 +221,13 @@ pub struct NativeAgentRequest {
 }
 
 impl NativeAgentRequest {
+    /// Async questions remain answerable while the provider continues the turn.
+    #[must_use]
+    pub fn is_blocking(&self) -> bool {
+        self.method != "item/tool/requestUserInput"
+            || field(&self.parameters, "isBlocking") != false
+    }
+
     /// Only offer reusable choices supported by this exact Codex approval.
     #[must_use]
     pub fn approval_response(&self, decision: crate::NativeApprovalDecision) -> Option<Value> {
@@ -421,6 +456,11 @@ const MAX_PENDING_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 32;
 
 impl NativeSessionSnapshot {
+    #[must_use]
+    pub fn waiting_for_input(&self) -> bool {
+        self.requests.iter().any(NativeAgentRequest::is_blocking)
+    }
+
     /// Record how a turn ended; a successful one counts toward the conversation's completed turns.
     pub(crate) const fn finish_turn(&mut self, succeeded: bool) {
         self.completed_turn = succeeded;
@@ -653,11 +693,23 @@ impl NativeSessionSnapshot {
     }
 
     pub(crate) fn message(&mut self, id: String, role: &str, text: String, complete: bool) {
+        self.message_with_questions(id, role, text, complete, Vec::new());
+    }
+
+    fn message_with_questions(
+        &mut self,
+        id: String,
+        role: &str,
+        text: String,
+        complete: bool,
+        questions: Vec<NativeAsyncQuestion>,
+    ) {
         if id.is_empty() || id.len() > 8192 {
             return;
         }
         let text = transcript_text(role, text);
         if text.trim().is_empty()
+            && questions.is_empty()
             && matches!(
                 role,
                 "assistant" | "thinking" | "notice" | "custom" | "plan"
@@ -693,6 +745,7 @@ impl NativeSessionSnapshot {
         if let Some(item) = self.transcript.iter_mut().find(|item| item.id == id) {
             if item.role != "user" || role != "user" {
                 item.text = text;
+                item.questions = questions;
             }
             item.complete = complete;
             item.created_at = item.created_at.or(self.message_times.0);
@@ -715,6 +768,7 @@ impl NativeSessionSnapshot {
                 attachments: Vec::new(),
                 citations: Vec::new(),
                 applications: Vec::new(),
+                questions,
             });
         }
         self.trim_transcript();
@@ -739,6 +793,10 @@ impl NativeSessionSnapshot {
                             agent.prompt.len(),
                             agent.model.as_ref().map_or(0, String::len),
                         ]
+                    }))
+                    .chain(item.questions.iter().flat_map(|question| {
+                        std::iter::once(question.title.len())
+                            .chain(question.options.iter().flatten().map(String::len))
                     }))
                     .chain(item.attachments.iter().flat_map(|attachment| {
                         [
@@ -1173,12 +1231,12 @@ impl NativeSessionSnapshot {
                 let text = delegated_request(&text).map(str::to_owned).unwrap_or(text);
                 self.message(id, "user", text, complete);
             }
-            "agentMessage" => self.message(
-                id,
-                "assistant",
-                field(item, "text").as_str().unwrap_or_default().to_owned(),
-                complete,
-            ),
+            "agentMessage" => {
+                let questions = async_questions(item);
+                let text = field(item, "text").as_str().unwrap_or_default().to_owned();
+                self.message_with_questions(id, "assistant", text, complete, questions);
+            }
+
             // The summary is what Codex shows; raw reasoning stands in when there is none. The
             // completed item replaces the streamed text, which mixes both.
             "reasoning" => {

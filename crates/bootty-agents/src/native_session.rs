@@ -1319,7 +1319,7 @@ impl NativeAgentSession {
         drop(response);
         self.write(&value)?;
         snapshot.requests.retain(|item| item.id != request.id);
-        if snapshot.requests.is_empty() {
+        if !snapshot.waiting_for_input() && snapshot.status == NativeSessionStatus::Waiting {
             snapshot.status = if request.method == "mcpServer/elicitation/request"
                 && snapshot.turn_id.is_none()
                 && snapshot.pending_user_item.is_none()
@@ -1558,7 +1558,7 @@ impl NativeAgentSession {
     }
 
     pub(crate) fn publish_input_wait(&self) {
-        let waiting = !lock(&self.snapshot).requests.is_empty();
+        let waiting = lock(&self.snapshot).waiting_for_input();
         update_input_wait(&self.pending, waiting);
     }
 
@@ -1816,7 +1816,7 @@ fn read_frames(
             } else {
                 ingest_pi_frame(snapshot, &value)?;
                 lock(snapshot).settle_stop_request();
-                let waiting = !lock(snapshot).requests.is_empty();
+                let waiting = lock(snapshot).waiting_for_input();
                 update_input_wait(pending, waiting);
                 publish_change(change_handler);
             }
@@ -1856,7 +1856,7 @@ fn read_frames(
             None
         };
         drop(snapshot);
-        let waiting = !lock(&shared_snapshot).requests.is_empty();
+        let waiting = lock(&shared_snapshot).waiting_for_input();
         update_input_wait(pending, waiting);
         if let Some(params) = deferred {
             let input = Arc::clone(input);
@@ -2375,7 +2375,9 @@ fn capture_request(
         from_attached_tools,
         wire_id,
     });
-    snapshot.status = NativeSessionStatus::Waiting;
+    if snapshot.waiting_for_input() {
+        snapshot.status = NativeSessionStatus::Waiting;
+    }
     snapshot.changed();
     Ok(None)
 }
@@ -2888,7 +2890,7 @@ impl NativeAgentSession {
         }
         let mut snapshot = lock(&self.snapshot);
         snapshot.requests.retain(|item| item.id != request.id);
-        if snapshot.requests.is_empty() && snapshot.status == NativeSessionStatus::Waiting {
+        if !snapshot.waiting_for_input() && snapshot.status == NativeSessionStatus::Waiting {
             snapshot.status = if snapshot.turn_id.is_some() {
                 NativeSessionStatus::Working
             } else {

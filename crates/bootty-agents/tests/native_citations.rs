@@ -17,6 +17,7 @@ fn response(text: &str, role: &str) -> NativeTranscriptItem {
         attachments: Vec::new(),
         citations: Vec::new(),
         applications: Vec::new(),
+        questions: Vec::new(),
     }
 }
 

@@ -54,6 +54,8 @@ use citations::{ResponseCitation, ResponseSelection};
 #[path = "gpui_agent_timeline.rs"]
 mod timeline;
 use timeline::TranscriptRow;
+#[path = "gpui_agent_questions.rs"]
+mod questions;
 #[path = "gpui_agent_requests.rs"]
 mod requests;
 use requests::{is_approval, is_claude_question};
@@ -234,6 +236,7 @@ pub struct NativeAgentSessionView {
     /// Where file links were added to each message's markdown, so selections map to its text.
     link_marks: BTreeMap<String, crate::transcript_links::LinkMarks>,
     tool_diffs: BTreeMap<String, ToolDiffs>,
+    async_questions: BTreeMap<String, Entity<questions::AsyncQuestionsView>>,
     subagent_details: BTreeMap<String, subagents::SubagentConversation>,
     transcript_subscriptions: BTreeMap<String, Vec<Subscription>>,
     message_focus: BTreeMap<String, FocusHandle>,
@@ -390,6 +393,7 @@ impl NativeAgentSessionView {
             transcript: BTreeMap::new(),
             link_marks: BTreeMap::new(),
             tool_diffs: BTreeMap::new(),
+            async_questions: BTreeMap::new(),
             subagent_details: BTreeMap::new(),
             transcript_subscriptions: BTreeMap::new(),
             message_focus: BTreeMap::new(),
@@ -764,6 +768,7 @@ impl NativeAgentSessionView {
         self.restore_initial_message(window, cx);
         let generation_changed = previous.generation != self.record.generation;
         if generation_changed {
+            self.async_questions.clear();
             self.speech
                 .update(cx, super::gpui_speech::SpeechInput::stop);
             self.annotation_preview = None;
@@ -778,7 +783,7 @@ impl NativeAgentSessionView {
                 self.model_picker_subscription = None;
             }
         }
-        if previous.snapshot.transcript != self.record.snapshot.transcript {
+        if generation_changed || previous.snapshot.transcript != self.record.snapshot.transcript {
             self.sync_transcript(&previous.snapshot.transcript, window, cx);
         } else if previous.snapshot.status != self.record.snapshot.status {
             self.refresh_timeline();
@@ -806,6 +811,7 @@ impl NativeAgentSessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.sync_async_questions(window, cx);
         self.retain_subagent_details();
         let current = self
             .record
@@ -957,7 +963,61 @@ impl NativeAgentSessionView {
         }
     }
 
+    fn sync_async_questions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.async_questions.retain(|id, _| {
+            self.record
+                .snapshot
+                .transcript
+                .iter()
+                .any(|item| item.id == *id && !item.questions.is_empty())
+        });
+        for item in &self.record.snapshot.transcript {
+            if item.questions.is_empty()
+                || self
+                    .async_questions
+                    .get(&item.id)
+                    .is_some_and(|view| view.read(cx).questions() == item.questions)
+            {
+                continue;
+            }
+            let view = cx.new(|cx| {
+                questions::AsyncQuestionsView::new(
+                    self.record.target(),
+                    item.id.clone(),
+                    item.questions.clone(),
+                    window,
+                    cx,
+                )
+            });
+            cx.subscribe_in(
+                &view,
+                window,
+                |this, _, answer: &questions::AsyncQuestionAnswer, window, cx| {
+                    if this.record.target() != answer.target
+                        || !this.can_prompt()
+                        || !this.async_questions.contains_key(&answer.item)
+                    {
+                        return;
+                    }
+                    // A question reply has its own editor; preserve the conversation's draft.
+                    this.submit_command("prompt", vec![answer.text.clone()], None, window, cx);
+                    this.sync_requests(window, cx);
+                    this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                },
+            )
+            .detach();
+            self.async_questions.insert(item.id.clone(), view);
+        }
+    }
+
     fn sync_requests(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let enabled = self.provider_enabled()
+            && self.can_prompt()
+            && !self.pending.contains("prompt")
+            && !self.pending.contains("queue");
+        for questions in self.async_questions.values() {
+            questions.update(cx, |questions, cx| questions.set_enabled(enabled, cx));
+        }
         let changes = self
             .record
             .snapshot
@@ -1002,6 +1062,24 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        let submitted_draft = matches!(operation, "prompt" | "queue").then(|| SubmittedPrompt {
+            text: self.composer.read(cx).value().to_string(),
+            revision: self.draft_revision,
+            annotations: self.annotations.clone(),
+            citations: self.active_citations(cx),
+            attachments: self.active_attachment_ids(cx),
+        });
+        self.submit_command(operation, arguments, submitted_draft, window, cx);
+    }
+
+    fn submit_command(
+        &mut self,
+        operation: &str,
+        arguments: Vec<String>,
+        submitted_draft: Option<SubmittedPrompt>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         if !self.provider_enabled() && operation != "interrupt" {
             return;
         }
@@ -1020,13 +1098,6 @@ impl NativeAgentSessionView {
         if self.pending.contains(&pending) {
             return;
         }
-        let submitted_draft = matches!(operation, "prompt" | "queue").then(|| SubmittedPrompt {
-            text: self.composer.read(cx).value().to_string(),
-            revision: self.draft_revision,
-            annotations: self.annotations.clone(),
-            citations: self.active_citations(cx),
-            attachments: self.active_attachment_ids(cx),
-        });
         let mut invocation = CommandInvocation::new(
             format!("agents.native.{operation}"),
             Vec::new(),
@@ -1093,6 +1164,7 @@ impl NativeAgentSessionView {
                         );
                     }
                 }
+                this.sync_requests(window, cx);
                 cx.notify();
             });
         })
@@ -1949,7 +2021,12 @@ impl NativeAgentSessionView {
             .flex()
             .flex_col()
             .when(user, gpui_kit::Styled::items_end)
-            .child(self.render_message_body(item, owner.clone(), cx))
+            .when(!item.text.is_empty() || item.questions.is_empty(), |row| {
+                row.child(self.render_message_body(item, owner.clone(), cx))
+            })
+            .when_some(self.async_questions.get(&item.id), |row, questions| {
+                row.gap_3().child(questions.clone())
+            })
             .when(self.record.snapshot.undelivered(item), |row| {
                 row.child(Self::undelivered_notice(item, owner.clone(), cx))
             })

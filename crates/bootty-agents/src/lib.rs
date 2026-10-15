@@ -128,7 +128,7 @@ pub use native_permissions::{
     NativeApprovalDecision, NativePermissionMode, NativePermissionUpdate,
 };
 pub use native_protocol::{
-    NativeAgentRequest, NativeProviderArchiveState, NativeProviderWriterState,
+    NativeAgentRequest, NativeAsyncQuestion, NativeProviderArchiveState, NativeProviderWriterState,
     NativeSessionSnapshot, NativeSessionStatus, NativeTodo, NativeTodoStatus, NativeToolCall,
     NativeToolStatus, NativeTranscriptItem, NativeTurnOutcome, NativeTurnReceipt,
     native_error_message,

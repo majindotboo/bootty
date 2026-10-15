@@ -43,6 +43,7 @@ fn visible(item: &NativeTranscriptItem) -> bool {
     !item.display_text().trim().is_empty()
         || !item.attachments.is_empty()
         || !item.citations.is_empty()
+        || !item.questions.is_empty()
         || item.tool.is_some()
         || item.subagent.is_some()
 }

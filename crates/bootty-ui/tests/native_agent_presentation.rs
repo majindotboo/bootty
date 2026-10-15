@@ -3098,3 +3098,79 @@ fn compaction_is_an_operation_instead_of_a_model_response(cx: &mut TestAppContex
         }
     }
 }
+
+#[gpui_kit::test]
+fn async_question_answers_steer_without_consuming_the_composer_draft(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for free_text in [false, true] {
+        let mut record = saved_record("working");
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+            {"id":"user","role":"user","text":"Continue working","complete":true},
+            {"id":"question","role":"assistant","text":"Which option?","complete":true,
+             "questions":[{"title":"Which option?","options":["A","B"]}]},
+            {"id":"more-work","role":"assistant","text":"Continuing the task","complete":false}
+        ]))
+        .unwrap();
+        let target = record.target();
+        let (sender, calls) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.simulate_resize(size(px(1000.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let composer = visual.debug_bounds("native-composer").unwrap();
+        visual.simulate_click(composer.center(), Modifiers::none());
+        visual.simulate_input("Unrelated draft");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let value = if free_text {
+            let input = visual.debug_bounds("async-input:question:0").unwrap();
+            visual.simulate_click(input.center(), Modifiers::none());
+            visual.simulate_input("A custom\nmultiline answer");
+            "A custom\nmultiline answer"
+        } else {
+            let option = visual.debug_bounds("async-option:question:0:B").unwrap();
+            visual.simulate_click(option.center(), Modifiers::none());
+            "B"
+        };
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let send = visual.debug_bounds("async-answer:question").unwrap();
+        visual.simulate_click(send.center(), Modifiers::none());
+        visual.run_until_parked();
+        let answer = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|call| call.command == "agents.native.prompt")
+            .cloned()
+            .expect("a question answer steers immediately");
+        pretty_assertions::assert_eq!(answer.target, Some(target));
+        pretty_assertions::assert_eq!(answer.arguments[2], format!("Which option?\n{value}"));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let composer = visual.debug_bounds("native-composer").unwrap();
+        visual.simulate_click(composer.center(), Modifiers::none());
+        visual.simulate_keystrokes("enter");
+        visual.run_until_parked();
+        let draft = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|call| call.command == "agents.native.queue")
+            .cloned()
+            .expect("the composer draft remains sendable");
+        pretty_assertions::assert_eq!(draft.arguments[2], "Unrelated draft");
+    }
+}

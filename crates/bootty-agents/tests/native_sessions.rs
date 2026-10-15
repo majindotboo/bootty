@@ -3126,3 +3126,83 @@ fn unknown_codex_requests_are_declined_without_ending_the_conversation() {
         && item.text
             == "Bootty declined a request it doesn't support yet: item/permissions/requestApproval."));
 }
+
+#[rstest]
+#[case::choices(json!(["Use A", "Use B"]))]
+#[case::free_text(Value::Null)]
+fn codex_async_questions_survive_live_updates_history_and_serialization(#[case] options: Value) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let scope = session.snapshot();
+    let item = json!({"id":"async-question","type":"agentMessage","text":"","delivery":"async",
+        "questions":[{"title":"Which option?","options":options}]});
+    fs::write(root.path().join("events.json"), json!([
+        {"method":"item/completed","params":{"threadId":scope.session_id,"turnId":scope.turn_id,"item":item}}
+    ]).to_string()).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, NativeSessionStatus::Working);
+    assert!(!snapshot.waiting_for_input());
+    let question = snapshot
+        .transcript
+        .iter()
+        .find(|item| item.id == "async-question")
+        .unwrap();
+    assert_eq!(question.questions[0].title, "Which option?");
+    assert_eq!(json!(question.questions[0].options), options);
+    let saved: bootty_agents::NativeSessionSnapshot =
+        serde_json::from_value(json!(snapshot)).unwrap();
+    assert_eq!(
+        saved.transcript.last().unwrap().questions,
+        question.questions
+    );
+    session
+        .rpc("__finish", json!({"status":"completed"}))
+        .unwrap();
+    fs::write(
+        root.path().join("paged-history.json"),
+        json!([{"turnId":"turn-1","item":item}]).to_string(),
+    )
+    .unwrap();
+    let history = session.read_history("latest").unwrap();
+    assert_eq!(
+        history.transcript.last().unwrap().questions,
+        question.questions
+    );
+    session.stop();
+}
+
+#[rstest]
+#[case::legacy(None, NativeSessionStatus::Waiting)]
+#[case::blocking(Some(true), NativeSessionStatus::Waiting)]
+#[case::nonblocking(Some(false), NativeSessionStatus::Working)]
+fn codex_user_input_requests_only_pause_work_when_blocking(
+    #[case] blocking: Option<bool>,
+    #[case] expected: NativeSessionStatus,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let snapshot = session.snapshot();
+    let mut params = json!({"threadId":snapshot.session_id,"turnId":snapshot.turn_id,"itemId":"question",
+        "questions":[{"id":"choice","header":"Choice","question":"Which option?"}]});
+    if let Some(blocking) = blocking {
+        params["isBlocking"] = json!(blocking);
+    }
+    fs::write(
+        root.path().join("events.json"),
+        json!([{"id":"question-request","method":"item/tool/requestUserInput","params":params}])
+            .to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, expected);
+    assert_eq!(
+        snapshot.waiting_for_input(),
+        expected == NativeSessionStatus::Waiting
+    );
+    assert_eq!(snapshot.requests.len(), 1);
+    session.stop();
+}
