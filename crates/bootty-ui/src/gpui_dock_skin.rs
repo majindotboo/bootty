@@ -132,6 +132,15 @@ impl DockAreaRenderer for WorkspaceDockSkin {
                 dock_title_row(self.chrome.read(cx).panel_background())
                     .pl(px(inset))
                     .gap_2()
+                    .when(show_left, |header| {
+                        header.child(panel_toggle(
+                            self.owner.clone(),
+                            placement,
+                            true,
+                            &self.chrome,
+                            cx,
+                        ))
+                    })
                     .child(
                         div()
                             .id("sidebar-window-drag-region")
@@ -157,16 +166,7 @@ impl DockAreaRenderer for WorkspaceDockSkin {
                                     .truncate()
                                     .child("Bootty"),
                             ),
-                    )
-                    .when(show_left, |header| {
-                        header.child(panel_toggle(
-                            self.owner.clone(),
-                            placement,
-                            true,
-                            &self.chrome,
-                            cx,
-                        ))
-                    }),
+                    ),
             )
         } else if placement.is_right() {
             let width = dock_status_width(f32::from(dock.size()), show_right);
@@ -175,6 +175,14 @@ impl DockAreaRenderer for WorkspaceDockSkin {
                 .update(cx, |chrome, cx| chrome.dock_status(width, true, cx));
             Some(
                 dock_title_row(self.chrome.read(cx).panel_background())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_1()
+                            .min_w_0()
+                            .justify_end()
+                            .children(status),
+                    )
                     .when(show_right, |header| {
                         header.child(panel_toggle(
                             self.owner.clone(),
@@ -183,15 +191,7 @@ impl DockAreaRenderer for WorkspaceDockSkin {
                             &self.chrome,
                             cx,
                         ))
-                    })
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .justify_end()
-                            .children(status),
-                    ),
+                    }),
             )
         } else {
             None
@@ -950,6 +950,7 @@ fn sidebar_tools() -> impl Iterator<Item = &'static crate::commands::PanelDescri
                 crate::commands::DockAction::Files
                     | crate::commands::DockAction::Changes
                     | crate::commands::DockAction::Diff
+                    | crate::commands::DockAction::Subagents
             ) | crate::commands::PanelCreation::Browser
         )
     })
@@ -991,9 +992,7 @@ fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>, cx: &App) -> impl IntoEl
     let present = |action: crate::commands::DockAction, cx: &App| {
         owner.upgrade().is_some_and(|owner| {
             let dock = owner.read(cx);
-            action
-                .panel()
-                .is_some_and(|kind| dock.panel_present(kind, cx))
+            dock.action_panel_present(action, cx)
         })
     };
     let all_open = sidebar_tools().all(|panel| {
@@ -1031,9 +1030,7 @@ fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>, cx: &App) -> impl IntoEl
                 };
                 if menu_owner.upgrade().is_some_and(|owner| {
                     let dock = owner.read(cx);
-                    action
-                        .panel()
-                        .is_some_and(|kind| dock.panel_present(kind, cx))
+                    dock.action_panel_present(action, cx)
                 }) {
                     continue;
                 }

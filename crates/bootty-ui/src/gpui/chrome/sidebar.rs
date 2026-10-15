@@ -30,8 +30,8 @@ use super::{
 use crate::gpui::theme::{mix, readable_color};
 
 const ROW_HEIGHT: f32 = 1.75;
-const SESSION_ROW_HEIGHT: f32 = 4.25;
-const GROUPED_SESSION_ROW_HEIGHT: f32 = 3.0;
+const SESSION_ROW_HEIGHT: f32 = 5.0;
+const GROUPED_SESSION_ROW_HEIGHT: f32 = 3.625;
 const PROJECT_HEADER_HEIGHT: f32 = 1.25;
 const GROUP_ROW_HEIGHT: f32 = 2.0;
 pub(super) const SPACE_SWITCHER_HEIGHT: f32 = 36.0;
@@ -63,7 +63,7 @@ impl Render for DraggedSidebarPreview {
             } else {
                 SESSION_ROW_HEIGHT
             }))
-            .px_4()
+            .p_2()
             .flex()
             .items_center()
             .overflow_hidden()
@@ -419,21 +419,6 @@ impl SidebarRows {
             .child(self.hover_reconciliation())
     }
 
-    fn subagents_button(&self) -> impl IntoElement {
-        let owner = self.owner.clone();
-        Button::new("sidebar-subagents")
-            .ghost()
-            .small()
-            .size_7()
-            .icon(gpui_kit::assets::IconName::Bot)
-            .text_color(color(self.colors.subtext))
-            .accessibility_label("Subagents")
-            .tooltip("Subagents")
-            .on_click(move |_, _, cx| {
-                emit_sidebar_command(&owner, "show_subagents", cx);
-            })
-    }
-
     fn search_toolbar(&self) -> gpui_kit::AnyElement {
         let create_owner = self.owner.clone();
         let add_owner = self.owner.clone();
@@ -478,7 +463,6 @@ impl SidebarRows {
                     .tooltip("Filter and sort sessions")
                     .dropdown_menu(move |menu, window, cx| rows.options_menu(menu, window, cx)),
             )
-            .child(self.subagents_button())
             .child(
                 Button::new("sidebar-add-project")
                     .debug_selector(|| "sidebar-add-project".to_owned())
@@ -1408,6 +1392,10 @@ impl SidebarRows {
 
     fn session_label(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
         v_flex()
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("sidebar-session-content-{key}")
+            })
             .w_full()
             .min_w_0()
             .gap_0p5()
@@ -2185,7 +2173,7 @@ impl SidebarRows {
             .h(gpui_kit::rems(row_height))
             .pl_2()
             .pr_2()
-            .when(row.kind.is_session(), gpui_kit::Styled::px_4)
+            .when(row.kind.is_session(), gpui_kit::Styled::p_2)
             .flex()
             .items_center()
             .text_sm()

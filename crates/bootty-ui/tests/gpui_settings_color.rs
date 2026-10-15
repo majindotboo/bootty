@@ -7,7 +7,7 @@ use bootty_ui::gpui::{
     ScalarValue, SettingsCategory, SettingsControl, SettingsIntent, SettingsPage, SettingsPageItem,
     SettingsRow, UiPalette, init_theme,
 };
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState, ColorSelect};
 use gpui_kit::{
     AppContext, Context, Entity, Focusable as _, Hsla, IntoElement, Modifiers, Render,
     Subscription, TestAppContext, Window, point, px,
@@ -172,7 +172,7 @@ impl ActualPickerProbe {
 
 impl Render for ActualPickerProbe {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        ColorPicker::new(&self.picker).label("Color")
+        ColorSelect::new(&self.picker).placeholder("Color")
     }
 }
 

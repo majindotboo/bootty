@@ -66,6 +66,7 @@ impl Platform for BoottyPlatform {
         fn unhide_other_apps(&self) -> ();
         fn displays(&self) -> Vec<Rc<dyn PlatformDisplay>>;
         fn primary_display(&self) -> Option<Rc<dyn PlatformDisplay>>;
+        fn on_displays_changed(&self, callback: Box<dyn FnMut()>) -> ();
         fn active_window(&self) -> Option<AnyWindowHandle>;
         fn window_stack(&self) -> Option<Vec<AnyWindowHandle>>;
         fn is_screen_capture_supported(&self) -> bool;

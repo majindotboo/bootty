@@ -36,7 +36,7 @@ impl SessionsPanel {
     }
 }
 
-/// Every live conversation's delegated subagents, shown with the right-side tool panels.
+/// The selected conversation's delegated subagents, shown with the right-side tool panels.
 pub struct SubagentsPanel {
     focus: FocusHandle,
     parents: Vec<Entity<NativeAgentSessionView>>,

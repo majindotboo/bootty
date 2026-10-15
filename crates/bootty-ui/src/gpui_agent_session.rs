@@ -258,6 +258,7 @@ pub struct NativeAgentSessionView {
     requests: Entity<requests::NativeRequestView>,
     pending: BTreeSet<String>,
     error: Option<String>,
+    command_error: Option<(String, String)>,
     dismissed_error: Option<String>,
     subscriptions: Vec<Subscription>,
 }
@@ -327,7 +328,7 @@ impl NativeAgentSessionView {
                 this.sync_requests(window, cx);
             },
         );
-        let speech = cx.new(|_| crate::gpui_speech::SpeechInput::new());
+        let speech = cx.new(crate::gpui_speech::SpeechInput::new);
         let speech_subscription = cx.subscribe_in(
             &speech,
             window,
@@ -424,6 +425,7 @@ impl NativeAgentSessionView {
             requests,
             pending: BTreeSet::new(),
             error: None,
+            command_error: None,
             dismissed_error: None,
             subscriptions: vec![subscription, citation_subscription, request_subscription],
         };
@@ -744,6 +746,7 @@ impl NativeAgentSessionView {
             // A resumed generation owns fresh request tokens; old responses cannot affect it.
             self.pending.clear();
             self.error = None;
+            self.command_error = None;
             self.dismissed_error = None;
         }
         if record.generation != self.record.generation {
@@ -1044,6 +1047,7 @@ impl NativeAgentSessionView {
         };
         self.pending.insert(pending.clone());
         self.error = None;
+        self.command_error = None;
         let operation = operation.to_owned();
         let generation = self.record.generation;
         cx.spawn_in(window, async move |owner, cx| {
@@ -1077,10 +1081,7 @@ impl NativeAgentSessionView {
                         this.subagent_read_error(&pending);
                     }
                     Ok(outcome) => {
-                        this.error = Some(
-                            crate::commands::command_outcome_message(&outcome)
-                                .map_or_else(|| "Agent command failed".to_owned(), diagnostic),
-                        );
+                        this.command_error = Some(command_failure(&operation, &outcome));
                     }
                     Err(_) => {
                         this.error = Some(
@@ -1218,7 +1219,7 @@ impl NativeAgentSessionView {
     }
 
     fn send_prompt_mode(&mut self, opposite: bool, window: &Window, cx: &mut Context<Self>) {
-        if self.speech.read(cx).dictating() {
+        if self.speech.read(cx).dictating(cx) {
             self.speech
                 .update(cx, super::gpui_speech::SpeechInput::finish_dictation);
             return;
@@ -1431,36 +1432,42 @@ impl NativeAgentSessionView {
                     .gap_3()
                     .text_sm()
                     .text_color(cx.theme().foreground.opacity(0.72))
-                    .when(busy, |row| {
-                        row.child(
-                            div()
-                                .id("native-progress-status")
-                                .debug_selector(|| "native-progress-status".into())
-                                .min_w_0()
-                                .h_7()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .child(if animate {
-                                    crate::motion::spinner(cx.theme().foreground.opacity(0.72))
+                    .when(
+                        busy && !self.record.snapshot.transcript.iter().any(|item| {
+                            item.compaction_status()
+                                == Some(bootty_agents::NativeToolStatus::Running)
+                        }),
+                        |row| {
+                            row.child(
+                                div()
+                                    .id("native-progress-status")
+                                    .debug_selector(|| "native-progress-status".into())
+                                    .min_w_0()
+                                    .h_7()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(if animate {
+                                        crate::motion::spinner(cx.theme().foreground.opacity(0.72))
+                                            .into_any_element()
+                                    } else {
+                                        // A paused spinner reads as frozen; waiting on the user is a clock.
+                                        gpui_kit::component::Icon::new(
+                                            if self.record.snapshot.status
+                                                == NativeSessionStatus::Waiting
+                                            {
+                                                gpui_kit::assets::IconName::Clock
+                                            } else {
+                                                gpui_kit::assets::IconName::LoaderCircle
+                                            },
+                                        )
+                                        .small()
                                         .into_any_element()
-                                } else {
-                                    // A paused spinner reads as frozen; waiting on the user is a clock.
-                                    gpui_kit::component::Icon::new(
-                                        if self.record.snapshot.status
-                                            == NativeSessionStatus::Waiting
-                                        {
-                                            gpui_kit::assets::IconName::Clock
-                                        } else {
-                                            gpui_kit::assets::IconName::LoaderCircle
-                                        },
-                                    )
-                                    .small()
-                                    .into_any_element()
-                                })
-                                .child(label),
-                        )
-                    })
+                                    })
+                                    .child(label),
+                            )
+                        },
+                    )
                     .child(self.render_subagent_group(cx)),
             )
     }
@@ -1912,6 +1919,9 @@ impl NativeAgentSessionView {
             return self
                 .render_subagent(item, agent, owner, cx)
                 .into_any_element();
+        }
+        if let Some(status) = item.compaction_status() {
+            return self.render_compaction(item, status, window, cx);
         }
         if is_tool_output(&item.role) || item.tool.is_some() {
             return self.render_tool_output(item, owner, cx);
@@ -2636,6 +2646,12 @@ impl NativeAgentSessionView {
             .error
             .clone()
             .filter(|_| !self.record.snapshot.provider_writer_blocked())
+            .map(|message| (message, None))
+            .or_else(|| {
+                self.command_error
+                    .clone()
+                    .map(|(message, details)| (message, Some(details)))
+            })
             .or_else(|| {
                 (!self.record.snapshot.transport_lost
                     && !self.record.snapshot.provider_archived()
@@ -2646,11 +2662,11 @@ impl NativeAgentSessionView {
                         .error
                         .as_deref()
                         .filter(|error| self.dismissed_error.as_deref() != Some(*error))
-                        .map(diagnostic),
+                        .map(|error| (diagnostic(error), Some(error.to_owned()))),
                 )
                 .flatten()
             });
-        div().when_some(message, |body, message| {
+        div().when_some(message, |body, (message, details)| {
             body.child(
                 div()
                     .flex()
@@ -2670,6 +2686,20 @@ impl NativeAgentSessionView {
                             .text_color(cx.theme().danger)
                             .child(message),
                     )
+                    .when_some(details, |row, details| {
+                        row.child(
+                            Button::new("copy-conversation-error-details")
+                                .debug_selector(|| "copy-conversation-error-details".into())
+                                .ghost()
+                                .small()
+                                .label("Copy details")
+                                .on_click(move |_, _, cx| {
+                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                        details.clone(),
+                                    ));
+                                }),
+                        )
+                    })
                     .child(
                         Button::new("conversation-recover-error")
                             .ghost()
@@ -2683,6 +2713,7 @@ impl NativeAgentSessionView {
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.error = None;
+                                this.command_error = None;
                                 this.dismissed_error.clone_from(&this.record.snapshot.error);
                                 if this.record.snapshot.status == NativeSessionStatus::Error {
                                     this.command("resume", Vec::new(), window, cx);
@@ -3379,6 +3410,25 @@ fn diagnostic(text: impl AsRef<str>) -> String {
     crate::error_catalog::ErrorNotice::from_text(text.as_ref()).to_string()
 }
 
+/// Keep a failed action's scope beside its original diagnostic.
+fn command_failure(operation: &str, outcome: &CommandOutcome) -> (String, String) {
+    let details = crate::commands::command_outcome_message(outcome)
+        .unwrap_or_else(|| "Agent command failed".to_owned());
+    let action = match operation {
+        "history" => "Could not load conversation history",
+        "prompt" | "queue" => "Could not send the message",
+        "rename" => "Could not rename the conversation",
+        "interrupt" => "Could not interrupt the agent",
+        "fork" => "Could not start the side chat",
+        "resume" => "Could not resume the conversation",
+        _ => "Could not update the conversation",
+    };
+    (
+        format!("{action}. {}", diagnostic(&details)),
+        format!("{operation}: {details}"),
+    )
+}
+
 /// A failed command's message as people should read it.
 fn outcome_error(outcome: &CommandOutcome) -> Option<String> {
     crate::commands::command_outcome_message(outcome).map(diagnostic)
@@ -3712,6 +3762,10 @@ fn tool_diff_files<'a>(
 ) -> impl Iterator<Item = gpui_kit::Div> + 'a {
     files.iter().map(|file| {
         div()
+            .debug_selector({
+                let path = file.path.clone();
+                move || format!("native-inline-diff:{path}")
+            })
             .w_full()
             .min_w_0()
             .border_1()

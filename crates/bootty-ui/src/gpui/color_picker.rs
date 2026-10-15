@@ -10,10 +10,10 @@ use gpui_kit::component::{
 
 use std::rc::Rc;
 
-use gpui_kit::component::color_picker::{ColorPicker, ColorPickerEvent, ColorPickerState};
+use gpui_kit::component::color_picker::{ColorPickerEvent, ColorPickerState, ColorSelect};
 use gpui_kit::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, Styled as _, Subscription, Window, div,
+    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, SharedString, Styled as _, Subscription, Window, div,
     prelude::FluentBuilder as _,
 };
 
@@ -139,10 +139,10 @@ pub(super) fn render_color_picker(
     let reset_button_id = format!("{reset_selector}-button");
     let on_reset = on_update;
     let component: AnyElement = if enabled {
-        ColorPicker::new(&picker)
-            .label(display_value)
+        ColorSelect::new(&picker)
+            .small()
+            .placeholder(default_label.to_owned())
             .accessibility_label(label.to_owned())
-            .anchor(Anchor::TopRight)
             .into_any_element()
     } else {
         Button::new(SharedString::from(format!("{component_selector}-disabled")))

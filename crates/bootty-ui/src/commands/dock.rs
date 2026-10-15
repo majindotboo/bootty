@@ -20,12 +20,13 @@ pub enum DockAction {
 }
 
 impl DockAction {
-    pub const PANELS: [Self; 5] = [
+    pub const PANELS: [Self; 6] = [
         Self::Sidebar,
         Self::Files,
         Self::Changes,
         Self::Diff,
         Self::Agents,
+        Self::Subagents,
     ];
 
     #[must_use]
@@ -87,7 +88,6 @@ impl DockAction {
             Self::ToggleHiddenTabs,
             Self::CodexBar,
             Self::Spaces,
-            Self::Subagents,
         ]
         .into_iter()
         .chain(Self::PANELS)
@@ -155,6 +155,13 @@ pub const PANELS: &[PanelDescriptor] = &[
         description: "Open a website or local development server.",
         icon: gpui_kit::component::IconName::Globe,
         creation: PanelCreation::Browser,
+    },
+    PanelDescriptor {
+        name: "bootty.subagents",
+        label: "Subagents",
+        description: "Inspect delegated work in the selected conversation.",
+        icon: gpui_kit::component::IconName::Bot,
+        creation: PanelCreation::Command(DockAction::Subagents),
     },
     PanelDescriptor {
         name: "bootty.terminal",

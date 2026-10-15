@@ -4,6 +4,18 @@ use rstest::rstest;
 
 #[rstest]
 #[case(
+    "Wait for the current voice call to end before starting another",
+    "Wait for the current voice call to end before starting another."
+)]
+#[case(
+    "Voice connection failed. Check your network and try again.",
+    "Voice connection failed. Check your network and try again."
+)]
+#[case(
+    "Voice connection was lost. Check your network and try again.",
+    "Voice connection was lost. Check your network and try again."
+)]
+#[case(
     "%14: rmux pane output ended: TransportLost",
     "The terminal connection was lost. Try reopening this pane."
 )]

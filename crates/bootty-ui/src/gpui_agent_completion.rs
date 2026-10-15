@@ -48,7 +48,16 @@ impl NativeAgentSessionView {
         });
     }
     /// Take the voice call's offer to this conversation's Codex session, then connect its answer.
-    pub(super) fn start_voice_call(&self, offer: String, window: &Window, cx: &Context<Self>) {
+    pub(super) fn start_voice_call(
+        &self,
+        offer: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(epoch) = self.speech.read(cx).voice_epoch() else {
+            return;
+        };
+        let target = self.record.target();
         let mut invocation = CommandInvocation::new(
             "agents.native.voice-start",
             vec![
@@ -58,15 +67,25 @@ impl NativeAgentSessionView {
             ],
             Caller::Internal,
         );
-        invocation.target = Some(self.record.target());
-        let Ok(receiver) = self.sender.submit(
+        invocation.target = Some(target.clone());
+        let receiver = match self.sender.submit(
             invocation,
             Instant::now()
                 .checked_add(Duration::from_secs(30))
                 .unwrap_or_else(Instant::now),
             CommandCancellation::new(),
-        ) else {
-            return;
+        ) {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                crate::gpui_speech::notify_error(
+                    crate::error_catalog::command_send_message(error),
+                    window,
+                    cx,
+                );
+                self.speech
+                    .update(cx, super::super::gpui_speech::SpeechInput::stop);
+                return;
+            }
         };
         cx.spawn_in(window, async move |owner, cx| {
             let outcome = cx
@@ -80,6 +99,12 @@ impl NativeAgentSessionView {
                 _ => None,
             };
             _ = owner.update_in(cx, |this, window, cx| {
+                // A stopped call's reply must never connect or stop its replacement.
+                if this.record.target() != target
+                    || this.speech.read(cx).voice_epoch() != Some(epoch)
+                {
+                    return;
+                }
                 if let Some(answer) = answer {
                     this.speech
                         .update(cx, |speech, cx| speech.answer(answer, cx));

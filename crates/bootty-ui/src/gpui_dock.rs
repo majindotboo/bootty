@@ -635,6 +635,7 @@ impl WorkspaceDock {
     pub(crate) fn update_subagents(
         &self,
         parents: Vec<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
+        selected: Option<&CommandTarget>,
         cx: &mut Context<Self>,
     ) {
         for panel in self.subagents.borrow().values() {
@@ -646,6 +647,12 @@ impl WorkspaceDock {
                 panel.update(cx, |panel, cx| panel.attach_parent(parent.clone(), cx));
             }
         }
+        let parents = parents
+            .into_iter()
+            .filter(|parent| {
+                selected.is_some_and(|target| parent.read(cx).conversation_id() == target.handle)
+            })
+            .collect();
         self.subagents_hub
             .update(cx, |hub, cx| hub.update_subagents(parents, cx));
     }
@@ -1108,6 +1115,20 @@ impl WorkspaceDock {
             .is_some_and(|tree| tree.find_panel_node(id).is_some())
     }
 
+    pub(crate) fn action_panel_present(&self, action: DockAction, cx: &App) -> bool {
+        if action == DockAction::Subagents {
+            let id = PanelId::from(self.subagents_hub.entity_id());
+            self.area
+                .read(cx)
+                .layout(DockPlacement::Right)
+                .is_some_and(|tree| tree.find_panel_node(id).is_some())
+        } else {
+            action
+                .panel()
+                .is_some_and(|kind| self.panel_present(kind, cx))
+        }
+    }
+
     pub(crate) fn panel_visible(&self, kind: bootty_config::config::PanelKind, cx: &App) -> bool {
         let id = self.tool_panel(kind).panel_id(cx);
         let area = self.area.read(cx);
@@ -1462,6 +1483,11 @@ impl WorkspaceDock {
             .find(|kind| self.tool_panel(*kind).panel_id(cx) == id)
         {
             self.remove_tool(kind, window, cx);
+            self.layout_changed(cx);
+        } else if PanelId::from(self.subagents_hub.entity_id()) == id {
+            self.area.update(cx, |area, cx| {
+                area.remove_panel(self.subagents_hub.clone(), window, cx);
+            });
             self.layout_changed(cx);
         } else if let Some(panel) = self
             .subagents

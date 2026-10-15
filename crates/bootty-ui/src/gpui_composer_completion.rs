@@ -103,7 +103,7 @@ impl ComposerCompletion {
                 cx.notify();
             }
         });
-        Self {
+        let mut this = Self {
             scope,
             sender,
             editor,
@@ -128,7 +128,9 @@ impl ComposerCompletion {
             omitted: 0,
             error: None,
             _subscription: subscription,
-        }
+        };
+        this.load_add_catalog(window, cx);
+        this
     }
 
     pub(super) fn restore_provider_mentions(

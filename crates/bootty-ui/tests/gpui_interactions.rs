@@ -684,11 +684,12 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
                 assert!((status.center().y - title.center().y).abs() <= px(0.5));
                 assert!(title.right() < status.left());
                 assert!(title.top() - row.top() < px(font_size));
-                assert!(row.size.height <= px(font_size * 3.0));
                 assert!(cx.debug_bounds("sidebar-project-task-0").is_none());
             } else {
                 assert!(status.bottom() <= title.top());
             }
+            assert_eq!(metadata.left() - row.left(), px(font_size * 0.5));
+            assert_eq!(row.bottom() - metadata.bottom(), px(font_size * 0.5));
             assert!(status.right() <= row.right());
             assert!(
                 row.right() - status.right() <= px(font_size),
@@ -706,13 +707,8 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
             assert!(icon.left() >= status.left());
             assert!(icon.right() <= status.right());
         }
+        assert_task_padding(cx, font_size, grouped);
         assert_task_agent_stack(cx);
-        if !grouped {
-            let project = cx
-                .debug_bounds("sidebar-project-task-0")
-                .expect("flat project context");
-            assert!(project.bottom() <= cx.debug_bounds("sidebar-title-task-0").unwrap().top());
-        }
         let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
         for row in &mut sidebar.rows {
             row.current = row.key == "task-1";
@@ -752,6 +748,29 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
             cx.debug_bounds("sidebar-title-task-1").unwrap().left()
         );
     }
+}
+
+#[allow(
+    clippy::arithmetic_side_effects,
+    reason = "Compare measured layout insets"
+)]
+fn assert_task_padding(cx: &mut VisualTestContext, font_size: f32, grouped: bool) {
+    if !grouped {
+        let project = cx
+            .debug_bounds("sidebar-project-task-0")
+            .expect("flat project context");
+        assert!(project.bottom() <= cx.debug_bounds("sidebar-title-task-0").unwrap().top());
+    }
+
+    let row = cx
+        .debug_bounds("sidebar-row-task-0")
+        .expect("selected task");
+    let content = cx
+        .debug_bounds("sidebar-session-content-task-0")
+        .expect("session content");
+    assert_eq!(content.top() - row.top(), px(font_size * 0.5));
+    assert_eq!(row.bottom() - content.bottom(), px(font_size * 0.5));
+    assert_eq!(content.left() - row.left(), px(font_size * 0.5));
 }
 
 fn assert_task_agent_stack(cx: &mut VisualTestContext) {

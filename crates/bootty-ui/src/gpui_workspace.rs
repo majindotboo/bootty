@@ -2142,9 +2142,14 @@ impl GpuiWorkspace {
     }
 
     fn sync_agents(&self, cx: &mut Context<Self>) {
+        let selected = self.selected_native_conversation_target(cx);
         if let Some(tools) = &self.tools {
             tools.update(cx, |tools, cx| {
-                tools.update_subagents(self.native_conversations.subagent_parents(), cx);
+                tools.update_subagents(
+                    self.native_conversations.subagent_parents(),
+                    selected.as_ref(),
+                    cx,
+                );
                 tools.update_agents(
                     self.state.agent_overview(),
                     self.state

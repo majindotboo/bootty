@@ -265,3 +265,6 @@ makes a WebRTC offer, the conversation takes it to Codex with
 starts turns on the conversation for what it delegates, and speaks the replies; the
 transcript shows only the delegated request. Ending voice mode stops the call.
 Other conversations and drafts show no voice button.
+
+Speech notifications and conversation errors offer **Copy details** for the original
+diagnostic.

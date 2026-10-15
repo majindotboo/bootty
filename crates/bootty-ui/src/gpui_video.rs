@@ -6,8 +6,6 @@ use avplayer::{
     PlayerItem, PlayerItemVideoOutput, PlayerItemVideoOutputSettings, PlayerStatus, Time, UrlAsset,
 };
 use bootty_host::media::{MediaCancellation, MediaReader};
-use core_foundation::base::TCFType as _;
-use core_video::pixel_buffer::{CVPixelBuffer, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::{
     ActiveTheme as _, Sizable as _,
@@ -19,6 +17,8 @@ use gpui_kit::{
     prelude::*, surface,
 };
 use num_traits::ToPrimitive as _;
+use objc2_core_foundation::CFRetained;
+use objc2_core_video::{CVPixelBuffer, kCVPixelFormatType_420YpCbCr8BiPlanarFullRange};
 use std::{
     io::{Read, Seek, SeekFrom},
     sync::{
@@ -95,7 +95,7 @@ impl Playback {
         unsafe_code,
         reason = "Retain the same Core Video object in GPUI's wrapper"
     )]
-    fn frame(&self) -> Result<Option<CVPixelBuffer>> {
+    fn frame(&self) -> Result<Option<CFRetained<CVPixelBuffer>>> {
         let time = self.player.current_time()?;
         if !self.output.has_new_pixel_buffer_for_item_time(time) {
             return Ok(None);
@@ -107,10 +107,12 @@ impl Playback {
             buffer.pixel_format() == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
             "unsupported video pixel format"
         );
-        // SAFETY: AVPlayer returned an owned CVPixelBuffer. wrap_under_get_rule retains
+        // SAFETY: AVPlayer returned an owned CVPixelBuffer. CFRetained retains
         // that exact object before the source wrapper drops; neither wrapper mutates it.
         Ok(Some(unsafe {
-            CVPixelBuffer::wrap_under_get_rule(buffer.as_ptr().cast())
+            CFRetained::retain(
+                std::ptr::NonNull::new(buffer.as_ptr().cast()).context("null video frame")?,
+            )
         }))
     }
 }
@@ -171,7 +173,7 @@ fn supply_request(
 
 pub struct VideoPreview {
     playback: Playback,
-    frame: Option<CVPixelBuffer>,
+    frame: Option<CFRetained<CVPixelBuffer>>,
     seek: Entity<SliderState>,
     _seek_subscription: Subscription,
     playing: bool,

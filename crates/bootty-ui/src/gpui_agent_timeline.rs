@@ -115,7 +115,7 @@ fn append_turn(
         let Some(item) = transcript.get(index) else {
             continue;
         };
-        if is_work(item) {
+        if is_work(item) && item.compaction_status().is_none() {
             run.push(index);
             continue;
         }
@@ -133,7 +133,7 @@ fn append_turn(
 fn is_work(item: &NativeTranscriptItem) -> bool {
     item.tool
         .as_ref()
-        .is_none_or(|tool| tool.name != "fileChange")
+        .is_none_or(|tool| !matches!(tool.name.as_str(), "fileChange" | "contextCompaction"))
         && (matches!(item.role.as_str(), "thinking" | "reasoning" | "tool") || item.tool.is_some())
 }
 
@@ -170,6 +170,107 @@ fn push_work_run(
 }
 
 impl NativeAgentSessionView {
+    pub(super) fn render_compaction(
+        &self,
+        item: &NativeTranscriptItem,
+        status: bootty_agents::NativeToolStatus,
+        window: &Window,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        use bootty_agents::NativeToolStatus;
+        use gpui_kit::component::{Icon, IconName};
+        let active = status == NativeToolStatus::Running
+            && self.record.snapshot.status == bootty_agents::NativeSessionStatus::Working;
+        let label = match status {
+            NativeToolStatus::Completed => "Context compacted",
+            NativeToolStatus::Running if active => "Compacting context",
+            NativeToolStatus::Failed => "Compaction failed",
+            _ if self.record.snapshot.status == bootty_agents::NativeSessionStatus::Error => {
+                "Compaction failed"
+            }
+            _ => "Compaction interrupted",
+        };
+        let detail = if active {
+            item.created_at
+                .and_then(|started| {
+                    u64::try_from(
+                        chrono::Utc::now()
+                            .timestamp_millis()
+                            .saturating_sub(started),
+                    )
+                    .ok()
+                })
+                .map(std::time::Duration::from_millis)
+                .map_or_else(
+                    || "Making room in this conversation…".to_owned(),
+                    |elapsed| {
+                        format!(
+                            "Making room in this conversation · {}",
+                            crate::clock::format_working_duration(elapsed)
+                        )
+                    },
+                )
+        } else {
+            String::new()
+        };
+        div()
+            .w_full()
+            .min_w_0()
+            .px_4()
+            .py_2()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .debug_selector({
+                        let id = item.id.clone();
+                        move || format!("native-compaction-{id}")
+                    })
+                    .w_full()
+                    .max_w(gpui_kit::rems(48.))
+                    .min_w_0()
+                    .p_3()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
+                    .bg(cx.theme().muted.opacity(0.3))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if active && window.is_visible() && self.moving(cx) {
+                        crate::motion::spinner(cx.theme().muted_foreground).into_any_element()
+                    } else {
+                        Icon::new(if status == NativeToolStatus::Completed {
+                            IconName::Check
+                        } else if active {
+                            IconName::LoaderCircle
+                        } else {
+                            IconName::Square
+                        })
+                        .small()
+                        .into_any_element()
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!("native-compaction-status:{label}")
+                                    })
+                                    .child(label),
+                            )
+                            .when(active, |column| column.child(div().text_xs().child(detail))),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn refresh_timeline(&mut self) {
         let new = rows(
             &self.record.snapshot.transcript,

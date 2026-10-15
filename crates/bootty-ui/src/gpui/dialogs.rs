@@ -725,7 +725,7 @@ impl DialogView {
             Self::subscribe_prompt_content(&prompt_textarea, window, cx);
         let command_interceptor = Self::command_interceptor(cx);
         let (control_focus, provider_focus) = Self::composer_control_focus(cx);
-        let speech = cx.new(|_| crate::gpui_speech::SpeechInput::new());
+        let speech = cx.new(crate::gpui_speech::SpeechInput::new);
         let speech_subscription = cx.subscribe_in(
             &speech,
             window,
@@ -1083,7 +1083,7 @@ impl DialogView {
     }
 
     fn prompt_submit(&self, cx: &mut Context<Self>) {
-        if self.speech.read(cx).dictating() {
+        if self.speech.read(cx).dictating(cx) {
             self.speech
                 .update(cx, super::super::gpui_speech::SpeechInput::finish_dictation);
             return;
@@ -1098,7 +1098,7 @@ impl DialogView {
     }
 
     fn new_session_submit(&self, action: &str, cx: &mut Context<Self>) {
-        if self.speech.read(cx).dictating() {
+        if self.speech.read(cx).dictating(cx) {
             self.speech
                 .update(cx, super::super::gpui_speech::SpeechInput::finish_dictation);
             return;

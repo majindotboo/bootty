@@ -32,7 +32,7 @@ as_conversions = "deny"
 anstyle-parse = "1"
 # Deliberate limit: code blocks highlight the languages agents write most. Each grammar compiles
 # into the app; add one when conversations need it.
-gpui-kit = { version = "0.7.0", features = [
+gpui-kit = { version = "0.7.3", features = [
     "tree-sitter-bash",
     "tree-sitter-c",
     "tree-sitter-cpp",

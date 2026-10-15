@@ -1663,6 +1663,19 @@ fn turns_keep_progress_and_changed_files_visible(cx: &mut TestAppContext) {
                 .debug_bounds("native-file-change:src/main.rs:+1:-1")
                 .is_some()
         );
+        let disclosure = visual
+            .debug_bounds("tool-disclosure:edit")
+            .expect("file disclosure");
+        visual.simulate_click(disclosure.center(), Modifiers::none());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let diff = visual
+            .debug_bounds("native-inline-diff:src/main.rs")
+            .expect("expanded diff");
+        assert!(
+            diff.size.height > px(30.),
+            "a text diff has room for its source lines"
+        );
     }
 }
 
@@ -2073,6 +2086,16 @@ fn conversation_errors_keep_bootty_wording_and_summarize_provider_text(cx: &mut 
             .debug_bounds("native-conversation-error:Could not complete the operation. Try again.")
             .is_some()
     );
+    let details = visual
+        .debug_bounds("copy-conversation-error-details")
+        .expect("provider diagnostics remain available");
+    visual.simulate_click(details.center(), Modifiers::none());
+    visual.update(|_, cx| {
+        pretty_assertions::assert_eq!(
+            cx.read_from_clipboard().unwrap().text().unwrap(),
+            "Could not read /Users/private/token.json: invalid"
+        );
+    });
     let editor = visual.debug_bounds("native-composer").expect("composer");
     visual.simulate_click(editor.center(), Modifiers::none());
     visual.simulate_input("/rename ");
@@ -2800,4 +2823,68 @@ fn app_access_card_offers_conversation_and_permanent_grants(cx: &mut TestAppCont
         invocation.arguments[2..],
         [card.to_owned(), "always-allow".to_owned()]
     );
+}
+
+#[gpui_kit::test]
+fn compaction_is_an_operation_instead_of_a_model_response(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for (status, operation, selector) in [
+        (
+            "working",
+            "running",
+            "native-compaction-status:Compacting context",
+        ),
+        (
+            "idle",
+            "completed",
+            "native-compaction-status:Context compacted",
+        ),
+        (
+            "idle",
+            "interrupted",
+            "native-compaction-status:Compaction interrupted",
+        ),
+        (
+            "error",
+            "interrupted",
+            "native-compaction-status:Compaction failed",
+        ),
+    ] {
+        let mut record = saved_record(status);
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+            {"id":"compact", "role":"tool", "text":"", "complete":operation != "running",
+             "tool":{"name":"contextCompaction", "input":"", "status":operation}}
+        ]))
+        .unwrap();
+        let (sender, _receiver) =
+            bootty_control::app_command_channel(8, std::sync::Arc::new(|| {}));
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    false,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.simulate_resize(size(px(960.), px(790.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds(selector).is_some(), "{selector}");
+        assert!(visual.debug_bounds("native-message-body-compact").is_none());
+        assert!(visual.debug_bounds("tool-disclosure:compact").is_none());
+        assert!(visual.debug_bounds("copy-message:compact").is_none());
+        if operation == "running" {
+            assert!(
+                visual.debug_bounds("native-progress-status").is_none(),
+                "compaction owns its progress display"
+            );
+        }
+    }
 }

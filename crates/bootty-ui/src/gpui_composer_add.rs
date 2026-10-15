@@ -79,7 +79,7 @@ impl ComposerCompletion {
 
     /// Each opening refreshes account capabilities and open apps. The last results stay on
     /// screen until fresh ones arrive, so the menu keeps its shape instead of popping in.
-    fn load_add_catalog(&mut self, window: &Window, cx: &Context<Self>) {
+    pub(super) fn load_add_catalog(&mut self, window: &Window, cx: &Context<Self>) {
         self.error = None;
         if !self.pending.contains_key("catalog") {
             self.fetch(

@@ -107,6 +107,14 @@ fn a_mentioned_file_is_its_project_path(#[case] typed: &str, #[case] draft: &str
     let session = session.unwrap();
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|command| command.command == "agents.native.completions"),
+        "provider actions warm before the composer receives input"
+    );
     let editor = visual.debug_bounds("native-composer").expect("composer");
     visual.simulate_click(editor.center(), Modifiers::none());
     visual.simulate_input(&format!("Review {typed}"));

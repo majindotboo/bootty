@@ -160,6 +160,15 @@ fn technical_summary(message: &str) -> String {
     if lower.contains("rate limit") || lower.contains("usage limit") {
         return "The provider's usage limit was reached. Retry when it resets.".into();
     }
+    if lower.contains("current voice call") {
+        return "Wait for the current voice call to end before starting another.".into();
+    }
+    if lower.contains("voice connection failed") {
+        return "Voice connection failed. Check your network and try again.".into();
+    }
+    if lower.contains("voice connection was lost") {
+        return "Voice connection was lost. Check your network and try again.".into();
+    }
     if lower.contains("microphone") || lower.contains("speech was detected") {
         return "Check microphone access and the input device, then try recording again.".into();
     }
