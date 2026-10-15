@@ -1296,7 +1296,7 @@ fn interrupted_codex_turns_stay_marked() {
             .map(|item| item.text)
             .collect::<Vec<_>>()
     };
-    assert_eq!(notices(session.snapshot()), ["You interrupted this turn."]);
+    assert_eq!(notices(session.snapshot()), ["Interrupted"]);
     session.stop();
 
     fs::write(
@@ -1308,7 +1308,7 @@ fn interrupted_codex_turns_stay_marked() {
     let mut config = config(root.path()).unwrap();
     config.session_id = Some("native-thread".to_owned());
     let resumed = NativeAgentSession::spawn(config).unwrap();
-    assert_eq!(notices(resumed.snapshot()), ["This turn was interrupted."]);
+    assert_eq!(notices(resumed.snapshot()), ["Interrupted"]);
     resumed.stop();
 }
 
@@ -2527,7 +2527,7 @@ fn nested_side_chat_retains_copied_context_after_live_history_eviction(
         snapshot
             .transcript
             .iter()
-            .any(|item| item.role == "notice" && item.text.starts_with("Bootty left out")),
+            .any(|item| item.role == "notice" && item.text.starts_with("Omitted ")),
         echo_mode != "exact"
     );
     let identity = grandchild.snapshot.session_id.as_ref().unwrap();
@@ -2765,6 +2765,11 @@ fn codex_compaction_uses_the_provider_operation_and_waits_for_completion(
         .unwrap();
     barrier(&session).unwrap();
     assert_eq!(session.snapshot().status, status);
+    assert_eq!(
+        session.snapshot().transcript.len(),
+        1,
+        "compaction carries its own terminal status"
+    );
     assert_eq!(
         session.snapshot().transcript[0].compaction_status(),
         Some(operation)
@@ -3205,5 +3210,47 @@ fn codex_user_input_requests_only_pause_work_when_blocking(
         expected == NativeSessionStatus::Waiting
     );
     assert_eq!(snapshot.requests.len(), 1);
+    session.stop();
+}
+
+/// Legacy file-change output is not repeated in the settled item or stored provider history.
+#[rstest]
+#[case("failed", NativeToolStatus::Failed)]
+#[case("completed", NativeToolStatus::Completed)]
+fn codex_file_change_output_survives_settlement_and_history(
+    #[case] status: &str,
+    #[case] expected: NativeToolStatus,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let item = json!({"id":"patch", "type":"fileChange", "status":status,
+        "changes":[{"path":"/tmp/project/file.rs","diff":"@@ -1 +1 @@\n-old\n+new\n"}]});
+    let mut started = item.clone();
+    started["status"] = json!("inProgress");
+    fs::write(root.path().join("events.json"), json!([
+        {"method":"item/started","params":{"threadId":"native-thread","turnId":"turn-1","item":started}},
+        {"method":"item/fileChange/outputDelta","params":{"threadId":"native-thread","turnId":"turn-1","itemId":"patch","delta":"Patch output\nDetails"}},
+        {"method":"item/completed","params":{"threadId":"native-thread","turnId":"turn-1","item":item}}
+    ]).to_string()).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    let patch = snapshot
+        .transcript
+        .iter()
+        .find(|item| item.id == "patch")
+        .unwrap();
+    pretty_assertions::assert_eq!(patch.text, "Patch output\nDetails");
+    assert_eq!(patch.tool.as_ref().unwrap().status, expected);
+    session
+        .rpc("__finish", json!({"status":"completed"}))
+        .unwrap();
+    fs::write(
+        root.path().join("paged-history.json"),
+        json!([{"turnId":"turn-1","item":item}]).to_string(),
+    )
+    .unwrap();
+    let history = session.read_history("latest").unwrap();
+    pretty_assertions::assert_eq!(history.transcript[0].text, patch.text);
     session.stop();
 }

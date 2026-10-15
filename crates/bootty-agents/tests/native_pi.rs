@@ -229,7 +229,7 @@ fn pi_large_completion_keeps_the_owned_image_budget(#[case] event: &str, #[case]
         .snapshot()
         .transcript
         .iter()
-        .any(|item| item.role == "notice" && item.text.starts_with("Bootty left out"));
+        .any(|item| item.role == "notice" && item.text.starts_with("Omitted "));
     assert_eq!(left_out, !owned, "completion case {event}");
     if owned {
         assert_eq!(

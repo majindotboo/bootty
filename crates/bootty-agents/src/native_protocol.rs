@@ -198,6 +198,15 @@ impl NativeTranscriptItem {
         } else {
             self.text.clone()
         };
+        let text = if self.role == "notice"
+            && matches!(
+                text.as_str(),
+                "You interrupted this turn." | "This turn was interrupted."
+            ) {
+            "Interrupted".to_owned()
+        } else {
+            text
+        };
         let text = transcript_text(&self.role, text);
         if self.role == "user" {
             crate::native_annotations::display_user_annotations(text)
@@ -495,7 +504,7 @@ impl NativeSessionSnapshot {
     pub(crate) fn skipped_frame(&mut self, bytes: usize) {
         let id = format!("skipped-frame-{}", self.revision);
         let text = format!(
-            "Bootty left out {} MiB from {} that is too large to show. The conversation continues.",
+            "Omitted {} MiB of oversized output from {}.",
             bytes.div_ceil(1024 * 1024),
             self.provider.display_name()
         );
@@ -505,15 +514,18 @@ impl NativeSessionSnapshot {
 
     /// Marks where a turn ended early. The mark stays in the transcript and in its saved history.
     pub(crate) fn interrupted_turn(&mut self, turn: &str) {
-        let text = if self.stopping() {
-            "You interrupted this turn."
-        } else {
-            "This turn was interrupted."
-        };
+        if self.transcript.last().is_some_and(|item| {
+            matches!(
+                item.compaction_status(),
+                Some(NativeToolStatus::Running | NativeToolStatus::Interrupted)
+            )
+        }) {
+            return;
+        }
         self.message(
             format!("interrupted-{turn}"),
             "notice",
-            text.to_owned(),
+            "Interrupted".to_owned(),
             true,
         );
     }
@@ -882,7 +894,13 @@ impl NativeSessionSnapshot {
                 .iter()
                 .find(|saved| saved.id == item.id && saved.role == item.role)
             {
-                if item.role == "user" {
+                if item.role == "user"
+                    || (item.text.is_empty()
+                        && item
+                            .tool
+                            .as_ref()
+                            .is_some_and(|tool| tool.name == "fileChange"))
+                {
                     item.text.clone_from(&saved.text);
                 }
                 item.images.clone_from(&saved.images);
@@ -1223,6 +1241,17 @@ impl NativeSessionSnapshot {
         self.settle_running_tools();
     }
 
+    fn tool_output_text(&self, id: &str, output: &str) -> String {
+        if output.is_empty() {
+            self.transcript
+                .iter()
+                .find(|item| item.id == id)
+                .map_or_else(String::new, |item| item.text.clone())
+        } else {
+            output.to_owned()
+        }
+    }
+
     fn codex_item(&mut self, item: &Value, complete: bool) {
         let id = field(item, "id").as_str().unwrap_or("item").to_owned();
         match field(item, "type").as_str().unwrap_or_default() {
@@ -1282,14 +1311,7 @@ impl NativeSessionSnapshot {
             ),
             "commandExecution" => {
                 let output = field(item, "aggregatedOutput").as_str().unwrap_or_default();
-                let output = if output.is_empty() {
-                    self.transcript
-                        .iter()
-                        .find(|item| item.id == id)
-                        .map_or_else(String::new, |item| item.text.clone())
-                } else {
-                    output.to_owned()
-                };
+                let output = self.tool_output_text(&id, output);
                 self.tool_message(
                     id,
                     Some("commandExecution"),
@@ -1299,11 +1321,13 @@ impl NativeSessionSnapshot {
                 );
             }
             "fileChange" => {
+                // Older providers report patch failures through output deltas only.
+                let output = self.tool_output_text(&id, "");
                 self.tool_message(
                     id,
                     Some("fileChange"),
                     item.get("changes").map(Value::to_string),
-                    String::new(),
+                    output,
                     codex_tool_status(item, complete),
                 );
             }
@@ -1367,11 +1391,14 @@ impl NativeSessionSnapshot {
             | "item/plan/delta"
             | "item/reasoning/textDelta"
             | "item/reasoning/summaryTextDelta"
-            | "item/commandExecution/outputDelta" => {
+            | "item/commandExecution/outputDelta"
+            | "item/fileChange/outputDelta" => {
                 let role = match field(value, "method").as_str() {
                     Some("item/agentMessage/delta") => "assistant",
                     Some("item/plan/delta") => "plan",
-                    Some("item/commandExecution/outputDelta") => "tool",
+                    Some("item/commandExecution/outputDelta" | "item/fileChange/outputDelta") => {
+                        "tool"
+                    }
                     _ => "thinking",
                 };
                 self.delta(

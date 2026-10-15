@@ -601,8 +601,9 @@ impl NativeAgentSessionView {
             activity_summary(&tools)
         };
         // A turn can fold several runs; its duration reads once, on the last.
-        match self
-            .turn_duration(members)
+        match members
+            .first()
+            .and_then(|first| self.turn_duration(*first))
             .filter(|_| !live && self.last_fold_of_turn(members))
         {
             Some(duration) if duration.as_secs() > 0 => format!(
@@ -628,9 +629,8 @@ impl NativeAgentSessionView {
     }
 
     /// How long a settled turn took: from its prompt to the last item the turn reported.
-    fn turn_duration(&self, members: &[usize]) -> Option<std::time::Duration> {
+    fn turn_duration(&self, first: usize) -> Option<std::time::Duration> {
         let transcript = &self.record.snapshot.transcript;
-        let first = *members.first()?;
         let start = transcript
             .get(..first)?
             .iter()
@@ -645,6 +645,49 @@ impl NativeAgentSessionView {
             .max()?;
         let millis = u64::try_from(end.checked_sub(start)?).ok()?;
         Some(std::time::Duration::from_millis(millis))
+    }
+
+    /// A reply carries elapsed time when no work fold already carries it.
+    fn unfolded_turn_duration(&self, item: &NativeTranscriptItem) -> Option<std::time::Duration> {
+        if !matches!(item.role.as_str(), "assistant" | "plan") {
+            return None;
+        }
+        let transcript = &self.record.snapshot.transcript;
+        let index = transcript.iter().position(|entry| entry.id == item.id)?;
+        let prompt = transcript
+            .get(..index)?
+            .iter()
+            .rposition(|entry| entry.role == "user")?;
+        if transcript
+            .get(prompt.saturating_add(1)..)?
+            .iter()
+            .take_while(|entry| entry.role != "user")
+            .any(|entry| visible(entry) && is_work(entry))
+        {
+            return None;
+        }
+        self.turn_duration(index)
+            .filter(|duration| duration.as_secs() > 0)
+    }
+
+    pub(super) fn render_unfolded_turn_duration(
+        &self,
+        item: &NativeTranscriptItem,
+        cx: &App,
+    ) -> Option<gpui_kit::Div> {
+        let duration = crate::clock::format_working_duration(self.unfolded_turn_duration(item)?);
+        Some(
+            div()
+                .mr_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .debug_selector({
+                    let id = item.id.clone();
+                    let duration = duration.clone();
+                    move || format!("native-turn-duration:{id}:{duration}")
+                })
+                .child(duration),
+        )
     }
 
     fn render_work_group(

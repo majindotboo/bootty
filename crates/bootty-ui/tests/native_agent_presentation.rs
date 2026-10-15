@@ -3280,3 +3280,93 @@ fn add_menu_inserts_provider_commands_as_editable_slash_text(cx: &mut TestAppCon
         .unwrap();
     pretty_assertions::assert_eq!(text, "/compact ");
 }
+
+#[gpui_kit::test]
+fn parsed_file_changes_keep_the_providers_failure_output(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for status in ["failed", "completed"] {
+        let mut record = saved_record("idle");
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+            {"id":"prompt","role":"user","text":"Edit the file","complete":true},
+            {"id":"edit","role":"tool","text":"Patch could not be applied to src/main.rs.","complete":true,
+             "tool":{"name":"fileChange","status":status,"input":"[{\"path\":\"/tmp/project/src/main.rs\",\"diff\":\"@@ -1 +1 @@\\n-old\\n+new\\n\"}]"}}
+        ])).unwrap();
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual
+                .debug_bounds("native-file-change:src/main.rs:+1:-1")
+                .is_some()
+        );
+        let disclosure = visual.debug_bounds("tool-disclosure:edit").unwrap();
+        visual.simulate_click(disclosure.center(), Modifiers::none());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        pretty_assertions::assert_eq!(
+            visual.debug_bounds("failed-change-output:edit").is_some(),
+            status == "failed"
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn settled_replies_without_work_folds_show_elapsed_time(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for (status, tool, duration) in [
+        ("idle", None, true),
+        ("idle", Some("fileChange"), true),
+        ("idle", Some("Bash"), false),
+        ("working", None, false),
+    ] {
+        let mut record = saved_record(status);
+        let mut transcript = vec![
+            serde_json::json!({"id":"prompt","role":"user","text":"Review","complete":true,"created_at":1_000_000}),
+        ];
+        if let Some(tool) = tool {
+            transcript.push(serde_json::json!({"id":"tool","role":"tool","text":"","complete":true,"created_at":1_010_000,"tool":{"name":tool,"status":"completed","input":"[]"}}));
+        }
+        transcript.push(serde_json::json!({"id":"reply","role":"assistant","text":"Reviewed","complete":true,"created_at":1_050_000,"updated_at":1_072_000}));
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!(transcript)).unwrap();
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        pretty_assertions::assert_eq!(
+            visual
+                .debug_bounds("native-turn-duration:reply:1m 12s")
+                .is_some(),
+            duration,
+            "{status}, {tool:?}"
+        );
+    }
+}

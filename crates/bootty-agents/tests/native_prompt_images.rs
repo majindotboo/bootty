@@ -706,7 +706,7 @@ fn large_tool_records_bootty_did_not_capture_never_become_images(
         snapshot
             .transcript
             .iter()
-            .any(|item| item.role == "notice" && item.text.starts_with("Bootty left out")),
+            .any(|item| item.role == "notice" && item.text.starts_with("Omitted ")),
         "{:#?}",
         snapshot.transcript
     );

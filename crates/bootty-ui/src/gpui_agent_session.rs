@@ -1814,7 +1814,7 @@ impl NativeAgentSessionView {
     fn render_tool_details(&self, item: &NativeTranscriptItem, cx: &App) -> gpui_kit::Div {
         if let Some(diffs) = self.tool_diffs.get(&item.id) {
             let body = div().pt_2().flex().flex_col().gap_2();
-            return match diffs {
+            let details = match diffs {
                 ToolDiffs::Loading => body.child(
                     div()
                         .flex()
@@ -1830,6 +1830,29 @@ impl NativeAgentSessionView {
                 }
                 ToolDiffs::Ready(files) => body.children(tool_diff_files(files, cx)),
             };
+            return details.when_some(
+                self.transcript.get(&item.id).filter(|_| {
+                    !item.text.is_empty()
+                        && item.tool.as_ref().is_some_and(|tool| {
+                            tool.status == bootty_agents::NativeToolStatus::Failed
+                        })
+                }),
+                |body, state| {
+                    body.child(
+                        div()
+                            .debug_selector({
+                                let id = item.id.clone();
+                                move || format!("failed-change-output:{id}")
+                            })
+                            .text_color(cx.theme().danger)
+                            .child(capped_scroll(
+                                format!("tool-output-scroll:{}", item.id),
+                                20.,
+                                TextView::new(state).selectable(true),
+                            )),
+                    )
+                },
+            );
         }
         div()
             .pt_2()
@@ -2239,6 +2262,7 @@ impl NativeAgentSessionView {
             .flex()
             .items_center()
             .when(item.role == "user", gpui_kit::Styled::justify_end)
+            .children(self.render_unfolded_turn_duration(item, cx))
             .child(
                 div()
                     .flex()

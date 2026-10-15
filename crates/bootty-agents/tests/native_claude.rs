@@ -445,8 +445,8 @@ fn claude_usage_fills_the_context_meter() {
 /// past it is cut down or skipped, with a notice, and the turn still finishes.
 #[rstest]
 #[case::tool_image("read-image", None)]
-#[case::large_output("big-output", Some("Bootty left out 2 MiB from Claude"))]
-#[case::past_the_envelope("huge-line", Some("Bootty left out 18 MiB from Claude"))]
+#[case::large_output("big-output", Some("Omitted 2 MiB of oversized output from Claude."))]
+#[case::past_the_envelope("huge-line", Some("Omitted 18 MiB of oversized output from Claude."))]
 fn large_messages_never_end_the_conversation(#[case] prompt: &str, #[case] notice: Option<&str>) {
     let root = TempDir::new().unwrap();
     let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
@@ -1043,7 +1043,7 @@ fn interrupted_turn_settles_its_running_tool() {
             .snapshot()
             .transcript
             .iter()
-            .any(|item| item.role == "notice" && item.text == "You interrupted this turn.")
+            .any(|item| item.role == "notice" && item.text == "Interrupted")
     );
     session.stop();
 }
