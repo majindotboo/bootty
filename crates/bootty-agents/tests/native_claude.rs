@@ -83,6 +83,9 @@ for line in sys.stdin:
    if prompt=='cancel': emit({'type':'control_cancel_request','request_id':'permission-id'})
    continue
   if prompt=='hold': continue
+  if prompt.startswith('write-'):
+   emit({'type':'control_request','request_id':'write-id','request':{'subtype':'can_use_tool','tool_name':'Write','tool_use_id':'write-tool','input':{'file_path':'/tmp/large','content':'x'*int(prompt[6:])}}})
+   continue
   if prompt=='flood':
    for i in range(300):
     emit({'type':'assistant','uuid':'think-'+str(i),'session_id':session,'parent_tool_use_id':None,'message':{'id':'think-message-'+str(i),'content':[{'type':'thinking','thinking':''}]}})
@@ -106,6 +109,13 @@ for line in sys.stdin:
    emit({'type':'system','subtype':'task_started','session_id':session,'task_id':'child','tool_use_id':'agent-call','description':'Review source'})
    emit({'type':'system','subtype':'task_notification','session_id':session,'task_id':'child','status':status,'summary':'Observed result'})
    emit({'type':'system','subtype':'task_progress','session_id':session,'task_id':'child'})
+  if prompt=='background-shell':
+   # Observed from Claude 2.1.296: every Bash run is a task; only a backgrounded one outlives its turn.
+   tool_use('bg-call','cargo build');tool_use('fg-call','ls')
+   emit({'type':'system','subtype':'task_started','session_id':session,'task_id':'fg-task','tool_use_id':'fg-call','description':'List files','task_type':'local_bash'})
+   emit({'type':'system','subtype':'task_started','session_id':session,'task_id':'bg-task','tool_use_id':'bg-call','description':'Watch the build','is_backgrounded':True,'task_type':'local_bash'})
+  if prompt=='background-done':
+   emit({'type':'system','subtype':'task_updated','session_id':session,'task_id':'bg-task','patch':{'status':'completed'}})
   if prompt=='self-turn':
    result()
    # Claude reports a finished background task in a turn nobody sent.
@@ -1099,4 +1109,123 @@ fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
         NativeQueuedMessageStatus::Queued
     );
     service.shutdown().unwrap();
+}
+
+/// Claude reports background shells as tasks. One stays visible and keeps its conversation active
+/// until Claude reports it finished; foreground commands stay plain tools.
+#[test]
+fn background_shells_stay_visible_until_they_finish() {
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    let session = service.resolve(&target).unwrap();
+    let tasks = || {
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .filter_map(|item| item.subagent.as_ref())
+            .map(|task| {
+                (
+                    task.id.clone(),
+                    task.title.clone(),
+                    task.prompt.clone(),
+                    task.status,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    service.prompt(&target, "background-shell").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(
+        tasks(),
+        vec![(
+            "bg-task".to_owned(),
+            "Watch the build".to_owned(),
+            "cargo build".to_owned(),
+            NativeToolStatus::Running
+        )]
+    );
+    service.checkpoint().unwrap();
+    let activity = service.activities().remove(0);
+    assert_eq!(
+        (activity.status, activity.running_subagents),
+        (NativeSessionStatus::Idle, 1)
+    );
+
+    service.prompt(&target, "background-done").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(tasks()[0].3, NativeToolStatus::Completed);
+    service.checkpoint().unwrap();
+    assert_eq!(service.activities()[0].running_subagents, 0);
+    service.shutdown().unwrap();
+}
+
+/// An approval stays whole, because allowing it sends Claude the exact input back. One too large
+/// to hold is declined through Claude's protocol and the conversation continues.
+#[rstest]
+#[case::large_write(64 * 1024, true)]
+#[case::oversized_write(2 * 1024 * 1024, false)]
+fn large_claude_approvals_are_held_and_oversized_ones_declined(
+    #[case] bytes: usize,
+    #[case] held: bool,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt(&format!("write-{bytes}")).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    if held {
+        assert_eq!(snapshot.status, NativeSessionStatus::Waiting);
+        let request = snapshot.requests.first().unwrap().id.clone();
+        session
+            .respond(&request, json!({"decision":"accept"}))
+            .unwrap();
+    } else {
+        assert_eq!(snapshot.requests, []);
+        assert!(snapshot.transcript.iter().any(|item| item.role == "notice"
+            && item.text == "Bootty declined a provider request that is too large to show."));
+    }
+    // An answer or decline is already queued for Claude; this barrier follows it.
+    barrier(&session).unwrap();
+    let answer: Value =
+        serde_json::from_slice(&fs::read(root.path().join("answer.json")).unwrap()).unwrap();
+    if held {
+        assert_eq!(
+            answer["response"]["response"]["updatedInput"]["content"]
+                .as_str()
+                .map(str::len),
+            Some(bytes)
+        );
+    } else {
+        assert_eq!(answer["response"]["subtype"], "error");
+    }
+    // Either answer lets Claude finish the turn; the conversation is still alive.
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
+    session.stop();
+}
+
+/// A message Claude never confirmed is in flight while Claude runs, and undelivered once the
+/// process that could confirm it has ended.
+#[test]
+fn an_unconfirmed_message_is_undelivered_once_its_provider_ends() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("no-ack").unwrap();
+    barrier(&session).unwrap();
+    let undelivered = || {
+        let snapshot = session.snapshot();
+        snapshot
+            .transcript
+            .iter()
+            .filter(|item| snapshot.undelivered(item))
+            .map(|item| item.text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(undelivered(), Vec::<String>::new());
+    session.stop();
+    assert_eq!(undelivered(), vec!["no-ack".to_owned()]);
 }

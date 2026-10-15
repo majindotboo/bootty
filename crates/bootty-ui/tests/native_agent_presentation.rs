@@ -4,7 +4,7 @@ use bootty_agents::{AgentKind, NativeSessionConfig, NativeSessionRecord};
 use bootty_control::Caller;
 use bootty_ui::{
     NativeAgentSessionView,
-    gpui::{UiPalette, init_theme},
+    gpui::{CommandAction, UiPalette, init_theme},
 };
 use gpui_kit::{
     AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, MouseUpEvent, ScrollDelta,
@@ -1082,6 +1082,8 @@ fn native_command_sender(
                 };
                 let value = if request.invocation.command == "agents.native.history" {
                     serde_json::json!({"transcript":history,"has_older":false,"has_newer":false,"at_latest":true})
+                } else if request.invocation.command == "agents.native.models-info" {
+                    serde_json::json!({"models":[],"permissions":null})
                 } else if request.invocation.command == "agents.native.completions" {
                     serde_json::json!({"options":[{"kind":"command","name":"compact",
                         "display_name":"compact","description":"Summarize the context",
@@ -1755,7 +1757,7 @@ fn enter_submits_trigger_text_only_when_nothing_matches(cx: &mut TestAppContext)
         init_theme(UiPalette::default(), cx);
     });
     for (text, submits) in [
-        ("/new", true),
+        ("/nothing", true),
         ("costs $5", true),
         ("ping @alice", true),
         ("/comp", false),
@@ -1799,6 +1801,403 @@ fn enter_submits_trigger_text_only_when_nothing_matches(cx: &mut TestAppContext)
             .any(|invocation| invocation.command == "agents.native.prompt");
         assert_eq!(submitted, submits, "Enter after {text:?}");
     }
+}
+
+/// Bootty's own slash commands run the command their button uses instead of reaching the model.
+#[gpui_kit::test]
+fn bootty_slash_commands_run_instead_of_sending(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    // Picking `/stop` from the menu inserts it; Enter then runs it. A typed argument runs directly.
+    for (keys, command, arguments) in [
+        (
+            &["/stop", "confirm", "enter"][..],
+            "agents.native.interrupt",
+            vec!["saved-pi", "1"],
+        ),
+        (
+            &["/rename Better title", "enter"],
+            "agents.native.rename",
+            vec!["saved-pi", "1", "Better title", "Conversation"],
+        ),
+    ] {
+        let record = saved_record("working");
+        let (sender, commands) = native_command_sender(&record);
+        let mut session = None;
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                );
+                view.set_completion_binding(
+                    Some(bootty_control::CommandTarget {
+                        kind: bootty_control::ResourceKind::Binding,
+                        handle: "captured-binding".into(),
+                        generation: 1,
+                    }),
+                    window,
+                    cx,
+                );
+                view
+            });
+            session = Some(view.clone());
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let session = session.unwrap();
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let editor = visual.debug_bounds("native-composer").expect("composer");
+        visual.simulate_click(editor.center(), Modifiers::none());
+        for key in keys {
+            if *key == "enter" {
+                visual.simulate_keystrokes("enter");
+            } else if *key == "confirm" {
+                visual.update(|window, cx| {
+                    session.update(cx, |view, cx| {
+                        view.perform_completion(CommandAction::Confirm, window, cx);
+                    });
+                });
+            } else {
+                visual.simulate_input(key);
+            }
+            visual.run_until_parked();
+        }
+        let sent = commands.lock().unwrap().clone();
+        let ran = sent
+            .iter()
+            .find(|invocation| invocation.command == command)
+            .unwrap_or_else(|| panic!("{keys:?} runs {command}: {sent:?}"));
+        pretty_assertions::assert_eq!(ran.arguments, arguments);
+        assert!(
+            !sent.iter().any(|invocation| matches!(
+                invocation.command.as_str(),
+                "agents.native.prompt" | "agents.native.queue"
+            )),
+            "{keys:?} never reaches the model"
+        );
+    }
+}
+
+/// Bootty's own messages read as written; a provider's raw diagnostic gets the catalog's text.
+#[gpui_kit::test]
+fn conversation_errors_keep_bootty_wording_and_summarize_provider_text(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.error = Some("Could not read /Users/private/token.json: invalid".into());
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("native-conversation-error:Could not complete the operation. Try again.")
+            .is_some()
+    );
+    let editor = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_input("/rename ");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("native-conversation-error:Add the new title after /rename.")
+            .is_some()
+    );
+}
+
+/// A message the provider never confirmed says so, and its text can be sent again.
+#[gpui_kit::test]
+fn undelivered_messages_offer_to_resend_their_text(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "lost", "role": "user", "text": "Lost message", "complete": false}
+    ]))
+    .unwrap();
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-undelivered-lost").is_some());
+    let resend = visual.debug_bounds("native-resend-lost").expect("resend");
+    visual.simulate_click(resend.center(), Modifiers::none());
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    assert!(
+        commands.lock().unwrap().iter().any(|invocation| {
+            invocation.command == "agents.native.prompt"
+                && invocation
+                    .arguments
+                    .iter()
+                    .any(|argument| argument == "Lost message")
+        }),
+        "the restored text is sent again"
+    );
+}
+
+/// A proposed plan shows its steps above the composer, and Implement carries it out.
+#[gpui_kit::test]
+fn a_ready_plan_shows_its_steps_and_implements_in_one_click(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.config = NativeSessionConfig::new(AgentKind::Codex, "/tmp/project");
+    record.snapshot.provider = AgentKind::Codex;
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "ask", "role": "user", "text": "Plan the change", "complete": true},
+        {"id": "plan-1", "role": "plan", "text": "# Plan\n\n1. Make the change", "complete": true}
+    ]))
+    .unwrap();
+    record.snapshot.todos = serde_json::from_value(serde_json::json!([
+        {"text": "Read the code", "status": "completed"},
+        {"text": "Make the change", "status": "in_progress"}
+    ]))
+    .unwrap();
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-message-body-plan-1").is_some());
+    assert!(visual.debug_bounds("native-todos:1 of 2 done").is_some());
+    let implement = visual
+        .debug_bounds("native-implement-plan")
+        .expect("Implement");
+    visual.simulate_click(implement.center(), Modifiers::none());
+    visual.run_until_parked();
+    assert!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|invocation| invocation.command == "agents.native.implement"),
+        "Implement runs the shared command"
+    );
+}
+
+/// A resume rebuilds the completion; app chips already in the draft still send.
+#[gpui_kit::test]
+fn app_chips_survive_a_rebuilt_completion(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = commands.clone();
+    let inbox = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<bootty_control::AppCommandReceiver>,
+    ));
+    let queued = inbox.clone();
+    let (sender, receiver) = bootty_control::app_command_channel(
+        16,
+        std::sync::Arc::new(move || {
+            let inbox = queued.lock().unwrap();
+            while let Ok(request) = inbox.as_ref().unwrap().try_recv() {
+                let value = if request.invocation.command == "agents.native.completions" {
+                    serde_json::json!({"options":[{"kind":"app","name":"github",
+                        "display_name":"GitHub","description":"Repositories",
+                        "argument_hint":null,"path":"app://github","scope":null}]})
+                } else {
+                    serde_json::Value::Null
+                };
+                observed.lock().unwrap().push(request.invocation.clone());
+                request
+                    .response
+                    .send(bootty_control::CommandOutcome::Success {
+                        value,
+                        warnings: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }),
+    );
+    *inbox.lock().unwrap() = Some(receiver);
+    let binding = |handle: &str| bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Binding,
+        handle: handle.into(),
+        generation: 1,
+    };
+    let mut session = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            );
+            view.set_completion_binding(Some(binding("first")), window, cx);
+            view
+        });
+        session = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let session = session.unwrap();
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_input("@Git");
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        session.update(cx, |view, cx| {
+            view.perform_completion(CommandAction::Confirm, window, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        session.update(cx, |view, cx| {
+            view.set_completion_binding(Some(binding("second")), window, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.simulate_input(" review this");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let sent = commands.lock().unwrap().clone();
+    let prompt = sent
+        .iter()
+        .find(|invocation| invocation.command == "agents.native.prompt")
+        .unwrap_or_else(|| panic!("the draft with its app chip is sent: {sent:?}"));
+    assert!(
+        prompt
+            .arguments
+            .last()
+            .is_some_and(|mentions| mentions.contains("\"name\":\"github\"")),
+        "{:?}",
+        prompt.arguments
+    );
+}
+
+/// A failed first message comes back with its attachment chips, so sending it again keeps them.
+#[gpui_kit::test]
+fn a_restored_failed_draft_keeps_its_attachments(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("stopped");
+    record.pending_initial_message = Some("Review [notes.txt] please".into());
+    record.attachments = serde_json::from_value(serde_json::json!([
+        {"id":"placed","kind":"file","name":"notes.txt","mime_type":"text/plain",
+         "size_bytes":12,"prompt_ranges":[{"start":7,"end":18}]},
+        {"id":"unplaced","kind":"file","name":"summary.md","mime_type":"text/markdown",
+         "size_bytes":40}
+    ]))
+    .unwrap();
+    let mut resumed = serde_json::to_value(&record).unwrap();
+    resumed["generation"] = 2.into();
+    resumed["snapshot"]["status"] = "idle".into();
+    resumed["pending_initial_message"] = serde_json::Value::Null;
+    let commands = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = commands.clone();
+    let inbox = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<bootty_control::AppCommandReceiver>,
+    ));
+    let queued = inbox.clone();
+    let (sender, receiver) = bootty_control::app_command_channel(
+        16,
+        std::sync::Arc::new(move || {
+            let inbox = queued.lock().unwrap();
+            while let Ok(request) = inbox.as_ref().unwrap().try_recv() {
+                let value = if request.invocation.command == "agents.native.resume" {
+                    resumed.clone()
+                } else {
+                    serde_json::Value::Null
+                };
+                observed.lock().unwrap().push(request.invocation.clone());
+                request
+                    .response
+                    .send(bootty_control::CommandOutcome::Success {
+                        value,
+                        warnings: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }),
+    );
+    *inbox.lock().unwrap() = Some(receiver);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let resume = visual.debug_bounds("native-resume").expect("resume");
+    visual.simulate_click(resume.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    let sent = commands.lock().unwrap().clone();
+    let prompt = sent
+        .iter()
+        .find(|invocation| invocation.command == "agents.native.prompt")
+        .unwrap_or_else(|| panic!("the restored draft is sent: {sent:?}"));
+    let attachments: Vec<String> = serde_json::from_str(&prompt.arguments[4]).unwrap();
+    pretty_assertions::assert_eq!(attachments.len(), 2, "{:?}", prompt.arguments);
+    assert!(attachments.contains(&"placed".to_owned()));
+    assert!(attachments.contains(&"unplaced".to_owned()));
 }
 
 #[gpui_kit::test]

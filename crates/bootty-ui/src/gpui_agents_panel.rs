@@ -6,7 +6,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
-    shimmer::ShimmerText,
 };
 use gpui_kit::{
     App, Context, Entity, FocusHandle, Focusable, IntoElement, ParentElement, Render, SharedString,
@@ -139,7 +138,13 @@ impl Focusable for AgentsPanel {
     }
 }
 impl Render for AgentsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if window.is_visible()
+            && !cx.reduce_motion()
+            && self.entries.iter().any(|entry| agent_group(entry).0 == 1)
+        {
+            crate::motion::request_frame(cx.entity_id(), cx);
+        }
         let query = self.query.read(cx).value().to_lowercase();
         let attention = self
             .entries
@@ -320,21 +325,14 @@ impl AgentsPanel {
                     .px_2()
                     .text_xs()
                     .text_color(status_color)
-                    .map(|status| {
-                        let text = format!(
-                            "{} · {}",
-                            entry.provider.display_name(),
-                            status_label(entry)
-                        );
-                        if rank == 1 {
-                            status.child(
-                                ShimmerText::new(text)
-                                    .id(SharedString::from(format!("{id}:status"))),
-                            )
-                        } else {
-                            status.child(text)
-                        }
-                    }),
+                    .when(rank == 1 && !cx.reduce_motion(), |status| {
+                        status.opacity(crate::motion::pulse())
+                    })
+                    .child(format!(
+                        "{} · {}",
+                        entry.provider.display_name(),
+                        status_label(entry)
+                    )),
             )
             .child(
                 div()

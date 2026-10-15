@@ -1,6 +1,5 @@
 use gpui_kit::base::Tab;
-use num_traits::ToPrimitive as _;
-use std::{cmp::Ordering, rc::Rc, sync::OnceLock, time::Instant};
+use std::{cmp::Ordering, rc::Rc};
 
 use gpui_kit::{
     Context, FocusHandle, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
@@ -1270,26 +1269,22 @@ fn status_action(
 /// native operation remains visibly alive without changing the tab's measured content geometry.
 fn status_progress(progress: StatusProgress, id: String) -> gpui_kit::AnyElement {
     const HEIGHT: f32 = 2.0;
-    const SWEEP_PERIOD: f64 = 1.5;
-    static STARTED: OnceLock<Instant> = OnceLock::new();
-    let started = *STARTED.get_or_init(Instant::now);
 
     let bar = canvas(
         move |bounds, _, _| bounds,
-        move |bounds, _, window, _| {
+        move |bounds, _, window, cx| {
             let width = f32::from(bounds.size.width).max(0.0);
             let (fill_x, fill_width) = progress.value.map_or_else(
                 || {
                     if window.is_window_active() {
-                        window.request_animation_frame();
+                        crate::motion::request_frame(window.current_view(), cx);
                     }
-                    let phase = (started.elapsed().as_secs_f64() % SWEEP_PERIOD) / SWEEP_PERIOD;
+                    let phase = crate::motion::phase(std::time::Duration::from_millis(1500));
                     let phase = if phase < 0.5 {
                         phase * 2.0
                     } else {
                         phase.mul_add(-2.0, 2.0)
                     };
-                    let phase = phase.to_f32().unwrap_or_default();
                     let width = width * 0.35;
                     (width * 0.65 * phase, width)
                 },

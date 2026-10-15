@@ -15,7 +15,8 @@ use std::{
 use assert_fs::TempDir;
 use bootty_agents::{
     AgentKind, AgentLaunch, NativeAgentService, NativeAgentSession, NativeSessionConfig,
-    NativeSessionStatus, NativeToolStatus, NativeTurnOutcome, NativeTurnReceipt,
+    NativeSessionStatus, NativeTodo, NativeTodoStatus, NativeToolStatus, NativeTurnOutcome,
+    NativeTurnReceipt,
 };
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
@@ -41,6 +42,7 @@ waiting=None
 deferred=False
 release_pending=False
 approvals=[]
+declined=[]
 hold_approval=False
 writers=[]
 def emit(value): print(json.dumps(value),flush=True)
@@ -57,6 +59,7 @@ for line in sys.stdin:
   if 'result' in value:
    approvals.append(value['result'])
    if not hold_approval: completed()
+  if 'error' in value: declined.append(value)
   continue
  if method == 'initialized': continue
  if method == 'initialize': reply(ident,{})
@@ -140,6 +143,9 @@ for line in sys.stdin:
    emit({'id':900,'method':'item/commandExecution/requestApproval','params':scope})
    reply(ident,{'turn':{'id':'turn-'+str(turn)}})
    continue
+  if text == 'unknown-request':
+   # A request kind Bootty doesn't answer; the turn goes on without it.
+   emit({'id':'permissions-1','method':'item/permissions/requestApproval','params':{'threadId':thread,'turnId':'turn-'+str(turn)}})
   if text == 'mcp-approval':
    emit({'id':'foreign-mcp','method':'mcpServer/elicitation/request','params':{'threadId':'foreign','turnId':None}})
    emit({'id':'stale-mcp','method':'mcpServer/elicitation/request','params':{'threadId':thread,'turnId':'other'}})
@@ -201,7 +207,7 @@ for line in sys.stdin:
    with open('events.json') as source: events=json.load(source)
    os.unlink('events.json')
    for event in events: emit(event)
-  reply(ident,{'approvals':approvals})
+  reply(ident,{'approvals':approvals,'declined':declined})
  elif method == 'thread/read':
   with open('read.json','w') as output: json.dump(value,output)
   child=params.get('threadId',thread)
@@ -1489,6 +1495,100 @@ fn mcp_input_requests_remain_pending_without_fabricating_content(
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
 }
 
+/// A Codex plan turn shows its current steps and keeps the proposed plan in the transcript, where a
+/// resumed conversation reads it back. The next turn starts without the old steps.
+#[rstest]
+fn codex_plans_keep_their_steps_for_the_turn_and_the_proposed_plan_in_the_transcript() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let snapshot = session.snapshot();
+    let scope = json!({"threadId":snapshot.session_id,"turnId":snapshot.turn_id});
+    let emit = |events: &[(&str, Value)]| {
+        let events = events
+            .iter()
+            .map(|(method, params)| {
+                let mut params = params.clone();
+                params["threadId"] = scope["threadId"].clone();
+                params["turnId"] = scope["turnId"].clone();
+                json!({"method":method,"params":params})
+            })
+            .collect::<Vec<_>>();
+        fs::write(root.path().join("events.json"), json!(events).to_string()).unwrap();
+        barrier(&session).unwrap();
+        session.snapshot()
+    };
+    let plan = |snapshot: &bootty_agents::NativeSessionSnapshot| {
+        snapshot
+            .transcript
+            .iter()
+            .find(|item| item.id == "plan-1")
+            .map(|item| (item.role.clone(), item.text.clone(), item.complete))
+    };
+
+    let snapshot = emit(&[
+        (
+            "turn/plan/updated",
+            json!({"explanation":null,"plan":[
+                {"step":"Read the reducer","status":"completed"},
+                {"step":"Keep plan items","status":"inProgress"},
+                {"step":"Test it","status":"pending"},
+            ]}),
+        ),
+        (
+            "item/plan/delta",
+            json!({"itemId":"plan-1","delta":"# Draft"}),
+        ),
+    ]);
+    let todo = |text: &str, status| NativeTodo {
+        text: text.to_owned(),
+        status,
+    };
+    assert_eq!(
+        snapshot.todos,
+        [
+            todo("Read the reducer", NativeTodoStatus::Completed),
+            todo("Keep plan items", NativeTodoStatus::InProgress),
+            todo("Test it", NativeTodoStatus::Pending),
+        ]
+    );
+    assert_eq!(
+        plan(&snapshot),
+        Some(("plan".into(), "# Draft".into(), false))
+    );
+
+    let snapshot = emit(&[(
+        "item/completed",
+        json!({"item":{"id":"plan-1","type":"plan","text":"# Plan\n\n1. Keep plan items"}}),
+    )]);
+    assert_eq!(
+        plan(&snapshot),
+        Some(("plan".into(), "# Plan\n\n1. Keep plan items".into(), true))
+    );
+
+    session
+        .rpc("__finish", json!({"status":"completed"}))
+        .unwrap();
+    session.send_prompt("active").unwrap();
+    assert_eq!(session.snapshot().todos, []);
+    session.stop();
+
+    fs::write(
+        root.path().join("history-timestamps.json"),
+        json!([{"id":"prior","items":[{"id":"plan-1","type":"plan","text":"Saved plan"}]}])
+            .to_string(),
+    )
+    .unwrap();
+    let mut config = config(root.path()).unwrap();
+    config.session_id = Some("native-thread".to_owned());
+    let resumed = NativeAgentSession::spawn(config).unwrap();
+    assert_eq!(
+        plan(&resumed.snapshot()),
+        Some(("plan".into(), "Saved plan".into(), true))
+    );
+    resumed.stop();
+}
+
 #[rstest]
 fn mcp_approval_is_reported_as_attention_without_a_provider_failure() {
     let root = TempDir::new().unwrap();
@@ -2617,4 +2717,24 @@ fn writer_owned_elsewhere_is_readable_and_can_retry_without_changing_identity() 
     assert_eq!(resumed.config.session_id, record.config.session_id);
     assert_eq!(resumed.snapshot.status, NativeSessionStatus::Idle);
     service.shutdown().unwrap();
+}
+
+/// A request kind Bootty doesn't answer is declined through the protocol, shown in the
+/// transcript, and the turn still finishes.
+#[rstest]
+fn unknown_codex_requests_are_declined_without_ending_the_conversation() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("unknown-request").unwrap();
+    let result = barrier(&session).unwrap();
+    assert_eq!(
+        result["declined"],
+        json!([{"id":"permissions-1","error":{"code":-32601,"message":"Bootty does not support this request"}}])
+    );
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, NativeSessionStatus::Idle);
+    assert_eq!(snapshot.requests, []);
+    assert!(snapshot.transcript.iter().any(|item| item.role == "notice"
+        && item.text
+            == "Bootty declined a request it doesn't support yet: item/permissions/requestApproval."));
 }

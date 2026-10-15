@@ -145,7 +145,7 @@ impl NativeAgentSessionView {
                                     cx,
                                 ),
                                 Err(error) => {
-                                    this.error = Some(error);
+                                    this.error = Some(super::diagnostic(error));
                                     cx.notify();
                                 }
                             }
@@ -219,7 +219,7 @@ impl NativeAgentSessionView {
                         });
                         this.import_attachment(path, None, window, cx);
                     }
-                    Err(error) => this.error = Some(error.into()),
+                    Err(error) => this.error = Some(super::diagnostic(error)),
                 }
                 cx.notify();
             });
@@ -346,7 +346,7 @@ impl NativeAgentSessionView {
                         }
                     }
                     (Ok(outcome), _) => {
-                        this.error = crate::commands::command_outcome_message(&outcome);
+                        this.error = super::outcome_error(&outcome);
                     }
                     (Err(_), _) => this.error = Some("Could not attach the file".into()),
                 }

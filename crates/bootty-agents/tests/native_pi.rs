@@ -78,6 +78,9 @@ for line in sys.stdin:
    emit({'type':'extension_ui_request','id':'dialog','method':'editor','title':'Question','prefill':'First line\nSecond line'})
    continue
   emit({'type':'agent_start'});working=True
+  if value['message']=='oversized-editor':
+   emit({'type':'extension_ui_request','id':'dialog','method':'editor','title':'Question','prefill':'x'*(2*1024*1024)})
+   reply(value,{'disposition':'started'});continue
   if value['message'] in ['confirm','select','input','editor']:
    for index in range(40): emit({'type':'extension_ui_request','id':'notice-'+str(index),'method':'notify','message':'Information'})
    emit({'type':'extension_ui_request','id':'dialog','method':value['message'],'title':'Question','options':['Allow','Block']})
@@ -1580,4 +1583,32 @@ fn resumed_pi_retains_the_last_provider_failure(
     session.send_prompt("next message").unwrap();
     assert_eq!(session.snapshot().error, None);
     session.stop();
+}
+
+/// A dialog too large to hold is cancelled through Pi's protocol, and the run settles instead of
+/// the conversation ending.
+#[test]
+fn oversized_pi_dialogs_are_cancelled_without_ending_the_conversation() {
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create("captured-binding", "Dialog", config(root.path()).unwrap())
+        .unwrap();
+    let session = service.resolve(&record.target()).unwrap();
+    service
+        .prompt(&record.target(), "oversized-editor")
+        .unwrap();
+    // The cancel went out while reading the dialog; this round trip follows it.
+    session.rpc("get_state", json!({})).unwrap();
+    let response: Value =
+        serde_json::from_slice(&fs::read(root.path().join("answer.json")).unwrap()).unwrap();
+    assert_eq!(
+        response,
+        json!({"type":"extension_ui_response","id":"dialog","cancelled":true})
+    );
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.requests, []);
+    assert_eq!(snapshot.status, NativeSessionStatus::Idle);
+    assert!(snapshot.transcript.iter().any(|item| item.role == "notice"
+        && item.text == "Bootty declined a provider request that is too large to show."));
 }

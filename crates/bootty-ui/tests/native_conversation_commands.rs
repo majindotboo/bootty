@@ -53,6 +53,10 @@ mod test_config;
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 // Real provider subprocess, public app-server protocol, and reply barriers; no timed sleeps.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One provider script holds every scripted Codex turn"
+)]
 fn provider(root: &Path) -> TestResult<String> {
     let program = root.join("codex-provider.py");
     fs::write(
@@ -77,6 +81,7 @@ turn=0
 waiting=None
 held_start=None
 stuck=False
+approval=False
 methods=[]
 def emit(value): print(json.dumps(value),file=output,flush=True)
 def reply(ident,result): emit({'id':ident,'result':result})
@@ -95,6 +100,10 @@ def tool_call(params):
 for line in source:
  value=json.loads(line)
  method=value.get('method')
+ if method is None:
+  # An approval answer finishes the turn that asked for it.
+  if approval and 'result' in value: notice('turn/completed',turn={'id':'turn-'+str(turn),'status':'completed','items':[]}); approval=False
+  continue
  methods.append(method)
  ident=value.get('id')
  params=value.get('params',{})
@@ -130,6 +139,10 @@ for line in source:
   if text == 'wait': waiting=ident; continue
   # The turn starts but never reports an end, even after an acknowledged interrupt.
   if text == 'stuck': stuck=True; reply(ident,{'turn':{'id':'turn-'+str(turn)}}); continue
+  if text == 'approval':
+   approval=True
+   emit({'id':900,'method':'item/commandExecution/requestApproval','params':{'threadId':thread,'turnId':'turn-'+str(turn),'itemId':'command','command':'echo approved'}})
+   reply(ident,{'turn':{'id':'turn-'+str(turn)}});continue
   notice('item/started',item={'id':'command-'+str(turn),'type':'commandExecution','command':'echo probe','aggregatedOutput':''})
   notice('item/commandExecution/outputDelta',itemId='command-'+str(turn),delta='tool output')
   notice('item/agentMessage/delta',itemId='answer-'+str(turn),delta='reply: '+text)
@@ -659,13 +672,14 @@ fn native_conversation_commands_stream_through_every_shared_mailbox_caller() -> 
     }
     let mut list = CommandInvocation::new("agents.native.list", Vec::new(), Caller::Socket);
     list.target = Some(binding);
-    assert_eq!(
-        success(host.submit(list)?)?
-            .as_array()
-            .ok_or("list missing")?
-            .len(),
-        1
-    );
+    let listed = success(host.submit(list)?)?;
+    let listed = listed.as_array().ok_or("list missing")?;
+    assert_eq!(listed.len(), 1);
+    // A listing names targets without whole transcripts, which exceed the payload limit.
+    let entry = listed.first().ok_or("listed conversation")?;
+    assert_eq!(entry["id"], record.id);
+    assert_eq!(entry["generation"], record.generation);
+    assert!(entry.get("snapshot").is_none() && entry.get("transcript").is_none());
     Ok(())
 }
 
@@ -931,6 +945,77 @@ fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() ->
             .count(),
         2
     );
+    Ok(())
+}
+
+/// Native conversations raise desktop notifications like observed agents: when one needs
+/// approval, and when its turn finishes. The Agents panel lists them too.
+#[rstest]
+fn native_conversations_notify_when_they_need_approval_and_finish() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let background = record(&host.start(&binding, "conversation", "task-notify", "")?)?;
+    let target = background.target();
+    // A conversation in view doesn't notify; another task's conversation takes focus.
+    let foreground = record(&host.start(&binding, "foreground", "task-foreground", "")?)?;
+    let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Socket);
+    focus.target = Some(foreground.target());
+    success(host.submit(focus)?)?;
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .ok_or("deadline overflow")?;
+    let notified = |host: &mut Host, title: &str| -> TestResult<()> {
+        loop {
+            host.tick();
+            if host.effects.iter().any(|effect| {
+                matches!(effect, AppEffect::DesktopNotification { title: shown, .. } if shown == title)
+            }) {
+                return Ok(());
+            }
+            host.wakes
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        }
+    };
+    host.tick();
+    host.effects.clear();
+    success(host.submit(native_command(
+        "agents.native.prompt",
+        &target,
+        &["approval"],
+        Caller::Socket,
+    ))?)?;
+    notified(&mut host, "Codex: Needs approval")?;
+    let request = host
+        .state
+        .native_agent_service()
+        .ok_or("native owner missing")?
+        .sessions()
+        .into_iter()
+        .find(|session| session.id == background.id)
+        .ok_or("conversation")?
+        .snapshot
+        .requests
+        .first()
+        .ok_or("pending approval")?
+        .id
+        .clone();
+    success(host.submit(native_command(
+        "agents.native.approve",
+        &target,
+        &[&request, "allow"],
+        Caller::Socket,
+    ))?)?;
+    notified(&mut host, "Codex: Finished")?;
+    let mut listed = host
+        .state
+        .agent_overview()
+        .into_iter()
+        .filter(|entry| entry.source == "native")
+        .map(|entry| entry.status)
+        .collect::<Vec<_>>();
+    listed.sort();
+    // The Agents panel lists both conversations: the finished one and the one in view.
+    assert_eq!(listed, vec!["complete".to_owned(), "idle".to_owned()]);
     Ok(())
 }
 
@@ -3322,7 +3407,7 @@ fn agent_choice_splits_the_captured_pane_instead_of_creating_a_tab(
     if matches!(backend, MultiplexerBackendConfig::Native) {
         return agent_choice_split(command, conversation_parent, backend);
     }
-    run_isolated_split(command, conversation_parent, &backend)
+    run_isolated_split(command, conversation_parent, backend)
 }
 
 const SPLIT_ENV: &str = "BOOTTY_SPLIT_CHILD";
@@ -3333,7 +3418,7 @@ const SPLIT_CHILD: &str = "isolated_split_child";
 fn run_isolated_split(
     command: &str,
     conversation_parent: bool,
-    backend: &MultiplexerBackendConfig,
+    backend: MultiplexerBackendConfig,
 ) -> TestResult<()> {
     // Socket paths include the development namespace and must fit Unix socket limits.
     let directory = assert_fs::TempDir::new_in("/tmp")?;

@@ -1,6 +1,8 @@
 pub mod action_catalog;
 mod agent_cursor;
 mod agent_tray;
+#[cfg(target_os = "macos")]
+pub use agent_tray::run_helper as run_agent_tray_helper;
 pub mod ansi_palette;
 pub mod app_actions;
 pub mod assets;
@@ -25,6 +27,7 @@ mod gpui_background;
 mod gpui_composer_completion;
 pub use gpui_composer_completion::CompletionScope;
 pub mod completion;
+pub mod composer_commands;
 mod gpui_browser_panel;
 mod gpui_dock;
 mod gpui_dock_skin;
@@ -51,6 +54,7 @@ pub mod keymap;
 pub mod keymap_runtime;
 pub mod menu;
 pub mod metrics;
+mod motion;
 pub mod native_host;
 mod native_platform;
 mod new_session;

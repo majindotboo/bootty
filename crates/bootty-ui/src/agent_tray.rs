@@ -10,7 +10,14 @@ use std::{
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 #[path = "agent_tray/native.rs"]
+mod native;
+#[cfg(target_os = "windows")]
+use native as platform;
+#[cfg(target_os = "macos")]
+#[path = "agent_tray/macos.rs"]
 mod platform;
+#[cfg(target_os = "macos")]
+pub use platform::run_helper;
 #[cfg(target_os = "linux")]
 #[path = "agent_tray/linux.rs"]
 mod platform;
@@ -45,7 +52,7 @@ pub fn dispatch(id: &str) -> bool {
     true
 }
 
-#[derive(Clone, Default, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Snapshot {
     unread: usize,
     total: usize,
@@ -147,8 +154,7 @@ impl AgentTray {
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = routes;
-        // macOS can deadlock the main thread while connecting a new status item's scene, so the
-        // item is created once and kept, even when no agents remain.
+        // Keep the tray owner alive even when no agents remain.
         if snapshot.total == 0 && self.backend.is_none() {
             return;
         }

@@ -664,13 +664,30 @@ pub fn accept_prompt_reply(
     result.map(|_| ())
 }
 
+/// Cancels a Pi dialog Bootty can't hold, so the extension continues instead of the
+/// conversation ending.
+pub fn decline_ui_request(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Option<Value> {
+    if field(value, "type") != "extension_ui_request"
+        || !matches!(
+            field(value, "method").as_str(),
+            Some("select" | "confirm" | "input" | "editor")
+        )
+    {
+        return None;
+    }
+    let id = valid_identity(field(value, "id"))?;
+    let reason = snapshot.request_refusal(value)?;
+    snapshot.declined_request(&id, reason.to_owned());
+    Some(json!({"type":"extension_ui_response","id":id,"cancelled":true}))
+}
+
 fn ui_request(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(), String> {
     let Some(id) = valid_identity(field(value, "id")) else {
         return Err("Pi UI request has no valid identity".to_owned());
     };
     let method = field(value, "method").as_str().unwrap_or_default();
     if matches!(method, "select" | "confirm" | "input" | "editor") {
-        if value.to_string().len() > 16 * 1024 || snapshot.requests.len() >= 32 {
+        if snapshot.request_refusal(value).is_some() {
             return Err("Pi pending UI requests exceed the bounded view".to_owned());
         }
         if snapshot

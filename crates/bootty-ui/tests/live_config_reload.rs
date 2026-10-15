@@ -566,7 +566,16 @@ fn every_new_window_policy_reports_the_restart_requirement() {
         assert!(state.reload_config(&mut Vec::new()), "{name}");
         assert_eq!(
             state.last_error().as_deref(),
-            Some("config reloaded; session/window settings require a new window or restart"),
+            Some("Settings reloaded. Session and window settings apply in a new window."),
+            "{name}",
+        );
+        // The window notification shows Bootty's wording, not a generic failure.
+        assert_eq!(
+            state
+                .last_error_notice()
+                .map(|notice| notice.to_string())
+                .as_deref(),
+            Some("Settings reloaded. Session and window settings apply in a new window."),
             "{name}",
         );
     }

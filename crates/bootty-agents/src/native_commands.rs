@@ -128,6 +128,7 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             vec!["id", "generation", "subagent"],
             ResourceKind::Session,
         ),
+        ("implement", vec!["id", "generation"], ResourceKind::Session),
         ("interrupt", vec!["id", "generation"], ResourceKind::Session),
         ("stop", vec!["id", "generation"], ResourceKind::Session),
         (

@@ -85,6 +85,9 @@ pub enum ErrorNotice {
     Ditch(String),
     #[error("the worktree was removed, but a branch remains")]
     DitchPartial(String),
+    /// Bootty's own wording, shown as written.
+    #[error("{0}")]
+    Message(String),
     #[error("{summary}")]
     Technical { summary: String, details: String },
 }

@@ -971,6 +971,27 @@ impl NativeAgentService {
         Ok(config)
     }
 
+    /// Leave Plan mode and ask the agent to carry out the plan it proposed. Plan mode is saved off
+    /// first, so the prompt's turn runs in the default mode.
+    /// # Errors
+    /// Returns stale targets, persistence failures, or the prompt's errors.
+    pub fn implement_plan(&self, target: &CommandTarget) -> Result<NativeSessionSnapshot, String> {
+        {
+            let _mutation = lock(&self.mutation);
+            let mut candidate = lock(&self.store).clone();
+            let record = candidate
+                .records
+                .iter_mut()
+                .find(|record| record.target() == *target)
+                .ok_or("Native session target is unknown or stale")?;
+            if record.config.plan_mode == Some(true) {
+                record.config.plan_mode = Some(false);
+                self.commit(candidate)?;
+            }
+        }
+        self.prompt(target, "Implement the plan.")
+    }
+
     /// Save the next-turn policy without interrupting active work. Idle changes resume with
     /// a fresh scoped tool lease; the captured approval request keeps its current policy.
     /// # Errors
@@ -1985,6 +2006,12 @@ struct PublicationState {
     followup_wake: Arc<followups::Wake>,
 }
 
+/// Deliberate limit: while a reply streams, the catalog commits at most ten times a second,
+/// because each commit rewrites every conversation and syncs it to disk. Status, request and
+/// identity changes commit at once. Publish live snapshots apart from persistence before raising
+/// the rate.
+const STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
+
 fn start_publication_worker(
     state: PublicationState,
     receiver: mpsc::Receiver<()>,
@@ -1992,54 +2019,86 @@ fn start_publication_worker(
     thread::Builder::new()
         .name("native-agent-history".to_owned())
         .spawn(move || {
-            while receiver.recv().is_ok() {
-                if state.shutdown.load(Ordering::Acquire) {
-                    return;
-                }
-                {
-                    let _mutation = lock(&state.mutation);
-                    let mut candidate = lock(&state.store).clone();
-                    let mut changed = false;
-                    {
-                        let live = lock(&state.live);
-                        for record in &mut candidate.records {
-                            if let Some(session) = live.get(&record.id) {
-                                let snapshot = session.snapshot();
-                                if snapshot.revision != record.snapshot.revision {
-                                    record.config.capture_session(&snapshot);
-                                    record.snapshot = snapshot;
-                                    changed = true;
-                                }
-                            }
-                        }
-                    }
-                    if !changed {
-                        continue;
-                    }
-                    {
-                        let result = serde_json::to_vec(&candidate)
-                            .map_err(|error| error.to_string())
-                            .and_then(|bytes| {
-                                if bytes.len() > 16 * 1024 * 1024 {
-                                    return Err("Native agent catalog exceeds 16 MiB".to_owned());
-                                }
-                                write_private(&state.path, &bytes)
-                            });
-                        match result {
-                            Ok(()) => *lock(&state.store) = candidate,
-                            Err(error) => {
-                                eprintln!("native agent history could not be saved: {error}");
-                                continue;
-                            }
-                        }
-                    }
-                }
-                publish(&state.revision, &state.change_handler);
-                state.followup_wake.notify();
+            let mut committed = None;
+            let mut signalled = receiver.recv().is_ok();
+            while signalled && !state.shutdown.load(Ordering::Acquire) {
+                // Signals during a streamed change's wait fold into the same commit.
+                signalled = state.commit_live(&mut committed).map_or_else(
+                    || receiver.recv().is_ok(),
+                    |wait| {
+                        !matches!(
+                            receiver.recv_timeout(wait),
+                            Err(mpsc::RecvTimeoutError::Disconnected)
+                        )
+                    },
+                );
             }
         })
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+impl PublicationState {
+    /// Commits and publishes live snapshots that moved past the saved ones. Returns how long a
+    /// streamed-only change waits for its commit slot.
+    fn commit_live(&self, committed: &mut Option<Instant>) -> Option<Duration> {
+        let mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        let mut changed = false;
+        let mut settled = false;
+        {
+            let live = lock(&self.live);
+            for record in &mut candidate.records {
+                if let Some(session) = live.get(&record.id) {
+                    let snapshot = session.snapshot();
+                    if snapshot.revision != record.snapshot.revision {
+                        settled |= !streamed_only(&record.snapshot, &snapshot);
+                        record.config.capture_session(&snapshot);
+                        record.snapshot = snapshot;
+                        changed = true;
+                    }
+                }
+            }
+        }
+        if !changed {
+            return None;
+        }
+        if !settled
+            && let Some(wait) =
+                committed.and_then(|at| STREAM_COMMIT_INTERVAL.checked_sub(at.elapsed()))
+        {
+            return Some(wait);
+        }
+        let result = serde_json::to_vec(&candidate)
+            .map_err(|error| error.to_string())
+            .and_then(|bytes| {
+                if bytes.len() > 16 * 1024 * 1024 {
+                    return Err("Native agent catalog exceeds 16 MiB".to_owned());
+                }
+                write_private(&self.path, &bytes)
+            });
+        if let Err(error) = result {
+            eprintln!("native agent history could not be saved: {error}");
+            return None;
+        }
+        *lock(&self.store) = candidate;
+        *committed = Some(Instant::now());
+        drop(mutation);
+        publish(&self.revision, &self.change_handler);
+        self.followup_wake.notify();
+        None
+    }
+}
+
+/// Whether only streamed output changed: the turn, its status, requests and identity are as saved.
+fn streamed_only(saved: &NativeSessionSnapshot, live: &NativeSessionSnapshot) -> bool {
+    saved.status == live.status
+        && saved.turn_id == live.turn_id
+        && saved.first_turn == live.first_turn
+        && saved.requests == live.requests
+        && saved.error == live.error
+        && saved.session_id == live.session_id
+        && saved.session_file == live.session_file
 }
 
 fn publish(revision: &AtomicU64, handler: &Mutex<Option<NativeChangeHandler>>) {

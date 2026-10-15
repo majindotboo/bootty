@@ -1,4 +1,5 @@
-//! Queued prompts sit in an inset drawer attached to the shared composer surface.
+//! Queued prompts and the current plan sit in an inset drawer attached to the shared composer
+//! surface.
 use super::NativeAgentSessionView;
 use bootty_agents::{NativeQueuedMessage, NativeQueuedMessageStatus, NativeSessionStatus};
 use gpui_kit::component::{
@@ -28,13 +29,14 @@ enum QueueAction {
 impl NativeAgentSessionView {
     pub(super) fn render_queued_messages(&self, cx: &Context<Self>) -> impl IntoElement {
         let messages = &self.record.queued_messages;
+        let plan = self.render_plan(cx);
         div()
             .id("native-queue")
             .debug_selector(|| "native-queue".into())
             .min_w_0()
             .mx_3()
-            .when(!messages.is_empty(), |drawer| {
-                // Like T3's attachment seam, the composer covers the drawer's lower edge.
+            .when(!messages.is_empty() || plan.is_some(), |drawer| {
+                // The composer covers the drawer's lower edge.
                 drawer
                     .mb_neg_3()
                     .pb_3()
@@ -44,6 +46,10 @@ impl NativeAgentSessionView {
                     .border_1()
                     .border_color(cx.theme().border.opacity(0.5))
                     .bg(cx.theme().muted.opacity(0.2))
+            })
+            .children(plan)
+            .when(!messages.is_empty(), |drawer| {
+                drawer
                     .child(
                         Button::new("native-queued-header")
                             .debug_selector(|| "native-queued-header".into())

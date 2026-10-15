@@ -1643,6 +1643,7 @@ fn read_frames(
             return Ok(());
         };
         if count > FRAME_LIMIT
+            && !is_provider_request(&value, provider)
             && !allows_history_page(&value, snapshot, pending)
             && !allows_image_frame(&value, snapshot, pending, claude)
             && !allows_history_echo(&value, snapshot, pending, claude)
@@ -1666,8 +1667,14 @@ fn read_frames(
             continue;
         }
         if provider == AgentKind::Pi {
+            let declined = (field(&value, "type") != "response")
+                .then(|| crate::native_pi::decline_ui_request(&mut lock(snapshot), &value))
+                .flatten();
             if field(&value, "type") == "response" {
                 route_reply(&value, pending, provider);
+            } else if let Some(reply) = declined {
+                write_frame(input, closing, &reply)?;
+                publish_change(change_handler);
             } else {
                 ingest_pi_frame(snapshot, &value)?;
                 lock(snapshot).settle_stop_request();
@@ -1692,7 +1699,9 @@ fn read_frames(
                 )?;
                 continue;
             }
-            capture_request(&mut snapshot, &value)?;
+            if let Some(reply) = capture_request(&mut snapshot, &value)? {
+                write_frame(input, closing, &reply)?;
+            }
         } else {
             // The reducer also accepts observed child lifecycles after the parent turn ends.
             // It still rejects foreign threads and unrelated turns before projecting content.
@@ -1747,6 +1756,16 @@ fn read_frames(
             lock(workers).push(worker);
         }
         publish_change(change_handler);
+    }
+}
+
+/// A provider request is read whole even past the control budget, so one too large to hold is
+/// declined through the protocol instead of ending the conversation.
+fn is_provider_request(value: &Value, provider: AgentKind) -> bool {
+    match provider {
+        AgentKind::Claude => field(value, "type") == "control_request",
+        AgentKind::Pi => field(value, "type") == "extension_ui_request",
+        AgentKind::Codex => value.get("id").is_some() && value.get("method").is_some(),
     }
 }
 
@@ -2086,8 +2105,17 @@ fn image_blocks(content: &Value, count: usize, image_kind: &str) -> bool {
     })
 }
 
-fn capture_request(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(), String> {
+/// Holds a provider request for an answer, or returns the error reply that declines it. Only a
+/// broken identity ends the conversation.
+fn capture_request(
+    snapshot: &mut NativeSessionSnapshot,
+    value: &Value,
+) -> Result<Option<Value>, String> {
     let method = field(value, "method").as_str().unwrap_or_default();
+    let wire_id = field(value, "id").clone();
+    if !(wire_id.is_string() || wire_id.is_number()) || wire_id.to_string().len() > 8192 {
+        return Err("Provider request has an invalid identity".to_owned());
+    }
     if !matches!(
         method,
         "item/commandExecution/requestApproval"
@@ -2095,15 +2123,27 @@ fn capture_request(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Resul
             | "item/tool/requestUserInput"
             | "mcpServer/elicitation/request"
     ) {
-        return Err(format!("Unsupported native provider request: {method}"));
+        snapshot.declined_request(
+            &wire_id.to_string(),
+            format!(
+                "Bootty declined a request it doesn't support yet: {}.",
+                method
+                    .chars()
+                    .filter(|character| !character.is_control())
+                    .take(80)
+                    .collect::<String>()
+            ),
+        );
+        return Ok(Some(
+            json!({"id":wire_id,"error":{"code":-32601,"message":"Bootty does not support this request"}}),
+        ));
     }
     let parameters = field(value, "params").clone();
-    if parameters.to_string().len() > 16 * 1024 || snapshot.requests.len() >= 32 {
-        return Err("Native provider pending requests exceed the bounded view".to_owned());
-    }
-    let wire_id = field(value, "id").clone();
-    if !(wire_id.is_string() || wire_id.is_number()) || wire_id.to_string().len() > 8192 {
-        return Err("Provider request has an invalid identity".to_owned());
+    if let Some(reason) = snapshot.request_refusal(&parameters) {
+        snapshot.declined_request(&wire_id.to_string(), reason.to_owned());
+        return Ok(Some(
+            json!({"id":wire_id,"error":{"code":-32000,"message":reason}}),
+        ));
     }
     if snapshot
         .requests
@@ -2127,7 +2167,7 @@ fn capture_request(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Resul
     });
     snapshot.status = NativeSessionStatus::Waiting;
     snapshot.changed();
-    Ok(())
+    Ok(None)
 }
 
 fn codex_turn_parameters(

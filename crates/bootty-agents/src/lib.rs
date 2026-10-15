@@ -127,8 +127,9 @@ pub use native_permissions::{
 };
 pub use native_protocol::{
     NativeAgentRequest, NativeProviderArchiveState, NativeProviderWriterState,
-    NativeSessionSnapshot, NativeSessionStatus, NativeToolCall, NativeToolStatus,
-    NativeTranscriptItem, NativeTurnOutcome, NativeTurnReceipt, native_error_message,
+    NativeSessionSnapshot, NativeSessionStatus, NativeTodo, NativeTodoStatus, NativeToolCall,
+    NativeToolStatus, NativeTranscriptItem, NativeTurnOutcome, NativeTurnReceipt,
+    native_error_message,
 };
 pub use native_service::{
     NativeAgentService, NativeCreationError, NativeProviderInfo, NativeQueuedMessage,

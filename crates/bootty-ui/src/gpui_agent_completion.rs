@@ -1,6 +1,7 @@
 //! Conversation completions capture the exact provider and binding.
 use super::*;
 use crate::{
+    composer_commands::ComposerCommand,
     gpui::CommandAction,
     gpui_composer_completion::{CompletionScope, CompletionSource, ComposerCompletion},
 };
@@ -88,6 +89,7 @@ impl NativeAgentSessionView {
                 .remote
                 .as_ref()
                 .map(|remote| remote.host.clone()),
+            commands: true,
         };
         if self
             .completion
@@ -98,7 +100,17 @@ impl NativeAgentSessionView {
         }
         let editor = self.composer.clone();
         let sender = self.sender.clone();
-        let completion = cx.new(|cx| ComposerCompletion::new(scope, sender, editor, window, cx));
+        // A resume replaces the completion; chips already in the draft keep their app or plugin.
+        let mentions = self
+            .completion
+            .as_ref()
+            .and_then(|completion| completion.read(cx).provider_mentions(cx).ok())
+            .unwrap_or_default();
+        let completion = cx.new(|cx| {
+            let mut completion = ComposerCompletion::new(scope, sender, editor, window, cx);
+            completion.restore_provider_mentions(&mentions);
+            completion
+        });
         // Restored prompts show app chips; the completion registered the icon sender above.
         crate::gpui_application_icons::load(
             self.record
@@ -119,35 +131,8 @@ impl NativeAgentSessionView {
              _,
              selection: &crate::gpui_composer_completion::CompletionSelection,
              window,
-             cx| match &selection.source {
-                CompletionSource::File(_) => {
-                    this.stage_project_attachment(selection.clone(), window, cx);
-                }
-                CompletionSource::Application(target) => {
-                    if this.applications.len() >= 8 {
-                        this.error = Some("Mention at most eight application windows".into());
-                        cx.notify();
-                        return;
-                    }
-                    let token = crate::gpui_prompt_attachments::application_token(target);
-                    let id = token.id().to_string();
-                    let mention = bootty_agents::NativeApplicationMention {
-                        id: id.clone(),
-                        target: target.clone(),
-                        prompt_range: selection.range.clone(),
-                    };
-                    this.applications.retain(|existing| existing.id != id);
-                    this.applications.push(mention);
-                    this.composer.update(cx, |input, cx| {
-                        input.set_selected_range(selection.range.clone(), cx);
-                        if let Err(error) = input.replace_with_token(token, window, cx) {
-                            this.error = Some(error.to_string());
-                        }
-                        input.focus_handle(cx).focus(window, cx);
-                    });
-                    cx.notify();
-                }
-                CompletionSource::Provider(_) | CompletionSource::Directory(_) => {}
+             cx| {
+                this.completion_selected(selection, window, cx);
             },
         ));
         self.completion_subscriptions.push(cx.subscribe_in(
@@ -159,6 +144,46 @@ impl NativeAgentSessionView {
         ));
         self.completion = Some(completion);
         cx.notify();
+    }
+
+    fn completion_selected(
+        &mut self,
+        selection: &crate::gpui_composer_completion::CompletionSelection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &selection.source {
+            CompletionSource::File(_) => {
+                self.stage_project_attachment(selection.clone(), window, cx);
+            }
+            CompletionSource::Application(target) => {
+                if self.applications.len() >= 8 {
+                    self.error = Some("Mention at most eight application windows".into());
+                    cx.notify();
+                    return;
+                }
+                let token = crate::gpui_prompt_attachments::application_token(target);
+                let id = token.id().to_string();
+                let mention = bootty_agents::NativeApplicationMention {
+                    id: id.clone(),
+                    target: target.clone(),
+                    prompt_range: selection.range.clone(),
+                };
+                self.applications.retain(|existing| existing.id != id);
+                self.applications.push(mention);
+                self.composer.update(cx, |input, cx| {
+                    input.set_selected_range(selection.range.clone(), cx);
+                    if let Err(error) = input.replace_with_token(token, window, cx) {
+                        self.error = Some(error.to_string());
+                    }
+                    input.focus_handle(cx).focus(window, cx);
+                });
+                cx.notify();
+            }
+            CompletionSource::Provider(_)
+            | CompletionSource::Directory(_)
+            | CompletionSource::Composer(_) => {}
+        }
     }
 
     fn composer_add_action(
@@ -244,7 +269,7 @@ impl NativeAgentSessionView {
                         this.import_attachment(staged.path, Some(staged.temporary), window, cx);
                     }
                     Err(error) => {
-                        this.error = Some(error);
+                        this.error = Some(super::diagnostic(error));
                         cx.notify();
                     }
                 }
@@ -279,12 +304,80 @@ impl NativeAgentSessionView {
             .collect()
     }
 
+    /// The Bootty command a plain draft names. Attachments, notes, quotes and mentions make it a
+    /// message instead.
+    pub(super) fn composer_command(&self, cx: &App) -> Option<(ComposerCommand, String)> {
+        if !self.attachments.is_empty()
+            || !self.annotations.is_empty()
+            || !self.applications.is_empty()
+            || !self.active_citations(cx).is_empty()
+        {
+            return None;
+        }
+        let draft = self.composer.read(cx).value().to_string();
+        ComposerCommand::parse(&draft, |name| {
+            self.completion
+                .as_ref()
+                .is_some_and(|completion| completion.read(cx).provider_command(name))
+        })
+        .map(|(command, argument)| (command, argument.to_owned()))
+    }
+
+    /// Runs a Bootty command through the command its button or menu item already uses.
+    pub(super) fn run_composer_command(
+        &mut self,
+        command: ComposerCommand,
+        argument: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let app_command = match command {
+            ComposerCommand::Rename if argument.is_empty() => {
+                self.error = Some("Add the new title after /rename.".into());
+                cx.notify();
+                return;
+            }
+            ComposerCommand::Rename => {
+                let current = self.record.title.clone();
+                self.command("rename", vec![argument, current], window, cx);
+                None
+            }
+            ComposerCommand::Stop => {
+                self.command("interrupt", Vec::new(), window, cx);
+                None
+            }
+            ComposerCommand::Model => {
+                self.perform_completion(
+                    CommandAction::Focus(crate::gpui::ComposerControl::Model),
+                    window,
+                    cx,
+                );
+                None
+            }
+            ComposerCommand::New => Some("agents.native.open"),
+            ComposerCommand::Diff => Some("show_changes"),
+            ComposerCommand::Settings => Some("open_settings"),
+        };
+        self.composer
+            .update(cx, |composer, cx| composer.set_value("", window, cx));
+        if let Some(name) = app_command {
+            window.dispatch_action(
+                Box::new(crate::gpui_actions::InvokeCommand::new(
+                    CommandInvocation::from_action(name, Caller::Internal),
+                )),
+                cx,
+            );
+        }
+        cx.notify();
+    }
+
     pub(crate) fn completion_active(&self, window: &Window, cx: &App) -> bool {
         self.completion
             .as_ref()
             .is_some_and(|completion| completion.read(cx).active(window, cx))
     }
-    pub(crate) fn perform_completion(
+    /// Runs a composer action, as its keybinding does: completion navigation, focus, dictation.
+    pub fn perform_completion(
         &self,
         action: CommandAction,
         window: &mut Window,

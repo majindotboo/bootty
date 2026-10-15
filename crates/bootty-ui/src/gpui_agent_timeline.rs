@@ -4,7 +4,6 @@ use bootty_agents::{NativeToolStatus, NativeTranscriptItem};
 use gpui_kit::component::{
     ActiveTheme as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    shimmer::ShimmerText,
 };
 use gpui_kit::{
     App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _, Window, div,
@@ -109,7 +108,7 @@ fn append_turn(
     let final_message = indices.iter().rev().copied().find(|ix| {
         transcript
             .get(*ix)
-            .is_some_and(|item| item.role == "assistant")
+            .is_some_and(|item| matches!(item.role.as_str(), "assistant" | "plan"))
     });
     let members = indices
         .iter()
@@ -625,19 +624,13 @@ impl NativeAgentSessionView {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .map(|summary_row| {
-                                if live
-                                    && self.record.snapshot.status
-                                        == bootty_agents::NativeSessionStatus::Working
-                                {
-                                    summary_row.child(
-                                        ShimmerText::new(summary)
-                                            .id(SharedString::from(format!("work-shimmer:{id}"))),
-                                    )
-                                } else {
-                                    summary_row.child(summary)
-                                }
-                            }),
+                            .when(
+                                live && self.record.snapshot.status
+                                    == bootty_agents::NativeSessionStatus::Working
+                                    && self.moving(cx),
+                                |summary_row| summary_row.opacity(crate::motion::pulse()),
+                            )
+                            .child(summary),
                     ),
             )
             .on_click(move |_, _, cx| {

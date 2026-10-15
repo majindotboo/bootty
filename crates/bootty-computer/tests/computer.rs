@@ -545,6 +545,27 @@ proptest! {
     }
 }
 
+// A stray 66x20 helper window in front of an app's real window must not become its target.
+#[rstest]
+#[case(66.0, 20.0)]
+#[case(20.0, 400.0)]
+#[tokio::test]
+async fn targets_skip_windows_too_small_to_work_in(
+    target: ComputerTarget,
+    #[case] width: f64,
+    #[case] height: f64,
+) {
+    let mut stray = target.clone();
+    stray.window_id = 7;
+    stray.bounds.width = width;
+    stray.bounds.height = height;
+    let fake = Arc::new(Fake {
+        windows: vec![window(&stray), window(&target)],
+        ..Fake::default()
+    });
+    assert_eq!(fake.computer().targets().await.unwrap(), vec![target]);
+}
+
 #[rstest]
 #[tokio::test]
 async fn icons_return_pngs_only_for_known_apps(target: ComputerTarget) {

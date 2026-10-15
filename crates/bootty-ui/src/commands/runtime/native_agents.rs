@@ -561,7 +561,7 @@ impl AppState {
             .unwrap_or_default();
         let (deadline, cancellation) = executor::command_execution(execution);
         let repaint = self.repaint.clone();
-        let activity = matches!(operation, "prompt" | "queue" | "queue-steer")
+        let activity = matches!(operation, "prompt" | "queue" | "queue-steer" | "implement")
             .then(|| self.native_activity_invocation(&service, target))
             .flatten();
         let commands = self.commands.sender.clone();
@@ -908,11 +908,21 @@ impl AppState {
         &self,
         record: &NativeSessionRecord,
     ) -> Option<(ExactMuxTarget, CommandTarget)> {
-        let exact = self.native_panel_exact(
+        self.native_pane_target(
             &record.id,
             &record.binding_id,
             record.task_identity.as_deref()?,
-        )?;
+        )
+    }
+
+    /// The pane that shows a conversation, and its terminal target.
+    pub(crate) fn native_pane_target(
+        &self,
+        id: &str,
+        binding_id: &str,
+        task: &str,
+    ) -> Option<(ExactMuxTarget, CommandTarget)> {
+        let exact = self.native_panel_exact(id, binding_id, task)?;
         let binding = self.workspace.binding(exact.scope())?;
         let handle =
             self.binding_target_handle(binding.scope(), binding.mux().binding_generation());
@@ -1626,18 +1636,14 @@ impl AppState {
             });
         }
         let binding_id = exact.persistence_value().to_string();
-        if invocation.command == "agents.native.activities" {
+        // A listing names each conversation and its target generation. Full records carry whole
+        // transcripts and exceed the control payload limit; `agents.native.history` pages them.
+        if matches!(
+            invocation.command.as_str(),
+            "agents.native.activities" | "agents.native.list"
+        ) {
             return CommandDispatch::Complete(serialized_command_outcome(json!(
                 service.activities_for_binding(&binding_id)
-            )));
-        }
-        if invocation.command == "agents.native.list" {
-            return CommandDispatch::Complete(serialized_command_outcome(json!(
-                service
-                    .sessions()
-                    .into_iter()
-                    .filter(|record| record.binding_id == binding_id)
-                    .collect::<Vec<_>>()
             )));
         }
         let captured = match self.capture_native_launch(&invocation, &destination, &binding_id) {
@@ -2788,6 +2794,10 @@ fn native_title_context(
     })
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One match routes every native conversation operation"
+)]
 fn invoke(
     service: &NativeAgentService,
     invocation: &CommandInvocation,
@@ -2827,6 +2837,9 @@ fn invoke(
         "history" => service
             .read_history(target, arg(2))
             .and_then(|page| serde_json::to_value(page).map_err(|error| error.to_string())),
+        "implement" => service
+            .implement_plan(target)
+            .map(|snapshot| json!(snapshot)),
         "interrupt" => service.interrupt(target).map(|()| Value::Null),
         "stop" => service.stop(target).map(|()| Value::Null),
         "rename" => invocation.arguments.get(3).map_or_else(

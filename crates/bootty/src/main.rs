@@ -25,6 +25,15 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--agent-tray-stdio")) {
+        anyhow::ensure!(
+            std::env::args_os().len() == 2,
+            "Unexpected agent tray arguments"
+        );
+        bootty_ui::run_agent_tray_helper()?;
+        return Ok(ExitCode::SUCCESS);
+    }
     if let Some(connection) = agent_tool_stdio_connection()? {
         let stdin = io::stdin();
         let stdout = io::stdout();

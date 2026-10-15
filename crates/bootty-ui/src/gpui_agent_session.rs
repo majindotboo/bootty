@@ -61,6 +61,8 @@ use requests::{is_approval, is_claude_question};
 mod context_card;
 #[path = "gpui_agent_followups.rs"]
 mod followups;
+#[path = "gpui_agent_plan.rs"]
+mod plan;
 pub use context_card::ConversationContext;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -610,8 +612,50 @@ impl NativeAgentSessionView {
         ) && self.composer.read(cx).value().is_empty()
             && let Some(message) = &self.record.pending_initial_message
         {
+            // Sending reads attachments from their chips, so each one returns to its place, or to
+            // the end when its place is unknown.
+            let attachments = &self.record.attachments;
+            let mut placed = attachments
+                .iter()
+                .flat_map(|attachment| {
+                    let chip = crate::gpui_prompt_attachments::token(
+                        attachment.id.clone(),
+                        &attachment.name,
+                        attachment.size_bytes,
+                    );
+                    attachment
+                        .prompt_ranges
+                        .iter()
+                        .filter(|range| message.get((*range).clone()) == Some(chip.text().as_ref()))
+                        .map(|range| (range.clone(), chip.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            placed.sort_by_key(|(range, _)| std::cmp::Reverse(range.start));
+            let unplaced = attachments
+                .iter()
+                .filter(|attachment| {
+                    !placed
+                        .iter()
+                        .any(|(_, chip)| chip.id().as_ref() == attachment.id)
+                })
+                .map(|attachment| {
+                    crate::gpui_prompt_attachments::token(
+                        attachment.id.clone(),
+                        &attachment.name,
+                        attachment.size_bytes,
+                    )
+                })
+                .collect::<Vec<_>>();
             self.composer.update(cx, |composer, cx| {
                 composer.set_value(message.clone(), window, cx);
+                for (range, chip) in placed {
+                    _ = composer.replace_range_with_token(range, chip, window, cx);
+                }
+                for chip in unplaced {
+                    let end = composer.value().len();
+                    _ = composer.replace_range_with_token(end..end, chip, window, cx);
+                }
             });
             if self.attachments.is_empty() {
                 self.attachments = self
@@ -993,7 +1037,7 @@ impl NativeAgentSessionView {
                     Ok(outcome) => {
                         this.error = Some(
                             crate::commands::command_outcome_message(&outcome)
-                                .unwrap_or_else(|| "Agent command failed".to_owned()),
+                                .map_or_else(|| "Agent command failed".to_owned(), diagnostic),
                         );
                     }
                     Err(_) => {
@@ -1131,6 +1175,15 @@ impl NativeAgentSessionView {
                 .update(cx, super::gpui_speech::SpeechInput::finish_dictation);
             return;
         }
+        if let Some((command, argument)) = self.composer_command(cx) {
+            let owner = cx.weak_entity();
+            window.defer(cx, move |window, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    this.run_composer_command(command, argument, window, cx);
+                });
+            });
+            return;
+        }
         if !self.provider_enabled()
             || !self.can_prompt()
             || self.pending.contains("prompt")
@@ -1250,6 +1303,14 @@ impl NativeAgentSessionView {
         }
     }
 
+    /// Working motion runs while the agent works, unless the user turned it off. Waiting on the
+    /// user holds still.
+    fn moving(&self, cx: &App) -> bool {
+        self.record.snapshot.status != NativeSessionStatus::Waiting
+            && self.working_indicator.animate
+            && !cx.reduce_motion()
+    }
+
     fn has_running_activity(&self) -> bool {
         self.record.snapshot.status == NativeSessionStatus::Working
             || self.record.snapshot.transcript.iter().any(|item| {
@@ -1304,10 +1365,7 @@ impl NativeAgentSessionView {
         } else {
             "Working…".to_owned()
         };
-        let animate = self.record.snapshot.status != NativeSessionStatus::Waiting
-            && self.working_indicator.animate
-            && window.is_visible()
-            && !cx.reduce_motion();
+        let animate = window.is_visible() && self.moving(cx);
         div()
             .id("native-working")
             .debug_selector(|| "native-working".into())
@@ -1336,11 +1394,7 @@ impl NativeAgentSessionView {
                                 .items_center()
                                 .gap_2()
                                 .child(if animate {
-                                    gpui_kit::component::spinner::Spinner::new()
-                                        .icon(gpui_kit::assets::IconName::LoaderCircle)
-                                        .color(cx.theme().foreground.opacity(0.72))
-                                        .ease(|value| value)
-                                        .small()
+                                    crate::motion::spinner(cx.theme().foreground.opacity(0.72))
                                         .into_any_element()
                                 } else {
                                     // A paused spinner reads as frozen; waiting on the user is a clock.
@@ -1356,16 +1410,7 @@ impl NativeAgentSessionView {
                                     .small()
                                     .into_any_element()
                                 })
-                                .map(|row| {
-                                    if animate {
-                                        row.child(
-                                            gpui_kit::component::shimmer::ShimmerText::new(label)
-                                                .id("native-working-label"),
-                                        )
-                                    } else {
-                                        row.child(label)
-                                    }
-                                }),
+                                .child(label),
                         )
                     })
                     .child(self.render_subagent_group(cx)),
@@ -1436,7 +1481,7 @@ impl NativeAgentSessionView {
             "{} {name} details",
             if open { "Hide" } else { "Show" }
         ))
-        .child(Self::render_tool_heading(item, open, cx))
+        .child(self.render_tool_heading(item, open, cx))
         .on_click(move |_, _, cx| {
             _ = owner.update(cx, |this, cx| {
                 this.tool_disclosures.insert(id.clone(), !open);
@@ -1450,7 +1495,12 @@ impl NativeAgentSessionView {
         })
     }
 
-    fn render_tool_heading(item: &NativeTranscriptItem, open: bool, cx: &App) -> gpui_kit::Div {
+    fn render_tool_heading(
+        &self,
+        item: &NativeTranscriptItem,
+        open: bool,
+        cx: &App,
+    ) -> gpui_kit::Div {
         let name = item
             .tool
             .as_ref()
@@ -1492,9 +1542,8 @@ impl NativeAgentSessionView {
                     .as_ref()
                     .is_some_and(|tool| tool.status == bootty_agents::NativeToolStatus::Running)
                 {
-                    row.child(gpui_kit::component::shimmer::ShimmerText::new(summary).id(
-                        gpui_kit::SharedString::from(format!("tool-shimmer:{}", item.id)),
-                    ))
+                    row.when(self.moving(cx), |row| row.opacity(crate::motion::pulse()))
+                        .child(summary)
                 } else {
                     row.child(summary)
                 }
@@ -1807,8 +1856,12 @@ impl NativeAgentSessionView {
             .flex_col()
             .when(user, gpui_kit::Styled::items_end)
             .child(self.render_message_body(item, owner.clone(), cx))
+            .when(self.record.snapshot.undelivered(item), |row| {
+                row.child(Self::undelivered_notice(item, owner.clone(), cx))
+            })
             .when(
-                meta && item.complete && matches!(item.role.as_str(), "user" | "assistant"),
+                meta && item.complete
+                    && matches!(item.role.as_str(), "user" | "assistant" | "plan"),
                 |row| row.child(self.message_metadata(item, focused, owner, cx)),
             );
         div()
@@ -1845,6 +1898,7 @@ impl NativeAgentSessionView {
         let title = match item.role.as_str() {
             "thinking" | "reasoning" => "Thinking",
             "change" => "Changes",
+            "plan" => "Plan",
             _ => "",
         };
         let id = item.id.clone();
@@ -1864,6 +1918,9 @@ impl NativeAgentSessionView {
             })
             .when(matches!(item.role.as_str(), "notice" | "thinking" | "reasoning"), |row| {
                 row.text_sm().text_color(cx.theme().muted_foreground)
+            })
+            .when(item.role == "plan", |row| {
+                row.gap_1().p_3().rounded(cx.theme().radius).border_1().border_color(cx.theme().border)
             })
             .when(!title.is_empty(), |row| {
                 row.child(div().text_xs().text_color(cx.theme().muted_foreground).child(title))
@@ -1941,6 +1998,43 @@ impl NativeAgentSessionView {
                     cx.open_url(url);
                 }
             })
+    }
+
+    /// A message the provider never confirmed says so, and its text can go back to the composer.
+    fn undelivered_notice(
+        item: &NativeTranscriptItem,
+        owner: gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::Div {
+        let id = item.id.clone();
+        let text = item.text.clone();
+        div()
+            .debug_selector({
+                let id = id.clone();
+                move || format!("native-undelivered-{id}")
+            })
+            .h_8()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_xs()
+            .text_color(cx.theme().danger)
+            .child("Not delivered")
+            .child(
+                Button::new(gpui_kit::SharedString::from(format!("resend-message:{id}")))
+                    .debug_selector(move || format!("native-resend-{id}"))
+                    .ghost()
+                    .xsmall()
+                    .label("Edit and resend")
+                    .on_click(move |_, window, cx| {
+                        _ = owner.update(cx, |this, cx| {
+                            this.composer.update(cx, |composer, cx| {
+                                composer.set_value(text.clone(), window, cx);
+                                composer.focus_handle(cx).focus(window, cx);
+                            });
+                        });
+                    }),
+            )
     }
 
     fn message_metadata(
@@ -2437,62 +2531,66 @@ impl NativeAgentSessionView {
     }
 
     fn render_error_recovery(&self, cx: &Context<Self>) -> impl IntoElement {
-        div().when_some(
-            self.error
-                .as_ref()
-                .filter(|_| !self.record.snapshot.provider_writer_blocked())
-                .or_else(|| {
-                    (!self.record.snapshot.transport_lost
-                        && !self.record.snapshot.provider_archived()
-                        && !self.record.snapshot.provider_writer_blocked())
-                    .then_some(
-                        self.record
-                            .snapshot
-                            .error
-                            .as_ref()
-                            .filter(|error| self.dismissed_error.as_ref() != Some(*error)),
-                    )
-                    .flatten()
-                }),
-            |body, error| {
-                body.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .px_4()
-                        .py_2()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(
-                            div().flex_1().child(
-                                crate::error_catalog::ErrorNotice::from_text(error.as_str())
-                                    .to_string(),
-                            ),
-                        )
-                        .child(
-                            Button::new("conversation-recover-error")
-                                .ghost()
-                                .small()
-                                .label(
-                                    if self.record.snapshot.status == NativeSessionStatus::Error {
-                                        "Retry"
-                                    } else {
-                                        "Dismiss"
-                                    },
-                                )
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.error = None;
-                                    this.dismissed_error.clone_from(&this.record.snapshot.error);
-                                    if this.record.snapshot.status == NativeSessionStatus::Error {
-                                        this.command("resume", Vec::new(), window, cx);
-                                    }
-                                    cx.notify();
-                                })),
-                        ),
+        // The view writes its own messages for people; the provider's error passes the catalog.
+        let message = self
+            .error
+            .clone()
+            .filter(|_| !self.record.snapshot.provider_writer_blocked())
+            .or_else(|| {
+                (!self.record.snapshot.transport_lost
+                    && !self.record.snapshot.provider_archived()
+                    && !self.record.snapshot.provider_writer_blocked())
+                .then_some(
+                    self.record
+                        .snapshot
+                        .error
+                        .as_deref()
+                        .filter(|error| self.dismissed_error.as_deref() != Some(*error))
+                        .map(diagnostic),
                 )
-            },
-        )
+                .flatten()
+            });
+        div().when_some(message, |body, message| {
+            body.child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_4()
+                    .py_2()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        div()
+                            .debug_selector({
+                                let message = message.clone();
+                                move || format!("native-conversation-error:{message}")
+                            })
+                            .flex_1()
+                            .child(message),
+                    )
+                    .child(
+                        Button::new("conversation-recover-error")
+                            .ghost()
+                            .small()
+                            .label(
+                                if self.record.snapshot.status == NativeSessionStatus::Error {
+                                    "Retry"
+                                } else {
+                                    "Dismiss"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.error = None;
+                                this.dismissed_error.clone_from(&this.record.snapshot.error);
+                                if this.record.snapshot.status == NativeSessionStatus::Error {
+                                    this.command("resume", Vec::new(), window, cx);
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            )
+        })
     }
 
     fn render_collapsed_composer(&self, cx: &Context<Self>) -> gpui_kit::Div {
@@ -3038,6 +3136,9 @@ impl Render for NativeAgentSessionView {
         self.load_models(window, cx);
         self.load_history(window, cx);
         self.sync_activity_tick(window, cx);
+        if busy && window.is_visible() && self.moving(cx) {
+            crate::motion::request_frame(cx.entity_id(), cx);
+        }
         let enabled = self.provider_enabled()
             && !matches!(
                 self.record.snapshot.status,
@@ -3124,6 +3225,17 @@ fn element_tooltip(
             })
             .build(window, cx)
         })
+}
+
+/// Text from providers, commands, and lower layers, as people should read it. The view's own
+/// messages are already written for people and skip this.
+fn diagnostic(text: impl AsRef<str>) -> String {
+    crate::error_catalog::ErrorNotice::from_text(text.as_ref()).to_string()
+}
+
+/// A failed command's message as people should read it.
+fn outcome_error(outcome: &CommandOutcome) -> Option<String> {
+    crate::commands::command_outcome_message(outcome).map(diagnostic)
 }
 
 fn compact_tokens(tokens: u64) -> String {

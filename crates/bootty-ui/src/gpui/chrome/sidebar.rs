@@ -1739,17 +1739,11 @@ impl SidebarRows {
                     return;
                 }
                 let animated = animate && window.is_visible() && !cx.reduce_motion();
-                let phase = owner.upgrade().map_or(0.0, |owner| {
-                    if animated {
-                        owner
-                            .read(cx)
-                            .sidebar_animation_epoch
-                            .elapsed()
-                            .as_secs_f32()
-                    } else {
-                        0.0
-                    }
-                });
+                let phase = if animated {
+                    crate::motion::phase(std::time::Duration::from_secs(1))
+                } else {
+                    0.0
+                };
                 let radius = f32::from(bounds.size.width.min(bounds.size.height)) * 0.4;
                 let center = bounds.center();
                 for dash in 0..8_u8 {
@@ -1774,22 +1768,9 @@ impl SidebarRows {
                         window.paint_path(path, tint);
                     }
                 }
-                if animated {
-                    _ = owner.update(cx, |this, cx| {
-                        if this.sidebar_animation_task.is_some() {
-                            return;
-                        }
-                        // One 30 Hz wakeup per sidebar; clipped, inactive and reduced-motion rings park.
-                        this.sidebar_animation_task = Some(cx.spawn(async move |owner, cx| {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(33))
-                                .await;
-                            _ = owner.update(cx, |this, cx| {
-                                this.sidebar_animation_task = None;
-                                cx.notify();
-                            });
-                        }));
-                    });
+                // Clipped, inactive and reduced-motion rings park.
+                if animated && let Some(owner) = owner.upgrade() {
+                    crate::motion::request_frame(owner.entity_id(), cx);
                 }
             },
         )

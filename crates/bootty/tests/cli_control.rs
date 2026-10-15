@@ -124,6 +124,21 @@ fn cli_control_helper() {
         assert!(child.wait().unwrap().success());
     }
 
+    assert_targeted_commands_use_live_owner(&receiver);
+
+    let update = spawn_bootty(&["update"]).wait_with_output().unwrap();
+    assert!(!update.status.success());
+    assert!(
+        String::from_utf8_lossy(&update.stderr)
+            .contains("install the complete Bootty release package")
+    );
+
+    assert_bare_invocation_uses_live_owner();
+
+    drop(server);
+}
+
+fn assert_targeted_commands_use_live_owner(receiver: &AppCommandReceiver) {
     // Both CLI paths deliver the same exact target, wherever `--target` appears.
     let target = Some(bootty_control::CommandTarget {
         kind: bootty_control::ResourceKind::Session,
@@ -156,7 +171,7 @@ fn cli_control_helper() {
         ],
     ] {
         let mut child = spawn_bootty(arguments);
-        let request = receive_request(&receiver);
+        let request = receive_request(receiver);
         assert_eq!(request.invocation.command, "agents.native.status");
         assert_eq!(request.invocation.arguments, vec!["native:claude:26", "43"]);
         assert_eq!(request.invocation.target, target, "{arguments:?}");
@@ -182,22 +197,11 @@ fn cli_control_helper() {
         .unwrap()
         .write_all(br#"["native:claude:26","43"]"#)
         .unwrap();
-    let request = receive_request(&receiver);
+    let request = receive_request(receiver);
     assert_eq!(request.invocation.arguments, vec!["native:claude:26", "43"]);
     assert_eq!(request.invocation.target, target);
     request.response.send(CommandOutcome::success()).unwrap();
     assert!(targeted_stdin.wait().unwrap().success());
-
-    let update = spawn_bootty(&["update"]).wait_with_output().unwrap();
-    assert!(!update.status.success());
-    assert!(
-        String::from_utf8_lossy(&update.stderr)
-            .contains("install the complete Bootty release package")
-    );
-
-    assert_bare_invocation_uses_live_owner();
-
-    drop(server);
 }
 
 fn spawn_bootty(arguments: &[&str]) -> std::process::Child {

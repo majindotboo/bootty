@@ -94,6 +94,26 @@ pub struct NativeTranscriptItem {
     pub applications: Vec<crate::NativeApplication>,
 }
 
+/// One step of the plan the agent is following.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NativeTodo {
+    pub text: String,
+    pub status: NativeTodoStatus,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeTodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// Deliberate limit: a plan keeps this many steps of at most `MAX_TODO_BYTES` each, so a runaway
+/// plan can't grow the catalog. Raise it if real plans hit it.
+const MAX_TODOS: usize = 64;
+const MAX_TODO_BYTES: usize = 1024;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NativeToolStatus {
@@ -300,6 +320,9 @@ pub struct NativeSessionSnapshot {
     #[serde(default)]
     pub completed_turn: bool,
     pub transcript: Vec<NativeTranscriptItem>,
+    /// The plan the current turn reported, step by step. A new turn starts without one.
+    #[serde(default)]
+    pub todos: Vec<NativeTodo>,
     pub requests: Vec<NativeAgentRequest>,
     pub usage: Option<Value>,
     pub error: Option<String>,
@@ -329,7 +352,53 @@ pub struct NativeSessionSnapshot {
     message_times: (Option<i64>, Option<i64>),
 }
 
+/// A pending request stays whole, because an approval answers with its exact input. The budget
+/// keeps a burst from exhausting memory and the catalog; raise it only with a streamed store.
+const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+const MAX_PENDING_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+const MAX_PENDING_REQUESTS: usize = 32;
+
 impl NativeSessionSnapshot {
+    /// Why a new provider request can't be held for an answer, if it can't. The caller declines
+    /// it through the provider's protocol instead of ending the conversation.
+    pub(crate) fn request_refusal(&self, request: &Value) -> Option<&'static str> {
+        let size = request.to_string().len();
+        let pending = self
+            .requests
+            .iter()
+            .map(|pending| pending.parameters.to_string().len())
+            .fold(0_usize, usize::saturating_add);
+        if self.requests.len() >= MAX_PENDING_REQUESTS {
+            Some("Bootty declined a provider request because 32 are already waiting.")
+        } else if size > MAX_REQUEST_BYTES
+            || pending.saturating_add(size) > MAX_PENDING_REQUEST_BYTES
+        {
+            Some("Bootty declined a provider request that is too large to show.")
+        } else {
+            None
+        }
+    }
+
+    /// Records a declined provider request where the conversation shows it.
+    pub(crate) fn declined_request(&mut self, id: &str, reason: String) {
+        self.message(format!("declined-request-{id}"), "notice", reason, true);
+        self.changed();
+    }
+
+    /// A user message the provider never confirmed, and no longer can: it isn't the message in
+    /// flight, or the process that would confirm it has ended. Restored history keeps the fact,
+    /// because confirmation is what marks a user message complete.
+    #[must_use]
+    pub fn undelivered(&self, item: &NativeTranscriptItem) -> bool {
+        item.role == "user"
+            && !item.complete
+            && (self.pending_user_item.as_deref() != Some(item.id.as_str())
+                || matches!(
+                    self.status,
+                    NativeSessionStatus::Stopped | NativeSessionStatus::Error
+                ))
+    }
+
     /// An interrupt was acknowledged, but the provider has not reported the turn's end yet.
     #[must_use]
     pub const fn stopping(&self) -> bool {
@@ -416,6 +485,7 @@ impl NativeSessionSnapshot {
             stop_requested_at: None,
             completed_turn: false,
             transcript: Vec::new(),
+            todos: Vec::new(),
             requests: Vec::new(),
             usage: None,
             error: None,
@@ -486,7 +556,11 @@ impl NativeSessionSnapshot {
             return;
         }
         let text = transcript_text(role, text);
-        if text.trim().is_empty() && matches!(role, "assistant" | "thinking" | "notice" | "custom")
+        if text.trim().is_empty()
+            && matches!(
+                role,
+                "assistant" | "thinking" | "notice" | "custom" | "plan"
+            )
         {
             if let Some(item) = self.transcript.iter_mut().find(|item| item.id == id) {
                 item.complete = complete;
@@ -975,6 +1049,13 @@ impl NativeSessionSnapshot {
                 field(item, "text").as_str().unwrap_or_default().to_owned(),
                 complete,
             ),
+            // The completed plan item is authoritative; its deltas only preview it.
+            "plan" => self.message(
+                id,
+                "plan",
+                field(item, "text").as_str().unwrap_or_default().to_owned(),
+                complete,
+            ),
             "commandExecution" => {
                 let output = field(item, "aggregatedOutput").as_str().unwrap_or_default();
                 let output = if output.is_empty() {
@@ -1034,18 +1115,20 @@ impl NativeSessionSnapshot {
                 self.turn_id = string(field(field(params, "turn"), "id"));
                 self.status = NativeSessionStatus::Working;
                 self.completed_turn = false;
+                self.todos.clear();
             }
+            "turn/plan/updated" => self.todos = codex_todos(field(params, "plan")),
             "turn/completed" => self.complete_turn(params),
             "item/agentMessage/delta"
+            | "item/plan/delta"
             | "item/reasoning/textDelta"
             | "item/reasoning/summaryTextDelta"
             | "item/commandExecution/outputDelta" => {
-                let role = if field(value, "method") == "item/agentMessage/delta" {
-                    "assistant"
-                } else if field(value, "method") == "item/commandExecution/outputDelta" {
-                    "tool"
-                } else {
-                    "thinking"
+                let role = match field(value, "method").as_str() {
+                    Some("item/agentMessage/delta") => "assistant",
+                    Some("item/plan/delta") => "plan",
+                    Some("item/commandExecution/outputDelta") => "tool",
+                    _ => "thinking",
                 };
                 self.delta(
                     field(params, "itemId")
@@ -1079,6 +1162,29 @@ impl NativeSessionSnapshot {
             _ => {}
         }
     }
+}
+
+fn codex_todos(plan: &Value) -> Vec<NativeTodo> {
+    plan.as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|step| {
+            let text = field(step, "step").as_str()?;
+            let status = match field(step, "status").as_str() {
+                Some("inProgress") => NativeTodoStatus::InProgress,
+                Some("completed") => NativeTodoStatus::Completed,
+                _ => NativeTodoStatus::Pending,
+            };
+            Some(NativeTodo {
+                text: text
+                    .get(..text.floor_char_boundary(MAX_TODO_BYTES))
+                    .unwrap_or_default()
+                    .to_owned(),
+                status,
+            })
+        })
+        .take(MAX_TODOS)
+        .collect()
 }
 
 fn codex_tool_status(item: &Value, complete: bool) -> NativeToolStatus {
@@ -1131,7 +1237,7 @@ fn bounded_tool_input(name: &str, input: String) -> String {
 }
 
 fn transcript_text(role: &str, text: String) -> String {
-    if matches!(role, "user" | "assistant" | "thinking") {
+    if matches!(role, "user" | "assistant" | "thinking" | "plan") {
         // Conversation text uses the aggregate transcript budget; tool output has its own cap.
         presentation_text(&text)
     } else {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use bootty_agents::{AgentKind, AgentPaneKey};
+use bootty_agents::{AgentKind, AgentPaneKey, NativeSessionActivity, NativeSessionStatus};
 use bootty_control::{Caller, CommandCancellation, CommandInvocation, CommandTarget, ResourceKind};
 use serde::{Deserialize, Serialize};
 
@@ -54,14 +54,122 @@ fn message_preview(message: Option<&str>) -> (Option<String>, bool) {
 pub(super) struct AgentNotifications {
     observed: HashMap<(AgentKind, AgentPaneKey), u64>,
     acknowledgements: HashMap<(AgentKind, AgentPaneKey), u64>,
+    /// Each native conversation's last seen generation and status.
+    native: HashMap<String, (u64, NativeSessionStatus)>,
+}
+
+/// A native conversation and the pane that shows it.
+struct NativeAttention {
+    activity: NativeSessionActivity,
+    scope: bootty_mux::controller::SpaceId,
+    pane: String,
+    target: CommandTarget,
+    host: String,
+}
+
+/// A conversation's status in the words the Agents panel and sidebar use.
+const fn native_status(activity: &NativeSessionActivity) -> &'static str {
+    match activity.status {
+        NativeSessionStatus::Working => "working",
+        NativeSessionStatus::Waiting => "waiting",
+        NativeSessionStatus::Error => "error",
+        NativeSessionStatus::Idle if activity.running_subagents > 0 => "working",
+        NativeSessionStatus::Idle if activity.completed_turn => "complete",
+        NativeSessionStatus::Idle | NativeSessionStatus::Starting => "idle",
+        NativeSessionStatus::Stopped => "stopped",
+    }
+}
+
+/// What a conversation's status change means to the person following it, if anything.
+fn native_event(
+    before: NativeSessionStatus,
+    activity: &NativeSessionActivity,
+) -> Option<&'static str> {
+    match (before, activity.status) {
+        (
+            NativeSessionStatus::Working | NativeSessionStatus::Waiting,
+            NativeSessionStatus::Idle,
+        ) if activity.completed_turn => Some("Finished"),
+        (before, NativeSessionStatus::Waiting) if before != NativeSessionStatus::Waiting => {
+            Some(if activity.approval {
+                "Needs approval"
+            } else {
+                "Needs input"
+            })
+        }
+        (before, NativeSessionStatus::Error) if before != NativeSessionStatus::Error => {
+            Some("Failed")
+        }
+        _ => None,
+    }
 }
 
 impl AppState {
-    pub fn agent_overview(&self) -> Vec<AgentOverview> {
-        let Some(agents) = self.agent_service() else {
+    /// Native conversations placed in a workspace pane.
+    fn native_attention(&self) -> Vec<NativeAttention> {
+        let Some(service) = self.native_agent_service() else {
             return Vec::new();
         };
-        let mut result = Vec::new();
+        service
+            .activities()
+            .into_iter()
+            .filter_map(|activity| {
+                let (exact, target) = self.native_pane_target(
+                    &activity.id,
+                    &activity.binding_id,
+                    activity.task_identity.as_deref()?,
+                )?;
+                let pane = exact.ids().2?.to_owned();
+                let host = self
+                    .workspace
+                    .binding(exact.scope())?
+                    .multiplexer()
+                    .remote
+                    .as_ref()
+                    .map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label);
+                Some(NativeAttention {
+                    scope: exact.scope(),
+                    pane,
+                    target,
+                    host,
+                    activity,
+                })
+            })
+            .collect()
+    }
+
+    /// Native conversations as Agents panel rows; focusing one shows its pane.
+    fn native_overview(&self) -> Vec<AgentOverview> {
+        self.native_attention()
+            .into_iter()
+            .map(|native| AgentOverview {
+                provider: native.activity.provider,
+                target: native.target,
+                scope: native.scope.persistence_value().to_string(),
+                pane: native.pane,
+                host: native.host,
+                status: native_status(&native.activity).to_owned(),
+                title: native.activity.title,
+                unread: false,
+                attention_sequence: "0".to_owned(),
+                can_resume: false,
+                cwd: None,
+                source: "native".to_owned(),
+                session_id: None,
+                session_file: None,
+                last_event: None,
+                last_message: None,
+                last_message_truncated: false,
+                turn_ended_at: None,
+            })
+            .collect()
+    }
+
+    pub fn agent_overview(&self) -> Vec<AgentOverview> {
+        let mut result = self.native_overview();
+        let Some(agents) = self.agent_service() else {
+            return result;
+        };
         for provider in AgentKind::ALL {
             for (key, state) in agents.pane_states(provider) {
                 let Some(binding) = self
@@ -165,7 +273,7 @@ impl AppState {
             .to_string();
         let mut live = HashMap::new();
         let mut acknowledgements = HashMap::new();
-        for entry in entries {
+        for entry in entries.into_iter().filter(|entry| entry.source != "native") {
             let key = AgentPaneKey::new(&entry.scope, &entry.pane);
             let state =
                 agents.snapshot_scoped(entry.provider, Some(&entry.scope), Some(&entry.pane));
@@ -225,5 +333,40 @@ impl AppState {
         }
         self.agent_notifications.observed = live;
         self.agent_notifications.acknowledgements = acknowledgements;
+    }
+
+    /// Notifies when a native conversation finishes, needs approval or input, or fails. A
+    /// conversation seen for the first time, or just resumed, never notifies.
+    pub(super) fn sync_native_attention(
+        &mut self,
+        window_focused: bool,
+        effects: &mut Vec<AppEffect>,
+    ) {
+        let focused = self.focused_pane();
+        let active = self.workspace.active.binding.scope();
+        let mut seen = HashMap::new();
+        for native in self.native_attention() {
+            let activity = &native.activity;
+            let before = self
+                .agent_notifications
+                .native
+                .get(&activity.id)
+                .filter(|(generation, _)| *generation == activity.generation)
+                .map(|(_, status)| *status);
+            seen.insert(activity.id.clone(), (activity.generation, activity.status));
+            let Some(event) = before.and_then(|before| native_event(before, activity)) else {
+                continue;
+            };
+            let visible = window_focused
+                && native.scope == active
+                && focused.as_deref() == Some(native.pane.as_str());
+            if self.config().session.agent_notifications.allows(visible) {
+                effects.push(AppEffect::DesktopNotification {
+                    title: format!("{}: {event}", activity.provider.display_name()),
+                    body: format!("{} · {}", native.host, activity.title),
+                });
+            }
+        }
+        self.agent_notifications.native = seen;
     }
 }

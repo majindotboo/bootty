@@ -50,7 +50,7 @@ This file describes the current production structure.
 | Native conversations and provider subprocesses | `bootty-agents::NativeAgentService` | Commit catalog snapshots before publication; resume only the captured task, account and provider conversation. |
 | Dictation and voice | `bootty-agents::voice` | Public OpenAI transcription and Realtime calls use an API key from `OPENAI_API_KEY` or the captured Codex/Pi API-key store; subscription OAuth tokens are not sent to these APIs. The pinned Pi audio host owns cross-platform microphone capture and playback. `bootty-host::speech` owns bounded helper framing and process lifetime. The GUI receives text and status; credentials stay provider-owned. |
 | Persisted agent runs and dispatch attempts | `bootty-agents::OrchestrationService` | Commit before publication; recovery interrupts outstanding attempts without replaying prompts. |
-| Desktop capture and input | `bootty-computer` | Disabled, denied, stale or occluded targets fail before input; the platform helper validates the exact observed process and window. |
+| Desktop capture and input | `bootty-computer` | Disabled, denied, stale or occluded targets fail before input; the in-process platform adapter validates the exact observed process and window on macOS, Windows and X11. |
 | Native browser views and validated web content | `bootty-browser` | Native window systems report capability errors; navigation and bounded page events pass through the host adapter. |
 | Local browser annotations and credential origin checks | `bootty-browser` | Bounded annotations persist atomically. Retained credential library APIs validate the document and exact origin; platform-store records remain separate from browser-managed passwords. |
 | Browser page identity, selection and saved placement | `bootty-ui::BrowserPanel` and `gpui_dock` | A stale page ID fails rather than navigating another page; page content and placement persist in `native-panels.json`. |
@@ -474,15 +474,16 @@ resumes a child or acquires its writer. Pi task IDs are output/lifecycle identit
 not invented conversation IDs. Claude Agent/Task notifications must name an
 observed parent tool. Unknown or foreign children remain inaccessible.
 
-An explicit application mention grants that conversation access to its selected
-window for the next submission. The lease owns opaque reference IDs, process
-incarnation and geometry. A new prompt replaces that scope; stop/revocation
-cancels pending application work. Grants and pixels are not persisted or inherited
-by subagents. Screenshot, focus and input tools reenter the shared command path;
-the signed helper still checks existing OS permissions, secure input and exact
-window identity. Input requires the selected window to be focused; the focus
-command raises only that window. Global feature defaults cannot widen a mention's
-scope or substitute another application.
+A conversation's lease grants apps by bundle ID for the rest of that
+conversation. A prompt mention, an approval card the agent raises through
+`bootty/computer/requestAccess`, or `computer.always-allowed-apps` adds a grant;
+only the UI answers a card. Revocation cancels pending application work. Grants and
+pixels are not persisted or inherited by subagents. Bootty itself, known terminals
+and System Settings are never granted. Screenshot, focus and input tools reenter the
+shared command path; `bootty-computer` still checks OS permissions, secure input and
+the exact window observed by the last snapshot. Input requires that window to be
+focused; the focus command raises only that window. On macOS, where input skips the
+real pointer, the UI briefly shows its own cursor where delivered input landed.
 
 The native transcript folds completed thinking and tool work by turn while keeping
 final responses visible. Live work retains its elapsed timer independently of the
@@ -1101,7 +1102,12 @@ actions and automatic acknowledgement submit the shared command catalog.
 The process-wide agent tray in `bootty-ui` aggregates window projections and
 retains window-bound command senders. Native menu callbacks enqueue shared
 commands; they never mutate GPUI entities or provider state. Linux DBus work
-runs outside the UI thread. Tray lifetime never controls application lifetime.
+runs outside the UI thread. On macOS, a stateless child process owns AppKit's
+tray event loop so a blocked status-item scene cannot block workspace windows.
+Bounded stdio carries coalesced snapshots and menu IDs; the parent resolves IDs
+through its retained command routes. Parent shutdown closes the helper input,
+which terminates the helper even when its main thread is blocked. Tray lifetime
+never controls application lifetime.
 
 Control subscriptions own their event queue, revision and wake signal. `event.wait`
 checks the queue and subscribes to that signal under the same state lock; no UI

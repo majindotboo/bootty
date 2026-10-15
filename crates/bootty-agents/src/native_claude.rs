@@ -133,7 +133,7 @@ impl ClaudeProtocol {
             Some("system")
                 if matches!(
                     field(value, "subtype").as_str(),
-                    Some("task_started" | "task_progress" | "task_notification")
+                    Some("task_started" | "task_progress" | "task_updated" | "task_notification")
                 ) && snapshot.session_id.as_deref() == Some(self.session_id.as_str())
                     && field(value, "session_id").as_str() == Some(self.session_id.as_str()) =>
             {
@@ -450,8 +450,9 @@ impl ClaudeProtocol {
                 "Unsupported or unrelated native control request",
             )));
         }
-        if snapshot.requests.len() >= 32 || request.to_string().len() > 16 * 1024 {
-            return Err("Claude exceeded the bounded pending permission budget".to_owned());
+        if let Some(reason) = snapshot.request_refusal(request) {
+            snapshot.declined_request(id, reason.to_owned());
+            return Ok(Some(control_error(id, reason)));
         }
         if !snapshot
             .requests

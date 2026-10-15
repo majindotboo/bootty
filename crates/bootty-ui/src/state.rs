@@ -1733,6 +1733,7 @@ impl AppState {
         self.drain_app_commands(viewport, effects);
         self.reconcile_orchestration();
         self.sync_agent_attention(window_focused, effects);
+        self.sync_native_attention(window_focused, effects);
 
         // A command-palette choice from the previous frame runs as soon as viewport/effects are
         // available, before mux refresh can retarget selected-window actions back to backend-active.
@@ -1907,17 +1908,21 @@ impl AppState {
         if let Err(error) = self.workspace.reconcile_binding_states() {
             warnings.push(error.to_string());
         }
-        if self.config_runtime.has_new_session_config_changes() {
-            warnings.push(
-                "config reloaded; session/window settings require a new window or restart"
-                    .to_owned(),
-            );
-        }
-        if let Some(warning) = change.compatibility_warning {
-            warnings.push(warning);
-        }
+        // A failure outranks Bootty's own notes about the reload, which keep their wording.
         self.last_error =
-            (!warnings.is_empty()).then(|| ErrorNotice::from_text(warnings.join("; ")));
+            if warnings.is_empty() {
+                change
+                    .compatibility_warning
+                    .or_else(|| {
+                        self.config_runtime.has_new_session_config_changes().then(|| {
+                        "Settings reloaded. Session and window settings apply in a new window."
+                            .to_owned()
+                    })
+                    })
+                    .map(ErrorNotice::Message)
+            } else {
+                Some(ErrorNotice::from_text(warnings.join("; ")))
+            };
         effects.push(AppEffect::RequestRepaint);
     }
 

@@ -81,7 +81,9 @@ impl DialogView {
                     });
                     cx.notify();
                 }
-                CompletionSource::Provider(_) | CompletionSource::Directory(_) => {}
+                CompletionSource::Provider(_)
+                | CompletionSource::Directory(_)
+                | CompletionSource::Composer(_) => {}
             },
         ));
         self.completion_subscriptions.push(cx.subscribe_in(

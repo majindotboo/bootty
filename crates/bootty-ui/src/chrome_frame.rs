@@ -1075,10 +1075,11 @@ fn sidebar_rows(
             ..base
         };
         let terminal_priority = sidebar_session_activity(state, session, &mut row);
+        let selected_native = active_pane_conversation(state, session);
         sidebar_native_activity(
             &mut row,
             session,
-            &scope,
+            (&scope, selected_native.as_deref()),
             &native_activities,
             terminal_priority,
             state.ui_theme().palette,
@@ -1112,10 +1113,25 @@ fn sidebar_session_activity(state: &AppState, session: &SessionView, row: &mut S
     priority
 }
 
+/// A task can hold several conversations; its row acts on the one in the session's active pane.
+fn active_pane_conversation(state: &AppState, session: &SessionView) -> Option<String> {
+    let attached = state
+        .workspace
+        .active
+        .binding
+        .session_attachment(session.identity.as_deref()?)?;
+    attached
+        .windows
+        .iter()
+        .flat_map(|window| &window.panes)
+        .find(|pane| pane.pane_id.is_some() && pane.pane_id == session.pane_id)
+        .and_then(|pane| pane.native_agent.clone())
+}
+
 fn sidebar_native_activity(
     row: &mut SidebarRow,
     session: &SessionView,
-    binding_id: &str,
+    (binding_id, selected): (&str, Option<&str>),
     activities: &[bootty_agents::NativeSessionActivity],
     terminal_priority: u8,
     theme: crate::gpui::UiPalette,
@@ -1131,7 +1147,10 @@ fn sidebar_native_activity(
         .collect::<Vec<_>>();
     if let (Some(task), Some(activity)) = (
         row.task.as_mut().filter(|task| !task.state.deleted),
-        matching.last(),
+        matching
+            .iter()
+            .find(|activity| Some(activity.id.as_str()) == selected)
+            .or_else(|| matching.last()),
     ) {
         task.native_conversation = Some(bootty_control::CommandTarget {
             kind: bootty_control::ResourceKind::Session,

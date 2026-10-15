@@ -23,10 +23,19 @@ const TEXT_SPACING: Duration = Duration::from_millis(50);
 const FOCUS_CHECKS: usize = 10;
 const FOCUS_WAIT: Duration = Duration::from_millis(20);
 
+/// Narrower or shorter windows, in desktop units, are tooltips, drag images or stray helpers rather
+/// than somewhere to work. They still cover points. Deliberate limit: lower it if a real app needs
+/// input in a smaller window.
+const MIN_TARGET_EDGE: f64 = 48.0;
+
+/// Windows an agent can work in, front to back.
 pub fn targets(desktop: &dyn Desktop) -> Vec<ComputerTarget> {
     desktop
         .windows()
         .into_iter()
+        .filter(|window| {
+            window.bounds.width >= MIN_TARGET_EDGE && window.bounds.height >= MIN_TARGET_EDGE
+        })
         .filter_map(|window| window.app)
         .take(256)
         .collect()

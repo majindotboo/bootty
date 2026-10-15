@@ -32,6 +32,8 @@ pub struct CompletionScope {
     pub files: CommandInvocation,
     pub applications: bool,
     pub remote: Option<bootty_config::config::RemoteConfig>,
+    /// Offer Bootty's own slash commands; only a live conversation can run them.
+    pub commands: bool,
 }
 
 #[derive(Clone)]
@@ -40,6 +42,7 @@ pub enum CompletionSource {
     File(crate::attachment_source::FileCompletionSource),
     Directory(String),
     Application(bootty_computer::ComputerTarget),
+    Composer(crate::composer_commands::ComposerCommand),
 }
 #[derive(Clone)]
 struct CompletionItem {
@@ -422,9 +425,31 @@ impl ComposerCompletion {
             .collect();
     }
 
-    /// `/` lists commands and skills; `$` lists only skills. Apps and plugins are `@` mentions.
+    /// Whether the provider advertises a slash command with this name.
+    pub(crate) fn provider_command(&self, name: &str) -> bool {
+        self.catalog.as_ref().is_some_and(|catalog| {
+            catalog
+                .options
+                .iter()
+                .any(|option| option.kind == NativeCompletionKind::Command && option.name == name)
+        })
+    }
+
+    /// `/` lists Bootty's commands, then the provider's commands and skills; `$` lists only
+    /// skills. Apps and plugins are `@` mentions.
     fn command_candidates(&self, kind: CompletionKind) -> Vec<CompletionItem> {
-        self.catalog
+        let composer = (kind == CompletionKind::Command && self.scope.commands)
+            .then_some(crate::composer_commands::ComposerCommand::ALL)
+            .into_iter()
+            .flatten()
+            .map(|command| CompletionItem {
+                label: format!("/{}", command.label(|name| self.provider_command(name))),
+                detail: command.description().to_owned(),
+                icon: "terminal",
+                source: CompletionSource::Composer(command),
+            });
+        let provider = self
+            .catalog
             .as_ref()
             .into_iter()
             .flat_map(|catalog| &catalog.options)
@@ -445,8 +470,8 @@ impl ComposerCompletion {
                     icon: if skill { "sparkles" } else { "terminal" },
                     source: CompletionSource::Provider(option.clone()),
                 }
-            })
-            .collect()
+            });
+        composer.chain(provider).collect()
     }
 
     fn integration_candidates(&self) -> Vec<CompletionItem> {
@@ -689,6 +714,17 @@ impl ComposerCompletion {
                 input.replace(format!("@{}/", path.trim_end_matches('/')), window, cx);
                 input.focus_handle(cx).focus(window, cx);
             });
+            cx.notify();
+            return;
+        }
+        if let CompletionSource::Composer(command) = &item.source {
+            let label = command.label(|name| self.provider_command(name));
+            self.editor.update(cx, |input, cx| {
+                input.set_selected_range(trigger.range.clone(), cx);
+                input.replace(format!("/{label} "), window, cx);
+                input.focus_handle(cx).focus(window, cx);
+            });
+            self.items.clear();
             cx.notify();
             return;
         }

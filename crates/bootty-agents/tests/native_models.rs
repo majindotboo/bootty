@@ -778,6 +778,41 @@ fn plan_mode_is_persisted_and_sent_as_a_provider_collaboration_mode(#[case] plan
 }
 
 #[rstest]
+fn implementing_a_plan_runs_its_turn_outside_plan_mode() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("store.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service
+        .create(
+            "binding",
+            "Planning",
+            config(root.path(), AgentKind::Codex).unwrap(),
+        )
+        .unwrap();
+    let target = record.target();
+    let selection = NativeModelSelection {
+        plan_mode: Some(true),
+        fast_mode: None,
+        model: "available".into(),
+        reasoning_effort: None,
+    };
+    service.configure(&target, &selection).unwrap();
+    service.implement_plan(&target).unwrap();
+    let wire: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(
+        (
+            &wire["params"]["collaborationMode"]["mode"],
+            &wire["params"]["input"][0]["text"]
+        ),
+        (&json!("default"), &json!("Implement the plan."))
+    );
+    let persisted: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(persisted["records"][0]["config"]["plan_mode"], false);
+    service.stop(&target).unwrap();
+}
+
+#[rstest]
 fn user_goal_controls_update_and_clear_the_provider_goal_without_sending_a_turn() {
     let root = TempDir::new().unwrap();
     let session =

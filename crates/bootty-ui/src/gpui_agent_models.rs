@@ -4,6 +4,9 @@ use crate::gpui::{ModelPickerEvent, ModelPickerView};
 use bootty_agents::NativeModelSelection;
 use gpui_kit::component::menu::PopupMenuItem;
 
+/// A catalog the provider sent in a shape Bootty doesn't know.
+const UNREADABLE_CATALOG: &str = "The provider sent a model list Bootty can't read.";
+
 pub(super) type ModelPickerState = ModelPickerView;
 
 pub fn reasoning_label(value: &str) -> String {
@@ -125,8 +128,8 @@ impl NativeAgentSessionView {
                                 this.provider_permissions = catalog.permissions;
                                 this.error = None;
                             }
-                            Err(error) => {
-                                this.error = Some(format!("Invalid provider catalog: {error}"));
+                            Err(_) => {
+                                this.error = Some(UNREADABLE_CATALOG.into());
                             }
                         }
                     }
@@ -142,9 +145,8 @@ impl NativeAgentSessionView {
                                     "No models are available for this provider account".into(),
                                 );
                             }
-                            Err(error) => {
-                                this.error =
-                                    Some(format!("Invalid provider model catalog: {error}"));
+                            Err(_) => {
+                                this.error = Some(UNREADABLE_CATALOG.into());
                             }
                         }
                     }
@@ -165,7 +167,7 @@ impl NativeAgentSessionView {
                         if matches!(operation.as_str(), "configure" | "favorite") {
                             this.models = None;
                         }
-                        this.error = crate::commands::command_outcome_message(&outcome);
+                        this.error = super::outcome_error(&outcome);
                     }
                     Err(_) => this.error = Some("Model command stopped".to_owned()),
                 }

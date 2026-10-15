@@ -369,9 +369,12 @@ impl NativeSessionSnapshot {
                 .find(|item| item.id == format!("claude-tool-{tool}"))
                 .and_then(|item| item.tool.as_ref())
         });
+        // Agent tools start subagents, and a backgrounded task (such as a shell) keeps running
+        // after its turn. Foreground commands are already visible as tools.
         if known.is_none()
             && (subtype != "task_started"
-                || !tool.is_some_and(|tool| matches!(tool.name.as_str(), "Agent" | "Task")))
+                || !(field(value, "is_backgrounded") == true
+                    || tool.is_some_and(|tool| matches!(tool.name.as_str(), "Agent" | "Task"))))
         {
             return;
         }
@@ -383,10 +386,17 @@ impl NativeSessionSnapshot {
         {
             old.status
         } else {
-            match field(value, "status").as_str() {
+            // `task_updated` carries its status change in a patch.
+            match field(value, "status")
+                .as_str()
+                .or_else(|| field(field(value, "patch"), "status").as_str())
+            {
                 Some("completed") => NativeToolStatus::Completed,
                 Some("failed") => NativeToolStatus::Failed,
-                Some("stopped") => NativeToolStatus::Interrupted,
+                Some("stopped" | "killed") => NativeToolStatus::Interrupted,
+                _ if subtype == "task_updated" => known
+                    .as_ref()
+                    .map_or(NativeToolStatus::Running, |old| old.status),
                 _ => NativeToolStatus::Running,
             }
         };
@@ -398,7 +408,11 @@ impl NativeSessionSnapshot {
                 id: id.into(),
                 provider: Some(crate::AgentKind::Claude),
                 title: text(title, 256),
-                prompt: text(field(&args, "prompt"), 2048),
+                prompt: text(
+                    args.get("prompt")
+                        .unwrap_or_else(|| field(&args, "command")),
+                    2048,
+                ),
                 model: model(field(&args, "model")),
                 thread_id: None,
                 owner_session: self.session_id.clone(),
