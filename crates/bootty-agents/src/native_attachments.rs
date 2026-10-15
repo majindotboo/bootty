@@ -433,8 +433,9 @@ fn extension(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+/// An animated GIF attaches as its first frame.
 fn is_supported_image(extension: &str) -> bool {
-    matches!(extension, "png" | "jpg" | "jpeg" | "webp")
+    matches!(extension, "png" | "jpg" | "jpeg" | "gif" | "webp")
 }
 
 fn safe_extension(extension: &str) -> String {

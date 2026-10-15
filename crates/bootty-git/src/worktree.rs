@@ -1,11 +1,11 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::{
-    project::{WorktreePickerEntry, main_worktree_entry, session_name_for_path},
+    project::{WorktreePickerEntry, home_dir_from, main_worktree_entry, session_name_for_path},
     runner::{CommandRunner, SystemCommandRunner},
 };
 
-/// A new branch and sibling checkout, resolved on the repository's host.
+/// A new branch and checkout, resolved on the repository's host.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct WorktreeRequest {
@@ -14,6 +14,9 @@ pub struct WorktreeRequest {
     pub name: Option<String>,
     #[serde(default)]
     pub start_ref: Option<String>,
+    /// Parent of every project's worktrees; `~` is the host's home. `None` uses the host default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directory: Option<String>,
 }
 impl WorktreeRequest {
     /// # Errors
@@ -45,6 +48,13 @@ impl WorktreeRequest {
             .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
         {
             return Err("Enter a starting branch, tag or commit".to_owned());
+        }
+        if self
+            .directory
+            .as_ref()
+            .is_some_and(|value| value.trim().is_empty() || value.chars().any(char::is_control))
+        {
+            return Err("Enter a valid worktree directory".to_owned());
         }
         Ok(())
     }
@@ -92,15 +102,7 @@ impl<R: CommandRunner> Git<R> {
             return status;
         }
         status.in_repo = true;
-        if let (Some(git_dir), Some(common)) = (
-            self.read(cwd, &["rev-parse", "--absolute-git-dir"]),
-            self.read(
-                cwd,
-                &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-            ),
-        ) {
-            status.is_linked_worktree = git_dir != common;
-        }
+        status.is_linked_worktree = self.is_linked_worktree(cwd);
         status.branch = self.read(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
         status.dirty = self
             .read(cwd, &["status", "--porcelain"])
@@ -113,6 +115,29 @@ impl<R: CommandRunner> Git<R> {
             status.unpushed = count;
         }
         status
+    }
+
+    fn is_linked_worktree(&self, cwd: &str) -> bool {
+        let git_dir = self.read(cwd, &["rev-parse", "--absolute-git-dir"]);
+        let common = self.read(
+            cwd,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        );
+        git_dir.is_some() && common.is_some() && git_dir != common
+    }
+
+    /// The main checkout that owns the linked worktree containing `cwd`.
+    /// `None` for a main checkout, a bare repository's worktrees, or a non-repository.
+    pub fn linked_worktree_project(&self, cwd: &str) -> Option<String> {
+        if !self.is_linked_worktree(cwd) {
+            return None;
+        }
+        let main = self.main_worktree(cwd)?;
+        (self
+            .read(&main, &["rev-parse", "--is-inside-work-tree"])
+            .as_deref()
+            == Some("true"))
+        .then_some(main)
     }
 
     /// Detach HEAD while retaining the worktree and all commits.
@@ -171,6 +196,13 @@ impl<R: CommandRunner> Git<R> {
 
     pub fn worktree_root(&self, cwd: &str) -> Option<String> {
         self.read(cwd, &["rev-parse", "--show-toplevel"])
+    }
+
+    /// Commits in `cwd`'s history that no remote branch has. `None` when Git can't tell.
+    pub fn commits_not_on_remotes(&self, cwd: &str) -> Option<u64> {
+        self.read(cwd, &["rev-list", "--count", "HEAD", "--not", "--remotes"])?
+            .parse()
+            .ok()
     }
 
     /// Return the branch name, or the stable seven-character detached-head
@@ -259,19 +291,6 @@ impl<R: CommandRunner> Git<R> {
     }
 
     /// # Errors
-    /// Returns an error if the branch or destination is invalid, or Git cannot create the checkout and branch.
-    pub fn add_worktree(&self, repo_dir: &str, branch: &str) -> Result<String, String> {
-        self.create_worktree(
-            repo_dir,
-            &WorktreeRequest {
-                branch: branch.to_owned(),
-                name: None,
-                start_ref: None,
-            },
-        )
-    }
-
-    /// # Errors
     /// Returns an error for invalid inputs or failed Git operations.
     /// If branch creation fails, the error reports any failure to remove the new clean checkout.
     pub fn create_worktree(
@@ -305,7 +324,7 @@ impl<R: CommandRunner> Git<R> {
                 ],
             )
             .ok_or_else(|| format!("Starting ref {start_ref:?} does not resolve to a commit"))?;
-        let path = self.new_worktree_path(repo_dir, &request.branch, request.name.as_deref())?;
+        let path = self.new_worktree_path(repo_dir, request)?;
         let args = vec![
             "worktree".to_owned(),
             "add".to_owned(),
@@ -348,28 +367,29 @@ impl<R: CommandRunner> Git<R> {
         Some(parse_git_worktree_list(&output.stdout))
     }
 
+    /// `<directory>/<repository>/<name>`: short names stay unique per repository.
     fn new_worktree_path(
         &self,
         repo_dir: &str,
-        branch: &str,
-        name: Option<&str>,
+        request: &WorktreeRequest,
     ) -> Result<String, String> {
         let main = self
             .main_worktree(repo_dir)
             .unwrap_or_else(|| repo_dir.to_owned());
-        let main = Path::new(&main);
-        let parent = main
-            .parent()
-            .ok_or_else(|| "repository has no parent directory".to_owned())?;
-        let repo_name = main
+        let repo_name = Path::new(&main)
             .file_name()
             .and_then(|name| name.to_str())
+            .map(|name| name.strip_suffix(".git").unwrap_or(name))
+            .filter(|name| !name.is_empty())
             .ok_or_else(|| "could not read repository name".to_owned())?;
-        Ok(parent
-            .join(name.map_or_else(
-                || format!("{}-{}", repo_name, branch.replace('/', "-")),
-                str::to_owned,
-            ))
+        Ok(worktree_directory(request.directory.as_deref())?
+            .join(repo_name)
+            .join(
+                request
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| request.branch.replace('/', "-")),
+            )
             .to_string_lossy()
             .into_owned())
     }
@@ -476,8 +496,8 @@ fn parse_git_worktree_list(text: &str) -> Vec<WorktreePickerEntry> {
     entries
 }
 
-/// Git state of a session's working directory, used to decide which Ditch
-/// cleanup actions are safe to offer.
+/// Git state of a session's working directory, used to decide whether a checkout can be removed
+/// without losing work.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorktreeStatus {
@@ -551,10 +571,58 @@ pub fn mark_occupied_worktrees(entries: &mut [WorktreePickerEntry], open_cwds: &
     Git::new().mark_occupied_worktrees(entries, open_cwds);
 }
 
+/// Resolve the parent of new worktrees from this process's environment and identity.
 /// # Errors
-/// Returns an error if the branch or destination is invalid, or Git cannot create the checkout and branch.
-pub fn add_worktree(repo_dir: &str, branch: &str) -> Result<String, String> {
-    Git::new().add_worktree(repo_dir, branch)
+/// Returns an error when the home directory is unknown or the result is relative.
+pub fn worktree_directory(configured: Option<&str>) -> Result<PathBuf, String> {
+    worktree_directory_from(
+        configured,
+        bootty_config::ApplicationIdentity::for_process().namespace(),
+        |name| std::env::var_os(name),
+    )
+}
+
+/// Resolve the parent of new worktrees. A leading `~` is the home directory.
+///
+/// The default is `~/.local/share/<namespace>/worktrees`, or
+/// `%LOCALAPPDATA%\\<namespace>\\worktrees` on Windows, so each identity only sees its own
+/// checkouts.
+/// # Errors
+/// Returns an error when the home directory is unknown or the result is relative.
+pub fn worktree_directory_from(
+    configured: Option<&str>,
+    namespace: &str,
+    var: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Result<PathBuf, String> {
+    let unknown_home = || "Could not find the home directory for worktrees".to_owned();
+    let path = match configured.map(str::trim) {
+        Some("~") => home_dir_from(var).ok_or_else(unknown_home)?,
+        Some(path) => match path.strip_prefix("~/").or_else(|| path.strip_prefix("~\\")) {
+            Some(rest) => home_dir_from(var).ok_or_else(unknown_home)?.join(rest),
+            None => PathBuf::from(path),
+        },
+        #[cfg(windows)]
+        None => {
+            let mut var = var;
+            PathBuf::from(
+                var("LOCALAPPDATA")
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(unknown_home)?,
+            )
+            .join(namespace)
+            .join("worktrees")
+        }
+        #[cfg(not(windows))]
+        None => home_dir_from(var)
+            .ok_or_else(unknown_home)?
+            .join(".local/share")
+            .join(namespace)
+            .join("worktrees"),
+    };
+    if !path.is_absolute() {
+        return Err("Worktree directory must be an absolute path".to_owned());
+    }
+    Ok(path)
 }
 
 #[must_use]

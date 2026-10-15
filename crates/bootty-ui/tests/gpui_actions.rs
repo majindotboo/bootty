@@ -357,6 +357,60 @@ fn shifted_comma_and_period_dispatch_session_moves(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui_kit::test]
+fn composer_shortcuts_reach_terminals_unless_a_composer_is_shown(cx: &mut TestAppContext) {
+    use bootty_config::config::MultiplexerBackendConfig;
+    use bootty_ui::{
+        commands::CommandCatalog,
+        gpui_actions::{
+            key_bindings_for_native_conversation, key_bindings_for_snapshot,
+            replace_workspace_key_bindings,
+        },
+        keymap_runtime::{KeymapFocus, KeymapRuntime},
+    };
+
+    let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
+    std::fs::write(file.path(), "").unwrap();
+    let config = bootty_config::config::load_config_from_path(file.path()).unwrap();
+    let catalog = std::sync::Arc::new(CommandCatalog::default());
+    let keymap = KeymapRuntime::new(&config, std::sync::Arc::clone(&catalog));
+    let received = Rc::new(RefCell::new(Vec::new()));
+    let window = cx.update(|cx| {
+        let received = Rc::clone(&received);
+        cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+            let focus = cx.focus_handle();
+            window.focus(&focus, cx);
+            cx.new(|_| BindingProbe {
+                focus,
+                received,
+                key_context: WORKSPACE_KEY_CONTEXT.to_owned(),
+            })
+        })
+        .unwrap()
+    });
+
+    let terminal = key_bindings_for_snapshot(
+        keymap.snapshot(),
+        KeymapFocus::Terminal,
+        MultiplexerBackendConfig::Native,
+        &catalog,
+    );
+    let composer = key_bindings_for_native_conversation(
+        keymap.snapshot(),
+        MultiplexerBackendConfig::Native,
+        &catalog,
+    );
+    for (bindings, expected) in [
+        (terminal, Vec::<&str>::new()),
+        (composer, vec!["ui.composer.effort-up"]),
+    ] {
+        cx.update(|cx| replace_workspace_key_bindings(bindings, cx).unwrap());
+        received.borrow_mut().clear();
+        cx.simulate_keystrokes(*window, "alt-.");
+        assert_eq!(received.borrow().as_slice(), expected.as_slice());
+    }
+}
+
 #[rstest]
 #[case("codex", "Open Codex terminal", "openai")]
 #[case("claude", "Open Claude terminal", "claude")]

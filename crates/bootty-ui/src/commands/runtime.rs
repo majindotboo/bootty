@@ -196,11 +196,9 @@ pub enum PendingCommandResult {
         target: CommandTarget,
         result: mpsc::Receiver<Result<String, String>>,
     },
-    DitchCleanup {
-        scope: SpaceId,
-        command: Box<MuxCommand>,
-        membership: Option<Box<BindingMembershipMutation>>,
-        result: mpsc::Receiver<bootty_mux::workflow::DitchCleanupOutcome>,
+    WorktreeCleanup {
+        result: mpsc::Receiver<crate::state::HostResults>,
+        warnings: Vec<bootty_control::CommandWarning>,
     },
     Mux {
         layout: Option<bootty_mux::workspace::PreparedPaneArrangement>,
@@ -239,8 +237,8 @@ pub struct PendingAppCommand {
 
 impl PendingAppCommand {
     fn cancellation_outcome(&self, now: Instant) -> Option<CommandOutcome> {
-        // Reconcile a cleanup result before honoring cancellation of its backend command.
-        if matches!(self.result, PendingCommandResult::DitchCleanup { .. }) {
+        // Git can't be stopped mid-removal, so the caller hears what the cleanup did.
+        if matches!(self.result, PendingCommandResult::WorktreeCleanup { .. }) {
             return None;
         }
         if self.cancellation.is_cancelled() {
@@ -526,7 +524,6 @@ impl AppState {
     ) {
         match pending {
             PendingCommandResult::Mux { scope, .. }
-            | PendingCommandResult::DitchCleanup { scope, .. }
             | PendingCommandResult::SessionAgentAssociation { scope, .. } => {
                 scopes.insert(*scope);
             }
@@ -572,6 +569,7 @@ impl AppState {
             | PendingCommandResult::Link { .. }
             | PendingCommandResult::Clipboard { .. }
             | PendingCommandResult::Outcome(_)
+            | PendingCommandResult::WorktreeCleanup { .. }
             | PendingCommandResult::NativeResume { .. } => {}
         }
     }
@@ -836,10 +834,6 @@ impl AppState {
         self.poll_started_pending_command(pending, now, effects)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Typed pending-result dispatch stays together; each asynchronous lifecycle has its own owner"
-    )]
     fn poll_started_pending_command(
         &mut self,
         pending: &mut PendingAppCommand,
@@ -871,26 +865,14 @@ impl AppState {
             PendingCommandResult::TerminalAgent { .. } => {
                 return Self::poll_terminal_agent(pending);
             }
-            PendingCommandResult::DitchCleanup {
-                scope,
-                command,
-                membership,
-                result,
-            } => {
-                match self.poll_ditch_cleanup(
-                    *scope,
-                    command,
-                    membership,
-                    result,
-                    (pending.deadline, pending.cancellation.clone()),
-                ) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(None) => return Poll::Ready(None),
-                    Poll::Ready(Some(result)) => {
-                        pending.result = result;
-                    }
+            PendingCommandResult::WorktreeCleanup { result, warnings } => {
+                match ready!(poll_command_result(result)) {
+                    Ok(results) => self.finish_worktree_cleanup(results, std::mem::take(warnings)),
+                    Err(mpsc::RecvError) => CommandOutcome::Failed {
+                        code: "worktree_cleanup_failed".to_owned(),
+                        message: "Worktree cleanup stopped".to_owned(),
+                    },
                 }
-                return self.poll_pending_app_command(pending, now, effects);
             }
             PendingCommandResult::Forward { result } => match ready!(poll_command_result(result)) {
                 Ok(Ok(result)) => self.finish_forward(result),
@@ -1293,6 +1275,7 @@ impl AppState {
                     execution,
                 ),
             CoreCommandExecutor::WslList => self.dispatch_wsl_list(execution),
+            CoreCommandExecutor::WorktreeCleanup => self.dispatch_worktree_cleanup(execution),
             CoreCommandExecutor::OpenLink(arguments) => {
                 self.dispatch_attached_link(exact_target, invocation.target, &arguments, execution)
             }

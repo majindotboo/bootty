@@ -308,8 +308,6 @@ command-reload_config-description = Re-read the config file from disk
 command-reload_config-title = Reload Config
 command-rename_session-description = Rename the current session
 command-rename_session-title = Rename Session
-command-ditch_session-description = Close the session and optionally remove its worktree
-command-ditch_session-title = Ditch Session
 command-rename_tab-description = Rename the current tab
 command-rename_tab-title = Rename Tab
 command-reset_font_size-description = Restore the configured terminal font size
@@ -368,6 +366,8 @@ command-toggle_sidebar_focus-description = Move keyboard focus to the sidebar
 command-toggle_sidebar_focus-title = Focus Sidebar
 command-toggle_sidebar_visibility-description = Show or hide the session sidebar
 command-toggle_sidebar_visibility-title = Toggle Sidebar
+command-worktrees--clean-description = Remove worktrees no session needs, and the oldest past the worktree limit
+command-worktrees--clean-title = Clean Up Worktrees
 
 document-revert = Revert from Disk…
 document-format = Format Document

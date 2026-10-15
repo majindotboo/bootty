@@ -1,8 +1,8 @@
-//! Authoritative mux commands, membership persistence, and cleanup completion.
+//! Authoritative mux commands and membership persistence.
 
 use super::{
-    CommandDispatch, PendingAppCommand, PendingCommandResult, command_outcome_for_mux_error,
-    command_outcome_message, poll_command_result, serialized_command_outcome,
+    CommandDispatch, PendingCommandResult, command_outcome_for_mux_error, command_outcome_message,
+    serialized_command_outcome,
 };
 use crate::{commands::ExactMuxTarget, error_catalog::ErrorNotice, state::AppState};
 use bootty_control::{CommandCancellation, CommandOutcome, CommandTarget, ResourceKind};
@@ -14,69 +14,9 @@ use bootty_mux::{
     executor,
     repository::BindingMembershipMutation,
 };
-use std::{
-    collections::BTreeMap,
-    sync::mpsc,
-    task::{Poll, ready},
-    time::Instant,
-};
+use std::{collections::BTreeMap, time::Instant};
 
 impl AppState {
-    pub(super) fn poll_ditch_cleanup(
-        &mut self,
-        scope: SpaceId,
-        command: &MuxCommand,
-        membership: &mut Option<Box<BindingMembershipMutation>>,
-        result: &mpsc::Receiver<bootty_mux::workflow::DitchCleanupOutcome>,
-        execution: (Instant, CommandCancellation),
-    ) -> Poll<Option<PendingCommandResult>> {
-        use bootty_mux::workflow::DitchCleanupOutcome;
-        let cleanup = match ready!(poll_command_result(result)) {
-            Ok(outcome) => outcome,
-            Err(mpsc::RecvError) => {
-                DitchCleanupOutcome::NoAction("Git cleanup worker stopped".to_owned())
-            }
-        };
-        match cleanup {
-            DitchCleanupOutcome::NoAction(error) => {
-                self.workspace
-                    .defer_binding_membership_reconciliation(scope);
-                self.record_notice(ErrorNotice::Ditch(error));
-                return Poll::Ready(None);
-            }
-            DitchCleanupOutcome::Partial { branch, error } => {
-                self.record_notice(ErrorNotice::DitchPartial(format!(
-                    "worktree removed; branch '{branch}' remains: {error}"
-                )));
-            }
-            DitchCleanupOutcome::Complete => {}
-        }
-        // Commit against the original binding with the original deadline and cancellation token.
-        let Some(submitted) = executor::submit_authoritative_command_for_scope(
-            &mut self.workspace,
-            &self.repaint,
-            scope,
-            command.clone(),
-            membership.take(),
-            Some(execution),
-            CommandSelection::Follow,
-        ) else {
-            self.workspace
-                .defer_binding_membership_reconciliation(scope);
-            self.record_notice(ErrorNotice::Ditch(
-                "Session binding disappeared after cleanup".to_owned(),
-            ));
-            return Poll::Ready(None);
-        };
-        Poll::Ready(Some(PendingCommandResult::Mux {
-            scope: submitted.scope,
-            command: Box::new(submitted.command),
-            membership: submitted.membership,
-            layout: submitted.layout,
-            result: submitted.result,
-        }))
-    }
-
     pub(super) fn dispatch_pane_command(
         &mut self,
         action: crate::commands::PaneAction,
@@ -174,29 +114,6 @@ impl AppState {
         })
     }
 
-    pub(crate) fn prepare_ditch_session_command(
-        &mut self,
-        session_id: String,
-    ) -> Result<(SpaceId, MuxCommand, Option<Box<BindingMembershipMutation>>), CommandOutcome> {
-        let command = MuxCommand::DitchSession { session_id };
-        let scope = self.workspace.active.binding.scope();
-        if self.mux_command_pending(scope, &command) {
-            let outcome = CommandOutcome::Unavailable {
-                message: "This session is already being closed".to_owned(),
-            };
-            self.record_message("This session is already being closed".to_owned());
-            return Err(outcome);
-        }
-        if let Some(outcome) = self.preflight_mux_command(&command) {
-            if let Some(message) = command_outcome_message(&outcome) {
-                self.record_error(message);
-            }
-            return Err(outcome);
-        }
-        let membership = self.begin_authoritative_membership(&command)?;
-        Ok((scope, command, membership))
-    }
-
     /// Whether `command` is already in flight against the binding at `scope`.
     pub(super) fn mux_command_pending(&self, scope: SpaceId, command: &MuxCommand) -> bool {
         self.commands
@@ -212,12 +129,7 @@ impl AppState {
         command: &MuxCommand,
     ) -> bool {
         match pending {
-            PendingCommandResult::DitchCleanup {
-                scope: pending_scope,
-                command: pending_command,
-                ..
-            }
-            | PendingCommandResult::Mux {
+            PendingCommandResult::Mux {
                 scope: pending_scope,
                 command: pending_command,
                 ..
@@ -249,70 +161,12 @@ impl AppState {
             | PendingCommandResult::TerminalAgentRestore { .. }
             | PendingCommandResult::TerminalAgent { .. }
             | PendingCommandResult::Outcome(_)
+            | PendingCommandResult::WorktreeCleanup { .. }
             | PendingCommandResult::NativeResume { .. }
             | PendingCommandResult::Forward { .. }
             | PendingCommandResult::Clipboard { .. }
             | PendingCommandResult::Link { .. } => false,
         }
-    }
-
-    pub(crate) fn submit_prepared_ditch_session_command(
-        &mut self,
-        (scope, command, membership): (SpaceId, MuxCommand, Option<Box<BindingMembershipMutation>>),
-    ) {
-        debug_assert_eq!(scope, self.workspace.active.binding.scope());
-        let (deadline, cancellation) = executor::command_execution(None);
-        let result = self.submit_authoritative_mux_command(
-            command,
-            membership,
-            Some((deadline, cancellation.clone())),
-        );
-        self.commands.pending.push(PendingAppCommand {
-            creation_receipt: None,
-            label: "Session cleanup".to_owned(),
-            user_initiated_annotation_capture: false,
-            deadline,
-            cancellation,
-            response: None,
-            result,
-        });
-    }
-
-    pub(crate) fn submit_ditch_cleanup(
-        &mut self,
-        (scope, command, membership): (SpaceId, MuxCommand, Option<Box<BindingMembershipMutation>>),
-        cwd: Option<String>,
-        action: &crate::presentation::dialogs::DitchAction,
-    ) {
-        let action = crate::state::ditch::mux_ditch_action(action);
-        let (deadline, cancellation) = executor::command_execution(None);
-        let (sender, result) = mpsc::channel();
-        let repaint = self.repaint.clone();
-        let cleanup_cancellation = cancellation.clone();
-        std::thread::spawn(move || {
-            let outcome = bootty_mux::workflow::run_ditch_cleanup_with_deadline(
-                cwd.as_deref(),
-                &action,
-                deadline,
-                cleanup_cancellation,
-            );
-            let _ = sender.send(outcome);
-            repaint();
-        });
-        self.commands.pending.push(PendingAppCommand {
-            creation_receipt: None,
-            label: "Session cleanup".to_owned(),
-            user_initiated_annotation_capture: false,
-            deadline,
-            cancellation,
-            response: None,
-            result: PendingCommandResult::DitchCleanup {
-                scope,
-                command: Box::new(command),
-                membership,
-                result,
-            },
-        });
     }
 
     pub(super) fn command_outcome_for_mux_result(

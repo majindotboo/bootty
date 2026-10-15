@@ -537,7 +537,9 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
         SettingsCategory::Terminal => match id {
             "session.shell" => 0,
             "session.working-directory" => 1,
-            "session.env" => 2,
+            "session.worktree-directory" => 2,
+            "session.worktree-limit" => 3,
+            "session.env" => 4,
             "session.term" => 10,
             "session.colorterm" => 11,
             "session.glyph-protocol" => 12,

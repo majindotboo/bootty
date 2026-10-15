@@ -59,6 +59,8 @@ mod requests;
 use requests::{is_approval, is_claude_question};
 #[path = "gpui_agent_context.rs"]
 mod context_card;
+#[path = "gpui_agent_drafts.rs"]
+mod drafts;
 #[path = "gpui_agent_followups.rs"]
 mod followups;
 #[path = "gpui_agent_plan.rs"]
@@ -165,8 +167,15 @@ struct SubmittedPrompt {
 
 enum ToolDiffs {
     Loading,
-    Ready(Vec<(String, Entity<crate::gpui_git_panel::GitDiffPanel>, f32)>),
+    Ready(Vec<ToolDiff>),
     Failed(String),
+}
+
+struct ToolDiff {
+    path: String,
+    view: Entity<crate::gpui_git_panel::GitDiffPanel>,
+    rows: f32,
+    counts: Option<(usize, usize)>,
 }
 
 struct WorkingIndicator {
@@ -204,6 +213,7 @@ pub struct NativeAgentSessionView {
     completion: Option<Entity<crate::gpui_composer_completion::ComposerCompletion>>,
     completion_subscriptions: Vec<Subscription>,
     draft_revision: u64,
+    draft_save: Option<gpui_kit::Task<()>>,
     follow_up_behavior: bootty_config::config::FollowUpBehavior,
     send_shortcut: bootty_config::config::ComposerSendShortcut,
     presentation: PresentationPreferences,
@@ -286,6 +296,7 @@ impl NativeAgentSessionView {
         let subscription = cx.subscribe_in(&composer, window, |this, _, event, _, cx| {
             if matches!(event, InputEvent::Change) {
                 this.draft_revision = this.draft_revision.wrapping_add(1);
+                this.schedule_draft_save(cx);
             }
             cx.notify();
         });
@@ -354,6 +365,7 @@ impl NativeAgentSessionView {
             completion: None,
             completion_subscriptions: Vec::new(),
             draft_revision: 0,
+            draft_save: None,
             follow_up_behavior: bootty_config::config::FollowUpBehavior::default(),
             send_shortcut: bootty_config::config::ComposerSendShortcut::default(),
             presentation: PresentationPreferences {
@@ -418,6 +430,7 @@ impl NativeAgentSessionView {
             subscriptions: vec![subscription, citation_subscription, request_subscription],
         };
         this.restore_initial_message(window, cx);
+        this.restore_saved_draft(window, cx);
         this.configure_timeline(cx);
         this.sync_transcript(&[], window, cx);
         this.sync_requests(window, cx);
@@ -1471,7 +1484,50 @@ impl NativeAgentSessionView {
                     .open(open)
                     .child(self.render_tool_disclosure(item, open, owner, cx))
                     .content(self.render_tool_details(item, cx)),
-            );
+            )
+            .when(!open, |output| {
+                let Some(ToolDiffs::Ready(files)) = self.tool_diffs.get(&item.id) else {
+                    return output;
+                };
+                output.child(
+                    div()
+                        .pt_1()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .children(files.iter().map(|file| {
+                            div()
+                                .debug_selector({
+                                    let path = file.path.clone();
+                                    let counts = file.counts;
+                                    move || {
+                                        format!(
+                                            "native-file-change:{path}:+{}:-{}",
+                                            counts.map_or(0, |c| c.0),
+                                            counts.map_or(0, |c| c.1)
+                                        )
+                                    }
+                                })
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_sm()
+                                .child(div().flex_1().min_w_0().truncate().child(file.path.clone()))
+                                .when_some(file.counts, |row, (added, removed)| {
+                                    row.child(
+                                        div()
+                                            .text_color(cx.theme().success)
+                                            .child(format!("+{added}")),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().danger)
+                                            .child(format!("−{removed}")),
+                                    )
+                                })
+                        })),
+                )
+            });
         div()
             .w_full()
             .min_w_0()
@@ -1491,10 +1547,7 @@ impl NativeAgentSessionView {
         cx: &App,
     ) -> Button {
         let id = item.id.clone();
-        let name = item
-            .tool
-            .as_ref()
-            .map_or_else(|| "Execution details".into(), |tool| tool_label(&tool.name));
+        let name = self.tool_name(item);
         Button::new(gpui_kit::SharedString::from(format!(
             "tool-output:{}:{id}",
             self.record.id
@@ -1525,16 +1578,32 @@ impl NativeAgentSessionView {
         })
     }
 
+    fn tool_name<'a>(&self, item: &'a NativeTranscriptItem) -> std::borrow::Cow<'a, str> {
+        match self.tool_diffs.get(&item.id) {
+            Some(ToolDiffs::Ready(files)) => std::borrow::Cow::Owned(format!(
+                "{} {} {}",
+                match item.tool.as_ref().map(|tool| tool.status) {
+                    Some(bootty_agents::NativeToolStatus::Completed) => "Edited",
+                    Some(bootty_agents::NativeToolStatus::Running) => "Editing",
+                    _ => "Changes to",
+                },
+                files.len(),
+                if files.len() == 1 { "file" } else { "files" }
+            )),
+            _ => item
+                .tool
+                .as_ref()
+                .map_or_else(|| "Execution details".into(), |tool| tool_label(&tool.name)),
+        }
+    }
+
     fn render_tool_heading(
         &self,
         item: &NativeTranscriptItem,
         open: bool,
         cx: &App,
     ) -> gpui_kit::Div {
-        let name = item
-            .tool
-            .as_ref()
-            .map_or_else(|| "Execution details".into(), |tool| tool_label(&tool.name));
+        let name = self.tool_name(item);
         // Completing is the normal case; only the other outcomes say so.
         let status = item
             .tool
@@ -1623,6 +1692,21 @@ impl NativeAgentSessionView {
                         files
                             .into_iter()
                             .map(|(path, file)| {
+                                let counts = (!file.patch_unavailable).then(|| {
+                                    file.hunks.iter().flat_map(|hunk| &hunk.lines).fold(
+                                        (0_usize, 0_usize),
+                                        |(added, removed), line| {
+                                            (
+                                                added.saturating_add(usize::from(
+                                                    line.old_line.is_none(),
+                                                )),
+                                                removed.saturating_add(usize::from(
+                                                    line.new_line.is_none(),
+                                                )),
+                                            )
+                                        },
+                                    )
+                                });
                                 let rows = file
                                     .hunks
                                     .iter()
@@ -1636,7 +1720,18 @@ impl NativeAgentSessionView {
                                     view.show_file_diff(file, window, cx);
                                     view
                                 });
-                                (path, view, rows)
+                                let path = std::path::Path::new(&path);
+                                let path = path
+                                    .strip_prefix(&this.record.config.cwd)
+                                    .unwrap_or(path)
+                                    .to_string_lossy()
+                                    .into_owned();
+                                ToolDiff {
+                                    path,
+                                    view,
+                                    rows,
+                                    counts,
+                                }
                             })
                             .collect(),
                     ),
@@ -1681,7 +1776,7 @@ impl NativeAgentSessionView {
                         crate::error_catalog::ErrorNotice::from_text(error.as_str()).to_string(),
                     ))
                 }
-                ToolDiffs::Ready(files) => body.children(files.iter().map(|(path, view, rows)| {
+                ToolDiffs::Ready(files) => body.children(files.iter().map(|file| {
                     div()
                         .w_full()
                         .min_w_0()
@@ -1695,13 +1790,13 @@ impl NativeAgentSessionView {
                                 .py_1()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(path.clone()),
+                                .child(file.path.clone()),
                         )
                         .child(
                             div()
-                                .h(cx.theme().mono_font_size.mul(rows.mul_add(1.5, 1.0)))
+                                .h(cx.theme().mono_font_size.mul(file.rows.mul_add(1.5, 1.0)))
                                 .min_w_0()
-                                .child(view.clone()),
+                                .child(file.view.clone()),
                         )
                 })),
             };
@@ -2220,22 +2315,24 @@ impl NativeAgentSessionView {
             view.child(
                 Collapsible::new()
                     .open(open)
+                    // Collapsible stretches its trigger and Button centers its content.
                     .child(
-                        Button::new("side-chats-toggle")
-                            .ghost()
-                            .xsmall()
-                            .justify_start()
-                            .icon(if open {
-                                gpui_kit::component::IconName::ChevronDown
-                            } else {
-                                gpui_kit::component::IconName::ChevronRight
-                            })
-                            .text_color(cx.theme().muted_foreground)
-                            .label(format!("Side chats · {}", related.len()))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.working_indicator.side_chats_expanded ^= true;
-                                cx.notify();
-                            })),
+                        div().flex().child(
+                            Button::new("side-chats-toggle")
+                                .ghost()
+                                .xsmall()
+                                .icon(if open {
+                                    gpui_kit::component::IconName::ChevronDown
+                                } else {
+                                    gpui_kit::component::IconName::ChevronRight
+                                })
+                                .text_color(cx.theme().muted_foreground)
+                                .label(format!("Side chats · {}", related.len()))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.working_indicator.side_chats_expanded ^= true;
+                                    cx.notify();
+                                })),
+                        ),
                     )
                     .content(
                         div()
@@ -2650,16 +2747,14 @@ impl NativeAgentSessionView {
     }
 
     fn render_collapsed_composer(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        let placeholder = format!("Message {}…", self.record.config.provider.display_name());
         div().flex().child(
             Button::new("expand-composer")
                 .ghost()
                 .w_full()
                 .max_w(gpui_kit::rems(48.))
-                .justify_start()
-                .label(format!(
-                    "Message {}…",
-                    self.record.config.provider.display_name()
-                ))
+                .accessibility_label(placeholder.clone())
+                .child(div().flex_1().min_w_0().truncate().child(placeholder))
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.composer.read(cx).focus_handle(cx).focus(window, cx);
                 })),

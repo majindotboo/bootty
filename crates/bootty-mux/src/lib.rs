@@ -29,7 +29,6 @@ pub mod snapshot;
 #[cfg(feature = "terminal-runtime")]
 pub mod terminal;
 pub mod tmux_compatible_layout;
-pub mod workflow;
 
 #[cfg(feature = "terminal-runtime")]
 pub mod pane_layout;

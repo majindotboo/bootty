@@ -11,7 +11,7 @@ base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
 png.workspace = true
-image = { workspace = true, features = ["png", "jpeg", "webp"] }
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 markdown.workspace = true
 bootty-computer = { path = "../bootty-computer" }
 bootty-control = { path = "../bootty-control" }

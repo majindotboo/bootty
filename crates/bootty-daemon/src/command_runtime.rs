@@ -152,6 +152,7 @@ pub fn run_remote_worktree(args: &[String]) -> Result<()> {
                     branch: required_option(arguments, "--branch")?,
                     name: None,
                     start_ref: None,
+                    directory: None,
                 }
             };
             println!(
@@ -159,6 +160,20 @@ pub fn run_remote_worktree(args: &[String]) -> Result<()> {
                 serde_json::to_string(
                     &bootty_git::Git::new()
                         .create_worktree(&project, &request)
+                        .map_err(anyhow::Error::msg)?
+                )?
+            );
+        }
+        "clean" => {
+            let request = serde_json::from_str::<bootty_git::CleanupRequest>(&required_option(
+                arguments,
+                "--request",
+            )?)?;
+            println!(
+                "{}",
+                serde_json::to_string(
+                    &bootty_git::Git::new()
+                        .clean_worktrees(&request)
                         .map_err(anyhow::Error::msg)?
                 )?
             );

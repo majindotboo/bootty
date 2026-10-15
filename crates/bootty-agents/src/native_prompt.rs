@@ -586,13 +586,9 @@ impl NativePrompt {
         prompt
     }
 
-    // Hoist advertised skill chips into Pi's leading native skill command.
-    // Only authored text is scanned; attached files and quoted agent responses are references.
-    fn pi_skill_message(&self) -> String {
-        if self.skills.is_empty() {
-            return self.text.clone();
-        }
-        let mut body = self.text.clone();
+    /// Where advertised skill chips sit in the text, in order. Only authored text is scanned;
+    /// attached files and quoted agent responses are references.
+    fn skill_mentions(&self) -> Vec<std::ops::Range<usize>> {
         let mut ranges = Vec::new();
         let mut offset = 0_usize;
         for token in self.authored_text().split_inclusive(char::is_whitespace) {
@@ -606,7 +602,16 @@ impl NativePrompt {
             }
             offset = offset.saturating_add(token.len());
         }
-        for range in ranges.into_iter().rev() {
+        ranges
+    }
+
+    // Hoist advertised skill chips into Pi's leading native skill command.
+    fn pi_skill_message(&self) -> String {
+        if self.skills.is_empty() {
+            return self.text.clone();
+        }
+        let mut body = self.text.clone();
+        for range in self.skill_mentions().into_iter().rev() {
             body.replace_range(range, "");
         }
         let body = body.trim();
@@ -657,16 +662,44 @@ impl NativePrompt {
         Ok(Value::Object(params))
     }
 
+    /// Claude runs one skill per message, from a `/name` that opens its last text block; the
+    /// text after the name is the skill's arguments. The last skill chip becomes that command.
+    /// Earlier chips read `/name` in the leading text, so the model can still run them.
+    fn claude_skill_command(&self) -> Option<(String, String)> {
+        let mut mentions = self.skill_mentions();
+        let last = mentions.pop()?;
+        let mut leading = self.text.get(..last.start)?.to_owned();
+        for mention in mentions {
+            leading.replace_range(mention.start..mention.start.saturating_add(1), "/");
+        }
+        let command = format!("/{}", self.text.get(last.start.saturating_add(1)..)?);
+        Some((leading.trim_end().to_owned(), command.trim_end().to_owned()))
+    }
+
     pub(crate) fn claude_content(&self) -> Result<Value, String> {
-        let message = self.provider_message()?;
-        if self.images.is_empty() {
+        let images = self.images.iter().map(|image| json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":image.base64()}}));
+        let Some((leading, command)) = self.claude_skill_command() else {
+            let message = self.provider_message()?;
+            if self.images.is_empty() {
+                return Ok(message.into());
+            }
+            let mut content = Vec::new();
+            if !message.is_empty() {
+                content.push(json!({"type":"text","text":message}));
+            }
+            content.extend(images);
+            return Ok(content.into());
+        };
+        let message = self.provider_message_with_text(command)?;
+        if leading.is_empty() && self.images.is_empty() {
             return Ok(message.into());
         }
         let mut content = Vec::new();
-        if !message.is_empty() {
-            content.push(json!({"type":"text","text":message}));
+        if !leading.is_empty() {
+            content.push(json!({"type":"text","text":leading}));
         }
-        content.extend(self.images.iter().map(|image| json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":image.base64()}})));
+        content.extend(images);
+        content.push(json!({"type":"text","text":message}));
         Ok(content.into())
     }
 

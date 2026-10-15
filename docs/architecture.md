@@ -33,6 +33,7 @@ This file describes the current production structure.
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
 | Backend processes and native topology | The selected provider under `bootty-mux` | Bootty reports backend failure and does not invent success. |
 | Git project, worktree, branch, and bounded diff facts | `bootty-git` | Git commands run through the owning host runner; remote paths never use local filesystem state. |
+| Removing Bootty's worktrees | `bootty-git::cleanup` on the checkouts' host | A checkout with uncommitted changes or commits no remote has stays, and the report says why. |
 | The installed remote Space catalog | `bootty-mux::remote_catalog::Catalog` | A backend-scoped lease serializes mutations; membership follows backend session tags. |
 | PTY and child lifecycle | `TerminalSession` and `TerminalWorker` | Runtime health reports asynchronous core failure. |
 | VT state | `TerminalEngine` | Consumers read published frames. |
@@ -134,12 +135,24 @@ installed daemon keeps core providers and catalog operations without Ghostty VT
 or local PTY support. `bootty-host` owns SSH and WSL commands, daemon installation,
 remote framing, and generic process execution. `bootty-git` owns project
 discovery, favorites, worktrees, status, and Git facts through its host-runner
-seam. Worktree creation resolves a branch, optional sibling folder name and optional
-starting ref on that same host. It resolves the ref to a commit before creating
+seam. Worktree creation resolves a branch, optional folder name, optional
+starting ref and the configured worktree directory on that same host. New
+checkouts go in `<directory>/<repository>/<name>`. It resolves the ref to a commit before creating
 the checkout, then creates the branch. A branch failure removes only the clean
 checkout it created; failed cleanup reports the retained path. The New Session
-form and `worktree.create` command share this policy. Remote daemon protocol 7
+form and `worktree.create` command share this policy. Remote daemon protocol 22
 carries the typed request, preventing older daemons from silently dropping options.
+Git facts report a linked worktree's main checkout, so the sidebar groups that
+session under its project rather than the checkout folder.
+
+Worktree cleanup runs on the checkouts' host too: in the app for local checkouts
+and through remote daemon protocol 23 for a remote host. The UI sends every saved
+session's directory, lifecycle and attachment, plus every live pane directory, from
+all Spaces on that host. `bootty-git` removes checkouts no session uses and, past
+`session.worktree-limit`, the oldest archived and then settled ones, with their
+branches when Git's safe delete accepts them. Passes never overlap. The default
+directory includes the identity namespace, and only the identity's own configuration
+cleans it, because another configuration keeps other sessions.
 
 The native, rmux, tmux, and Herdr implementations are internal `bootty-mux`
 providers registered through one registry. Herdr is opaque: Bootty attaches to
@@ -425,8 +438,10 @@ from the selected provider/account's live protocol. The shared Add menu also rea
 Codex's installed callable apps and enabled plugins, enriches them with provider
 metadata, and inserts typed mentions. Submission revalidates these references
 against the captured account, including queued messages. Plan mode is an explicit
-provider collaboration selection; conversation goals stay owned by Codex through
-its thread goal API. Unsupported actions are omitted. Probing a creation draft does
+provider selection: a Codex collaboration mode on each turn, or Claude's plan
+permission mode, set when the choice changes and left when Claude's plan is
+approved. Conversation goals stay owned by Codex through its thread goal API.
+Unsupported actions are omitted. Probing a creation draft does
 not start a conversation. File search runs through `bootty-host::files` on the captured host, with bounded
 ranked Git indexes and ignore rules. Outside Git it completes the typed directory
 without recursively scanning a home tree.
@@ -439,7 +454,10 @@ App choices come from current exact local window tokens. Atomic editor tokens
 preserve skill, file, and app references through undo and draft restoration.
 Only authored text can invoke skills; appended browser annotations, files and
 assistant quotes remain reference material. Codex receives typed skill inputs;
-Pi uses its native leading `/skill:` command.
+Pi uses its native leading `/skill:` command. Claude marks only its own commands,
+so its other catalog entries are skills. Claude runs one skill per message, from a
+`/name` that opens the last text block, so the last skill chip becomes that block
+and earlier chips read `/name`.
 
 Native launch binds the persisted conversation target to its private tool lease
 before provider initialization. Automatic agent listing reads compact accepted
@@ -485,10 +503,12 @@ the exact window observed by the last snapshot. Input requires that window to be
 focused; the focus command raises only that window. On macOS, where input skips the
 real pointer, the UI briefly shows its own cursor where delivered input landed.
 
-The native transcript folds completed thinking and tool work by turn while keeping
-final responses visible. Live work retains its elapsed timer independently of the
-fold. Selected assistant text supports `C` to comment, `R` to choose a reaction
-with arrows and Enter, and `Y` to copy. These shortcuts apply only to the focused
+The native transcript keeps assistant progress messages and final responses visible
+after a turn settles. Thinking and command output between messages fold into work
+summaries; a settled turn's duration reads on its last fold. Codex file changes stay
+visible with file paths and line counts; their diffs expand through the existing
+disclosure. Live work retains its elapsed timer independently of the fold. Selected
+assistant text supports `C` to comment, `R` to choose a reaction with arrows and Enter, and `Y` to copy. These shortcuts apply only to the focused
 response selection; the prompt editor keeps ordinary typing. Comments and Pi's
 reaction meanings share the validated citation payload and editable inline tokens.
 

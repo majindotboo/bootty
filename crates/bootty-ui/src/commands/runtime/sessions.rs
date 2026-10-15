@@ -660,11 +660,6 @@ impl AppState {
                     scope: pending_scope,
                     membership: Some(membership),
                     ..
-                }
-                | PendingCommandResult::DitchCleanup {
-                    scope: pending_scope,
-                    membership: Some(membership),
-                    ..
                 } => *pending_scope == scope && membership.identity() == identity,
                 _ => false,
             })
@@ -799,6 +794,16 @@ impl AppState {
             };
             match self.workspace.set_session_state(scope, identity, change) {
                 Ok(changed) => {
+                    if changed
+                        && matches!(
+                            change,
+                            SessionStateChange::Delete
+                                | SessionStateChange::Archive
+                                | SessionStateChange::SetLifecycle(SessionLifecycle::Settled)
+                        )
+                    {
+                        self.request_worktree_cleanup();
+                    }
                     let saved = self
                         .workspace
                         .binding(scope)

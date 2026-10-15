@@ -196,6 +196,8 @@ output-archives = false # private bounded previous-session snapshots
 clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 shell = "/bin/zsh"
 working-directory = "/Users/example/src"
+worktree-directory = "~/.local/share/bootty/worktrees"
+worktree-limit = 10 # Bootty worktrees kept per host; 0 removes only unused ones
 env = [{ name = "EDITOR", value = "vim" }]
 term = "xterm-bootty"
 colorterm = "truecolor"
@@ -396,7 +398,7 @@ Each section accepts only `context`, `use_key_equivalents`,
 `use_builtin_defaults`, `unbind`, and `bindings`:
 
 - `context` defaults to `Global`. Supported contexts are `Global`, `Sidebar`, `Command`,
-  `SurfaceChooser`, `ComposerCompletion`, `Terminal`, `Herdr`, `Native`, `rmux`, and `tmux`. Backend contexts apply only
+  `SurfaceChooser`, `Composer`, `ComposerCompletion`, `Terminal`, `Herdr`, `Native`, `rmux`, and `tmux`. Backend contexts apply only
   while a terminal is focused. The Zed-style forms
   `Terminal && backend == herdr|native|rmux|tmux` are aliases.
   `Command` applies to the active command palette or picker; underlying workspace
@@ -409,6 +411,8 @@ Each section accepts only `context`, `use_key_equivalents`,
   Alt-</>, Ctrl-M and Ctrl-G. A/T choose Agent/Terminal, 1–3 choose terminal
   profiles, E edits profiles, and Escape cancels. Inline keycaps show the effective
   bindings; removing a shortcut does not reveal a hidden hard-coded fallback.
+  `Composer` applies while an Agent composer is shown: a native conversation or the
+  new-session form. Elsewhere its keys reach the terminal.
   `ComposerCompletion` applies while an Agent composer has an active suggestion menu.
   `ui.composer.previous`, `next`, `confirm`, and `cancel` use the same editable keymap.
   Defaults include Up/Down, Emacs Ctrl-P/N, Ctrl-K/J and Vim Alt-K/J, Enter/Tab to
@@ -676,16 +680,32 @@ creating worktrees (branch prefix and starting ref).
 Project settings live in the workspace database and apply to new sessions.
 Existing sessions keep their selected provider and model.
 
+New worktrees go in `<session.worktree-directory>/<repository>/<name>` on the
+repository's host. Unset, the directory is `~/.local/share/bootty/worktrees` on
+macOS and Linux and `%LOCALAPPDATA%\bootty\worktrees` on Windows; Development
+builds use their own namespace in place of `bootty`. A leading `~` is that host's
+home. Generated names use the task's short slug. The sidebar groups a linked
+worktree's sessions under its main checkout's project.
+
+Bootty cleans up the worktrees in that directory on each host: hourly, soon after
+a session is deleted, archived or settled, and when the worktree settings change.
+A worktree no saved session or live terminal uses goes after its first hour.
+Past `session.worktree-limit` (default 10), the worktrees of the oldest archived
+sessions go first, then the oldest settled ones. Active sessions and sessions with
+a running terminal keep theirs. A worktree with uncommitted changes or commits no
+remote has always stays, and Bootty says so once. A removed worktree's branch goes
+too when `git branch -d` accepts it. `0` removes only worktrees no session uses.
+The unset directory is only cleaned by the identity's default configuration; another
+configuration path must set `session.worktree-directory`.
+
+`worktrees.clean` (**Clean Up Worktrees** in the palette) runs the cleanup now on
+every host and reports what each removed and kept. It asks for confirmation from
+the CLI and socket.
+
 `settle_session` settles the exact current saved session without closing its
 terminal. It is available in the palette and keybinding presets; on macOS the
 standard shortcut is `Cmd+Shift+W`. `session.settle` accepts an explicit saved
 identity with its Binding target for detached work and other Spaces.
-
-`ditch_session` (**Ditch Session** in the palette) closes the current live
-session and cleans up its checkout. The dialog shows the path, branch,
-worktree kind and whether it is dirty, then closes the session alone, detaches
-the worktree, or removes the worktree and optionally its branch. Remote sessions
-close without cleanup.
 
 `sidebar.sort-order` defaults to `"manual"`. Choose **Manual** or **Recent activity**
 from the sidebar view menu or Sidebar settings. Recent activity uses persisted
@@ -766,13 +786,16 @@ Older tile groups reopen as tabs with the frontmost tile selected; every panel r
 Changes separates staged, unstaged, and untracked files. Stage/Unstage updates the
 index without changing working files. Commit uses only the index; Amend explicitly
 replaces the last commit and asks before proceeding. Git errors stay visible in the
-panel. The message box remains disabled while its command is running.
+panel. The message box remains disabled while its command is running. When the
+branch has an upstream, the header fetches, and shows ↓ and ↑ counts that pull
+(fast-forward only) and push (never forced) the commits the two don't share.
 
 CLI/socket/keybinding callers use the same commands: `git.open REPOSITORY`,
 `git.status REPOSITORY`, `git.diff REPOSITORY PATH staged|unstaged|untracked`,
 `git.stage REPOSITORY PATH`, `git.unstage REPOSITORY PATH`, `git.commit REPOSITORY MESSAGE`,
-and `git.amend REPOSITORY MESSAGE`. Repository/file paths belong to the target binding's
-host. Paths are literal rather than Git pathspec patterns; invalid UTF-8 filenames are
+`git.amend REPOSITORY MESSAGE`, `git.fetch REPOSITORY`, `git.pull REPOSITORY` and
+`git.push REPOSITORY`. `git.status` reports the upstream with its ahead and behind
+counts. Repository/file paths belong to the target binding's host. Paths are literal rather than Git pathspec patterns; invalid UTF-8 filenames are
 currently rejected by the text transport. External amend callers use the existing
 command confirmation mechanism. SSH runs through the existing daemon transport.
 
@@ -1028,6 +1051,7 @@ Composer controls have bindable commands: `ui.composer.focus-space`,
 `ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.
 Their default shortcuts are Ctrl+Alt+S/M/P/W/A for space, model,
 project, worktree, and permissions. Provider and effort have no separate default binding.
+These defaults and the effort shortcuts live in the `Composer` context.
 Provider, model, and effort share one picker; their focus commands open it. Control
 tooltips describe their purpose and show the active configured shortcut.
 

@@ -10,10 +10,10 @@ use crate::commands::command_invocation_from_catalog;
 use crate::input::focus::InputFocus;
 use crate::presentation::dialogs::{
     CommandPaletteDialog, CommandPaletteEvent, CommandPaletteState, DialogProjection,
-    DitchSessionDialog, DitchSessionEvent, KeybindHelpDialog, NewSessionDialog,
-    NewSessionPickerEvent, RenameSessionDialog, RenameSessionEvent, RenameTabDialog,
-    RenameTabEvent, SessionPickerDialog, SessionPickerEvent, SpaceEditorDialog, SpaceEditorEvent,
-    SpacePickerDialog, SpacePickerEvent, ThemePickerDialog, ThemePickerEvent, default_space_icon,
+    KeybindHelpDialog, NewSessionDialog, NewSessionPickerEvent, RenameSessionDialog,
+    RenameSessionEvent, RenameTabDialog, RenameTabEvent, SessionPickerDialog, SessionPickerEvent,
+    SpaceEditorDialog, SpaceEditorEvent, SpacePickerDialog, SpacePickerEvent, ThemePickerDialog,
+    ThemePickerEvent, default_space_icon,
 };
 use bootty_mux::workspace::ScopedSessionTarget;
 impl AppState {
@@ -53,10 +53,6 @@ impl AppState {
                 None
             }
             ModalDialog::SpaceEditor(dialog) => {
-                dialog.poll();
-                None
-            }
-            ModalDialog::DitchSession(dialog) => {
                 dialog.poll();
                 None
             }
@@ -102,7 +98,6 @@ impl AppState {
             }
             ModalDialog::RenameSession(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
             ModalDialog::RenameTab(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
-            ModalDialog::DitchSession(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
             ModalDialog::KeybindHelp(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
             ModalDialog::CommandPalette(dialog) => {
                 DialogProjection::Dialog(Box::new(dialog.spec()))
@@ -183,7 +178,6 @@ impl AppState {
             Command(CommandPaletteEvent),
             Capture(crate::presentation::capture::CaptureEvent),
             ThemeEditor(crate::presentation::theme_editor::ThemeEditorEvent),
-            Ditch(DitchSessionEvent),
             KeybindDismiss,
             NewSession(NewSessionPickerEvent),
             History(crate::presentation::terminal_history::TerminalHistoryEvent),
@@ -213,7 +207,6 @@ impl AppState {
             ModalDialog::SessionPicker(dialog) => dialog.apply(intent).map(Event::Session),
             ModalDialog::RenameSession(dialog) => dialog.apply(intent).map(Event::RenameSession),
             ModalDialog::RenameTab(dialog) => dialog.apply(intent).map(Event::RenameTab),
-            ModalDialog::DitchSession(dialog) => dialog.apply(intent).map(Event::Ditch),
             ModalDialog::KeybindHelp(dialog) => {
                 dialog.apply(intent).then_some(Event::KeybindDismiss)
             }
@@ -256,7 +249,6 @@ impl AppState {
                     }
                 }
             },
-            Some(Event::Ditch(event)) => self.apply_ditch_session_event(event),
             Some(Event::KeybindDismiss) => self.dismiss_keybind_help(),
             Some(Event::NewSession(event)) => self.apply_picker_event(event),
             Some(Event::History(event)) => self.apply_terminal_history_event(event),
@@ -479,34 +471,6 @@ impl AppState {
                     name,
                     &self.repaint,
                 );
-                self.dismiss_modal_dialog();
-            }
-        }
-    }
-    pub fn apply_ditch_session_event(&mut self, event: DitchSessionEvent) {
-        match event {
-            DitchSessionEvent::Close => self.dismiss_modal_dialog(),
-            DitchSessionEvent::Ditch {
-                session_id,
-                cwd,
-                action,
-            } => {
-                if self.active_multiplexer().remote.is_some()
-                    && !matches!(action, crate::presentation::dialogs::DitchAction::KillOnly)
-                {
-                    self.record_notice(crate::error_catalog::ErrorNotice::Ditch(
-                        "Remote worktree cleanup is not supported; close the session without cleanup".to_owned(),
-                    ));
-                    return;
-                }
-                let Ok(prepared) = self.prepare_ditch_session_command(session_id) else {
-                    return;
-                };
-                if matches!(action, crate::presentation::dialogs::DitchAction::KillOnly) {
-                    self.submit_prepared_ditch_session_command(prepared);
-                } else {
-                    self.submit_ditch_cleanup(prepared, cwd, &action);
-                }
                 self.dismiss_modal_dialog();
             }
         }
@@ -1114,6 +1078,7 @@ impl AppState {
             draft.isolated = false;
         }
         let mut form = NewSessionForm::new(draft, destinations, self.config().agents.clone());
+        form.set_worktree_directory(self.config().session.worktree_directory.clone());
         form.set_project_defaults(
             self.workspace
                 .spaces()
@@ -1453,31 +1418,6 @@ impl AppState {
             .and_then(|id| session.windows.iter().find(|window| window.id == id))
             .or_else(|| session.windows.first())?;
         Some((session.id.clone(), window.id.clone(), window.name.clone()))
-    }
-    pub(super) fn open_ditch_session_dialog(&mut self) {
-        let Some(selected) = self.selected_session_id() else {
-            return;
-        };
-        self.open_ditch_session_dialog_for(&selected);
-    }
-    pub fn open_ditch_session_dialog_for(&mut self, session_id: &str) -> bool {
-        let Some((session_id, cwd)) = self
-            .workspace
-            .active
-            .binding
-            .mux()
-            .session_by_id_or_name(session_id)
-            .map(|session| (session.id.clone(), session.anchor.cwd.clone()))
-        else {
-            return false;
-        };
-        let dialog = if self.active_multiplexer().remote.is_some() {
-            DitchSessionDialog::open_remote(session_id, cwd)
-        } else {
-            DitchSessionDialog::open_with_repaint(session_id, cwd, self.repaint.clone())
-        };
-        self.open_overlay(ModalDialog::DitchSession(dialog));
-        true
     }
     pub(super) fn open_keybind_help_dialog(&mut self) {
         let bindings = self

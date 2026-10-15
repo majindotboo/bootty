@@ -165,9 +165,12 @@ impl AppState {
                 self.open_rename_session_dialog();
                 effects.push(AppEffect::RequestRepaint);
             }
-            AppAction::DitchSession => {
-                self.open_ditch_session_dialog();
-                effects.push(AppEffect::RequestRepaint);
+            AppAction::CleanWorktrees => {
+                self.commands
+                    .queue(bootty_control::CommandInvocation::from_action(
+                        "worktrees.clean",
+                        bootty_control::Caller::Internal,
+                    ));
             }
             AppAction::MoveSessionToSpace => {
                 self.open_space_picker_for_current_session();

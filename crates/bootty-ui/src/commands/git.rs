@@ -10,6 +10,9 @@ command_actions! {
         Unstage => ("git.unstage", "Unstage File", ["repository", "path"], Write),
         Commit => ("git.commit", "Commit Staged Changes", ["repository", "message"], Write),
         Amend => ("git.amend", "Amend Last Commit", ["repository", "message"], Destructive),
+        Fetch => ("git.fetch", "Fetch From Remote", ["repository"], Write),
+        Pull => ("git.pull", "Pull From Upstream", ["repository"], Write),
+        Push => ("git.push", "Push To Upstream", ["repository"], Write),
         CreateWorktree => ("worktree.create", "Create Worktree", ["repository", "branch", "folder", "start_ref"], Write),
         Overview => ("git.overview", "Git History, Branches and Stashes", ["repository", "limit"], Read),
         CommitDiff => ("git.commit-diff", "Git Commit Diff", ["repository", "commit"], Read),
@@ -69,11 +72,16 @@ impl GitAction {
         }
     }
 
-    pub(super) fn worktree_request(args: &[String]) -> Result<bootty_git::WorktreeRequest, String> {
+    /// `directory` is the configured worktree parent; wire arguments never carry it.
+    pub(super) fn worktree_request(
+        args: &[String],
+        directory: Option<String>,
+    ) -> Result<bootty_git::WorktreeRequest, String> {
         Ok(bootty_git::WorktreeRequest {
             branch: args.get(1).ok_or("Worktree branch is required")?.clone(),
             name: args.get(2).filter(|value| !value.is_empty()).cloned(),
             start_ref: args.get(3).filter(|value| !value.is_empty()).cloned(),
+            directory,
         })
     }
 
@@ -127,13 +135,16 @@ impl GitAction {
             Self::StashDrop => git
                 .stash_drop(root, arg(1)?, arg(2)?)
                 .map(|()| serde_json::Value::Null),
-            Self::CreateWorktree => git
-                .create_worktree(root, &Self::worktree_request(args)?)
-                .map(serde_json::Value::String),
+            Self::CreateWorktree => {
+                Err("Worktree creation requires the configured directory".into())
+            }
             Self::Open => Err("Opening Git panels requires a window".to_owned()),
             Self::Status => {
                 serde_json::to_value(git.changes(root)?).map_err(|error| error.to_string())
             }
+            Self::Fetch => git.fetch_remote(root).map(|()| serde_json::Value::Null),
+            Self::Pull => git.pull_upstream(root).map(|()| serde_json::Value::Null),
+            Self::Push => git.push_upstream(root).map(|()| serde_json::Value::Null),
             Self::Diff => {
                 let group = match arg(2)? {
                     "staged" => ChangeGroup::Staged,

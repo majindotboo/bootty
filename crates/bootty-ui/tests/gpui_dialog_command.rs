@@ -7,10 +7,7 @@ use bootty_ui::gpui::{
     ActionId, CommandAction, DialogAction, DialogId, DialogIntent, DialogPayload, DialogRole,
     DialogRow, DialogSpec, DialogView, RowId, UiPalette, init_theme, parse_keybinding,
 };
-use bootty_ui::presentation::dialogs::{
-    DitchAction, DitchSessionDialog, DitchSessionEvent, SpaceMoveTarget, SpacePickerDialog,
-    SpacePickerEvent,
-};
+use bootty_ui::presentation::dialogs::{SpaceMoveTarget, SpacePickerDialog, SpacePickerEvent};
 use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable as _, IntoElement, Modifiers,
@@ -414,39 +411,6 @@ fn command_control_navigation_uses_component_selection(cx: &TestAppContext) {
             payload: DialogPayload::default(),
         }));
     });
-}
-
-#[gpui_kit::test]
-fn ditch_uses_command_focus_navigation_and_cancellation(cx: &TestAppContext) {
-    let mut ditch = DitchSessionDialog::open_remote("qa-session".to_owned(), None);
-    let (probe, mut cx) = rooted_probe(cx, ditch.spec());
-    cx.simulate_keystrokes("tab ctrl-n ctrl-p enter");
-    let events = probe.read_with(&cx, |probe, _| {
-        probe
-            .intents
-            .borrow()
-            .iter()
-            .filter_map(|intent| ditch.apply(intent))
-            .collect::<Vec<_>>()
-    });
-    pretty_assertions::assert_eq!(
-        events,
-        vec![DitchSessionEvent::Ditch {
-            session_id: "qa-session".to_owned(),
-            cwd: None,
-            action: DitchAction::KillOnly,
-        }]
-    );
-    cx.simulate_keystrokes("escape");
-    let events = probe.read_with(&cx, |probe, _| {
-        probe
-            .intents
-            .borrow()
-            .iter()
-            .filter_map(|intent| ditch.apply(intent))
-            .collect::<Vec<_>>()
-    });
-    assert_eq!(events.last(), Some(&DitchSessionEvent::Close));
 }
 
 #[gpui_kit::test]
@@ -1237,7 +1201,7 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
     let spec = DialogSpec {
         id: DialogId::new("confirm"),
         role: DialogRole::Confirm,
-        title: "Ditch session".to_owned(),
+        title: "Delete session".to_owned(),
         icon: None,
         hint: Some("Enter confirm   Esc cancel".to_owned()),
         footer: None,
@@ -1264,7 +1228,7 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
             DialogRow {
                 detail: Some("This removes the worktree.".to_owned()),
                 destructive: true,
-                ..DialogRow::action("ditch", "Ditch", DialogAction::new("ditch"))
+                ..DialogRow::action("delete", "Delete", DialogAction::new("delete"))
             },
             DialogRow::action("cancel-action", "Keep", DialogAction::new("keep")),
         ],
@@ -1274,13 +1238,13 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
     let (probe, mut cx) = rooted_probe(cx, spec);
 
     assert!(cx.debug_bounds("dialog-confirm-panel").is_some());
-    assert!(cx.debug_bounds("dialog-confirm-detail-ditch").is_some());
+    assert!(cx.debug_bounds("dialog-confirm-detail-delete").is_some());
     cx.simulate_keystrokes("enter");
     probe.update(&mut cx, |probe, _| {
         assert!(probe.intents.borrow().contains(&DialogIntent::Activate {
             dialog: DialogId::new("confirm"),
-            row: RowId::new("ditch"),
-            action: ActionId::new("ditch"),
+            row: RowId::new("delete"),
+            action: ActionId::new("delete"),
             payload: DialogPayload::default(),
         }));
     });

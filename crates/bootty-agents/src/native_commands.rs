@@ -99,6 +99,17 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             ResourceKind::Session,
         ),
         (
+            "draft",
+            vec!["id", "generation", "draft"],
+            ResourceKind::Session,
+        ),
+        ("seen", vec!["id", "generation"], ResourceKind::Session),
+        (
+            "mark-unread",
+            vec!["id", "generation"],
+            ResourceKind::Session,
+        ),
+        (
             "queue-retry",
             vec!["id", "generation", "message_id"],
             ResourceKind::Session,

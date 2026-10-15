@@ -52,6 +52,24 @@ impl AppState {
         }
     }
 
+    pub(super) fn dispatch_worktree_cleanup(
+        &mut self,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        if let Err(error) = executor::begin_synchronous_command(execution) {
+            return self.reject_command(super::command_outcome_for_mux_error(error));
+        }
+        match self.start_worktree_cleanup() {
+            Ok((result, warnings)) => {
+                CommandDispatch::Pending(super::PendingCommandResult::WorktreeCleanup {
+                    result,
+                    warnings,
+                })
+            }
+            Err(outcome) => self.reject_command(outcome),
+        }
+    }
+
     pub(crate) fn open_session_git_changes(&mut self, scope: SpaceId, session_id: &str) {
         let Some(binding) = self.workspace.binding(scope) else {
             return;
@@ -93,27 +111,26 @@ impl AppState {
             });
         };
         let remote = binding.multiplexer().remote.clone();
+        let worktree_directory = self
+            .config()
+            .session
+            .worktree_directory
+            .clone()
+            .filter(|directory| !directory.trim().is_empty());
         self.dispatch_committed_command(execution, move || {
-            let result = remote.map_or_else(
-                || action.execute(SystemCommandRunner, &arguments),
-                |remote| {
-                    if action == GitAction::CreateWorktree {
-                        bootty_mux::remote_space::create_remote_worktree_request_with_runner(
-                            &remote,
-                            arguments.first().ok_or("Repository path is required")?,
-                            &GitAction::worktree_request(&arguments)?,
-                            &SystemCommandRunner,
-                        )
-                        .map(serde_json::Value::String)
-                        .map_err(|error| error.to_string())
-                    } else {
+            let result = if action == GitAction::CreateWorktree {
+                create_worktree(remote, &arguments, worktree_directory)
+            } else {
+                remote.map_or_else(
+                    || action.execute(SystemCommandRunner, &arguments),
+                    |remote| {
                         action.execute(
                             RemoteCommandRunner::new(RemoteHost::new(remote), SystemCommandRunner),
                             &arguments,
                         )
-                    }
-                },
-            );
+                    },
+                )
+            };
             match result {
                 Ok(value) => CommandOutcome::Success {
                     value,
@@ -126,4 +143,28 @@ impl AppState {
             }
         })
     }
+}
+
+/// Create the checkout on the repository's host, which resolves the configured directory.
+fn create_worktree(
+    remote: Option<bootty_config::config::RemoteConfig>,
+    arguments: &[String],
+    directory: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let repository = arguments.first().ok_or("Repository path is required")?;
+    let request = GitAction::worktree_request(arguments, directory)?;
+    remote
+        .map_or_else(
+            || bootty_git::Git::new().create_worktree(repository, &request),
+            |remote| {
+                bootty_mux::remote_space::create_remote_worktree_request_with_runner(
+                    &remote,
+                    repository,
+                    &request,
+                    &SystemCommandRunner,
+                )
+                .map_err(|error| error.to_string())
+            },
+        )
+        .map(serde_json::Value::String)
 }

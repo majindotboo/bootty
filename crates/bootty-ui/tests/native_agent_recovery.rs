@@ -86,6 +86,24 @@ fn target(value: &serde_json::Value, field: &str) -> TestResult<CommandTarget> {
         value.get(field).cloned().ok_or("issued target missing")?,
     )?)
 }
+/// Every pane the backend shows, by session and window. Titles are left out: a starting shell
+/// may still be renaming its window.
+fn topology(state: &AppState) -> Vec<(String, String, Option<String>)> {
+    state
+        .mux()
+        .all_sessions()
+        .iter()
+        .flat_map(|session| {
+            session.windows.iter().flat_map(|window| {
+                window
+                    .panes
+                    .iter()
+                    .map(|pane| (session.id.clone(), window.id.clone(), pane.pane_id.clone()))
+            })
+        })
+        .collect()
+}
+
 fn submit(
     state: &mut AppState,
     wakes: &mpsc::Receiver<()>,
@@ -308,7 +326,7 @@ fn history_resume_reuses_the_exact_live_terminal_only_after_account_validation(
     wait_observed(&mut host, &terminal)?;
     let service = host.state.terminal_agent_service().ok_or("agent owner")?;
     let (source, prior_tools) = service.spawn_parent(&terminal).ok_or("live native tools")?;
-    let topology = host.state.mux().all_sessions().to_vec();
+    let before = topology(&host.state);
     let scope = host.state.mux_scope();
     let mut resume = CommandInvocation::new(
         "agents.claude.resume",
@@ -347,7 +365,7 @@ fn history_resume_reuses_the_exact_live_terminal_only_after_account_validation(
         assert_eq!(target(&value, "terminal")?, terminal);
         assert_eq!(value["reused"], true);
     }
-    assert_eq!(host.state.mux().all_sessions(), topology);
+    assert_eq!(topology(&host.state), before);
     assert_eq!(host.state.mux_scope(), scope);
     assert_eq!(service.records().len(), 1);
     assert_eq!(service.live_records().len(), 1);
@@ -509,7 +527,7 @@ fn missing_original_destination_cannot_launch_into_another_session(host: TestRes
     );
     create.target = Some(binding);
     success(submit(&mut host.state, &host.wakes, create).unwrap()).unwrap();
-    let before = host.state.mux().all_sessions().to_vec();
+    let before = topology(&host.state);
     for operation in ["resume", "fork"] {
         let outcome = submit(
             &mut host.state,
@@ -525,7 +543,7 @@ fn missing_original_destination_cannot_launch_into_another_session(host: TestRes
             matches!(outcome, CommandOutcome::Unavailable { .. }),
             "{outcome:?}"
         );
-        assert_eq!(host.state.mux().all_sessions(), before);
+        assert_eq!(topology(&host.state), before);
         assert_eq!(
             host.state
                 .terminal_agent_service()

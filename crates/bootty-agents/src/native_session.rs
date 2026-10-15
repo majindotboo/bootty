@@ -280,8 +280,8 @@ impl NativeSessionConfig {
     }
 
     pub(crate) fn validate_stored(&self) -> Result<(), String> {
-        if self.plan_mode == Some(true) && self.provider != AgentKind::Codex {
-            return Err("Collaboration Plan mode requires Codex".into());
+        if self.plan_mode == Some(true) && self.provider == AgentKind::Pi {
+            return Err("Pi has no Plan mode".into());
         }
         if self.profile.as_ref().is_some_and(|profile| {
             profile.is_empty()
@@ -411,6 +411,8 @@ pub struct NativeAgentSession {
     claude: Option<Arc<Mutex<crate::native_claude::ClaudeProtocol>>>,
     pub(crate) completion_catalog: Mutex<Option<crate::NativeCompletionCatalog>>,
     pub(crate) claude_models: Mutex<Option<Vec<crate::NativeModelOption>>>,
+    /// Whether Claude is in its plan permission mode, as Bootty last set or launched it.
+    pub(crate) claude_plan: Mutex<bool>,
     pub(crate) history_window: Mutex<Option<crate::native_history::HistoryPosition>>,
     pub(crate) history_quotes: Mutex<NativeSessionSnapshot>,
     _launch_resources: NativeLaunchResources,
@@ -545,6 +547,7 @@ impl NativeAgentSession {
             claude,
             completion_catalog: Mutex::new(None),
             claude_models: Mutex::new(None),
+            claude_plan: Mutex::new(config.plan_mode == Some(true)),
             history_window: Mutex::new(None),
             history_quotes: Mutex::new(NativeSessionSnapshot::new(config.provider)),
             _launch_resources: launch_resources,
@@ -774,14 +777,19 @@ impl NativeAgentSession {
         if prompt.has_provider_mentions() && self.config.provider != AgentKind::Codex {
             return Err("Apps and plugin mentions require the captured Codex account".into());
         }
-        let resolved_prompt =
-            if self.config.provider != AgentKind::Claude && prompt.needs_skill_catalog() {
-                let catalog = self.completions()?;
-                prompt.validate_provider_mentions(&catalog)?;
-                prompt.with_advertised_skills(&catalog)
-            } else {
-                prompt.clone()
-            };
+        let resolved_prompt = if prompt.needs_skill_catalog() {
+            match self.completions() {
+                Ok(catalog) => {
+                    prompt.validate_provider_mentions(&catalog)?;
+                    prompt.with_advertised_skills(&catalog)
+                }
+                // Older Claude transports advertise no catalog, so `$` text stays prose.
+                Err(_) if self.config.provider == AgentKind::Claude => prompt.clone(),
+                Err(error) => return Err(error),
+            }
+        } else {
+            prompt.clone()
+        };
         let prompt = &resolved_prompt;
         if matches!(delivery, NativePromptDelivery::Steer) {
             return self.send_active_prompt(prompt);
@@ -2580,11 +2588,17 @@ fn native_command(
                 .or(config.fresh_session_id.as_deref())
                 .ok_or("Missing captured Claude UUID")?;
             command.args(tool_arguments).args(&config.arguments);
-            if let Some(mode) = config.permissions.claude() {
+            let mode = if config.plan_mode == Some(true) {
+                Some("plan")
+            } else {
+                config.permissions.claude()
+            };
+            if let Some(mode) = mode {
                 command.args(["--permission-mode", mode]);
-                if config.permissions == crate::NativePermissionMode::FullAccess {
-                    command.arg("--allow-dangerously-skip-permissions");
-                }
+            }
+            // Leaving Plan mode returns to full access, which Claude only allows when asked.
+            if config.permissions == crate::NativePermissionMode::FullAccess {
+                command.arg("--allow-dangerously-skip-permissions");
             }
             if let Some(directory) = attachment_directory {
                 if !directory.is_absolute() {

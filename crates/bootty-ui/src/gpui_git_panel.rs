@@ -956,6 +956,59 @@ impl GitChangesPanel {
         content
     }
 
+    /// Fetch, and pull or push the commits the branch and its upstream don't share.
+    fn render_sync(&self, cx: &Context<Self>) -> Vec<Button> {
+        let Some(upstream) = self
+            .changes
+            .as_ref()
+            .and_then(|changes| changes.upstream.as_ref())
+        else {
+            return Vec::new();
+        };
+        let commits = |count: u32| if count == 1 { "commit" } else { "commits" };
+        let sync = |id: &'static str, command: &'static str| {
+            Button::new(id)
+                .debug_selector(move || id.into())
+                .ghost()
+                .xsmall()
+                .disabled(self.mutating)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.request(command, Vec::new(), window, cx);
+                }))
+        };
+        let mut buttons = vec![
+            sync("git-fetch", "git.fetch")
+                .icon(Icon::default().path("icons/cloud-download.svg"))
+                .accessibility_label("Fetch")
+                .tooltip(format!("Fetch the remote of {}", upstream.name)),
+        ];
+        if upstream.behind > 0 {
+            buttons.push(
+                sync("git-pull", "git.pull")
+                    .label(format!("↓{}", upstream.behind))
+                    .tooltip(format!(
+                        "Pull {} {} from {}",
+                        upstream.behind,
+                        commits(upstream.behind),
+                        upstream.name
+                    )),
+            );
+        }
+        if upstream.ahead > 0 {
+            buttons.push(
+                sync("git-push", "git.push")
+                    .label(format!("↑{}", upstream.ahead))
+                    .tooltip(format!(
+                        "Push {} {} to {}",
+                        upstream.ahead,
+                        commits(upstream.ahead),
+                        upstream.name
+                    )),
+            );
+        }
+        buttons
+    }
+
     fn render_header(&self, cx: &Context<Self>) -> [gpui_kit::AnyElement; 2] {
         let root = self
             .changes
@@ -976,6 +1029,7 @@ impl GitChangesPanel {
                 .min_w_0()
                 .flex_shrink_0()
                 .child(div().flex_1().min_w_0().truncate().text_sm().child(branch))
+                .children(self.render_sync(cx))
                 .child(
                     Button::new("refresh")
                         .icon(IconName::RotateCw)

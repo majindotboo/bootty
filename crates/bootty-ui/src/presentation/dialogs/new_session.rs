@@ -1232,6 +1232,7 @@ impl NewSessionDialog {
             branch: normalized_name(&draft.branch)?,
             name: normalized_name(&draft.folder),
             start_ref: normalized_name(&draft.start_ref),
+            directory: None,
         };
         if let Err(error) = request.validate() {
             draft.error = Some(error);

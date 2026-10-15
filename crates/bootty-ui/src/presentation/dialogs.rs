@@ -6,12 +6,11 @@ pub use new_session::{NewSessionDialog, NewSessionPickerEvent};
 use bootty_mux::RemoteSpaceSummary;
 use gpui_kit::component::Colorize as _;
 
-use crate::strings::home_dir;
 use std::collections::HashMap;
 
 use crate::{
     gpui::{
-        DialogAction, DialogId, DialogIntent, DialogPayload, DialogRole, DialogRow, DialogSpec,
+        DialogAction, DialogIntent, DialogPayload, DialogRole, DialogRow, DialogSpec,
         OptionalSpaceEditorChoice, RemoteSpaceSnapshot, RowId, SpaceEditorChoice,
         SpaceEditorColors, SpaceEditorIcon, SpaceEditorIntent, SpaceEditorSnapshot,
     },
@@ -27,7 +26,6 @@ use crate::{
 use bootty_config::config::{
     AppearanceMode, MultiplexerBackendConfig, RemoteConfig, SshProfileConfig,
 };
-use bootty_git::{self as project, WorktreeStatus};
 use bootty_mux::repository::{RemoteSpaceRef, SpaceMuxOverride, SpaceRemoteOverride};
 use bootty_mux::{RepaintHandle, controller::SpaceId};
 
@@ -39,7 +37,6 @@ use crate::{
 use bootty_mux::workspace::{BindingSessionGroup, ScopedSessionTarget};
 
 pub const COMMAND_PALETTE_ID: &str = "command-palette";
-pub const DITCH_ID: &str = "ditch-session";
 pub const KEYBIND_HELP_ID: &str = "keybind-help";
 pub const NEW_SESSION_ID: &str = "new-session";
 pub const RENAME_SESSION_ID: &str = "rename-session";
@@ -181,30 +178,6 @@ pub enum ThemePickerEvent {
     RestorePreview,
     Preview(String),
     Select(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DitchAction {
-    DetachWorktree,
-    KillOnly,
-    RemoveWorktree {
-        force: bool,
-    },
-    RemoveWorktreeAndBranch {
-        force: bool,
-        branch: String,
-        repo: String,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DitchSessionEvent {
-    Close,
-    Ditch {
-        session_id: String,
-        cwd: Option<String>,
-        action: DitchAction,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1183,184 +1156,6 @@ impl SpacePickerDialog {
     }
 }
 
-pub struct DitchSessionDialog {
-    session_id: String,
-    cwd: Option<String>,
-    status: WorktreeStatus,
-    list: SearchableList<DitchAction>,
-    inspection: Option<std::sync::mpsc::Receiver<Self>>,
-    remote: bool,
-}
-
-impl DitchSessionDialog {
-    pub fn open(session_id: String, cwd: Option<String>) -> Self {
-        let status = cwd
-            .as_deref()
-            .map_or_else(Default::default, project::status);
-        let main = cwd.as_deref().and_then(project::main_worktree);
-        let trunk = cwd.as_deref().and_then(project::trunk_branch);
-        let multi_worktree = cwd.as_deref().map_or(0, project::worktree_count) > 1;
-        let actions = ditch_actions(&status, main.as_deref(), trunk.as_deref(), multi_worktree);
-        let entries = actions
-            .into_iter()
-            .map(|action| {
-                let (label, detail) = ditch_action_text(&action);
-                let mut entry = SearchableEntry::new(action, label);
-                entry.secondary = Some(detail);
-                entry
-            })
-            .collect();
-        Self {
-            session_id,
-            cwd,
-            status,
-            list: SearchableList::new(entries),
-            inspection: None,
-            remote: false,
-        }
-    }
-
-    pub fn open_with_repaint(
-        session_id: String,
-        cwd: Option<String>,
-        repaint: RepaintHandle,
-    ) -> Self {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let mut dialog = Self::open(session_id.clone(), None);
-        dialog.cwd.clone_from(&cwd);
-        dialog.inspection = Some(receiver);
-        std::thread::spawn(move || {
-            let _ = sender.send(Self::open(session_id, cwd));
-            repaint();
-        });
-        dialog
-    }
-
-    #[must_use]
-    pub fn open_remote(session_id: String, cwd: Option<String>) -> Self {
-        // Remote Git cleanup needs a remote execution contract; never inspect a remote path locally.
-        let mut dialog = Self::open(session_id, None);
-        dialog.cwd = cwd;
-        dialog.remote = true;
-        dialog
-    }
-
-    pub fn poll(&mut self) {
-        if let Some(inspection) = &self.inspection {
-            match inspection.try_recv() {
-                Ok(dialog) => *self = dialog,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => self.inspection = None,
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-            }
-        }
-    }
-
-    #[must_use]
-    pub fn spec(&self) -> DialogSpec {
-        let path = self.cwd.as_deref().map_or_else(
-            || "(unknown)".to_owned(),
-            |cwd| bootty_git::project::display_path(cwd, home_dir().as_deref()),
-        );
-        let mut rows = vec![DialogRow::section("path", format!("path: {path}"))];
-        rows.push(DialogRow::section(
-            "git",
-            if self.remote {
-                "Remote session: worktree and branch are kept".to_owned()
-            } else if self.inspection.is_some() {
-                "Inspecting worktree…".to_owned()
-            } else if !self.status.in_repo {
-                "git: not a git repository".to_owned()
-            } else {
-                format!(
-                    "branch: {} · {} · {}",
-                    self.status.branch.as_deref().unwrap_or("detached"),
-                    if self.status.is_linked_worktree {
-                        "linked worktree"
-                    } else {
-                        "main worktree"
-                    },
-                    if self.status.dirty { "dirty" } else { "clean" },
-                )
-            },
-        ));
-        rows.extend(self.list.rows().into_iter().map(|row| DialogRow {
-            id: RowId::new(row.source_index.to_string()),
-            icon: Some(if matches!(row.value, DitchAction::DetachWorktree) {
-                "unlink".to_owned()
-            } else if matches!(row.value, DitchAction::KillOnly) {
-                "x".to_owned()
-            } else {
-                "trash-2".to_owned()
-            }),
-            label: row.primary.to_owned(),
-            color: None,
-            detail: row.secondary.map(str::to_owned),
-            trailing: None,
-            keybinding: None,
-            current: false,
-            enabled: self.inspection.is_none(),
-            destructive: !matches!(
-                row.value,
-                DitchAction::DetachWorktree | DitchAction::KillOnly
-            ),
-            action: Some(DialogAction::new("ditch").with_payload(row.source_index.to_string())),
-            preview: None,
-        }));
-        DialogSpec {
-            id: DialogId::new(DITCH_ID),
-            role: DialogRole::SearchableList,
-            title: format!("Ditch session {}?", self.session_id),
-            icon: Some("trash-2".to_owned()),
-            hint: Some("↑ ↓ navigate   Enter confirm   Esc cancel".to_owned()),
-            footer: None,
-            text: None,
-            text_label: None,
-            fields: Vec::new(),
-            spaces: Vec::new(),
-            completion: None,
-            applications: Vec::new(),
-            provider_mentions: Vec::new(),
-            attachments: Vec::new(),
-            models: Vec::new(),
-            available_efforts: Vec::new(),
-            projects: Vec::new(),
-            project_labels: std::collections::BTreeMap::new(),
-            selected_project: None,
-            models_loading: false,
-            model_error: None,
-            selected_model: None,
-            busy: false,
-            multiline: false,
-            text_hint: None,
-            rows,
-            empty_text: String::new(),
-            placement: crate::gpui::DialogPlacement::Center,
-        }
-    }
-
-    pub fn apply(&mut self, intent: &DialogIntent) -> Option<DitchSessionEvent> {
-        if intent.dialog_id().0 != DITCH_ID {
-            return None;
-        }
-        match intent {
-            DialogIntent::Dismiss { .. } => Some(DitchSessionEvent::Close),
-            DialogIntent::Activate { payload, .. } if self.inspection.is_none() => {
-                payload_index(payload).and_then(|index| {
-                    self.list
-                        .rows()
-                        .get(index)
-                        .map(|row| DitchSessionEvent::Ditch {
-                            session_id: self.session_id.clone(),
-                            cwd: self.cwd.clone(),
-                            action: row.value.clone(),
-                        })
-                })
-            }
-            _ => None,
-        }
-    }
-}
-
 pub struct KeybindHelpDialog {
     model: KeybindHelpModel,
 }
@@ -1731,61 +1526,6 @@ fn classify_theme(name: &str) -> ThemeKind {
         ThemeKind::Light
     } else {
         ThemeKind::Dark
-    }
-}
-
-fn ditch_actions(
-    status: &WorktreeStatus,
-    main: Option<&str>,
-    trunk: Option<&str>,
-    multi_worktree: bool,
-) -> Vec<DitchAction> {
-    let mut actions = Vec::new();
-    if multi_worktree && status.branch.is_some() {
-        actions.push(DitchAction::DetachWorktree);
-    }
-    actions.push(DitchAction::KillOnly);
-    if status.is_linked_worktree {
-        actions.push(DitchAction::RemoveWorktree {
-            force: status.dirty,
-        });
-        if let (Some(branch), Some(repo)) = (&status.branch, main)
-            && trunk != Some(branch.as_str())
-        {
-            actions.push(DitchAction::RemoveWorktreeAndBranch {
-                force: true,
-                branch: branch.clone(),
-                repo: repo.to_owned(),
-            });
-        }
-    }
-    actions
-}
-
-fn ditch_action_text(action: &DitchAction) -> (&'static str, String) {
-    match action {
-        DitchAction::DetachWorktree => (
-            "Detach worktree",
-            "Detach HEAD to free the branch; keep the worktree, branch, and commits".to_owned(),
-        ),
-        DitchAction::KillOnly => (
-            "Kill session",
-            "Close the session; keep the worktree and branch".to_owned(),
-        ),
-        DitchAction::RemoveWorktree { force } => (
-            "Kill + remove worktree",
-            if *force {
-                "Discard uncommitted changes and remove the linked worktree".to_owned()
-            } else {
-                "Remove the linked worktree".to_owned()
-            },
-        ),
-        DitchAction::RemoveWorktreeAndBranch { branch, .. } => (
-            "Kill + remove worktree + delete branch",
-            format!(
-                "Remove the worktree and delete branch '{branch}' (uncommitted changes and unmerged commits are lost)"
-            ),
-        ),
     }
 }
 

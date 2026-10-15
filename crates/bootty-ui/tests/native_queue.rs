@@ -40,6 +40,8 @@ fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContex
         }]))
         .unwrap(),
         attachments: Vec::new(),
+        draft: None,
+        seen_turns: 0,
     };
     let commands = Arc::new(Mutex::new(Vec::<CommandInvocation>::new()));
     let observed = commands.clone();

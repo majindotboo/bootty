@@ -60,6 +60,22 @@ pub struct NativeSessionRecord {
     pub spawn_parent: Option<CommandTarget>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_messages: Vec<NativeQueuedMessage>,
+    /// Unsent composer contents, kept across restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<NativeDraft>,
+    /// How many of the conversation's completed turns the user has seen.
+    #[serde(default)]
+    pub seen_turns: u64,
+}
+
+/// Text typed into a conversation's composer and the attachment chips placed in it.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeDraft {
+    pub text: String,
+    /// Attachments this conversation holds, each with where its chip sits in `text`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<NativeAttachmentReference>,
 }
 
 /// Creation can fail after a durable reservation exists. Its exact target remains retryable.
@@ -132,6 +148,10 @@ impl NativeSessionRecord {
 
 /// Lightweight accepted conversation facts for the sidebar; transcript data stays in records.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag is an independent fact the sidebar shows"
+)]
 pub struct NativeSessionActivity {
     pub id: String,
     pub title: String,
@@ -145,6 +165,9 @@ pub struct NativeSessionActivity {
     pub model: Option<String>,
     pub status: NativeSessionStatus,
     pub completed_turn: bool,
+    /// A turn finished since the user last looked at the conversation.
+    #[serde(default)]
+    pub unread: bool,
     pub first_turn: Option<crate::NativeTurnReceipt>,
     pub approval: bool,
     pub input: bool,
@@ -365,6 +388,72 @@ impl NativeAgentService {
             .find(|record| record.target() == *target)
             .map(|record| record.binding_id.clone())
             .ok_or_else(|| "Native session target is unknown or stale".to_owned())
+    }
+
+    /// Keep a conversation's unsent composer contents. An empty draft clears it. Attachment
+    /// names and sizes come from the conversation's own copies; only chip places come from here.
+    /// # Errors
+    /// Returns stale targets, oversized drafts, attachments the conversation doesn't hold, or
+    /// persistence failures.
+    pub fn save_draft(&self, target: &CommandTarget, draft: NativeDraft) -> Result<(), String> {
+        if draft.text.len() > crate::MAX_NATIVE_PROMPT_TEXT_BYTES {
+            return Err("The draft exceeds the message limit".to_owned());
+        }
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        let record = candidate
+            .records
+            .iter_mut()
+            .find(|record| record.target() == *target)
+            .ok_or("Native session target is unknown or stale")?;
+        let attachments = draft
+            .attachments
+            .into_iter()
+            .map(|placed| {
+                let mut held = record
+                    .attachments
+                    .iter()
+                    .find(|held| held.id == placed.id)
+                    .cloned()
+                    .ok_or("The draft has an attachment this conversation doesn't hold")?;
+                held.prompt_ranges = placed.prompt_ranges;
+                Ok(held)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let draft =
+            (!draft.text.trim().is_empty() || !attachments.is_empty()).then_some(NativeDraft {
+                text: draft.text,
+                attachments,
+            });
+        if record.draft == draft {
+            return Ok(());
+        }
+        record.draft = draft;
+        self.commit(candidate)
+    }
+
+    /// Mark the conversation's finished turns seen, or every turn but the last one unseen.
+    /// # Errors
+    /// Returns stale targets or persistence failures.
+    pub fn mark_seen(&self, target: &CommandTarget, seen: bool) -> Result<(), String> {
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        let record = candidate
+            .records
+            .iter_mut()
+            .find(|record| record.target() == *target)
+            .ok_or("Native session target is unknown or stale")?;
+        let completed = record.snapshot.completed_turns;
+        let seen_turns = if seen {
+            completed
+        } else {
+            completed.saturating_sub(1)
+        };
+        if record.seen_turns == seen_turns {
+            return Ok(());
+        }
+        record.seen_turns = seen_turns;
+        self.commit(candidate)
     }
 
     /// Copy a caller-selected file into this exact session's private attachment store.
@@ -937,10 +1026,13 @@ impl NativeAgentService {
             return Err("Selected reasoning effort is not supported by this model".to_owned());
         }
         if let Some(plan) = selection.plan_mode {
-            if session.config.provider != crate::AgentKind::Codex {
-                return Err("This provider does not support collaboration Plan mode".into());
+            if session.config.provider == crate::AgentKind::Pi {
+                return Err("Pi has no Plan mode".into());
             }
-            if plan && !session.completions()?.plan_mode {
+            if plan
+                && session.config.provider == crate::AgentKind::Codex
+                && !session.completions()?.plan_mode
+            {
                 return Err("Plan mode is not available for this account".into());
             }
         }
@@ -976,20 +1068,23 @@ impl NativeAgentService {
     /// # Errors
     /// Returns stale targets, persistence failures, or the prompt's errors.
     pub fn implement_plan(&self, target: &CommandTarget) -> Result<NativeSessionSnapshot, String> {
-        {
-            let _mutation = lock(&self.mutation);
-            let mut candidate = lock(&self.store).clone();
-            let record = candidate
-                .records
-                .iter_mut()
-                .find(|record| record.target() == *target)
-                .ok_or("Native session target is unknown or stale")?;
-            if record.config.plan_mode == Some(true) {
-                record.config.plan_mode = Some(false);
-                self.commit(candidate)?;
-            }
-        }
+        self.leave_plan_mode(target)?;
         self.prompt(target, "Implement the plan.")
+    }
+
+    fn leave_plan_mode(&self, target: &CommandTarget) -> Result<(), String> {
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        let record = candidate
+            .records
+            .iter_mut()
+            .find(|record| record.target() == *target)
+            .ok_or("Native session target is unknown or stale")?;
+        if record.config.plan_mode == Some(true) {
+            record.config.plan_mode = Some(false);
+            self.commit(candidate)?;
+        }
+        Ok(())
     }
 
     /// Save the next-turn policy without interrupting active work. Idle changes resume with
@@ -1047,18 +1142,42 @@ impl NativeAgentService {
     /// # Errors
     /// Returns stale targets, unknown approval IDs, or provider transport errors.
     pub fn approve(&self, target: &CommandTarget, id: &str, allow: bool) -> Result<(), String> {
-        self.resolve(target)?.approve(id, allow)
+        self.approve_decision(
+            target,
+            id,
+            if allow {
+                crate::NativeApprovalDecision::AllowOnce
+            } else {
+                crate::NativeApprovalDecision::Deny
+            },
+        )
     }
 
+    /// Approving Claude's plan ends Plan mode: Claude leaves it, and the saved choice follows.
     /// # Errors
-    /// Returns stale targets, unavailable approval scopes, or transport errors.
+    /// Returns stale targets, unavailable approval scopes, transport or persistence errors.
     pub fn approve_decision(
         &self,
         target: &CommandTarget,
         id: &str,
         decision: crate::NativeApprovalDecision,
     ) -> Result<(), String> {
-        self.resolve(target)?.approve_decision(id, decision)
+        let session = self.resolve(target)?;
+        let approves_plan = decision != crate::NativeApprovalDecision::Deny
+            && session.snapshot().requests.iter().any(|request| {
+                request.id == id
+                    && request.method == "claude.permission"
+                    && request
+                        .parameters
+                        .get("tool_name")
+                        .is_some_and(|tool| tool == "ExitPlanMode")
+            });
+        session.approve_decision(id, decision)?;
+        if approves_plan {
+            session.left_claude_plan();
+            self.leave_plan_mode(target)?;
+        }
+        Ok(())
     }
 
     /// # Errors
@@ -1317,6 +1436,8 @@ impl NativeAgentService {
             side_chat: None,
             spawn_parent: None,
             queued_messages: Vec::new(),
+            draft: None,
+            seen_turns: 0,
         };
         if let Some(CreationOrigin::InitialMessage { attachments, .. }) = &origin {
             for path in attachments {
@@ -1677,6 +1798,7 @@ impl NativeAgentService {
                 model: record.config.model.clone(),
                 status: record.snapshot.status,
                 completed_turn: record.snapshot.completed_turn,
+                unread: record.snapshot.completed_turns > record.seen_turns,
                 first_turn: record.snapshot.first_turn.clone(),
                 approval: record.snapshot.requests.iter().any(|request| {
                     request.is_mcp_approval()

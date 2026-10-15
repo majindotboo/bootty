@@ -90,7 +90,7 @@ impl SessionAction {
             Self::AutoSettle => ("Enable inactivity-based settlement or keep the saved session active. enabled is true or false. Never closes its terminal.".to_owned(), Some(ResourceKind::Binding)),
             Self::Hide => ("Hide saved work while preserving lifecycle, snooze and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
             Self::Show => ("Show hidden saved work while preserving lifecycle and snooze.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Delete => ("Permanently remove a closed session's saved record and terminal checkpoint from this Space. Close live sessions first; use Archive to retain recoverable work. Native agent history, worktrees and branches remain.".to_owned(), Some(ResourceKind::Binding)),
+            Self::Delete => ("Permanently remove a closed session's saved record and terminal checkpoint from this Space. Close live sessions first; use Archive to retain recoverable work. Native agent history remains; worktree cleanup then removes its Bootty worktree unless it holds uncommitted or unpushed work.".to_owned(), Some(ResourceKind::Binding)),
             Self::Restore => ("Restore a deleted saved identity with its previous lifecycle, archive, visibility and snooze. Never start a terminal implicitly.".to_owned(), Some(ResourceKind::Binding)),
             Self::Reopen => ("Reattach the exact original terminal when live; otherwise restore its saved layout, panes, directories and plain history, or start a fresh shell in the saved directory when no checkpoint exists. Preserve logical identity, title and order; never adopt by name or replay shell commands or prompts.".to_owned(), Some(ResourceKind::Binding)),
             Self::Create => (

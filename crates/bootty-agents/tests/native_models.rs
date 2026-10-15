@@ -9,11 +9,8 @@ use proptest::prelude::*;
 use rstest::rstest;
 use serde_json::{Value, json};
 
-fn config(root: &Path, provider: AgentKind) -> std::io::Result<NativeSessionConfig> {
-    let script = root.join("provider.py");
-    fs::write(
-        &script,
-        r"#!/usr/bin/env python3
+/// One fake for Codex, Claude and Pi, picked by the arguments each is launched with.
+const PROVIDER: &str = r"#!/usr/bin/env python3
 import json,os,sys
 pi='--mode' in sys.argv
 claude='--input-format' in sys.argv
@@ -22,7 +19,10 @@ model={'provider':'configured','id':'available','name':'Available','reasoning':T
 effort=sys.argv[sys.argv.index('--effort')+1] if '--effort' in sys.argv else 'medium'
 goal=None
 fast=any(json.loads(sys.argv[i+1]).get('fastMode',False) for i,arg in enumerate(sys.argv[:-1]) if arg=='--settings')
+if claude:
+ with open('argv.json','w') as output: json.dump(sys.argv[1:],output)
 def emit(value): print(json.dumps(value),flush=True)
+def finish(): emit({'type':'result','subtype':'success','session_id':identity,'uuid':'result-uuid','is_error':False,'terminal_reason':'completed','result':'Done','errors':[]})
 def reply(value,data):
  if claude: emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':data}})
  elif pi: emit({'id':value['id'],'type':'response','command':value['type'],'success':True,'data':data})
@@ -33,6 +33,12 @@ for line in sys.stdin:
   with open('prompt.json','w') as output: json.dump({'params':value['message'],'model':model,'effort':effort,'fast':fast},output)
   emit({'type':'system','subtype':'init','session_id':identity,'cwd':os.getcwd()})
   emit(dict(value,isReplay=True))
+  # Observed from Claude 2.1.299: a plan arrives as an ExitPlanMode approval.
+  if value['message']['content']=='plan': emit({'type':'control_request','request_id':'plan-id','request':{'subtype':'can_use_tool','tool_name':'ExitPlanMode','tool_use_id':'plan-tool','input':{'plan':'1. Write it'},'requires_user_interaction':True}})
+  elif value['message']['content']=='finish': finish()
+  continue
+ if claude and value['type']=='control_response':
+  finish()
   continue
  method=value['request']['subtype'] if claude else value.get('type') if pi else value.get('method')
  params=value['request'] if claude else value if pi else value.get('params',{})
@@ -91,6 +97,9 @@ for line in sys.stdin:
   fast=params['settings'].get('fastMode',fast)
   reply(value,{})
  elif method=='interrupt': reply(value,{})
+ elif method=='set_permission_mode':
+  with open('modes','a') as output: output.write(params['mode']+'\n')
+  reply(value,{'mode':params['mode']})
  elif method=='get_settings':
   settings={'effective':{'effortLevel':effort,'fastMode':fast}}
   if os.path.exists('claude-settings.json'):
@@ -104,8 +113,11 @@ for line in sys.stdin:
   if pi: reply(value,{'disposition':'handled'})
   else: reply(value,{'turn':{'id':'turn'}})
  else: raise Exception(method)
-",
-    )?;
+";
+
+fn config(root: &Path, provider: AgentKind) -> std::io::Result<NativeSessionConfig> {
+    let script = root.join("provider.py");
+    fs::write(&script, PROVIDER)?;
     fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
     let mut config = NativeSessionConfig::new(provider, root);
     config.program = script.to_string_lossy().into_owned();
@@ -448,11 +460,29 @@ fn completion_discovery_reads_the_project_catalog_without_a_turn(#[case] provide
     assert!(!root.path().join("prompt.json").exists());
 }
 
+/// Claude's handshake catalog: one skill from the user's setup and one of Claude's own commands.
+fn advertise_claude_skill(root: &Path) -> std::io::Result<()> {
+    fs::write(
+        root.join("claude-catalog.json"),
+        json!({
+            "models": [{"value": "available", "resolvedModel": "claude-test", "displayName": "Available",
+                "supportsEffort": true, "supportedEffortLevels": ["medium", "high", "max"]}],
+            "commands": [
+                {"name": "project-skill", "description": "Project work", "argumentHint": ""},
+                {"name": "compact", "description": "Free up context", "argumentHint": "", "builtin": true}
+            ]
+        })
+        .to_string(),
+    )
+}
+
 #[rstest]
 #[case(AgentKind::Codex)]
 #[case(AgentKind::Pi)]
+#[case(AgentKind::Claude)]
 fn advertised_skill_chips_use_the_provider_protocol(#[case] provider: AgentKind) {
     let root = TempDir::new().unwrap();
+    advertise_claude_skill(root.path()).unwrap();
     let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
     let record = service
         .create("binding", "Session", config(root.path(), provider).unwrap())
@@ -478,10 +508,39 @@ fn advertised_skill_chips_use_the_provider_protocol(#[case] provider: AgentKind)
                 .to_string_lossy()
                 .as_ref()
         );
-    } else {
+    } else if provider == AgentKind::Pi {
         assert_eq!(
             wire["params"]["message"],
             "/skill:project-skill Use \nKeep $unknown literal."
+        );
+    } else {
+        // Claude runs the skill that opens the last text block; the earlier chip reads as `/name`.
+        assert_eq!(
+            wire["params"]["content"],
+            json!([
+                {"type": "text", "text": "Use /project-skill\nKeep $unknown literal."},
+                {"type": "text", "text": "/project-skill"}
+            ])
+        );
+        let kinds = service
+            .completions(&record.target())
+            .unwrap()
+            .options
+            .into_iter()
+            .map(|option| (option.name, option.kind))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    "project-skill".to_owned(),
+                    bootty_agents::NativeCompletionKind::Skill
+                ),
+                (
+                    "compact".to_owned(),
+                    bootty_agents::NativeCompletionKind::Command
+                ),
+            ]
         );
     }
     service.shutdown().unwrap();
@@ -490,8 +549,10 @@ fn advertised_skill_chips_use_the_provider_protocol(#[case] provider: AgentKind)
 #[rstest]
 #[case(AgentKind::Codex)]
 #[case(AgentKind::Pi)]
+#[case(AgentKind::Claude)]
 fn skill_text_in_attached_reference_context_does_not_execute(#[case] provider: AgentKind) {
     let root = TempDir::new().unwrap();
+    advertise_claude_skill(root.path()).unwrap();
     let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
     let record = service
         .create("binding", "Session", config(root.path(), provider).unwrap())
@@ -508,10 +569,94 @@ fn skill_text_in_attached_reference_context_does_not_execute(#[case] provider: A
     if provider == AgentKind::Codex {
         assert_eq!(wire["params"]["input"].as_array().unwrap().len(), 1);
         assert_eq!(wire["params"]["input"][0]["text"], message);
-    } else {
+    } else if provider == AgentKind::Pi {
         assert_eq!(wire["params"]["message"], message);
+    } else {
+        assert_eq!(wire["params"]["content"], message);
     }
     service.shutdown().unwrap();
+}
+
+/// Claude's Plan mode is its own permission mode. A conversation launches in it, switches when the
+/// choice changes, and leaves it when Claude's plan is approved, without telling Claude again.
+#[rstest]
+fn claude_plan_mode_follows_the_choice_and_ends_when_the_plan_is_approved() {
+    let root = TempDir::new().unwrap();
+    let mut config = config(root.path(), AgentKind::Claude).unwrap();
+    config.plan_mode = Some(true);
+    config.model = Some("available".to_owned());
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service.create("binding", "Session", config).unwrap();
+    let target = record.target();
+    let argv: Vec<String> =
+        serde_json::from_slice(&fs::read(root.path().join("argv.json")).unwrap()).unwrap();
+    assert!(
+        argv.windows(2)
+            .any(|pair| pair == ["--permission-mode", "plan"])
+    );
+    let modes = || fs::read_to_string(root.path().join("modes")).unwrap_or_default();
+    let wait = |ready: &dyn Fn(&bootty_agents::NativeSessionRecord) -> bool| {
+        let deadline = std::time::Instant::now()
+            .checked_add(std::time::Duration::from_secs(5))
+            .unwrap();
+        while !service
+            .sessions()
+            .iter()
+            .any(|record| record.target() == target && ready(record))
+        {
+            assert!(std::time::Instant::now() < deadline, "timed out");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    };
+
+    service.prompt(&target, "plan").unwrap();
+    wait(&|record| !record.snapshot.requests.is_empty());
+    service
+        .approve_decision(
+            &target,
+            &record_request(&service, &target),
+            bootty_agents::NativeApprovalDecision::AllowOnce,
+        )
+        .unwrap();
+    wait(&|record| {
+        record.config.plan_mode == Some(false)
+            && record.snapshot.status == bootty_agents::NativeSessionStatus::Idle
+    });
+    service.prompt(&target, "finish").unwrap();
+    assert_eq!(modes(), "", "Claude left Plan mode itself");
+
+    for plan in [true, false] {
+        wait(&|record| record.snapshot.status == bootty_agents::NativeSessionStatus::Idle);
+        service
+            .configure(
+                &target,
+                &NativeModelSelection {
+                    plan_mode: Some(plan),
+                    fast_mode: None,
+                    model: "available".to_owned(),
+                    reasoning_effort: None,
+                },
+            )
+            .unwrap();
+        service.prompt(&target, "finish").unwrap();
+    }
+    assert_eq!(modes(), "plan\ndefault\n");
+    service.shutdown().unwrap();
+}
+
+fn record_request(service: &NativeAgentService, target: &bootty_control::CommandTarget) -> String {
+    service
+        .sessions()
+        .into_iter()
+        .find(|record| record.target() == *target)
+        .and_then(|record| {
+            record
+                .snapshot
+                .requests
+                .first()
+                .map(|request| request.id.clone())
+        })
+        .unwrap_or_default()
 }
 
 #[rstest]

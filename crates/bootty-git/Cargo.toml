@@ -4,6 +4,7 @@ edition.workspace = true
 version.workspace = true
 
 [dependencies]
+bootty-config = { path = "../bootty-config" }
 bootty-host = { path = "../bootty-host" }
 bootty-write = { path = "../bootty-write" }
 notify.workspace = true

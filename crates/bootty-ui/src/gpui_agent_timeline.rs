@@ -37,9 +37,10 @@ impl TranscriptRow {
     }
 }
 
+/// Whether a row has anything to draw. Image references aren't drawn on their own; the prompt
+/// text links the annotation they came from.
 fn visible(item: &NativeTranscriptItem) -> bool {
     !item.display_text().trim().is_empty()
-        || !item.images.is_empty()
         || !item.attachments.is_empty()
         || !item.citations.is_empty()
         || item.tool.is_some()
@@ -101,89 +102,16 @@ fn append_turn(
                 .is_some_and(|item| visible(item) && !(current_turn && item.subagent.is_some()))
         })
         .collect::<Vec<_>>();
-    if live {
-        append_live_turn(rows, transcript, &indices, expanded);
-        return;
-    }
     let final_message = indices.iter().rev().copied().find(|ix| {
-        transcript
-            .get(*ix)
-            .is_some_and(|item| matches!(item.role.as_str(), "assistant" | "plan"))
+        !live
+            && transcript
+                .get(*ix)
+                .is_some_and(|item| matches!(item.role.as_str(), "assistant" | "plan"))
     });
-    let members = indices
-        .iter()
-        .copied()
-        .filter(|ix| {
-            Some(*ix) != final_message
-                && transcript.get(*ix).is_some_and(|item| {
-                    matches!(
-                        item.role.as_str(),
-                        "assistant" | "thinking" | "reasoning" | "tool"
-                    )
-                })
-        })
-        .collect::<Vec<_>>();
-    let has_work = members
-        .iter()
-        .any(|ix| transcript.get(*ix).is_some_and(is_work));
-    if !has_work {
-        rows.extend(indices.into_iter().filter_map(|index| {
-            transcript.get(index).map(|item| TranscriptRow::Message {
-                index,
-                id: item.id.clone(),
-                meta: Some(index) == final_message,
-            })
-        }));
-        return;
-    }
-    let Some(first) = members.first() else {
-        return;
-    };
-    let Some(first) = transcript.get(*first) else {
-        return;
-    };
-    let id = first.id.clone();
-    let open = expanded.get(&id).copied().unwrap_or(false);
-    let mut grouped = false;
-    for index in indices {
-        if members.binary_search(&index).is_ok() {
-            if !grouped {
-                rows.push(TranscriptRow::Work {
-                    id: id.clone(),
-                    members: members.clone(),
-                    open,
-                    live,
-                });
-                grouped = true;
-            }
-            if !open {
-                continue;
-            }
-        }
-        if let Some(item) = transcript.get(index) {
-            rows.push(TranscriptRow::Message {
-                index,
-                id: item.id.clone(),
-                meta: Some(index) == final_message,
-            });
-        }
-    }
-}
-
-fn is_work(item: &NativeTranscriptItem) -> bool {
-    matches!(item.role.as_str(), "thinking" | "reasoning" | "tool") || item.tool.is_some()
-}
-
-/// While a turn streams, every message stays readable in order; only the runs of thinking and
-/// tools between messages fold. The settled turn folds into one summary afterwards.
-fn append_live_turn(
-    rows: &mut Vec<TranscriptRow>,
-    transcript: &[NativeTranscriptItem],
-    indices: &[usize],
-    expanded: &BTreeMap<String, bool>,
-) {
+    // Progress messages and file changes stay readable when a turn settles.
+    // Only the runs of thinking and command output between them fold.
     let mut run = Vec::new();
-    for &index in indices {
+    for index in indices {
         let Some(item) = transcript.get(index) else {
             continue;
         };
@@ -195,11 +123,18 @@ fn append_live_turn(
         rows.push(TranscriptRow::Message {
             index,
             id: item.id.clone(),
-            meta: false,
+            meta: Some(index) == final_message,
         });
     }
     // Only the trailing run can still be working.
-    push_work_run(rows, transcript, run, expanded, true);
+    push_work_run(rows, transcript, run, expanded, live);
+}
+
+fn is_work(item: &NativeTranscriptItem) -> bool {
+    item.tool
+        .as_ref()
+        .is_none_or(|tool| tool.name != "fileChange")
+        && (matches!(item.role.as_str(), "thinking" | "reasoning" | "tool") || item.tool.is_some())
 }
 
 fn push_work_run(
@@ -573,13 +508,31 @@ impl NativeAgentSessionView {
         } else {
             activity_summary(&tools)
         };
-        match self.turn_duration(members).filter(|_| !live) {
+        // A turn can fold several runs; its duration reads once, on the last.
+        match self
+            .turn_duration(members)
+            .filter(|_| !live && self.last_fold_of_turn(members))
+        {
             Some(duration) if duration.as_secs() > 0 => format!(
                 "{summary} · {}",
                 crate::clock::format_working_duration(duration)
             ),
             _ => summary,
         }
+    }
+
+    /// Whether no work follows `members` before the next prompt.
+    fn last_fold_of_turn(&self, members: &[usize]) -> bool {
+        let transcript = &self.record.snapshot.transcript;
+        members
+            .last()
+            .and_then(|last| transcript.get(last.saturating_add(1)..))
+            .is_none_or(|rest| {
+                !rest
+                    .iter()
+                    .take_while(|item| item.role != "user")
+                    .any(|item| visible(item) && is_work(item))
+            })
     }
 
     /// How long a settled turn took: from its prompt to the last item the turn reported.

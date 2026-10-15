@@ -133,7 +133,7 @@ pub use native_protocol::{
     native_error_message,
 };
 pub use native_service::{
-    NativeAgentService, NativeCreationError, NativeProviderInfo, NativeQueuedMessage,
+    NativeAgentService, NativeCreationError, NativeDraft, NativeProviderInfo, NativeQueuedMessage,
     NativeQueuedMessageStatus, NativeSessionActivity, NativeSessionRecord,
 };
 pub use native_session::{

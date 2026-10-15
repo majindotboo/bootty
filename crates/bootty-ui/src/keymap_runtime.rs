@@ -34,6 +34,8 @@ pub enum KeymapFocus {
     Sidebar,
     Command,
     SurfaceChooser,
+    /// A shown Agent composer: a native conversation or the new-session form.
+    Composer,
     ComposerCompletion,
     #[default]
     Other,
@@ -221,6 +223,7 @@ fn compile_context(context: &KeymapContext) -> Result<RuntimeContext, String> {
         KeymapContext::Sidebar => "Sidebar",
         KeymapContext::Command => "Command",
         KeymapContext::SurfaceChooser => "SurfaceChooser",
+        KeymapContext::Composer => "Composer",
         KeymapContext::ComposerCompletion => "ComposerCompletion",
         KeymapContext::Terminal => "Terminal",
         KeymapContext::Herdr => "Terminal && backend == herdr",
@@ -262,7 +265,11 @@ fn active_key_contexts(focus: KeymapFocus, backend: MultiplexerBackendConfig) ->
         KeymapFocus::Sidebar => focused.add("Sidebar"),
         KeymapFocus::Command => focused.add("Command"),
         KeymapFocus::SurfaceChooser => focused.add("SurfaceChooser"),
-        KeymapFocus::ComposerCompletion => focused.add("ComposerCompletion"),
+        KeymapFocus::Composer => focused.add("Composer"),
+        KeymapFocus::ComposerCompletion => {
+            focused.add("Composer");
+            focused.add("ComposerCompletion");
+        }
         KeymapFocus::Other => return contexts,
     }
     if focus == KeymapFocus::Command {
@@ -748,7 +755,7 @@ fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
         ("ctrl+alt+a", "ui.composer.focus-permissions"),
     ] {
         bindings.push(KeymapBindingSnapshot {
-            context: KeymapContext::Global,
+            context: KeymapContext::Composer,
             keystrokes: keystrokes.into(),
             action: KeymapAction::command(command),
             kind: KeymapBindingKind::Binding,

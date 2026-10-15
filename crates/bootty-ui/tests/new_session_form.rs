@@ -305,7 +305,22 @@ fn worktree_is_optional_generated_editable_and_capability_bounded(mut form: NewS
     .expect("valid generated names");
     assert_eq!(form.title(), "Improve composer");
     assert_eq!(form.draft.branch, "bootty/improve-composer");
-    assert_eq!(form.draft.folder, "current-improve-composer");
+    assert_eq!(form.draft.folder, "improve-composer");
+    let footer = form.spec(false).footer;
+    form.set_worktree_directory(Some("/srv/checkouts".to_owned()));
+    let namespace = bootty_config::ApplicationIdentity::for_process().namespace();
+    let default = if cfg!(windows) {
+        format!("%LOCALAPPDATA%\\{namespace}\\worktrees")
+    } else {
+        format!("~/.local/share/{namespace}/worktrees")
+    };
+    assert_eq!(
+        [footer, form.spec(false).footer],
+        [
+            Some(format!("{default}/current/improve-composer")),
+            Some("/srv/checkouts/current/improve-composer".to_owned()),
+        ]
+    );
     for (field, value) in [
         ("branch", "  feature/custom  "),
         ("folder", " custom-checkout "),
@@ -319,6 +334,7 @@ fn worktree_is_optional_generated_editable_and_capability_bounded(mut form: NewS
             branch: "feature/custom".to_owned(),
             name: Some("custom-checkout".to_owned()),
             start_ref: Some("main".to_owned()),
+            directory: None,
         }))
     );
     form.change_field("folder", "../unowned");

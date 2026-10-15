@@ -154,6 +154,8 @@ impl Default for SessionConfig {
             shell_integration: false,
             shell: None,
             working_directory: None,
+            worktree_directory: None,
+            worktree_limit: 10,
             env: Vec::new(),
             term: DEFAULT_TERM.to_owned(),
             colorterm: "truecolor".to_owned(),

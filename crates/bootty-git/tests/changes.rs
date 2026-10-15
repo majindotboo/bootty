@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::process::Command;
 
 use assert_fs::{TempDir, prelude::*};
@@ -123,4 +125,95 @@ fn filenames_are_literal_and_renames_unstage_both_paths(repository: anyhow::Resu
     repository.child("renamed.txt").assert("content\nmore\n");
     assert!(git.stage_file(root, "*").is_err());
     assert!(git.stage_file(root, "../outside").is_err());
+}
+
+fn git_in(cwd: &std::path::Path, args: &[&str]) {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn commit_file(clone: &std::path::Path, name: &str) {
+    std::fs::write(clone.join(name), name).expect("write file");
+    git_in(clone, &["add", name]);
+    git_in(clone, &["commit", "-q", "-m", name]);
+}
+
+/// Two clones of one origin: changes report how far each branch is from its upstream, and fetch,
+/// pull and push close the distance without ever merging.
+#[rstest]
+fn sync_reports_and_closes_the_distance_to_the_upstream() {
+    let dir = TempDir::new().unwrap();
+    git_in(
+        dir.path(),
+        &["init", "-q", "--bare", "-b", "main", "origin.git"],
+    );
+    let clones = ["mine", "theirs"].map(|name| dir.path().join(name));
+    for clone in &clones {
+        git_in(
+            dir.path(),
+            &["clone", "-q", "origin.git", clone.to_str().unwrap()],
+        );
+        for (key, value) in [
+            ("user.name", "Bootty Test"),
+            ("user.email", "test@example.invalid"),
+            ("commit.gpgsign", "false"),
+            ("core.hooksPath", "/dev/null"),
+            ("init.defaultBranch", "main"),
+        ] {
+            git_in(clone, &["config", key, value]);
+        }
+    }
+    let [mine, theirs] = clones.map(|clone| clone.to_str().unwrap().to_owned());
+    let git = Git::new();
+    let distance = |clone: &str| {
+        git.changes(clone)
+            .unwrap()
+            .upstream
+            .map(|upstream| (upstream.name, upstream.ahead, upstream.behind))
+    };
+    commit_file(std::path::Path::new(&mine), "first");
+    git_in(
+        std::path::Path::new(&mine),
+        &["push", "-q", "-u", "origin", "main"],
+    );
+    git.pull_upstream(&theirs).unwrap();
+
+    commit_file(std::path::Path::new(&mine), "second");
+    assert_eq!(distance(&mine), Some(("origin/main".to_owned(), 1, 0)));
+    git.push_upstream(&mine).unwrap();
+    assert_eq!(distance(&mine), Some(("origin/main".to_owned(), 0, 0)));
+    assert_eq!(distance(&theirs), Some(("origin/main".to_owned(), 0, 0)));
+    git.fetch_remote(&theirs).unwrap();
+    assert_eq!(distance(&theirs), Some(("origin/main".to_owned(), 0, 1)));
+    git.pull_upstream(&theirs).unwrap();
+    assert!(std::path::Path::new(&theirs).join("second").exists());
+
+    commit_file(std::path::Path::new(&theirs), "their-change");
+    commit_file(std::path::Path::new(&mine), "my-change");
+    git.push_upstream(&mine).unwrap();
+    git.fetch_remote(&theirs).unwrap();
+    assert_eq!(distance(&theirs), Some(("origin/main".to_owned(), 1, 1)));
+    assert!(
+        git.pull_upstream(&theirs).is_err(),
+        "diverged branches never merge"
+    );
+    assert!(
+        git.push_upstream(&theirs).is_err(),
+        "a push never overwrites"
+    );
+
+    git_in(
+        std::path::Path::new(&mine),
+        &["switch", "-q", "-c", "local-only"],
+    );
+    assert_eq!(distance(&mine), None);
 }

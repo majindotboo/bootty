@@ -523,7 +523,8 @@ fn worktree_form_keeps_its_project_and_normalizes_captured_fields(
                 request: bootty_git::WorktreeRequest {
                     branch,
                     name: folder,
-                    start_ref: use_head.then(|| "HEAD".to_owned())
+                    start_ref: use_head.then(|| "HEAD".to_owned()),
+                    directory: None,
                 },
             })
         );

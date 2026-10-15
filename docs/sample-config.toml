@@ -385,6 +385,15 @@ clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 # override the account login shell, inherited working directory, or environment.
 # shell = "/opt/homebrew/bin/fish"
 # working-directory = "/Users/alice/src/project"
+# New worktrees go in <worktree-directory>/<repository>/<name> on the
+# repository's host; ~ is that host's home. Unset uses
+# ~/.local/share/bootty/worktrees, or %LOCALAPPDATA%\bootty\worktrees on Windows;
+# Development builds use their own namespace in place of bootty.
+# worktree-directory = "~/src/worktrees"
+# Keep at most this many of Bootty's worktrees on each host. Past it, the oldest
+# archived and settled sessions' worktrees go first; one with uncommitted or
+# unpushed work always stays. 0 removes only worktrees no session uses.
+# worktree-limit = 10
 # env = [
 #   { name = "EDITOR", value = "nvim" },
 # ]

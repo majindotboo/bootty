@@ -36,7 +36,45 @@ impl ChangedFile {
 pub struct RepositoryChanges {
     pub root: String,
     pub branch: Option<String>,
+    /// The branch's upstream, when it has one Git can still find.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<Upstream>,
     pub files: Vec<ChangedFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Upstream {
+    pub name: String,
+    /// Commits the branch has that the upstream lacks.
+    pub ahead: u32,
+    /// Commits the upstream has that the branch lacks.
+    pub behind: u32,
+}
+
+impl Upstream {
+    /// Read `git status --branch`'s header, such as `## main...origin/main [ahead 1, behind 2]`.
+    fn from_status_header(header: &str) -> Option<Self> {
+        let (_, tracking) = header.strip_prefix("## ")?.split_once("...")?;
+        let (name, counts) = tracking
+            .split_once(" [")
+            .map_or((tracking, ""), |(name, counts)| {
+                (name, counts.trim_end_matches(']'))
+            });
+        if counts == "gone" {
+            return None;
+        }
+        let count = |label: &str| {
+            counts
+                .split(", ")
+                .find_map(|part| part.strip_prefix(label)?.parse().ok())
+                .unwrap_or(0)
+        };
+        Some(Self {
+            name: name.to_owned(),
+            ahead: count("ahead "),
+            behind: count("behind "),
+        })
+    }
 }
 
 impl<R: CommandRunner> Git<R> {
@@ -52,6 +90,7 @@ impl<R: CommandRunner> Git<R> {
                 "status",
                 "--porcelain=v1",
                 "-z",
+                "--branch",
                 "--untracked-files=all",
             ],
         )?;
@@ -63,7 +102,10 @@ impl<R: CommandRunner> Git<R> {
                     .to_owned(),
             );
         }
-        let mut fields = output.split_terminator('\0');
+        let mut fields = output.split_terminator('\0').peekable();
+        let upstream = fields
+            .next_if(|field| field.starts_with("## "))
+            .and_then(Upstream::from_status_header);
         let mut files = Vec::new();
         while let Some(field) = fields.next() {
             let [index, worktree, b' ', path @ ..] = field.as_bytes() else {
@@ -90,8 +132,31 @@ impl<R: CommandRunner> Git<R> {
         Ok(RepositoryChanges {
             branch: self.head_branch(&root),
             root,
+            upstream,
             files,
         })
+    }
+
+    /// # Errors
+    /// Returns Git's error, such as an unreachable remote.
+    pub fn fetch_remote(&self, root: &str) -> Result<(), String> {
+        self.checked_output(root, &["fetch"]).map(|_| ())
+    }
+
+    /// Bring in the upstream's commits. Git refuses instead of merging when the branch has
+    /// diverged.
+    /// # Errors
+    /// Returns Git's error, such as a diverged branch or conflicting local changes.
+    pub fn pull_upstream(&self, root: &str) -> Result<(), String> {
+        self.checked_output(root, &["pull", "--ff-only"])
+            .map(|_| ())
+    }
+
+    /// A normal push: it never overwrites commits the upstream has.
+    /// # Errors
+    /// Returns Git's error, such as a rejected push or a branch without an upstream.
+    pub fn push_upstream(&self, root: &str) -> Result<(), String> {
+        self.checked_output(root, &["push"]).map(|_| ())
     }
 
     /// # Errors

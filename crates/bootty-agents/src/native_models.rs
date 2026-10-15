@@ -300,7 +300,31 @@ impl NativeAgentSession {
             }
         }
         self.rpc("set_model", json!({"model":selection.model}))?;
+        if let Some(plan) = selection.plan_mode {
+            self.apply_claude_plan(plan)?;
+        }
         Ok(())
+    }
+
+    /// Plan mode is a Claude permission mode. Leaving it returns to the conversation's own
+    /// policy. Claude is only told when the mode changes, so a mode it chose stays.
+    fn apply_claude_plan(&self, plan: bool) -> Result<(), String> {
+        if *super::native_session::lock(&self.claude_plan) == plan {
+            return Ok(());
+        }
+        let mode = if plan {
+            "plan"
+        } else {
+            self.config.permissions.claude().unwrap_or("default")
+        };
+        self.rpc("set_permission_mode", json!({"mode": mode}))?;
+        *super::native_session::lock(&self.claude_plan) = plan;
+        Ok(())
+    }
+
+    /// Claude left Plan mode itself, because its plan was approved.
+    pub(crate) fn left_claude_plan(&self) {
+        *super::native_session::lock(&self.claude_plan) = false;
     }
 
     pub(crate) fn apply_pi_selection(

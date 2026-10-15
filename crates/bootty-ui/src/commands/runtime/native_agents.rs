@@ -2859,6 +2859,15 @@ fn invoke(
                 serde_json::to_value(reference).map_err(|error| error.to_string())
             }),
         "import" => Err("Native attachment imports require an internal caller".to_owned()),
+        "draft" if invocation.caller == Caller::Internal => {
+            serde_json::from_str::<bootty_agents::NativeDraft>(arg(2))
+                .map_err(|error| error.to_string())
+                .and_then(|draft| service.save_draft(target, draft))
+                .map(|()| Value::Null)
+        }
+        "draft" => Err("Native drafts require an internal caller".to_owned()),
+        "seen" => service.mark_seen(target, true).map(|()| Value::Null),
+        "mark-unread" => service.mark_seen(target, false).map(|()| Value::Null),
         "attachment-preview" if invocation.caller == Caller::Internal => service
             .preview_attachment(target, arg(2))
             .map(|png| json!({"png": BASE64.encode(png)})),

@@ -18,6 +18,7 @@ pub enum KeymapContext {
     Sidebar,
     Command,
     SurfaceChooser,
+    Composer,
     ComposerCompletion,
     Terminal,
     Herdr,
@@ -29,11 +30,12 @@ pub enum KeymapContext {
 }
 
 impl KeymapContext {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Global,
         Self::Sidebar,
         Self::Command,
         Self::SurfaceChooser,
+        Self::Composer,
         Self::ComposerCompletion,
         Self::Terminal,
         Self::Herdr,
@@ -49,6 +51,7 @@ impl KeymapContext {
             Self::Sidebar => "Sidebar",
             Self::Command => "Command",
             Self::SurfaceChooser => "SurfaceChooser",
+            Self::Composer => "Composer",
             Self::ComposerCompletion => "ComposerCompletion",
             Self::Terminal => "Terminal",
             Self::Herdr => "Herdr",
@@ -75,6 +78,7 @@ impl FromStr for KeymapContext {
             "Sidebar" | "sidebar" => Ok(Self::Sidebar),
             "Command" | "command" => Ok(Self::Command),
             "SurfaceChooser" | "surfacechooser" => Ok(Self::SurfaceChooser),
+            "Composer" | "composer" => Ok(Self::Composer),
             "ComposerCompletion" | "composercompletion" => Ok(Self::ComposerCompletion),
             "Terminal" | "terminal" => Ok(Self::Terminal),
             "Herdr" | "herdr" | "Terminal && backend == herdr" => Ok(Self::Herdr),

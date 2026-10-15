@@ -378,7 +378,13 @@ pub fn decode_claude(value: &Value) -> Result<NativeCompletionCatalog, String> {
         if let Some(name) = name(field(command, "name")) {
             options.push(NativeCompletionOption {
                 icon_url: None,
-                kind: NativeCompletionKind::Command,
+                // Claude marks its own commands. The rest come from skills, plugins and custom
+                // commands, which Claude runs the same way: as a skill.
+                kind: if field(command, "builtin") == true {
+                    NativeCompletionKind::Command
+                } else {
+                    NativeCompletionKind::Skill
+                },
                 display_name: name.clone(),
                 name,
                 description: text(field(command, "description")),
@@ -390,6 +396,8 @@ pub fn decode_claude(value: &Value) -> Result<NativeCompletionCatalog, String> {
     }
     Ok(NativeCompletionCatalog {
         options,
+        // Plan is one of Claude's own permission modes.
+        plan_mode: true,
         ..NativeCompletionCatalog::default()
     })
 }

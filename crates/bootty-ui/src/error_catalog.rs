@@ -81,10 +81,6 @@ pub enum ErrorNotice {
     TerminalConfigPublicationFailed(String),
     #[error("the worktree operation failed")]
     Worktree(String),
-    #[error("the session cleanup could not complete")]
-    Ditch(String),
-    #[error("the worktree was removed, but a branch remains")]
-    DitchPartial(String),
     /// Bootty's own wording, shown as written.
     #[error("{0}")]
     Message(String),
@@ -122,9 +118,7 @@ impl ErrorNotice {
             | Self::RemoteSpaceCatalogVersionUnsupported(message)
             | Self::SshProfileUnavailable(message)
             | Self::TerminalConfigPublicationFailed(message)
-            | Self::Worktree(message)
-            | Self::Ditch(message)
-            | Self::DitchPartial(message) => Some(message),
+            | Self::Worktree(message) => Some(message),
             Self::Technical { summary, details } if summary != details => Some(details),
             _ => None,
         }

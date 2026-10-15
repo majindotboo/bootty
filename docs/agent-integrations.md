@@ -118,13 +118,18 @@ providers' public protocols: Codex app-server, Pi RPC and Claude stream-json.
 The selected account, project, task and conversation identity stay captured for
 the lifetime of that conversation. Local and remote conversations use the same
 captured provider protocol; the remote daemon owns the provider process transport.
+A conversation's unsent text and attachment chips are saved with it shortly after
+typing stops, and return when it reopens, including after a restart.
+A conversation that finishes a turn shows Finished in the sidebar until its pane is
+seen; Mark unread in its row menu shows it again.
 
 The Add menu is shared by creation drafts and existing conversations. It includes
 files, local application windows, and the captured provider's enabled skills.
 Codex also supplies installed callable apps and enabled plugins, with typed
 mentions that remain intact when queued. Plan mode and conversation goals appear
-when advertised by that server. Goals use Codex's thread goal API; they are not
-added as prompt text. Sketch and skill recording are not supported here yet.
+when advertised by that server. Claude always offers Plan mode, its own permission
+mode; approving Claude's plan leaves it. Goals use Codex's thread goal API; they
+are not added as prompt text. Sketch and skill recording are not supported here yet.
 
 Session naming also updates the exact newly created conversation's tab title.
 Delayed names apply only while each captured title remains unchanged; sibling

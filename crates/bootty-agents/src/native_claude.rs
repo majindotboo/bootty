@@ -480,7 +480,7 @@ impl ClaudeProtocol {
             snapshot.status = NativeSessionStatus::Working;
             return;
         }
-        snapshot.completed_turn = outcome == NativeTurnOutcome::Succeeded;
+        snapshot.finish_turn(outcome == NativeTurnOutcome::Succeeded);
         snapshot.status = if outcome == NativeTurnOutcome::Failed {
             snapshot.error = Some(failure_reason(value));
             NativeSessionStatus::Error
@@ -620,6 +620,18 @@ pub fn command(id: &str, method: &str, params: &Value) -> Result<Value, String> 
                 })
                 .ok_or("Invalid Claude model selector")?;
             json!({"subtype":method,"model":model})
+        }
+        "set_permission_mode" if fields.len() == 1 => {
+            let mode = field(params, "mode")
+                .as_str()
+                .filter(|mode| {
+                    matches!(
+                        *mode,
+                        "default" | "acceptEdits" | "auto" | "bypassPermissions" | "plan"
+                    )
+                })
+                .ok_or("Invalid Claude permission mode")?;
+            json!({"subtype":method,"mode":mode})
         }
         "apply_flag_settings" if fields.len() == 1 => {
             let settings = field(params, "settings")

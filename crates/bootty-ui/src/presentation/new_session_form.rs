@@ -93,7 +93,8 @@ pub struct NewSessionForm {
     destinations: Vec<SessionDestination>,
     providers: AgentProvidersConfig,
     pub worktree_available: bool,
-    worktree_parent: Option<String>,
+    worktree_repository: Option<String>,
+    worktree_directory: Option<String>,
     pub error: Option<String>,
     pub model_options: Vec<bootty_agents::NativeModelOption>,
     pub model_error: Option<String>,
@@ -116,7 +117,8 @@ impl NewSessionForm {
             destinations,
             providers,
             worktree_available: false,
-            worktree_parent: None,
+            worktree_repository: None,
+            worktree_directory: None,
             error: None,
             model_options: Vec::new(),
             model_error: None,
@@ -159,12 +161,15 @@ impl NewSessionForm {
         if self.draft.projectless {
             return;
         }
-        self.worktree_parent = worktrees
+        // The main checkout names the repository folder under the worktree directory.
+        self.worktree_repository = worktrees
             .iter()
             .find(|entry| !entry.is_new)
             .and_then(|entry| entry.path.as_deref())
-            .and_then(|path| path.trim_end_matches(['/', '\\']).rsplit_once(['/', '\\']))
-            .map(|(parent, _)| parent.to_owned());
+            .map(|path| {
+                let name = directory_name(path);
+                name.strip_suffix(".git").unwrap_or(name).to_owned()
+            });
         self.set_worktree_available(
             self.destination()
                 .is_some_and(|destination| destination.worktrees)
@@ -193,7 +198,7 @@ impl NewSessionForm {
     fn update_directory(&mut self, cwd: String) {
         self.draft.cwd = cwd;
         self.worktree_available = false;
-        self.worktree_parent = None;
+        self.worktree_repository = None;
         self.error = None;
         self.apply_project_defaults();
         self.hydrate_model_catalog();
@@ -206,6 +211,11 @@ impl NewSessionForm {
         self.project_defaults = projects;
         self.apply_project_defaults();
         self.hydrate_model_catalog();
+    }
+
+    /// The configured `session.worktree-directory`, shown in the destination preview.
+    pub fn set_worktree_directory(&mut self, directory: Option<String>) {
+        self.worktree_directory = directory.filter(|directory| !directory.trim().is_empty());
     }
 
     fn project_settings(&self) -> Option<&bootty_mux::repository::ProjectSettings> {
@@ -272,7 +282,7 @@ impl NewSessionForm {
                     .cloned()
                     .unwrap_or_else(|| destination.cwd.clone());
                 self.worktree_available = false;
-                self.worktree_parent = None;
+                self.worktree_repository = None;
                 if !destination.worktrees {
                     self.draft.isolated = false;
                 }
@@ -475,7 +485,7 @@ impl NewSessionForm {
             if self.draft.branch == format!("{}{}", self.branch_prefix(), names.slug) {
                 self.draft.branch.clear();
             }
-            if self.draft.folder == format!("{}-{}", directory_name(&self.draft.cwd), names.slug) {
+            if self.draft.folder == names.slug {
                 self.draft.folder.clear();
             }
         }
@@ -499,6 +509,7 @@ impl NewSessionForm {
             branch: self.draft.branch.trim().to_owned(),
             name: Some(trimmed(&self.draft.folder).ok_or("Enter a worktree folder name")?),
             start_ref: trimmed(&self.draft.start_ref),
+            directory: None,
         };
         request.validate()?;
         Ok(Some(request))
@@ -1069,7 +1080,7 @@ impl NewSessionForm {
             self.draft.branch = format!("{}{}", self.branch_prefix(), names.slug);
         }
         if self.draft.folder.is_empty() {
-            self.draft.folder = format!("{}-{}", directory_name(&self.draft.cwd), names.slug);
+            self.draft.folder.clone_from(&names.slug);
         }
         self.generated_names = Some(names);
         Ok(())
@@ -1243,10 +1254,20 @@ impl NewSessionForm {
     }
     fn destination_path(&self) -> String {
         if self.draft.isolated {
-            self.worktree_parent.as_ref().map_or_else(
-                || self.draft.folder.clone(),
-                |parent| format!("{parent}/{}", self.draft.folder),
-            )
+            // Mirrors bootty_git's host-side default; the host resolves `~`.
+            let namespace = bootty_config::ApplicationIdentity::for_process().namespace();
+            let directory = self.worktree_directory.clone().unwrap_or_else(|| {
+                if cfg!(windows) {
+                    format!("%LOCALAPPDATA%\\{namespace}\\worktrees")
+                } else {
+                    format!("~/.local/share/{namespace}/worktrees")
+                }
+            });
+            let repository = self
+                .worktree_repository
+                .as_deref()
+                .unwrap_or_else(|| directory_name(&self.draft.cwd));
+            format!("{directory}/{repository}/{}", self.draft.folder)
         } else {
             self.draft.cwd.clone()
         }
@@ -1350,6 +1371,10 @@ impl NewSessionForm {
                 placeholder: String::new(),
                 kind: DialogFieldKind::Text,
             });
+        }
+        if self.draft.mode == NewSessionMode::Agent
+            && matches!(self.draft.provider.as_str(), "codex" | "claude")
+        {
             fields.push(choice(
                 "plan-mode",
                 "Plan mode",

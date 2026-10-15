@@ -94,6 +94,7 @@ pub enum CoreCommandExecutor {
     Job(JobAction, Vec<String>),
     Recovery(&'static str, Vec<String>),
     WslList,
+    WorktreeCleanup,
     CaptureTerminal(Vec<String>, bool),
     ShellPrompt(&'static str, Vec<String>),
     Git(GitAction, Vec<String>),
@@ -155,6 +156,7 @@ enum CommandExecutorResolver {
     ShellIntegration,
     WslList,
     WslSpace,
+    WorktreeCleanup,
     CaptureTerminal(bool),
     ShellPrompt(&'static str),
     ReadTerminal,
@@ -293,6 +295,7 @@ impl CommandRegistry {
                 SynchronousCommand::ShellIntegration(first_argument()?.clone()),
             ),
             CommandExecutorResolver::WslList => CoreCommandExecutor::WslList,
+            CommandExecutorResolver::WorktreeCleanup => CoreCommandExecutor::WorktreeCleanup,
             CommandExecutorResolver::WslSpace => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::WslSpace(arguments()))
             }
@@ -351,6 +354,7 @@ impl CommandRegistry {
         register_forward_commands(&mut commands);
         register_feature_commands(&mut commands);
         register_host_commands(&mut commands);
+        register_worktree_commands(&mut commands);
         Self { commands }
     }
 }
@@ -849,6 +853,19 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             },
         );
     }
+}
+
+/// The catalog gives `worktrees.clean` its palette row and key; every caller gets what each host
+/// did.
+fn register_worktree_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
+    let descriptor = Command::CleanWorktrees.descriptor();
+    commands.insert(
+        descriptor.id.clone(),
+        RegisteredCommand {
+            descriptor,
+            executor: CommandExecutorResolver::WorktreeCleanup,
+        },
+    );
 }
 
 fn register_host_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {

@@ -3,6 +3,8 @@ mod clipboard;
 mod recovery;
 pub use recovery::SessionCheckpointTicket;
 mod settlement;
+mod worktree_cleanup;
+pub use worktree_cleanup::HostResults;
 mod themes;
 use bootty_mux::pane_layout::Divider;
 use std::{
@@ -41,7 +43,6 @@ use bootty_terminal::{
 
 mod dialog_runtime;
 mod dialogs;
-pub mod ditch;
 mod input;
 mod keybinds;
 mod mux_actions;
@@ -273,6 +274,7 @@ pub struct AppState {
     pub(super) commands: CommandRuntime,
     pub(super) session_activity_receipt: std::cell::RefCell<Option<(CommandTarget, String, i64)>>,
     last_settlement_check: Option<Instant>,
+    worktree_cleanup: worktree_cleanup::WorktreeCleanup,
     pub(super) workspace: WorkspaceRuntime,
     repaint_scheduler: RepaintScheduler,
     pub(super) last_error: Option<ErrorNotice>,
@@ -456,6 +458,7 @@ impl AppState {
             commands,
             session_activity_receipt: std::cell::RefCell::new(None),
             last_settlement_check: None,
+            worktree_cleanup: worktree_cleanup::WorktreeCleanup::default(),
             workspace,
             repaint_scheduler: RepaintScheduler::default(),
             last_error: keymap_diagnostic.map(ErrorNotice::from_text),
@@ -1707,6 +1710,7 @@ impl AppState {
         self.restore_terminal_agents(now);
         self.reconcile_agent_ownership();
         self.poll_session_settlement(now, &mut effects);
+        self.poll_worktree_cleanup(now);
         if let Some(after) = workspace_frame.next_wake {
             effects.push(AppEffect::RepaintAfter(after));
         }

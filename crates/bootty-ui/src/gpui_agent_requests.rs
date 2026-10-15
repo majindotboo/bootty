@@ -1002,6 +1002,7 @@ fn claude_title(parameters: &Value) -> &'static str {
     match field(parameters, "tool_name").as_str() {
         Some("Bash") => "Allow this command?",
         Some("Write" | "Edit" | "MultiEdit" | "NotebookEdit") => "Allow these file changes?",
+        Some("ExitPlanMode") => "Implement this plan?",
         _ => "Allow this tool?",
     }
 }
@@ -1012,6 +1013,7 @@ fn claude_approval_description(parameters: &Value, home: Option<&std::path::Path
     let input = field(parameters, "input");
     let subject = field(input, "command")
         .as_str()
+        .or_else(|| field(input, "plan").as_str())
         .map(str::to_owned)
         .or_else(|| {
             field(input, "file_path")

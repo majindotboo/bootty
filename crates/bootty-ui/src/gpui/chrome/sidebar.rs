@@ -2625,19 +2625,24 @@ pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, live: bool) -> Ve
     }
     let mut rows = Vec::new();
     if let Some(target) = &task.native_conversation {
-        let mut invocation = bootty_control::CommandInvocation::new(
-            "agents.native.regenerate-title",
-            vec![target.handle.clone(), target.generation.to_string()],
-            bootty_control::Caller::Internal,
-        );
-        invocation.target = Some(target.clone());
-        rows.push(MenuRow {
-            label: "Regenerate title".to_owned(),
-            enabled: !task.pending,
-            destructive: false,
-            starts_group: false,
-            intent: ChromeIntent::Command(invocation),
-        });
+        for (label, command) in [
+            ("Regenerate title", "agents.native.regenerate-title"),
+            ("Mark unread", "agents.native.mark-unread"),
+        ] {
+            let mut invocation = bootty_control::CommandInvocation::new(
+                command,
+                vec![target.handle.clone(), target.generation.to_string()],
+                bootty_control::Caller::Internal,
+            );
+            invocation.target = Some(target.clone());
+            rows.push(MenuRow {
+                label: label.to_owned(),
+                enabled: !task.pending,
+                destructive: false,
+                starts_group: false,
+                intent: ChromeIntent::Command(invocation),
+            });
+        }
     }
     if !task.state.archived {
         rows.extend(row(

@@ -39,6 +39,8 @@ pub struct GitFacts {
     pub diff_added: Option<u64>,
     pub diff_removed: Option<u64>,
     pub worktree_revision: u64,
+    /// The main checkout when the cwd is a linked worktree, so it groups with its project.
+    pub project: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -70,6 +72,7 @@ pub struct GitSessionFacts {
     pub diff_added: Option<u64>,
     pub diff_removed: Option<u64>,
     pub worktree_revision: u64,
+    pub project: Option<String>,
     pub display_process: Option<String>,
 }
 
@@ -89,6 +92,23 @@ struct CachedFacts {
     diff_counted: bool,
     live_running: bool,
     diff_running: bool,
+    project: ProjectFact,
+}
+
+/// A cwd's owning checkout cannot change, so each incarnation resolves it once.
+#[derive(Clone, Debug)]
+enum ProjectFact {
+    Unresolved,
+    Resolved(Option<String>),
+}
+
+impl ProjectFact {
+    fn path(&self) -> Option<String> {
+        match self {
+            Self::Unresolved => None,
+            Self::Resolved(path) => path.clone(),
+        }
+    }
 }
 
 impl CachedFacts {
@@ -109,6 +129,7 @@ impl CachedFacts {
             diff_counted: false,
             live_running: false,
             diff_running: false,
+            project: ProjectFact::Unresolved,
         }
     }
 }
@@ -220,6 +241,7 @@ where
         };
         let mut start_live = None;
         let mut start_diff = None;
+        let mut resolve_project = false;
         let mut snapshot = GitFacts::default();
         let mut schedule = self.schedule.lock().ok();
         if let Ok(mut entries) = self.entries.lock() {
@@ -253,6 +275,7 @@ where
                 entry.live_revision = revision;
                 if !cwd.is_empty() {
                     entry.live_running = true;
+                    resolve_project = matches!(entry.project, ProjectFact::Unresolved);
                     start_live = Some(Arc::clone(&entry.incarnation));
                 }
             }
@@ -294,12 +317,20 @@ where
                     }
                 }
             }
-            snapshot = entry.facts.clone();
+            snapshot = GitFacts {
+                project: entry.project.path(),
+                ..entry.facts.clone()
+            };
         }
 
         drop(schedule);
         if let Some(incarnation) = start_live {
-            self.spawn_live(cache_key.to_owned(), incarnation, cwd.to_owned());
+            self.spawn_live(
+                cache_key.to_owned(),
+                incarnation,
+                cwd.to_owned(),
+                resolve_project,
+            );
         }
         if let Some(incarnation) = start_diff {
             self.spawn_diff(cache_key.to_owned(), incarnation, cwd.to_owned());
@@ -325,6 +356,7 @@ where
             diff_added: facts.diff_added,
             diff_removed: facts.diff_removed,
             worktree_revision: facts.worktree_revision,
+            project: facts.project.take(),
             display_process: input
                 .process
                 .as_deref()
@@ -339,7 +371,10 @@ where
         };
         let facts = entries.get_mut(cache_key)?;
         facts.seen_at = now;
-        Some(facts.facts.clone())
+        Some(GitFacts {
+            project: facts.project.path(),
+            ..facts.facts.clone()
+        })
     }
 
     /// Return the watcher revision already known for `cwd` and request
@@ -366,7 +401,13 @@ where
         self.retired.store(true, Ordering::Release);
     }
 
-    fn spawn_live(&self, cache_key: String, incarnation: Arc<()>, cwd: String) {
+    fn spawn_live(
+        &self,
+        cache_key: String,
+        incarnation: Arc<()>,
+        cwd: String,
+        resolve_project: bool,
+    ) {
         let git = self.git.clone();
         let entries = Arc::clone(&self.entries);
         let retired = Arc::clone(&self.retired);
@@ -374,6 +415,7 @@ where
             if retired.load(Ordering::Acquire) {
                 return;
             }
+            let project = resolve_project.then(|| git.linked_worktree_project(&cwd));
             let branch = git.head_branch(&cwd);
             if retired.load(Ordering::Acquire) {
                 return;
@@ -382,6 +424,9 @@ where
                 && let Some(entry) = entries.get_mut(&cache_key)
                 && Arc::ptr_eq(&entry.incarnation, &incarnation)
             {
+                if let Some(project) = project {
+                    entry.project = ProjectFact::Resolved(project);
+                }
                 if branch.is_some() {
                     entry.facts.branch = branch;
                     entry.facts.branch_status = BranchStatus::Current;

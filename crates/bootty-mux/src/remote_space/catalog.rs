@@ -254,26 +254,6 @@ pub fn list_remote_worktrees_with_runner<R: CommandRunner>(
 
 /// # Errors
 /// Returns remote command, worktree creation, or invalid response errors.
-pub fn create_remote_worktree_with_runner<R: CommandRunner>(
-    remote: &RemoteConfig,
-    project: &str,
-    branch: &str,
-    runner: &R,
-) -> Result<String> {
-    create_remote_worktree_request_with_runner(
-        remote,
-        project,
-        &bootty_git::WorktreeRequest {
-            branch: branch.to_owned(),
-            name: None,
-            start_ref: None,
-        },
-        runner,
-    )
-}
-
-/// # Errors
-/// Returns remote command, worktree creation, or invalid response errors.
 pub fn create_remote_worktree_request_with_runner<R: CommandRunner>(
     remote: &RemoteConfig,
     project: &str,
@@ -292,6 +272,23 @@ pub fn create_remote_worktree_request_with_runner<R: CommandRunner>(
             "--request",
             &payload,
         ],
+        runner,
+    )?;
+    Ok(serde_json::from_str(&output)?)
+}
+
+/// Run Bootty's worktree cleanup on the remote host that holds the checkouts.
+/// # Errors
+/// Returns remote command failures or an invalid cleanup report.
+pub fn clean_remote_worktrees_with_runner<R: CommandRunner>(
+    remote: &RemoteConfig,
+    request: &bootty_git::CleanupRequest,
+    runner: &R,
+) -> Result<bootty_git::CleanupReport> {
+    let payload = serde_json::to_string(request)?;
+    let output = run_remote_config(
+        remote,
+        &["remote-worktree", "clean", "--request", &payload],
         runner,
     )?;
     Ok(serde_json::from_str(&output)?)

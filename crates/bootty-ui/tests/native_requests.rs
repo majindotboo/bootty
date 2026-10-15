@@ -45,6 +45,8 @@ fn claude_approvals_offer_the_choices_claude_suggested(cx: &mut TestAppContext) 
         spawn_parent: None,
         queued_messages: Vec::new(),
         attachments: Vec::new(),
+        draft: None,
+        seen_turns: 0,
     };
     let commands = Arc::new(Mutex::new(Vec::<CommandInvocation>::new()));
     let observed = commands.clone();

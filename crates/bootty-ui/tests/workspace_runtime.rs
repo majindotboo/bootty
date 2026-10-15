@@ -42,10 +42,7 @@ use bootty_mux::{
         TerminalRuntime,
     },
 };
-use bootty_ui::{
-    AppState, ModalDialog,
-    presentation::dialogs::{DitchAction, DitchSessionEvent, NewSessionPickerEvent},
-};
+use bootty_ui::{AppState, ModalDialog, presentation::dialogs::NewSessionPickerEvent};
 use rusqlite::Connection;
 
 #[path = "support/idle_frames.rs"]
@@ -149,7 +146,7 @@ impl MuxBackend for RestoreBackend {
                         .lock()
                         .expect("restore backend release lock")
                         .recv()
-                        .expect("release delayed ditch");
+                        .expect("release delayed close");
                 }
                 self.sessions
                     .lock()
@@ -1103,13 +1100,9 @@ fn backend_without_session_stamping_projects_direct_sessions_without_membership(
     );
 }
 
+/// A close still running when another Space is shown completes in the Space it came from.
 #[rstest]
-#[case(DitchAction::KillOnly)]
-#[case(DitchAction::DetachWorktree)]
-fn pending_ditch_completes_in_its_original_space(
-    directory: assert_fs::TempDir,
-    #[case] action: DitchAction,
-) {
+fn a_pending_close_completes_in_its_original_space(directory: assert_fs::TempDir) {
     let config_path = directory.path().join("config.toml");
     let config = test_config::config(config_path.clone(), MultiplexerBackendConfig::Tmux);
     let cwd = directory.path().to_string_lossy().into_owned();
@@ -1180,20 +1173,44 @@ fn pending_ditch_completes_in_its_original_space(
             .flat_map(|group| group.sessions.iter())
             .any(|session| session.id == "delayed")
     }));
-    assert!(state.open_ditch_session_dialog_for("delayed"));
-    assert!(matches!(
-        state.modal_dialog(),
-        Some(ModalDialog::DitchSession(_))
-    ));
+    let CommandOutcome::Success { value: current, .. } = submit_and_wait(
+        &mut state,
+        CommandInvocation::new(
+            "resource.current",
+            vec!["session".to_owned()],
+            Caller::Socket,
+        ),
+    ) else {
+        panic!("the delayed session is current");
+    };
+    let mut close = targeted("session.close", Vec::new(), current["target"].clone());
+    close.confirmation = Some(close.confirmation());
+    let (response, closed) = mpsc::channel();
+    state
+        .app_command_sender(Caller::Socket)
+        .try_send(AppCommandRequest {
+            creation_receipt: None,
+            invocation: close,
+            deadline: Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .expect("test deadline"),
+            cancellation: CommandCancellation::new(),
+            response,
+        })
+        .expect("submit close");
     state.clear_last_error();
-    state.apply_ditch_session_event(DitchSessionEvent::Ditch {
-        session_id: "delayed".to_owned(),
-        cwd: None,
-        action,
-    });
+    // The backend holds the close until it is released.
+    for _ in 0..10 {
+        state.update_frame(frames::idle_frame(Instant::now()));
+    }
     assert!(state.activate_space_from_ui(second_id));
     assert_eq!(state.binding_session_groups()[0].sessions, []);
-    release_tx.send(()).expect("release delayed ditch");
+    release_tx.send(()).expect("release delayed close");
+    let closed = wait_until(&mut state, "the close answers", |_| closed.try_recv().ok());
+    assert!(
+        matches!(closed, CommandOutcome::Success { .. }),
+        "{closed:?}"
+    );
 
     for tick in 0..250 {
         state.update_frame(frames::idle_frame(
@@ -1214,7 +1231,7 @@ fn pending_ditch_completes_in_its_original_space(
         std::thread::sleep(Duration::from_millis(1));
         state.binding_session_groups()[0].sessions.is_empty()
     });
-    assert!(removed, "original Space must publish the ditch completion");
+    assert!(removed, "original Space must publish the close");
 
     drop(state);
     let (_, reopened) = WorkspaceRepository::open(&config_path).expect("reopen workspace");
@@ -5141,4 +5158,150 @@ fn deletion_removes_closed_history_and_rejects_live_sessions(
     let mut reopened = app_state(config, backends);
     let binding = listed_spaces(&mut reopened)[0].2.clone();
     assert_eq!(saved_metadata_listing(&mut reopened, binding), expected);
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A pushed repository and Bootty's worktree directory beside it.
+fn pushed_repository(root: &Path) -> std::path::PathBuf {
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).expect("project directory");
+    git(root, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
+    git(&project, &["init", "-q", "-b", "main"]);
+    for (key, value) in [
+        ("user.email", "test@bootty.dev"),
+        ("user.name", "Bootty Test"),
+        ("commit.gpgsign", "false"),
+        ("core.hooksPath", "/dev/null"),
+    ] {
+        git(&project, &["config", key, value]);
+    }
+    std::fs::write(project.join("README"), "hello").expect("write README");
+    git(&project, &["add", "."]);
+    git(&project, &["commit", "-q", "-m", "init"]);
+    let origin = root.join("origin.git");
+    git(
+        &project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            origin.to_str().expect("origin path"),
+        ],
+    );
+    git(&project, &["push", "-q", "-u", "origin", "main"]);
+    project
+}
+
+/// A pushed checkout in Bootty's worktree directory, made before the last hour. `unpushed` adds a
+/// commit no remote has.
+fn old_checkout(project: &Path, worktrees: &Path, name: &str, unpushed: bool) -> String {
+    let path = worktrees.join("project").join(name);
+    let text = path.to_str().expect("checkout path").to_owned();
+    git(project, &["worktree", "add", "-q", "-b", name, &text]);
+    git(&path, &["push", "-q", "-u", "origin", name]);
+    if unpushed {
+        std::fs::write(path.join("work"), "work").expect("write work");
+        git(&path, &["add", "."]);
+        git(&path, &["commit", "-q", "-m", "unpushed"]);
+    }
+    std::fs::File::options()
+        .write(true)
+        .open(path.join(".git"))
+        .and_then(|marker| {
+            marker.set_modified(
+                std::time::SystemTime::now()
+                    .checked_sub(Duration::from_hours(2))
+                    .expect("two hours ago"),
+            )
+        })
+        .expect("age the checkout");
+    text
+}
+
+/// Bootty's worktrees go when nothing needs them: a checkout no session uses goes on the first
+/// pass, one with unpushed work stays and is reported, and deleting a session frees its checkout.
+#[rstest]
+fn worktree_cleanup_removes_checkouts_only_when_nothing_needs_them(directory: assert_fs::TempDir) {
+    let project = pushed_repository(directory.path());
+    let worktrees = directory.path().join("worktrees");
+    let unused = old_checkout(&project, &worktrees, "unused", false);
+    let unpushed = old_checkout(&project, &worktrees, "unpushed", true);
+    let used = old_checkout(&project, &worktrees, "used", false);
+    let config_path = directory.path().join("settings/config.toml");
+    std::fs::create_dir_all(config_path.parent().expect("settings")).expect("settings directory");
+    drop(claim_first_space(&config_path, "used-id", "used", &used));
+    let mut config = test_config::config(config_path, MultiplexerBackendConfig::Native);
+    config.session.worktree_directory = Some(worktrees.to_string_lossy().into_owned());
+    let mut state = app_state(config, support::backends());
+
+    wait_until(
+        &mut state,
+        "the first pass removes the unused checkout",
+        |_| (!Path::new(&unused).exists()).then_some(()),
+    );
+    let kept = format!("Kept {unpushed}. It has 1 commit no remote has.");
+    wait_until(
+        &mut state,
+        "the first pass reports unpushed work",
+        |state| {
+            state
+                .last_error()
+                .is_some_and(|notice| notice.contains(&kept))
+                .then_some(())
+        },
+    );
+    let mut clean = CommandInvocation::new("worktrees.clean", Vec::new(), Caller::Socket);
+    let CommandOutcome::ConfirmationRequired { confirmation } =
+        submit_and_wait(&mut state, clean.clone())
+    else {
+        panic!("removing worktrees asks first");
+    };
+    clean.confirmation = Some(*confirmation);
+    let outcome = submit_and_wait(&mut state, clean);
+    let CommandOutcome::Success { value, warnings } = outcome else {
+        panic!("worktrees.clean failed: {outcome:?}");
+    };
+    assert_eq!(
+        (value, warnings),
+        (
+            serde_json::json!({"hosts": [{
+                "host": "Local",
+                "removed": [],
+                "kept": [{"path": unpushed, "reason": "It has 1 commit no remote has"}],
+                "remaining": 2,
+            }]}),
+            Vec::new()
+        )
+    );
+
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let deleted = saved_metadata_command(
+        &mut state,
+        "session.delete",
+        vec!["used-id".to_owned()],
+        binding,
+    );
+    assert!(
+        matches!(deleted, CommandOutcome::Success { .. }),
+        "{deleted:?}"
+    );
+    wait_until(
+        &mut state,
+        "deleting the session frees its checkout",
+        |_| (!Path::new(&used).exists()).then_some(()),
+    );
+    assert!(Path::new(&unpushed).exists());
 }

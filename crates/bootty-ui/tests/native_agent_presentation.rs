@@ -68,6 +68,8 @@ fn saved_record(status: &str) -> NativeSessionRecord {
         spawn_parent: None,
         queued_messages: Vec::new(),
         attachments: Vec::new(),
+        draft: None,
+        seen_turns: 0,
     }
 }
 
@@ -1587,58 +1589,81 @@ fn empty_conversation_explains_how_to_start(cx: &mut TestAppContext) {
     }
 }
 
-/// While a turn streams, every assistant message stays visible in order; only the work between
-/// messages folds.
+/// Progress messages and changed files remain visible after a turn settles or another begins.
 #[gpui_kit::test]
-fn live_turn_keeps_every_message_visible(cx: &mut TestAppContext) {
+fn turns_keep_progress_and_changed_files_visible(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
     });
-    let mut record = saved_record("working");
-    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+    for status in ["working", "idle", "stopped", "error"] {
+        let mut record = saved_record(status);
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!([
         {"id": "prompt", "role": "user", "text": "Audit this", "complete": true},
         {"id": "first-tool", "role": "tool", "text": "", "complete": true,
          "tool": {"name": "Bash", "input": "{\"command\":\"ls\"}", "status": "completed"}},
         {"id": "status", "role": "assistant", "text": "Found the cause.", "complete": true},
         {"id": "second-tool", "role": "tool", "text": "", "complete": false,
          "tool": {"name": "Bash", "input": "{\"command\":\"cargo test\"}", "status": "running"}},
+        {"id": "edit", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "fileChange", "input": "[{\"path\":\"/tmp/project/src/main.rs\",\"diff\":\"@@ -1 +1 @@\\n-old\\n+new\\n\"}]", "status": "completed"}},
         {"id": "latest", "role": "assistant", "text": "Running the tests.", "complete": false}
     ]))
     .unwrap();
-    let (sender, _) = native_command_sender(&record);
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            NativeAgentSessionView::new(
-                record,
-                sender.for_caller(Caller::Internal),
-                true,
-                window,
-                cx,
-            )
+        if status == "working" {
+            for item in &mut record.snapshot.transcript {
+                item.complete = true;
+                if let Some(tool) = &mut item.tool {
+                    tool.status = bootty_agents::NativeToolStatus::Completed;
+                }
+            }
+            record.snapshot.transcript.push(
+                serde_json::from_value(serde_json::json!({
+                    "id":"follow-up", "role":"user", "text":"Is it fixed?", "complete":true
+                }))
+                .unwrap(),
+            );
+        }
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
         });
-        gpui_kit::component::Root::new(view, window, cx)
-    });
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    let status = visual
-        .debug_bounds("native-message-status")
-        .expect("an earlier message stays visible while the turn streams");
-    let latest = visual
-        .debug_bounds("native-message-latest")
-        .expect("latest message");
-    let between = visual
-        .debug_bounds("native-work-group-second-tool")
-        .expect("work between messages folds");
-    assert!(status.top() < between.top() && between.top() < latest.top());
-    assert!(
-        visual
-            .debug_bounds("native-work-group-first-tool")
-            .is_some()
-    );
-    // Commentary between tools carries no timestamp or actions; the prompt keeps them.
-    assert!(visual.debug_bounds("copy-message:status").is_none());
-    assert!(visual.debug_bounds("copy-message:prompt").is_some());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let status = visual
+            .debug_bounds("native-message-status")
+            .expect("an earlier progress message stays visible");
+        let latest = visual
+            .debug_bounds("native-message-latest")
+            .expect("latest message");
+        let between = visual
+            .debug_bounds("native-work-group-second-tool")
+            .expect("work between messages folds");
+        assert!(status.top() < between.top() && between.top() < latest.top());
+        assert!(
+            visual
+                .debug_bounds("native-work-group-first-tool")
+                .is_some()
+        );
+        // Commentary between tools carries no timestamp or actions; the prompt keeps them.
+        assert!(visual.debug_bounds("copy-message:status").is_none());
+        assert!(visual.debug_bounds("copy-message:prompt").is_some());
+        assert!(visual.debug_bounds("native-tool-heading-edit").is_some());
+        assert!(
+            visual
+                .debug_bounds("native-file-change:src/main.rs:+1:-1")
+                .is_some()
+        );
+    }
 }
 
 /// Long tool output scrolls inside its row instead of stretching the transcript.
@@ -1692,7 +1717,40 @@ fn expanded_tool_output_scrolls_within_a_capped_box(cx: &mut TestAppContext) {
     );
 }
 
-/// A settled turn's fold says how long the turn took.
+/// A message with nothing to draw takes no row, even when it carries image references.
+#[gpui_kit::test]
+fn image_references_alone_draw_no_empty_row(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Look at this", "complete": true},
+        {"id": "pictures", "role": "user", "text": "", "complete": true,
+         "images": [{"id": "shot", "pixel_width": 800, "pixel_height": 600}]}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-message-prompt").is_some());
+    assert!(visual.debug_bounds("native-message-pictures").is_none());
+}
+
+/// A settled turn's last fold says how long the turn took.
 #[gpui_kit::test]
 fn settled_folds_say_how_long_the_turn_took(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -1704,8 +1762,13 @@ fn settled_folds_say_how_long_the_turn_took(cx: &mut TestAppContext) {
         {"id": "prompt", "role": "user", "text": "Build it", "complete": true,
          "created_at": 1_000_000},
         {"id": "build", "role": "tool", "text": "", "complete": true,
-         "created_at": 1_002_000, "updated_at": 1_060_000,
+         "created_at": 1_002_000, "updated_at": 1_030_000,
          "tool": {"name": "Bash", "input": "{\"command\":\"cargo build\"}", "status": "completed"}},
+        {"id": "progress", "role": "assistant", "text": "Built; testing.", "complete": true,
+         "created_at": 1_031_000},
+        {"id": "test", "role": "tool", "text": "", "complete": true,
+         "created_at": 1_032_000, "updated_at": 1_060_000,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cargo test\"}", "status": "completed"}},
         {"id": "reply", "role": "assistant", "text": "Built.", "complete": true,
          "created_at": 1_065_000, "updated_at": 1_072_000}
     ]))
@@ -1725,6 +1788,12 @@ fn settled_folds_say_how_long_the_turn_took(cx: &mut TestAppContext) {
     });
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
+    // The turn folds two runs; only the last says how long the turn took.
+    assert!(
+        visual
+            .debug_bounds("native-work-summary:Ran 1 command")
+            .is_some()
+    );
     assert!(
         visual
             .debug_bounds("native-work-summary:Ran 1 command · 1m 12s")

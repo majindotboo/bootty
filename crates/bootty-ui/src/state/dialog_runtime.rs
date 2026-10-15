@@ -1,7 +1,6 @@
 use crate::presentation::dialogs::{
-    CommandPaletteDialog, DitchSessionDialog, KeybindHelpDialog, NewSessionDialog,
-    RenameSessionDialog, RenameTabDialog, SessionPickerDialog, SpaceEditorDialog,
-    SpacePickerDialog, ThemePickerDialog,
+    CommandPaletteDialog, KeybindHelpDialog, NewSessionDialog, RenameSessionDialog,
+    RenameTabDialog, SessionPickerDialog, SpaceEditorDialog, SpacePickerDialog, ThemePickerDialog,
 };
 
 /// The one product workflow presented as a floating modal in an application window.
@@ -14,7 +13,6 @@ pub enum ModalDialog {
     SessionPicker(SessionPickerDialog),
     RenameSession(RenameSessionDialog),
     RenameTab(RenameTabDialog),
-    DitchSession(DitchSessionDialog),
     KeybindHelp(KeybindHelpDialog),
     CommandPalette(CommandPaletteDialog),
     ThemePicker(ThemePickerDialog),
@@ -137,7 +135,6 @@ impl DialogRuntime {
                     | ModalDialog::SessionPicker(_)
                     | ModalDialog::RenameSession(_)
                     | ModalDialog::RenameTab(_)
-                    | ModalDialog::DitchSession(_)
             )
         ) {
             self.clear();

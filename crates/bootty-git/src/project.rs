@@ -10,9 +10,10 @@ use serde::{Deserialize, Serialize};
 use crate::favorite_paths;
 
 pub use crate::worktree::{
-    Git, WorktreeStatus, add_worktree, delete_branch, detach_head, diff_counts,
-    discover_worktree_picker_entries, head_branch, main_worktree, mark_occupied_worktrees,
-    remove_worktree, status, suggested_session_name, trunk_branch, worktree_count, worktree_root,
+    Git, WorktreeStatus, delete_branch, detach_head, diff_counts, discover_worktree_picker_entries,
+    head_branch, main_worktree, mark_occupied_worktrees, remove_worktree, status,
+    suggested_session_name, trunk_branch, worktree_count, worktree_directory,
+    worktree_directory_from, worktree_root,
 };
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

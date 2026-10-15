@@ -56,6 +56,8 @@ pub(super) struct AgentNotifications {
     acknowledgements: HashMap<(AgentKind, AgentPaneKey), u64>,
     /// Each native conversation's last seen generation and status.
     native: HashMap<String, (u64, NativeSessionStatus)>,
+    /// Conversations already sent `agents.native.seen` for their current unread turn.
+    native_seen: std::collections::HashSet<String>,
 }
 
 /// A native conversation and the pane that shows it.
@@ -149,8 +151,8 @@ impl AppState {
                 pane: native.pane,
                 host: native.host,
                 status: native_status(&native.activity).to_owned(),
+                unread: native.activity.unread,
                 title: native.activity.title,
-                unread: false,
                 attention_sequence: "0".to_owned(),
                 can_resume: false,
                 cwd: None,
@@ -345,8 +347,31 @@ impl AppState {
         let focused = self.focused_pane();
         let active = self.workspace.active.binding.scope();
         let mut seen = HashMap::new();
+        let mut marked = std::collections::HashSet::new();
         for native in self.native_attention() {
             let activity = &native.activity;
+            let visible = window_focused
+                && native.scope == active
+                && focused.as_deref() == Some(native.pane.as_str());
+            // Looking at a finished conversation reads it.
+            if activity.unread && visible {
+                if !self.agent_notifications.native_seen.contains(&activity.id) {
+                    let mut command =
+                        CommandInvocation::from_action("agents.native.seen", Caller::Internal);
+                    command.arguments = vec![activity.id.clone(), activity.generation.to_string()];
+                    command.target = Some(native.target.clone());
+                    _ = self.app_command_sender(Caller::Internal).submit(
+                        command,
+                        {
+                            let now = std::time::Instant::now();
+                            now.checked_add(std::time::Duration::from_secs(5))
+                                .unwrap_or(now)
+                        },
+                        CommandCancellation::new(),
+                    );
+                }
+                marked.insert(activity.id.clone());
+            }
             let before = self
                 .agent_notifications
                 .native
@@ -357,9 +382,6 @@ impl AppState {
             let Some(event) = before.and_then(|before| native_event(before, activity)) else {
                 continue;
             };
-            let visible = window_focused
-                && native.scope == active
-                && focused.as_deref() == Some(native.pane.as_str());
             if self.config().session.agent_notifications.allows(visible) {
                 effects.push(AppEffect::DesktopNotification {
                     title: format!("{}: {event}", activity.provider.display_name()),
@@ -368,5 +390,6 @@ impl AppState {
             }
         }
         self.agent_notifications.native = seen;
+        self.agent_notifications.native_seen = marked;
     }
 }

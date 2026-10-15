@@ -322,6 +322,9 @@ pub struct NativeSessionSnapshot {
     /// An observed successful turn completion; imported history cannot establish this fact.
     #[serde(default)]
     pub completed_turn: bool,
+    /// How many turns this conversation has completed while Bootty watched.
+    #[serde(default)]
+    pub completed_turns: u64,
     pub transcript: Vec<NativeTranscriptItem>,
     /// The plan the current turn reported, step by step. A new turn starts without one.
     #[serde(default)]
@@ -362,6 +365,14 @@ const MAX_PENDING_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 32;
 
 impl NativeSessionSnapshot {
+    /// Record how a turn ended; a successful one counts toward the conversation's completed turns.
+    pub(crate) const fn finish_turn(&mut self, succeeded: bool) {
+        self.completed_turn = succeeded;
+        if succeeded {
+            self.completed_turns = self.completed_turns.saturating_add(1);
+        }
+    }
+
     /// Why a new provider request can't be held for an answer, if it can't. The caller declines
     /// it through the provider's protocol instead of ending the conversation.
     pub(crate) fn request_refusal(&self, request: &Value) -> Option<&'static str> {
@@ -515,6 +526,7 @@ impl NativeSessionSnapshot {
             transport_lost: false,
             stop_requested_at: None,
             completed_turn: false,
+            completed_turns: 0,
             transcript: Vec::new(),
             todos: Vec::new(),
             requests: Vec::new(),
@@ -1059,7 +1071,7 @@ impl NativeSessionSnapshot {
             }
         }
         self.working_since = None;
-        self.completed_turn = field(field(params, "turn"), "status") == "completed";
+        self.finish_turn(field(field(params, "turn"), "status") == "completed");
         self.status = if field(field(params, "turn"), "status") == "failed" {
             self.error =
                 string(field(field(field(params, "turn"), "error"), "message")).map(bounded_text);

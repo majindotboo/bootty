@@ -753,6 +753,10 @@ pub struct SessionConfig {
     pub shell_integration: bool,
     pub shell: Option<String>,
     pub working_directory: Option<PathBuf>,
+    /// Parent of new worktrees, resolved on the repository's host. `None` uses the host default.
+    pub worktree_directory: Option<String>,
+    /// At most this many of Bootty's worktrees stay on each host; 0 keeps every one still used.
+    pub worktree_limit: u16,
     pub env: Vec<(String, String)>,
     pub term: String,
     pub colorterm: String,

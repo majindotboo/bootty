@@ -1143,7 +1143,7 @@ fn notifications_specs() -> [SettingSpec; 4] {
     ]
 }
 
-fn terminal_environment_specs() -> [SettingSpec; 4] {
+fn terminal_environment_specs() -> [SettingSpec; 6] {
     [
         spec(
             &["session", "working-directory"],
@@ -1160,6 +1160,40 @@ fn terminal_environment_specs() -> [SettingSpec; 4] {
                         .as_ref()
                         .map_or_else(String::new, |path| path.display().to_string()),
                 )
+            }),
+        ),
+        spec(
+            &["session", "worktree-directory"],
+            "Worktree directory",
+            "New worktrees go in <directory>/<repository>/<name> on the repository's host. ~ is that host's home.",
+            "shell",
+            "SHELL",
+            text("~/.local/share/bootty/worktrees", true),
+            SettingDefault::Field(|config| {
+                SettingValue::Text(
+                    config
+                        .session
+                        .worktree_directory
+                        .clone()
+                        .unwrap_or_default(),
+                )
+            }),
+        ),
+        spec(
+            &["session", "worktree-limit"],
+            "Worktree limit",
+            "Keep at most this many of Bootty's worktrees on each host. Past it, the oldest archived and settled sessions' worktrees go first; one with uncommitted or unpushed work always stays. 0 removes only worktrees no session uses.",
+            "shell",
+            "SHELL",
+            SettingKind::Number {
+                range: 0.0..=1000.0,
+                control: NumberControl::Edit,
+                precision: 0,
+                suffix: "".into(),
+                display_scale: 1.0,
+            },
+            SettingDefault::Field(|config| {
+                SettingValue::Number(f32::from(config.session.worktree_limit))
             }),
         ),
         spec(

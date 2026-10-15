@@ -224,6 +224,7 @@ fn context_snapshot(
         KeymapContext::Global => "Every Bootty surface.",
         KeymapContext::Sidebar => "The focused sidebar.",
         KeymapContext::Command => "The active command palette or picker.",
+        KeymapContext::Composer => "A shown Agent composer.",
         KeymapContext::ComposerCompletion => "The completion menu in an Agent composer.",
         KeymapContext::SurfaceChooser => "The new tab or split chooser.",
         KeymapContext::Terminal => "The focused terminal, regardless of backend.",

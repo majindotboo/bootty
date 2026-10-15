@@ -999,7 +999,7 @@ fn sidebar_rows(
     let grouped = state.config().sidebar.group_by_project;
     let mut groups = Vec::<(Option<&str>, Vec<(usize, &SessionView)>)>::new();
     for (index, session) in sessions.iter().enumerate() {
-        let group = session.cwd.as_deref();
+        let group = session_project_path(projection, session);
         if grouped && let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
             indices.push((index, session));
         } else {
@@ -1018,17 +1018,15 @@ fn sidebar_rows(
         } else {
             &session.display_name
         };
-        let cwd = session.cwd.as_deref();
-        let project = cwd
-            .and_then(|cwd| cwd.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next())
-            .filter(|name| !name.is_empty())
-            .unwrap_or("No project");
-        let group = cwd.unwrap_or("").to_owned();
-        let base = sidebar_session_base(state, session, index, sessions.len(), palette);
-        let artwork = cwd.and_then(|cwd| {
+        let project_path = session_project_path(projection, session);
+        let project = project_name(project_path);
+        let group = project_path.unwrap_or("").to_owned();
+        let mut base = sidebar_session_base(state, session, index, sessions.len(), palette);
+        base.project_path = project_path.map(str::to_owned);
+        let artwork = project_path.and_then(|path| {
             native.artwork.request(
                 &scope,
-                cwd,
+                path,
                 state.active_multiplexer().remote.as_ref(),
                 now,
                 &state.repaint,
@@ -1088,6 +1086,28 @@ fn sidebar_rows(
         last_group = Some(group);
     }
     rows
+}
+
+/// A linked worktree belongs to its main checkout's project; other sessions to their cwd.
+fn session_project_path<'a>(
+    projection: &'a ChromeProjection,
+    session: &'a SessionView,
+) -> Option<&'a str> {
+    projection
+        .session_facts
+        .get(&session.id)
+        .and_then(|facts| facts.project.as_deref())
+        .or(session.cwd.as_deref())
+}
+
+fn project_name(path: Option<&str>) -> &str {
+    path.and_then(|path| {
+        path.trim_end_matches(['/', '\\'])
+            .rsplit(['/', '\\'])
+            .next()
+    })
+    .filter(|name| !name.is_empty())
+    .unwrap_or("No project")
 }
 
 fn sidebar_session_activity(state: &AppState, session: &SessionView, row: &mut SidebarRow) -> u8 {
@@ -1181,7 +1201,7 @@ fn sidebar_native_activity(
                 S::Idle | S::Stopped if activity.running_subagents > 0 => 7,
                 S::Waiting => 6,
                 S::Starting => 5,
-                S::Idle | S::Stopped if activity.completed_turn => 3,
+                S::Idle | S::Stopped if activity.unread => 3,
                 S::Idle | S::Stopped => 0,
             }
         }
@@ -1207,7 +1227,7 @@ fn sidebar_native_activity(
                 }
                 S::Waiting => Some(("Waiting", "clock", theme.muted)),
                 S::Error => Some(("Failed", "circle-alert", theme.destructive)),
-                S::Idle | S::Stopped if activity.completed_turn => {
+                S::Idle | S::Stopped if activity.unread => {
                     Some(("Finished", "circle-check", theme.success))
                 }
                 S::Idle | S::Stopped => None,

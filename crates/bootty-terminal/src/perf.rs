@@ -7,7 +7,7 @@
 //!
 //! Tests arm the guard around the frames they want kept clean; [`record_subprocess`] then panics
 //! naming the caller. Production leaves it disarmed, because a frame may legitimately fork `git` in
-//! response to a click (opening the ditch popup, creating a worktree) and killing a live session
+//! response to a click (creating a worktree) and killing a live session
 //! over that would be worse than the stall it prevents. A steady-state frame has no such excuse,
 //! which is exactly the window a test can arm.
 

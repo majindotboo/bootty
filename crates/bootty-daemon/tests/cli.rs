@@ -960,8 +960,22 @@ fn remote_worktree_create_resolves_options_on_the_daemon_host(#[case] request_js
         );
     }
     let mut command = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"));
+    // The default worktree directory belongs to the daemon host's home and the client's identity.
+    let host_home = directory.child("home");
     command
-        .args(["remote-worktree", "create", "--project"])
+        .env("HOME", host_home.path())
+        .env("LOCALAPPDATA", host_home.path())
+        .env(
+            bootty_config::DEVELOPMENT_NAMESPACE_ENV,
+            "bootty-dev-0123456789abcdef",
+        )
+        .args([
+            "--application-identity",
+            "bootty-dev",
+            "remote-worktree",
+            "create",
+            "--project",
+        ])
         .arg(project.path());
     if request_json {
         command.args([
@@ -974,13 +988,22 @@ fn remote_worktree_create_resolves_options_on_the_daemon_host(#[case] request_js
     let output = command.output().unwrap();
     assert_success(&output);
     let path: String = serde_json::from_slice(&output.stdout).unwrap();
+    let worktrees = if cfg!(windows) {
+        host_home
+            .path()
+            .join("bootty-dev-0123456789abcdef/worktrees")
+    } else {
+        host_home
+            .path()
+            .join(".local/share/bootty-dev-0123456789abcdef/worktrees")
+    };
     assert_eq!(
-        std::path::Path::new(&path).file_name().unwrap(),
-        if request_json {
+        std::path::PathBuf::from(&path),
+        worktrees.join("repo").join(if request_json {
             "my checkout"
         } else {
-            "repo-feature-new"
-        }
+            "feature-new"
+        })
     );
     let branch = Command::new("git")
         .args(["-C", &path, "branch", "--show-current"])
@@ -990,5 +1013,69 @@ fn remote_worktree_create_resolves_options_on_the_daemon_host(#[case] request_js
     assert_eq!(
         String::from_utf8(branch.stdout).unwrap().trim(),
         "feature/new"
+    );
+}
+
+/// The daemon runs Bootty's worktree cleanup on its own host, resolving `~` there, and keeps a
+/// checkout whose commits no remote has.
+#[rstest::rstest]
+fn remote_worktree_clean_runs_on_the_daemon_host() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let project = directory.child("repo");
+    project.create_dir_all().unwrap();
+    let host_home = directory.child("home");
+    let checkout = host_home.path().join("worktrees/repo/old");
+    for args in [
+        vec!["init", "-q"],
+        vec![
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "old",
+            checkout.to_str().unwrap(),
+        ],
+    ] {
+        assert_success(
+            &Command::new("git")
+                .arg("-C")
+                .arg(project.path())
+                .args(args)
+                .output()
+                .unwrap(),
+        );
+    }
+    let request = serde_json::json!({
+        "directory": "~/worktrees", "limit": 10, "sessions": [], "now": i64::MAX / 2,
+    });
+    let output = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
+        .env("HOME", host_home.path())
+        .env("USERPROFILE", host_home.path())
+        .args(["remote-worktree", "clean", "--request"])
+        .arg(request.to_string())
+        .output()
+        .unwrap();
+    assert_success(&output);
+    let report: bootty_git::CleanupReport = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report,
+        bootty_git::CleanupReport {
+            removed: Vec::new(),
+            kept: vec![bootty_git::KeptWorktree {
+                path: checkout.to_string_lossy().into_owned(),
+                reason: "It has 1 commit no remote has".to_owned(),
+            }],
+            remaining: 1,
+        }
     );
 }

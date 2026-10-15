@@ -413,7 +413,7 @@ pub fn key_bindings_for_native_conversation(
     backend: MultiplexerBackendConfig,
     catalog: &CommandCatalog,
 ) -> WorkspaceKeyBindings {
-    let other = key_bindings_for_snapshot(snapshot, KeymapFocus::Other, backend, catalog);
+    let composer = key_bindings_for_snapshot(snapshot, KeymapFocus::Composer, backend, catalog);
     let terminal = key_bindings_for_snapshot(snapshot, KeymapFocus::Terminal, backend, catalog);
     // Native panels own input, so attachment backends cannot receive their terminal prefix.
     let host = key_bindings_for_snapshot(
@@ -435,7 +435,7 @@ pub fn key_bindings_for_native_conversation(
         })
         .collect::<Vec<_>>();
     navigation.reverse();
-    navigation.extend(other.bindings);
+    navigation.extend(composer.bindings);
     WorkspaceKeyBindings::new(navigation)
 }
 

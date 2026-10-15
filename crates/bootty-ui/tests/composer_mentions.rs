@@ -33,6 +33,8 @@ fn idle_record() -> NativeSessionRecord {
         spawn_parent: None,
         queued_messages: Vec::new(),
         attachments: Vec::new(),
+        draft: None,
+        seen_turns: 0,
     }
 }
 

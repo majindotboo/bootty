@@ -1143,6 +1143,134 @@ fn queued_followups_wait_for_idle_and_survive_a_conversation_owner_restart() {
     service.shutdown().unwrap();
 }
 
+/// Each image format people attach becomes a PNG image the provider can read.
+#[rstest]
+#[case("photo.png")]
+#[case("photo.jpg")]
+#[case("photo.webp")]
+#[case("animation.gif")]
+fn image_files_attach_as_png_images(#[case] name: &str) {
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let file = root.path().join(name);
+    image::RgbImage::from_pixel(2, 1, image::Rgb([0, 0, 0]))
+        .save(&file)
+        .unwrap();
+    let reference = service.import_attachment(&record.target(), &file).unwrap();
+    assert_eq!(
+        (
+            reference.kind,
+            reference.mime_type.as_str(),
+            reference.pixel_width,
+            reference.pixel_height
+        ),
+        (
+            bootty_agents::NativeAttachmentKind::Image,
+            "image/png",
+            Some(2),
+            Some(1)
+        )
+    );
+    service.shutdown().unwrap();
+}
+
+/// A finished turn is unread until the conversation is seen. Mark unread brings the last turn
+/// back, and what was seen survives a restart.
+#[rstest]
+fn finished_turns_stay_unread_until_seen() {
+    use std::sync::{Arc, mpsc};
+    let root = TempDir::new().unwrap();
+    let catalog = root.path().join("native.json");
+    let service = Arc::new(NativeAgentService::open(&catalog).unwrap());
+    let (sender, changes) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    let unread = |service: &NativeAgentService| service.activities()[0].unread;
+    assert!(!unread(&service));
+    service.prompt(&target, "hello").unwrap();
+    while !unread(&service) {
+        changes
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+    service.mark_seen(&target, true).unwrap();
+    assert!(!unread(&service));
+    service.mark_seen(&target, false).unwrap();
+    assert!(unread(&service));
+    service.shutdown().unwrap();
+    drop(service);
+
+    let restored = NativeAgentService::open(&catalog).unwrap();
+    assert!(unread(&restored));
+    restored
+        .mark_seen(&restored.sessions()[0].target(), true)
+        .unwrap();
+    assert!(!unread(&restored));
+    restored.shutdown().unwrap();
+}
+
+/// A conversation's unsent draft survives a restart. Its attachment names and sizes come from the
+/// conversation's own copies, an attachment it doesn't hold is refused, and an empty draft clears.
+#[rstest]
+fn drafts_survive_a_restart_and_only_name_held_attachments() {
+    let root = TempDir::new().unwrap();
+    let catalog = root.path().join("native.json");
+    let service = NativeAgentService::open(&catalog).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let file = root.path().join("notes.md");
+    fs::write(&file, "Review this note").unwrap();
+    let held = service.import_attachment(&record.target(), &file).unwrap();
+    let mut placed = held.clone();
+    placed.name = "renamed by the client".to_owned();
+    placed.prompt_ranges = std::iter::once(0..10).collect();
+    let draft = bootty_agents::NativeDraft {
+        text: "[notes.md] then this".to_owned(),
+        attachments: vec![placed.clone()],
+    };
+    service.save_draft(&record.target(), draft.clone()).unwrap();
+    let mut foreign = placed;
+    foreign.id = "native-att-foreign".to_owned();
+    assert!(
+        service
+            .save_draft(
+                &record.target(),
+                bootty_agents::NativeDraft {
+                    text: String::new(),
+                    attachments: vec![foreign],
+                },
+            )
+            .is_err()
+    );
+    service.shutdown().unwrap();
+    drop(service);
+
+    let restored = NativeAgentService::open(&catalog).unwrap();
+    let mut expected = held;
+    expected.prompt_ranges = std::iter::once(0..10).collect();
+    assert_eq!(
+        restored.sessions()[0].draft,
+        Some(bootty_agents::NativeDraft {
+            text: draft.text,
+            attachments: vec![expected],
+        })
+    );
+    restored
+        .save_draft(&record.target(), bootty_agents::NativeDraft::default())
+        .unwrap();
+    assert_eq!(restored.sessions()[0].draft, None);
+    restored.shutdown().unwrap();
+}
+
 #[rstest]
 #[case("notes.md", false)]
 #[case("screenshot.png", true)]

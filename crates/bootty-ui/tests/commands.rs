@@ -26,10 +26,7 @@ use bootty_mux::workspace::{
 };
 use bootty_terminal::geometry::SurfaceRect;
 use bootty_ui::commands::{BrowserAction, CommandCatalog, CommandExecutor, CoreCommandExecutor};
-use bootty_ui::{
-    AppState, ModalDialog,
-    presentation::dialogs::{DitchAction, DitchSessionEvent, NewSessionPickerEvent},
-};
+use bootty_ui::{AppState, ModalDialog, presentation::dialogs::NewSessionPickerEvent};
 use rusqlite::Connection;
 
 /// Bounds waits on real child processes and command replies. Passing tests advance on events;
@@ -936,231 +933,6 @@ fn native_split_command_publishes_the_binding_owned_layout() {
 }
 
 #[test]
-fn ditch_session_keeps_saved_identity_after_authoritative_command() {
-    let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let config_path = directory.path().join("config.toml");
-    let started = Instant::now();
-    let mut state = native_state(directory.path());
-    let created = submit_terminal_choice(&mut state, "new_tab", Caller::Socket, started);
-    assert!(
-        matches!(created, CommandOutcome::Success { .. }),
-        "{created:?}"
-    );
-
-    let target = (0..250)
-        .find_map(|tick| {
-            state.update_frame(frames::idle_frame(
-                started
-                    .checked_add(Duration::from_millis(
-                        250_u64.checked_add(tick).expect("test tick fits"),
-                    ))
-                    .expect("test timestamp fits"),
-            ));
-            std::thread::sleep(Duration::from_millis(1));
-            state
-                .binding_session_groups()
-                .into_iter()
-                .find_map(|group| group.sessions.first().map(|session| group.target(session)))
-        })
-        .expect("native session becomes available");
-    let original_name = state
-        .binding_session_groups()
-        .iter()
-        .flat_map(|group| group.sessions.iter())
-        .find(|session| session.id == target.session_id)
-        .expect("live session")
-        .name
-        .clone();
-
-    // The shared command opens cleanup for the current session.
-    let opened = submit_action(&mut state, "ditch_session", Caller::Keybinding, started);
-    assert!(
-        matches!(opened, CommandOutcome::Success { .. }),
-        "{opened:?}"
-    );
-    assert!(matches!(
-        state.modal_dialog(),
-        Some(ModalDialog::DitchSession(_))
-    ));
-    state.apply_ditch_session_event(DitchSessionEvent::Ditch {
-        session_id: target.session_id.clone(),
-        cwd: None,
-        action: DitchAction::KillOnly,
-    });
-
-    let removed = (0..250).any(|tick| {
-        state.update_frame(frames::idle_frame(
-            started
-                .checked_add(Duration::from_millis(500 + tick))
-                .expect("test timestamp fits"),
-        ));
-        std::thread::sleep(Duration::from_millis(1));
-        !state
-            .binding_session_groups()
-            .iter()
-            .flat_map(|group| group.sessions.iter())
-            .any(|session| session.id == target.session_id)
-    });
-    assert!(
-        removed,
-        "authoritative ditch result must remove the live session"
-    );
-
-    drop(state);
-    let (_, reopened) = WorkspaceRepository::open(&config_path).expect("reopen workspace");
-    assert!(
-        reopened.spaces()[0]
-            .binding()
-            .sessions()
-            .backend_names()
-            .contains(&original_name)
-    );
-}
-
-#[test]
-fn ditch_submits_after_worktree_removal_when_branch_deletion_fails() {
-    let (_repository, main, worktree, duplicate) = repo_with_duplicate_branch();
-    let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let started = Instant::now();
-    let (wake, wakes) = mpsc::channel();
-    let mut state = AppState::new(
-        test_config::config(
-            directory.path().join("config.toml"),
-            MultiplexerBackendConfig::Native,
-        ),
-        support::backends(),
-        Arc::new(move || {
-            _ = wake.send(());
-        }),
-        None,
-        None,
-    )
-    .expect("app state");
-    open_native_session(&mut state, &worktree, started);
-    let session_id = state.mux().sessions()[0].id.clone();
-
-    let cwd = worktree.to_string_lossy().into_owned();
-    let action = DitchAction::RemoveWorktreeAndBranch {
-        force: true,
-        branch: "feature".to_owned(),
-        repo: main.to_string_lossy().into_owned(),
-    };
-    let ditch_event = || DitchSessionEvent::Ditch {
-        session_id: session_id.clone(),
-        cwd: Some(cwd.clone()),
-        action: action.clone(),
-    };
-    let database = directory.path().join("session-order.sqlite3");
-    let lock = Connection::open(&database).expect("open lock connection");
-    lock.execute_batch("BEGIN IMMEDIATE")
-        .expect("hold workspace write lock");
-    assert!(state.open_ditch_session_dialog_for(&session_id));
-    state.apply_ditch_session_event(ditch_event());
-    assert!(
-        worktree.exists(),
-        "failed Ditch preparation must not remove the worktree"
-    );
-    assert!(matches!(
-        state.modal_dialog(),
-        Some(ModalDialog::DitchSession(_))
-    ));
-    lock.execute_batch("ROLLBACK")
-        .expect("release workspace write lock");
-    drop(lock);
-
-    state.apply_ditch_session_event(ditch_event());
-
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
-        .expect("test deadline fits");
-    loop {
-        state.update_frame(frames::idle_frame(Instant::now()));
-        if !state
-            .binding_session_groups()
-            .iter()
-            .flat_map(|group| group.sessions.iter())
-            .any(|session| session.id == session_id)
-        {
-            break;
-        }
-        wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .expect("partial cleanup must still submit Ditch and wake the app");
-    }
-    assert!(!worktree.exists(), "ditch must remove the linked worktree");
-    assert!(
-        state
-            .last_error()
-            .is_some_and(|warning| warning.contains("branch 'feature' remains")),
-        "partial cleanup warning must name the remaining branch"
-    );
-    assert!(duplicate.exists(), "duplicate branch checkout must remain");
-    assert!(git_read(&main, &["branch", "--list", "feature"]).contains("feature"));
-}
-
-fn repo_with_duplicate_branch() -> (assert_fs::TempDir, PathBuf, PathBuf, PathBuf) {
-    let root = assert_fs::TempDir::new().expect("temporary repository root");
-    let main = root.path().join("main");
-    let worktree = root.path().join("worktree");
-    let duplicate = root.path().join("duplicate");
-    fs::create_dir(&main).expect("create main worktree");
-    git_ok(&main, &["init", "-q", "-b", "main"]);
-    git_ok(&main, &["config", "user.email", "test@bootty.dev"]);
-    git_ok(&main, &["config", "user.name", "Bootty Test"]);
-    fs::write(main.join("README"), "hello").expect("write initial file");
-    git_ok(&main, &["add", "."]);
-    git_ok(&main, &["commit", "-q", "-m", "init"]);
-    git_ok(
-        &main,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "feature",
-            worktree.to_str().expect("UTF-8 worktree path"),
-        ],
-    );
-    git_ok(
-        &main,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "--force",
-            duplicate.to_str().expect("UTF-8 duplicate path"),
-            "feature",
-        ],
-    );
-    (root, main, worktree, duplicate)
-}
-
-fn git_ok(cwd: &Path, args: &[&str]) {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn git_read(cwd: &Path, args: &[&str]) -> String {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .output()
-        .expect("run git");
-    assert!(output.status.success());
-    String::from_utf8_lossy(&output.stdout).trim().to_owned()
-}
-
-#[test]
 fn native_window_actions_use_the_binding_owned_plan() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
     let started = Instant::now();
@@ -1572,10 +1344,12 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
     );
     fs::write(directory.path().join("file[a].txt"), "contents\n").unwrap();
     let (wake, wakes) = mpsc::channel();
-    let config = test_config::config(
+    let checkouts = assert_fs::TempDir::new().unwrap();
+    let mut config = test_config::config(
         directory.path().join("settings/config.toml"),
         MultiplexerBackendConfig::Native,
     );
+    config.session.worktree_directory = Some(checkouts.path().to_string_lossy().into_owned());
     let mut state = AppState::new(
         config,
         support::backends(),
@@ -1661,6 +1435,10 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
         panic!("worktree creation failed");
     };
     let checkout = value.as_str().unwrap();
+    assert!(
+        std::path::Path::new(checkout).starts_with(checkouts.path()),
+        "{checkout} is outside the configured worktree directory"
+    );
     assert_eq!(
         fs::read_to_string(std::path::Path::new(checkout).join("file[a].txt")).unwrap(),
         "contents\n"

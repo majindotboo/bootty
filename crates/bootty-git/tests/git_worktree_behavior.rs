@@ -3,8 +3,8 @@ use std::{fs, path::Path, process::Command};
 
 use assert_fs::{TempDir, prelude::*};
 use bootty_git::project::{
-    WorktreeStatus, add_worktree, delete_branch, detach_head, diff_counts, head_branch,
-    remove_worktree, status, suggested_session_name, trunk_branch, worktree_count,
+    WorktreeStatus, delete_branch, detach_head, diff_counts, head_branch, remove_worktree, status,
+    suggested_session_name, trunk_branch, worktree_count,
 };
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
@@ -230,24 +230,14 @@ fn trunk_uses_the_remote_default_then_falls_back_to_main_worktree(
 }
 
 #[rstest]
-fn add_worktree_creates_a_sibling_for_the_new_branch(repository: anyhow::Result<Repository>) {
-    let repository = repository.expect("repository fixture");
-    let created =
-        add_worktree(repository.main.to_str().unwrap(), "wip/login").expect("add worktree");
-    assert!(created.ends_with("main-wip-login"));
-    let added = status(&created);
-    assert!(added.is_linked_worktree);
-    assert_eq!(added.branch.as_deref(), Some("wip/login"));
-}
-
-#[rstest]
 #[case(None)]
 #[case(Some("custom checkout"))]
-fn create_worktree_resolves_starting_ref_and_preserves_current_checkout(
+fn create_worktree_nests_under_the_repository_and_preserves_current_checkout(
     repository: anyhow::Result<Repository>,
     #[case] name: Option<&str>,
 ) {
     let repository = repository.expect("repository fixture");
+    let checkouts = TempDir::new().unwrap();
     let root = repository.main.to_str().unwrap();
     let initial = git_read(&repository.main, &["rev-parse", "HEAD"]).expect("git output");
     git_ok(&repository.main, &["tag", "baseline"]).expect("git setup command");
@@ -261,18 +251,18 @@ fn create_worktree_resolves_starting_ref_and_preserves_current_checkout(
                 branch: "topic/nested".to_owned(),
                 name: name.map(str::to_owned),
                 start_ref: Some("baseline".to_owned()),
+                directory: Some(checkouts.path().to_str().unwrap().to_owned()),
             },
         )
         .unwrap();
     assert_eq!(
         Path::new(&path),
-        repository
-            .root
+        checkouts
             .path()
-            .canonicalize()
-            .unwrap()
-            .join(name.unwrap_or("main-topic-nested"))
+            .join("main")
+            .join(name.unwrap_or("topic-nested"))
     );
+    assert!(status(&path).is_linked_worktree);
     assert_eq!(
         git_read(Path::new(&path), &["rev-parse", "HEAD"]).expect("git output"),
         initial
@@ -296,7 +286,7 @@ fn create_worktree_resolves_starting_ref_and_preserves_current_checkout(
 #[case("new-branch", "../escape", "HEAD")]
 #[case("new-branch", "/absolute", "HEAD")]
 #[case("new-branch", "..", "HEAD")]
-#[case("new-branch", "wt", "HEAD")]
+#[case("new-branch", "occupied", "HEAD")]
 #[case("new-branch", "new-checkout", "missing-ref")]
 #[case("@{-1}", "new-checkout", "HEAD")]
 #[case("HEAD", "new-checkout", "HEAD")]
@@ -308,6 +298,8 @@ fn rejected_worktree_request_does_not_change_repository(
     #[case] start_ref: &str,
 ) {
     let repository = repository.expect("repository fixture");
+    let checkouts = TempDir::new().unwrap();
+    checkouts.child("main/occupied/keep").touch().unwrap();
     let before = git_read(&repository.main, &["show-ref"]).expect("git output");
     let worktrees =
         git_read(&repository.main, &["worktree", "list", "--porcelain"]).expect("git output");
@@ -319,6 +311,7 @@ fn rejected_worktree_request_does_not_change_repository(
                     branch: branch.to_owned(),
                     name: Some(name.to_owned()),
                     start_ref: Some(start_ref.to_owned()),
+                    directory: Some(checkouts.path().to_str().unwrap().to_owned()),
                 }
             )
             .is_err()
@@ -385,4 +378,69 @@ fn linked_checkout_of_bare_repository_can_be_removed(repository: anyhow::Result<
     );
     remove_worktree(linked.to_str().unwrap(), false).expect("remove bare repository checkout");
     assert!(!linked.exists());
+}
+
+#[rstest]
+fn only_a_linked_checkout_belongs_to_another_project(repository: anyhow::Result<Repository>) {
+    let repository = repository.expect("repository fixture");
+    let bare = repository.root.path().join("bare.git");
+    git_ok(
+        &repository.main,
+        &["clone", "--bare", ".", bare.to_str().unwrap()],
+    )
+    .expect("git setup command");
+    let bare_checkout = repository.root.path().join("bare-checkout");
+    git_ok(
+        &bare,
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            bare_checkout.to_str().unwrap(),
+        ],
+    )
+    .expect("git setup command");
+    let main = repository.main.canonicalize().unwrap();
+    let nested = repository.worktree.join("nested");
+    fs::create_dir(&nested).unwrap();
+    let git = bootty_git::Git::new();
+    let project = |path: &Path| git.linked_worktree_project(path.to_str().unwrap());
+    assert_eq!(
+        [
+            project(&repository.worktree),
+            project(&nested),
+            project(&repository.main),
+            project(&bare_checkout),
+            project(repository.root.path()),
+        ],
+        [
+            main.to_str().map(str::to_owned),
+            main.to_str().map(str::to_owned),
+            None,
+            None,
+            None,
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[rstest]
+#[case(None, Ok("/home/me/.local/share/bootty-dev-test/worktrees"))]
+#[case(Some("~"), Ok("/home/me"))]
+#[case(Some("~/checkouts"), Ok("/home/me/checkouts"))]
+#[case(Some(" /srv/checkouts "), Ok("/srv/checkouts"))]
+#[case(Some("checkouts"), Err("Worktree directory must be an absolute path"))]
+fn worktree_directory_resolves_home_and_rejects_relative_paths(
+    #[case] configured: Option<&str>,
+    #[case] expected: Result<&str, &str>,
+) {
+    let resolved = bootty_git::worktree_directory_from(configured, "bootty-dev-test", |name| {
+        (name == "HOME").then(|| "/home/me".into())
+    });
+    assert_eq!(
+        resolved,
+        expected
+            .map(std::path::PathBuf::from)
+            .map_err(str::to_owned)
+    );
 }

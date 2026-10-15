@@ -3121,6 +3121,8 @@ fn native_tab_keeps_its_exact_target_across_selection_updates(cx: &mut TestAppCo
         spawn_parent: None,
         queued_messages: Vec::new(),
         attachments: Vec::new(),
+        draft: None,
+        seen_turns: 0,
     };
     let mut snapshot = chrome_snapshot();
     let selector = "status-tab-top-1-native:codex:owned-thread:conversation";
