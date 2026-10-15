@@ -681,6 +681,12 @@ terminal. It is available in the palette and keybinding presets; on macOS the
 standard shortcut is `Cmd+Shift+W`. `session.settle` accepts an explicit saved
 identity with its Binding target for detached work and other Spaces.
 
+`ditch_session` (**Ditch Session** in the palette) closes the current live
+session and cleans up its checkout. The dialog shows the path, branch,
+worktree kind and whether it is dirty, then closes the session alone, detaches
+the worktree, or removes the worktree and optionally its branch. Remote sessions
+close without cleanup.
+
 `sidebar.sort-order` defaults to `"manual"`. Choose **Manual** or **Recent activity**
 from the sidebar view menu or Sidebar settings. Recent activity uses persisted
 accepted session input and native prompts; equal or undated sessions keep their
@@ -808,8 +814,9 @@ Files commands also expose `files.list PATH [OFFSET]`, `files.read PATH`, and
 `files.format PATH CONTENT_BASE64` returns formatted document bytes without
 writing the host file.
 `files.source PATH ROOT` returns a seekable source descriptor after checking that
-the regular file stays inside the captured root. File mentions use this command
-and read the bytes on that same host before admitting an attachment.
+the regular file stays inside the captured root. A composer's `@` file mention
+inserts the file's project path instead (`@src/main.rs`, quoted when it has
+spaces), so the agent reads and edits the real file.
 All paths belong to the selected binding's host, including remote paths.
 
 Shell completion notifications require live OSC 133 command-start and finish

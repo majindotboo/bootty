@@ -631,6 +631,15 @@ impl AppState {
         )
     }
 
+    /// Switches whether a message sent during a turn waits for it or steers it.
+    pub(crate) fn toggle_follow_up_behavior(&mut self, effects: &mut Vec<AppEffect>) -> bool {
+        let next = self.config().agents.follow_up_behavior.opposite();
+        self.mutate_config_document(
+            |document| document.set_str(&["agents", "follow-up-behavior"], next.token()),
+            effects,
+        )
+    }
+
     pub(crate) fn toggle_session_grouping(&mut self, effects: &mut Vec<AppEffect>) -> bool {
         let grouped = !self.config().sidebar.group_by_project;
         self.mutate_config_document(
@@ -863,6 +872,10 @@ impl AppState {
     )]
     pub(crate) fn record_error(&mut self, error: impl ToString) {
         self.last_error = Some(ErrorNotice::from_text(error.to_string()));
+    }
+    /// Records Bootty's own sentence as written, so it never reads as the generic failure.
+    pub(crate) fn record_message(&mut self, message: impl Into<String>) {
+        self.last_error = Some(ErrorNotice::Message(message.into()));
     }
     pub(crate) fn record_notice(&mut self, notice: ErrorNotice) {
         self.last_error = Some(notice);

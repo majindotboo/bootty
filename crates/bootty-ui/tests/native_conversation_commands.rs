@@ -948,6 +948,34 @@ fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() ->
     Ok(())
 }
 
+/// A path in a reply opens on the conversation's host, relative to its directory, the way a path
+/// in its terminal does.
+#[rstest]
+fn reply_paths_open_relative_to_the_conversation() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let conversation = record(&host.start(&binding, "conversation", "task-links", "")?)?;
+    fs::write(host.directory.path().join("notes.md"), "one\ntwo\n")?;
+    host.effects.clear();
+    success(host.submit(native_command(
+        "agents.native.open-link",
+        &conversation.target(),
+        &["notes.md:2"],
+        Caller::Internal,
+    ))?)?;
+    let opened = host
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            AppEffect::OpenFiles(request) => Some((request.path.clone(), request.line)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let notes = fs::canonicalize(host.directory.path().join("notes.md"))?;
+    assert_eq!(opened, [(notes.to_string_lossy().into_owned(), 2)]);
+    Ok(())
+}
+
 /// Native conversations raise desktop notifications like observed agents: when one needs
 /// approval, and when its turn finishes. The Agents panel lists them too.
 #[rstest]

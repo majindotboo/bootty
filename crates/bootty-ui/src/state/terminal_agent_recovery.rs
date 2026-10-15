@@ -25,7 +25,7 @@ impl AppState {
                     self.terminal_agent_recoveries.push(response);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    self.record_error("Terminal agent recovery worker stopped");
+                    self.record_message("Terminal agent recovery worker stopped");
                 }
             }
         }
@@ -91,7 +91,9 @@ impl AppState {
                 CommandCancellation::new(),
             ) {
                 Ok(response) => self.terminal_agent_recoveries.push(response),
-                Err(_) => self.record_error("Terminal agent recovery command could not be queued"),
+                Err(_) => {
+                    self.record_message("Terminal agent recovery command could not be queued");
+                }
             }
         }
     }

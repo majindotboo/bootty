@@ -15,10 +15,21 @@ pub struct NativeSubagent {
     pub model: Option<String>,
     /// Only Codex reports a provider thread here. Pi's task IDs are not conversation IDs.
     pub thread_id: Option<String>,
+    /// Claude saved this subagent's conversation to its own file; a background shell has none.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub claude_file: bool,
     pub owner_session: Option<String>,
     pub status: NativeToolStatus,
     pub started_at: Option<i64>,
     pub completed_at: Option<i64>,
+}
+
+impl NativeSubagent {
+    /// Whether the subagent's own conversation can be read: a Codex thread or a Claude file.
+    #[must_use]
+    pub const fn readable(&self) -> bool {
+        self.thread_id.is_some() || self.claude_file
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -191,6 +202,7 @@ impl NativeSessionSnapshot {
                     prompt: text(field(item, "prompt"), 2048),
                     model: model(field(item, "model")),
                     thread_id: Some(id.into()),
+                    claude_file: false,
                     owner_session: self.session_id.clone(),
                     status,
                     started_at: None,
@@ -304,6 +316,7 @@ impl NativeSessionSnapshot {
                     prompt,
                     model: model(field(row, "model")),
                     thread_id: None,
+                    claude_file: false,
                     owner_session: self.session_id.clone(),
                     status,
                     started_at: None,
@@ -336,6 +349,7 @@ impl NativeSessionSnapshot {
                 prompt: text(field(row, "description"), 2048),
                 model: model(field(row, "model")),
                 thread_id: None,
+                claude_file: false,
                 owner_session: self.session_id.clone(),
                 status,
                 started_at: field(row, "startedAt").as_i64(),
@@ -415,6 +429,10 @@ impl NativeSessionSnapshot {
                 ),
                 model: model(field(&args, "model")),
                 thread_id: None,
+                // An agent task saves its conversation; a backgrounded shell doesn't.
+                claude_file: known.as_ref().is_some_and(|known| known.claude_file)
+                    || field(value, "task_type") == "local_agent"
+                    || tool.is_some_and(|tool| matches!(tool.name.as_str(), "Agent" | "Task")),
                 owner_session: self.session_id.clone(),
                 status,
                 started_at: None,
@@ -426,6 +444,25 @@ impl NativeSessionSnapshot {
 }
 
 impl crate::NativeAgentSession {
+    /// Claude keeps each subagent's transcript in its own session file.
+    fn read_claude_subagent(
+        &self,
+        snapshot: &NativeSessionSnapshot,
+        agent: NativeSubagent,
+    ) -> Result<NativeSubagentDetail, String> {
+        let session = snapshot
+            .session_id
+            .as_deref()
+            .or(self.config.session_id.as_deref())
+            .ok_or("Claude has no captured session identity")?;
+        let history =
+            crate::native_history_claude::subagent_transcript(&self.config, session, &agent.id)?;
+        Ok(NativeSubagentDetail {
+            agent,
+            transcript: history.transcript,
+        })
+    }
+
     /// Read a child only when this provider thread reported its identity; never acquire its writer.
     /// # Errors
     /// Rejects unknown children, missing provider transcripts or mismatched read replies.
@@ -439,6 +476,9 @@ impl crate::NativeAgentSession {
             .ok_or("The provider did not report this subagent")?;
         if agent.owner_session != snapshot.session_id {
             return Err("This subagent belongs to the source conversation".into());
+        }
+        if self.config.provider == crate::AgentKind::Claude {
+            return self.read_claude_subagent(&snapshot, agent);
         }
         let original = agent.clone();
         let thread = agent

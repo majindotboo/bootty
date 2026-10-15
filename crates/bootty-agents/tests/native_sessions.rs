@@ -1205,6 +1205,39 @@ fn active_followup_steers_the_existing_turn_and_rejection_preserves_work() {
     session.interrupt().unwrap();
 }
 
+/// A stopped Codex turn leaves a mark in the transcript, and a resumed conversation shows its
+/// interrupted turns too.
+#[rstest]
+fn interrupted_codex_turns_stay_marked() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    session.interrupt().unwrap();
+    barrier(&session).unwrap();
+    let notices = |snapshot: bootty_agents::NativeSessionSnapshot| {
+        snapshot
+            .transcript
+            .into_iter()
+            .filter(|item| item.role == "notice")
+            .map(|item| item.text)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(notices(session.snapshot()), ["You interrupted this turn."]);
+    session.stop();
+
+    fs::write(
+        root.path().join("history-timestamps.json"),
+        json!([{"id":"prior","status":"interrupted","items":[{"id":"saved","type":"agentMessage","text":"Partial"}]}])
+            .to_string(),
+    )
+    .unwrap();
+    let mut config = config(root.path()).unwrap();
+    config.session_id = Some("native-thread".to_owned());
+    let resumed = NativeAgentSession::spawn(config).unwrap();
+    assert_eq!(notices(resumed.snapshot()), ["This turn was interrupted."]);
+    resumed.stop();
+}
+
 #[rstest]
 #[case("wait", true)]
 #[case("defer", false)]
@@ -1493,6 +1526,124 @@ fn mcp_input_requests_remain_pending_without_fabricating_content(
         json!([{"action":action}])
     );
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
+}
+
+/// Codex reasoning, web searches, viewed images and compaction reach the transcript instead of
+/// vanishing; a completed reasoning item's summary replaces its streamed text.
+#[rstest]
+fn codex_reasoning_search_image_and_compaction_items_reach_the_transcript() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let snapshot = session.snapshot();
+    let scope = json!({"threadId":snapshot.session_id,"turnId":snapshot.turn_id});
+    let emit = |events: &[(&str, Value)]| {
+        let events = events
+            .iter()
+            .map(|(method, params)| {
+                let mut params = params.clone();
+                params["threadId"] = scope["threadId"].clone();
+                params["turnId"] = scope["turnId"].clone();
+                json!({"method":method,"params":params})
+            })
+            .collect::<Vec<_>>();
+        fs::write(root.path().join("events.json"), json!(events).to_string()).unwrap();
+        barrier(&session).unwrap();
+        session.snapshot()
+    };
+    let row = |snapshot: &bootty_agents::NativeSessionSnapshot, id: &str| {
+        snapshot
+            .transcript
+            .iter()
+            .find(|item| item.id == id)
+            .map(|item| {
+                (
+                    item.role.clone(),
+                    item.text.clone(),
+                    item.tool
+                        .as_ref()
+                        .map(|tool| (tool.name.clone(), tool.input.clone(), tool.status)),
+                )
+            })
+    };
+
+    let snapshot = emit(&[
+        (
+            "item/reasoning/textDelta",
+            json!({"itemId":"think","delta":"raw notes "}),
+        ),
+        (
+            "item/reasoning/summaryTextDelta",
+            json!({"itemId":"think","delta":"Summary"}),
+        ),
+        (
+            "item/started",
+            json!({"item":{"id":"search","type":"webSearch","query":"","action":null}}),
+        ),
+    ]);
+    assert_eq!(
+        row(&snapshot, "search"),
+        Some((
+            "tool".into(),
+            String::new(),
+            Some(("webSearch".into(), "{}".into(), NativeToolStatus::Running))
+        ))
+    );
+
+    let snapshot = emit(&[
+        (
+            "item/completed",
+            json!({"item":{"id":"think","type":"reasoning","summary":["Checked the docs"],"content":["raw notes"]}}),
+        ),
+        (
+            "item/completed",
+            json!({"item":{"id":"search","type":"webSearch","query":"gpui tooltips","action":{"type":"search","query":"gpui tooltips"}}}),
+        ),
+        (
+            "item/completed",
+            json!({"item":{"id":"page","type":"webSearch","query":"","action":{"type":"openPage","url":"https://example.com/docs"}}}),
+        ),
+        (
+            "item/completed",
+            json!({"item":{"id":"image","type":"imageView","path":"/tmp/shot.png"}}),
+        ),
+        (
+            "item/completed",
+            json!({"item":{"id":"compact","type":"contextCompaction"}}),
+        ),
+    ]);
+    assert_eq!(
+        row(&snapshot, "think"),
+        Some(("thinking".into(), "Checked the docs".into(), None))
+    );
+    assert_eq!(
+        row(&snapshot, "search").and_then(|row| row.2),
+        Some((
+            "webSearch".into(),
+            json!({"query":"gpui tooltips"}).to_string(),
+            NativeToolStatus::Completed
+        ))
+    );
+    assert_eq!(
+        row(&snapshot, "page")
+            .and_then(|row| row.2)
+            .map(|tool| tool.1),
+        Some(json!({"url":"https://example.com/docs"}).to_string())
+    );
+    assert_eq!(
+        row(&snapshot, "image")
+            .and_then(|row| row.2)
+            .map(|tool| tool.1),
+        Some(json!({"path":"/tmp/shot.png"}).to_string())
+    );
+    assert_eq!(
+        row(&snapshot, "compact").map(|row| (row.0, row.1)),
+        Some((
+            "notice".into(),
+            "Codex compacted the conversation's context.".into()
+        ))
+    );
+    session.stop();
 }
 
 /// A Codex plan turn shows its current steps and keeps the proposed plan in the transcript, where a
@@ -2291,21 +2442,19 @@ fn nested_side_chat_retains_copied_context_after_live_history_eviction(
         recent
     );
     fs::write(root.path().join("history-echo-mode"), echo_mode).unwrap();
-    let result = service.prompt(&grandchild.target(), "Grandchild question");
-    if echo_mode != "exact" {
-        assert!(result.is_err());
-        assert!(
-            service
-                .resolve(&grandchild.target())
-                .unwrap()
-                .snapshot()
-                .error
-                .is_some()
-        );
-        service.shutdown().unwrap();
-        return;
-    }
-    result.unwrap();
+    service
+        .prompt(&grandchild.target(), "Grandchild question")
+        .unwrap();
+    // An echo Bootty can't match is cut down instead of ending the conversation.
+    let snapshot = service.resolve(&grandchild.target()).unwrap().snapshot();
+    assert_eq!(snapshot.error, None);
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .any(|item| item.role == "notice" && item.text.starts_with("Bootty left out")),
+        echo_mode != "exact"
+    );
     let identity = grandchild.snapshot.session_id.as_ref().unwrap();
     let wire: Value =
         serde_json::from_slice(&fs::read(root.path().join(format!("{identity}-1.json"))).unwrap())
@@ -2467,7 +2616,15 @@ fn child_reads_reconcile_status_without_claiming_its_writer(
     .unwrap();
     let detail = session.read_subagent("child-thread").unwrap();
     assert_eq!(detail.agent.status, expected);
-    assert_eq!(detail.transcript.last().unwrap().text, "Audit result");
+    assert_eq!(
+        detail
+            .transcript
+            .iter()
+            .rfind(|item| item.role != "notice")
+            .unwrap()
+            .text,
+        "Audit result"
+    );
     let snapshot = session.snapshot();
     assert_eq!(
         snapshot

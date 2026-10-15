@@ -468,44 +468,47 @@ impl NativeRequestView {
         let id = request.id.clone();
         let target = self.target.clone();
         let question = is_claude_question(request);
-        let mut body = div().flex().flex_col().gap_2();
-        if question {
-            body = body.children(
-                questions(request)
-                    .map(|question| self.render_question(request, question, pending, cx)),
-            );
-        } else {
-            body = body.child(request_details(
-                gpui_kit::SharedString::from(format!("claude-approval-scope:{id}")),
-                serde_json::to_string_pretty(field(&request.parameters, "input"))
-                    .unwrap_or_default(),
-            ));
+        if !question {
+            return div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(request_details(
+                    gpui_kit::SharedString::from(format!("claude-approval-scope:{id}")),
+                    claude_approval_description(
+                        &request.parameters,
+                        crate::strings::home_dir().as_deref(),
+                    ),
+                ))
+                .child(self.approval_buttons(request, pending, cx));
         }
+        let body = div().flex().flex_col().gap_2().children(
+            questions(request).map(|question| self.render_question(request, question, pending, cx)),
+        );
         let denied = id.clone();
         let denied_target = target.clone();
-        let empty = question
-            && (questions(request).next().is_none()
-                || questions(request).any(|question| {
-                    let Some(key) =
-                        question_key(request, question).map(|key| (id.clone(), key.to_owned()))
-                    else {
-                        return true;
-                    };
-                    self.selected_answers
+        let empty = questions(request).next().is_none()
+            || questions(request).any(|question| {
+                let Some(key) =
+                    question_key(request, question).map(|key| (id.clone(), key.to_owned()))
+                else {
+                    return true;
+                };
+                self.selected_answers
+                    .get(&key)
+                    .is_none_or(BTreeSet::is_empty)
+                    && self
+                        .answers
                         .get(&key)
-                        .is_none_or(BTreeSet::is_empty)
-                        && self
-                            .answers
-                            .get(&key)
-                            .is_none_or(|answer| answer.read(cx).value().trim().is_empty())
-                }));
+                        .is_none_or(|answer| answer.read(cx).value().trim().is_empty())
+            });
         body.child(
             div()
                 .flex()
                 .gap_2()
                 .child(
                     Button::new(gpui_kit::SharedString::from(format!("claude-decline:{id}")))
-                        .label(if question { "Cancel" } else { "Deny" })
+                        .label("Cancel")
                         .small()
                         .ghost()
                         .disabled(pending)
@@ -521,26 +524,12 @@ impl NativeRequestView {
                 )
                 .child(
                     Button::new(gpui_kit::SharedString::from(format!("claude-accept:{id}")))
-                        .label(if question {
-                            "Send answers"
-                        } else {
-                            "Allow once"
-                        })
+                        .label("Send answers")
                         .small()
                         .primary()
                         .disabled(pending || empty)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            if question {
-                                this.submit_claude_answers(&target, &id, window, cx);
-                            } else {
-                                this.request_command(
-                                    &target,
-                                    NativeRequestOperation::Respond,
-                                    vec![id.clone(), json!({"decision":"accept"}).to_string()],
-                                    window,
-                                    cx,
-                                );
-                            }
+                            this.submit_claude_answers(&target, &id, window, cx);
                         })),
                 ),
         )
@@ -948,8 +937,7 @@ fn request_title(request: &NativeAgentRequest) -> &str {
         .as_str()
         .or_else(|| {
             (request.method == "claude.permission" && !is_claude_question(request))
-                .then(|| field(&request.parameters, "tool_name").as_str())
-                .flatten()
+                .then(|| claude_title(&request.parameters))
         })
         .unwrap_or_else(|| match request.method.as_str() {
             "item/commandExecution/requestApproval" => "Allow this command?",
@@ -1008,6 +996,75 @@ impl gpui_kit::RenderOnce for RequestDetails {
             )
             .vertical_scrollbar(&scroll)
     }
+}
+
+fn claude_title(parameters: &Value) -> &'static str {
+    match field(parameters, "tool_name").as_str() {
+        Some("Bash") => "Allow this command?",
+        Some("Write" | "Edit" | "MultiEdit" | "NotebookEdit") => "Allow these file changes?",
+        _ => "Allow this tool?",
+    }
+}
+
+/// What a Claude approval would do: the command or file, Claude's description of it, and what a
+/// reusable choice would allow.
+fn claude_approval_description(parameters: &Value, home: Option<&std::path::Path>) -> String {
+    let input = field(parameters, "input");
+    let subject = field(input, "command")
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| {
+            field(input, "file_path")
+                .as_str()
+                .or_else(|| field(input, "notebook_path").as_str())
+                .map(|path| bootty_git::project::display_path(path, home))
+        })
+        .unwrap_or_else(|| {
+            let tool = field(parameters, "tool_name").as_str().unwrap_or_default();
+            format!(
+                "{}\n{}",
+                tool_label(tool),
+                serde_json::to_string_pretty(input).unwrap_or_default()
+            )
+        });
+    let mut lines = Vec::new();
+    if let Some(description) = field(parameters, "description")
+        .as_str()
+        .filter(|description| !subject.ends_with(description))
+    {
+        lines.push(description.to_owned());
+    }
+    lines.insert(0, subject);
+    for suggestion in field(parameters, "permission_suggestions")
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        match field(suggestion, "type").as_str() {
+            Some("addRules") => {
+                let rules = field(suggestion, "rules")
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|rule| {
+                        let tool = field(rule, "toolName").as_str()?;
+                        Some(field(rule, "ruleContent").as_str().map_or_else(
+                            || tool.to_owned(),
+                            |content| format!("{tool}({content})"),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                if !rules.is_empty() {
+                    lines.push(format!("Reusable choices allow {}", rules.join(", ")));
+                }
+            }
+            Some("setMode") if field(suggestion, "mode") == "acceptEdits" => {
+                lines.push("Allow for this session accepts every edit until it ends".to_owned());
+            }
+            _ => {}
+        }
+    }
+    lines.join("\n")
 }
 
 fn approval_description(

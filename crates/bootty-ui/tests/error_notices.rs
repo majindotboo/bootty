@@ -49,6 +49,18 @@ use rstest::rstest;
     "This conversation is open in another app. Close it there, then retry."
 )]
 #[case(
+    "session 019a is archived. Run `codex unarchive 019a` to unarchive it first.",
+    "This conversation is archived. Unarchive it to continue."
+)]
+#[case(
+    "This conversation is archived in Codex.",
+    "This conversation is archived. Unarchive it to continue."
+)]
+#[case(
+    "Could not read archived logs",
+    "Could not complete the operation. Try again."
+)]
+#[case(
     "Not logged in · /login",
     "Sign in to the selected provider account, then retry."
 )]

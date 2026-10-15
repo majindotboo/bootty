@@ -568,10 +568,38 @@ impl NativeAgentSessionView {
         if live && let Some(tool) = active {
             return running_label(tool);
         }
-        if tools.is_empty() {
-            return "Thought process".to_owned();
+        let summary = if tools.is_empty() {
+            "Thought process".to_owned()
+        } else {
+            activity_summary(&tools)
+        };
+        match self.turn_duration(members).filter(|_| !live) {
+            Some(duration) if duration.as_secs() > 0 => format!(
+                "{summary} · {}",
+                crate::clock::format_working_duration(duration)
+            ),
+            _ => summary,
         }
-        activity_summary(&tools)
+    }
+
+    /// How long a settled turn took: from its prompt to the last item the turn reported.
+    fn turn_duration(&self, members: &[usize]) -> Option<std::time::Duration> {
+        let transcript = &self.record.snapshot.transcript;
+        let first = *members.first()?;
+        let start = transcript
+            .get(..first)?
+            .iter()
+            .rev()
+            .find(|item| item.role == "user")?
+            .created_at?;
+        let end = transcript
+            .get(first..)?
+            .iter()
+            .take_while(|item| item.role != "user")
+            .filter_map(|item| item.updated_at.or(item.created_at))
+            .max()?;
+        let millis = u64::try_from(end.checked_sub(start)?).ok()?;
+        Some(std::time::Duration::from_millis(millis))
     }
 
     fn render_work_group(
@@ -695,7 +723,7 @@ fn tool_activity(tool: &bootty_agents::NativeToolCall) -> ToolActivity {
         || has("query")
         || matches!(
             name,
-            "Grep" | "Glob" | "grep" | "find" | "WebSearch" | "web_search"
+            "Grep" | "Glob" | "grep" | "find" | "WebSearch" | "web_search" | "webSearch"
         )
     {
         ToolActivity::Search

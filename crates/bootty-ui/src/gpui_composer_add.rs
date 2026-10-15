@@ -355,17 +355,9 @@ fn application_item(
     .on_click(move |_, _, cx| {
         _ = app.update(cx, |this, cx| {
             let range = this.editor.read(cx).selected_range();
-            let original = this
-                .editor
-                .read(cx)
-                .value()
-                .get(range.clone())
-                .unwrap_or_default()
-                .to_owned();
             cx.emit(CompletionSelection {
                 source: CompletionSource::Application(selection.clone()),
                 range,
-                original,
             });
         });
     })

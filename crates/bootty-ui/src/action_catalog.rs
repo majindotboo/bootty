@@ -257,6 +257,9 @@ command_catalog! {
     RenameSession:
         "Rename Session", "Rename the current session",
         "rename_session", "pencil", Sessions, shown, Write, Session, None;
+    DitchSession:
+        "Ditch Session", "Close the session and optionally remove its worktree",
+        "ditch_session", "trash-2", Sessions, shown, Write, Session, None;
     MoveSessionToSpace:
         "Move Session to Space", "Hand the current session to another space, or to no space",
         "move_session_to_space", "shapes", Sessions, shown, Write, Session, None;

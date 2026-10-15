@@ -20,7 +20,8 @@ pub struct AgentsPanel {
     focus: FocusHandle,
     query: Entity<InputState>,
     attention_only: bool,
-    pending: bool,
+    /// Rows with a command in flight; `None` is Next unread. Other rows stay usable.
+    pending: Vec<Option<bootty_control::CommandTarget>>,
     error: Option<String>,
 }
 impl AgentsPanel {
@@ -46,7 +47,7 @@ impl AgentsPanel {
             entries: Vec::new(),
             selected: None,
             focus: cx.focus_handle(),
-            pending: false,
+            pending: Vec::new(),
             error: None,
         }
     }
@@ -69,7 +70,8 @@ impl AgentsPanel {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending {
+        let key = entry.as_ref().map(|entry| entry.target.clone());
+        if self.pending.contains(&key) {
             return;
         }
         let mut commands = Vec::new();
@@ -97,7 +99,7 @@ impl AgentsPanel {
         }
         commands.push(command);
         let sender = self.sender.clone();
-        self.pending = true;
+        self.pending.push(key.clone());
         self.error = None;
         cx.notify();
         cx.spawn_in(window, async move |weak, cx| {
@@ -113,17 +115,23 @@ impl AgentsPanel {
                                     .unwrap_or_else(std::time::Instant::now),
                                 CommandCancellation::new(),
                             )
-                            .map_err(|error| format!("Agent command unavailable: {error:?}"))?;
-                        let outcome = receiver.recv().map_err(|error| error.to_string())?;
+                            .map_err(|error| {
+                                crate::error_catalog::command_send_message(error).to_owned()
+                            })?;
+                        let outcome = receiver.recv().map_err(|_| {
+                            "The agent command stopped before it finished.".to_owned()
+                        })?;
                         if let Some(error) = crate::commands::command_outcome_message(&outcome) {
-                            return Err(error);
+                            return Err(
+                                crate::error_catalog::ErrorNotice::from_text(error).to_string()
+                            );
                         }
                     }
                     Ok::<(), String>(())
                 })
                 .await;
             _ = weak.update_in(cx, |this, _, cx| {
-                this.pending = false;
+                this.pending.retain(|pending| *pending != key);
                 this.error = result.err();
                 cx.notify();
             });
@@ -186,8 +194,9 @@ impl Render for AgentsPanel {
                 .child(Button::new("agents-attention").label(format!("Needs attention {attention}")).ghost().small().selected(self.attention_only)
                     .on_click(cx.listener(|this, _, _, cx| { this.attention_only = true; cx.notify(); }))))
             .when(no_matches, |body| body.child(div().p_2().text_sm().text_color(cx.theme().muted_foreground).child("No matching agents")))
-            .child(Button::new("next-agent").label("Next unread").ghost().small().disabled(self.pending || !self.entries.iter().any(|entry| entry.unread)).on_click(cx.listener(|this, _, window, cx| this.invoke(None, "next", window, cx))))
-            .children(self.error.clone().map(|error| gpui_kit::component::alert::Alert::error("agent-command-error", error)))
+            .child(Button::new("next-agent").label("Next unread").ghost().small().disabled(self.pending.contains(&None) || !self.entries.iter().any(|entry| entry.unread)).on_click(cx.listener(|this, _, window, cx| this.invoke(None, "next", window, cx))))
+            .children(self.error.clone().map(|error| gpui_kit::component::alert::Alert::error("agent-command-error", error)
+                .on_close(cx.listener(|this, _, _, cx| { this.error = None; cx.notify(); }))))
             .when(self.entries.is_empty(), |body| body.child(div().p_2().text_sm().text_color(cx.theme().muted_foreground).whitespace_normal().child("No active agents. Sessions appear here when an installed integration reports them.")))
             .children(rows)
             .children(self.chrome.read(cx).dock_codexbar())
@@ -231,7 +240,7 @@ impl AgentsPanel {
     ) -> impl IntoElement {
         let owner = cx.weak_entity();
         let menu_entry = entry.clone();
-        let pending = self.pending;
+        let pending = self.pending.contains(&Some(entry.target.clone()));
         Button::new(SharedString::from(format!("{id}:actions")))
             .icon(IconName::Ellipsis)
             .ghost()
@@ -274,7 +283,7 @@ impl AgentsPanel {
         };
         let id = format!("agent:{}:{}:{}", entry.provider, entry.scope, entry.pane);
         let focus_entry = entry.clone();
-        let pending = self.pending;
+        let pending = self.pending.contains(&Some(entry.target.clone()));
         div()
             .id(SharedString::from(id.clone()))
             .flex()

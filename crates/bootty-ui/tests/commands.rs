@@ -972,7 +972,12 @@ fn ditch_session_keeps_saved_identity_after_authoritative_command() {
         .name
         .clone();
 
-    assert!(state.open_ditch_session_dialog_for(&target.session_id));
+    // The shared command opens cleanup for the current session.
+    let opened = submit_action(&mut state, "ditch_session", Caller::Keybinding, started);
+    assert!(
+        matches!(opened, CommandOutcome::Success { .. }),
+        "{opened:?}"
+    );
     assert!(matches!(
         state.modal_dialog(),
         Some(ModalDialog::DitchSession(_))
@@ -3805,6 +3810,33 @@ fn closing_the_last_space_says_why() {
     );
 }
 
+/// A guard Bootty writes itself shows its own sentence, not the generic failure.
+#[test]
+fn a_stale_surface_chooser_says_why() {
+    use bootty_ui::surface_creation::{PendingNewSurface, SurfaceParent, SurfacePlacement};
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let mut state = native_state(directory.path());
+    let binding = CommandTarget {
+        kind: ResourceKind::Binding,
+        handle: "captured-binding".to_owned(),
+        generation: 7,
+    };
+    state.open_surface_agent_form(&PendingNewSurface {
+        id: 41,
+        binding: binding.clone(),
+        task_identity: "saved-task".to_owned(),
+        cwd: "/tmp/project".to_owned(),
+        parent: SurfaceParent::Binding(binding),
+        placement: SurfacePlacement::Tab,
+    });
+    assert_eq!(
+        state.last_error_notice(),
+        Some(bootty_ui::error_catalog::ErrorNotice::Message(
+            "The new surface chooser was closed or replaced".to_owned()
+        ))
+    );
+}
+
 fn selection(state: &AppState) -> (Option<String>, Option<String>) {
     (
         state.mux().selected_session().map(str::to_owned),
@@ -4092,6 +4124,33 @@ fn session_grouping_command_persists_without_changing_sessions(#[case] caller: C
         CommandOutcome::Success { .. }
     ));
     assert!(state.config().sidebar.group_by_project);
+}
+
+/// The queueing toggle saves the opposite follow-up behavior, and toggling again restores it.
+#[rstest]
+#[case(Caller::CommandPalette)]
+#[case(Caller::Internal)]
+fn follow_up_queueing_toggles_and_persists(#[case] caller: Caller) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let mut state = native_state(directory.path());
+    let now = Instant::now();
+    let before = state.config().agents.follow_up_behavior;
+    for expected in [before.opposite(), before] {
+        assert!(matches!(
+            submit_action(&mut state, "agents.toggle-queueing", caller, now),
+            CommandOutcome::Success { .. }
+        ));
+        let loaded =
+            bootty_config::config::load_config_from_path(directory.path().join("config.toml"))
+                .unwrap();
+        assert_eq!(
+            (
+                state.config().agents.follow_up_behavior,
+                loaded.agents.follow_up_behavior
+            ),
+            (expected, expected)
+        );
+    }
 }
 
 #[rstest]

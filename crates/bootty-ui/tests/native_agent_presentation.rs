@@ -1641,6 +1641,97 @@ fn live_turn_keeps_every_message_visible(cx: &mut TestAppContext) {
     assert!(visual.debug_bounds("copy-message:prompt").is_some());
 }
 
+/// Long tool output scrolls inside its row instead of stretching the transcript.
+#[gpui_kit::test]
+fn expanded_tool_output_scrolls_within_a_capped_box(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let output = (1..=200)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Show the log", "complete": true},
+        {"id": "log", "role": "tool", "text": output, "complete": true,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cat build.log\"}", "status": "completed"}},
+        {"id": "reply", "role": "assistant", "text": "That's the log.", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(1600.)));
+    for selector in ["native-work-summary:Ran 1 command", "tool-disclosure:log"] {
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let control = visual.debug_bounds(selector).expect(selector);
+        visual.simulate_click(control.center(), Modifiers::none());
+    }
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let output = visual
+        .debug_bounds("tool-output-scroll:log")
+        .expect("expanded output");
+    assert!(
+        output.size.height < px(400.),
+        "200 lines stay in a capped box: {:?}",
+        output.size
+    );
+}
+
+/// A settled turn's fold says how long the turn took.
+#[gpui_kit::test]
+fn settled_folds_say_how_long_the_turn_took(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Build it", "complete": true,
+         "created_at": 1_000_000},
+        {"id": "build", "role": "tool", "text": "", "complete": true,
+         "created_at": 1_002_000, "updated_at": 1_060_000,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cargo build\"}", "status": "completed"}},
+        {"id": "reply", "role": "assistant", "text": "Built.", "complete": true,
+         "created_at": 1_065_000, "updated_at": 1_072_000}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("native-work-summary:Ran 1 command · 1m 12s")
+            .is_some()
+    );
+}
+
 /// Folds say what their tools did, mark failures, and name a running command's program.
 #[gpui_kit::test]
 fn work_folds_summarize_what_their_tools_did(cx: &mut TestAppContext) {
@@ -2020,6 +2111,45 @@ fn a_ready_plan_shows_its_steps_and_implements_in_one_click(cx: &mut TestAppCont
             .any(|invocation| invocation.command == "agents.native.implement"),
         "Implement runs the shared command"
     );
+}
+
+/// A reply's code block names its language and copies exactly its code.
+#[gpui_kit::test]
+fn code_blocks_name_their_language_and_copy_their_code(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "ask", "role": "user", "text": "Show the loop", "complete": true},
+        {"id": "reply", "role": "assistant", "complete": true,
+         "text": "Here it is:\n\n```rust\nfor item in items {\n    println!(\"{item}\");\n}\n```\n"}
+    ]))
+    .unwrap();
+    let (sender, _commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let copy = visual.debug_bounds("copy-code:rust").expect("copy code");
+    visual.simulate_click(copy.center(), Modifiers::none());
+    visual.update(|_, cx| {
+        pretty_assertions::assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("for item in items {\n    println!(\"{item}\");\n}".to_owned())
+        );
+    });
 }
 
 /// A resume rebuilds the completion; app chips already in the draft still send.

@@ -47,12 +47,15 @@ impl super::GpuiWorkspace {
                                 );
                                 this.pending_effects.extend(effects);
                             } else {
-                                this.state.record_error("Choose a folder with a UTF-8 path");
+                                this.state
+                                    .record_message("Choose a folder with a UTF-8 path");
                             }
                         }
                     }
                     Ok(Ok(None)) => {}
-                    _ => this.state.record_error("Could not open the folder chooser"),
+                    _ => this
+                        .state
+                        .record_message("Could not open the folder chooser"),
                 }
                 cx.notify();
             });

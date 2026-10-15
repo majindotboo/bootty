@@ -63,7 +63,7 @@ impl AppState {
             .find(|session| session.id == session_id)
             .and_then(|session| session.anchor.cwd.clone())
         else {
-            self.record_error("Session has not reported a Git directory");
+            self.record_message("Session has not reported a Git directory");
             return;
         };
         let generation = binding.mux().binding_generation();

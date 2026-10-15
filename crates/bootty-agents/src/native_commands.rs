@@ -159,6 +159,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         ),
         ("terminal", vec!["id", "generation"], ResourceKind::Session),
         (
+            "open-link",
+            vec!["id", "generation", "location"],
+            ResourceKind::Session,
+        ),
+        (
             "history",
             vec!["id", "generation", "direction"],
             ResourceKind::Session,

@@ -348,8 +348,21 @@ impl AppState {
                 },
             ),
             AgentWorkspaceAction::Next => self.focus_next_agent(),
+            AgentWorkspaceAction::ToggleQueueing => {
+                if self.toggle_follow_up_behavior(effects) {
+                    CommandOutcome::success()
+                } else {
+                    CommandOutcome::Failed {
+                        code: "config_write_failed".to_owned(),
+                        message: "Could not save the follow-up setting".to_owned(),
+                    }
+                }
+            }
         };
-        if action != AgentWorkspaceAction::List && matches!(outcome, CommandOutcome::Success { .. })
+        if matches!(
+            action,
+            AgentWorkspaceAction::Focus | AgentWorkspaceAction::Next
+        ) && matches!(outcome, CommandOutcome::Success { .. })
         {
             self.apply_sidebar_action(crate::app_actions::SidebarAction::FocusTerminal, effects);
             effects.push(AppEffect::FocusTerminal);

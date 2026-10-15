@@ -186,7 +186,9 @@ fn legacy_pi_permissions_do_not_block_saved_conversations(#[case] permissions: &
 #[case::foreign_event("foreign-event", false)]
 #[case::wrong_mime("wrong-mime", false)]
 #[case::nonimage_budget("control-overflow", false)]
-fn pi_large_completion_keeps_the_owned_image_budget(#[case] event: &str, #[case] accepted: bool) {
+/// A large completion keeps the image the prompt owned; anything else past the budget is cut down,
+/// with a notice, and the run goes on.
+fn pi_large_completion_keeps_the_owned_image_budget(#[case] event: &str, #[case] owned: bool) {
     let root = TempDir::new().unwrap();
     let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
     let record = service
@@ -221,14 +223,15 @@ fn pi_large_completion_keeps_the_owned_image_budget(#[case] event: &str, #[case]
     )
     .unwrap();
     fs::write(root.path().join("image-end-case"), event).unwrap();
-    let result = service.prompt_input(&record.target(), &prompt);
-    assert_eq!(
-        result.is_ok(),
-        accepted,
-        "completion case {event}: {result:?}"
-    );
-    if accepted {
-        let session = service.resolve(&record.target()).unwrap();
+    service.prompt_input(&record.target(), &prompt).unwrap();
+    let session = service.resolve(&record.target()).unwrap();
+    let left_out = session
+        .snapshot()
+        .transcript
+        .iter()
+        .any(|item| item.role == "notice" && item.text.starts_with("Bootty left out"));
+    assert_eq!(left_out, !owned, "completion case {event}");
+    if owned {
         assert_eq!(
             session.snapshot().status,
             NativeSessionStatus::Working,

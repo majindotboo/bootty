@@ -135,6 +135,8 @@ pub enum OpenNativeSession {
     SideChatCreated {
         source: CommandTarget,
         record: Box<NativeSessionRecord>,
+        /// A queued message moved to the side chat's composer.
+        draft: Option<String>,
     },
     Related {
         target: CommandTarget,
@@ -219,6 +221,8 @@ pub struct NativeAgentSessionView {
     expanded_annotation: Option<u64>,
     annotation_preview: Option<AnnotationPreview>,
     transcript: BTreeMap<String, Entity<TextViewState>>,
+    /// Where file links were added to each message's markdown, so selections map to its text.
+    link_marks: BTreeMap<String, crate::transcript_links::LinkMarks>,
     tool_diffs: BTreeMap<String, ToolDiffs>,
     subagent_details: BTreeMap<String, subagents::SubagentConversation>,
     transcript_subscriptions: BTreeMap<String, Vec<Subscription>>,
@@ -371,6 +375,7 @@ impl NativeAgentSessionView {
             expanded_annotation: None,
             annotation_preview: None,
             transcript: BTreeMap::new(),
+            link_marks: BTreeMap::new(),
             tool_diffs: BTreeMap::new(),
             subagent_details: BTreeMap::new(),
             transcript_subscriptions: BTreeMap::new(),
@@ -610,11 +615,23 @@ impl NativeAgentSessionView {
             self.record.snapshot.status,
             NativeSessionStatus::Error | NativeSessionStatus::Stopped
         ) && self.composer.read(cx).value().is_empty()
-            && let Some(message) = &self.record.pending_initial_message
+            && let Some(message) = self.record.pending_initial_message.clone()
         {
-            // Sending reads attachments from their chips, so each one returns to its place, or to
-            // the end when its place is unknown.
-            let attachments = &self.record.attachments;
+            let attachments = self.record.attachments.clone();
+            self.restore_draft(&message, &attachments, window, cx);
+        }
+    }
+
+    /// Puts a message back in the composer. Sending reads attachments from their chips, so each
+    /// one returns to its place, or to the end when its place is unknown.
+    pub(super) fn restore_draft(
+        &mut self,
+        message: &str,
+        attachments: &[bootty_agents::NativeAttachmentReference],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        {
             let mut placed = attachments
                 .iter()
                 .flat_map(|attachment| {
@@ -648,7 +665,7 @@ impl NativeAgentSessionView {
                 })
                 .collect::<Vec<_>>();
             self.composer.update(cx, |composer, cx| {
-                composer.set_value(message.clone(), window, cx);
+                composer.set_value(message.to_owned(), window, cx);
                 for (range, chip) in placed {
                     _ = composer.replace_range_with_token(range, chip, window, cx);
                 }
@@ -657,17 +674,17 @@ impl NativeAgentSessionView {
                     _ = composer.replace_range_with_token(end..end, chip, window, cx);
                 }
             });
-            if self.attachments.is_empty() {
-                self.attachments = self
-                    .record
+            for reference in attachments {
+                if !self
                     .attachments
                     .iter()
-                    .cloned()
-                    .map(|reference| ComposerAttachment {
-                        reference,
+                    .any(|attachment| attachment.reference.id == reference.id)
+                {
+                    self.attachments.push(ComposerAttachment {
+                        reference: reference.clone(),
                         preview: None,
-                    })
-                    .collect();
+                    });
+                }
             }
         }
     }
@@ -798,6 +815,8 @@ impl NativeAgentSessionView {
             .collect::<BTreeSet<_>>();
         self.transcript
             .retain(|id, _| current.contains(id.as_str()));
+        self.link_marks
+            .retain(|id, _| current.contains(id.as_str()));
         self.transcript_subscriptions
             .retain(|id, _| self.transcript.contains_key(id));
         self.message_focus
@@ -827,17 +846,14 @@ impl NativeAgentSessionView {
                     {
                         self.selected_response = None;
                     }
-                    state.update(cx, |state, cx| {
-                        state.set_text(&streamed_markdown(item, self.presentation.streaming), cx);
-                    });
+                    let (markdown, marks) = streamed_markdown(item, self.presentation.streaming);
+                    self.link_marks.insert(item.id.clone(), marks);
+                    state.update(cx, |state, cx| state.set_text(&markdown, cx));
                 }
             } else {
-                let state = cx.new(|cx| {
-                    TextViewState::markdown(
-                        &streamed_markdown(item, self.presentation.streaming),
-                        cx,
-                    )
-                });
+                let (markdown, marks) = streamed_markdown(item, self.presentation.streaming);
+                self.link_marks.insert(item.id.clone(), marks);
+                let state = cx.new(|cx| TextViewState::markdown(&markdown, cx));
                 let focus = cx.focus_handle();
                 let mut subscriptions = vec![
                     cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
@@ -1018,6 +1034,10 @@ impl NativeAgentSessionView {
                     return;
                 }
                 this.pending.remove(&pending);
+                // A failed fork keeps its queued message where it was.
+                if operation == "fork" && !matches!(result, Ok(CommandOutcome::Success { .. })) {
+                    this.queued_messages.take_side_chat();
+                }
                 match result {
                     Ok(CommandOutcome::Success { value, .. }) => {
                         if value.get("provider_writer").and_then(Value::as_str) != Some("blocked")
@@ -1101,11 +1121,17 @@ impl NativeAgentSessionView {
                 }
             }
         } else if operation == "fork" {
+            let moved = self.queued_messages.take_side_chat();
             if let Ok(record) = serde_json::from_value::<NativeSessionRecord>(value) {
                 cx.emit(OpenNativeSession::SideChatCreated {
                     source: self.record.target(),
                     record: Box::new(record),
+                    draft: moved.as_ref().map(|(_, text)| text.clone()),
                 });
+                // The message now lives in the side chat, so it leaves this queue.
+                if let Some((id, _)) = moved {
+                    self.command("queue-cancel", vec![id], window, cx);
+                }
             } else {
                 self.error = Some("The side chat did not return its session identity".into());
             }
@@ -1473,6 +1499,10 @@ impl NativeAgentSessionView {
             "tool-output:{}:{id}",
             self.record.id
         )))
+        .debug_selector({
+            let id = id.clone();
+            move || format!("tool-disclosure:{id}")
+        })
         .w_full()
         .px_0()
         .small()
@@ -1505,9 +1535,11 @@ impl NativeAgentSessionView {
             .tool
             .as_ref()
             .map_or_else(|| "Execution details".into(), |tool| tool_label(&tool.name));
+        // Completing is the normal case; only the other outcomes say so.
         let status = item
             .tool
             .as_ref()
+            .filter(|tool| tool.status != bootty_agents::NativeToolStatus::Completed)
             .map(|tool| tool_status_label(tool.status));
         let failed = item
             .tool
@@ -1688,7 +1720,9 @@ impl NativeAgentSessionView {
                             .text_color(cx.theme().muted_foreground)
                             .child("Input"),
                     )
-                    .child(
+                    .child(capped_scroll(
+                        format!("tool-input-scroll:{}", item.id),
+                        12.,
                         TextView::markdown(
                             gpui_kit::SharedString::from(format!(
                                 "tool-input:{}:{}",
@@ -1697,7 +1731,7 @@ impl NativeAgentSessionView {
                             tool_input_markdown(tool),
                         )
                         .selectable(true),
-                    )
+                    ))
                 },
             )
             .when_some(
@@ -1711,7 +1745,11 @@ impl NativeAgentSessionView {
                             .text_color(cx.theme().muted_foreground)
                             .child("Output"),
                     )
-                    .child(TextView::new(state).selectable(true))
+                    .child(capped_scroll(
+                        format!("tool-output-scroll:{}", item.id),
+                        20.,
+                        TextView::new(state).selectable(true),
+                    ))
                 },
             )
     }
@@ -1763,7 +1801,7 @@ impl NativeAgentSessionView {
                 view.child(TextView::new(state).selectable(true))
             })
             .when(
-                agent.thread_id.is_some() && agent.owner_session == self.record.snapshot.session_id,
+                agent.readable() && agent.owner_session == self.record.snapshot.session_id,
                 |view| {
                     view.child(
                         Button::new(format!("subagent-read:{child_id}"))
@@ -1969,6 +2007,7 @@ impl NativeAgentSessionView {
         let id = id.to_owned();
         TextView::new(state)
             .selectable(true)
+            .code_block_actions(code_block_actions)
             .on_link_click(move |url, _, window, cx| {
                 if let Some(ix) = url
                     .strip_prefix("bootty-citation:")
@@ -1995,7 +2034,10 @@ impl NativeAgentSessionView {
                         this.open_response_annotation(&id, ix, window, cx);
                     });
                 } else {
-                    cx.open_url(url);
+                    // Files and URLs open the way the conversation's terminal opens them.
+                    _ = owner.update(cx, |this, cx| {
+                        this.command("open-link", vec![url.to_string()], window, cx);
+                    });
                 }
             })
     }
@@ -2150,8 +2192,21 @@ impl NativeAgentSessionView {
                 self.accept_subagent_detail(detail.clone(), cx);
             }
         }
+        // Every revision resends the list; only a changed one redraws. A child's detail follows
+        // its revision.
+        let unchanged = self.related.len() == related.len()
+            && self.related.iter().zip(&related).all(|(old, new)| {
+                old.target == new.target
+                    && old.title == new.title
+                    && old.model == new.model
+                    && old.status == new.status
+                    && old.revision == new.revision
+                    && old.subagent.is_some() == new.subagent.is_some()
+            });
         self.related = related;
-        cx.notify();
+        if !unchanged {
+            cx.notify();
+        }
     }
 
     fn render_related_conversations(&self, cx: &Context<Self>) -> gpui_kit::Div {
@@ -2567,6 +2622,7 @@ impl NativeAgentSessionView {
                                 move || format!("native-conversation-error:{message}")
                             })
                             .flex_1()
+                            .text_color(cx.theme().danger)
                             .child(message),
                     )
                     .child(
@@ -3108,9 +3164,6 @@ impl NativeAgentSessionView {
     }
     fn load_history(&mut self, window: &Window, cx: &mut Context<Self>) {
         if matches!(
-            self.record.config.provider,
-            AgentKind::Codex | AgentKind::Pi
-        ) && matches!(
             self.record.snapshot.status,
             NativeSessionStatus::Idle | NativeSessionStatus::Working | NativeSessionStatus::Waiting
         ) && self.record.pending_initial_message.is_none()
@@ -3207,6 +3260,56 @@ impl Render for NativeAgentSessionView {
 /// Token counts read at a glance: 950, 12k, 1.2M.
 /// Give `control` a tooltip that ends with it. `Button::tooltip` shows through a window overlay
 /// that hides only on hover-out, so a button that disappears under a still pointer leaves it up.
+/// A fenced block's language and a copy button, in its corner.
+fn code_block_actions(
+    block: &gpui_kit::base::text::CodeBlock,
+    _: &mut Window,
+    cx: &mut App,
+) -> gpui_kit::Div {
+    let code = block.code();
+    let id = block.span.map_or(0, |span| span.start);
+    let lang = block.lang().unwrap_or_default();
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .when_some(block.lang(), |row, lang| {
+            row.child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(lang),
+            )
+        })
+        .child(element_tooltip(
+            gpui_kit::SharedString::from(format!("copy-code-tooltip:{id}")),
+            "Copy code",
+            Button::new(gpui_kit::SharedString::from(format!("copy-code:{id}")))
+                .debug_selector(move || format!("copy-code:{lang}"))
+                .icon(IconName::Copy)
+                .ghost()
+                .xsmall()
+                .accessibility_label("Copy code")
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(code.to_string()));
+                }),
+        ))
+}
+
+/// Long tool text scrolls inside its row instead of stretching the transcript.
+fn capped_scroll(
+    id: String,
+    max_rems: f32,
+    content: impl IntoElement,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    div()
+        .id(gpui_kit::SharedString::from(id.clone()))
+        .debug_selector(move || id)
+        .max_h(gpui_kit::rems(max_rems))
+        .overflow_y_scroll()
+        .child(content)
+}
+
 fn element_tooltip(
     id: impl Into<gpui_kit::ElementId>,
     label: impl Into<gpui_kit::SharedString>,
@@ -3344,7 +3447,8 @@ fn tool_label(name: &str) -> std::borrow::Cow<'_, str> {
         "commandExecution" | "Bash" | "bash" | "exec_command" => "Run",
         "Read" | "read" | "read_file" => "Read",
         "fileChange" | "Edit" | "edit" | "Write" | "write" | "apply_patch" => "Edit",
-        "Grep" | "grep" | "Glob" | "glob" | "search" | "web_search" => "Search",
+        "Grep" | "grep" | "Glob" | "glob" | "search" | "web_search" | "webSearch" => "Search",
+        "imageView" => "View image",
         "codemode" | "code_mode" => "Run code",
         "write_stdin" => "Read command output",
         "terminal_read" => "Read terminal",
@@ -3415,6 +3519,7 @@ fn tool_input_summary(
             .get("pattern")
             .or_else(|| input.get("query"))
             .and_then(Value::as_str)
+            .or_else(|| input.get("url").and_then(Value::as_str))
     });
     let code = input
         .as_ref()
@@ -3489,15 +3594,26 @@ fn transcript_markdown(item: &NativeTranscriptItem) -> String {
     }
 }
 
+/// The markdown a message shows: streamed replies reveal their visible part, and replies link the
+/// file paths in their inline code.
 fn streamed_markdown(
     item: &NativeTranscriptItem,
     streaming: bootty_config::config::ResponseStreaming,
-) -> String {
+) -> (String, crate::transcript_links::LinkMarks) {
     let text = transcript_markdown(item);
-    if item.role == "assistant" && item.tool.is_none() {
-        streaming.visible_text(&text, item.complete).to_owned()
+    let reply = matches!(item.role.as_str(), "assistant" | "plan") && item.tool.is_none();
+    let visible = if item.role == "assistant" && item.tool.is_none() {
+        streaming.visible_text(&text, item.complete)
     } else {
-        text
+        text.as_str()
+    };
+    if reply {
+        crate::transcript_links::link_code_paths(visible)
+    } else {
+        (
+            visible.to_owned(),
+            crate::transcript_links::LinkMarks::default(),
+        )
     }
 }
 

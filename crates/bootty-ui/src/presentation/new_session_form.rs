@@ -1125,9 +1125,6 @@ impl NewSessionForm {
             catalog,
             files,
             applications: true,
-            remote: self
-                .destination()
-                .and_then(|destination| destination.remote.clone()),
             commands: false,
         })
     }

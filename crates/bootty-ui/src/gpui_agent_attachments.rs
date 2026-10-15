@@ -498,6 +498,16 @@ impl NativeAgentSessionView {
             .filter(|reference| reference.kind == bootty_agents::NativeAttachmentKind::Image)
             .map(|reference| reference.id.clone())
             .collect::<BTreeSet<_>>();
+        // A preview lives only while a message, queued draft, or the composer still shows it.
+        let shown = |id: &String| {
+            images.contains(id)
+                || self
+                    .attachments
+                    .iter()
+                    .any(|attachment| &attachment.reference.id == id)
+        };
+        self.attachment_previews.retain(|id, _| shown(id));
+        self.attachment_preview_attempts.retain(|id| shown(id));
         for id in images {
             if self.attachment_previews.contains_key(&id)
                 || !self.attachment_preview_attempts.insert(id.clone())
@@ -550,8 +560,22 @@ impl NativeAgentSessionView {
                     if this.record.target() == target
                         && let Some(preview) = preview
                     {
+                        // Only the rows that show this image change height.
+                        for (ix, row) in this.timeline.iter().enumerate() {
+                            if let super::TranscriptRow::Message { index, .. } = row
+                                && this
+                                    .record
+                                    .snapshot
+                                    .transcript
+                                    .get(*index)
+                                    .is_some_and(|item| {
+                                        item.attachments.iter().any(|reference| reference.id == id)
+                                    })
+                            {
+                                this.list.remeasure_items(ix..ix.saturating_add(1));
+                            }
+                        }
                         this.attachment_previews.insert(id, preview);
-                        this.list.remeasure();
                         cx.notify();
                     }
                 });

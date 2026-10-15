@@ -92,6 +92,9 @@ impl NativeAgentSession {
         if self.config.provider == AgentKind::Pi {
             return self.history_page_pi(current, previous, direction);
         }
+        if self.config.provider == AgentKind::Claude {
+            return self.history_page_claude(current, previous, direction);
+        }
         if self.config.provider != AgentKind::Codex {
             return Err("This provider has no paginated history transport".into());
         }

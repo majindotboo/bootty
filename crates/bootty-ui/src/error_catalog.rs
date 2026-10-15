@@ -131,13 +131,27 @@ impl ErrorNotice {
     }
 }
 
+/// What a person sees when a command can't even be queued.
+#[must_use]
+pub const fn command_send_message(error: bootty_control::AppCommandSendError) -> &'static str {
+    match error {
+        bootty_control::AppCommandSendError::Overloaded => "Bootty is busy. Try again in a moment.",
+        bootty_control::AppCommandSendError::Shutdown => "Bootty is shutting down.",
+    }
+}
+
 fn technical_summary(message: &str) -> String {
     let message = bootty_agents::native_error_message(message);
     let lower = message.to_ascii_lowercase();
     if lower.contains("active writer") || lower.contains("open in another app") {
         return "This conversation is open in another app. Close it there, then retry.".into();
     }
-    if lower.contains("archived") {
+    // Only an archived conversation has an unarchive action; other "archived" text doesn't.
+    if lower.contains("is archived")
+        && ["session", "conversation", "thread"]
+            .iter()
+            .any(|subject| lower.contains(subject))
+    {
         return "This conversation is archived. Unarchive it to continue.".into();
     }
     if lower.contains("not logged in")

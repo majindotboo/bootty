@@ -175,6 +175,9 @@ impl NativeAgentRequest {
     #[must_use]
     pub fn approval_response(&self, decision: crate::NativeApprovalDecision) -> Option<Value> {
         use crate::NativeApprovalDecision as D;
+        if self.method == "claude.permission" {
+            return crate::native_claude::approval_response(&self.parameters, decision);
+        }
         if self.method == crate::APPLICATION_ACCESS_METHOD {
             // An app grant lasts the conversation, so a one-call allowance is not offered.
             return (decision != D::AllowOnce).then(|| Value::String(decision.id().into()));
@@ -380,6 +383,34 @@ impl NativeSessionSnapshot {
     }
 
     /// Records a declined provider request where the conversation shows it.
+    /// Records the part of a provider message too large to hold, which Bootty left out so the
+    /// conversation goes on.
+    pub(crate) fn skipped_frame(&mut self, bytes: usize) {
+        let id = format!("skipped-frame-{}", self.revision);
+        let text = format!(
+            "Bootty left out {} MiB from {} that is too large to show. The conversation continues.",
+            bytes.div_ceil(1024 * 1024),
+            self.provider.display_name()
+        );
+        self.message(id, "notice", text, true);
+        self.changed();
+    }
+
+    /// Marks where a turn ended early. The mark stays in the transcript and in its saved history.
+    pub(crate) fn interrupted_turn(&mut self, turn: &str) {
+        let text = if self.stopping() {
+            "You interrupted this turn."
+        } else {
+            "This turn was interrupted."
+        };
+        self.message(
+            format!("interrupted-{turn}"),
+            "notice",
+            text.to_owned(),
+            true,
+        );
+    }
+
     pub(crate) fn declined_request(&mut self, id: &str, reason: String) {
         self.message(format!("declined-request-{id}"), "notice", reason, true);
         self.changed();
@@ -1003,6 +1034,11 @@ impl NativeSessionSnapshot {
                 for item in field(turn, "items").as_array().into_iter().flatten() {
                     snapshot.history_item(item);
                 }
+                if field(turn, "status") == "interrupted"
+                    && let Some(id) = field(turn, "id").as_str()
+                {
+                    snapshot.interrupted_turn(id);
+                }
             },
         );
     }
@@ -1017,6 +1053,9 @@ impl NativeSessionSnapshot {
             };
             if let Some(outcome) = outcome {
                 self.finish_first_turn(&id, outcome);
+            }
+            if outcome == Some(NativeTurnOutcome::Interrupted) {
+                self.interrupted_turn(&id);
             }
         }
         self.working_since = None;
@@ -1047,6 +1086,42 @@ impl NativeSessionSnapshot {
                 id,
                 "assistant",
                 field(item, "text").as_str().unwrap_or_default().to_owned(),
+                complete,
+            ),
+            // The summary is what Codex shows; raw reasoning stands in when there is none. The
+            // completed item replaces the streamed text, which mixes both.
+            "reasoning" => {
+                let summary = joined_strings(field(item, "summary"));
+                let text = if summary.trim().is_empty() {
+                    joined_strings(field(item, "content"))
+                } else {
+                    summary
+                };
+                self.message(id, "thinking", text, complete);
+            }
+            "webSearch" => self.tool_message(
+                id,
+                Some("webSearch"),
+                Some(web_search_input(item)),
+                String::new(),
+                codex_tool_status(item, complete),
+            ),
+            "imageView" => self.tool_message(
+                id,
+                Some("imageView"),
+                Some(serde_json::json!({"path": field(item, "path")}).to_string()),
+                String::new(),
+                codex_tool_status(item, complete),
+            ),
+            "contextCompaction" => self.message(
+                id,
+                "notice",
+                if complete {
+                    "Codex compacted the conversation's context."
+                } else {
+                    "Compacting the conversation's context…"
+                }
+                .to_owned(),
                 complete,
             ),
             // The completed plan item is authoritative; its deltas only preview it.
@@ -1185,6 +1260,41 @@ fn codex_todos(plan: &Value) -> Vec<NativeTodo> {
         })
         .take(MAX_TODOS)
         .collect()
+}
+
+fn joined_strings(parts: &Value) -> String {
+    parts
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// A web search as tool input: what it searched for, or the page it opened.
+fn web_search_input(item: &Value) -> String {
+    let action = field(item, "action");
+    let queries = field(action, "queries")
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let query = field(action, "query")
+        .as_str()
+        .or_else(|| field(action, "pattern").as_str())
+        .or_else(|| (!queries.is_empty()).then_some(queries.as_str()))
+        .or_else(|| field(item, "query").as_str());
+    let mut input = serde_json::Map::new();
+    if let Some(query) = query.filter(|query| !query.is_empty()) {
+        input.insert("query".into(), query.into());
+    }
+    if let Some(url) = field(action, "url").as_str() {
+        input.insert("url".into(), url.into());
+    }
+    Value::Object(input).to_string()
 }
 
 fn codex_tool_status(item: &Value, complete: bool) -> NativeToolStatus {

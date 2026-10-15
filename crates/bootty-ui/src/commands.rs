@@ -108,6 +108,8 @@ pub enum AgentWorkspaceAction {
     List,
     Focus,
     Next,
+    /// Switch whether a message sent during a turn waits for it or steers it.
+    ToggleQueueing,
 }
 
 /// Commands that finish on the app thread after their cancellation token is started.
@@ -651,6 +653,12 @@ fn register_agents_commands(commands: &mut BTreeMap<String, RegisteredCommand>) 
             AgentWorkspaceAction::Next,
             "agents.next",
             "Next Unread Agent",
+            ResourceKind::ApplicationWindow,
+        ),
+        (
+            AgentWorkspaceAction::ToggleQueueing,
+            "agents.toggle-queueing",
+            "Toggle Queueing Follow-up Messages",
             ResourceKind::ApplicationWindow,
         ),
     ] {

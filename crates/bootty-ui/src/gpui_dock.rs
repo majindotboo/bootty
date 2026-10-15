@@ -585,7 +585,7 @@ impl WorkspaceDock {
         ) {
             Ok(receiver) => receiver,
             Err(error) => {
-                self.error = Some(format!("Command unavailable: {error:?}"));
+                self.error = Some(crate::error_catalog::command_send_message(error).to_owned());
                 return;
             }
         };
@@ -596,8 +596,12 @@ impl WorkspaceDock {
                 .await;
             _ = weak.update_in(cx, |this, _, cx| {
                 this.error = result.map_or_else(
-                    |error| Some(error.to_string()),
-                    |outcome| crate::commands::command_outcome_message(&outcome),
+                    |_| Some("The command stopped before it finished.".to_owned()),
+                    |outcome| {
+                        crate::commands::command_outcome_message(&outcome).map(|message| {
+                            crate::error_catalog::ErrorNotice::from_text(message).to_string()
+                        })
+                    },
                 );
                 cx.notify();
             });
@@ -1702,11 +1706,14 @@ impl Render for WorkspaceDock {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .children(
-                self.error.clone().map(|error| {
-                    gpui_kit::component::alert::Alert::error("dock-save-error", error)
-                }),
-            )
+            .children(self.error.clone().map(|error| {
+                gpui_kit::component::alert::Alert::error("dock-command-error", error).on_close(
+                    cx.listener(|this, _, _, cx| {
+                        this.error = None;
+                        cx.notify();
+                    }),
+                )
+            }))
             .child(
                 div()
                     .relative()

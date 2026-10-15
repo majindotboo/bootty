@@ -107,7 +107,7 @@ impl NativeAgentSessionView {
         let Some(agent) = self.subagent(id) else {
             return;
         };
-        if agent.thread_id.is_none() {
+        if !agent.readable() {
             return;
         }
         if agent.owner_session != self.record.snapshot.session_id {
@@ -323,7 +323,7 @@ impl NativeAgentSessionView {
                             .child(item.tool.as_ref().map_or_else(|| item.role.clone(), |tool| super::tool_label(&tool.name).into_owned())))
                         .child(TextView::new(state).selectable(true))))
             })
-            .when(agent.thread_id.is_none(), |view| {
+            .when(!agent.readable(), |view| {
                 let item = self.record.snapshot.transcript.iter().find(|item| item.subagent.as_ref().is_some_and(|agent| agent.id == id));
                 view.when_some(item.and_then(|item| self.transcript.get(&item.id)), |view, state| {
                     view.child(TextView::new(state).selectable(true))
@@ -331,7 +331,7 @@ impl NativeAgentSessionView {
             })
             .when(!self.subagent_details.contains_key(id), |view| view.child(div().text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(if agent.thread_id.is_some() {
+                .child(if agent.readable() {
                     "Loading conversation…"
                 } else {
                     "This provider reports the subagent's progress and result in the parent conversation."

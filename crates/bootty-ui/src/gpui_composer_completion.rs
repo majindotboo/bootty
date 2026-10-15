@@ -31,7 +31,6 @@ pub struct CompletionScope {
     pub catalog: CommandInvocation,
     pub files: CommandInvocation,
     pub applications: bool,
-    pub remote: Option<bootty_config::config::RemoteConfig>,
     /// Offer Bootty's own slash commands; only a live conversation can run them.
     pub commands: bool,
 }
@@ -39,7 +38,8 @@ pub struct CompletionScope {
 #[derive(Clone)]
 pub enum CompletionSource {
     Provider(NativeCompletionOption),
-    File(crate::attachment_source::FileCompletionSource),
+    /// A project file, by its path from the project root.
+    File(String),
     Directory(String),
     Application(bootty_computer::ComputerTarget),
     Composer(crate::composer_commands::ComposerCommand),
@@ -56,7 +56,6 @@ struct CompletionItem {
 pub struct CompletionSelection {
     pub source: CompletionSource,
     pub range: std::ops::Range<usize>,
-    pub original: String,
 }
 
 pub struct ComposerCompletion {
@@ -407,19 +406,7 @@ impl ComposerCompletion {
                 source: if path.ends_with('/') {
                     CompletionSource::Directory(path)
                 } else {
-                    let mut invocation = CommandInvocation::new(
-                        "files.source",
-                        vec![
-                            format!("{}/{path}", page.root.trim_end_matches('/')),
-                            page.root.clone(),
-                        ],
-                        Caller::Internal,
-                    );
-                    invocation.target.clone_from(&self.scope.files.target);
-                    CompletionSource::File(crate::attachment_source::FileCompletionSource {
-                        invocation,
-                        remote: self.scope.remote.clone(),
-                    })
+                    CompletionSource::File(path)
                 },
             })
             .collect();
@@ -702,29 +689,42 @@ impl ComposerCompletion {
             return;
         }
         self.trigger = None;
-        let text = self.editor.read(cx).value().to_string();
-        let Some(original) = text.get(trigger.range.clone()).map(str::to_owned) else {
-            return;
-        };
-        self.dismissed = Some((trigger.kind, trigger.range.start));
-        if let CompletionSource::Directory(path) = &item.source {
-            self.dismissed = None;
-            self.editor.update(cx, |input, cx| {
-                input.set_selected_range(trigger.range.clone(), cx);
-                input.replace(format!("@{}/", path.trim_end_matches('/')), window, cx);
-                input.focus_handle(cx).focus(window, cx);
-            });
-            cx.notify();
+        if self
+            .editor
+            .read(cx)
+            .value()
+            .get(trigger.range.clone())
+            .is_none()
+        {
             return;
         }
-        if let CompletionSource::Composer(command) = &item.source {
-            let label = command.label(|name| self.provider_command(name));
+        self.dismissed = Some((trigger.kind, trigger.range.start));
+        let text = match &item.source {
+            CompletionSource::Directory(path) => Some(format!("@{}/", path.trim_end_matches('/'))),
+            // The agent reads the project file itself, so the prompt names it, not a copy.
+            CompletionSource::File(path) if path.contains(char::is_whitespace) => {
+                Some(format!("@\"{path}\" "))
+            }
+            CompletionSource::File(path) => Some(format!("@{path} ")),
+            CompletionSource::Composer(command) => Some(format!(
+                "/{} ",
+                command.label(|name| self.provider_command(name))
+            )),
+            _ => None,
+        };
+        if let Some(text) = text {
+            // A folder drills in, so its completion stays open.
+            let folder = matches!(item.source, CompletionSource::Directory(_));
+            if folder {
+                self.dismissed = None;
+            } else {
+                self.items.clear();
+            }
             self.editor.update(cx, |input, cx| {
                 input.set_selected_range(trigger.range.clone(), cx);
-                input.replace(format!("/{label} "), window, cx);
+                input.replace(text, window, cx);
                 input.focus_handle(cx).focus(window, cx);
             });
-            self.items.clear();
             cx.notify();
             return;
         }
@@ -767,7 +767,6 @@ impl ComposerCompletion {
             cx.emit(CompletionSelection {
                 source: item.source,
                 range: trigger.range,
-                original,
             });
         }
         self.items.clear();

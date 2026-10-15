@@ -4,8 +4,8 @@ use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
 
 use assert_fs::TempDir;
 use bootty_agents::{
-    AgentKind, AgentLaunch, NativeAgentService, NativeAgentSession, NativeSessionConfig,
-    NativeSessionStatus, NativeToolStatus, NativeTurnOutcome,
+    AgentKind, AgentLaunch, NativeAgentService, NativeAgentSession, NativeApprovalDecision,
+    NativeSessionConfig, NativeSessionStatus, NativeToolStatus, NativeTurnOutcome,
 };
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
@@ -32,8 +32,8 @@ session=sys.argv[sys.argv.index('--resume' if '--resume' in sys.argv else '--ses
 with open('launch.json','w') as output: json.dump({'argv':sys.argv[1:],'account':os.environ.get('CLAUDE_CONFIG_DIR'),'pid':os.getpid()},output)
 def emit(value): print(json.dumps(value),flush=True)
 def control(value): emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':{'models':[],'account':{},'commands':[{'name':'review','description':'Review changes','argumentHint':'[path]'}]}}})
-def result(reason='completed',subtype='success',identity=None,errors=None):
- emit({'type':'result','subtype':subtype,'session_id':identity or session,'uuid':'result-uuid-not-user-uuid','is_error':subtype!='success','terminal_reason':reason,'result':'Hello world','errors':errors or []})
+def result(reason='completed',subtype='success',identity=None,errors=None,**extra):
+ emit({'type':'result','subtype':subtype,'session_id':identity or session,'uuid':'result-uuid-not-user-uuid','is_error':subtype!='success','terminal_reason':reason,'result':'Hello world','errors':errors or [],**extra})
 def event(value): emit({'type':'stream_event','session_id':session,'parent_tool_use_id':None,'event':value})
 def tool_use(ident,command): emit({'type':'assistant','uuid':'block-'+ident,'session_id':session,'parent_tool_use_id':None,'message':{'id':'message-'+ident,'content':[{'type':'tool_use','id':ident,'name':'Bash','input':{'command':command}}]}})
 def user_event(content,**extra): emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':content},**extra})
@@ -75,6 +75,11 @@ for line in sys.stdin:
   result() # No user ACK yet: never a completed turn.
   if prompt=='no-ack': continue
   echo=dict(value);echo['isReplay']=True;echo['message']={'role':'user','content':[{'type':'text','text':prompt}]};emit(echo)
+  if prompt in ['permission-rules','permission-mode']:
+   # Observed from Claude 2.1.299: Bash suggests a reusable rule; Write suggests accepting edits.
+   suggestion={'type':'addRules','rules':[{'toolName':'Bash','ruleContent':'npm view *'}],'behavior':'allow','destination':'localSettings'} if prompt=='permission-rules' else {'type':'setMode','mode':'acceptEdits','destination':'session'}
+   emit({'type':'control_request','request_id':'permission-id','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'tool-id','input':{'command':'npm view left-pad version'},'permission_suggestions':[suggestion]}})
+   continue
   if prompt in ['permission','cancel','question']:
    emit({'type':'control_request','request_id':'permission-id','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'tool-id','input':{'command':'echo hello'}}})
    if prompt=='question':
@@ -93,12 +98,34 @@ for line in sys.stdin:
     emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'flood-call-'+str(i),'content':[{'type':'text','text':'ok'}],'is_error':False}]}})
   if prompt=='tool-hold':
    running='bash-call';tool_use(running,'sleep 60');continue
+  if prompt=='tool-stream':
+   # Observed from Claude 2.1.299: arguments arrive as partial JSON after an empty input.
+   event({'type':'message_start','message':{'id':'stream-tool-message'}})
+   event({'type':'content_block_start','index':0,'content_block':{'type':'tool_use','id':'stream-call','name':'Read','input':{}}})
+   for part in ['','{"file_path": "/private/t','mp/notes']:
+    event({'type':'content_block_delta','index':0,'delta':{'type':'input_json_delta','partial_json':part}})
+   continue
   event({'type':'message_start','message':{'id':'assistant-id'}})
   event({'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}})
   event({'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Hello '}})
   event({'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'world'}})
   emit({'type':'assistant','uuid':'block-id','session_id':session,'parent_tool_use_id':None,'message':{'id':'assistant-id','content':[{'type':'text','text':'Hello world'}]}})
   event({'type':'content_block_stop','index':0})
+  if prompt=='usage':
+   # Observed from Claude 2.1.299: each model call reports its usage; the result reports the window.
+   emit({'type':'assistant','uuid':'usage-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'usage-message','content':[{'type':'text','text':'Counted'}],'usage':{'input_tokens':2,'cache_creation_input_tokens':900,'cache_read_input_tokens':24000,'output_tokens':40}}})
+   result(modelUsage={'claude-haiku-5-5':{'contextWindow':200000},'claude-opus-5-5':{'contextWindow':1000000}})
+   continue
+  if prompt=='read-image':
+   # Observed from Claude 2.1.299: a Read of an image repeats its base64 in tool_use_result.
+   data='A'*700000
+   emit({'type':'assistant','uuid':'read-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'read-message','content':[{'type':'tool_use','id':'read-call','name':'Read','input':{'file_path':'shot.png'}}]}})
+   emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'read-call','content':[{'type':'image','source':{'type':'base64','data':data,'media_type':'image/jpeg'}}]}]},'tool_use_result':{'type':'image','file':{'base64':data,'type':'image/jpeg'}}})
+  if prompt=='big-output':
+   emit({'type':'assistant','uuid':'big-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'big-message','content':[{'type':'tool_use','id':'read-call','name':'Bash','input':{'command':'cat big.log'}}]}})
+   emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'read-call','content':[{'type':'text','text':'z'*(2*1024*1024)}]}]}})
+  if prompt=='huge-line':
+   emit({'type':'assistant','uuid':'huge-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'huge-message','content':[{'type':'text','text':'y'*(17*1024*1024)}]}})
   if prompt in ['tool-success','tool-failure']:
    emit({'type':'assistant','uuid':'tool-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'tool-message','content':[{'type':'tool_use','id':'bash-call','name':'Bash','input':{'command':'echo hello'}}]}})
    emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'bash-call','content':[{'type':'text','text':'observed output'}],'is_error':prompt=='tool-failure'}]}})
@@ -147,6 +174,216 @@ fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
 fn barrier(session: &NativeAgentSession) -> Result<(), String> {
     // A correlated control reply follows all preceding fixture events; no clock polling.
     session.rpc("initialize", json!({})).map(|_| ())
+}
+
+/// A Claude conversation reads earlier turns from its session file, with the rows the live view
+/// would show: the main thread only, and a tool's result on its call.
+#[rstest]
+fn claude_history_reads_the_session_file() {
+    let root = TempDir::new().unwrap();
+    let folder = fs::canonicalize(root.path())
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let directory = root.path().join("account/projects").join(folder);
+    fs::create_dir_all(&directory).unwrap();
+    // Observed from Claude 2.1.299: one entry per content block, bookkeeping without a uuid,
+    // attachments beside the chain, and sidechain entries for subagents.
+    let entries = [
+        json!({"type":"queue-operation","operation":"enqueue"}),
+        json!({"type":"user","uuid":"u1","parentUuid":null,"isSidechain":false,
+            "message":{"role":"user","content":"Find the bug"}}),
+        json!({"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,
+            "message":{"id":"msg-1","role":"assistant","content":[
+                {"type":"tool_use","id":"toolu-1","name":"Bash","input":{"command":"cargo test"}}]}}),
+        json!({"type":"attachment","uuid":"x1","parentUuid":"a1","isSidechain":false}),
+        json!({"type":"user","uuid":"r1","parentUuid":"a1","isSidechain":false,
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"toolu-1","content":"1 failed"}]}}),
+        json!({"type":"user","uuid":"s1","parentUuid":"r1","isSidechain":true,
+            "message":{"role":"user","content":"Subagent prompt"}}),
+        json!({"type":"assistant","uuid":"a2","parentUuid":"r1","isSidechain":false,
+            "message":{"id":"msg-2","role":"assistant","content":[
+                {"type":"text","text":"The test fails on overflow."}]}}),
+        json!({"type":"last-prompt","lastPrompt":"Find the bug"}),
+    ];
+    fs::write(
+        directory.join(format!("{SESSION}.jsonl")),
+        entries
+            .iter()
+            .map(|entry| entry.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut config = config(root.path()).unwrap();
+    config.fresh_session_id = None;
+    config.session_id = Some(SESSION.to_owned());
+    let session = NativeAgentSession::spawn(config).unwrap();
+    barrier(&session).unwrap();
+    let page = session.read_history("latest").unwrap();
+    let rows = page
+        .transcript
+        .iter()
+        .map(|item| (item.id.as_str(), item.role.as_str(), item.text.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [
+            ("u1", "user", "Find the bug"),
+            ("claude-tool-toolu-1", "tool", "1 failed"),
+            ("claude-msg-2-0", "assistant", "The test fails on overflow."),
+        ]
+    );
+    assert_eq!((page.has_older, page.at_latest), (false, true));
+    session.stop();
+}
+
+/// A Claude subagent's transcript comes from its own file, named for the task Claude reported.
+#[rstest]
+fn claude_subagent_transcripts_read_their_own_file() {
+    let root = TempDir::new().unwrap();
+    let folder = fs::canonicalize(root.path())
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let directory = root
+        .path()
+        .join("account/projects")
+        .join(folder)
+        .join(SESSION)
+        .join("subagents");
+    fs::create_dir_all(&directory).unwrap();
+    // Observed from Claude 2.1.299: a subagent file holds only sidechain entries.
+    let entries = [
+        json!({"type":"user","uuid":"c1","parentUuid":null,"isSidechain":true,"agentId":"child",
+            "message":{"role":"user","content":"Review the changes"}}),
+        json!({"type":"assistant","uuid":"c2","parentUuid":"c1","isSidechain":true,"agentId":"child",
+            "message":{"id":"msg-child","role":"assistant","content":[
+                {"type":"text","text":"Two files changed."}]}}),
+    ];
+    fs::write(
+        directory.join("agent-child.jsonl"),
+        entries
+            .iter()
+            .map(|entry| entry.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("subagent-completed").unwrap();
+    barrier(&session).unwrap();
+    let detail = session.read_subagent("child").unwrap();
+    let rows = detail
+        .transcript
+        .iter()
+        .map(|item| (item.role.as_str(), item.text.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [
+            ("user", "Review the changes"),
+            ("assistant", "Two files changed.")
+        ]
+    );
+    session.stop();
+}
+
+/// A running tool shows its arguments while Claude streams them.
+#[rstest]
+fn claude_tool_arguments_stream_into_the_running_row() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("tool-stream").unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    let tool = snapshot
+        .transcript
+        .iter()
+        .find(|item| item.id == "claude-tool-stream-call")
+        .and_then(|item| item.tool.clone())
+        .unwrap();
+    assert_eq!(
+        (
+            tool.name.as_str(),
+            tool.status,
+            serde_json::from_str::<Value>(&tool.input).unwrap()
+        ),
+        (
+            "Read",
+            NativeToolStatus::Running,
+            json!({"file_path": "/private/tmp/notes"})
+        )
+    );
+    session.stop();
+}
+
+/// The context meter reads the latest model call's tokens against the turn's largest window.
+#[rstest]
+fn claude_usage_fills_the_context_meter() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("usage").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(
+        session.snapshot().usage,
+        Some(json!({
+            "input": 2, "output": 40, "cacheRead": 24000, "cacheWrite": 900,
+            "modelContextWindow": 1_000_000
+        }))
+    );
+    session.stop();
+}
+
+/// A large message never ends the conversation. A tool's image fits the budget; anything else
+/// past it is cut down or skipped, with a notice, and the turn still finishes.
+#[rstest]
+#[case::tool_image("read-image", None)]
+#[case::large_output("big-output", Some("Bootty left out 2 MiB from Claude"))]
+#[case::past_the_envelope("huge-line", Some("Bootty left out 18 MiB from Claude"))]
+fn large_messages_never_end_the_conversation(#[case] prompt: &str, #[case] notice: Option<&str>) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt(prompt).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(
+        (snapshot.status, snapshot.completed_turn, &snapshot.error),
+        (NativeSessionStatus::Idle, true, &None)
+    );
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .find(|item| item.role == "notice")
+            .map(|item| item.text.split(" that").next().unwrap_or_default()),
+        notice
+    );
+    if prompt != "huge-line" {
+        let tool = snapshot
+            .transcript
+            .iter()
+            .find(|item| item.id == "claude-tool-read-call")
+            .and_then(|item| item.tool.as_ref())
+            .unwrap();
+        assert_eq!(tool.status, NativeToolStatus::Completed);
+    }
+    session.stop();
 }
 
 #[rstest]
@@ -307,6 +544,39 @@ fn permissions_preserve_exact_request_and_input_without_changing_policy(#[case] 
     );
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
     service.shutdown().unwrap();
+}
+
+/// Reusable approvals apply only what Claude suggested: for the session, every suggestion moves to
+/// the session; Always allow keeps a suggestion where Claude proposed it.
+#[rstest]
+#[case::rule_for_session("permission-rules", NativeApprovalDecision::AllowSession, Some(json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"npm view *"}],"behavior":"allow","destination":"session"}])))]
+#[case::rule_always("permission-rules", NativeApprovalDecision::AlwaysAllow, Some(json!([{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"npm view *"}],"behavior":"allow","destination":"localSettings"}])))]
+#[case::mode_for_session("permission-mode", NativeApprovalDecision::AllowSession, Some(json!([{"type":"setMode","mode":"acceptEdits","destination":"session"}])))]
+#[case::session_mode_is_not_always("permission-mode", NativeApprovalDecision::AlwaysAllow, None)]
+#[case::nothing_suggested("permission", NativeApprovalDecision::AllowSession, None)]
+fn reusable_approvals_apply_only_claudes_suggestions(
+    #[case] prompt: &str,
+    #[case] decision: NativeApprovalDecision,
+    #[case] permissions: Option<Value>,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt(prompt).unwrap();
+    barrier(&session).unwrap();
+    let request = session.snapshot().requests.remove(0);
+    let result = session.approve_decision(&request.id, decision);
+    assert_eq!(result.is_ok(), permissions.is_some(), "{result:?}");
+    if let Some(permissions) = permissions {
+        barrier(&session).unwrap();
+        let answer: Value =
+            serde_json::from_slice(&fs::read(root.path().join("answer.json")).unwrap()).unwrap();
+        let response = &answer["response"]["response"];
+        assert_eq!(
+            (&response["behavior"], &response["updatedPermissions"]),
+            (&json!("allow"), &permissions)
+        );
+    }
+    session.stop();
 }
 
 #[rstest]
@@ -658,7 +928,8 @@ fn failed_turns_keep_claudes_reason(#[case] prompt: &str, #[case] reason: &str) 
     session.stop();
 }
 
-/// An interrupted turn settles the tool it was running instead of leaving it Running.
+/// An interrupted turn settles the tool it was running instead of leaving it Running, and the
+/// transcript keeps a mark that the user stopped it.
 #[test]
 fn interrupted_turn_settles_its_running_tool() {
     let root = TempDir::new().unwrap();
@@ -676,6 +947,13 @@ fn interrupted_turn_settles_its_running_tool() {
     session.interrupt().unwrap();
     barrier(&session).unwrap();
     assert_eq!(tool_status(), Some(NativeToolStatus::Interrupted));
+    assert!(
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .any(|item| item.role == "notice" && item.text == "You interrupted this turn.")
+    );
     session.stop();
 }
 

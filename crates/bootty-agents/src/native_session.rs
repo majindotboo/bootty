@@ -1570,13 +1570,23 @@ fn drain_stderr(mut reader: impl Read, tail: &Mutex<Vec<u8>>) {
     }
 }
 
-fn route_reply(value: &Value, pending: &PendingReplies, provider: AgentKind) {
-    if let Some(id) = if provider == AgentKind::Claude {
+fn reply_id(value: &Value, provider: AgentKind) -> Option<String> {
+    let id = if provider == AgentKind::Claude {
         field(value, "response").get("request_id")
     } else {
         value.get("id")
-    } {
-        let id = id.as_str().map_or_else(|| id.to_string(), str::to_owned);
+    }?;
+    Some(id.as_str().map_or_else(|| id.to_string(), str::to_owned))
+}
+
+fn fail_reply(value: &Value, pending: &PendingReplies, provider: AgentKind, error: &str) {
+    if let Some(reply) = reply_id(value, provider).and_then(|id| lock(pending).remove(&id)) {
+        let _ = reply.sender.send(ReplyEvent::Reply(Err(error.to_owned())));
+    }
+}
+
+fn route_reply(value: &Value, pending: &PendingReplies, provider: AgentKind) {
+    if let Some(id) = reply_id(value, provider) {
         let sender = lock(pending).remove(&id);
         if let Some(reply) = sender {
             let result = if provider == AgentKind::Pi {
@@ -1639,19 +1649,39 @@ fn read_frames(
 ) -> Result<(), String> {
     let provider = lock(snapshot).provider;
     loop {
-        let Some((value, count)) = read_native_frame(&mut reader, provider)? else {
-            return Ok(());
+        let (mut value, count) = match read_native_frame(&mut reader, provider)? {
+            None => return Ok(()),
+            Some(NativeFrame::Message(value, count)) => (value, count),
+            Some(NativeFrame::Oversized(count)) => {
+                lock(snapshot).skipped_frame(count);
+                publish_change(change_handler);
+                continue;
+            }
         };
+        // An oversized message is cut down, never fatal: its long strings shrink so its state
+        // still lands. An oversized reply fails only its own request.
         if count > FRAME_LIMIT
             && !is_provider_request(&value, provider)
             && !allows_history_page(&value, snapshot, pending)
             && !allows_image_frame(&value, snapshot, pending, claude)
             && !allows_history_echo(&value, snapshot, pending, claude)
         {
-            return Err(
-                "Native provider exceeded the control budget outside an owned image or history reply"
-                    .to_owned(),
-            );
+            let removed = if is_reply(&value, provider) {
+                fail_reply(
+                    &value,
+                    pending,
+                    provider,
+                    "The provider's reply is too large for Bootty to read",
+                );
+                count
+            } else {
+                shorten_strings(&mut value)
+            };
+            lock(snapshot).skipped_frame(removed);
+            publish_change(change_handler);
+            if count.saturating_sub(removed) > FRAME_LIMIT {
+                continue;
+            }
         }
         if let Some(claude) = claude {
             if field(&value, "type") == "control_response" {
@@ -1769,10 +1799,16 @@ fn is_provider_request(value: &Value, provider: AgentKind) -> bool {
     }
 }
 
+/// One line from a provider. A line past the envelope is drained unread, so memory stays bounded.
+enum NativeFrame {
+    Message(Value, usize),
+    Oversized(usize),
+}
+
 fn read_native_frame(
     reader: &mut impl BufRead,
     provider: AgentKind,
-) -> Result<Option<(Value, usize)>, String> {
+) -> Result<Option<NativeFrame>, String> {
     let mut bytes = Vec::new();
     let count = reader
         .by_ref()
@@ -1783,7 +1819,20 @@ fn read_native_frame(
         return Ok(None);
     }
     if count > crate::MAX_NATIVE_IMAGE_ENVELOPE_BYTES {
-        return Err("Native agent frame exceeds 16 MiB".to_owned());
+        let mut skipped = count;
+        while bytes.last() != Some(&b'\n') {
+            bytes.clear();
+            let read = reader
+                .by_ref()
+                .take(64 * 1024)
+                .read_until(b'\n', &mut bytes)
+                .map_err(|error| error.to_string())?;
+            if read == 0 {
+                break;
+            }
+            skipped = skipped.saturating_add(read);
+        }
+        return Ok(Some(NativeFrame::Oversized(skipped)));
     }
     if matches!(provider, AgentKind::Pi | AgentKind::Claude) && bytes.last() != Some(&b'\n') {
         return Err("Provider emitted an unterminated JSONL record".to_owned());
@@ -1793,7 +1842,41 @@ fn read_native_frame(
     if !value.is_object() {
         return Err("Native agent emitted a non-object frame".to_owned());
     }
-    Ok(Some((value, count)))
+    Ok(Some(NativeFrame::Message(value, count)))
+}
+
+/// Deliberate limit: an oversized message keeps at most this much of each string. Raise it only
+/// with a streamed transcript store.
+const KEPT_STRING_BYTES: usize = 64 * 1024;
+
+/// Cuts every string longer than [`KEPT_STRING_BYTES`] at a character boundary, returning the
+/// bytes removed. A cut image no longer decodes, so it can't pass as a verified one.
+fn shorten_strings(value: &mut Value) -> usize {
+    match value {
+        Value::String(text) if text.len() > KEPT_STRING_BYTES => {
+            let kept = text.floor_char_boundary(KEPT_STRING_BYTES);
+            let removed = text.len().saturating_sub(kept);
+            text.truncate(kept);
+            removed
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .map(shorten_strings)
+            .fold(0, usize::saturating_add),
+        Value::Object(fields) => fields
+            .values_mut()
+            .map(shorten_strings)
+            .fold(0, usize::saturating_add),
+        _ => 0,
+    }
+}
+
+fn is_reply(value: &Value, provider: AgentKind) -> bool {
+    match provider {
+        AgentKind::Claude => field(value, "type") == "control_response",
+        AgentKind::Pi => field(value, "type") == "response",
+        AgentKind::Codex => value.get("method").is_none(),
+    }
 }
 
 fn allows_history_page(
@@ -1928,7 +2011,16 @@ fn allows_image_frame(
     claude: Option<&Mutex<crate::native_claude::ClaudeProtocol>>,
 ) -> bool {
     if let Some(claude) = claude {
-        return lock(claude).allows_image_echo(&lock(snapshot), value);
+        let (echo, images) = {
+            let claude = lock(claude);
+            let snapshot = lock(snapshot);
+            (
+                claude.allows_image_echo(&snapshot, value),
+                claude.tool_result_image_bytes(&snapshot, value),
+            )
+        };
+        return echo
+            || (images > 0 && value.to_string().len().saturating_sub(images) <= FRAME_LIMIT);
     }
     let snapshot = lock(snapshot);
     let mut content = snapshot.computer_image_contents(value);

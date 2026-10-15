@@ -195,6 +195,10 @@ impl NativeAgentSessionView {
         }
         let rendered_quote = state.selected_text();
         let selection = state.selected_source_range().and_then(|source_range| {
+            let source_range = match self.link_marks.get(message_id) {
+                Some(marks) => marks.source_range(source_range),
+                None => source_range,
+            };
             let item = self
                 .record
                 .snapshot

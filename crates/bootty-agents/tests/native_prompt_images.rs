@@ -657,7 +657,9 @@ fn exact_attached_computer_results_cross_the_control_budget_without_persisting_p
 #[case::pi_changed_completion_pixels(AgentKind::Pi, "completion_image")]
 #[case::pi_foreign_completion_id(AgentKind::Pi, "completion_id")]
 #[case::pi_foreign_completion_parent(AgentKind::Pi, "nested_completion_parent")]
-fn large_tool_records_require_the_exact_start_and_valid_bounded_png(
+/// A large tool image Bootty didn't capture is cut down instead of ending the conversation: it
+/// never becomes an image, and a notice says what was left out.
+fn large_tool_records_bootty_did_not_capture_never_become_images(
     #[case] provider: AgentKind,
     #[case] fault: &str,
 ) {
@@ -688,17 +690,25 @@ fn large_tool_records_require_the_exact_start_and_valid_bounded_png(
             capture_tools(provider, fault != "permission").unwrap(),
         )
         .unwrap();
-    assert!(
-        service
-            .prompt(&record.target(), "Capture the exact attached window")
-            .is_err()
-    );
+    service
+        .prompt(&record.target(), "Capture the exact attached window")
+        .unwrap();
     let snapshot = service.resolve(&record.target()).unwrap().snapshot();
-    assert_eq!(snapshot.status, NativeSessionStatus::Error);
-    assert!(!snapshot.completed_turn);
-    assert_ne!(
-        snapshot.first_turn.as_ref().unwrap().outcome,
-        NativeTurnOutcome::Succeeded
+    assert_ne!(snapshot.status, NativeSessionStatus::Error);
+    assert_eq!(snapshot.error, None);
+    assert!(
+        snapshot
+            .transcript
+            .iter()
+            .all(|item| item.images.is_empty())
+    );
+    assert!(
+        snapshot
+            .transcript
+            .iter()
+            .any(|item| item.role == "notice" && item.text.starts_with("Bootty left out")),
+        "{:#?}",
+        snapshot.transcript
     );
     service.shutdown().unwrap();
 }

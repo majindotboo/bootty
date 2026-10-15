@@ -403,7 +403,9 @@ fn application(
     })
 }
 
-const fn cf<T: ?Sized>(value: &T) -> *const c_void {
+/// The CF object behind a reference. Taking `&CFType` makes a retained wrapper deref to its
+/// object, so a call can't pass the wrapper's address instead.
+const fn cf(value: &CFType) -> *const c_void {
     std::ptr::from_ref(value).cast()
 }
 
@@ -411,14 +413,14 @@ fn ax_application(process_id: i32) -> Option<CFRetained<CFType>> {
     let raw = NonNull::new(unsafe { AXUIElementCreateApplication(process_id) }.cast::<CFType>())?;
     // AXUIElementCreateApplication returns a +1 reference.
     let app = unsafe { CFRetained::from_raw(raw) };
-    unsafe { AXUIElementSetMessagingTimeout(cf(&*app), AX_TIMEOUT) };
+    unsafe { AXUIElementSetMessagingTimeout(cf(&app), AX_TIMEOUT) };
     Some(app)
 }
 
 fn ax_attribute(element: &CFType, name: &str) -> Option<CFRetained<CFType>> {
     let name = CFString::from_str(name);
     let mut value = std::ptr::null_mut();
-    if unsafe { AXUIElementCopyAttributeValue(cf(element), cf(&*name), &raw mut value) } != 0 {
+    if unsafe { AXUIElementCopyAttributeValue(cf(element), cf(&name), &raw mut value) } != 0 {
         return None;
     }
     // Copy functions return a +1 reference.
@@ -434,7 +436,7 @@ fn element_bounds(element: &CFType) -> Option<DisplayBounds> {
     let value = |name, kind, out: *mut c_void| {
         ax_attribute(element, name)
             .filter(|value| CFGetTypeID(Some(value)) == unsafe { AXValueGetTypeID() })
-            .is_some_and(|value| unsafe { AXValueGetValue(cf(&*value), kind, out) })
+            .is_some_and(|value| unsafe { AXValueGetValue(cf(&value), kind, out) })
     };
     let mut origin = CGPoint::default();
     let mut size = CGSize::default();

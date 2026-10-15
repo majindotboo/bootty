@@ -184,7 +184,7 @@ impl AppState {
             let outcome = CommandOutcome::Unavailable {
                 message: "This session is already being closed".to_owned(),
             };
-            self.record_error("This session is already being closed".to_owned());
+            self.record_message("This session is already being closed".to_owned());
             return Err(outcome);
         }
         if let Some(outcome) = self.preflight_mux_command(&command) {

@@ -79,6 +79,7 @@ pub mod terminal_sprite;
 pub mod terminal_text;
 pub mod terminal_text_atlas;
 pub mod theme;
+pub mod transcript_links;
 pub mod usage;
 pub mod window;
 pub mod workspace_composition;

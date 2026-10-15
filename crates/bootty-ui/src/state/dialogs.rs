@@ -631,7 +631,7 @@ impl AppState {
         let Some(target) = self
             .current_command_target_for("terminal.export", bootty_control::ResourceKind::Terminal)
         else {
-            self.record_error("Export needs an attached terminal");
+            self.record_message("Export needs an attached terminal");
             return;
         };
         let destination = bootty_git::home_dir()
@@ -729,7 +729,7 @@ impl AppState {
                 match result {
                     Some(Ok(())) => {}
                     Some(Err(error)) => self.record_error(error),
-                    None => self.record_error("the project picker is no longer open"),
+                    None => self.record_message("The project picker is no longer open"),
                 }
             }
             NewSessionPickerEvent::Error(error) => {
@@ -1032,7 +1032,7 @@ impl AppState {
             .pending_new_surface()
             .is_none_or(|pending| pending != request)
         {
-            self.record_error("The new surface chooser was closed or replaced");
+            self.record_message("The new surface chooser was closed or replaced");
             return;
         }
         if let Err(outcome) = self.validate_surface_request(request) {
@@ -1059,7 +1059,7 @@ impl AppState {
                 .iter_mut()
                 .find(|destination| destination.target == request.binding)
             else {
-                self.record_error("The captured host cannot create an agent surface");
+                self.record_message("The captured host cannot create an agent surface");
                 return;
             };
             destination.cwd.clone_from(&request.cwd);
@@ -1074,7 +1074,7 @@ impl AppState {
             .iter()
             .find(|destination| destination.scope == current)
         else {
-            self.record_error("The current host cannot create a session");
+            self.record_message("The current host cannot create a session");
             return;
         };
         let mut draft = self.session_creation_draft(destination);
@@ -1096,7 +1096,7 @@ impl AppState {
                     |request| Some(request.task_identity.as_str()),
                 );
                 let Some(selected) = selected else {
-                    self.record_error("Open a session before adding an agent tab");
+                    self.record_message("Open a session before adding an agent tab");
                     return;
                 };
                 let identity = request.map_or_else(
@@ -1104,7 +1104,7 @@ impl AppState {
                     |request| Some(request.task_identity.clone()),
                 );
                 let Some(identity) = identity.filter(|identity| !identity.is_empty()) else {
-                    self.record_error("Save this session in a Space before adding an agent tab");
+                    self.record_message("Save this session in a Space before adding an agent tab");
                     return;
                 };
                 draft.identity = identity;
@@ -1453,6 +1453,12 @@ impl AppState {
             .and_then(|id| session.windows.iter().find(|window| window.id == id))
             .or_else(|| session.windows.first())?;
         Some((session.id.clone(), window.id.clone(), window.name.clone()))
+    }
+    pub(super) fn open_ditch_session_dialog(&mut self) {
+        let Some(selected) = self.selected_session_id() else {
+            return;
+        };
+        self.open_ditch_session_dialog_for(&selected);
     }
     pub fn open_ditch_session_dialog_for(&mut self, session_id: &str) -> bool {
         let Some((session_id, cwd)) = self

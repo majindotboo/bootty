@@ -30,6 +30,8 @@ pub struct ClaudeProtocol {
     steering: VecDeque<Dispatch>,
     message_id: Option<String>,
     block_index: Option<u64>,
+    /// The tool row whose arguments are streaming, and the JSON received so far.
+    tool_input: Option<(String, String)>,
 }
 
 impl ClaudeProtocol {
@@ -44,6 +46,7 @@ impl ClaudeProtocol {
             steering: VecDeque::new(),
             message_id: None,
             block_index: None,
+            tool_input: None,
         })
     }
 
@@ -238,6 +241,35 @@ impl ClaudeProtocol {
             })
     }
 
+    /// Image bytes in this turn's tool results, which Claude repeats in `tool_use_result`. They
+    /// stay outside the control budget; the transcript keeps only a result's text.
+    pub fn tool_result_image_bytes(
+        &self,
+        snapshot: &NativeSessionSnapshot,
+        value: &Value,
+    ) -> usize {
+        if !self.accepts(snapshot, value) || field(value, "type") != "user" {
+            return 0;
+        }
+        let blocks = field(field(value, "message"), "content").as_array();
+        let mut bytes = blocks
+            .into_iter()
+            .flatten()
+            .filter(|block| field(block, "type") == "tool_result")
+            .flat_map(|block| field(block, "content").as_array().into_iter().flatten())
+            .filter(|item| field(item, "type") == "image")
+            .filter_map(|item| field(field(item, "source"), "data").as_str())
+            .map(str::len)
+            .fold(0_usize, usize::saturating_add);
+        let repeated = field(value, "tool_use_result");
+        if field(repeated, "type") == "image"
+            && let Some(data) = field(field(repeated, "file"), "base64").as_str()
+        {
+            bytes = bytes.saturating_add(data.len());
+        }
+        bytes
+    }
+
     pub fn allows_history_echo(&self, snapshot: &NativeSessionSnapshot, value: &Value) -> bool {
         self.accepts(snapshot, value)
             && field(value, "type") == "user"
@@ -327,8 +359,14 @@ impl ClaudeProtocol {
             }
             Some("content_block_start") => {
                 self.block_index = field(event, "index").as_u64();
+                let block = field(event, "content_block");
+                self.tool_input = (field(block, "type") == "tool_use")
+                    .then(|| field(block, "id").as_str())
+                    .flatten()
+                    .filter(|id| valid_wire_id(id))
+                    .map(|id| (format!("claude-tool-{id}"), String::new()));
                 if let Some(id) = self.block_id() {
-                    content_block(snapshot, id, field(event, "content_block"), false);
+                    content_block(snapshot, id, block, false);
                 }
             }
             Some("content_block_delta") if field(event, "index").as_u64() == self.block_index => {
@@ -345,14 +383,46 @@ impl ClaudeProtocol {
                                 snapshot.delta(id, "thinking", text);
                             }
                         }
+                        Some("input_json_delta") => self.stream_tool_input(snapshot, delta),
                         _ => {}
                     }
                 }
             }
             Some("content_block_stop") if field(event, "index").as_u64() == self.block_index => {
                 self.block_index = None;
+                self.tool_input = None;
             }
             _ => {}
+        }
+    }
+
+    /// Shows a running tool's arguments as they arrive. A prefix that closes into JSON replaces
+    /// the row's input; the completed block sets the whole input later.
+    fn stream_tool_input(&mut self, snapshot: &mut NativeSessionSnapshot, delta: &Value) {
+        /// Deliberate limit: a preview needs only the arguments' start, and each update copies
+        /// the prefix. Raise it if summaries need later fields.
+        const PREVIEW_BYTES: usize = 8 * 1024;
+        let (Some((row, input)), Some(partial)) =
+            (&mut self.tool_input, field(delta, "partial_json").as_str())
+        else {
+            return;
+        };
+        if input.len() > PREVIEW_BYTES {
+            return;
+        }
+        input.push_str(partial);
+        if let Some(preview) = ["", "\"}", "}", "\"]}", "]}"]
+            .into_iter()
+            .map(|suffix| format!("{input}{suffix}"))
+            .find(|candidate| serde_json::from_str::<Value>(candidate).is_ok())
+        {
+            snapshot.tool_message(
+                row.clone(),
+                None,
+                Some(preview),
+                String::new(),
+                NativeToolStatus::Running,
+            );
         }
     }
 
@@ -366,6 +436,7 @@ impl ClaudeProtocol {
 
     fn assistant(&self, snapshot: &mut NativeSessionSnapshot, value: &Value) {
         let message = field(value, "message");
+        record_usage(snapshot, field(message, "usage"));
         let Some(content) = field(message, "content").as_array() else {
             return;
         };
@@ -384,6 +455,7 @@ impl ClaudeProtocol {
     }
 
     fn finish(&mut self, snapshot: &mut NativeSessionSnapshot, value: &Value) {
+        record_context_window(snapshot, field(value, "modelUsage"));
         let outcome = match field(value, "terminal_reason").as_str() {
             Some("aborted_streaming" | "aborted_tools") => NativeTurnOutcome::Interrupted,
             _ if field(value, "subtype") == "success" && field(value, "is_error") == false => {
@@ -393,6 +465,10 @@ impl ClaudeProtocol {
         };
         if let Some(dispatch) = self.dispatch.take() {
             snapshot.finish_first_turn(&dispatch.id, outcome);
+            // A steer can also abort tools; only a requested stop marks the turn.
+            if outcome == NativeTurnOutcome::Interrupted && snapshot.stopping() {
+                snapshot.interrupted_turn(&dispatch.id);
+            }
         }
         snapshot.settle_running_tools();
         self.dispatch = self.steering.pop_front();
@@ -625,13 +701,30 @@ pub fn permission_response(
     {
         return question_response(request, response);
     }
-    let decision = response
+    let fields = response
         .as_object()
-        .filter(|fields| fields.len() == 1)
-        .and_then(|fields| fields.get("decision"))
+        .filter(|fields| {
+            fields
+                .keys()
+                .all(|key| matches!(key.as_str(), "decision" | "scope"))
+        })
+        .ok_or("Claude permission response must contain only a decision and its scope")?;
+    let decision = fields
+        .get("decision")
         .and_then(Value::as_str)
         .filter(|decision| matches!(*decision, "accept" | "decline"))
-        .ok_or("Claude permission response must contain only an accept or decline decision")?;
+        .ok_or("Claude permission response must accept or decline")?;
+    // A reusable scope applies only the rules Claude itself suggested for this request.
+    let permissions = fields
+        .get("scope")
+        .map(|scope| {
+            scope
+                .as_str()
+                .filter(|_| decision == "accept")
+                .and_then(|scope| updated_permissions(&request.parameters, scope))
+                .ok_or("Claude didn't offer that approval scope")
+        })
+        .transpose()?;
     let id = request
         .wire_id
         .as_str()
@@ -643,13 +736,62 @@ pub fn permission_response(
         return Err("Claude questions require explicit answers".to_owned());
     }
     let permission = if decision == "accept" {
-        json!({"behavior":"allow","updatedInput":field(&request.parameters,"input"),"toolUseID":tool})
+        let mut allow = json!({"behavior":"allow","updatedInput":field(&request.parameters,"input"),"toolUseID":tool});
+        if let (Some(permissions), Some(allow)) = (permissions, allow.as_object_mut()) {
+            allow.insert("updatedPermissions".to_owned(), permissions.into());
+        }
+        allow
     } else {
         json!({"behavior":"deny","message":"Denied by the user","toolUseID":tool})
     };
     Ok(
         json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":permission}}),
     )
+}
+
+/// A Claude approval's answer for `decision`, when Claude offered that choice. Allow for this
+/// session applies Claude's suggestions for the session; Always allow keeps them where Claude
+/// proposed.
+#[must_use]
+pub fn approval_response(
+    parameters: &Value,
+    decision: crate::NativeApprovalDecision,
+) -> Option<Value> {
+    use crate::NativeApprovalDecision as D;
+    let scope = match decision {
+        D::Deny => return Some(json!({"decision":"decline"})),
+        D::AllowOnce => return Some(json!({"decision":"accept"})),
+        D::AllowSession => "session",
+        D::AlwaysAllow => "always",
+    };
+    updated_permissions(parameters, scope).map(|_| json!({"decision":"accept","scope":scope}))
+}
+
+/// Claude's own suggestions for a scope: every suggestion moved to the session, or the
+/// suggestions as proposed when one outlives the session.
+fn updated_permissions(parameters: &Value, scope: &str) -> Option<Vec<Value>> {
+    let suggestions = field(parameters, "permission_suggestions")
+        .as_array()
+        .filter(|suggestions| !suggestions.is_empty())?;
+    match scope {
+        "session" => Some(
+            suggestions
+                .iter()
+                .cloned()
+                .map(|mut suggestion| {
+                    if let Some(fields) = suggestion.as_object_mut() {
+                        fields.insert("destination".to_owned(), "session".into());
+                    }
+                    suggestion
+                })
+                .collect(),
+        ),
+        "always" => suggestions
+            .iter()
+            .any(|suggestion| field(suggestion, "destination") != "session")
+            .then(|| suggestions.clone()),
+        _ => None,
+    }
 }
 
 fn question_response(request: &NativeAgentRequest, response: &Value) -> Result<Value, String> {
@@ -730,7 +872,12 @@ fn cancel_request(snapshot: &mut NativeSessionSnapshot, value: &Value) {
     }
 }
 
-fn content_block(snapshot: &mut NativeSessionSnapshot, id: String, block: &Value, complete: bool) {
+pub fn content_block(
+    snapshot: &mut NativeSessionSnapshot,
+    id: String,
+    block: &Value,
+    complete: bool,
+) {
     match field(block, "type").as_str() {
         Some("text") => snapshot.message(
             id,
@@ -762,7 +909,49 @@ fn content_block(snapshot: &mut NativeSessionSnapshot, id: String, block: &Value
     }
 }
 
-fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
+/// The context the latest model call filled, in the counters the context meter reads.
+fn record_usage(snapshot: &mut NativeSessionSnapshot, usage: &Value) {
+    let Some(input) = field(usage, "input_tokens").as_u64() else {
+        return;
+    };
+    let count = |key| field(usage, key).as_u64().unwrap_or(0);
+    let mut next = json!({
+        "input": input,
+        "output": count("output_tokens"),
+        "cacheRead": count("cache_read_input_tokens"),
+        "cacheWrite": count("cache_creation_input_tokens"),
+    });
+    if let Some(window) = snapshot
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.get("modelContextWindow"))
+        && let Some(next) = next.as_object_mut()
+    {
+        next.insert("modelContextWindow".to_owned(), window.clone());
+    }
+    snapshot.usage = Some(next);
+}
+
+/// A turn's result reports each model's context window; the meter measures against the largest.
+fn record_context_window(snapshot: &mut NativeSessionSnapshot, models: &Value) {
+    let Some(window) = models.as_object().and_then(|models| {
+        models
+            .values()
+            .filter_map(|model| field(model, "contextWindow").as_u64())
+            .max()
+    }) else {
+        return;
+    };
+    if let Some(usage) = snapshot
+        .usage
+        .get_or_insert_with(|| json!({}))
+        .as_object_mut()
+    {
+        usage.insert("modelContextWindow".to_owned(), window.into());
+    }
+}
+
+pub fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
     // Claude rejects the tool it was running when a stop arrives; that tool was interrupted.
     let rejected = |id: &str| {
         field(value, "tool_result_meta")

@@ -165,6 +165,10 @@ impl AppState {
                 self.open_rename_session_dialog();
                 effects.push(AppEffect::RequestRepaint);
             }
+            AppAction::DitchSession => {
+                self.open_ditch_session_dialog();
+                effects.push(AppEffect::RequestRepaint);
+            }
             AppAction::MoveSessionToSpace => {
                 self.open_space_picker_for_current_session();
                 effects.push(AppEffect::RequestRepaint);

@@ -657,7 +657,6 @@ impl GpuiWorkspace {
                 this.sync_related_conversations(cx);
                 this.present_native_conversation(window, cx);
                 cx.notify();
-                window.refresh();
             });
         })
         .detach();
@@ -751,7 +750,7 @@ impl GpuiWorkspace {
         if self.native_conversations.focus_requested {
             let Some(identity) = record.task_identity.as_deref() else {
                 self.state
-                    .record_error("This conversation has no saved task.");
+                    .record_message("This conversation has no saved task.");
                 self.close_native_conversation();
                 return;
             };
@@ -1005,8 +1004,12 @@ impl GpuiWorkspace {
                 crate::gpui::chrome::ChromeIntent::OpenGitChanges(target.clone()),
                 cx,
             ),
-            OpenNativeSession::SideChatCreated { source, record } => {
-                self.present_side_chat(source, record.as_ref().clone(), window, cx);
+            OpenNativeSession::SideChatCreated {
+                source,
+                record,
+                draft,
+            } => {
+                self.present_side_chat(source, record.as_ref().clone(), draft.clone(), window, cx);
             }
             OpenNativeSession::Subagent { source, id } => {
                 if let Some(record) = self
@@ -1059,6 +1062,7 @@ impl GpuiWorkspace {
         &mut self,
         source: &CommandTarget,
         record: NativeSessionRecord,
+        draft: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1082,6 +1086,12 @@ impl GpuiWorkspace {
             .any(|current| current.id == record.id)
         {
             self.native_conversations.records.push(record.clone());
+        }
+        // A message moved from a queue reaches its side chat even when the side chat opens
+        // without focus.
+        if let Some(draft) = draft {
+            let view = self.ensure_native_conversation_view(record.clone(), window, cx);
+            view.update(cx, |view, cx| view.set_draft(&draft, window, cx));
         }
         // A completed fork must never steal focus from a different saved task or Space.
         if self.native_conversation_view(cx).is_none()
@@ -1317,7 +1327,7 @@ impl GpuiWorkspace {
     ) {
         if require_shown && self.shown_native_conversation_target(cx).as_ref() != Some(target) {
             self.state
-                .record_error("This annotation’s conversation is no longer selected.");
+                .record_message("This annotation’s conversation is no longer selected.");
             return;
         }
         let Some(record) = self
@@ -1326,7 +1336,7 @@ impl GpuiWorkspace {
             .iter()
             .find(|record| record.target() == *target)
         else {
-            self.state.record_error(
+            self.state.record_message(
                 "This annotation’s conversation changed. Its local note was retained.",
             );
             return;
@@ -1342,7 +1352,7 @@ impl GpuiWorkspace {
         });
         if !saved {
             self.state
-                .record_error("This conversation’s saved task is unavailable.");
+                .record_message("This conversation’s saved task is unavailable.");
             return;
         }
         if let Some(tools) = &self.tools {
@@ -1387,6 +1397,7 @@ fn host_subagent(
                 .map_or_else(String::new, |item| item.text.clone()),
             model: child.config.model.clone(),
             thread_id: None,
+            claude_file: false,
             owner_session: parent.session_id.clone(),
             status,
             started_at: transcript.iter().find_map(|item| item.created_at),

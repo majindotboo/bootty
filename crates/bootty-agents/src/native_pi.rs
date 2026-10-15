@@ -437,6 +437,9 @@ fn ingest_message(snapshot: &mut NativeSessionSnapshot, value: &Value) {
             && let Some(id) = snapshot.turn_id.clone()
         {
             snapshot.finish_first_turn(&id, NativeTurnOutcome::Interrupted);
+            if snapshot.stopping() {
+                snapshot.interrupted_turn(&id);
+            }
         }
         snapshot.error = Some(bounded_text(
             field(message, "errorMessage")

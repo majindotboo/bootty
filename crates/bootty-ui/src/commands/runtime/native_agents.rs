@@ -236,7 +236,7 @@ impl AppState {
                     .get(identity)
                     .is_some_and(|saved| !saved.state.deleted)
         }) else {
-            self.record_error("This conversation’s saved task is unavailable.");
+            self.record_message("This conversation’s saved task is unavailable.");
             return false;
         };
         let scope = binding.scope();
@@ -253,6 +253,10 @@ impl AppState {
         true
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One router sends every native operation to its owner"
+    )]
     pub(super) fn dispatch_native_agent(
         &mut self,
         invocation: CommandInvocation,
@@ -338,6 +342,9 @@ impl AppState {
         if operation == "terminal" {
             return CommandDispatch::Complete(self.native_terminal_destination(&service, target));
         }
+        if operation == "open-link" {
+            return self.dispatch_native_link(&service, &invocation, execution);
+        }
         if operation == "panel" {
             return self.dispatch_native_panel(&service, &invocation, execution);
         }
@@ -357,6 +364,33 @@ impl AppState {
             return self.dispatch_native_resume(service, &invocation, execution);
         }
         self.dispatch_native_operation(service, invocation, execution)
+    }
+
+    /// Opens a link from a conversation the way its terminal would: a file on the conversation's
+    /// host, relative to its directory, or a URL through the binding's forwards.
+    fn dispatch_native_link(
+        &mut self,
+        service: &NativeAgentService,
+        invocation: &CommandInvocation,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(record) = service
+            .sessions()
+            .into_iter()
+            .find(|record| Some(&record.target()) == invocation.target.as_ref())
+        else {
+            return CommandDispatch::Complete(CommandOutcome::StaleTarget {
+                message: "The conversation changed".into(),
+            });
+        };
+        let Some((exact, terminal)) = self.native_panel_target(&record) else {
+            return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                message: "Open this conversation in a pane to follow its links".into(),
+            });
+        };
+        let location = invocation.arguments.get(2).cloned().unwrap_or_default();
+        let cwd = record.config.cwd.to_string_lossy().into_owned();
+        self.dispatch_link_open(terminal, &exact, &[location, cwd], execution)
     }
 
     fn native_conversation_binding(

@@ -83,12 +83,6 @@ impl NativeAgentSessionView {
             catalog,
             files,
             applications: self.record.snapshot.application_mentions_supported,
-            remote: self
-                .record
-                .config
-                .remote
-                .as_ref()
-                .map(|remote| remote.host.clone()),
             commands: true,
         };
         if self
@@ -153,9 +147,6 @@ impl NativeAgentSessionView {
         cx: &mut Context<Self>,
     ) {
         match &selection.source {
-            CompletionSource::File(_) => {
-                self.stage_project_attachment(selection.clone(), window, cx);
-            }
             CompletionSource::Application(target) => {
                 if self.applications.len() >= 8 {
                     self.error = Some("Mention at most eight application windows".into());
@@ -181,6 +172,7 @@ impl NativeAgentSessionView {
                 cx.notify();
             }
             CompletionSource::Provider(_)
+            | CompletionSource::File(_)
             | CompletionSource::Directory(_)
             | CompletionSource::Composer(_) => {}
         }
@@ -222,61 +214,6 @@ impl NativeAgentSessionView {
                 self.model_command("goal", vec![objective.clone()], window, cx);
             }
         }
-    }
-
-    fn stage_project_attachment(
-        &mut self,
-        selection: crate::gpui_composer_completion::CompletionSelection,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let CompletionSource::File(source) = selection.source else {
-            return;
-        };
-        if self
-            .attachments
-            .len()
-            .saturating_add(self.attachment_imports)
-            >= 16
-        {
-            self.error = Some("Attach at most 16 files".into());
-            cx.notify();
-            return;
-        }
-        let sender = self.sender.clone();
-        let target = self.record.target();
-        self.attachment_imports = self.attachment_imports.saturating_add(1);
-        self.error = None;
-        cx.spawn_in(window, async move |owner, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { source.stage(&sender) })
-                .await;
-            _ = owner.update_in(cx, |this, window, cx| {
-                this.attachment_imports = this.attachment_imports.saturating_sub(1);
-                if this.record.target() != target
-                    || this.composer.read(cx).value().get(selection.range.clone())
-                        != Some(&selection.original)
-                {
-                    cx.notify();
-                    return;
-                }
-                match result {
-                    Ok(staged) => {
-                        this.composer.update(cx, |input, cx| {
-                            input.set_selected_range(selection.range, cx);
-                        });
-                        this.import_attachment(staged.path, Some(staged.temporary), window, cx);
-                    }
-                    Err(error) => {
-                        this.error = Some(super::diagnostic(error));
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
-        cx.notify();
     }
 
     pub(super) fn active_applications(

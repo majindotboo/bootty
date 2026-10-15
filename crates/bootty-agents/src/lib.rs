@@ -13,6 +13,7 @@ mod native_commands;
 mod native_completions;
 mod native_elicitation;
 mod native_history;
+mod native_history_claude;
 mod native_history_pi;
 pub use native_history::NativeHistoryPage;
 mod native_models;

@@ -486,6 +486,7 @@ binding_actions! {
     SelectSession(value: u32) => "select_session" [positive_index],
     MoveSession(value: i32) => "move_session" [number(parse_i32)],
     RenameSession => "rename_session" [unit],
+    DitchSession => "ditch_session" [unit],
     SettleSession => "settle_session" [unit],
     MoveSessionToSpace => "move_session_to_space" [unit],
     RenameTab => "rename_tab" [unit],

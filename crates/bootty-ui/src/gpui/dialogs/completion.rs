@@ -44,9 +44,6 @@ impl DialogView {
              selection: &crate::gpui_composer_completion::CompletionSelection,
              window,
              cx| match &selection.source {
-                CompletionSource::File(_) => {
-                    this.stage_project_attachment(selection.clone(), window, cx);
-                }
                 CompletionSource::Application(target) => {
                     let Some(spec) = this.spec.as_mut() else {
                         return;
@@ -82,6 +79,7 @@ impl DialogView {
                     cx.notify();
                 }
                 CompletionSource::Provider(_)
+                | CompletionSource::File(_)
                 | CompletionSource::Directory(_)
                 | CompletionSource::Composer(_) => {}
             },
@@ -122,77 +120,6 @@ impl DialogView {
         }
     }
 
-    fn stage_project_attachment(
-        &mut self,
-        selection: crate::gpui_composer_completion::CompletionSelection,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        let CompletionSource::File(source) = selection.source else {
-            return;
-        };
-        let Some((scope, sender)) = self
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.completion.clone())
-            .zip(self.completion_sender.clone())
-        else {
-            return;
-        };
-        if self.spec.as_ref().is_some_and(|spec| {
-            spec.attachments
-                .len()
-                .saturating_add(self.attachment_imports)
-                >= 16
-        }) {
-            self.attachment_error = Some("Attach at most 16 files".into());
-            cx.notify();
-            return;
-        }
-        let epoch = self.attachment_epoch;
-        self.attachment_imports = self.attachment_imports.saturating_add(1);
-        self.attachment_error = None;
-        cx.spawn_in(window, async move |owner, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move { source.stage(&sender) })
-                .await;
-            _ = owner.update_in(cx, |this, window, cx| {
-                this.attachment_imports = this.attachment_imports.saturating_sub(1);
-                if this.attachment_epoch != epoch
-                    || this.spec.as_ref().and_then(|spec| spec.completion.as_ref()) != Some(&scope)
-                    || this
-                        .prompt_textarea
-                        .read(cx)
-                        .value()
-                        .get(selection.range.clone())
-                        != Some(&selection.original)
-                {
-                    cx.notify();
-                    return;
-                }
-                match result {
-                    Ok(staged) => {
-                        this.prompt_textarea.update(cx, |input, cx| {
-                            input.set_selected_range(selection.range, cx);
-                        });
-                        this.stage_new_session_attachment(
-                            staged.path,
-                            Some(staged.temporary),
-                            window,
-                            cx,
-                        );
-                    }
-                    Err(error) => {
-                        this.attachment_error = Some(error);
-                        cx.notify();
-                    }
-                }
-            });
-        })
-        .detach();
-        cx.notify();
-    }
     pub(crate) fn completion_active(&self, window: &Window, cx: &App) -> bool {
         self.completion
             .as_ref()

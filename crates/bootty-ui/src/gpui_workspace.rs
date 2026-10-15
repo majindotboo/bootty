@@ -1232,7 +1232,7 @@ impl GpuiWorkspace {
             .iter()
             .any(|document| document.read(cx).saving(cx))
         {
-            self.state.record_error(
+            self.state.record_message(
                 "A document save is still running. Wait for its result before closing.",
             );
             return;
@@ -1348,7 +1348,7 @@ impl GpuiWorkspace {
                 if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
                     _ = weak.update(cx, |this, _| {
                         this.state
-                            .record_error("Session checkpoint did not finish before closing");
+                            .record_message("Session checkpoint did not finish before closing");
                     });
                     break;
                 }
@@ -3615,7 +3615,7 @@ impl GpuiWorkspace {
                 && !binding.uses_native_terminal_layout()
                 && binding.mux().selected_window_panes().len() > 1
             {
-                self.state.record_error("Use an absolute file link in a multipane tmux attachment; the clicked pane's directory is not available.");
+                self.state.record_message("Use an absolute file link in a multipane tmux attachment; the clicked pane's directory is not available.");
                 self.pending_link_click = Some((event.position, None));
                 return true;
             }

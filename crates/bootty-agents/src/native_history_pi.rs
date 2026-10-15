@@ -316,7 +316,7 @@ fn project_branch(
     Ok(Some(history))
 }
 
-fn read_line(reader: &mut impl BufRead) -> Result<Vec<u8>, String> {
+pub fn read_line(reader: &mut impl BufRead) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     reader
         .by_ref()
@@ -326,7 +326,7 @@ fn read_line(reader: &mut impl BufRead) -> Result<Vec<u8>, String> {
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_LINE_BYTES
         || !bytes.is_empty() && bytes.last() != Some(&b'\n')
     {
-        return Err("Pi history contains an oversized or incomplete record".into());
+        return Err("Provider history contains an oversized or incomplete record".into());
     }
     Ok(bytes)
 }
