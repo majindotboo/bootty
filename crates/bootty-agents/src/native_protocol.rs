@@ -1137,10 +1137,12 @@ impl NativeSessionSnapshot {
         self.working_since = None;
         self.finish_turn(field(field(params, "turn"), "status") == "completed");
         self.status = if field(field(params, "turn"), "status") == "failed" {
-            self.error =
-                string(field(field(field(params, "turn"), "error"), "message")).map(bounded_text);
+            self.error = string(field(field(field(params, "turn"), "error"), "message"))
+                .map(bounded_text)
+                .or_else(|| self.error.take());
             NativeSessionStatus::Error
         } else {
+            self.error = None;
             NativeSessionStatus::Idle
         };
         self.turn_id = None;
@@ -1278,6 +1280,7 @@ impl NativeSessionSnapshot {
                 }
                 self.turn_id = string(field(field(params, "turn"), "id"));
                 self.status = NativeSessionStatus::Working;
+                self.error = None;
                 self.completed_turn = false;
                 self.todos.clear();
             }

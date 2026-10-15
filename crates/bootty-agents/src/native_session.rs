@@ -938,6 +938,7 @@ impl NativeAgentSession {
             snapshot.status = NativeSessionStatus::Working;
             snapshot.working_since = Some((self.clock)());
             snapshot.completed_turn = false;
+            snapshot.error = None;
             snapshot.changed();
             id
         };
@@ -979,6 +980,7 @@ impl NativeAgentSession {
             snapshot.status = NativeSessionStatus::Working;
             snapshot.working_since = Some((self.clock)());
             snapshot.completed_turn = false;
+            snapshot.error = None;
             snapshot.changed();
             first_prompt
         };

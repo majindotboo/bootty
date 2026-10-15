@@ -73,6 +73,59 @@ fn saved_record(status: &str) -> NativeSessionRecord {
     }
 }
 
+/// Codex exposes stored history only after a fresh thread's first turn settles.
+#[gpui_kit::test]
+fn fresh_codex_turn_uses_live_content_until_history_is_available(cx: &mut TestAppContext) {
+    use bootty_agents::{NativeTurnOutcome, NativeTurnReceipt};
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for (outcome, reads_history) in [
+        (Some(NativeTurnOutcome::Running), false),
+        (Some(NativeTurnOutcome::Succeeded), true),
+        (Some(NativeTurnOutcome::Interrupted), true),
+        (None, true), // An existing thread resumed into a new provider process.
+    ] {
+        let mut record = saved_record("working");
+        record.config.provider = AgentKind::Codex;
+        record.config.session_id = Some("provider-session".into());
+        record.snapshot.provider = AgentKind::Codex;
+        record.snapshot.first_turn = outcome.map(|outcome| NativeTurnReceipt {
+            id: "first-turn".into(),
+            outcome,
+        });
+        let (sender, calls) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual.debug_bounds("native-message-reply").is_some(),
+            "live content stays visible"
+        );
+        pretty_assertions::assert_eq!(
+            calls
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|call| call.command == "agents.native.history"),
+            reads_history,
+            "first turn: {outcome:?}",
+        );
+    }
+}
+
 #[gpui_kit::test]
 fn restored_provider_history_is_visible_without_scrolling(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -1437,21 +1490,178 @@ fn composer_accepts_folders_from_paste_and_platform_drop(cx: &mut TestAppContext
     );
     visual.simulate_keystrokes("backspace");
     visual.update(|window, cx| window.draw(cx).clear(cx));
-    let position = composer.center();
+    for position in [
+        composer.center(),
+        visual
+            .debug_bounds("native-message-reply")
+            .unwrap()
+            .center(),
+    ] {
+        visual.simulate_event(gpui_kit::FileDropEvent::Entered {
+            position,
+            paths: gpui_kit::ExternalPaths(std::iter::once(path.clone()).collect()),
+        });
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.simulate_event(gpui_kit::FileDropEvent::Submit { position });
+        visual.run_until_parked();
+        visual.simulate_keystrokes("cmd-a cmd-c");
+        let text = visual
+            .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .unwrap();
+        pretty_assertions::assert_eq!(
+            text.matches(path.to_str().unwrap()).count(),
+            1,
+            "a drop adds the folder once, including over the transcript"
+        );
+        visual.simulate_keystrokes("backspace");
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    }
+}
+
+#[gpui_kit::test]
+fn a_file_drop_on_the_collapsed_composer_restores_the_draft(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().to_owned();
+    let mut record = saved_record("idle");
+    let user = record.snapshot.transcript[2].clone();
+    let reply = record.snapshot.transcript[4].clone();
+    record.snapshot.transcript.clear();
+    for ix in 0..40 {
+        let mut user = user.clone();
+        user.id = format!("user-{ix}");
+        let mut reply = reply.clone();
+        reply.id = format!("reply-{ix}");
+        record.snapshot.transcript.extend([user, reply]);
+    }
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(600.)));
+    visual.run_until_parked();
+    visual.simulate_event(ScrollWheelEvent {
+        position: point(px(500.), px(250.)),
+        delta: ScrollDelta::Lines(point(0., 60.)),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let position = visual
+        .debug_bounds("native-collapsed-composer")
+        .expect("scrolled-up composer collapses")
+        .center();
     visual.simulate_event(gpui_kit::FileDropEvent::Entered {
         position,
-        paths: gpui_kit::ExternalPaths(std::iter::once(path.clone()).collect()),
+        paths: gpui_kit::ExternalPaths(vec![path.clone()].into()),
     });
     visual.update(|window, cx| window.draw(cx).clear(cx));
     visual.simulate_event(gpui_kit::FileDropEvent::Submit { position });
     visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-composer").is_some());
     visual.simulate_keystrokes("cmd-a cmd-c");
     let text = visual
         .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
         .unwrap();
+    assert!(text.contains(path.to_str().unwrap()));
+}
+
+#[gpui_kit::test]
+fn cancelling_an_attachment_import_keeps_its_late_result_out_of_the_draft(cx: &mut TestAppContext) {
+    use gpui_kit::InputEvent as _;
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().join("notes.txt");
+    std::fs::write(&path, "Attachment body").unwrap();
+    let record = saved_record("idle");
+    let (sender, calls) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let position = visual
+        .debug_bounds("native-message-reply")
+        .unwrap()
+        .center();
+    // Dispatch without advancing the executor: the filesystem result is still in flight.
+    visual.update(|window, cx| {
+        window.dispatch_event(
+            gpui_kit::FileDropEvent::Entered {
+                position,
+                paths: gpui_kit::ExternalPaths(vec![path.clone()].into()),
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+        window.dispatch_event(
+            gpui_kit::FileDropEvent::Submit { position }.to_platform_input(),
+            cx,
+        );
+        window.draw(cx).clear(cx);
+    });
+    let cancel = visual
+        .debug_bounds("cancel-attachment-import:0")
+        .expect("pending import has a cancel action");
+    visual.update(|window, cx| {
+        window.dispatch_event(
+            gpui_kit::MouseDownEvent {
+                position: cancel.center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+                first_mouse: false,
+            }
+            .to_platform_input(),
+            cx,
+        );
+        window.dispatch_event(
+            MouseUpEvent {
+                position: cancel.center(),
+                button: MouseButton::Left,
+                modifiers: Modifiers::none(),
+                click_count: 1,
+            }
+            .to_platform_input(),
+            cx,
+        );
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("cancel-attachment-import:0").is_none());
     assert!(
-        text.contains(path.to_str().unwrap()),
-        "dropped folder becomes prompt context: {text}"
+        !calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.command == "agents.native.import")
     );
 }
 

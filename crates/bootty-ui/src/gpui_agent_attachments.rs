@@ -8,7 +8,32 @@ pub(super) struct ComposerAttachment {
     pub preview: Option<Arc<gpui_kit::RenderImage>>,
 }
 
+pub(super) struct PendingAttachmentImport {
+    name: String,
+    cancellation: Option<CommandCancellation>,
+}
+
 impl NativeAgentSessionView {
+    fn begin_attachment_import(
+        &mut self,
+        name: String,
+        cancellation: Option<CommandCancellation>,
+    ) -> u64 {
+        let id = self.next_attachment_import;
+        self.next_attachment_import = id.wrapping_add(1);
+        self.attachment_imports
+            .insert(id, PendingAttachmentImport { name, cancellation });
+        id
+    }
+
+    pub(super) fn cancel_attachment_imports(&mut self) {
+        for import in std::mem::take(&mut self.attachment_imports).into_values() {
+            if let Some(cancellation) = import.cancellation {
+                _ = cancellation.cancel();
+            }
+        }
+    }
+
     pub(super) fn prompt_arguments(
         &self,
         message: String,
@@ -123,14 +148,16 @@ impl NativeAgentSessionView {
                     }
                     let target = self.record.target();
                     let bytes = image.bytes().to_vec();
-                    self.attachment_imports = self.attachment_imports.saturating_add(1);
+                    let import = self.begin_attachment_import("Pasted image".into(), None);
                     cx.spawn_in(window, async move |owner, cx| {
                         let result = cx
                             .background_executor()
                             .spawn(async move { clipboard_png(&bytes) })
                             .await;
                         _ = owner.update_in(cx, |this, window, cx| {
-                            this.attachment_imports = this.attachment_imports.saturating_sub(1);
+                            if this.attachment_imports.remove(&import).is_none() {
+                                return;
+                            }
                             if this.record.target() != target {
                                 cx.notify();
                                 return;
@@ -163,10 +190,21 @@ impl NativeAgentSessionView {
     }
 
     pub(super) fn attach_path(&mut self, path: PathBuf, window: &Window, cx: &mut Context<Self>) {
+        if self.attachment_slots_full(cx) {
+            self.error = Some("Attach at most 16 files".into());
+            cx.notify();
+            return;
+        }
         let target = self.record.target();
         let insertion = self.composer.read(cx).selected_range();
         let revision = self.draft_revision;
-        self.attachment_imports = self.attachment_imports.saturating_add(1);
+        let import = self.begin_attachment_import(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            None,
+        );
         cx.spawn_in(window, async move |owner, cx| {
             let result = cx
                 .background_executor()
@@ -180,31 +218,21 @@ impl NativeAgentSessionView {
                 })
                 .await;
             _ = owner.update_in(cx, |this, window, cx| {
-                this.attachment_imports = this.attachment_imports.saturating_sub(1);
+                if this.attachment_imports.remove(&import).is_none() {
+                    return;
+                }
                 if this.record.target() != target {
                     return;
                 }
                 match result {
                     Ok((path, true)) => {
-                        this.composer.update(cx, |input, cx| {
-                            if this.draft_revision == revision {
-                                input.set_selected_range(insertion, cx);
-                            } else {
-                                input.set_selected_range(
-                                    input.value().len()..input.value().len(),
-                                    cx,
-                                );
-                            }
-                            if let Err(error) = input.replace_with_token(
-                                crate::gpui_prompt_attachments::directory_token(&path),
-                                window,
-                                cx,
-                            ) {
-                                this.error = Some(error.to_string());
-                            }
-                            input.focus_handle(cx).focus(window, cx);
-                        });
-                        this.draft_revision = this.draft_revision.wrapping_add(1);
+                        this.insert_attachment_token(
+                            crate::gpui_prompt_attachments::directory_token(&path),
+                            insertion,
+                            revision,
+                            window,
+                            cx,
+                        );
                     }
                     Ok((path, false)) => {
                         this.composer.update(cx, |input, cx| {
@@ -273,18 +301,25 @@ impl NativeAgentSessionView {
             Caller::Internal,
         );
         invocation.target = Some(target.clone());
+        let cancellation = CommandCancellation::new();
         let Ok(receiver) = self.sender.submit(
             invocation,
             Instant::now()
                 .checked_add(Duration::from_secs(60))
                 .unwrap_or_else(Instant::now),
-            CommandCancellation::new(),
+            cancellation.clone(),
         ) else {
             self.error = Some("Could not attach the file".into());
             cx.notify();
             return;
         };
-        self.attachment_imports = self.attachment_imports.saturating_add(1);
+        let import = self.begin_attachment_import(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            Some(cancellation),
+        );
         self.error = None;
         cx.spawn_in(window, async move |owner, cx| {
             let result = cx
@@ -297,7 +332,9 @@ impl NativeAgentSessionView {
                 })
                 .await;
             _ = owner.update_in(cx, |this, window, cx| {
-                this.attachment_imports = this.attachment_imports.saturating_sub(1);
+                if this.attachment_imports.remove(&import).is_none() {
+                    return;
+                }
                 if this.record.target() != target {
                     return;
                 }
@@ -325,22 +362,9 @@ impl NativeAgentSessionView {
                                 );
                                 this.attachments
                                     .push(ComposerAttachment { reference, preview });
-                                this.composer.update(cx, |input, cx| {
-                                    if this.draft_revision == revision {
-                                        input.set_selected_range(insertion, cx);
-                                    } else {
-                                        input.set_selected_range(
-                                            input.value().len()..input.value().len(),
-                                            cx,
-                                        );
-                                    }
-                                    if let Err(error) = input.replace_with_token(token, window, cx)
-                                    {
-                                        this.error = Some(error.to_string());
-                                    }
-                                    input.focus_handle(cx).focus(window, cx);
-                                });
-                                this.draft_revision = this.draft_revision.wrapping_add(1);
+                                this.insert_attachment_token(
+                                    token, insertion, revision, window, cx,
+                                );
                             }
                             Err(_) => this.error = Some("Invalid attachment response".into()),
                         }
@@ -357,77 +381,151 @@ impl NativeAgentSessionView {
         cx.notify();
     }
 
+    fn render_attachment_import(
+        id: u64,
+        import: &PendingAttachmentImport,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        div()
+            .debug_selector(move || format!("attachment-import:{id}"))
+            .flex()
+            .items_center()
+            .gap_2()
+            .min_w_0()
+            .child(gpui_kit::component::spinner::Spinner::new().small())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("Attaching {}…", import.name)),
+            )
+            .child(
+                Button::new(("cancel-attachment-import", id))
+                    .debug_selector(move || format!("cancel-attachment-import:{id}"))
+                    .label("Cancel")
+                    .ghost()
+                    .small()
+                    .accessibility_label(format!("Cancel attaching {}", import.name))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(import) = this.attachment_imports.remove(&id)
+                            && let Some(cancellation) = import.cancellation
+                        {
+                            _ = cancellation.cancel();
+                        }
+                        this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    })),
+            )
+    }
+
+    fn insert_attachment_token(
+        &mut self,
+        token: gpui_kit::component::input::InlineToken,
+        insertion: std::ops::Range<usize>,
+        revision: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.composer.update(cx, |input, cx| {
+            if self.draft_revision == revision {
+                input.set_selected_range(insertion, cx);
+            } else {
+                input.set_selected_range(input.value().len()..input.value().len(), cx);
+            }
+            if let Err(error) = input.replace_with_token(token, window, cx) {
+                self.error = Some(error.to_string());
+            }
+            input.focus_handle(cx).focus(window, cx);
+        });
+        self.draft_revision = self.draft_revision.wrapping_add(1);
+    }
+
     pub(super) fn render_attachments(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        div().flex().flex_col().gap_2().child(
-            div().flex().flex_wrap().gap_2().children(
-                self.attachments
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .children(
+                self.attachment_imports
                     .iter()
-                    .filter(|attachment| {
-                        self.active_attachment_ids(cx)
-                            .contains(&attachment.reference.id)
-                    })
-                    .filter_map(|attachment| {
-                        let preview = attachment.preview.as_ref()?;
-                        let id = attachment.reference.id.clone();
-                        Some(
-                            div()
-                                .relative()
-                                .w_20()
-                                .h_20()
-                                .rounded_md()
-                                .overflow_hidden()
-                                .child(
-                                    Button::new(gpui_kit::SharedString::from(format!(
-                                        "open-preview:{id}"
-                                    )))
-                                    .ghost()
-                                    .p_0()
-                                    .size_full()
-                                    .accessibility_label(format!(
-                                        "View {}",
-                                        attachment.reference.name
-                                    ))
+                    .map(|(&id, import)| Self::render_attachment_import(id, import, cx)),
+            )
+            .child(
+                div().flex().flex_wrap().gap_2().children(
+                    self.attachments
+                        .iter()
+                        .filter(|attachment| {
+                            self.active_attachment_ids(cx)
+                                .contains(&attachment.reference.id)
+                        })
+                        .filter_map(|attachment| {
+                            let preview = attachment.preview.as_ref()?;
+                            let id = attachment.reference.id.clone();
+                            Some(
+                                div()
+                                    .relative()
+                                    .w_20()
+                                    .h_20()
+                                    .rounded_md()
+                                    .overflow_hidden()
                                     .child(
-                                        gpui_kit::img(preview.clone())
-                                            .size_full()
-                                            .object_fit(gpui_kit::ObjectFit::Contain),
-                                    )
-                                    .on_click(cx.listener({
-                                        let id = id.clone();
-                                        move |this, _, window, cx| {
-                                            this.open_attachment(&id, window, cx);
-                                        }
-                                    })),
-                                )
-                                .child(
-                                    div().absolute().top_0().right_0().occlude().child(
                                         Button::new(gpui_kit::SharedString::from(format!(
-                                            "remove-preview:{id}"
+                                            "open-preview:{id}"
                                         )))
-                                        .debug_selector({
-                                            let id = id.clone();
-                                            move || format!("remove-preview:{id}")
-                                        })
-                                        .icon(IconName::Close)
-                                        .xsmall()
                                         .ghost()
+                                        .p_0()
+                                        .size_full()
                                         .accessibility_label(format!(
-                                            "Remove {}",
+                                            "View {}",
                                             attachment.reference.name
                                         ))
-                                        .tooltip(format!("Remove {}", attachment.reference.name))
+                                        .child(
+                                            gpui_kit::img(preview.clone())
+                                                .size_full()
+                                                .object_fit(gpui_kit::ObjectFit::Contain),
+                                        )
                                         .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                cx.stop_propagation();
-                                                this.remove_attachment(&id, window, cx);
+                                            cx.listener({
+                                                let id = id.clone();
+                                                move |this, _, window, cx| {
+                                                    this.open_attachment(&id, window, cx);
+                                                }
                                             }),
                                         ),
+                                    )
+                                    .child(
+                                        div().absolute().top_0().right_0().occlude().child(
+                                            Button::new(gpui_kit::SharedString::from(format!(
+                                                "remove-preview:{id}"
+                                            )))
+                                            .debug_selector({
+                                                let id = id.clone();
+                                                move || format!("remove-preview:{id}")
+                                            })
+                                            .icon(IconName::Close)
+                                            .xsmall()
+                                            .ghost()
+                                            .accessibility_label(format!(
+                                                "Remove {}",
+                                                attachment.reference.name
+                                            ))
+                                            .tooltip(format!(
+                                                "Remove {}",
+                                                attachment.reference.name
+                                            ))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                cx.stop_propagation();
+                                                this.remove_attachment(&id, window, cx);
+                                            })),
+                                        ),
                                     ),
-                                ),
-                        )
-                    }),
-            ),
-        )
+                            )
+                        }),
+                ),
+            )
     }
 
     pub(super) fn active_attachment_ids(&self, cx: &App) -> Vec<String> {
@@ -448,7 +546,7 @@ impl NativeAgentSessionView {
     fn attachment_slots_full(&self, cx: &App) -> bool {
         self.active_attachment_ids(cx)
             .len()
-            .saturating_add(self.attachment_imports)
+            .saturating_add(self.attachment_imports.len())
             >= 16
     }
 

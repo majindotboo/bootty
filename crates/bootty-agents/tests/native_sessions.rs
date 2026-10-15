@@ -51,7 +51,10 @@ def emit(value): print(json.dumps(value),flush=True)
 def notice(method,**params): emit({'method':method,'params':{'threadId':thread,'turnId':'turn-'+str(turn),**params}})
 def reply(ident,result): emit({'id':ident,'result':result})
 def started(): notice('turn/started',turn={'id':'turn-'+str(turn),'status':'inProgress','items':[]})
-def completed(status='completed'): notice('turn/completed',turn={'id':'turn-'+str(turn),'status':status,'items':[]})
+def completed(status='completed'):
+ data={'id':'turn-'+str(turn),'status':status,'items':[]}
+ if status=='failed': data['error']={'message':'stream disconnected'}
+ notice('turn/completed',turn=data)
 for line in sys.stdin:
  value=json.loads(line)
  method=value.get('method')
@@ -176,7 +179,7 @@ for line in sys.stdin:
    notice('item/completed',item={'id':'answer-'+str(turn),'type':'agentMessage','text':'hello'})
   emit({'method':'turn/completed','params':{'threadId':'other','turn':{'id':'turn-'+str(turn),'status':'completed'}}})
   emit({'method':'turn/completed','params':{'threadId':thread,'turn':{'id':'old','status':'completed'}}})
-  completed(text if text in ['failed','interrupted','unknown'] else 'completed')
+  completed('failed' if text=='fatal-error' else text if text in ['failed','interrupted','unknown'] else 'completed')
   reply(ident,{'turn':{'id':'different-ack' if text=='mismatched-ack' else 'turn-'+str(turn)}})
  elif method == 'turn/steer':
   assert params['threadId'] == thread and params['expectedTurnId'] == 'turn-'+str(turn)
@@ -749,6 +752,47 @@ fn codex_errors_end_the_turn_only_when_not_retried(
         ),
         (Some(outcome), error)
     );
+    session.stop();
+}
+
+#[rstest]
+#[case::completed("completed", NativeSessionStatus::Idle, None)]
+#[case::interrupted("interrupted", NativeSessionStatus::Idle, None)]
+#[case::failed("failed", NativeSessionStatus::Error, Some("stream disconnected"))]
+fn codex_turn_completion_and_next_prompt_replace_prior_errors(
+    #[case] completion: &str,
+    #[case] status: NativeSessionStatus,
+    #[case] error: Option<&str>,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    fs::write(
+        root.path().join("events.json"),
+        json!([{
+            "method":"error", "params":{
+                "threadId":session.snapshot().session_id,
+                "turnId":session.snapshot().turn_id,
+                "error":{"message":"stream disconnected"}, "willRetry":false
+            }
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Error);
+    session
+        .rpc("__finish", json!({"status":completion}))
+        .unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(
+        (snapshot.status, snapshot.error.as_deref()),
+        (status, error)
+    );
+    if status == NativeSessionStatus::Idle {
+        session.send_prompt("active").unwrap();
+        assert_eq!(session.snapshot().error, None);
+    }
     session.stop();
 }
 

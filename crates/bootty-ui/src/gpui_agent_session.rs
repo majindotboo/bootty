@@ -38,7 +38,7 @@ mod completion;
 
 #[path = "gpui_agent_attachments.rs"]
 mod attachments;
-use attachments::ComposerAttachment;
+use attachments::{ComposerAttachment, PendingAttachmentImport};
 pub use attachments::{attachment_preview, clipboard_png};
 #[path = "gpui_agent_models.rs"]
 mod models;
@@ -219,7 +219,8 @@ pub struct NativeAgentSessionView {
     queued_messages: followups::QueuedMessages,
     applications: Vec<bootty_agents::NativeApplicationMention>,
     attachments: Vec<ComposerAttachment>,
-    attachment_imports: usize,
+    attachment_imports: BTreeMap<u64, PendingAttachmentImport>,
+    next_attachment_import: u64,
     attachment_previews: BTreeMap<String, Arc<gpui_kit::RenderImage>>,
     attachment_preview_attempts: BTreeSet<String>,
     models: Option<Vec<bootty_agents::NativeModelOption>>,
@@ -374,7 +375,8 @@ impl NativeAgentSessionView {
             queued_messages: followups::QueuedMessages::default(),
             applications: Vec::new(),
             attachments: Vec::new(),
-            attachment_imports: 0,
+            attachment_imports: BTreeMap::new(),
+            next_attachment_import: 0,
             attachment_previews: BTreeMap::new(),
             attachment_preview_attempts: BTreeSet::new(),
             models: None,
@@ -748,6 +750,7 @@ impl NativeAgentSessionView {
             self.error = None;
             self.command_error = None;
             self.dismissed_error = None;
+            self.cancel_attachment_imports();
         }
         if record.generation != self.record.generation {
             self.history_loaded = false;
@@ -1238,7 +1241,7 @@ impl NativeAgentSessionView {
             || self.pending.contains("prompt")
             || self.pending.contains("queue")
             || self.pending.contains("configure")
-            || self.attachment_imports > 0
+            || !self.attachment_imports.is_empty()
         {
             return;
         }
@@ -2729,6 +2732,7 @@ impl NativeAgentSessionView {
         let placeholder = format!("Message {}…", self.record.config.provider.display_name());
         div().flex().child(
             Button::new("expand-composer")
+                .debug_selector(|| "native-collapsed-composer".into())
                 .ghost()
                 .w_full()
                 .max_w(gpui_kit::rems(48.))
@@ -2786,6 +2790,7 @@ impl NativeAgentSessionView {
             && self.composer.read(cx).value().is_empty()
             && !self.composer.read(cx).focus_handle(cx).is_focused(window)
             && self.attachments.is_empty()
+            && self.attachment_imports.is_empty()
             && self.annotations.is_empty()
         {
             return self.render_collapsed_composer(cx);
@@ -2809,20 +2814,10 @@ impl NativeAgentSessionView {
             .bg(cx.theme().muted.opacity(0.35))
             .border_1()
             .border_color(cx.theme().border)
-            .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
-                style.border_color(cx.theme().ring).bg(cx.theme().accent)
-            })
-            .on_drop(
-                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
-                    cx.stop_propagation();
-                    for path in &paths.0 {
-                        this.attach_path(path.clone(), window, cx);
-                    }
-                }),
+            .when(
+                !self.attachments.is_empty() || !self.attachment_imports.is_empty(),
+                |body| body.child(self.render_attachments(cx)),
             )
-            .when(!self.attachments.is_empty(), |body| {
-                body.child(self.render_attachments(cx))
-            })
             .when(!self.annotations.is_empty(), |body| {
                 body.child(self.render_annotations(cx))
             })
@@ -3050,7 +3045,7 @@ impl NativeAgentSessionView {
                                         || !ready
                                         || send_pending
                                         || self.pending.contains("configure")
-                                        || self.attachment_imports > 0
+                                        || !self.attachment_imports.is_empty()
                                         || (self.composer.read(cx).value().trim().is_empty()
                                             && self.attachments.is_empty()
                                             && self.annotations.is_empty()
@@ -3241,6 +3236,15 @@ impl NativeAgentSessionView {
             self.record.snapshot.status,
             NativeSessionStatus::Idle | NativeSessionStatus::Working | NativeSessionStatus::Waiting
         ) && self.record.pending_initial_message.is_none()
+            // A fresh Codex thread has no stored history until its first turn finishes.
+            // Its live transcript already contains that turn; don't query an absent store.
+            && (self.record.config.provider != AgentKind::Codex
+                || self.record.snapshot.completed_turns > 0
+                || self.record.snapshot.first_turn.as_ref().is_some_and(|turn| {
+                    turn.outcome != bootty_agents::NativeTurnOutcome::Running
+                })
+                || (self.record.config.session_id.is_some()
+                    && self.record.snapshot.first_turn.is_none()))
             && !self.pending.contains("prompt")
             && self
                 .record
@@ -3285,6 +3289,15 @@ impl Render for NativeAgentSessionView {
             .min_h_0()
             .flex()
             .flex_col()
+            .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().accent))
+            .on_drop(
+                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                    cx.stop_propagation();
+                    for path in &paths.0 {
+                        this.attach_path(path.clone(), window, cx);
+                    }
+                }),
+            )
             .when(wide, |view| view.pr(gpui_kit::rems(20.)))
             .child(self.render_context_geometry(cx))
             .bg(cx.theme().background)
