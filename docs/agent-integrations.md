@@ -158,6 +158,9 @@ Codex approvals show the command, working directory and reason. Allow once retai
 no grant. Allow for this session uses Codex's session approval cache; Always allow
 applies only the exact proposed command-prefix rule displayed in the request.
 Provider-restricted decisions, altered rules and expired requests are rejected.
+A file-change approval shows the diff it would apply: Codex's for the file-change
+item it names, and Claude's Edit, MultiEdit and Write built from their old and new
+text, numbered within the snippet since the request has no file positions.
 
 Permission changes during a turn are saved for the next turn. The current prompt
 and approval keep their captured policy. After the turn becomes idle, Bootty
@@ -242,12 +245,23 @@ activity do not depend on that ingress.
 ## Dictation and voice
 
 Both composers use the bundled Pi audio host for microphone capture and playback
-on macOS, Linux and Windows. Dictation uses OpenAI Realtime transcription; voice
-uses the public `/v1/realtime/calls` endpoint with an `ask_agent` function. Voice
-prompts enter the current conversation's ordinary submission path, and only the
-agent's returned result is sent back for speech.
+on macOS, Linux and Windows. Dictation uses OpenAI Realtime transcription and
+inserts the text at the cursor.
 
-Audio authentication reads `OPENAI_API_KEY`, then an API key in the captured
-Codex or Pi account store. ChatGPT subscription tokens are not API keys. Missing
-credentials stop before opening the microphone. Credentials never enter the GUI,
-command arguments, or error messages. There are no private Codex voice endpoints.
+Speech runs on the Codex sign-in already on this machine: a Codex conversation's
+own account, otherwise the selected Codex account. A ChatGPT sign-in sends its
+token with its account id; Codex in API-key mode sends that key. Nothing else is
+read. An expired token stops before opening the microphone. Credentials never
+enter the GUI, command arguments, or error messages.
+
+Without a current sign-in, dictation on macOS uses Apple's on-device speech
+recognizer, so audio and text stay on the Mac. The first such dictation asks for
+the Speech Recognition permission. Where neither is available, as on Windows and
+Linux without Codex, the buttons don't show and the commands report why.
+
+Voice mode is a Codex call on a Codex conversation's own thread. The audio host
+makes a WebRTC offer, the conversation takes it to Codex with
+`thread/realtime/start`, and Codex's answer connects the call. Codex then listens,
+starts turns on the conversation for what it delegates, and speaks the replies; the
+transcript shows only the delegated request. Ending voice mode stops the call.
+Other conversations and drafts show no voice button.

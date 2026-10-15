@@ -34,21 +34,86 @@ impl NativeAgentSessionView {
         cx: &mut Context<Self>,
     ) {
         let config = &self.record.config;
-        self.speech.update(cx, |speech, _| {
-            if matches!(
-                config.provider,
-                bootty_agents::AgentKind::Codex | bootty_agents::AgentKind::Pi
-            ) {
+        // A Codex conversation speaks for its own account; any other uses the selected one.
+        self.speech.update(cx, |speech, cx| {
+            if config.provider == bootty_agents::AgentKind::Codex {
                 speech.set_captured_account(
-                    &config.provider.to_string(),
                     config.program.clone(),
                     config.account_directory.clone(),
+                    cx,
                 );
             } else {
-                speech.set_account(codex, "codex");
+                speech.set_account(codex, cx);
             }
         });
     }
+    /// Take the voice call's offer to this conversation's Codex session, then connect its answer.
+    pub(super) fn start_voice_call(&self, offer: String, window: &Window, cx: &Context<Self>) {
+        let mut invocation = CommandInvocation::new(
+            "agents.native.voice-start",
+            vec![
+                self.record.id.clone(),
+                self.record.generation.to_string(),
+                offer,
+            ],
+            Caller::Internal,
+        );
+        invocation.target = Some(self.record.target());
+        let Ok(receiver) = self.sender.submit(
+            invocation,
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .unwrap_or_else(Instant::now),
+            CommandCancellation::new(),
+        ) else {
+            return;
+        };
+        cx.spawn_in(window, async move |owner, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { receiver.recv() })
+                .await;
+            let answer = match &outcome {
+                Ok(CommandOutcome::Success { value, .. }) => {
+                    value.get("sdp").and_then(Value::as_str).map(str::to_owned)
+                }
+                _ => None,
+            };
+            _ = owner.update_in(cx, |this, window, cx| {
+                if let Some(answer) = answer {
+                    this.speech
+                        .update(cx, |speech, cx| speech.answer(answer, cx));
+                    return;
+                }
+                let message = outcome
+                    .ok()
+                    .and_then(|outcome| crate::commands::command_outcome_message(&outcome))
+                    .unwrap_or_else(|| "Codex couldn't start voice mode".to_owned());
+                crate::gpui_speech::notify_error(&message, window, cx);
+                this.speech
+                    .update(cx, super::super::gpui_speech::SpeechInput::stop);
+            });
+        })
+        .detach();
+    }
+
+    /// End Codex's side of a voice call that ended here.
+    pub(super) fn end_voice_call(&self) {
+        let mut invocation = CommandInvocation::new(
+            "agents.native.voice-stop",
+            vec![self.record.id.clone(), self.record.generation.to_string()],
+            Caller::Internal,
+        );
+        invocation.target = Some(self.record.target());
+        _ = self.sender.submit(
+            invocation,
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .unwrap_or_else(Instant::now),
+            CommandCancellation::new(),
+        );
+    }
+
     pub(crate) fn set_speech_visible(&self, visible: bool, cx: &mut Context<Self>) {
         if !visible {
             self.speech

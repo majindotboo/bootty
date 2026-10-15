@@ -49,9 +49,9 @@ This file describes the current production structure.
 | Seekable file and media reads | `bootty-host::file_reader` | Files are opened on their owning host with bounded ranges and revision checks; account-scoped history rejects paths outside its captured root. |
 | Private stdio framing and remote endpoint relays | `bootty-host::private_stdio` | Bounded bytes use the owning host's encrypted process stream; tool grants and command authority stay with `bootty-agents`. |
 | Native conversations and provider subprocesses | `bootty-agents::NativeAgentService` | Commit catalog snapshots before publication; resume only the captured task, account and provider conversation. |
-| Dictation and voice | `bootty-agents::voice` | Public OpenAI transcription and Realtime calls use an API key from `OPENAI_API_KEY` or the captured Codex/Pi API-key store; subscription OAuth tokens are not sent to these APIs. The pinned Pi audio host owns cross-platform microphone capture and playback. `bootty-host::speech` owns bounded helper framing and process lifetime. The GUI receives text and status; credentials stay provider-owned. |
+| Dictation and voice | `bootty-agents::voice` | Speech uses the Codex sign-in on this machine, from the captured or selected Codex account. Without one, dictation uses the macOS on-device recognizer, and where that is unavailable composers show no speech buttons. Voice mode is a Codex realtime call on a Codex conversation's thread, started by that conversation's session. The pinned Pi audio host owns cross-platform microphone capture and playback. `bootty-host::speech` owns bounded helper framing and process lifetime. The GUI receives text and status; credentials stay provider-owned. |
 | Persisted agent runs and dispatch attempts | `bootty-agents::OrchestrationService` | Commit before publication; recovery interrupts outstanding attempts without replaying prompts. |
-| Desktop capture and input | `bootty-computer` | Disabled, denied, stale or occluded targets fail before input; the in-process platform adapter validates the exact observed process and window on macOS, Windows and X11. |
+| Desktop capture, accessibility elements and input | `bootty-computer` | Disabled, denied, stale or occluded targets fail before input; the in-process platform adapter validates the exact observed process and window on macOS, Windows and X11. A press re-reads its element and refuses one that moved, changed or was disabled. Elements are listed on macOS only. |
 | Native browser views and validated web content | `bootty-browser` | Native window systems report capability errors; navigation and bounded page events pass through the host adapter. |
 | Local browser annotations and credential origin checks | `bootty-browser` | Bounded annotations persist atomically. Retained credential library APIs validate the document and exact origin; platform-store records remain separate from browser-managed passwords. |
 | Browser page identity, selection and saved placement | `bootty-ui::BrowserPanel` and `gpui_dock` | A stale page ID fails rather than navigating another page; page content and placement persist in `native-panels.json`. |
@@ -389,7 +389,10 @@ user turns, with cached virtual-list measurements retained while streaming;
 copy actions and returning to the live tail act on that same transcript. Transcript
 refresh runs on a worker and follows service revisions, without an idle polling loop.
 Active-turn follow-ups use Codex's exact `turn/steer` acknowledgement, Claude's
-urgent input on its existing stream, or Pi's `steer` disposition. Rejection
+urgent input on its existing stream, or Pi's `steer` disposition. A turn that
+can't take a steer yet, such as while the previous message is still on its way or
+while it stops, queues the message marked to steer; the follow-up owner steers it in
+once the turn can take it, or sends it as the next turn's message. Provider rejection
 preserves the active turn and the composer draft. Context occupancy is
 shown only from reported token counts and provider-advertised capacity. File
 changes render the provider's diff rather than its raw JSON envelope.
@@ -499,15 +502,20 @@ only the UI answers a card. Revocation cancels pending application work. Grants 
 pixels are not persisted or inherited by subagents. Bootty itself, known terminals
 and System Settings are never granted. Screenshot, focus and input tools reenter the
 shared command path; `bootty-computer` still checks OS permissions, secure input and
-the exact window observed by the last snapshot. Input requires that window to be
+the exact window observed by the last snapshot. A snapshot also lists the window's
+accessibility elements, and the lease keeps them with that window, so a press names an
+element by its number in the latest snapshot. Input requires that window to be
 focused; the focus command raises only that window. On macOS, where input skips the
 real pointer, the UI briefly shows its own cursor where delivered input landed.
 
 The native transcript keeps assistant progress messages and final responses visible
 after a turn settles. Thinking and command output between messages fold into work
-summaries; a settled turn's duration reads on its last fold. Codex file changes stay
-visible with file paths and line counts; their diffs expand through the existing
-disclosure. Live work retains its elapsed timer independently of the fold. Selected
+summaries; a settled turn's duration reads on its last fold. File changes stay visible
+with file paths and line counts, and their diffs expand through the existing
+disclosure. Codex reports them as `fileChange`; Claude's Edit, MultiEdit and Write
+results and Pi's edit results become the same `fileChange` from the provider's own
+patch, live and in history. A patch too large for a provider message is left out
+whole, so its file shows without a diff instead of a cut one. Live work retains its elapsed timer independently of the fold. Selected
 assistant text supports `C` to comment, `R` to choose a reaction with arrows and Enter, and `Y` to copy. These shortcuts apply only to the focused
 response selection; the prompt editor keeps ordinary typing. Comments and Pi's
 reaction meanings share the validated citation payload and editable inline tokens.

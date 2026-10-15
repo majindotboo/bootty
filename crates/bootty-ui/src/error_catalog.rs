@@ -178,13 +178,6 @@ fn technical_summary(message: &str) -> String {
     if lower.contains("target is stale") {
         return "That pane or session no longer exists.".to_owned();
     }
-    if lower.contains("agent is stopping") {
-        return "The agent is stopping. Queued messages send after it stops.".to_owned();
-    }
-    if lower.contains("wait for the previous message") {
-        return "The previous message hasn't reached the agent yet. Try again in a moment."
-            .to_owned();
-    }
     // Untrusted provider and transport diagnostics remain available through details().
     "Could not complete the operation. Try again.".into()
 }

@@ -1,7 +1,9 @@
 use bootty_computer::{
     ComputerAction, ComputerTarget, DisplayBounds, HostCaptureRegion, Key, Modifier,
 };
-use bootty_control::{Caller, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind};
+use bootty_control::{
+    Caller, CommandInvocation, CommandOutcome, CommandTarget, MutationClass, ResourceKind,
+};
 use bootty_ui::commands::{
     CommandCatalog, CommandExecutor, ComputerCommand, CoreCommandExecutor, agent_may_use,
 };
@@ -77,6 +79,9 @@ fn shortcuts_use_one_typed_command_for_all_callers(
 #[case("computer.type", vec![String::new()])]
 #[case("computer.type", vec!["a".repeat(4097)])]
 #[case("computer.key", vec!["return".into(), "command,command,command,command,command".into()])]
+#[case("computer.elements", vec!["extra".into()])]
+#[case("computer.press", vec!["{}".into()])]
+#[case("computer.press", vec![element_json(900.0)])]
 fn malformed_actions_are_refused_at_public_command_resolution(
     target: ComputerTarget,
     #[case] command: &str,
@@ -108,6 +113,48 @@ fn missing_target_identity_or_fake_permission_token_is_refused(#[case] target: &
     assert!(
         matches!(result, Err(CommandOutcome::Failed { code, .. }) if code == "invalid_arguments")
     );
+}
+
+/// A listed element as `computer.elements` returns it; `x` places its frame.
+fn element_json(x: f64) -> String {
+    serde_json::json!({"path":[0, 2],"role":"Button","name":"Back",
+        "frame":{"x":x,"y":10.0,"width":20.0,"height":20.0}})
+    .to_string()
+}
+
+#[rstest]
+#[case("computer.elements", vec![], MutationClass::Read)]
+#[case("computer.press", vec![element_json(10.0)], MutationClass::Write)]
+fn element_commands_share_the_typed_computer_executor(
+    target: ComputerTarget,
+    #[case] id: &str,
+    #[case] arguments: Vec<String>,
+    #[case] mutation: MutationClass,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut values = vec![serde_json::to_string(&target)?];
+    values.extend(arguments.clone());
+    let resolved = CommandCatalog::default()
+        .resolve(CommandInvocation::new(id, values, Caller::Socket))
+        .map_err(|outcome| format!("{outcome:?}"))?;
+    assert_eq!(resolved.descriptor.mutation, mutation);
+    let CommandExecutor::Core(CoreCommandExecutor::Computer(actual)) = resolved.executor else {
+        return Err("element command did not resolve to the shared computer executor".into());
+    };
+    let action = match arguments.first() {
+        Some(element) => ComputerAction::Press {
+            element: Box::new(serde_json::from_str(element)?),
+        },
+        None => ComputerAction::Elements,
+    };
+    assert_eq!(
+        actual,
+        ComputerCommand::Execute {
+            target,
+            action,
+            destination: None,
+        }
+    );
+    Ok(())
 }
 
 #[rstest]

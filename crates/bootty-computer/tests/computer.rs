@@ -5,8 +5,9 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_computer::{
-    Computer, ComputerAccess, ComputerAction, ComputerError, ComputerResult, ComputerStatus,
-    ComputerTarget, DisplayBounds, HostCaptureRegion, MouseButton, PermissionStatus,
+    Computer, ComputerAccess, ComputerAction, ComputerElement, ComputerError, ComputerResult,
+    ComputerStatus, ComputerTarget, DisplayBounds, ElementState, HostCaptureRegion, MouseButton,
+    PermissionStatus, PressMethod,
     control::{MAX_TEXT_UNITS, text_pieces},
     desktop::{Desktop, Focus, Image, InputEvent, NativeWindow},
 };
@@ -217,12 +218,16 @@ struct Fake {
     accessibility: Option<PermissionStatus>,
     recording: Option<PermissionStatus>,
     secure: bool,
+    elements: Vec<ComputerElement>,
+    /// Whether elements have their own press action.
+    pressable: bool,
     posted: Mutex<Vec<InputEvent>>,
     raised: Mutex<Vec<u32>>,
+    pressed: Mutex<Vec<Vec<u16>>>,
 }
 
 impl Fake {
-    /// The target is the only window, focused and in front.
+    /// The target is the only window, focused and in front, with one unlabeled button.
     fn focused(target: &ComputerTarget) -> Arc<Self> {
         Arc::new(Self {
             windows: vec![window(target)],
@@ -230,6 +235,7 @@ impl Fake {
                 process_id: target.process_id,
                 window: Some(target.bounds.clone()),
             }),
+            elements: vec![button()],
             ..Self::default()
         })
     }
@@ -243,6 +249,37 @@ impl Fake {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone()
+    }
+
+    fn pressed(&self) -> Vec<Vec<u16>> {
+        self.pressed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+}
+
+/// An icon button with no label, centered on the point [`click`] uses.
+fn button() -> ComputerElement {
+    ComputerElement {
+        path: vec![0, 2],
+        role: "Button".into(),
+        name: None,
+        value: None,
+        identifier: Some("back".into()),
+        frame: DisplayBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 20.0,
+            height: 20.0,
+        },
+        states: Vec::new(),
+    }
+}
+
+fn press() -> ComputerAction {
+    ComputerAction::Press {
+        element: Box::new(button()),
     }
 }
 
@@ -308,6 +345,39 @@ impl Desktop for Fake {
             .unwrap_or_else(PoisonError::into_inner)
             .push(window.id);
         Ok(())
+    }
+
+    fn elements(
+        &self,
+        _: &NativeWindow,
+        limit: usize,
+    ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        Ok((
+            self.elements.iter().take(limit).cloned().collect(),
+            self.elements.len() > limit,
+        ))
+    }
+
+    fn element(
+        &self,
+        _: &NativeWindow,
+        path: &[u16],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
+        Ok(self
+            .elements
+            .iter()
+            .find(|element| element.path == path)
+            .cloned())
+    }
+
+    fn press(&self, _: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
+        if self.pressable {
+            self.pressed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(path.to_vec());
+        }
+        Ok(self.pressable)
     }
 
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image> {
@@ -424,7 +494,8 @@ const fn secure_input(fake: &mut Fake, _: &ComputerTarget) {
     fake.secure = true;
 }
 
-/// Each case changes one fact about the desktop; input must refuse and post nothing.
+/// Each case changes one fact about the desktop; input must refuse and post nothing. A press of
+/// an element without its own action clicks, so it follows the same rules.
 #[rstest]
 #[case::window_closed(close)]
 #[case::window_moved(move_window)]
@@ -438,13 +509,112 @@ const fn secure_input(fake: &mut Fake, _: &ComputerTarget) {
 async fn input_refuses_anything_but_the_exact_focused_window(
     target: ComputerTarget,
     #[case] change: fn(&mut Fake, &ComputerTarget),
+    #[values(click(), press())] action: ComputerAction,
 ) {
     let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
     change(&mut fake, &target);
     let fake = Arc::new(fake);
-    let result = run(&fake, &target, &click()).await;
+    let result = run(&fake, &target, &action).await;
     assert!(result.is_err(), "input must be refused, got {result:?}");
     assert_eq!(fake.posted(), []);
+}
+
+/// Apps that draw their own controls often have no press action; those elements get a click at
+/// their center instead, and the result says which happened.
+#[rstest]
+#[case::own_action(true, PressMethod::Action)]
+#[case::click_fallback(false, PressMethod::Click)]
+#[tokio::test]
+async fn press_uses_the_element_action_or_clicks_its_center(
+    target: ComputerTarget,
+    #[case] pressable: bool,
+    #[case] method: PressMethod,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.pressable = pressable;
+    let fake = Arc::new(fake);
+    let result = run(&fake, &target, &press()).await.unwrap();
+    assert_eq!(result, ComputerResult::Pressed { method });
+    let clicked = [InputEvent::Click {
+        x: 10.0,
+        y: 10.0,
+        button: MouseButton::Left,
+    }];
+    let (pressed, posted): (&[Vec<u16>], &[InputEvent]) = if pressable {
+        (&[vec![0, 2]], &[])
+    } else {
+        (&[], &clicked)
+    };
+    assert_eq!(fake.pressed(), pressed);
+    assert_eq!(fake.posted(), posted);
+}
+
+const fn move_element(element: &mut ComputerElement) {
+    element.frame.x = 4.0;
+}
+fn rename_element(element: &mut ComputerElement) {
+    element.name = Some("Forward".into());
+}
+fn replace_element(element: &mut ComputerElement) {
+    element.path = vec![0, 3];
+}
+fn disable_element(element: &mut ComputerElement) {
+    element.states.push(ElementState::Disabled);
+}
+
+/// A press acts only on the element as it was listed; anything else touches nothing.
+#[rstest]
+#[case::moved(move_element)]
+#[case::renamed(rename_element)]
+#[case::gone(replace_element)]
+#[case::disabled(disable_element)]
+#[tokio::test]
+async fn press_refuses_an_element_that_changed(
+    target: ComputerTarget,
+    #[case] change: fn(&mut ComputerElement),
+    #[values(true, false)] pressable: bool,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.elements.iter_mut().for_each(change);
+    fake.pressable = pressable;
+    let fake = Arc::new(fake);
+    let result = run(&fake, &target, &press()).await;
+    assert!(
+        matches!(
+            result,
+            Err(ComputerError::StaleElement | ComputerError::InvalidAction(_))
+        ),
+        "{result:?}"
+    );
+    assert_eq!(fake.pressed(), Vec::<Vec<u16>>::new());
+    assert_eq!(fake.posted(), []);
+}
+
+/// Listing reads the window without input, so it needs no focus, only Accessibility.
+#[rstest]
+#[tokio::test]
+async fn elements_need_accessibility_but_not_focus(target: ComputerTarget) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.focus = None;
+    let fake = Arc::new(fake);
+    assert_eq!(
+        run(&fake, &target, &ComputerAction::Elements)
+            .await
+            .unwrap(),
+        ComputerResult::Elements {
+            elements: vec![button()],
+            omitted: false,
+            target: Box::new(target.clone()),
+        }
+    );
+
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.accessibility = Some(PermissionStatus::NotGranted);
+    let fake = Arc::new(fake);
+    assert!(matches!(
+        run(&fake, &target, &ComputerAction::Elements).await,
+        Err(ComputerError::PermissionDenied(_))
+    ));
 }
 
 #[rstest]

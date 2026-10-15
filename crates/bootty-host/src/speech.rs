@@ -19,13 +19,21 @@ const FRAME_LIMIT: u64 = 65_536;
 pub enum SpeechEvent {
     Ready,
     Listening,
-    Speaking,
-    Finished,
     Stopped,
     Closed,
-    Partial { text: String },
-    Final { text: String },
-    Error { message: String },
+    Partial {
+        text: String,
+    },
+    Final {
+        text: String,
+    },
+    /// Voice mode's WebRTC offer, for the conversation to take to its provider.
+    Offer {
+        sdp: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -39,9 +47,12 @@ pub enum SpeechCommand {
     Listen {
         voice: bool,
     },
+    /// Dictate with this machine's own recognizer, for a composer without a Codex sign-in.
+    ListenOnDevice,
     Stop,
-    Speak {
-        text: String,
+    /// The provider's answer to the voice mode offer.
+    Answer {
+        sdp: String,
     },
 }
 
@@ -70,10 +81,11 @@ impl SpeechSession {
     }
 
     /// # Errors
-    /// Rejects oversized speech, stopped helpers, or a full command queue.
+    /// Rejects an oversized voice answer, stopped helpers, or a full command queue.
     pub fn send(&self, command: SpeechCommand) -> Result<(), String> {
-        if matches!(&command, SpeechCommand::Speak { text } if text.len() > 32_768) {
-            return Err("Speech exceeds 32 KiB".into());
+        // A helper frame is at most 64 KiB; an answer stays well under it.
+        if matches!(&command, SpeechCommand::Answer { sdp } if sdp.len() > 32_768) {
+            return Err("The voice answer exceeds 32 KiB".into());
         }
         self.commands
             .try_send(command)

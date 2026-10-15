@@ -11,11 +11,14 @@ use std::{
 #[case("{\"action\":\"listen\",\"voice\":false}\n")]
 #[case("{\"action\":\"listen\",\"voice\":false,\"unexpected\":true}\n")]
 #[case(
-    "{\"action\":\"account\",\"provider\":\"unsupported\",\"program\":\"must-not-run\",\"directory\":null}\n{\"action\":\"listen\",\"voice\":true}\n"
+    "{\"action\":\"account\",\"provider\":\"codex\",\"program\":\"must-not-run\",\"directory\":null}\n{\"action\":\"listen\",\"voice\":true}\n"
 )]
 fn rejected_start_reports_error_and_stops_cleanly(#[case] input: &str) {
+    // The default Codex home is empty, so no sign-in is found.
+    let codex_home = assert_fs::TempDir::new().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_bootty-voice"))
         .env_remove("OPENAI_API_KEY")
+        .env("CODEX_HOME", codex_home.path())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -43,22 +46,21 @@ fn rejected_start_reports_error_and_stops_cleanly(#[case] input: &str) {
     assert_eq!(events.last(), Some(&SpeechEvent::Stopped));
 }
 
+/// Without a current Codex sign-in, recording fails before any audio opens.
 #[rstest]
-#[case(false)]
-#[case(true)]
-fn subscription_tokens_do_not_authenticate_public_audio(#[case] voice: bool) {
+#[case::signed_out(r#"{"OPENAI_API_KEY":null}"#, "Sign in to Codex to use dictation")]
+#[case::expired(
+    r#"{"tokens":{"access_token":"header.eyJleHAiOjF9.signature","account_id":"account"}}"#,
+    "The Codex sign-in expired. Open Codex to sign in again."
+)]
+fn dictation_needs_a_current_codex_sign_in(#[case] auth: &str, #[case] message: &str) {
     use assert_fs::prelude::*;
     let account = assert_fs::TempDir::new().unwrap();
-    account
-        .child("auth.json")
-        .write_str(
-            r#"{"tokens":{"access_token":"subscription-token","account_id":"private-account"}}"#,
-        )
-        .unwrap();
+    account.child("auth.json").write_str(auth).unwrap();
     let input = format!(
         "{}\n{}\n",
         serde_json::json!({"action":"account","provider":"codex","program":"must-not-run","directory":account.path()}),
-        serde_json::json!({"action":"listen","voice":voice})
+        serde_json::json!({"action":"listen","voice":false})
     );
     let mut child = Command::new(env!("CARGO_BIN_EXE_bootty-voice"))
         .env_remove("OPENAI_API_KEY")
@@ -85,7 +87,7 @@ fn subscription_tokens_do_not_authenticate_public_audio(#[case] voice: bool) {
         vec![
             SpeechEvent::Ready,
             SpeechEvent::Error {
-                message: "Configure an OpenAI API key to use dictation and voice".into()
+                message: message.into()
             },
             SpeechEvent::Stopped
         ]

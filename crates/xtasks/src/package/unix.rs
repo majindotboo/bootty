@@ -348,7 +348,8 @@ fn info_plist(layout: &Layout, version: &str) -> String {
   </dict></array>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Send speech to OpenAI for dictation and voice mode. Programs running in Bootty can also request microphone access.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Hear speech for dictation and voice mode. Programs running in Bootty can also request microphone access.</string>
+  <key>NSSpeechRecognitionUsageDescription</key><string>Turn speech into text on this Mac for dictation when Codex is not signed in.</string>
 </dict>
 </plist>
 "#,

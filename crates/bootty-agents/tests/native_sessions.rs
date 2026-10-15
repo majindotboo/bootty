@@ -208,6 +208,19 @@ for line in sys.stdin:
    os.unlink('events.json')
    for event in events: emit(event)
   reply(ident,{'approvals':approvals,'declined':declined})
+ elif method == 'thread/realtime/start':
+  # Observed from codex-cli 0.162.1 on a ChatGPT sign-in: an empty result, then the answer.
+  with open('realtime.json','w') as output: json.dump(params,output)
+  reply(ident,{})
+  if params['transport']['sdp']=='refuse':
+   emit({'method':'thread/realtime/error','params':{'threadId':thread,'message':'realtime conversation requires API key auth'}})
+  else:
+   emit({'method':'thread/realtime/started','params':{'threadId':thread,'version':'v3'}})
+   emit({'method':'thread/realtime/sdp','params':{'threadId':thread,'sdp':'answer-sdp'}})
+ elif method == 'thread/realtime/stop':
+  open('realtime-stopped','w').close()
+  reply(ident,{})
+  emit({'method':'thread/realtime/closed','params':{'threadId':thread,'reason':'requested'}})
  elif method == 'thread/read':
   with open('read.json','w') as output: json.dump(value,output)
   child=params.get('threadId',thread)
@@ -2814,6 +2827,113 @@ fn changing_permissions_preserves_identity_without_replaying_a_prompt() {
     service.stop(&resumed.target()).unwrap();
     let reopened = NativeAgentService::open(&catalog).unwrap();
     assert_eq!(reopened.sessions()[0].config.permissions.id(), "supervised");
+}
+
+/// A voice call runs on the conversation's Codex thread: Codex answers the offer, starts the turns
+/// it delegates, and the transcript shows only the words delegated to the agent.
+#[rstest]
+fn codex_voice_calls_answer_the_offer_and_show_delegated_turns() {
+    let root = TempDir::new().unwrap();
+    let mut launch = config(root.path()).unwrap();
+    launch.session_id = Some("native-thread".into());
+    let session = NativeAgentSession::spawn(launch).unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(
+        session.start_voice("refuse"),
+        Err("realtime conversation requires API key auth".to_owned())
+    );
+    assert_eq!(
+        session.start_voice("offer-sdp"),
+        Ok("answer-sdp".to_owned())
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(root.path().join("realtime.json")).unwrap())
+            .unwrap(),
+        json!({"threadId":"native-thread","outputModality":"audio","version":"v3",
+            "transport":{"type":"webrtc","sdp":"offer-sdp"}})
+    );
+    // Observed from codex-cli 0.162.1: Codex starts a turn for what the call delegates.
+    let delegated = "<realtime_delegation>\n  <input>Run the tests</input>\n  \
+        <transcript_delta>Please run the tests</transcript_delta>\n</realtime_delegation>";
+    fs::write(
+        root.path().join("events.json"),
+        json!([
+            {"method":"turn/started","params":{"threadId":"native-thread","turn":{"id":"voice-turn","status":"inProgress","items":[]}}},
+            {"method":"item/completed","params":{"threadId":"native-thread","turnId":"voice-turn",
+                "item":{"id":"delegated","type":"userMessage","content":[{"type":"text","text":delegated}]}}},
+            {"method":"item/completed","params":{"threadId":"native-thread","turnId":"voice-turn",
+                "item":{"id":"reply","type":"agentMessage","text":"All tests pass."}}},
+            {"method":"turn/completed","params":{"threadId":"native-thread","turn":{"id":"voice-turn","status":"completed","items":[]}}},
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    let rows = session
+        .snapshot()
+        .transcript
+        .iter()
+        .filter(|item| matches!(item.id.as_str(), "delegated" | "reply"))
+        .map(|item| (item.id.clone(), item.role.clone(), item.text.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [
+            (
+                "delegated".to_owned(),
+                "user".to_owned(),
+                "Run the tests".to_owned()
+            ),
+            (
+                "reply".to_owned(),
+                "assistant".to_owned(),
+                "All tests pass.".to_owned()
+            ),
+        ]
+    );
+    session.stop_voice().unwrap();
+    assert!(root.path().join("realtime-stopped").exists());
+    session.stop();
+}
+
+/// A patch too large to keep is left out whole: its file stays listed, without a cut patch.
+#[rstest]
+fn oversized_file_changes_keep_their_paths() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let snapshot = session.snapshot();
+    let changes = json!([{
+        "path": "source.txt", "kind": { "type": "update", "move_path": null },
+        "diff": format!("@@ -1,1 +1,1 @@\n-before\n+{}\n", "x".repeat(1_100_000)),
+    }]);
+    let item = json!({ "id": "huge-file-change", "type": "fileChange", "changes": changes, "status": "completed" });
+    fs::write(
+        root.path().join("events.json"),
+        serde_json::to_vec(&json!([
+            { "method": "item/completed", "params": {
+                "threadId": snapshot.session_id, "turnId": snapshot.turn_id, "item": item,
+            }},
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    let input = &snapshot
+        .transcript
+        .iter()
+        .find(|item| item.id == "huge-file-change")
+        .unwrap()
+        .tool
+        .as_ref()
+        .unwrap()
+        .input;
+    assert_eq!(
+        serde_json::from_str::<Value>(input).unwrap(),
+        json!([{"path": "source.txt", "kind": { "type": "update", "move_path": null }, "diff": ""}])
+    );
+    session.stop();
 }
 
 proptest! {

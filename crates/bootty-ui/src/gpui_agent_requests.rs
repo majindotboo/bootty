@@ -45,6 +45,8 @@ pub(super) struct NativeRequestView {
     answer_subscriptions: BTreeMap<(String, String), Subscription>,
     editors: BTreeMap<String, Entity<TextareaState>>,
     editor_subscriptions: BTreeMap<String, Subscription>,
+    /// What each file-change approval would change: its `fileChange` input and diff rows.
+    diffs: BTreeMap<String, (String, Vec<super::ToolDiff>)>,
 }
 
 impl NativeRequestView {
@@ -59,13 +61,17 @@ impl NativeRequestView {
             answer_subscriptions: BTreeMap::new(),
             editors: BTreeMap::new(),
             editor_subscriptions: BTreeMap::new(),
+            diffs: BTreeMap::new(),
         }
     }
+    /// `changes` holds each file-change approval's changes, by request, in the transcript's
+    /// `fileChange` shape; paths show relative to `cwd`.
     pub(super) fn update(
         &mut self,
         target: CommandTarget,
         requests: &[NativeAgentRequest],
         pending: &BTreeSet<String>,
+        (changes, cwd): (&BTreeMap<String, String>, &std::path::Path),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -87,7 +93,35 @@ impl NativeRequestView {
             cx,
         );
         self.sync_answers(window, cx);
+        self.diffs.retain(|id, _| changes.contains_key(id));
+        for (id, input) in changes {
+            if self.diffs.get(id).is_some_and(|(seen, _)| seen == input) {
+                continue;
+            }
+            let files = super::parse_tool_diffs(input, cwd)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(path, file)| super::tool_diff(&path, file, cwd, window, cx))
+                .collect();
+            self.diffs.insert(id.clone(), (input.clone(), files));
+        }
         cx.notify();
+    }
+
+    /// The diff rows for an approval, when it changes files.
+    fn render_diffs(&self, id: &str, cx: &Context<Self>) -> Option<gpui_kit::Div> {
+        let (_, files) = self.diffs.get(id).filter(|(_, files)| !files.is_empty())?;
+        Some(
+            div()
+                .debug_selector({
+                    let id = id.to_owned();
+                    move || format!("approval-diff:{id}")
+                })
+                .flex()
+                .flex_col()
+                .gap_2()
+                .children(super::tool_diff_files(files, cx)),
+        )
     }
     pub(super) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
         if self.provider_enabled != enabled {
@@ -398,6 +432,11 @@ impl NativeRequestView {
         cx: &Context<Self>,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let id = request.id.clone();
+        if let Some(diffs) = self.render_diffs(&id, cx) {
+            return row
+                .child(diffs)
+                .child(self.approval_buttons(request, pending, cx));
+        }
         // Permission scope comes from the provider request, never a generic allow label.
         let description = approval_description(
             &request.parameters,
@@ -480,6 +519,7 @@ impl NativeRequestView {
                         crate::strings::home_dir().as_deref(),
                     ),
                 ))
+                .children(self.render_diffs(&id, cx))
                 .child(self.approval_buttons(request, pending, cx));
         }
         let body = div().flex().flex_col().gap_2().children(
@@ -996,6 +1036,99 @@ impl gpui_kit::RenderOnce for RequestDetails {
             )
             .vertical_scrollbar(&scroll)
     }
+}
+
+/// The files an approval would change, in the transcript's `fileChange` shape. Codex names the
+/// file-change item it asks about; a Claude edit carries its old and new text.
+pub(super) fn approval_change(
+    request: &NativeAgentRequest,
+    transcript: &[bootty_agents::NativeTranscriptItem],
+) -> Option<String> {
+    match request.method.as_str() {
+        "item/fileChange/requestApproval" => {
+            let item = field(&request.parameters, "itemId").as_str()?;
+            transcript
+                .iter()
+                .find(|candidate| candidate.id == item)?
+                .tool
+                .as_ref()
+                .filter(|tool| tool.name == "fileChange")
+                .map(|tool| tool.input.clone())
+        }
+        "claude.permission" => {
+            let input = field(&request.parameters, "input");
+            let path = field(input, "file_path").as_str()?;
+            let text = |value: &Value, key| field(value, key).as_str().map(str::to_owned);
+            let diff = match field(&request.parameters, "tool_name").as_str()? {
+                "Edit" => snippet_diff(&text(input, "old_string")?, &text(input, "new_string")?),
+                "MultiEdit" => field(input, "edits")
+                    .as_array()?
+                    .iter()
+                    .map(|edit| {
+                        Some(snippet_diff(
+                            &text(edit, "old_string")?,
+                            &text(edit, "new_string")?,
+                        ))
+                    })
+                    .collect::<Option<String>>()?,
+                "Write" => snippet_diff("", &text(input, "content")?),
+                _ => return None,
+            };
+            Some(serde_json::json!([{"path": path, "diff": diff}]).to_string())
+        }
+        _ => None,
+    }
+}
+
+/// A one-hunk patch from `old` to `new`: shared leading and trailing lines as context, the rest
+/// removed then added. An edit's input has no file positions, so lines count within the snippet.
+fn snippet_diff(old: &str, new: &str) -> String {
+    let old = old.lines().collect::<Vec<_>>();
+    let new = new.lines().collect::<Vec<_>>();
+    let prefix = old
+        .iter()
+        .zip(&new)
+        .take_while(|(before, after)| before == after)
+        .count();
+    let suffix = old
+        .iter()
+        .skip(prefix)
+        .rev()
+        .zip(new.iter().skip(prefix).rev())
+        .take_while(|(before, after)| before == after)
+        .count();
+    let removed = old.len().saturating_sub(prefix).saturating_sub(suffix);
+    let added = new.len().saturating_sub(prefix).saturating_sub(suffix);
+    let start = |count: usize| usize::from(count > 0);
+    let mut diff = format!(
+        "@@ -{},{} +{},{} @@\n",
+        start(old.len()),
+        old.len(),
+        start(new.len()),
+        new.len()
+    );
+    let lines = old
+        .iter()
+        .take(prefix)
+        .map(|line| (' ', *line))
+        .chain(
+            old.iter()
+                .skip(prefix)
+                .take(removed)
+                .map(|line| ('-', *line)),
+        )
+        .chain(new.iter().skip(prefix).take(added).map(|line| ('+', *line)))
+        .chain(
+            old.iter()
+                .skip(prefix.saturating_add(removed))
+                .map(|line| (' ', *line)),
+        );
+    for (mark, line) in lines {
+        diff.push(mark);
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    diff
 }
 
 fn claude_title(parameters: &Value) -> &'static str {

@@ -17,6 +17,7 @@ use gpui_kit::{
     Context, EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, Window, div,
     prelude::*,
 };
+use std::path::Path;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SpeechMode {
@@ -27,64 +28,115 @@ pub enum SpeechMode {
 #[derive(Clone)]
 pub enum SpeechInputEvent {
     Toggle(SpeechMode),
-    Final { text: String, mode: SpeechMode },
+    /// Dictated text for the composer.
+    Final {
+        text: String,
+    },
+    /// Voice mode's offer, for the conversation to take to Codex.
+    Offer(String),
+    /// A voice call ended here, so the conversation ends Codex's side.
+    VoiceEnded,
     Error(String),
 }
 
+/// Speech runs on the Codex sign-in already on this machine. Without one, dictation runs on device
+/// where the OS can, and otherwise its buttons don't show.
 pub struct SpeechInput {
     session: Option<SpeechSession>,
     epoch: u64,
     mode: SpeechMode,
     phase: &'static str,
     partial: String,
-    voice_available: bool,
+    /// What the captured Codex account and this machine offer.
+    availability: bootty_agents::voice::SpeechAvailability,
+    /// The composer belongs to a Codex conversation, which can hold a voice call.
+    voice_supported: bool,
     enabled: bool,
     account: Option<SpeechCommand>,
+    availability_check: Option<gpui_kit::Task<()>>,
 }
 
 impl SpeechInput {
-    pub(crate) const fn new(voice_available: bool) -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             session: None,
             epoch: 0,
             mode: SpeechMode::Dictation,
             phase: "",
             partial: String::new(),
-            voice_available,
+            availability: bootty_agents::voice::SpeechAvailability {
+                codex: false,
+                on_device: false,
+            },
+            voice_supported: false,
             enabled: true,
             account: None,
+            availability_check: None,
         }
     }
 
+    /// Use the selected Codex account from the configuration.
     pub(crate) fn set_account(
         &mut self,
-        preferences: &bootty_config::config::AgentProviderConfig,
-        provider: &str,
+        codex: &bootty_config::config::AgentProviderConfig,
+        cx: &Context<Self>,
     ) {
         self.set_captured_account(
-            provider,
-            if preferences.program.is_empty() {
-                provider.into()
+            if codex.program.is_empty() {
+                "codex".into()
             } else {
-                preferences.program.clone()
+                codex.program.clone()
             },
-            preferences
+            codex
                 .selected_profile()
                 .and_then(|profile| profile.directory.clone()),
+            cx,
         );
     }
 
+    /// Use a Codex account captured elsewhere, such as by a Codex conversation.
     pub(crate) fn set_captured_account(
         &mut self,
-        provider: &str,
         program: String,
         directory: Option<String>,
+        cx: &Context<Self>,
     ) {
+        let check = directory.clone();
         self.account = Some(SpeechCommand::Account {
-            provider: provider.into(),
+            provider: "codex".into(),
             program,
             directory,
         });
+        // Reading the sign-in is file work; the buttons appear once it's known.
+        self.availability_check = Some(cx.spawn(async move |owner, cx| {
+            let availability = cx
+                .background_executor()
+                .spawn(async move {
+                    bootty_agents::voice::availability(check.as_deref().map(Path::new))
+                })
+                .await;
+            _ = owner.update(cx, |this, cx| {
+                if this.availability != availability {
+                    this.availability = availability;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    /// Voice calls run on a Codex conversation's own session.
+    pub(crate) fn set_voice_supported(&mut self, supported: bool, cx: &mut Context<Self>) {
+        if self.voice_supported != supported {
+            self.voice_supported = supported;
+            cx.notify();
+        }
+    }
+
+    const fn available(&self, mode: SpeechMode) -> bool {
+        match mode {
+            SpeechMode::Dictation => self.availability.dictation(),
+            SpeechMode::Voice => self.voice_supported && self.availability.codex,
+        }
     }
 
     pub(crate) fn set_enabled(&mut self, enabled: bool, cx: &mut Context<Self>) {
@@ -97,6 +149,9 @@ impl SpeechInput {
     pub(crate) fn stop(&mut self, cx: &mut Context<Self>) {
         if self.session.is_none() {
             return;
+        }
+        if self.mode == SpeechMode::Voice {
+            cx.emit(SpeechInputEvent::VoiceEnded);
         }
         self.session = None;
         self.partial.clear();
@@ -119,8 +174,9 @@ impl SpeechInput {
         self.session.is_some() && self.mode == SpeechMode::Voice
     }
 
-    pub(crate) fn speak(&mut self, text: String, cx: &mut Context<Self>) {
-        self.send(SpeechCommand::Speak { text }, cx);
+    /// Connect the voice call with Codex's answer to its offer.
+    pub(crate) fn answer(&mut self, sdp: String, cx: &mut Context<Self>) {
+        self.send(SpeechCommand::Answer { sdp }, cx);
     }
 
     fn send(&mut self, command: SpeechCommand, cx: &mut Context<Self>) {
@@ -141,7 +197,14 @@ impl SpeechInput {
             }
             return;
         }
-        if !self.enabled || mode == SpeechMode::Voice && !self.voice_available {
+        if !self.available(mode) {
+            cx.emit(SpeechInputEvent::Error(match mode {
+                SpeechMode::Dictation => "Sign in to Codex to use dictation".into(),
+                SpeechMode::Voice => "Voice mode isn't available here".into(),
+            }));
+            return;
+        }
+        if !self.enabled {
             return;
         }
         let Some(program) = std::env::current_exe().ok().and_then(|path| {
@@ -169,9 +232,14 @@ impl SpeechInput {
         if let Some(account) = self.account.clone() {
             self.send(account, cx);
         }
+        // Dictation prefers the Codex sign-in; the recognizer on this machine stands in without one.
         self.send(
-            SpeechCommand::Listen {
-                voice: mode == SpeechMode::Voice,
+            if mode == SpeechMode::Dictation && !self.availability.codex {
+                SpeechCommand::ListenOnDevice
+            } else {
+                SpeechCommand::Listen {
+                    voice: mode == SpeechMode::Voice,
+                }
             },
             cx,
         );
@@ -185,25 +253,13 @@ impl SpeechInput {
                         match event {
                             SpeechEvent::Listening => this.phase = "Listening…",
                             SpeechEvent::Partial { text } => this.partial = text,
+                            // Only dictation produces text; Codex speaks voice mode's replies.
                             SpeechEvent::Final { text } => {
-                                if this.mode == SpeechMode::Dictation {
-                                    this.stop(cx);
-                                }
+                                this.stop(cx);
                                 this.partial.clear();
-                                this.phase = if this.mode == SpeechMode::Voice {
-                                    "Waiting for reply…"
-                                } else {
-                                    "Finishing dictation…"
-                                };
-                                cx.emit(SpeechInputEvent::Final {
-                                    text,
-                                    mode: this.mode,
-                                });
+                                cx.emit(SpeechInputEvent::Final { text });
                             }
-                            SpeechEvent::Speaking => this.phase = "Speaking…",
-                            SpeechEvent::Finished if this.mode == SpeechMode::Voice => {
-                                this.phase = "Listening…";
-                            }
+                            SpeechEvent::Offer { sdp } => cx.emit(SpeechInputEvent::Offer(sdp)),
                             SpeechEvent::Stopped if this.mode == SpeechMode::Dictation => {
                                 this.stop(cx);
                             }
@@ -212,7 +268,7 @@ impl SpeechInput {
                                 cx.emit(SpeechInputEvent::Error(message));
                                 this.stop(cx);
                             }
-                            SpeechEvent::Ready | SpeechEvent::Finished | SpeechEvent::Stopped => {}
+                            SpeechEvent::Ready | SpeechEvent::Stopped => {}
                         }
                         cx.notify();
                         this.session.is_some()
@@ -253,7 +309,7 @@ impl Render for SpeechInput {
             .children(
                 [SpeechMode::Dictation, SpeechMode::Voice]
                     .into_iter()
-                    .filter(|mode| *mode != SpeechMode::Voice || self.voice_available)
+                    .filter(|mode| self.available(*mode))
                     .map(|mode| {
                         let selected = active && self.mode == mode;
                         let label = match (mode, selected) {
@@ -262,31 +318,33 @@ impl Render for SpeechInput {
                             (SpeechMode::Voice, false) => "Start voice mode",
                             (SpeechMode::Voice, true) => "End voice mode",
                         };
-                        Button::new(match mode {
+                        let id = match mode {
                             SpeechMode::Dictation => "composer-dictation",
                             SpeechMode::Voice => "composer-voice",
-                        })
-                        .ghost()
-                        .small()
-                        .selected(selected)
-                        .disabled(!active && !self.enabled || active && self.mode != mode)
-                        .accessibility_label(label)
-                        .tooltip(label)
-                        .child(crate::gpui::sized_icon(
-                            match mode {
-                                SpeechMode::Dictation => "mic",
-                                SpeechMode::Voice => "audio-lines",
-                            },
-                            crate::gpui::IconSize::Small,
-                            if selected {
-                                cx.theme().primary
-                            } else {
-                                cx.theme().muted_foreground
-                            },
-                        ))
-                        .on_click(
-                            cx.listener(move |_, _, _, cx| cx.emit(SpeechInputEvent::Toggle(mode))),
-                        )
+                        };
+                        Button::new(id)
+                            .debug_selector(move || id.to_owned())
+                            .ghost()
+                            .small()
+                            .selected(selected)
+                            .disabled(!active && !self.enabled || active && self.mode != mode)
+                            .accessibility_label(label)
+                            .tooltip(label)
+                            .child(crate::gpui::sized_icon(
+                                match mode {
+                                    SpeechMode::Dictation => "mic",
+                                    SpeechMode::Voice => "audio-lines",
+                                },
+                                crate::gpui::IconSize::Small,
+                                if selected {
+                                    cx.theme().primary
+                                } else {
+                                    cx.theme().muted_foreground
+                                },
+                            ))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(SpeechInputEvent::Toggle(mode));
+                            }))
                     }),
             )
     }

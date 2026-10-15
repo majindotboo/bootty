@@ -4,7 +4,9 @@ use crate::{
     AgentCommandExecutor,
     tool_policy::{ToolLaunchGuard, ToolLease},
 };
-use bootty_computer::{ComputerAction, ComputerTarget};
+use bootty_computer::{
+    ComputerAction, ComputerElement, ComputerResultSnapshot, ComputerTarget, MAX_ELEMENTS,
+};
 use bootty_control::{
     CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
 };
@@ -80,11 +82,58 @@ impl From<&ComputerTarget> for NativeApplication {
     }
 }
 
-/// Granted apps, the window each was last captured in, and tool calls waiting on the user.
+/// What an agent asks of an app. A press names an element by its number in the app's latest
+/// snapshot, so the host presses exactly the element that snapshot listed.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum NativeApplicationAction {
+    Press(NativeElementPress),
+    Computer(ComputerAction),
+}
+impl NativeApplicationAction {
+    #[must_use]
+    pub const fn is_capture(&self) -> bool {
+        matches!(self, Self::Computer(action) if action.is_capture())
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeElementPress {
+    action: PressTag,
+    /// Numbered from 1, as the snapshot lists them.
+    pub element: std::num::NonZeroU16,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PressTag {
+    Press,
+}
+
+/// What `computer_snapshot` returns for an app: its image and the elements an agent can press.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeApplicationSnapshot {
+    pub image: ComputerResultSnapshot,
+    pub elements: Vec<ComputerElement>,
+    /// More elements were on screen than the listing returns.
+    pub omitted: bool,
+    /// Why no elements were listed, such as a missing Accessibility grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable: Option<String>,
+}
+
+/// An app's latest capture: its window and the elements listed with it.
+struct Observation {
+    target: ComputerTarget,
+    elements: Vec<ComputerElement>,
+}
+
+/// Granted apps, each one's latest capture, and tool calls waiting on the user.
 #[derive(Default)]
 pub struct ApplicationGrants {
     granted: Vec<NativeApplication>,
-    observed: Vec<ComputerTarget>,
+    observed: Vec<Observation>,
     waiters: Vec<(String, mpsc::Sender<bool>)>,
 }
 impl ApplicationGrants {
@@ -156,6 +205,20 @@ impl NativeApplicationAccess {
     /// The window from this app's latest capture. Input coordinates refer to it.
     #[must_use]
     pub fn observed(&self) -> Option<ComputerTarget> {
+        self.observation(|observation| observation.target.clone())
+    }
+    /// The element numbered `number` in this app's latest capture.
+    #[must_use]
+    pub fn element(&self, number: std::num::NonZeroU16) -> Option<ComputerElement> {
+        self.observation(|observation| {
+            observation
+                .elements
+                .get(usize::from(number.get()).checked_sub(1)?)
+                .cloned()
+        })
+        .flatten()
+    }
+    fn observation<T>(&self, read: impl FnOnce(&Observation) -> T) -> Option<T> {
         let state = self
             .lease
             .state
@@ -165,22 +228,24 @@ impl NativeApplicationAccess {
             .applications
             .observed
             .iter()
-            .find(|target| target.bundle_id == self.application.bundle_id)
-            .cloned()
+            .find(|observation| observation.target.bundle_id == self.application.bundle_id)
+            .map(read)
     }
-    /// Remember the window a capture saw; only this app's windows are accepted.
-    pub fn observe(&self, target: ComputerTarget) {
+    /// Remember the window a capture saw and the elements listed with it, replacing the app's
+    /// previous capture. Only this app's windows are accepted.
+    pub fn observe(&self, target: ComputerTarget, mut elements: Vec<ComputerElement>) {
         if target.bundle_id != self.application.bundle_id {
             return;
         }
+        elements.truncate(MAX_ELEMENTS);
         let mut state = self
             .lease
             .state
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let observed = &mut state.applications.observed;
-        observed.retain(|known| known.bundle_id != target.bundle_id);
-        observed.push(target);
+        observed.retain(|known| known.target.bundle_id != target.bundle_id);
+        observed.push(Observation { target, elements });
         drop(state);
     }
     /// Keep revocation connected to the final shared command mutation gate.
@@ -349,7 +414,7 @@ impl ToolLease {
     pub(crate) fn invoke_application(
         &self,
         application: &str,
-        action: &ComputerAction,
+        action: &NativeApplicationAction,
         commands: &dyn AgentCommandExecutor,
         deadline: Instant,
     ) -> CommandOutcome {

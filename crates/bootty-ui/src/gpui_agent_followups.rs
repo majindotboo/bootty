@@ -225,8 +225,22 @@ impl NativeAgentSessionView {
                 )
                 .child(Self::queued_action(message, QueueAction::Retry, false, cx))
             })
+            // A message marked to steer goes in as soon as the turn can take it.
+            .when(!failed && message.steer, |row| {
+                row.child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Steers next"),
+                )
+            })
             .when(
-                !failed && self.record.snapshot.steer_refusal().is_none(),
+                !failed
+                    && !message.steer
+                    && matches!(
+                        self.record.snapshot.status,
+                        NativeSessionStatus::Working | NativeSessionStatus::Waiting
+                    ),
                 |row| row.child(Self::queued_action(message, QueueAction::Steer, false, cx)),
             )
             .child(Self::queued_action(

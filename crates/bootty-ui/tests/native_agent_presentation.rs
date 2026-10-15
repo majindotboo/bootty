@@ -2489,6 +2489,7 @@ fn queued_drawer_stays_attached_and_keeps_actions_reachable_at_zoom(cx: &mut Tes
         preview_text: "A long queued follow-up that should stay readable without pushing its actions out of the pane".into(),
         attachments: Vec::new(),
         status,
+        steer: false,
     })
     .collect();
     let target = record.target();

@@ -51,7 +51,8 @@ mod tool_application;
 mod tool_bridge;
 mod tool_policy;
 pub use tool_application::{
-    APPLICATION_ACCESS_METHOD, NativeApplication, NativeApplicationAccess, NativeApplicationMention,
+    APPLICATION_ACCESS_METHOD, NativeApplication, NativeApplicationAccess, NativeApplicationAction,
+    NativeApplicationMention, NativeApplicationSnapshot, NativeElementPress,
 };
 mod tool_spawn;
 pub use tool_spawn::{ToolTerminalOperation, ToolTerminalRequest};

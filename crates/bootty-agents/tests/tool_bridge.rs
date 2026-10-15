@@ -1112,3 +1112,115 @@ fn revoking_tools_ends_app_access_and_waiting_requests(binding: CommandTarget) {
     );
     drop(guard);
 }
+
+#[expect(clippy::unwrap_used, reason = "Fixture encodes one fixed opaque pixel")]
+fn snapshot_png() -> String {
+    use base64::Engine as _;
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&[0, 0, 0, 255]).unwrap();
+        writer.finish().unwrap();
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn element(path: u16, role: &str, name: Option<&str>, states: &Value) -> Value {
+    let mut element = json!({"path":[0, path],"role":role,
+        "frame":{"x":288.0,"y":51.5,"width":32.0,"height":32.0},"states":states});
+    if let (Some(name), Some(fields)) = (name, element.as_object_mut()) {
+        fields.insert("name".into(), json!(name));
+    }
+    element
+}
+
+/// An app snapshot lists the window's elements after its image, numbered in screen order, and a
+/// press names one by that number.
+#[rstest]
+fn app_snapshots_number_elements_that_presses_name(binding: CommandTarget) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
+    grant.grant_applications(&conversation(), &[]).unwrap();
+    let protocol = ToolProtocol::new(grant);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let received = calls.clone();
+    let commands = move |invocation: CommandInvocation, _: Instant, _: CommandCancellation| {
+        let action: Value = serde_json::from_str(&invocation.arguments[3]).unwrap();
+        received.lock().unwrap().push(action.clone());
+        let value = if action["action"] == "snapshot" {
+            json!({"image":{"result":"snapshot","png_base64":snapshot_png(),"pixel_width":1,
+                "pixel_height":1,"target":app_mention().target},
+                "elements":[
+                    {"path":[1, 0],"role":"Unknown","identifier":"navigationBarBackButton",
+                        "frame":{"x":288.0,"y":51.0,"width":32.0,"height":32.0}},
+                    element(2, "RadioButton:TabButton", Some("Inbox \"2\""), &json!(["selected", "disabled"])),
+                ],
+                "omitted":true})
+        } else {
+            json!({"result":"pressed","method":"click"})
+        };
+        CommandOutcome::Success {
+            value,
+            warnings: Vec::new(),
+        }
+    };
+    let snapshot = json!({"name":"computer_snapshot","arguments":{"application":"Test"}});
+    let result = request(&protocol, &snapshot, &commands).unwrap()["result"].clone();
+    assert_eq!(result["isError"], false);
+    assert_eq!(result["content"][0]["type"], "image");
+    let listing = result["content"][2]["text"].as_str().unwrap();
+    let lines = listing.lines().skip(1).collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            "1 Unknown #navigationBarBackButton (288,51 32×32)",
+            "2 RadioButton:TabButton \"Inbox \\\"2\\\"\" (288,52 32×32) selected disabled",
+            "More elements were left out; scroll or use coordinates for the rest.",
+        ]
+    );
+
+    let press = json!({"name":"computer_input","arguments":{"application":"Test","action":{"action":"press","element":2}}});
+    let result = request(&protocol, &press, &commands).unwrap()["result"].clone();
+    assert_eq!(result["isError"], false);
+    assert_eq!(
+        calls.lock().unwrap().last(),
+        Some(&json!({"action":"press","element":2}))
+    );
+    let zero = json!({"name":"computer_input","arguments":{"application":"Test","action":{"action":"press","element":0}}});
+    assert_eq!(
+        request(&protocol, &zero, &commands).unwrap()["result"]["isError"],
+        true
+    );
+}
+
+/// Element numbers refer to the app's latest snapshot; a new snapshot replaces them.
+#[rstest]
+fn element_numbers_follow_the_latest_snapshot(binding: CommandTarget) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
+    grant
+        .grant_applications(&conversation(), &[app_mention()])
+        .unwrap();
+    let access = grant
+        .application_access(&conversation(), &mentioned_app())
+        .unwrap()
+        .unwrap();
+    let parse = |value: Value| -> bootty_computer::ComputerElement {
+        serde_json::from_value(value).unwrap()
+    };
+    let (back, inbox) = (
+        parse(element(1, "Button", Some("Back"), &json!([]))),
+        parse(element(2, "Button", Some("Inbox"), &json!([]))),
+    );
+    let number = |number| std::num::NonZeroU16::new(number).unwrap();
+    assert_eq!(access.element(number(1)), None);
+    access.observe(app_mention().target, vec![back.clone(), inbox.clone()]);
+    assert_eq!(access.element(number(1)), Some(back));
+    assert_eq!(access.element(number(3)), None);
+    access.observe(app_mention().target, vec![inbox.clone()]);
+    assert_eq!(access.element(number(1)), Some(inbox));
+    assert_eq!(access.element(number(2)), None);
+}

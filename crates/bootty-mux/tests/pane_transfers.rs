@@ -358,10 +358,11 @@ fn tmux_explicit_create_delivers_argv_exactly_and_never_reuses_a_name() -> Resul
 }
 
 #[rstest]
-#[case::right(MuxPaneSplitDirection::Right)]
-#[case::down(MuxPaneSplitDirection::Down)]
+#[case::right(MuxPaneSplitDirection::Right, "largest")]
+#[case::down(MuxPaneSplitDirection::Down, "smallest")]
 fn tmux_restores_windows_splits_directories_and_focus_without_adopting_live_work(
     #[case] direction: MuxPaneSplitDirection,
+    #[case] window_size: &str,
 ) -> Result<()> {
     let server = PrivateTmux {
         directory: assert_fs::TempDir::new()?,
@@ -369,6 +370,7 @@ fn tmux_restores_windows_splits_directories_and_focus_without_adopting_live_work
     server.run_checked(&["new-session", "-d", "-s", "unrelated", "/bin/sh", "-i"])?;
     server.run_checked(&["set-option", "-g", "default-shell", "/bin/sh"])?;
     server.run_checked(&["set-option", "-gw", "automatic-rename", "off"])?;
+    server.run_checked(&["set-option", "-gw", "window-size", window_size])?;
     let unrelated = server.processes()?;
     let pane = |id: &str| -> Result<SavedTerminalPane> {
         let cwd = server.directory.path().join(format!("{id} cwd # literal"));
@@ -436,6 +438,14 @@ fn tmux_restores_windows_splits_directories_and_focus_without_adopting_live_work
     assert_eq!(restored.tag, tag);
     assert_eq!(restored.windows.len(), 2);
     for (actual, expected) in restored.windows.iter().zip(&saved.windows) {
+        assert_eq!(
+            backend
+                .runner()
+                .run_checked(&["display-message", "-p", "-t", &actual.id, "#{window-size}",])?
+                .trim(),
+            window_size,
+            "restored windows must inherit the server's sizing policy"
+        );
         assert_eq!(actual.name, expected.title);
         assert_eq!(actual.panes.len(), expected.panes.len());
         assert_eq!(

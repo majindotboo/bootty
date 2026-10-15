@@ -933,6 +933,7 @@ impl GpuiWorkspace {
         let sender = self.state.app_command_sender(Caller::Internal);
         let view = cx.new(|cx| NativeAgentSessionView::new(record, sender, enabled, window, cx));
         view.update(cx, |view, cx| {
+            view.configure_speech_account(&self.state.config().agents.codex, cx);
             view.set_completion_binding(binding, window, cx);
             if let Some(catalog) = catalog {
                 view.set_cached_catalog(catalog, window, cx);

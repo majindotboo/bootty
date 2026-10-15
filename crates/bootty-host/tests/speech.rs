@@ -6,7 +6,7 @@ use rstest::rstest;
 use std::{fs, os::unix::fs::PermissionsExt as _};
 
 #[rstest]
-fn dictation_and_playback_deliver_events_without_recording_audio() {
+fn dictation_and_voice_deliver_events_without_recording_audio() {
     let root = TempDir::new().unwrap();
     let program = root.path().join("speech.py");
     fs::write(
@@ -19,7 +19,7 @@ for line in sys.stdin:
  command=json.loads(line)
  if command['action']=='listen': emit('listening'); emit('partial',text='Recognized words')
  elif command['action']=='stop': emit('final',text='Recognized words'); emit('stopped')
- elif command['action']=='speak': emit('speaking'); emit('finished')
+ elif command['action']=='answer': emit('listening')
 ",
     )
     .unwrap();
@@ -45,16 +45,13 @@ for line in sys.stdin:
     );
     assert_eq!(events.blocking_recv(), Some(SpeechEvent::Stopped));
     session
-        .send(SpeechCommand::Speak {
-            text: "Reply".into(),
-        })
+        .send(SpeechCommand::Answer { sdp: "v=0".into() })
         .unwrap();
-    assert_eq!(events.blocking_recv(), Some(SpeechEvent::Speaking));
-    assert_eq!(events.blocking_recv(), Some(SpeechEvent::Finished));
+    assert_eq!(events.blocking_recv(), Some(SpeechEvent::Listening));
     assert!(
         session
-            .send(SpeechCommand::Speak {
-                text: "x".repeat(32_769)
+            .send(SpeechCommand::Answer {
+                sdp: "x".repeat(32_769)
             })
             .is_err()
     );

@@ -139,9 +139,9 @@ impl NativeAgentSessionView {
             .ghost()
             .small()
             .w_full()
-            .label("Changes")
             .icon(IconName::File)
             .accessibility_label("Open Git changes")
+            .child(div().flex_1().child("Changes"))
             .when_some(diff, |button, diff| {
                 button.child(
                     div()
@@ -215,8 +215,15 @@ impl NativeAgentSessionView {
                     .ghost()
                     .small()
                     .w_full()
-                    .label(attachment.name.clone())
+                    .accessibility_label(attachment.name.clone())
                     .tooltip(attachment.name.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(attachment.name.clone()),
+                    )
                     .child(crate::gpui::sized_icon(
                         "paperclip",
                         crate::gpui::IconSize::Small,

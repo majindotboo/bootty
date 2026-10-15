@@ -23,7 +23,7 @@ fn fixture(root: &Path) -> std::io::Result<String> {
     fs::write(
         &path,
         r#"#!/usr/bin/env python3
-import json,os,sys
+import json,os,sys,time
 assert sys.argv[sys.argv.index('--input-format')+1]=='stream-json'
 assert sys.argv[sys.argv.index('--output-format')+1]=='stream-json'
 assert sys.argv[sys.argv.index('--permission-prompt-tool')+1]=='stdio'
@@ -63,7 +63,7 @@ for line in sys.stdin:
    emit({'type':'system','subtype':'init','session_id':session,'cwd':os.getcwd()})
    # Claude downscales large images and echoes them re-encoded as JPEG.
    echo=dict(value);echo['isReplay']=True
-   echo['message']=dict(value['message'],content=[dict(block,source=dict(block['source'],media_type='image/jpeg')) if block['type']=='image' else block for block in prompt])
+   if isinstance(prompt,list): echo['message']=dict(value['message'],content=[dict(block,source=dict(block['source'],media_type='image/jpeg')) if block['type']=='image' else block for block in prompt])
    emit(echo)
    running='steer-call';tool_use(running,'sleep 20');continue
   if urgent: result('aborted_streaming')
@@ -74,6 +74,9 @@ for line in sys.stdin:
   result(identity='foreign')
   result() # No user ACK yet: never a completed turn.
   if prompt=='no-ack': continue
+  if prompt=='slow-ack':
+   # The test lets Claude confirm this message only after it sends another.
+   while not os.path.exists('ack'): time.sleep(0.01)
   echo=dict(value);echo['isReplay']=True;echo['message']={'role':'user','content':[{'type':'text','text':prompt}]};emit(echo)
   if prompt in ['permission-rules','permission-mode']:
    # Observed from Claude 2.1.299: Bash suggests a reusable rule; Write suggests accepting edits.
@@ -96,7 +99,12 @@ for line in sys.stdin:
     emit({'type':'assistant','uuid':'think-'+str(i),'session_id':session,'parent_tool_use_id':None,'message':{'id':'think-message-'+str(i),'content':[{'type':'thinking','thinking':''}]}})
     emit({'type':'assistant','uuid':'flood-'+str(i),'session_id':session,'parent_tool_use_id':None,'message':{'id':'flood-message-'+str(i),'content':[{'type':'tool_use','id':'flood-call-'+str(i),'name':'Bash','input':{'command':'true'}}]}})
     emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'flood-call-'+str(i),'content':[{'type':'text','text':'ok'}],'is_error':False}]}})
-  if prompt=='tool-hold':
+  if prompt=='edit':
+   # Observed from Claude 2.1.299: an Edit result carries Claude's own patch.
+   emit({'type':'assistant','uuid':'block-edit','session_id':session,'parent_tool_use_id':None,'message':{'id':'message-edit','content':[{'type':'tool_use','id':'edit-call','name':'Edit','input':{'file_path':'/tmp/project/notes.txt','old_string':'line two','new_string':'line 2'}}]}})
+   user_event([{'type':'tool_result','tool_use_id':'edit-call','content':'Edited'}],tool_use_result={'filePath':'/tmp/project/notes.txt','oldString':'line two','newString':'line 2','structuredPatch':[{'oldStart':1,'oldLines':3,'newStart':1,'newLines':3,'lines':[' line one','-line two','+line 2',' line three']}]})
+   result();continue
+  if prompt in ['tool-hold','slow-ack']:
    running='bash-call';tool_use(running,'sleep 60');continue
   if prompt=='tool-stream':
    # Observed from Claude 2.1.299: arguments arrive as partial JSON after an empty input.
@@ -243,6 +251,89 @@ fn claude_history_reads_the_session_file() {
         ]
     );
     assert_eq!((page.has_older, page.at_latest), (false, true));
+    session.stop();
+}
+
+/// Claude's edits read as file changes built from Claude's own patch, live and from the session
+/// file, and a new file reads as all added.
+#[rstest]
+fn claude_edits_become_file_changes_from_its_patch() {
+    let root = TempDir::new().unwrap();
+    let edited = json!([{"path": "/tmp/project/notes.txt",
+        "diff": "@@ -1,3 +1,3 @@\n line one\n-line two\n+line 2\n line three\n"}]);
+    let created = json!([{"path": "/tmp/project/hello.txt", "diff": "@@ -0,0 +1,1 @@\n+hi\n"}]);
+    let change = |transcript: &[bootty_agents::NativeTranscriptItem], id: &str| {
+        transcript
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| item.tool.as_ref())
+            .filter(|tool| tool.name == "fileChange")
+            .map(|tool| serde_json::from_str::<Value>(&tool.input).unwrap())
+    };
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("edit").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(
+        change(&session.snapshot().transcript, "claude-tool-edit-call"),
+        Some(edited.clone())
+    );
+    session.stop();
+
+    let folder = fs::canonicalize(root.path())
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let directory = root.path().join("account/projects").join(folder);
+    fs::create_dir_all(&directory).unwrap();
+    // Observed from Claude 2.1.299: the session file calls the result `toolUseResult`.
+    let entries = [
+        json!({"type":"user","uuid":"u1","parentUuid":null,"isSidechain":false,
+            "message":{"role":"user","content":"Edit it"}}),
+        json!({"type":"assistant","uuid":"a1","parentUuid":"u1","isSidechain":false,
+            "message":{"id":"msg-1","role":"assistant","content":[
+                {"type":"tool_use","id":"toolu-edit","name":"Edit","input":{}},
+                {"type":"tool_use","id":"toolu-write","name":"Write","input":{}}]}}),
+        json!({"type":"user","uuid":"r1","parentUuid":"a1","isSidechain":false,
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"toolu-edit","content":"Edited"}]},
+            "toolUseResult":{"filePath":"/tmp/project/notes.txt","structuredPatch":[
+                {"oldStart":1,"oldLines":3,"newStart":1,"newLines":3,
+                 "lines":[" line one","-line two","+line 2"," line three"]}]}}),
+        json!({"type":"user","uuid":"r2","parentUuid":"r1","isSidechain":false,
+            "message":{"role":"user","content":[
+                {"type":"tool_result","tool_use_id":"toolu-write","content":"Created"}]},
+            "toolUseResult":{"type":"create","filePath":"/tmp/project/hello.txt",
+                "content":"hi","structuredPatch":[]}}),
+    ];
+    fs::write(
+        directory.join(format!("{SESSION}.jsonl")),
+        entries
+            .iter()
+            .map(|entry| entry.to_string() + "\n")
+            .collect::<String>(),
+    )
+    .unwrap();
+    let mut config = config(root.path()).unwrap();
+    config.fresh_session_id = None;
+    config.session_id = Some(SESSION.to_owned());
+    let session = NativeAgentSession::spawn(config).unwrap();
+    barrier(&session).unwrap();
+    let page = session.read_history("latest").unwrap();
+    assert_eq!(
+        (
+            change(&page.transcript, "claude-tool-toolu-edit"),
+            change(&page.transcript, "claude-tool-toolu-write")
+        ),
+        (Some(edited), Some(created))
+    );
     session.stop();
 }
 
@@ -1327,7 +1418,7 @@ fn queued_preview_retains_attachments_and_hides_only_image_tokens(
 }
 
 #[rstest]
-fn refused_queued_steer_keeps_the_message_queued_for_the_next_turn() {
+fn an_early_queued_steer_waits_and_sends_with_the_next_turn() {
     use bootty_agents::{NativeAgentService, NativePrompt, NativeQueuedMessageStatus};
     use std::{
         sync::{Arc, mpsc},
@@ -1348,14 +1439,11 @@ fn refused_queued_steer_keeps_the_message_queued_for_the_next_turn() {
             &NativePrompt::text("Retain this instruction").unwrap(),
         )
         .unwrap();
-    assert_eq!(
-        service.steer_followup(&record.target(), &queued.id),
-        Err("Wait for the previous message to reach the active turn".to_owned())
-    );
+    assert_eq!(service.steer_followup(&record.target(), &queued.id), Ok(()));
     assert_eq!(
         service.sessions()[0].queued_messages[0].status,
         NativeQueuedMessageStatus::Queued,
-        "nothing was sent, so the message keeps its place"
+        "no turn can take it, so the message keeps its place"
     );
     service.start_followups().unwrap();
     loop {
@@ -1380,6 +1468,70 @@ fn refused_queued_steer_keeps_the_message_queued_for_the_next_turn() {
             .collect::<Vec<_>>(),
         vec!["Retain this instruction"]
     );
+    service.shutdown().unwrap();
+}
+
+/// A message sent while the previous one is still on its way to Claude waits in the queue, then
+/// steers the same turn once Claude confirms the first. Timing never refuses it.
+#[test]
+fn a_message_sent_before_the_previous_one_lands_follows_it_into_the_turn() {
+    use bootty_agents::NativePrompt;
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+    let root = TempDir::new().unwrap();
+    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let (sender, changes) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    service.start_followups().unwrap();
+    service.prompt(&target, "slow-ack").unwrap();
+    service
+        .prompt_input(
+            &target,
+            &NativePrompt::text("Also check the tests").unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        service.sessions()[0].queued_messages.len(),
+        1,
+        "the message waits for the first to land"
+    );
+    fs::write(root.path().join("ack"), "").unwrap();
+    loop {
+        let current = service.sessions().remove(0);
+        let users = current
+            .snapshot
+            .transcript
+            .iter()
+            .filter(|item| item.role == "user")
+            .map(|item| (item.text.clone(), item.complete))
+            .collect::<Vec<_>>();
+        // A sent message completes when Claude replays it.
+        if current.queued_messages.is_empty()
+            && users.len() == 2
+            && users.iter().all(|(_, complete)| *complete)
+        {
+            assert_eq!(
+                users,
+                vec![
+                    ("slow-ack".to_owned(), true),
+                    ("Also check the tests".to_owned(), true)
+                ]
+            );
+            assert_eq!(current.snapshot.status, NativeSessionStatus::Working);
+            break;
+        }
+        changes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the queued message steers the turn");
+    }
     service.shutdown().unwrap();
 }
 
@@ -1483,7 +1635,7 @@ fn stopping_a_steered_screenshot_turn_settles_and_sends_the_queue() {
 }
 
 /// Claude acknowledges an interrupt without a result when no turn is running. The session stays
-/// visibly stopping, and a steer is refused while the queued message keeps its place.
+/// visibly stopping, and a steered queued message keeps its place instead of joining the turn.
 #[test]
 fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
     use bootty_agents::{NativePrompt, NativeQueuedMessageStatus};
@@ -1506,10 +1658,7 @@ fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
     let snapshot = session.snapshot();
     assert_eq!(snapshot.status, NativeSessionStatus::Working);
     assert!(snapshot.stopping());
-    assert_eq!(
-        service.steer_followup(&target, &queued.id),
-        Err("The agent is stopping; queued messages send after it stops".to_owned())
-    );
+    assert_eq!(service.steer_followup(&target, &queued.id), Ok(()));
     assert_eq!(
         service.sessions()[0].queued_messages[0].status,
         NativeQueuedMessageStatus::Queued

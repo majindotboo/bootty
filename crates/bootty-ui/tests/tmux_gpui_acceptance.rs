@@ -17,6 +17,11 @@ use bootty_mux::terminal::{
     BackendPanePolicy, MuxPaneTarget, PaneStartRequest, ScopedMuxPaneTarget, TerminalRuntime,
 };
 use bootty_mux::tmux::{TmuxPanePolicy, local_server_args};
+use bootty_mux::{
+    command::MuxCommand,
+    session_snapshot::{SavedTerminalPane, SavedTerminalSession, SavedTerminalWindow},
+    snapshot::MuxSessionTag,
+};
 use bootty_terminal::geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface};
 use bootty_terminal::terminal_frame::RenderFrame;
 use bootty_terminal::terminal_session::TerminalSessionConfig;
@@ -40,7 +45,7 @@ const REMOTE_INPUT_MARKER: &str = "BOOTTY_REMOTE_TMUX_INPUT=accepted";
 const REMOTE_SIZE_MARKER: &str = "BOOTTY_REMOTE_TMUX_SIZE=30 100";
 
 #[rstest]
-fn tmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
+fn tmux_restored_session_publishes_real_frames_through_gpui() -> Result<()> {
     if env::var_os(CHILD_ENV).is_some() {
         return run_child_acceptance();
     }
@@ -61,7 +66,7 @@ fn tmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
     let output = Command::new(env::current_exe().context("resolve acceptance test executable")?)
         .args([
             "--exact",
-            "tmux_policy_publishes_real_frames_through_gpui",
+            "tmux_restored_session_publishes_real_frames_through_gpui",
             "--nocapture",
         ])
         .env(CHILD_ENV, "1")
@@ -203,7 +208,7 @@ fn run_child_acceptance() -> Result<()> {
     );
     let session = format!("bootty-e2e-{}", std::process::id());
     let script = write_pane_script()?;
-    start_server(&session, &script)?;
+    restore_session(&session, &script)?;
 
     let target = ScopedMuxPaneTarget::from(MuxPaneTarget::Session {
         session_id: session,
@@ -401,20 +406,46 @@ fn write_remote_transport(path: &std::path::Path, argv_log: &std::path::Path) ->
     Ok(())
 }
 
-fn start_server(session: &str, script: &std::path::Path) -> Result<()> {
+fn restore_session(session: &str, script: &std::path::Path) -> Result<()> {
     let output = Command::new("tmux")
         .args(local_server_args(ApplicationIdentity::for_process()))
-        .args(["-f", "/dev/null"])
-        .args(["new-session", "-d", "-x", "80", "-y", "24", "-s", session])
+        .args(["set-option", "-g", "default-shell"])
         .arg(script)
         .output()
-        .context("start isolated tmux server")?;
-    if !output.status.success() {
-        bail!(
-            "start isolated tmux server: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
+        .context("configure isolated tmux pane program")?;
+    anyhow::ensure!(output.status.success(), "{output:?}");
+    bootty_mux::tmux::TmuxBackend::for_identity(ApplicationIdentity::for_process()).execute(
+        MuxCommand::RestoreSession {
+            session_id: session.to_owned(),
+            tag: MuxSessionTag {
+                identity: Some("saved-session".into()),
+                space: None,
+            },
+            snapshot: SavedTerminalSession {
+                captured_at: 1,
+                session_id: "saved-session".into(),
+                backend_id: "$old".into(),
+                active_window_id: Some("window".into()),
+                windows: vec![SavedTerminalWindow {
+                    id: "window".into(),
+                    backend_id: "@old".into(),
+                    title: "restored".into(),
+                    focused_pane_id: "pane".into(),
+                    layout: None,
+                    panes: vec![SavedTerminalPane {
+                        id: "pane".into(),
+                        backend_id: "%old".into(),
+                        cwd: "/tmp".into(),
+                        cols: 80,
+                        rows: 24,
+                        text: String::new(),
+                        omitted_lines: 0,
+                        native_agent: None,
+                    }],
+                }],
+            },
+        },
+    )?;
     Ok(())
 }
 

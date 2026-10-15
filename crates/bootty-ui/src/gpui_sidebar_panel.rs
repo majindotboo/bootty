@@ -24,9 +24,6 @@ fn panel_state(name: &str) -> PanelState {
 pub struct SessionsPanel {
     chrome: Entity<GpuiChrome>,
     focus: FocusHandle,
-    subagents: bool,
-    parents: Vec<Entity<NativeAgentSessionView>>,
-    observations: Vec<gpui_kit::Subscription>,
 }
 
 impl SessionsPanel {
@@ -35,15 +32,23 @@ impl SessionsPanel {
         Self {
             chrome,
             focus: cx.focus_handle(),
-            subagents: false,
-            parents: Vec::new(),
-            observations: Vec::new(),
         }
     }
-    pub(crate) fn show_subagents(&mut self, show: bool, cx: &mut Context<Self>) {
-        if self.subagents != show {
-            self.subagents = show;
-            cx.notify();
+}
+
+/// Every live conversation's delegated subagents, shown with the right-side tool panels.
+pub struct SubagentsPanel {
+    focus: FocusHandle,
+    parents: Vec<Entity<NativeAgentSessionView>>,
+    observations: Vec<gpui_kit::Subscription>,
+}
+
+impl SubagentsPanel {
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus: cx.focus_handle(),
+            parents: Vec::new(),
+            observations: Vec::new(),
         }
     }
 
@@ -70,25 +75,10 @@ impl SessionsPanel {
             .filter(|parent| !parent.read(cx).subagents().is_empty());
         let empty = groups.clone().next().is_none();
         div()
+            .track_focus(&self.focus)
             .size_full()
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .p_2()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(
-                        Button::new("subagents-back")
-                            .ghost()
-                            .small()
-                            .label("Sessions")
-                            .icon(gpui_kit::component::IconName::ChevronLeft)
-                            .on_click(cx.listener(|this, _, _, cx| this.show_subagents(false, cx))),
-                    )
-                    .child(div().text_sm().child("Subagents")),
-            )
             .child(
                 div()
                     .id("subagents-hub")
@@ -158,6 +148,34 @@ impl SessionsPanel {
     }
 }
 
+impl EventEmitter<PanelEvent> for SubagentsPanel {}
+impl Focusable for SubagentsPanel {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+impl BasePanel for SubagentsPanel {
+    fn panel_name(&self) -> &'static str {
+        "bootty.subagents"
+    }
+    fn dump(&self, _: &App) -> PanelState {
+        panel_state(self.panel_name())
+    }
+}
+impl Panel for SubagentsPanel {
+    fn tab_name(&self, _: &App) -> Option<gpui_kit::SharedString> {
+        Some("Subagents".into())
+    }
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        "Subagents"
+    }
+}
+impl Render for SubagentsPanel {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_subagents(cx)
+    }
+}
+
 impl EventEmitter<PanelEvent> for SessionsPanel {}
 impl Focusable for SessionsPanel {
     fn focus_handle(&self, _: &App) -> FocusHandle {
@@ -185,9 +203,6 @@ impl Panel for SessionsPanel {
 }
 impl Render for SessionsPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if self.subagents {
-            return self.render_subagents(cx).into_any_element();
-        }
         let content = self.chrome.update(cx, GpuiChrome::dock_sidebar);
         div()
             .track_focus(&self.focus)
@@ -198,6 +213,5 @@ impl Render for SessionsPanel {
             .size_full()
             .overflow_hidden()
             .children(content)
-            .into_any_element()
     }
 }

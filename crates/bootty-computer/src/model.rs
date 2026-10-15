@@ -184,12 +184,28 @@ pub enum ComputerAction {
         delta_x: i32,
         delta_y: i32,
     },
+    /// List the window's accessibility elements.
+    Elements,
+    /// Press an element from an earlier listing: its accessibility action when it has one,
+    /// otherwise a click at its center.
+    Press {
+        element: Box<ComputerElement>,
+    },
 }
 
 impl ComputerAction {
     #[must_use]
     pub const fn is_capture(&self) -> bool {
         matches!(self, Self::Snapshot | Self::SnapshotRegion { .. })
+    }
+
+    /// Reads the window's pixels or elements without input.
+    #[must_use]
+    pub const fn observes(&self) -> bool {
+        matches!(
+            self,
+            Self::Snapshot | Self::SnapshotRegion { .. } | Self::Elements
+        )
     }
 
     /// Validate bounded input without touching the OS.
@@ -217,6 +233,7 @@ impl ComputerAction {
             } if delta_x.unsigned_abs() > 10_000 || delta_y.unsigned_abs() > 10_000 => Err(
                 ComputerError::InvalidAction("scroll delta exceeds 10000 pixels".into()),
             ),
+            Self::Press { element } => element.validate(),
             _ => Ok(()),
         }
     }
@@ -254,6 +271,91 @@ impl DisplayBounds {
             && rect.x + rect.width <= self.x + self.width
             && rect.y + rect.height <= self.y + self.height
     }
+}
+
+/// Most accessibility elements one listing returns.
+pub const MAX_ELEMENTS: usize = 300;
+/// The deepest element path, in child steps from the window.
+pub const MAX_ELEMENT_DEPTH: usize = 64;
+
+/// One accessibility element of a window, as the app reported it. Disabled and unlabeled elements
+/// are listed too, so every visible control can be matched to a screenshot by its frame.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ComputerElement {
+    /// Child positions from the window. A press finds the element again by this path.
+    pub path: Vec<u16>,
+    /// The platform role, with its subrole after a colon, such as `RadioButton:TabButton`.
+    pub role: String,
+    /// The title, description or help text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The app's own identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identifier: Option<String>,
+    /// Global desktop points.
+    pub frame: DisplayBounds,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub states: Vec<ElementState>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ElementState {
+    Disabled,
+    Selected,
+    Checked,
+    Focused,
+}
+
+impl ComputerElement {
+    /// Where a press clicks when the element has no accessibility action.
+    #[must_use]
+    pub fn center(&self) -> (f64, f64) {
+        (
+            self.frame.x + self.frame.width / 2.0,
+            self.frame.y + self.frame.height / 2.0,
+        )
+    }
+
+    /// The same element after a fresh read: its role, name and frame are unchanged.
+    #[must_use]
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.path == other.path
+            && self.role == other.role
+            && self.name == other.name
+            && self.frame == other.frame
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ComputerError> {
+        let long = |text: &Option<String>| text.as_ref().is_some_and(|text| text.len() > 1024);
+        if self.path.is_empty()
+            || self.path.len() > MAX_ELEMENT_DEPTH
+            || self.role.is_empty()
+            || self.role.len() > 256
+            || long(&self.name)
+            || long(&self.value)
+            || long(&self.identifier)
+            || self.states.len() > 4
+        {
+            return Err(ComputerError::InvalidAction(
+                "invalid accessibility element".into(),
+            ));
+        }
+        self.frame.validate()
+    }
+}
+
+/// How a press reached the element.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PressMethod {
+    /// The element's own accessibility press action.
+    Action,
+    /// A click at the element's center, for elements without one.
+    Click,
 }
 
 /// Geometry observed from the exact native host before dispatch, in window-frame points.
@@ -374,6 +476,16 @@ impl ComputerTarget {
                     "coordinates are outside the target".into(),
                 ))
             }
+            ComputerAction::Press { element } => {
+                let (x, y) = element.center();
+                if self.contains(x, y) {
+                    Ok(())
+                } else {
+                    Err(ComputerError::InvalidAction(
+                        "the element is outside the target".into(),
+                    ))
+                }
+            }
             _ => Ok(()),
         }
     }
@@ -404,6 +516,15 @@ pub enum ComputerResult {
         pixel_height: u32,
         target: Box<ComputerTarget>,
     },
+    Elements {
+        /// Screen order, at most [`MAX_ELEMENTS`].
+        elements: Vec<ComputerElement>,
+        /// More elements were left out past the limit or the time budget.
+        omitted: bool,
+        target: Box<ComputerTarget>,
+    },
+    /// The press was delivered. Application acceptance is observed by a subsequent snapshot.
+    Pressed { method: PressMethod },
 }
 
 impl ComputerResult {
@@ -413,17 +534,38 @@ impl ComputerResult {
         action: &ComputerAction,
     ) -> Result<(), ComputerError> {
         match (self, action) {
-            (Self::Posted, ComputerAction::Snapshot | ComputerAction::SnapshotRegion { .. })
-            | (
-                Self::Snapshot { .. },
-                ComputerAction::Click { .. }
+            (
+                Self::Posted,
+                ComputerAction::Focus
+                | ComputerAction::Click { .. }
                 | ComputerAction::Move { .. }
                 | ComputerAction::TypeText { .. }
                 | ComputerAction::Key { .. }
                 | ComputerAction::Scroll { .. },
-            ) => Err(ComputerError::Platform(
-                "computer use returned an unexpected result".into(),
-            )),
+            )
+            | (Self::Pressed { .. }, ComputerAction::Press { .. }) => Ok(()),
+            (
+                Self::Elements {
+                    elements,
+                    target: listed,
+                    ..
+                },
+                ComputerAction::Elements,
+            ) => {
+                listed.validate()?;
+                if !same_window(listed, target) {
+                    return Err(ComputerError::StaleTarget);
+                }
+                if elements.len() > MAX_ELEMENTS {
+                    return Err(ComputerError::Platform(
+                        "the element list exceeds its limit".into(),
+                    ));
+                }
+                elements
+                    .iter()
+                    .try_for_each(ComputerElement::validate)
+                    .map_err(|_| ComputerError::Platform("invalid accessibility element".into()))
+            }
             (
                 Self::Snapshot {
                     target: captured,
@@ -433,7 +575,7 @@ impl ComputerResult {
                     region,
                     requested_region,
                 },
-                _,
+                ComputerAction::Snapshot | ComputerAction::SnapshotRegion { .. },
             ) => {
                 captured.validate()?;
                 let expected_region = match action {
@@ -466,12 +608,7 @@ impl ComputerResult {
                     }
                 }
 
-                if captured.window_id != target.window_id
-                    || captured.process_id != target.process_id
-                    || captured.bundle_id != target.bundle_id
-                    || captured.launch_time.to_bits() != target.launch_time.to_bits()
-                    || captured.bounds != target.bounds
-                {
+                if !same_window(captured, target) {
                     return Err(ComputerError::StaleTarget);
                 }
                 if *pixel_width == 0
@@ -487,9 +624,20 @@ impl ComputerResult {
                 }
                 Ok(())
             }
-            (Self::Posted, _) => Ok(()),
+            _ => Err(ComputerError::Platform(
+                "computer use returned an unexpected result".into(),
+            )),
         }
     }
+}
+
+/// The same observed window token, compared exactly.
+fn same_window(observed: &ComputerTarget, target: &ComputerTarget) -> bool {
+    observed.window_id == target.window_id
+        && observed.process_id == target.process_id
+        && observed.bundle_id == target.bundle_id
+        && observed.launch_time.to_bits() == target.launch_time.to_bits()
+        && observed.bounds == target.bounds
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -506,6 +654,8 @@ pub enum ComputerError {
     TargetUnavailable,
     #[error("computer target changed; select it again")]
     StaleTarget,
+    #[error("the element moved, changed or closed; list elements again")]
+    StaleElement,
     #[error("computer target is not the focused window")]
     TargetNotFocused,
     #[error("secure input is active; computer use is paused")]

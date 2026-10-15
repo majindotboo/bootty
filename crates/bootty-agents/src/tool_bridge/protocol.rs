@@ -2,7 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use bootty_computer::{ComputerAction, ComputerResultSnapshot};
+use bootty_computer::{ComputerAction, ComputerResultSnapshot, ElementState};
+
+use crate::{NativeApplicationAction, NativeApplicationSnapshot};
 use bootty_control::CommandOutcome;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -130,8 +132,8 @@ impl ToolProtocol {
         if !self.lease.revoked() && self.lease.application_mentions_supported() {
             // Advertise before the first prompt so MCP clients can cache the catalog. Authority
             // comes from a user mention, an approval card or the user's always-allowed apps.
-            tools.push(json!({"name":"computer_snapshot","description":"Capture a PNG of a macOS app's front window. application is the app's bundle id or name, such as dev.zed.Zed or Zed. The first use of an app in this conversation asks the user to allow it. Omit application to capture only the host-granted Bootty window.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
-            tools.push(json!({"name":"computer_input","description":"Focus, click, type, press a key, move or scroll in the window from the app's latest computer_snapshot. Take a snapshot first. x and y are desktop points; the snapshot caption maps its pixels to them. Input requires the app to be focused, so focus it first. After the window moves or resizes, take a new snapshot. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"computer_snapshot","description":"Capture a PNG of a macOS app's front window and list its accessibility elements, numbered, with their roles, names and frames. application is the app's bundle id or name, such as dev.zed.Zed or Zed. The first use of an app in this conversation asks the user to allow it. Omit application to capture only the host-granted Bootty window.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"computer_input","description":"Focus, press an element, click, type, press a key, move or scroll in the window from the app's latest computer_snapshot. Take a snapshot first. press takes an element number from that snapshot; it uses the element's own action, or clicks its center when it has none. x and y are desktop points; the snapshot caption maps its pixels to them. Input requires the app to be focused, so focus it first. After the window moves or resizes, take a new snapshot. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.spawn_enabled() {
             let labels = json!({
@@ -330,11 +332,15 @@ impl ToolProtocol {
         #[serde(deny_unknown_fields)]
         struct Input {
             application: String,
-            action: ComputerAction,
+            action: NativeApplicationAction,
         }
         let parsed = if name == "computer_snapshot" {
-            serde_json::from_value::<Snapshot>(arguments)
-                .map(|input| (input.application, ComputerAction::Snapshot))
+            serde_json::from_value::<Snapshot>(arguments).map(|input| {
+                (
+                    input.application,
+                    NativeApplicationAction::Computer(ComputerAction::Snapshot),
+                )
+            })
         } else {
             serde_json::from_value::<Input>(arguments)
                 .map(|input| (input.application, input.action))
@@ -355,13 +361,23 @@ impl ToolProtocol {
         let Some(deadline) = now.checked_add(bootty_host::private_stdio::TOOL_CALL_TIMEOUT) else {
             return (tool_error("Tool deadline is unavailable"), false);
         };
-        let image = action.is_capture();
-        outcome_result(
-            &self
-                .lease
-                .invoke_application(&reference, &action, commands, deadline),
-            image,
-        )
+        let outcome = self
+            .lease
+            .invoke_application(&reference, &action, commands, deadline);
+        match &outcome {
+            CommandOutcome::Success { value, .. } if action.is_capture() => {
+                serde_json::from_value::<NativeApplicationSnapshot>(value.clone()).map_or_else(
+                    |_| {
+                        (
+                            tool_error("Computer capture returned an invalid image"),
+                            false,
+                        )
+                    },
+                    |snapshot| (application_snapshot_result(&snapshot), true),
+                )
+            }
+            _ => outcome_result(&outcome, false),
+        }
     }
     fn spawn(
         &self,
@@ -755,6 +771,60 @@ fn image_result(snapshot: &ComputerResultSnapshot) -> Value {
         {"type":"text","text":caption}],"isError":false})
 }
 
+/// The image with its caption, then the numbered elements an agent can press.
+fn application_snapshot_result(snapshot: &NativeApplicationSnapshot) -> Value {
+    let mut result = image_result(&snapshot.image);
+    let text = snapshot.unavailable.as_ref().map_or_else(
+        || elements_text(snapshot),
+        |reason| format!("No accessibility elements: {reason}"),
+    );
+    if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
+        content.push(json!({"type":"text","text":text}));
+    }
+    result
+}
+
+fn elements_text(snapshot: &NativeApplicationSnapshot) -> String {
+    use std::fmt::Write as _;
+    let mut text = String::from(
+        "Accessibility elements in screen order: number, role, \"name\", = value, #identifier, frame (x,y width×height in desktop points), states. Unlabeled elements show only their role and frame; match them to the image. Press one with computer_input {\"action\":\"press\",\"element\":N}.\n",
+    );
+    for (number, element) in (1_usize..).zip(&snapshot.elements) {
+        _ = write!(text, "{number} {}", element.role);
+        if let Some(name) = &element.name {
+            _ = write!(text, " {name:?}");
+        }
+        if let Some(value) = &element.value {
+            _ = write!(text, " = {value:?}");
+        }
+        if let Some(identifier) = &element.identifier {
+            _ = write!(text, " #{identifier}");
+        }
+        let frame = &element.frame;
+        _ = write!(
+            text,
+            " ({:.0},{:.0} {:.0}×{:.0})",
+            frame.x, frame.y, frame.width, frame.height
+        );
+        for state in &element.states {
+            text.push_str(match state {
+                ElementState::Disabled => " disabled",
+                ElementState::Selected => " selected",
+                ElementState::Checked => " checked",
+                ElementState::Focused => " focused",
+            });
+        }
+        text.push('\n');
+    }
+    if snapshot.elements.is_empty() {
+        text.push_str("The app reported no elements in this window.\n");
+    }
+    if snapshot.omitted {
+        text.push_str("More elements were left out; scroll or use coordinates for the rest.\n");
+    }
+    text
+}
+
 fn outcome_result(outcome: &CommandOutcome, image: bool) -> (Value, bool) {
     if image && let CommandOutcome::Success { value, .. } = outcome {
         return serde_json::from_value::<ComputerResultSnapshot>(value.clone()).map_or_else(
@@ -781,6 +851,13 @@ fn application_action_schema() -> Value {
     let mut variants = Vec::new();
     for (name, fields) in [
         ("focus", vec![]),
+        (
+            "press",
+            vec![(
+                "element",
+                json!({"type":"integer","minimum":1,"maximum":bootty_computer::MAX_ELEMENTS}),
+            )],
+        ),
         (
             "click",
             vec![

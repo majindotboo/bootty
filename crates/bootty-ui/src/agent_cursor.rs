@@ -1,5 +1,5 @@
-//! The agent cursor: a small pointer shown where an agent clicks, moves or scrolls, so computer use
-//! is visible. Only macOS needs it, because input goes straight to the app there and the real
+//! The agent cursor: a small pointer shown where an agent clicks, presses, moves or scrolls, so
+//! computer use is visible. Only macOS needs it, because input goes straight to the app there and the real
 //! pointer stays put; on Windows and X11 the real pointer moves to each point. It never takes
 //! focus, and its window starts just past the target so it never covers the pixel the agent acts
 //! on.
@@ -47,11 +47,12 @@ pub fn pointing<T, E>(
     repaint: &dyn Fn(),
     act: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
-    let (ComputerAction::Click { x, y, .. }
-    | ComputerAction::Move { x, y }
-    | ComputerAction::Scroll { x, y, .. }) = *action
-    else {
-        return act();
+    let (x, y) = match action {
+        ComputerAction::Click { x, y, .. }
+        | ComputerAction::Move { x, y }
+        | ComputerAction::Scroll { x, y, .. } => (*x, *y),
+        ComputerAction::Press { element } => element.center(),
+        _ => return act(),
     };
     if !cfg!(target_os = "macos") {
         return act();

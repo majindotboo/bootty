@@ -621,14 +621,14 @@ pub struct DialogView {
 }
 
 impl DialogView {
+    /// Speech uses the selected Codex account.
     pub(crate) fn configure_speech_account(
         &self,
-        preferences: &bootty_config::config::AgentProviderConfig,
-        provider: &str,
+        codex: &bootty_config::config::AgentProviderConfig,
         cx: &mut Context<Self>,
     ) {
         self.speech
-            .update(cx, |speech, _| speech.set_account(preferences, provider));
+            .update(cx, |speech, cx| speech.set_account(codex, cx));
     }
     fn composer_control_focus(
         cx: &Context<Self>,
@@ -725,7 +725,7 @@ impl DialogView {
             Self::subscribe_prompt_content(&prompt_textarea, window, cx);
         let command_interceptor = Self::command_interceptor(cx);
         let (control_focus, provider_focus) = Self::composer_control_focus(cx);
-        let speech = cx.new(|_| crate::gpui_speech::SpeechInput::new(false));
+        let speech = cx.new(|_| crate::gpui_speech::SpeechInput::new());
         let speech_subscription = cx.subscribe_in(
             &speech,
             window,
@@ -741,7 +741,7 @@ impl DialogView {
                         window.dispatch_action(Box::new(action), cx);
                     });
                 }
-                crate::gpui_speech::SpeechInputEvent::Final { text, .. } => {
+                crate::gpui_speech::SpeechInputEvent::Final { text } => {
                     this.prompt_textarea.update(cx, |input, cx| {
                         input.replace_text_in_range(None, text, window, cx);
                     });
@@ -749,6 +749,9 @@ impl DialogView {
                 crate::gpui_speech::SpeechInputEvent::Error(error) => {
                     crate::gpui_speech::notify_error(error, window, cx);
                 }
+                // A draft has no conversation to hold a voice call.
+                crate::gpui_speech::SpeechInputEvent::Offer(_)
+                | crate::gpui_speech::SpeechInputEvent::VoiceEnded => {}
             },
         );
         Self {

@@ -961,35 +961,39 @@ impl SidebarRows {
 
     fn settled_header(&self, count: usize) -> gpui_kit::AnyElement {
         let owner = self.owner.clone();
-        Button::new("sidebar-settled-toggle")
-            .debug_selector(|| "sidebar-settled-section".into())
-            .ghost()
-            .small()
-            .w_full()
+        // Button content centers in its own width, so a row keeps the heading at the start.
+        div()
+            .flex()
             .mt_auto()
-            .justify_start()
-            .text_color(color(self.colors.muted))
-            .child(crate::gpui::icon(
-                if self.settled_shelf.collapsed {
-                    "chevron-right"
-                } else {
-                    "chevron-down"
-                },
-                self.icon_size,
-                color(self.colors.muted),
-            ))
-            .label(format!("Settled ({count})"))
-            .accessibility_label(if self.settled_shelf.collapsed {
-                "Expand settled sessions"
-            } else {
-                "Collapse settled sessions"
-            })
-            .on_click(move |_, _, cx| {
-                _ = owner.update(cx, |this, cx| {
-                    this.sidebar_settled_shelf.collapsed = !this.sidebar_settled_shelf.collapsed;
-                    cx.notify();
-                });
-            })
+            .child(
+                Button::new("sidebar-settled-toggle")
+                    .debug_selector(|| "sidebar-settled-section".into())
+                    .ghost()
+                    .small()
+                    .text_color(color(self.colors.muted))
+                    .child(crate::gpui::icon(
+                        if self.settled_shelf.collapsed {
+                            "chevron-right"
+                        } else {
+                            "chevron-down"
+                        },
+                        self.icon_size,
+                        color(self.colors.muted),
+                    ))
+                    .label(format!("Settled ({count})"))
+                    .accessibility_label(if self.settled_shelf.collapsed {
+                        "Expand settled sessions"
+                    } else {
+                        "Collapse settled sessions"
+                    })
+                    .on_click(move |_, _, cx| {
+                        _ = owner.update(cx, |this, cx| {
+                            this.sidebar_settled_shelf.collapsed =
+                                !this.sidebar_settled_shelf.collapsed;
+                            cx.notify();
+                        });
+                    }),
+            )
             .into_any_element()
     }
 

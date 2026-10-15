@@ -204,7 +204,6 @@ pub struct NativeAgentSessionView {
     wide: bool,
     speech: Entity<crate::gpui_speech::SpeechInput>,
     _speech_subscription: Subscription,
-    spoken_response: Option<String>,
     focus: FocusHandle,
     permissions_focus: FocusHandle,
     available_efforts: Vec<String>,
@@ -328,7 +327,7 @@ impl NativeAgentSessionView {
                 this.sync_requests(window, cx);
             },
         );
-        let speech = cx.new(|_| crate::gpui_speech::SpeechInput::new(true));
+        let speech = cx.new(|_| crate::gpui_speech::SpeechInput::new());
         let speech_subscription = cx.subscribe_in(
             &speech,
             window,
@@ -339,15 +338,15 @@ impl NativeAgentSessionView {
                 crate::gpui_speech::SpeechInputEvent::Error(error) => {
                     crate::gpui_speech::notify_error(error, window, cx);
                 }
-                crate::gpui_speech::SpeechInputEvent::Final { text, mode } => {
+                crate::gpui_speech::SpeechInputEvent::Final { text } => {
                     this.composer.update(cx, |input, cx| {
                         input.replace_text_in_range(None, text, window, cx);
                     });
-                    if *mode == crate::gpui_speech::SpeechMode::Voice {
-                        // Let the editor publish its revision before capturing the submitted draft.
-                        cx.defer_in(window, |this, window, cx| this.send_prompt(window, cx));
-                    }
                 }
+                crate::gpui_speech::SpeechInputEvent::Offer(offer) => {
+                    this.start_voice_call(offer.clone(), window, cx);
+                }
+                crate::gpui_speech::SpeechInputEvent::VoiceEnded => this.end_voice_call(),
             },
         );
         let mut this = Self {
@@ -357,7 +356,6 @@ impl NativeAgentSessionView {
             wide: false,
             speech,
             _speech_subscription: speech_subscription,
-            spoken_response: None,
             focus: cx.focus_handle(),
             permissions_focus: cx.focus_handle(),
             sender,
@@ -431,6 +429,18 @@ impl NativeAgentSessionView {
         };
         this.restore_initial_message(window, cx);
         this.restore_saved_draft(window, cx);
+        // A Codex conversation's speech runs on its own account, and it can hold a voice call;
+        // the host sets any other's account.
+        if this.record.config.provider == AgentKind::Codex {
+            let (program, directory) = (
+                this.record.config.program.clone(),
+                this.record.config.account_directory.clone(),
+            );
+            this.speech.update(cx, |speech, cx| {
+                speech.set_captured_account(program, directory, cx);
+                speech.set_voice_supported(true, cx);
+            });
+        }
         this.configure_timeline(cx);
         this.sync_transcript(&[], window, cx);
         this.sync_requests(window, cx);
@@ -778,18 +788,6 @@ impl NativeAgentSessionView {
         self.load_attachment_previews(window, cx);
         self.load_models(window, cx);
         self.sync_model_picker(window, cx);
-        if self.speech.read(cx).voice_active()
-            && self.record.snapshot.status == NativeSessionStatus::Idle
-            && previous.snapshot.status != NativeSessionStatus::Idle
-            && let Some(response) = self.record.snapshot.transcript.iter().rev().find(|item| {
-                item.role == "assistant" && item.complete && !item.text.trim().is_empty()
-            })
-            && self.spoken_response.as_ref() != Some(&response.id)
-        {
-            self.spoken_response = Some(response.id.clone());
-            let text: String = response.text.chars().take(8192).collect();
-            self.speech.update(cx, |speech, cx| speech.speak(text, cx));
-        }
         if generation_changed && let Some(annotation_id) = self.expanded_annotation {
             self.load_annotation_preview(annotation_id, window, cx);
         }
@@ -954,12 +952,23 @@ impl NativeAgentSessionView {
     }
 
     fn sync_requests(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let changes = self
+            .record
+            .snapshot
+            .requests
+            .iter()
+            .filter_map(|request| {
+                requests::approval_change(request, &self.record.snapshot.transcript)
+                    .map(|change| (request.id.clone(), change))
+            })
+            .collect::<BTreeMap<_, _>>();
         self.requests.update(cx, |requests, cx| {
             requests.set_enabled(self.provider_enabled(), cx);
             requests.update(
                 self.record.target(),
                 &self.record.snapshot.requests,
                 &self.pending,
+                (&changes, &self.record.config.cwd),
                 window,
                 cx,
             );
@@ -1692,46 +1701,7 @@ impl NativeAgentSessionView {
                         files
                             .into_iter()
                             .map(|(path, file)| {
-                                let counts = (!file.patch_unavailable).then(|| {
-                                    file.hunks.iter().flat_map(|hunk| &hunk.lines).fold(
-                                        (0_usize, 0_usize),
-                                        |(added, removed), line| {
-                                            (
-                                                added.saturating_add(usize::from(
-                                                    line.old_line.is_none(),
-                                                )),
-                                                removed.saturating_add(usize::from(
-                                                    line.new_line.is_none(),
-                                                )),
-                                            )
-                                        },
-                                    )
-                                });
-                                let rows = file
-                                    .hunks
-                                    .iter()
-                                    .map(|hunk| hunk.lines.len().saturating_add(1))
-                                    .fold(0_usize, usize::saturating_add)
-                                    .clamp(2, 14);
-                                let rows = num_traits::ToPrimitive::to_f32(&rows).unwrap_or(14.0);
-                                let view = cx.new(|cx| {
-                                    let mut view =
-                                        crate::gpui_git_panel::GitDiffPanel::new(window, cx);
-                                    view.show_file_diff(file, window, cx);
-                                    view
-                                });
-                                let path = std::path::Path::new(&path);
-                                let path = path
-                                    .strip_prefix(&this.record.config.cwd)
-                                    .unwrap_or(path)
-                                    .to_string_lossy()
-                                    .into_owned();
-                                ToolDiff {
-                                    path,
-                                    view,
-                                    rows,
-                                    counts,
-                                }
+                                tool_diff(&path, file, &this.record.config.cwd, window, cx)
                             })
                             .collect(),
                     ),
@@ -1776,29 +1746,7 @@ impl NativeAgentSessionView {
                         crate::error_catalog::ErrorNotice::from_text(error.as_str()).to_string(),
                     ))
                 }
-                ToolDiffs::Ready(files) => body.children(files.iter().map(|file| {
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded_md()
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .px_3()
-                                .py_1()
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(file.path.clone()),
-                        )
-                        .child(
-                            div()
-                                .h(cx.theme().mono_font_size.mul(file.rows.mul_add(1.5, 1.0)))
-                                .min_w_0()
-                                .child(file.view.clone()),
-                        )
-                })),
+                ToolDiffs::Ready(files) => body.children(tool_diff_files(files, cx)),
             };
         }
         div()
@@ -2311,7 +2259,7 @@ impl NativeAgentSessionView {
             .filter(|related| related.subagent.is_none())
             .collect::<Vec<_>>();
         let open = self.working_indicator.side_chats_expanded;
-        div().px_4().when(!related.is_empty(), |view| {
+        div().when(!related.is_empty(), |view| {
             view.child(
                 Collapsible::new()
                     .open(open)
@@ -3343,7 +3291,7 @@ impl Render for NativeAgentSessionView {
                 body.child(self.render_activity(busy, window, cx))
             })
             .when(!wide, |body| {
-                body.child(self.render_related_conversations(cx))
+                body.child(self.render_related_conversations(cx).px_4())
             })
             .child(self.render_error_recovery(cx))
             .child(self.render_composer(window, cx))
@@ -3710,6 +3658,81 @@ fn streamed_markdown(
             crate::transcript_links::LinkMarks::default(),
         )
     }
+}
+
+/// One changed file's row: its path relative to `cwd`, its +/− counts, and a diff view sized
+/// to the patch.
+fn tool_diff(
+    path: &str,
+    file: bootty_git::diff::FileDiff,
+    cwd: &std::path::Path,
+    window: &mut Window,
+    cx: &mut App,
+) -> ToolDiff {
+    let counts = (!file.patch_unavailable).then(|| {
+        file.hunks.iter().flat_map(|hunk| &hunk.lines).fold(
+            (0_usize, 0_usize),
+            |(added, removed), line| {
+                (
+                    added.saturating_add(usize::from(line.old_line.is_none())),
+                    removed.saturating_add(usize::from(line.new_line.is_none())),
+                )
+            },
+        )
+    });
+    let rows = file
+        .hunks
+        .iter()
+        .map(|hunk| hunk.lines.len().saturating_add(1))
+        .fold(0_usize, usize::saturating_add)
+        .clamp(2, 14);
+    let rows = num_traits::ToPrimitive::to_f32(&rows).unwrap_or(14.0);
+    let view = cx.new(|cx| {
+        let mut view = crate::gpui_git_panel::GitDiffPanel::new(window, cx);
+        view.show_file_diff(file, window, cx);
+        view
+    });
+    let path = std::path::Path::new(path);
+    ToolDiff {
+        path: path
+            .strip_prefix(cwd)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .into_owned(),
+        view,
+        rows,
+        counts,
+    }
+}
+
+/// Each changed file under its path, in a box sized to its patch.
+fn tool_diff_files<'a>(
+    files: &'a [ToolDiff],
+    cx: &'a App,
+) -> impl Iterator<Item = gpui_kit::Div> + 'a {
+    files.iter().map(|file| {
+        div()
+            .w_full()
+            .min_w_0()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded_md()
+            .overflow_hidden()
+            .child(
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(file.path.clone()),
+            )
+            .child(
+                div()
+                    .h(cx.theme().mono_font_size.mul(file.rows.mul_add(1.5, 1.0)))
+                    .min_w_0()
+                    .child(file.view.clone()),
+            )
+    })
 }
 
 fn parse_tool_diffs(

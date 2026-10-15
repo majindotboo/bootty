@@ -6,7 +6,8 @@ use std::{
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_computer::{
-    Computer, ComputerAccess, ComputerError, ComputerResult, ComputerResultSnapshot,
+    Computer, ComputerAccess, ComputerAction, ComputerError, ComputerResult,
+    ComputerResultSnapshot, Permission,
 };
 use bootty_control::{CommandCancellation, CommandOutcome, CommandWarning};
 use bootty_mux::controller::RepaintHandle;
@@ -80,7 +81,7 @@ impl AppState {
             ComputerCommand::HostCapture
                 | ComputerCommand::HostSnapshot
                 | ComputerCommand::HostSnapshotRegion(_)
-        ) || matches!(&command, ComputerCommand::Execute { action, .. } if action.is_capture());
+        ) || matches!(&command, ComputerCommand::Execute { action, .. } if action.observes());
         if matches!(
             command,
             ComputerCommand::Execute { .. }
@@ -186,6 +187,29 @@ fn captured_result(
         ComputerResult::Posted => Ok(super::serialized_command_outcome(
             serde_json::json!({"result": "posted"}),
         )),
+        ComputerResult::Pressed { method } => Ok(super::serialized_command_outcome(
+            serde_json::json!({"result": "pressed", "method": method}),
+        )),
+        ComputerResult::Elements {
+            elements,
+            mut omitted,
+            target,
+        } => {
+            // The control reply has a 128 KiB bound; every returned element remains complete.
+            let mut accepted = Vec::new();
+            let mut bytes = 0_usize;
+            for element in elements {
+                bytes = bytes.saturating_add(serde_json::to_vec(&element)?.len());
+                if bytes > 96 * 1024 {
+                    omitted = true;
+                    break;
+                }
+                accepted.push(element);
+            }
+            Ok(super::serialized_command_outcome(serde_json::json!({
+                "result": "elements", "elements": accepted, "omitted": omitted, "target": target,
+            })))
+        }
         ComputerResult::Snapshot {
             png_base64,
             region,
@@ -274,11 +298,11 @@ pub fn computer_error_outcome(error: ComputerError) -> CommandOutcome {
         | ComputerError::SecureInput) => CommandOutcome::Denied {
             message: error.to_string(),
         },
-        error @ (ComputerError::StaleTarget | ComputerError::TargetNotFocused) => {
-            CommandOutcome::StaleTarget {
-                message: error.to_string(),
-            }
-        }
+        error @ (ComputerError::StaleTarget
+        | ComputerError::StaleElement
+        | ComputerError::TargetNotFocused) => CommandOutcome::StaleTarget {
+            message: error.to_string(),
+        },
         ComputerError::TargetUnavailable => CommandOutcome::Unavailable {
             message: "Selected computer window is unavailable".into(),
         },
@@ -358,9 +382,13 @@ fn run_application(
     let guard = access
         .begin(cancellation)
         .map_err(ComputerError::Platform)?;
+    let action = match agent_action(&command.action, &access, &application) {
+        Ok(action) => action,
+        Err(outcome) => return Ok(outcome),
+    };
     // Captures always see the app's current front window; input targets the captured one so
-    // coordinates keep meaning what the agent saw.
-    let target = if command.action.is_capture() {
+    // coordinates and element numbers keep meaning what the agent saw.
+    let target = if action.is_capture() {
         window.clone()
     } else if let Some(observed) = access.observed() {
         observed
@@ -370,18 +398,23 @@ fn run_application(
             application.name
         ));
     };
-    target.validate_action(&command.action)?;
-    let result = match crate::agent_cursor::pointing(&command.action, repaint.as_ref(), || {
-        runtime.block_on(computer.execute(
-            &ComputerAccess::from_user_setting(true),
-            &target,
-            &command.action,
-        ))
+    target.validate_action(&action)?;
+    let access_setting = ComputerAccess::from_user_setting(true);
+    let result = match crate::agent_cursor::pointing(&action, repaint.as_ref(), || {
+        runtime.block_on(computer.execute(&access_setting, &target, &action))
     }) {
         Err(ComputerError::StaleTarget) => {
             return Ok(CommandOutcome::StaleTarget {
                 message: format!(
                     "{}'s window moved, resized or closed. Take a new computer_snapshot.",
+                    application.name
+                ),
+            });
+        }
+        Err(ComputerError::StaleElement) => {
+            return Ok(CommandOutcome::StaleTarget {
+                message: format!(
+                    "That element of {} moved, changed or closed. Take a new computer_snapshot.",
                     application.name
                 ),
             });
@@ -394,17 +427,87 @@ fn run_application(
         });
     }
     let outcome = match result {
-        ComputerResult::Posted => {
-            super::serialized_command_outcome(serde_json::json!({"result": "posted"}))
-        }
         snapshot @ ComputerResult::Snapshot { .. } => {
-            let snapshot = ComputerResultSnapshot::try_from(snapshot)?;
-            access.observe(snapshot.geometry().0.clone());
-            super::serialized_command_outcome(serde_json::to_value(snapshot)?)
+            snapshot_with_elements(snapshot, &access, |target| {
+                runtime.block_on(computer.execute(
+                    &access_setting,
+                    target,
+                    &ComputerAction::Elements,
+                ))
+            })?
         }
+        result => captured_result(result, None)?,
     };
     drop(guard);
     Ok(outcome)
+}
+
+/// The platform action for an agent's request. A press names an element by its number in the
+/// app's latest capture; agents never list or press elements any other way.
+fn agent_action(
+    action: &bootty_agents::NativeApplicationAction,
+    access: &bootty_agents::NativeApplicationAccess,
+    application: &bootty_agents::NativeApplication,
+) -> Result<ComputerAction, CommandOutcome> {
+    match action {
+        bootty_agents::NativeApplicationAction::Press(press) => access
+            .element(press.element)
+            .map(|element| ComputerAction::Press {
+                element: Box::new(element),
+            })
+            .ok_or_else(|| CommandOutcome::StaleTarget {
+                message: format!(
+                    "{}'s latest computer_snapshot has no element {}. Take a new snapshot.",
+                    application.name, press.element
+                ),
+            }),
+        bootty_agents::NativeApplicationAction::Computer(
+            ComputerAction::Elements | ComputerAction::Press { .. },
+        ) => Err(CommandOutcome::Denied {
+            message: "computer_snapshot lists elements; press one by its number".to_owned(),
+        }),
+        bootty_agents::NativeApplicationAction::Computer(action) => Ok(action.clone()),
+    }
+}
+
+/// The agent's snapshot with the window's elements, which later presses refer to by number. A
+/// snapshot without elements still works with coordinates.
+fn snapshot_with_elements(
+    snapshot: ComputerResult,
+    access: &bootty_agents::NativeApplicationAccess,
+    list: impl FnOnce(&bootty_computer::ComputerTarget) -> Result<ComputerResult, ComputerError>,
+) -> Result<CommandOutcome, ComputerError> {
+    let image = ComputerResultSnapshot::try_from(snapshot)?;
+    let target = image.geometry().0.clone();
+    let (elements, omitted, unavailable) = match list(&target) {
+        Ok(ComputerResult::Elements {
+            elements, omitted, ..
+        }) => (elements, omitted, None),
+        Ok(_) => (Vec::new(), false, Some("the listing failed".to_owned())),
+        Err(error) => (Vec::new(), false, Some(elements_unavailable(&error))),
+    };
+    access.observe(target, elements.clone());
+    Ok(super::serialized_command_outcome(serde_json::to_value(
+        bootty_agents::NativeApplicationSnapshot {
+            image,
+            elements,
+            omitted,
+            unavailable,
+        },
+    )?))
+}
+
+/// Why a snapshot came without elements, in words an agent can act on.
+fn elements_unavailable(error: &ComputerError) -> String {
+    match error {
+        ComputerError::PermissionDenied(Permission::Accessibility) => {
+            "Bootty does not have the Accessibility permission; use coordinates.".to_owned()
+        }
+        ComputerError::Unsupported => {
+            "this platform does not list elements yet; use coordinates.".to_owned()
+        }
+        error => format!("{error}; use coordinates."),
+    }
 }
 
 /// The conversation's grant for the app, asking the user when it has none. Errors are the

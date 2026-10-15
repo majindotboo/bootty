@@ -58,13 +58,20 @@ the rest of the conversation, **Always allow** also adds its bundle id to
 the prompt grants it the same way. This consent replaces the switches above for
 agent app use; macOS Screen Recording and Accessibility grants still apply.
 Input targets the window from the app's latest capture, so an agent captures an
-app before clicking or typing. Agents never use the Bootty instance they run
+app before clicking or typing. On macOS a capture also lists the window's accessibility
+elements in screen order, including disabled and unlabeled ones, and `computer_input`
+can press an element by its number: Bootty uses the element's own action, or clicks
+its center when it has none. Listing elements needs the Accessibility grant; Chromium
+and Electron apps are asked to expose their web content, which may take one more
+capture to appear. Agents never use the Bootty instance they run
 in, terminals, or System Settings; another Bootty instance, such as a
 development build, is an ordinary app.
 
 Computer commands use an exact window token returned by `computer.targets`;
 input requires that window to remain focused and pointer coordinates to remain
-uncovered. Window or process changes invalidate the token. Only the focus
+uncovered. `computer.elements` lists the window's accessibility elements and
+`computer.press` presses one of them by the element it returned; it follows the
+capture switch and the input switch respectively. Window or process changes invalidate the token. Only the focus
 command activates an app, and input is never redirected to another window.
 Computer use works on macOS, Windows and Linux on X11, including XWayland apps
 in a Wayland session; native Wayland windows are not listed. On macOS, capture
@@ -1012,7 +1019,8 @@ view. Opening a result resumes its original provider session and account rather
 than starting a new conversation.
 
 `agents.follow-up-behavior` defaults to `"queue"`. Messages sent during an active
-turn wait for it to finish; `"steer"` sends them into the active turn instead.
+turn wait for it to finish; `"steer"` sends them into the active turn instead,
+waiting in the queue until the turn can take them.
 `agents.send-shortcut` decides which keys send one message with the opposite
 behavior. The queued messages appear above the composer and remain with the
 conversation when its tab closes. Failed or interrupted deliveries remain

@@ -49,10 +49,12 @@ impl WorkspaceDialogs {
     }
 
     pub fn new(
-        sender: bootty_control::BoundAppCommandSender,
+        state: &crate::AppState,
         window: &mut Window,
         cx: &mut Context<GpuiWorkspace>,
     ) -> Self {
+        let sender = state.app_command_sender(bootty_control::Caller::Internal);
+        let codex = &state.config().agents.codex;
         let view = cx.new(|cx| {
             let mut view = DialogView::new(window, cx);
             view.set_completion_sender(sender.clone());
@@ -71,6 +73,7 @@ impl WorkspaceDialogs {
         let creation_view = cx.new(|cx| {
             let mut view = DialogView::new(window, cx);
             view.set_completion_sender(sender);
+            view.configure_speech_account(codex, cx);
             view
         });
         let creation_subscription =

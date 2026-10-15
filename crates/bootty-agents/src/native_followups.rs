@@ -22,6 +22,9 @@ pub struct NativeQueuedMessage {
     pub preview_text: String,
     pub attachments: Vec<crate::NativeAttachmentReference>,
     pub status: NativeQueuedMessageStatus,
+    /// It steers the active turn as soon as the turn can take it.
+    #[serde(default)]
+    pub steer: bool,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -30,6 +33,10 @@ pub(super) struct QueuedInput {
     id: String,
     status: NativeQueuedMessageStatus,
     prompt: crate::native_prompt::SavedNativePrompt,
+    /// Steer the active turn as soon as it can take the message. Until then, or once the turn
+    /// ends, it waits like any queued message.
+    #[serde(default)]
+    steer: bool,
 }
 
 #[derive(Default)]
@@ -85,6 +92,7 @@ pub(super) fn projection(store: &Store, session: &str) -> Vec<NativeQueuedMessag
             preview_text: input.prompt.preview_text(),
             attachments: input.prompt.attachments.clone(),
             status: input.status,
+            steer: input.steer,
         })
         .collect()
 }
@@ -139,6 +147,24 @@ impl NativeAgentService {
         target: &CommandTarget,
         prompt: &crate::NativePrompt,
     ) -> Result<NativeQueuedMessage, String> {
+        self.enqueue(target, prompt, false)
+    }
+
+    /// Queue a message for the active turn, which takes it as soon as it can.
+    pub(super) fn queue_steer(
+        &self,
+        target: &CommandTarget,
+        prompt: &crate::NativePrompt,
+    ) -> Result<NativeQueuedMessage, String> {
+        self.enqueue(target, prompt, true)
+    }
+
+    fn enqueue(
+        &self,
+        target: &CommandTarget,
+        prompt: &crate::NativePrompt,
+        steer: bool,
+    ) -> Result<NativeQueuedMessage, String> {
         let session = self.resolve(target)?;
         let _mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();
@@ -173,12 +199,14 @@ impl NativeAgentService {
             preview_text: saved_prompt.preview_text(),
             attachments: saved_prompt.attachments.clone(),
             status: NativeQueuedMessageStatus::Queued,
+            steer,
         };
         candidate.followups.push(QueuedInput {
             session: target.handle.clone(),
             id,
             status: info.status,
             prompt: saved_prompt,
+            steer,
         });
         self.commit(candidate)?;
         Ok(info)
@@ -198,13 +226,13 @@ impl NativeAgentService {
         self.update_followup(target, id, Some(NativeQueuedMessageStatus::Queued))
     }
 
-    /// Promote an unsent queued message into the exact active turn.
+    /// Promote an unsent queued message into the exact active turn. A turn that can't take it
+    /// yet gets it as soon as it can, and otherwise it sends as the next turn's message.
     /// # Errors
-    /// Rejects stale targets, missing active turns or provider rejections.
+    /// Rejects stale targets or provider rejections.
     pub fn steer_followup(&self, target: &CommandTarget, id: &str) -> Result<(), String> {
-        // A refusal known before sending keeps the message queued for its normal turn.
-        if let Some(refusal) = self.resolve(target)?.snapshot().steer_refusal() {
-            return Err(refusal.to_owned());
+        if self.resolve(target)?.snapshot().steer_refusal().is_some() {
+            return self.mark_steer(target, id);
         }
         let input = {
             let _mutation = lock(&self.mutation);
@@ -238,6 +266,18 @@ impl NativeAgentService {
         });
         self.finish_followup(&input, outcome.is_ok());
         outcome.map(|_| ())
+    }
+
+    fn mark_steer(&self, target: &CommandTarget, id: &str) -> Result<(), String> {
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        let input = candidate
+            .followups
+            .iter_mut()
+            .find(|input| input.session == target.handle && input.id == id)
+            .ok_or("Queued message is no longer available")?;
+        input.steer = true;
+        self.commit(candidate)
     }
 
     fn update_followup(
@@ -274,32 +314,60 @@ impl NativeAgentService {
     }
 
     fn send_next_followup(&self) -> bool {
-        let Some((target, input)) = self.claim_followup() else {
+        let Some((target, input, delivery)) = self.claim_followup() else {
             return false;
         };
         let outcome = self
             .restore_followup(&target, &input)
-            .and_then(|prompt| self.prompt_idle_input(&target, &prompt));
+            .and_then(|prompt| self.prompt_input_mode(&target, &prompt, delivery));
         self.finish_followup(&input, outcome.is_ok());
         true
     }
 
-    fn claim_followup(&self) -> Option<(CommandTarget, QueuedInput)> {
+    /// The head of one conversation's queue that can go now: any message once the conversation is
+    /// idle, or a steer once the active turn can take it.
+    fn claim_followup(
+        &self,
+    ) -> Option<(
+        CommandTarget,
+        QueuedInput,
+        crate::native_session::NativePromptDelivery,
+    )> {
+        use crate::native_session::NativePromptDelivery;
         let _mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();
         let live = lock(&self.live);
         let mut seen = std::collections::BTreeSet::new();
-        let index = candidate.followups.iter().position(|input| {
-            seen.insert(&input.session)
-                && input.status == NativeQueuedMessageStatus::Queued
-                && candidate.records.iter().any(|record| {
-                    record.id == input.session
-                        && live.get(&record.id).is_some_and(|session| {
-                            session.snapshot().status == NativeSessionStatus::Idle
-                                && session.config.permissions == record.config.permissions
-                        })
-                })
-        })?;
+        let (index, delivery) =
+            candidate
+                .followups
+                .iter()
+                .enumerate()
+                .find_map(|(index, input)| {
+                    if !seen.insert(&input.session)
+                        || input.status != NativeQueuedMessageStatus::Queued
+                    {
+                        return None;
+                    }
+                    let record = candidate
+                        .records
+                        .iter()
+                        .find(|record| record.id == input.session)?;
+                    let session = live.get(&record.id)?;
+                    let snapshot = session.snapshot();
+                    if snapshot.status == NativeSessionStatus::Idle
+                        && session.config.permissions == record.config.permissions
+                    {
+                        Some((index, NativePromptDelivery::Idle))
+                    } else if input.steer
+                        && snapshot.status == NativeSessionStatus::Working
+                        && snapshot.steer_refusal().is_none()
+                    {
+                        Some((index, NativePromptDelivery::Steer))
+                    } else {
+                        None
+                    }
+                })?;
         drop(live);
         let input = candidate.followups.get_mut(index)?;
         input.status = NativeQueuedMessageStatus::Sending;
@@ -310,7 +378,7 @@ impl NativeAgentService {
             .find(|record| record.id == input.session)?
             .target();
         self.commit(candidate).ok()?;
-        Some((target, input))
+        Some((target, input, delivery))
     }
 
     fn restore_followup(

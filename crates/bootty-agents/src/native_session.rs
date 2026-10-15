@@ -827,6 +827,74 @@ impl NativeAgentSession {
         self.send_prompt_codex(prompt, selection)
     }
 
+    /// Start a Codex voice call on this conversation's thread and return Codex's answer to the
+    /// audio host's `offer`. Codex then listens, delegates turns here and speaks the replies.
+    /// # Errors
+    /// Returns a conversation that isn't Codex or has no thread yet, or Codex's refusal.
+    pub fn start_voice(&self, offer: &str) -> Result<String, String> {
+        if self.config.provider != AgentKind::Codex {
+            return Err("Voice mode runs on Codex conversations".into());
+        }
+        let thread = {
+            let mut snapshot = lock(&self.snapshot);
+            let thread = snapshot
+                .session_id
+                .clone()
+                .ok_or("Send a message before starting voice mode")?;
+            snapshot.realtime = crate::native_protocol::RealtimeCall::Awaiting;
+            thread
+        };
+        let answer = self
+            .rpc(
+                "thread/realtime/start",
+                json!({"threadId":thread,"outputModality":"audio","version":"v3",
+                    "transport":{"type":"webrtc","sdp":offer}}),
+            )
+            .and_then(|_| self.realtime_answer());
+        if answer.is_err() {
+            lock(&self.snapshot).realtime = crate::native_protocol::RealtimeCall::None;
+        }
+        answer
+    }
+
+    /// Codex sends its answer in a notification after accepting the call.
+    fn realtime_answer(&self) -> Result<String, String> {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_secs(20))
+            .ok_or("Voice deadline exceeds the clock range")?;
+        loop {
+            let answer = lock(&self.snapshot).realtime.take_answer();
+            if let Some(answer) = answer {
+                return answer;
+            }
+            if self.closing.load(Ordering::Acquire) {
+                return Err("Native agent session is stopped".to_owned());
+            }
+            if Instant::now() >= deadline {
+                return Err("Codex didn't answer the voice call".to_owned());
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// End this conversation's voice call, if Codex still runs one.
+    /// # Errors
+    /// Returns Codex's refusal to stop.
+    pub fn stop_voice(&self) -> Result<(), String> {
+        let thread = {
+            let mut snapshot = lock(&self.snapshot);
+            if std::mem::take(&mut snapshot.realtime) == crate::native_protocol::RealtimeCall::None
+            {
+                return Ok(());
+            }
+            snapshot.session_id.clone()
+        };
+        thread.map_or(Ok(()), |thread| {
+            self.rpc("thread/realtime/stop", json!({"threadId":thread}))
+                .map(|_| ())
+        })
+    }
+
     fn compact_codex(&self) -> Result<(), String> {
         let id = {
             let mut snapshot = lock(&self.snapshot);
@@ -1858,7 +1926,8 @@ fn read_native_frame(
 const KEPT_STRING_BYTES: usize = 64 * 1024;
 
 /// Cuts every string longer than [`KEPT_STRING_BYTES`] at a character boundary, returning the
-/// bytes removed. A cut image no longer decodes, so it can't pass as a verified one.
+/// bytes removed. A cut image no longer decodes, so it can't pass as a verified one; a long patch
+/// is removed whole.
 fn shorten_strings(value: &mut Value) -> usize {
     match value {
         Value::String(text) if text.len() > KEPT_STRING_BYTES => {
@@ -1872,8 +1941,17 @@ fn shorten_strings(value: &mut Value) -> usize {
             .map(shorten_strings)
             .fold(0, usize::saturating_add),
         Value::Object(fields) => fields
-            .values_mut()
-            .map(shorten_strings)
+            .iter_mut()
+            .map(|(key, value)| match value {
+                // A cut patch would misstate the change, so a long one is left out whole.
+                Value::String(text)
+                    if matches!(key.as_str(), "diff" | "patch")
+                        && text.len() > KEPT_STRING_BYTES =>
+                {
+                    std::mem::take(text).len()
+                }
+                _ => shorten_strings(value),
+            })
             .fold(0, usize::saturating_add),
         _ => 0,
     }

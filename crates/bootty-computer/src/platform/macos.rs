@@ -1,5 +1,5 @@
-//! macOS: `CoreGraphics` window lists and events, Accessibility focus and `ScreenCaptureKit`
-//! capture.
+//! macOS: `CoreGraphics` window lists and events, Accessibility focus and elements, and
+//! `ScreenCaptureKit` capture.
 //! Events go straight to the target process, so the user's pointer never moves.
 #![allow(
     unsafe_code,
@@ -10,15 +10,15 @@ use std::{
     ffi::c_void,
     ptr::NonNull,
     sync::{Arc, mpsc},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use block2::RcBlock;
 use objc2::{AnyThread as _, rc::Retained};
 use objc2_app_kit::{NSApplicationActivationOptions, NSImage, NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::{
-    CFArray, CFDictionary, CFGetTypeID, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect,
-    CGSize,
+    CFArray, CFBoolean, CFDictionary, CFGetTypeID, CFNumber, CFRetained, CFString, CFType, CGPoint,
+    CGRect, CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGEvent, CGEventField, CGEventFlags,
@@ -33,8 +33,8 @@ use objc2_screen_capture_kit::{
 };
 
 use crate::{
-    ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier, MouseButton,
-    PermissionStatus,
+    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, ElementState,
+    Key, MAX_ELEMENT_DEPTH, Modifier, MouseButton, PermissionStatus,
     desktop::{Desktop, Focus, Image, InputEvent, NativeWindow},
 };
 
@@ -44,6 +44,48 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(10);
 const AX_TIMEOUT: f32 = 0.2;
 const AX_VALUE_CG_POINT: u32 = 1;
 const AX_VALUE_CG_SIZE: u32 = 2;
+const AX_ERROR_CANNOT_COMPLETE: i32 = -25204;
+const AX_ERROR_ACTION_UNSUPPORTED: i32 = -25206;
+// A listing reads at most this many elements and stops at this budget, even in huge web pages.
+const MAX_ELEMENT_READS: usize = 4_000;
+const ELEMENT_BUDGET: Duration = Duration::from_secs(3);
+/// Names and values longer than this many characters are cut.
+const MAX_ELEMENT_TEXT: usize = 200;
+/// Read together, one call per element; `Attributes` indexes values in this order.
+const ELEMENT_ATTRIBUTES: [&str; 12] = [
+    "AXRole",
+    "AXSubrole",
+    "AXTitle",
+    "AXDescription",
+    "AXHelp",
+    "AXValue",
+    "AXIdentifier",
+    "AXPosition",
+    "AXSize",
+    "AXEnabled",
+    "AXSelected",
+    "AXChildren",
+];
+/// Roles listed even without a name, because they act when pressed or typed into.
+const CONTROL_ROLES: [&str; 17] = [
+    "AXButton",
+    "AXCheckBox",
+    "AXRadioButton",
+    "AXPopUpButton",
+    "AXMenuButton",
+    "AXComboBox",
+    "AXTextField",
+    "AXTextArea",
+    "AXSlider",
+    "AXIncrementor",
+    "AXLink",
+    "AXDisclosureTriangle",
+    "AXMenuItem",
+    "AXColorWell",
+    "AXDateField",
+    "AXSegmentedControl",
+    "AXRow",
+];
 
 #[link(name = "ApplicationServices", kind = "framework")]
 unsafe extern "C" {
@@ -56,6 +98,18 @@ unsafe extern "C" {
         value: *mut *mut c_void,
     ) -> i32;
     fn AXUIElementPerformAction(element: *const c_void, action: *const c_void) -> i32;
+    fn AXUIElementCopyMultipleAttributeValues(
+        element: *const c_void,
+        attributes: *const c_void,
+        options: u32,
+        values: *mut *mut c_void,
+    ) -> i32;
+    fn AXUIElementCopyActionNames(element: *const c_void, names: *mut *mut c_void) -> i32;
+    fn AXUIElementSetAttributeValue(
+        element: *const c_void,
+        attribute: *const c_void,
+        value: *const c_void,
+    ) -> i32;
     fn AXUIElementGetTypeID() -> usize;
     fn AXValueGetTypeID() -> usize;
     fn AXValueGetValue(value: *const c_void, kind: u32, out: *mut c_void) -> bool;
@@ -285,21 +339,9 @@ impl Desktop for MacDesktop {
             .as_ref()
             .map(|app| app.process_id)
             .ok_or(ComputerError::TargetUnavailable)?;
-        let app = ax_application(process_id).ok_or(ComputerError::TargetUnavailable)?;
-        let windows = ax_attribute(&app, "AXWindows")
-            .and_then(|value| value.downcast::<CFArray>().ok())
-            .ok_or(ComputerError::TargetUnavailable)?;
-        // Accessibility elements are CFTypes; the array holds only window elements.
-        let windows: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(windows) };
-        let exact: Vec<_> = windows
-            .iter()
-            .filter(|element| element_bounds(element).as_ref() == Some(&window.bounds))
-            .collect();
-        let [element] = exact.as_slice() else {
-            return Err(ComputerError::TargetNotFocused);
-        };
+        let element = ax_window(window).ok_or(ComputerError::TargetNotFocused)?;
         let raise = CFString::from_static_str("AXRaise");
-        let raised = unsafe { AXUIElementPerformAction(cf(element), cf(&raise)) } == 0;
+        let raised = unsafe { AXUIElementPerformAction(cf(&element), cf(&raise)) } == 0;
         let activated = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
             .is_some_and(|app| {
                 app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
@@ -331,6 +373,91 @@ impl Desktop for MacDesktop {
         let image =
             unsafe { icon.CGImageForProposedRect_context_hints(&raw mut rect, None, None) }?;
         draw(&image, side, side).ok()
+    }
+
+    fn elements(
+        &self,
+        window: &NativeWindow,
+        limit: usize,
+    ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        let root = ax_window(window).ok_or(ComputerError::TargetUnavailable)?;
+        if let Some(app) = window
+            .app
+            .as_ref()
+            .and_then(|app| ax_application(app.process_id))
+        {
+            // Chromium and Electron apps expose web content only to assistive apps that ask, and
+            // build it in the background, so the first listing of a page may still be partial.
+            // Other apps refuse the attribute.
+            let manual = CFString::from_static_str("AXManualAccessibility");
+            unsafe {
+                AXUIElementSetAttributeValue(cf(&app), cf(&manual), cf(CFBoolean::new(true)));
+            }
+        }
+        let focused = window
+            .app
+            .as_ref()
+            .and_then(|app| ax_application(app.process_id))
+            .and_then(|app| ax_element(&app, "AXFocusedUIElement"));
+        let mut listing = Listing {
+            names: attribute_names(),
+            focused,
+            window: window.bounds.clone(),
+            limit,
+            deadline: Instant::now()
+                .checked_add(ELEMENT_BUDGET)
+                .unwrap_or_else(Instant::now),
+            reads: 0,
+            elements: Vec::new(),
+            omitted: false,
+        };
+        let children =
+            Attributes::read(&root, &listing.names).map_or_else(Vec::new, |root| root.children());
+        listing.visit(&children, &mut Vec::new(), None);
+        Ok((listing.elements, listing.omitted))
+    }
+
+    fn element(
+        &self,
+        window: &NativeWindow,
+        path: &[u16],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
+        let names = attribute_names();
+        Ok(element_at(window, path)
+            .and_then(|element| Attributes::read(&element, &names))
+            .and_then(|attributes| attributes.element(path.to_vec(), false)))
+    }
+
+    fn press(&self, window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
+        let element = element_at(window, path).ok_or(ComputerError::StaleElement)?;
+        let mut names = std::ptr::null_mut();
+        if unsafe { AXUIElementCopyActionNames(cf(&element), &raw mut names) } != 0 {
+            return Ok(false);
+        }
+        let Some(names) = NonNull::new(names.cast::<CFArray>()) else {
+            return Ok(false);
+        };
+        // Copy functions return a +1 reference; action names are strings.
+        let names: CFRetained<CFArray<CFType>> =
+            unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(names)) };
+        if !names.iter().any(|name| {
+            name.downcast::<CFString>()
+                .is_ok_and(|name| name.to_string() == "AXPress")
+        }) {
+            return Ok(false);
+        }
+        let action = CFString::from_static_str("AXPress");
+        match unsafe { AXUIElementPerformAction(cf(&element), cf(&action)) } {
+            0 => Ok(true),
+            AX_ERROR_ACTION_UNSUPPORTED => Ok(false),
+            // The app may still act on a press it did not confirm, so this is not a reason to click.
+            AX_ERROR_CANNOT_COMPLETE => Err(ComputerError::Platform(
+                "the app did not answer the press in time".into(),
+            )),
+            code => Err(ComputerError::Platform(format!(
+                "the app refused the press ({code})"
+            ))),
+        }
     }
 }
 
@@ -430,6 +557,317 @@ fn ax_attribute(element: &CFType, name: &str) -> Option<CFRetained<CFType>> {
 fn ax_element(element: &CFType, name: &str) -> Option<CFRetained<CFType>> {
     ax_attribute(element, name)
         .filter(|value| CFGetTypeID(Some(value)) == unsafe { AXUIElementGetTypeID() })
+}
+
+/// The accessibility element of exactly this window, matched by frame.
+fn ax_window(window: &NativeWindow) -> Option<CFRetained<CFType>> {
+    let app = ax_application(window.app.as_ref()?.process_id)?;
+    let windows = ax_attribute(&app, "AXWindows")?
+        .downcast::<CFArray>()
+        .ok()?;
+    // Accessibility elements are CFTypes; the array holds only window elements.
+    let windows: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(windows) };
+    let mut exact = windows
+        .iter()
+        .filter(|element| element_bounds(element).as_ref() == Some(&window.bounds));
+    let element = exact.next()?;
+    exact.next().is_none().then_some(element)
+}
+
+/// The element `path` names, by child position from the window.
+fn element_at(window: &NativeWindow, path: &[u16]) -> Option<CFRetained<CFType>> {
+    let mut element = ax_window(window)?;
+    for &index in path {
+        let children = ax_attribute(&element, "AXChildren")?
+            .downcast::<CFArray>()
+            .ok()?;
+        // Children of an accessibility element are elements.
+        let children: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(children) };
+        element = children.get(usize::from(index))?;
+    }
+    Some(element)
+}
+
+fn attribute_names() -> CFRetained<CFArray<CFString>> {
+    CFArray::from_retained_objects(&ELEMENT_ATTRIBUTES.map(CFString::from_static_str))
+}
+
+/// One element's attributes from a single call, in [`ELEMENT_ATTRIBUTES`] order. A missing
+/// attribute holds an error value, which no typed read below accepts.
+struct Attributes(CFRetained<CFArray<CFType>>);
+
+impl Attributes {
+    fn read(element: &CFType, names: &CFArray<CFString>) -> Option<Self> {
+        let mut values = std::ptr::null_mut();
+        if unsafe {
+            AXUIElementCopyMultipleAttributeValues(cf(element), cf(names), 0, &raw mut values)
+        } != 0
+        {
+            return None;
+        }
+        let values = NonNull::new(values.cast::<CFArray>())?;
+        // Copy functions return a +1 reference to an array of values.
+        Some(Self(unsafe {
+            CFRetained::cast_unchecked(CFRetained::from_raw(values))
+        }))
+    }
+
+    fn value(&self, name: &str) -> Option<CFRetained<CFType>> {
+        let index = ELEMENT_ATTRIBUTES.iter().position(|known| *known == name)?;
+        self.0.get(index)
+    }
+
+    fn string(&self, name: &str) -> Option<String> {
+        self.value(name)?
+            .downcast::<CFString>()
+            .ok()
+            .and_then(|text| clean_text(&text.to_string()))
+    }
+
+    fn flag(&self, name: &str) -> Option<bool> {
+        self.value(name)?
+            .downcast::<CFBoolean>()
+            .ok()
+            .map(|flag| flag.as_bool())
+    }
+
+    fn number(&self, name: &str) -> Option<f64> {
+        self.value(name)?.downcast::<CFNumber>().ok()?.as_f64()
+    }
+
+    fn children(&self) -> Vec<CFRetained<CFType>> {
+        let Some(children) = self
+            .value("AXChildren")
+            .and_then(|children| children.downcast::<CFArray>().ok())
+        else {
+            return Vec::new();
+        };
+        // Children of an accessibility element are elements.
+        let children: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(children) };
+        children.to_vec()
+    }
+
+    fn frame(&self) -> Option<DisplayBounds> {
+        let read = |name, kind, out: *mut c_void| {
+            self.value(name)
+                .filter(|value| CFGetTypeID(Some(value)) == unsafe { AXValueGetTypeID() })
+                .is_some_and(|value| unsafe { AXValueGetValue(cf(&value), kind, out) })
+        };
+        let mut origin = CGPoint::default();
+        let mut size = CGSize::default();
+        (read("AXPosition", AX_VALUE_CG_POINT, (&raw mut origin).cast())
+            && read("AXSize", AX_VALUE_CG_SIZE, (&raw mut size).cast()))
+        .then_some(DisplayBounds {
+            x: origin.x,
+            y: origin.y,
+            width: size.width,
+            height: size.height,
+        })
+    }
+
+    /// The element as listed, when it has a role and a visible frame.
+    fn element(&self, path: Vec<u16>, focused: bool) -> Option<ComputerElement> {
+        let role = self
+            .value("AXRole")?
+            .downcast::<CFString>()
+            .ok()?
+            .to_string();
+        let subrole = self
+            .value("AXSubrole")
+            .and_then(|subrole| subrole.downcast::<CFString>().ok())
+            .map(|subrole| subrole.to_string())
+            .filter(|subrole| subrole != "AXUnknown");
+        let frame = self
+            .frame()
+            .filter(|frame| frame.width > 0.0 && frame.height > 0.0)?;
+        let secure = subrole.as_deref() == Some("AXSecureTextField");
+        let toggle = matches!(role.as_str(), "AXRadioButton" | "AXCheckBox");
+        let on = toggle && self.number("AXValue") == Some(1.0);
+        let mut states = Vec::new();
+        if self.flag("AXEnabled") == Some(false) {
+            states.push(ElementState::Disabled);
+        }
+        if self.flag("AXSelected") == Some(true) || on && role == "AXRadioButton" {
+            states.push(ElementState::Selected);
+        }
+        if on && role == "AXCheckBox" {
+            states.push(ElementState::Checked);
+        }
+        if focused {
+            states.push(ElementState::Focused);
+        }
+        Some(ComputerElement {
+            path,
+            role: subrole.as_ref().map_or_else(
+                || bare(&role).to_owned(),
+                |subrole| format!("{}:{}", bare(&role), bare(subrole)),
+            ),
+            name: ["AXTitle", "AXDescription", "AXHelp"]
+                .into_iter()
+                .find_map(|name| self.string(name)),
+            // Password fields never expose their contents; toggles report their state instead.
+            value: (!secure && !toggle)
+                .then(|| {
+                    self.string("AXValue")
+                        .or_else(|| self.number("AXValue").map(|number| number.to_string()))
+                })
+                .flatten(),
+            identifier: self.string("AXIdentifier"),
+            frame,
+            states,
+        })
+    }
+}
+
+/// A role or subrole without its `AX` prefix.
+fn bare(name: &str) -> &str {
+    name.strip_prefix("AX").unwrap_or(name)
+}
+
+/// Single-line text cut to [`MAX_ELEMENT_TEXT`] characters; `None` when blank.
+fn clean_text(text: &str) -> Option<String> {
+    let words = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if words.is_empty() {
+        return None;
+    }
+    let mut cut: String = words.chars().take(MAX_ELEMENT_TEXT).collect();
+    if cut.len() < words.len() {
+        cut.push('…');
+    }
+    Some(cut)
+}
+
+/// A depth-first walk that lists elements in screen order within a fixed budget.
+struct Listing {
+    names: CFRetained<CFArray<CFString>>,
+    /// The app's one focused element; apps also report focus on its ancestors.
+    focused: Option<CFRetained<CFType>>,
+    window: DisplayBounds,
+    limit: usize,
+    deadline: Instant,
+    reads: usize,
+    elements: Vec<ComputerElement>,
+    omitted: bool,
+}
+
+impl Listing {
+    /// `context` is the name of the nearest listed ancestor; text that only repeats it is left
+    /// out, as in a link and its own label.
+    fn visit(
+        &mut self,
+        children: &[CFRetained<CFType>],
+        path: &mut Vec<u16>,
+        context: Option<&str>,
+    ) {
+        let mut siblings = Vec::new();
+        for (index, child) in children.iter().enumerate() {
+            if self.reads >= MAX_ELEMENT_READS || Instant::now() >= self.deadline {
+                self.omitted = true;
+                return;
+            }
+            self.reads = self.reads.saturating_add(1);
+            let (Ok(index), Some(attributes)) =
+                (u16::try_from(index), Attributes::read(child, &self.names))
+            else {
+                continue;
+            };
+            let frame = attributes.frame();
+            // Scrolled-away content and everything inside it stays out of the listing. Scroll
+            // bars are left out too: agents scroll with the scroll action.
+            if frame
+                .as_ref()
+                .is_some_and(|frame| !intersects(frame, &self.window))
+                || attributes.string("AXRole").as_deref() == Some("AXScrollBar")
+            {
+                continue;
+            }
+            let focused = self.focused.as_deref() == Some(&**child);
+            siblings.push((frame, (index, focused, attributes)));
+        }
+        for (_, (index, focused, attributes)) in reading_order(siblings) {
+            path.push(index);
+            let children = attributes.children();
+            let element = (focused || listed(&attributes, children.is_empty(), context))
+                .then(|| attributes.element(path.clone(), focused))
+                .flatten();
+            let name = element.as_ref().and_then(|element| element.name.clone());
+            if let Some(element) = element {
+                if self.elements.len() >= self.limit {
+                    self.omitted = true;
+                    path.pop();
+                    return;
+                }
+                self.elements.push(element);
+            }
+            if path.len() < MAX_ELEMENT_DEPTH {
+                self.visit(&children, path, name.as_deref().or(context));
+            }
+            path.pop();
+            if self.omitted {
+                return;
+            }
+        }
+    }
+}
+
+/// A sibling's frame and what the walk keeps with it.
+type Sibling<T> = (Option<DisplayBounds>, T);
+
+/// Apps order children their own way. Reading order is lines from top to bottom, where siblings
+/// that overlap vertically share a line, and each line from left to right; so side-by-side panes
+/// read left first. Siblings without a frame keep their order at the end.
+fn reading_order<T>(mut siblings: Vec<Sibling<T>>) -> Vec<Sibling<T>> {
+    let top = |frame: &Option<DisplayBounds>| frame.as_ref().map_or(f64::INFINITY, |frame| frame.y);
+    siblings.sort_by(|(left, _), (right, _)| top(left).total_cmp(&top(right)));
+    let mut lines: Vec<(f64, Vec<Sibling<T>>)> = Vec::new();
+    for sibling in siblings {
+        let span = sibling
+            .0
+            .as_ref()
+            .map(|frame| (frame.y, frame.y + frame.height));
+        match (span, lines.last_mut()) {
+            (Some((top, bottom)), Some((line_bottom, members))) if top < *line_bottom => {
+                *line_bottom = line_bottom.max(bottom);
+                members.push(sibling);
+            }
+            (span, _) => lines.push((
+                span.map_or(f64::INFINITY, |(_, bottom)| bottom),
+                vec![sibling],
+            )),
+        }
+    }
+    let left =
+        |frame: &Option<DisplayBounds>| frame.as_ref().map_or(f64::INFINITY, |frame| frame.x);
+    lines
+        .into_iter()
+        .flat_map(|(_, mut members)| {
+            members.sort_by(|(a, _), (b, _)| left(a).total_cmp(&left(b)));
+            members
+        })
+        .collect()
+}
+
+/// Containers are listed only when they say something; controls and leaves always are, so an
+/// unlabeled icon button still appears with its frame. Empty groups and text that repeats
+/// `context` add nothing.
+fn listed(attributes: &Attributes, leaf: bool, context: Option<&str>) -> bool {
+    let role = attributes.string("AXRole").unwrap_or_default();
+    if role == "AXStaticText" && attributes.string("AXValue").as_deref() == context {
+        return false;
+    }
+    leaf && role != "AXGroup"
+        || CONTROL_ROLES.contains(&role.as_str())
+        || ["AXTitle", "AXDescription", "AXHelp", "AXValue"]
+            .into_iter()
+            .any(|name| attributes.string(name).is_some())
+        || attributes.flag("AXSelected") == Some(true)
+}
+
+fn intersects(frame: &DisplayBounds, window: &DisplayBounds) -> bool {
+    frame.x < window.x + window.width
+        && frame.y < window.y + window.height
+        && frame.x + frame.width > window.x
+        && frame.y + frame.height > window.y
 }
 
 fn element_bounds(element: &CFType) -> Option<DisplayBounds> {

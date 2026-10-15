@@ -10,15 +10,9 @@ use bootty_ui::{
 use gpui_kit::{AppContext as _, Modifiers, TestAppContext};
 use std::sync::{Arc, Mutex};
 
-/// A queued message offers steer, remove and more; Edit message moves it back to the composer
-/// and out of the queue.
-#[gpui_kit::test]
-fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    let record = NativeSessionRecord {
+/// A working Codex conversation with one queued message and one already marked to steer.
+fn working_record() -> NativeSessionRecord {
+    NativeSessionRecord {
         id: "queue".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),
@@ -37,12 +31,26 @@ fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContex
         queued_messages: serde_json::from_value(serde_json::json!([{
             "id": "next", "text": "Check the logs too", "preview_text": "Check the logs too",
             "attachments": [], "status": "queued"
+        }, {
+            "id": "steering", "text": "And the config", "preview_text": "And the config",
+            "attachments": [], "status": "queued", "steer": true
         }]))
         .unwrap(),
         attachments: Vec::new(),
         draft: None,
         seen_turns: 0,
-    };
+    }
+}
+
+/// A queued message offers steer, remove and more; one already marked to steer offers no Steer.
+/// Edit message moves it back to the composer and out of the queue.
+#[gpui_kit::test]
+fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = working_record();
     let commands = Arc::new(Mutex::new(Vec::<CommandInvocation>::new()));
     let observed = commands.clone();
     let inbox = Arc::new(Mutex::new(None::<AppCommandReceiver>));
@@ -85,6 +93,7 @@ fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContex
     ] {
         assert!(visual.debug_bounds(control).is_some(), "{control}");
     }
+    assert!(visual.debug_bounds("native-queue-steer:steering").is_none());
     let menu = visual.debug_bounds("native-queued-menu:next").unwrap();
     visual.simulate_click(menu.center(), Modifiers::none());
     visual.run_until_parked();

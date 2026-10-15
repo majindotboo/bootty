@@ -390,10 +390,17 @@ pub fn ingest(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(),
                     field(value, if complete { "result" } else { "partialResult" }),
                     complete,
                 );
+                let change = (complete && field(value, "isError") != true)
+                    .then(|| file_change(name, field(field(value, "result"), "details")))
+                    .flatten();
                 snapshot.tool_message(
                     format!("tool-{id}"),
-                    field(value, "toolName").as_str(),
-                    value.get("args").map(Value::to_string),
+                    if change.is_some() {
+                        Some("fileChange")
+                    } else {
+                        field(value, "toolName").as_str()
+                    },
+                    change.or_else(|| value.get("args").map(Value::to_string)),
                     text,
                     if complete {
                         if field(value, "isError") == true {
@@ -532,12 +539,20 @@ fn message_content(snapshot: &mut NativeSessionSnapshot, message: &Value, comple
                 message,
                 complete,
             );
+            let name = field(message, "toolName").as_str().unwrap_or_default();
+            let change = (complete && field(message, "isError") != true)
+                .then(|| file_change(name, field(message, "details")))
+                .flatten();
             snapshot.tool_message(
                 id.clone(),
-                field(message, "toolName")
-                    .as_str()
-                    .map(|name| result_tool_name(name, message)),
-                None,
+                if change.is_some() {
+                    Some("fileChange")
+                } else {
+                    field(message, "toolName")
+                        .as_str()
+                        .map(|name| result_tool_name(name, message))
+                },
+                change,
                 content_text(content),
                 if !complete {
                     NativeToolStatus::Running
@@ -552,6 +567,24 @@ fn message_content(snapshot: &mut NativeSessionSnapshot, message: &Value, comple
         }
         snapshot.message(id, role, content_text(content), complete);
     }
+}
+
+/// Pi's edit reports a unified patch naming its file; its hunks become a file change.
+fn file_change(tool: &str, details: &Value) -> Option<String> {
+    if tool != "edit" {
+        return None;
+    }
+    let unified = field(details, "patch").as_str()?;
+    let file = unified
+        .lines()
+        .find_map(|line| line.strip_prefix("+++ "))?
+        .split('\t')
+        .next()?;
+    let hunks = unified
+        .find("@@")
+        .and_then(|start| unified.get(start..))
+        .unwrap_or_default();
+    Some(crate::native_protocol::file_change_input(file, hunks))
 }
 
 fn nested_tool_results(snapshot: &mut NativeSessionSnapshot, parent: &str, details: &Value) {

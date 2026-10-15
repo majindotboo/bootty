@@ -364,7 +364,7 @@ impl GpuiWorkspace {
             Self::create_settings_view(&state, &font_families, &integration_rows, window, cx);
         let (keymap_editor, keymap_editor_subscription) =
             Self::create_keymap_editor(&state, window, cx);
-        let dialogs = WorkspaceDialogs::new(state.app_command_sender(Caller::Internal), window, cx);
+        let dialogs = WorkspaceDialogs::new(&state, window, cx);
         let (chrome_view, chrome_subscription) =
             Self::create_chrome_view(&state, &launch, &keymap_context, window, cx);
         let terminal = Self::create_terminal_view(None, window, cx);
@@ -1700,21 +1700,10 @@ impl GpuiWorkspace {
                         action,
                         crate::gpui::CommandAction::Dictate | crate::gpui::CommandAction::Voice
                     ) {
-                        let provider = match self.state.modal_dialog() {
-                            Some(crate::state::ModalDialog::NewSession(dialog))
-                                if dialog.draft().is_some_and(|draft| draft.provider == "pi") =>
-                            {
-                                "pi"
-                            }
-                            _ => "codex",
-                        };
-                        let preferences = self.state.config().agents.provider(provider).cloned();
-                        if let Some(preferences) = preferences {
-                            self.dialogs.creation_view.update(cx, |view, cx| {
-                                view.configure_speech_account(&preferences, provider, cx);
-                            });
-                        }
                         let codex = self.state.config().agents.codex.clone();
+                        self.dialogs
+                            .creation_view
+                            .update(cx, |view, cx| view.configure_speech_account(&codex, cx));
                         if let Some(view) = self.native_conversation_view(cx) {
                             view.update(cx, |view, cx| view.configure_speech_account(&codex, cx));
                         }

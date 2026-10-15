@@ -28,7 +28,7 @@ pub struct ApplicationCommand {
     pub conversation: bootty_control::CommandTarget,
     pub caller: bootty_control::Caller,
     pub application: String,
-    pub action: ComputerAction,
+    pub action: bootty_agents::NativeApplicationAction,
 }
 
 /// Whether an agent may use this window.
@@ -136,6 +136,20 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
             "Press Computer Key",
             "Post a key with optional comma-separated modifiers to the exact selected focused window.",
             &["target", "key", "modifiers"][..],
+            MutationClass::Write,
+        ),
+        (
+            "computer.elements",
+            "List Computer Elements",
+            "List the accessibility elements of the exact selected window, in screen order.",
+            &["target"][..],
+            MutationClass::Read,
+        ),
+        (
+            "computer.press",
+            "Press Computer Element",
+            "Press an element from computer.elements in the exact selected focused window: its own action, or a click at its center.",
+            &["target", "element"][..],
             MutationClass::Write,
         ),
     ] {
@@ -269,6 +283,10 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
             invocation.arguments.get(2).map(String::as_str),
         )
         .map_err(|()| invalid())?,
+        "computer.elements" if invocation.arguments.len() == 1 => ComputerAction::Elements,
+        "computer.press" => ComputerAction::Press {
+            element: Box::new(serde_json::from_str(argument(1)?).map_err(|_| invalid())?),
+        },
         _ => return Err(invalid()),
     };
     target.validate_action(&action).map_err(|_| invalid())?;

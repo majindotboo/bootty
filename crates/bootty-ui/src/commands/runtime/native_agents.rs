@@ -2867,6 +2867,11 @@ fn invoke(
         }
         "draft" => Err("Native drafts require an internal caller".to_owned()),
         "seen" => service.mark_seen(target, true).map(|()| Value::Null),
+        "voice-start" if invocation.caller == Caller::Internal => service
+            .start_voice(target, arg(2))
+            .map(|sdp| json!({"sdp": sdp})),
+        "voice-start" => Err("Voice mode requires an internal caller".to_owned()),
+        "voice-stop" => service.stop_voice(target).map(|()| Value::Null),
         "mark-unread" => service.mark_seen(target, false).map(|()| Value::Null),
         "attachment-preview" if invocation.caller == Caller::Internal => service
             .preview_attachment(target, arg(2))

@@ -22,8 +22,14 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }
-ureq.workspace = true
 rustls.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+objc2 = { workspace = true }
+objc2-avf-audio = { version = "0.3", default-features = false, features = ["AVAudioBuffer", "AVAudioFormat", "AVAudioTypes", "std"] }
+objc2-foundation = { workspace = true, features = ["NSError", "NSOperation"] }
+objc2-speech = { version = "0.3", default-features = false, features = ["SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognizer", "SFTranscription", "block2", "objc2-avf-audio", "std"] }
 
 [dev-dependencies]
 proptest.workspace = true

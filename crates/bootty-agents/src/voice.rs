@@ -1,5 +1,8 @@
-//! `OpenAI` dictation and client-delegated voice using Pi's bundled native audio host.
+//! Dictation signed in with the Codex account already on this machine, or on device without one,
+//! and the media for voice calls a Codex conversation makes, using Pi's bundled native audio host.
 mod account;
+#[cfg(target_os = "macos")]
+mod on_device;
 mod transport;
 
 use std::{
@@ -14,6 +17,54 @@ use bootty_host::speech::{SpeechCommand, SpeechEvent};
 use serde_json::{Value, json};
 
 const FRAME_LIMIT: u64 = 320 * 1024;
+
+/// What speech this machine offers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpeechAvailability {
+    /// The Codex sign-in can dictate and hold voice calls.
+    pub codex: bool,
+    /// This Mac can dictate on device.
+    pub on_device: bool,
+}
+
+impl SpeechAvailability {
+    #[must_use]
+    pub const fn dictation(self) -> bool {
+        self.codex || self.on_device
+    }
+}
+
+/// What the Codex sign-in in `directory` (or the default Codex home) and this machine offer.
+/// It never prompts for permission.
+#[must_use]
+pub fn availability(directory: Option<&std::path::Path>) -> SpeechAvailability {
+    SpeechAvailability {
+        codex: account::signed_in(directory),
+        on_device: on_device_available(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn on_device_available() -> bool {
+    on_device::available()
+}
+
+/// Deliberate limit: on-device dictation uses Apple's recognizer. Add a local model here when
+/// Windows and Linux need dictation without Codex.
+#[cfg(not(target_os = "macos"))]
+const fn on_device_available() -> bool {
+    false
+}
+
+#[cfg(target_os = "macos")]
+fn on_device_dictation() -> Result<transport::Session, String> {
+    transport::Session::on_device()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn on_device_dictation() -> Result<transport::Session, String> {
+    Err("On-device dictation needs macOS".into())
+}
 
 struct AudioHost {
     child: Child,
@@ -122,35 +173,40 @@ pub fn run() -> anyhow::Result<()> {
             if let Some(command) = command {
                 match command? {
                     SpeechCommand::Account {
-                        provider,
+                        provider: _,
                         program: _,
                         directory,
                     } => {
-                        account = Some(account::Account {
-                            provider,
-                            directory,
-                        });
+                        account = Some(account::Account { directory });
                     }
                     SpeechCommand::Listen { voice } => {
                         // A voice call stays connected between delegations and replies.
                         if active.as_ref().is_none_or(|session| !session.voice()) {
                             active = None;
-                            let account = account
-                                .as_ref()
-                                .ok_or("Choose an OpenAI account before recording")?;
-                            let auth = account.authenticate()?;
-                            active = Some(transport::Session::start(auth, voice)?);
+                            active = Some(if voice {
+                                // The conversation's Codex session authenticates the call.
+                                transport::Session::voice_call()?
+                            } else {
+                                let account = account.as_ref().ok_or(account::SIGN_IN)?;
+                                transport::Session::dictation(&account.authenticate()?)?
+                            });
                         }
+                    }
+                    // The composer chose this after finding no Codex sign-in.
+                    SpeechCommand::ListenOnDevice => {
+                        active = None;
+                        active = Some(on_device_dictation()?);
                     }
                     SpeechCommand::Stop => {
                         if let Some(session) = active.as_mut() {
                             session.finish()?;
                         }
                     }
-                    SpeechCommand::Speak { text } => {
-                        if let Some(session) = active.as_mut() {
-                            session.speak(&text)?;
-                        }
+                    SpeechCommand::Answer { sdp } => {
+                        active
+                            .as_mut()
+                            .ok_or("There is no voice call to answer")?
+                            .answer(&sdp)?;
                     }
                 }
             }

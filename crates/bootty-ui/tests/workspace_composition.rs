@@ -289,6 +289,7 @@ fn repairing_duplicate_terminal_leaves_keeps_surviving_geometry(
 #[case("bootty.diff", DockPlacement::Right)]
 #[case("bootty.files", DockPlacement::Right)]
 #[case("bootty.agents", DockPlacement::Right)]
+#[case("bootty.subagents", DockPlacement::Right)]
 #[case("bootty.jobs", DockPlacement::Right)]
 #[case("bootty.transfers", DockPlacement::Right)]
 #[case("bootty.recovery", DockPlacement::Right)]

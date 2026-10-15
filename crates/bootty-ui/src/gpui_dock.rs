@@ -200,6 +200,7 @@ pub struct WorkspaceDock {
     pub(crate) empty_terminal: Option<(NodeId, crate::workspace_composition::EmptyTerminalState)>,
     agents: Entity<crate::gpui_agents_panel::AgentsPanel>,
     sessions: Entity<crate::gpui_sidebar_panel::SessionsPanel>,
+    subagents_hub: Entity<crate::gpui_sidebar_panel::SubagentsPanel>,
     browser: browser::BrowserPanels,
     documents: Rc<RefCell<Vec<gpui_kit::WeakEntity<DocumentPanel>>>>,
     document_factory: PanelFactory,
@@ -278,6 +279,8 @@ impl WorkspaceDock {
             cx,
         );
         let subagents = Self::subagent_panels(&area, cx);
+        let subagents_hub = cx.new(crate::gpui_sidebar_panel::SubagentsPanel::new);
+        register(&area, subagents_hub.clone(), cx);
         let panels = ContextPanels::new(context.clone(), sender.clone(), local_git, window, cx);
         panels.register(&area, cx);
         let agents = cx.new(|cx| {
@@ -329,6 +332,7 @@ impl WorkspaceDock {
             empty_terminal: None,
             agents,
             sessions,
+            subagents_hub,
             browser,
             documents,
             document_factory,
@@ -642,8 +646,8 @@ impl WorkspaceDock {
                 panel.update(cx, |panel, cx| panel.attach_parent(parent.clone(), cx));
             }
         }
-        self.sessions
-            .update(cx, |sidebar, cx| sidebar.update_subagents(parents, cx));
+        self.subagents_hub
+            .update(cx, |hub, cx| hub.update_subagents(parents, cx));
     }
 
     pub(crate) fn show_agents(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1668,14 +1672,13 @@ impl WorkspaceDock {
                 };
             }
             DockAction::Sidebar | DockAction::Spaces => {
-                self.sessions
-                    .update(cx, |sidebar, cx| sidebar.show_subagents(false, cx));
                 self.show_sidebar(window, cx);
             }
             DockAction::Subagents => {
-                self.sessions
-                    .update(cx, |sidebar, cx| sidebar.show_subagents(true, cx));
-                self.show_sidebar(window, cx);
+                let id = PanelId::from(self.subagents_hub.entity_id());
+                self.add_document_panel(panel_handle(self.subagents_hub.clone()), window, cx);
+                self.area
+                    .update(cx, |area, cx| area.select_panel(id, window, cx));
             }
             DockAction::Files => self.show_files(window, cx),
             DockAction::Changes => self.refresh(window, cx),

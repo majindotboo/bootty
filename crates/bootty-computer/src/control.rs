@@ -7,8 +7,8 @@ use std::{io::Cursor, thread, time::Duration};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::{
-    ComputerAction, ComputerError, ComputerResult, ComputerTarget, DisplayBounds, Permission,
-    PermissionStatus,
+    ComputerAction, ComputerElement, ComputerError, ComputerResult, ComputerTarget, DisplayBounds,
+    ElementState, MAX_ELEMENTS, MouseButton, Permission, PermissionStatus, PressMethod,
     desktop::{Desktop, Image, InputEvent, NativeWindow, pixel_count, pixel_edge},
 };
 
@@ -96,6 +96,8 @@ pub fn execute(
             },
         ),
         ComputerAction::TypeText { text } => type_text(desktop, target, text),
+        ComputerAction::Elements => elements(desktop, target),
+        ComputerAction::Press { element } => press(desktop, target, element),
         ComputerAction::Key { key, modifiers } => {
             let window = validate(desktop, target, true)?;
             desktop.post(
@@ -208,6 +210,57 @@ fn pointer(
     uncovered(desktop, &window, x, y)?;
     desktop.post(&window, event)?;
     Ok(ComputerResult::Posted)
+}
+
+fn elements(
+    desktop: &dyn Desktop,
+    target: &ComputerTarget,
+) -> Result<ComputerResult, ComputerError> {
+    require(desktop.status().accessibility, Permission::Accessibility)?;
+    let window = validate(desktop, target, false)?;
+    let token = window.app.clone().ok_or(ComputerError::TargetUnavailable)?;
+    let (elements, omitted) = desktop.elements(&window, MAX_ELEMENTS)?;
+    // The elements describe the window as it was listed; a move or resize makes them stale.
+    validate(desktop, target, false)?;
+    Ok(ComputerResult::Elements {
+        elements,
+        omitted,
+        target: Box::new(token),
+    })
+}
+
+/// The element's own press action first. Apps that draw their own controls often have none, so
+/// those get a click at the element's center under the usual pointer rules.
+fn press(
+    desktop: &dyn Desktop,
+    target: &ComputerTarget,
+    element: &ComputerElement,
+) -> Result<ComputerResult, ComputerError> {
+    let window = validate(desktop, target, true)?;
+    let current = desktop
+        .element(&window, &element.path)?
+        .filter(|current| current.same_as(element))
+        .ok_or(ComputerError::StaleElement)?;
+    if current.states.contains(&ElementState::Disabled) {
+        return Err(ComputerError::InvalidAction(
+            "the element is disabled".into(),
+        ));
+    }
+    if desktop.press(&window, &element.path)? {
+        return Ok(ComputerResult::Pressed {
+            method: PressMethod::Action,
+        });
+    }
+    let (x, y) = element.center();
+    let click = InputEvent::Click {
+        x,
+        y,
+        button: MouseButton::Left,
+    };
+    pointer(desktop, target, x, y, &click)?;
+    Ok(ComputerResult::Pressed {
+        method: PressMethod::Click,
+    })
 }
 
 fn type_text(

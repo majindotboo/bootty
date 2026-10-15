@@ -3728,6 +3728,10 @@ fn settled_sessions_remain_visible_below_active_and_pinned_sessions(cx: &mut Tes
             assert!(pinned.bottom() <= active.top());
             assert!(active.bottom() < heading.top());
             assert!(heading.bottom() <= settled.top());
+            assert!(
+                (heading.left().sub(settled.left())).abs() <= px(12.0),
+                "the settled heading starts with the rows: {heading:?}, {settled:?}"
+            );
             let footer = cx.debug_bounds("bootty-gpui-space-switcher").unwrap();
             assert!(
                 (footer.top().sub(settled.bottom())).abs() <= px(20.0),

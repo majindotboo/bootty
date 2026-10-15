@@ -1132,6 +1132,45 @@ fn pi_tool_results_keep_the_observed_name_input_and_failure_across_history(
     session.stop();
 }
 
+/// Pi's edit reads as a file change built from its unified patch, live and from history.
+#[rstest]
+fn pi_edits_become_file_changes_from_its_patch() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let arguments = json!({"path":"src/main.rs","edits":[{"oldText":"old","newText":"new"}]});
+    // Observed from Pi's edit tool: `details.patch` is a standard unified patch.
+    let details = json!({"diff":" 1 ctx\n-2 old\n+2 new","firstChangedLine":2,
+        "patch":"--- src/main.rs\n+++ src/main.rs\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n"});
+    let result = json!({"content":[{"type":"text","text":"Successfully replaced 1 block(s) in src/main.rs."}],
+        "details":details});
+    fs::write(
+        root.path().join("events.json"),
+        json!([
+            {"type":"message_end","message":{"role":"assistant","timestamp":2,"content":[{"type":"toolCall","id":"edit","name":"edit","arguments":arguments}]}},
+            {"type":"tool_execution_end","toolCallId":"edit","toolName":"edit","args":arguments,"result":result,"isError":false},
+            {"type":"message_end","message":{"role":"toolResult","timestamp":3,"toolCallId":"edit","toolName":"edit","content":result["content"],"details":details,"isError":false}},
+        ]).to_string(),
+    ).unwrap();
+    session.rpc("get_state", json!({})).unwrap();
+    let expected = json!([{"path":"src/main.rs","diff":"@@ -1,2 +1,2 @@\n ctx\n-old\n+new\n"}]);
+    for snapshot in [session.snapshot(), session.refresh_history().unwrap()] {
+        let tool = snapshot
+            .transcript
+            .iter()
+            .find(|item| item.id == "tool-edit")
+            .and_then(|item| item.tool.clone())
+            .unwrap();
+        assert_eq!(
+            (
+                tool.name.as_str(),
+                serde_json::from_str::<Value>(&tool.input).unwrap()
+            ),
+            ("fileChange", expected.clone())
+        );
+    }
+    session.stop();
+}
+
 #[rstest]
 #[case::builtin_completed("succeeded", NativeToolStatus::Completed, false)]
 #[case::builtin_failed("failed", NativeToolStatus::Failed, false)]

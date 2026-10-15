@@ -743,7 +743,16 @@ impl<R: CommandRunner> TmuxBackend<R> {
             .position(|pane| pane.id == saved.focused_pane_id)
             .and_then(|index| pane_ids.get(index))
             .context("saved focused pane is absent")?;
-        self.run_owned(&["select-pane".into(), "-t".into(), focused.clone()])
+        self.run_owned(&["select-pane".into(), "-t".into(), focused.clone()])?;
+        // resize-window pins window-size to manual. Saved geometry is only for replay;
+        // return to the inherited sizing policy before a live client attaches.
+        self.run_owned(&[
+            "set-option".into(),
+            "-wu".into(),
+            "-t".into(),
+            window_id.into(),
+            "window-size".into(),
+        ])
     }
 
     fn move_window(&self, window_id: String, delta: i32) -> Result<()> {

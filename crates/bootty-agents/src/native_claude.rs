@@ -976,16 +976,31 @@ pub fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
             })
     };
     if let Some(blocks) = field(field(value, "message"), "content").as_array() {
+        // A message's result describes its only tool: live output calls it `tool_use_result`,
+        // the session file `toolUseResult`.
+        let results = blocks
+            .iter()
+            .filter(|block| field(block, "type") == "tool_result")
+            .count();
+        let change = (results == 1)
+            .then(|| {
+                value
+                    .get("tool_use_result")
+                    .or_else(|| value.get("toolUseResult"))
+                    .and_then(file_change)
+            })
+            .flatten();
         for block in blocks {
             if field(block, "type") == "tool_result"
                 && let Some(id) = field(block, "tool_use_id")
                     .as_str()
                     .filter(|id| valid_wire_id(id))
             {
+                let change = change.clone().filter(|_| field(block, "is_error") != true);
                 snapshot.tool_message(
                     format!("claude-tool-{id}"),
-                    None,
-                    None,
+                    change.as_ref().map(|_| "fileChange"),
+                    change,
                     crate::native_protocol::content_text(field(block, "content")),
                     if snapshot.stopping() && rejected(id) {
                         NativeToolStatus::Interrupted
@@ -998,6 +1013,47 @@ pub fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
             }
         }
     }
+}
+
+/// Claude's own patch for a file it edited or wrote. A new file has no patch; its content is all
+/// added.
+fn file_change(result: &Value) -> Option<String> {
+    use std::fmt::Write as _;
+    let path = field(result, "filePath").as_str()?;
+    let hunks = field(result, "structuredPatch").as_array()?;
+    let diff = if hunks.is_empty() {
+        if field(result, "type") != "create" {
+            return None;
+        }
+        let content = field(result, "content").as_str()?;
+        let count = content.lines().count();
+        if count == 0 {
+            String::new()
+        } else {
+            std::iter::once(format!("@@ -0,0 +1,{count} @@\n"))
+                .chain(content.lines().map(|line| format!("+{line}\n")))
+                .collect()
+        }
+    } else {
+        let mut diff = String::new();
+        for hunk in hunks {
+            let number = |key: &str| field(hunk, key).as_u64();
+            _ = writeln!(
+                diff,
+                "@@ -{},{} +{},{} @@",
+                number("oldStart")?,
+                number("oldLines")?,
+                number("newStart")?,
+                number("newLines")?,
+            );
+            for line in field(hunk, "lines").as_array()? {
+                diff.push_str(line.as_str()?);
+                diff.push('\n');
+            }
+        }
+        diff
+    };
+    Some(crate::native_protocol::file_change_input(path, &diff))
 }
 
 pub fn valid_session_id(id: &str) -> bool {

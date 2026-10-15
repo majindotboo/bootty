@@ -1,7 +1,8 @@
 //! The platform seam. Each OS lists windows, reports focus, captures and posts input; the shared
 //! control rules decide what is allowed, so every platform enforces the same window identity.
 use crate::{
-    ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier, MouseButton,
+    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier,
+    MouseButton,
 };
 
 /// One on-screen window, front to back. `app` is present only for an ordinary application window
@@ -160,4 +161,38 @@ pub trait Desktop: Send + Sync {
     fn raise(&self, window: &NativeWindow) -> Result<(), ComputerError>;
     /// A square icon for an application, `side` pixels wide, when the OS has one.
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image>;
+
+    // Deliberate limit: only macOS reads accessibility elements. Implement the three methods
+    // below with UI Automation on Windows and AT-SPI on Linux when agents need elements there.
+
+    /// The window's accessibility elements in screen order: at most `limit`, and whether any were
+    /// left out.
+    ///
+    /// # Errors
+    /// Returns unsupported, availability or platform errors.
+    fn elements(
+        &self,
+        _window: &NativeWindow,
+        _limit: usize,
+    ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        Err(ComputerError::Unsupported)
+    }
+    /// The element at `path` as it is now, or `None` when the window has none there.
+    ///
+    /// # Errors
+    /// Returns unsupported, availability or platform errors.
+    fn element(
+        &self,
+        _window: &NativeWindow,
+        _path: &[u16],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
+        Err(ComputerError::Unsupported)
+    }
+    /// Perform the element's press action. `false` means it has none, so the caller clicks it.
+    ///
+    /// # Errors
+    /// Returns unsupported, availability or platform errors; a press is never retried.
+    fn press(&self, _window: &NativeWindow, _path: &[u16]) -> Result<bool, ComputerError> {
+        Err(ComputerError::Unsupported)
+    }
 }

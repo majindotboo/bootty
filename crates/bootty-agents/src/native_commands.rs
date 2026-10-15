@@ -105,6 +105,16 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         ),
         ("seen", vec!["id", "generation"], ResourceKind::Session),
         (
+            "voice-start",
+            vec!["id", "generation", "offer"],
+            ResourceKind::Session,
+        ),
+        (
+            "voice-stop",
+            vec!["id", "generation"],
+            ResourceKind::Session,
+        ),
+        (
             "mark-unread",
             vec!["id", "generation"],
             ResourceKind::Session,

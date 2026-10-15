@@ -294,6 +294,34 @@ fn computer_image_hashes(content: &Value) -> Option<Vec<[u8; 32]>> {
         .collect()
 }
 
+/// A voice call Codex runs on a conversation's thread.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub enum RealtimeCall {
+    #[default]
+    None,
+    /// Started; Codex hasn't answered the offer yet.
+    Awaiting,
+    /// Codex answered or refused; whoever started the call hasn't taken it yet.
+    Answered(Result<String, String>),
+    Live,
+}
+
+impl RealtimeCall {
+    /// Take Codex's answer, leaving the call live if Codex accepted it.
+    pub fn take_answer(&mut self) -> Option<Result<String, String>> {
+        if !matches!(self, Self::Answered(_)) {
+            return None;
+        }
+        let Self::Answered(answer) = std::mem::take(self) else {
+            return None;
+        };
+        if answer.is_ok() {
+            *self = Self::Live;
+        }
+        Some(answer)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NativeSessionSnapshot {
     pub provider: AgentKind,
@@ -354,6 +382,8 @@ pub struct NativeSessionSnapshot {
     /// Monotonic origin of this accepted live turn; inactive generations never restore it.
     #[serde(skip)]
     pub(crate) working_since: Option<Instant>,
+    #[serde(skip)]
+    pub(crate) realtime: RealtimeCall,
     #[serde(skip)]
     message_times: (Option<i64>, Option<i64>),
 }
@@ -542,6 +572,7 @@ impl NativeSessionSnapshot {
             computer_tool_server: None,
             computer_tools: BTreeMap::new(),
             working_since: None,
+            realtime: RealtimeCall::None,
             message_times: (None, None),
         }
     }
@@ -1010,7 +1041,7 @@ impl NativeSessionSnapshot {
             return false;
         }
         let method = field(value, "method").as_str().unwrap_or_default();
-        if method == "thread/tokenUsage/updated" {
+        if method == "thread/tokenUsage/updated" || method.starts_with("thread/realtime/") {
             return true;
         }
         // MCP requests have their own identity; the SDK cannot always correlate a turn.
@@ -1022,9 +1053,12 @@ impl NativeSessionSnapshot {
             .as_str()
             .or_else(|| field(field(params, "turn"), "id").as_str());
         if method == "turn/started" {
+            // During a voice call, Codex starts the turns it delegates to the agent.
             return turn.is_some()
                 && (self.turn_id.as_deref() == turn
-                    || (self.turn_id.is_none() && self.status == NativeSessionStatus::Working));
+                    || (self.turn_id.is_none()
+                        && (self.status == NativeSessionStatus::Working
+                            || self.realtime != RealtimeCall::None)));
         }
         turn.is_some() && turn == self.turn_id.as_deref()
     }
@@ -1092,7 +1126,9 @@ impl NativeSessionSnapshot {
         let id = field(item, "id").as_str().unwrap_or("item").to_owned();
         match field(item, "type").as_str().unwrap_or_default() {
             "userMessage" => {
-                self.message(id, "user", content_text(field(item, "content")), complete);
+                let text = content_text(field(item, "content"));
+                let text = delegated_request(&text).map(str::to_owned).unwrap_or(text);
+                self.message(id, "user", text, complete);
             }
             "agentMessage" => self.message(
                 id,
@@ -1205,6 +1241,23 @@ impl NativeSessionSnapshot {
                 self.todos.clear();
             }
             "turn/plan/updated" => self.todos = codex_todos(field(params, "plan")),
+            "thread/realtime/sdp" if self.realtime == RealtimeCall::Awaiting => {
+                if let Some(sdp) = field(params, "sdp").as_str() {
+                    self.realtime = RealtimeCall::Answered(Ok(sdp.to_owned()));
+                }
+            }
+            "thread/realtime/error" => {
+                let message = field(params, "message").as_str().map_or_else(
+                    || "Codex couldn't start voice mode".to_owned(),
+                    str::to_owned,
+                );
+                self.realtime = if self.realtime == RealtimeCall::Awaiting {
+                    RealtimeCall::Answered(Err(bounded_text(message)))
+                } else {
+                    RealtimeCall::None
+                };
+            }
+            "thread/realtime/closed" => self.realtime = RealtimeCall::None,
             "turn/completed" => self.complete_turn(params),
             "item/agentMessage/delta"
             | "item/plan/delta"
@@ -1348,14 +1401,38 @@ pub fn content_text(value: &Value) -> String {
 
 const RECENT_TRANSCRIPT_BYTES: usize = 1024 * 1024;
 
+/// The words a voice call delegated to the agent. Codex wraps them with the call's transcript.
+fn delegated_request(text: &str) -> Option<&str> {
+    let inner = text.trim().strip_prefix("<realtime_delegation>")?;
+    let start = inner.find("<input>")?.saturating_add("<input>".len());
+    let end = inner.find("</input>")?;
+    inner.get(start..end).map(str::trim)
+}
+
 fn bounded_tool_input(name: &str, input: String) -> String {
+    if name != "fileChange" {
+        return bounded_text(input);
+    }
     // File patches are structured JSON; truncation destroys their source-line mapping.
     // The existing transcript budget still bounds the whole retained projection.
-    if name == "fileChange" && input.len() <= RECENT_TRANSCRIPT_BYTES {
-        input
-    } else {
-        bounded_text(input)
+    if input.len() <= RECENT_TRANSCRIPT_BYTES {
+        return input;
     }
+    // Too large to keep whole: each changed path stays, without its patch.
+    let paths = serde_json::from_str::<Vec<Value>>(&input).unwrap_or_default();
+    Value::from(
+        paths
+            .iter()
+            .map(|change| serde_json::json!({"path": field(change, "path"), "diff": ""}))
+            .collect::<Vec<_>>(),
+    )
+    .to_string()
+}
+
+/// Bootty's one shape for changed files, whichever provider made them: a `fileChange` tool whose
+/// input lists each path with its unified diff hunks.
+pub fn file_change_input(path: &str, diff: &str) -> String {
+    serde_json::json!([{"path": path, "diff": diff}]).to_string()
 }
 
 fn transcript_text(role: &str, text: String) -> String {

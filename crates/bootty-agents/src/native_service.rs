@@ -652,15 +652,19 @@ impl NativeAgentService {
         target: &CommandTarget,
         prompt: &crate::NativePrompt,
     ) -> Result<NativeSessionSnapshot, String> {
+        // A turn that can't take a steer yet, such as while the previous message is still on its
+        // way, gets this one as soon as it can. Timing never refuses what the user sent.
+        let session = self.resolve(target)?;
+        let snapshot = session.snapshot();
+        if matches!(
+            snapshot.status,
+            NativeSessionStatus::Working | NativeSessionStatus::Waiting
+        ) && snapshot.steer_refusal().is_some()
+        {
+            self.queue_steer(target, prompt)?;
+            return Ok(session.snapshot());
+        }
         self.prompt_input_mode(target, prompt, NativePromptDelivery::Automatic)
-    }
-
-    fn prompt_idle_input(
-        &self,
-        target: &CommandTarget,
-        prompt: &crate::NativePrompt,
-    ) -> Result<NativeSessionSnapshot, String> {
-        self.prompt_input_mode(target, prompt, NativePromptDelivery::Idle)
     }
 
     fn prompt_input_mode(
@@ -1137,6 +1141,19 @@ impl NativeAgentService {
     /// Returns a stale/stopped target, or first-hand provider interrupt errors.
     pub fn interrupt(&self, target: &CommandTarget) -> Result<(), String> {
         self.resolve(target)?.interrupt()
+    }
+
+    /// Start a Codex voice call on the conversation and return Codex's answer to `offer`.
+    /// # Errors
+    /// Returns stale targets, a conversation that can't hold a call, or Codex's refusal.
+    pub fn start_voice(&self, target: &CommandTarget, offer: &str) -> Result<String, String> {
+        self.resolve(target)?.start_voice(offer)
+    }
+
+    /// # Errors
+    /// Returns stale targets or Codex's refusal to stop.
+    pub fn stop_voice(&self, target: &CommandTarget) -> Result<(), String> {
+        self.resolve(target)?.stop_voice()
     }
 
     /// # Errors
