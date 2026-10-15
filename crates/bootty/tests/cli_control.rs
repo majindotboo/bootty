@@ -124,6 +124,70 @@ fn cli_control_helper() {
         assert!(child.wait().unwrap().success());
     }
 
+    // Both CLI paths deliver the same exact target, wherever `--target` appears.
+    let target = Some(bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Session,
+        handle: "native:claude:26".to_owned(),
+        generation: 43,
+    });
+    for arguments in [
+        &[
+            "command",
+            "agents.native.status",
+            "--target",
+            "native:claude:26@43",
+            "native:claude:26",
+            "43",
+        ][..],
+        &[
+            "command",
+            "agents.native.status",
+            "native:claude:26",
+            "43",
+            "--target",
+            "native:claude:26@43",
+        ],
+        &[
+            "agents.native.status",
+            "--target",
+            "native:claude:26@43",
+            "native:claude:26",
+            "43",
+        ],
+    ] {
+        let mut child = spawn_bootty(arguments);
+        let request = receive_request(&receiver);
+        assert_eq!(request.invocation.command, "agents.native.status");
+        assert_eq!(request.invocation.arguments, vec!["native:claude:26", "43"]);
+        assert_eq!(request.invocation.target, target, "{arguments:?}");
+        request.response.send(CommandOutcome::success()).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+    let mut targeted_stdin = Command::new(env!("CARGO_BIN_EXE_bootty"))
+        .args([
+            "command",
+            "agents.native.status",
+            "--target",
+            "native:claude:26@43",
+            "--stdin-json",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    targeted_stdin
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"["native:claude:26","43"]"#)
+        .unwrap();
+    let request = receive_request(&receiver);
+    assert_eq!(request.invocation.arguments, vec!["native:claude:26", "43"]);
+    assert_eq!(request.invocation.target, target);
+    request.response.send(CommandOutcome::success()).unwrap();
+    assert!(targeted_stdin.wait().unwrap().success());
+
     let update = spawn_bootty(&["update"]).wait_with_output().unwrap();
     assert!(!update.status.success());
     assert!(

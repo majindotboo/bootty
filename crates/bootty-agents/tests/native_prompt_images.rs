@@ -102,7 +102,10 @@ for line in sys.stdin:
   with open('prompt.json','w') as output: json.dump(value,output)
   if claude:
    emit({'type':'system','subtype':'init','session_id':session,'cwd':os.getcwd()})
-   echo=dict(value);echo['isReplay']=True;emit(echo)
+   echo=dict(value);echo['isReplay']=True
+   # Claude downscales large images and echoes them re-encoded.
+   if os.path.exists('jpeg-echo'): echo['message']=dict(value['message'],content=[dict(block,source=dict(block['source'],media_type='image/jpeg')) if block['type']=='image' else block for block in blocks])
+   emit(echo)
    if history_mode:
     emit({'type':'assistant','uuid':'answer-'+str(turn),'session_id':session,'parent_tool_use_id':None,'message':{'id':'answer-'+str(turn),'content':[{'type':'text','text':'History seen'}]}})
    emit({'type':'result','subtype':'success','session_id':session,'uuid':'result-not-prompt','is_error':False,'terminal_reason':'completed','result':'Image seen'})
@@ -215,18 +218,24 @@ fn large_fork_context_echoes_preserve_turn_ownership_and_image_delivery(
 }
 
 #[rstest]
-#[case::codex_text(AgentKind::Codex, "Read this annotation", 0)]
-#[case::pi_text(AgentKind::Pi, "Read this annotation", 0)]
-#[case::claude_text(AgentKind::Claude, "Read this annotation", 0)]
-#[case::codex_large_image_only(AgentKind::Codex, "", 1024 * 1024)]
-#[case::pi_large_image_only(AgentKind::Pi, "", 1024 * 1024)]
-#[case::claude_large_image_only(AgentKind::Claude, "", 1024 * 1024)]
+#[case::codex_text(AgentKind::Codex, "Read this annotation", 0, false)]
+#[case::pi_text(AgentKind::Pi, "Read this annotation", 0, false)]
+#[case::claude_text(AgentKind::Claude, "Read this annotation", 0, false)]
+#[case::claude_reencoded_echo(AgentKind::Claude, "Read this annotation", 0, true)]
+#[case::codex_large_image_only(AgentKind::Codex, "", 1024 * 1024, false)]
+#[case::pi_large_image_only(AgentKind::Pi, "", 1024 * 1024, false)]
+#[case::claude_large_image_only(AgentKind::Claude, "", 1024 * 1024, false)]
+#[case::claude_large_reencoded_echo(AgentKind::Claude, "", 1024 * 1024, true)]
 fn provider_images_are_exact_transport_bytes_and_durable_safe_references(
     #[case] provider: AgentKind,
     #[case] text: &str,
     #[case] metadata_bytes: usize,
+    #[case] jpeg_echo: bool,
 ) {
     let root = TempDir::new().unwrap();
+    if jpeg_echo {
+        fs::write(root.path().join("jpeg-echo"), "").unwrap();
+    }
     let path = root.path().join("native.json");
     let mut config = NativeSessionConfig::new(provider, root.path());
     config.program = fixture(root.path()).unwrap();

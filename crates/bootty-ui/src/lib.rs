@@ -1,4 +1,5 @@
 pub mod action_catalog;
+mod agent_cursor;
 mod agent_tray;
 pub mod ansi_palette;
 pub mod app_actions;
@@ -19,6 +20,7 @@ pub mod gpui;
 pub mod gpui_actions;
 mod gpui_agent_session;
 mod gpui_agents_panel;
+mod gpui_application_icons;
 mod gpui_background;
 mod gpui_composer_completion;
 pub use gpui_composer_completion::CompletionScope;

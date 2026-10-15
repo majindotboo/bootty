@@ -1,81 +1,94 @@
 use crate::{
     ComputerAccess, ComputerAction, ComputerError, ComputerResult, ComputerStatus, ComputerTarget,
-    Permission, PermissionStatus,
+    Permission, PermissionStatus, control, desktop::Desktop,
 };
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-const RESPONSE_LIMIT: u64 = 16 * 1024 * 1024;
+/// Most app icons one call renders; callers batch larger sets.
+pub const MAX_ICON_REQUEST: usize = 16;
+const ICON_SIDE: u32 = 48;
+// Accessibility and capture calls can stall inside other apps; no action waits longer than this.
+const OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 
-#[derive(Clone, Debug)]
+/// Local desktop control. Native work runs on a blocking worker, never on the caller's thread.
+#[derive(Clone)]
 pub struct Computer {
-    helper_path: PathBuf,
+    desktop: Arc<dyn Desktop>,
 }
 
-#[derive(Serialize)]
-#[serde(tag = "method", rename_all = "snake_case")]
-enum Request<'a> {
-    Status,
-    Targets,
-    Execute {
-        enabled: bool,
-        target: &'a ComputerTarget,
-        #[serde(flatten)]
-        action: &'a ComputerAction,
-    },
+impl std::fmt::Debug for Computer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Computer").finish_non_exhaustive()
+    }
 }
 
-#[derive(Deserialize)]
-struct Response<T> {
-    value: Option<T>,
-    error: Option<HelperError>,
-}
-
-#[derive(Deserialize)]
-struct HelperError {
-    code: String,
-    message: String,
+impl Default for Computer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Computer {
+    /// Control this machine's desktop.
     #[must_use]
-    pub const fn new(helper_path: PathBuf) -> Self {
-        Self { helper_path }
+    pub fn new() -> Self {
+        Self::with_desktop(crate::platform::native())
+    }
+
+    #[must_use]
+    pub fn with_desktop(desktop: Arc<dyn Desktop>) -> Self {
+        Self { desktop }
     }
 
     /// Checks current OS permission state without presenting prompts.
     ///
     /// # Errors
-    /// Returns helper launch, protocol or timeout errors.
+    /// Returns timeout errors.
     pub async fn status(&self) -> Result<ComputerStatus, ComputerError> {
-        if !cfg!(target_os = "macos") {
-            return Ok(ComputerStatus {
-                accessibility: PermissionStatus::Unsupported,
-                screen_recording: PermissionStatus::Unsupported,
-                secure_input: false,
-            });
-        }
-        self.request(&Request::Status).await
+        self.run(|desktop| Ok(desktop.status())).await
     }
 
     /// Lists observable application windows without prompting for OS access.
     ///
     /// # Errors
-    /// Returns unsupported-platform, helper launch, protocol or timeout errors.
+    /// Returns timeout errors.
     pub async fn targets(&self) -> Result<Vec<ComputerTarget>, ComputerError> {
-        self.request(&Request::Targets).await
+        self.run(|desktop| Ok(control::targets(desktop))).await
+    }
+
+    /// Small PNG icons for apps, keyed by bundle id; unknown apps are omitted. Asks for at most
+    /// [`MAX_ICON_REQUEST`] apps and needs no OS permission.
+    ///
+    /// # Errors
+    /// Returns oversized-request and timeout errors.
+    pub async fn icons(
+        &self,
+        bundle_ids: &[String],
+    ) -> Result<BTreeMap<String, Vec<u8>>, ComputerError> {
+        if bundle_ids.len() > MAX_ICON_REQUEST {
+            return Err(ComputerError::InvalidAction(
+                "too many app icons requested".into(),
+            ));
+        }
+        let bundle_ids = bundle_ids.to_vec();
+        self.run(move |desktop| {
+            Ok(bundle_ids
+                .into_iter()
+                .filter(|bundle_id| !bundle_id.is_empty() && bundle_id.len() <= 256)
+                .filter_map(|bundle_id| {
+                    let png = control::icon_png(desktop, &bundle_id, ICON_SIDE)?;
+                    Some((bundle_id, png))
+                })
+                .collect())
+        })
+        .await
     }
 
     /// Posts one action; failures are never automatically retried.
     ///
     /// # Errors
     /// Refuses disabled access, invalid actions, denied permissions and secure input.
-    /// Also returns unsupported-platform, helper launch, protocol and timeout errors.
+    /// Also returns unsupported-platform, platform and timeout errors.
     pub async fn execute(
         &self,
         access: &ComputerAccess,
@@ -102,118 +115,23 @@ impl Computer {
         if status.secure_input {
             return Err(ComputerError::SecureInput);
         }
-        let result: ComputerResult = self
-            .request(&Request::Execute {
-                enabled: true,
-                target,
-                action,
-            })
+        let (work_target, work_action) = (target.clone(), action.clone());
+        let result = self
+            .run(move |desktop| control::execute(desktop, &work_target, &work_action))
             .await?;
         result.validate(target, action)?;
         Ok(result)
     }
 
-    async fn request<T: DeserializeOwned>(
+    async fn run<T: Send + 'static>(
         &self,
-        request: &Request<'_>,
+        work: impl FnOnce(&dyn Desktop) -> Result<T, ComputerError> + Send + 'static,
     ) -> Result<T, ComputerError> {
-        if !cfg!(target_os = "macos") {
-            return Err(ComputerError::Unsupported);
-        }
-        let mut child = tokio::process::Command::new(&self.helper_path)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-        let operation = async {
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| ComputerError::Helper("helper stdin unavailable".into()))?;
-            stdin.write_all(&serde_json::to_vec(request)?).await?;
-            drop(stdin);
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| ComputerError::Helper("helper stdout unavailable".into()))?;
-            let stderr = child
-                .stderr
-                .take()
-                .ok_or_else(|| ComputerError::Helper("helper stderr unavailable".into()))?;
-            let (output, _diagnostic, status) = tokio::try_join!(
-                read_bounded(stdout, RESPONSE_LIMIT),
-                read_bounded(stderr, 8192),
-                child.wait()
-            )?;
-            if !status.success() {
-                return Err(ComputerError::Helper("helper process failed".into()));
-            }
-            let response: Response<T> = serde_json::from_slice(&output)?;
-            if let Some(error) = response.error {
-                return Err(match error.code.as_str() {
-                    "disabled" => ComputerError::Disabled,
-                    "unsupported" => ComputerError::Unsupported,
-                    "accessibility_denied" => {
-                        ComputerError::PermissionDenied(Permission::Accessibility)
-                    }
-                    "screen_recording_denied" => {
-                        ComputerError::PermissionDenied(Permission::ScreenRecording)
-                    }
-                    "invalid_target" => ComputerError::InvalidTarget,
-                    "target_unavailable" => ComputerError::TargetUnavailable,
-                    "stale_target" => ComputerError::StaleTarget,
-                    "target_not_focused" => ComputerError::TargetNotFocused,
-                    "secure_input" => ComputerError::SecureInput,
-                    "invalid_action" => ComputerError::InvalidAction(error.message),
-                    _ => ComputerError::Helper(error.message),
-                });
-            }
-            response
-                .value
-                .ok_or_else(|| ComputerError::Helper("helper returned no value".into()))
-        };
-        tokio::time::timeout(Duration::from_secs(20), operation)
+        let desktop = self.desktop.clone();
+        let task = tokio::task::spawn_blocking(move || work(desktop.as_ref()));
+        tokio::time::timeout(OPERATION_TIMEOUT, task)
             .await
             .map_err(|_| ComputerError::Timeout)?
+            .map_err(|_| ComputerError::Platform("computer use stopped unexpectedly".into()))?
     }
-}
-
-async fn read_bounded(
-    reader: impl AsyncRead + Unpin,
-    limit: u64,
-) -> Result<Vec<u8>, std::io::Error> {
-    let mut data = Vec::new();
-    reader
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut data)
-        .await?;
-    if u64::try_from(data.len()).unwrap_or(u64::MAX) > limit {
-        return Err(std::io::Error::other("helper response exceeds size limit"));
-    }
-    Ok(data)
-}
-
-/// Packaging installs this inside the app before code signing, giving permission checks
-/// and input actions the same stable identity. Runtime never writes an executable.
-///
-/// # Errors
-/// Returns unsupported-platform or filesystem errors.
-#[cfg(target_os = "macos")]
-pub fn install_helper(destination: &Path) -> Result<(), ComputerError> {
-    use std::os::unix::fs::PermissionsExt;
-    let bytes = include_bytes!(concat!(env!("OUT_DIR"), "/bootty-computer"));
-    std::fs::write(destination, bytes)?;
-    std::fs::set_permissions(destination, std::fs::Permissions::from_mode(0o755))?;
-    Ok(())
-}
-
-/// Packaging installs this inside the app before code signing, giving permission checks
-/// and input actions the same stable identity. Runtime never writes an executable.
-///
-/// # Errors
-/// Returns unsupported-platform or filesystem errors.
-#[cfg(not(target_os = "macos"))]
-pub const fn install_helper(_: &Path) -> Result<(), ComputerError> {
-    Err(ComputerError::Unsupported)
 }

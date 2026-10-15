@@ -143,5 +143,5 @@ impl<'de> Deserialize<'de> for ComputerResultSnapshot {
 }
 
 fn invalid_image() -> ComputerError {
-    ComputerError::Helper("invalid or oversized screenshot PNG".into())
+    ComputerError::Platform("invalid or oversized screenshot PNG".into())
 }

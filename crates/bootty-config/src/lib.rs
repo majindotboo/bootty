@@ -16,9 +16,9 @@ pub use font_style::{FontStyleAssignment, FontWeightAssignments, FontWeightRole}
 pub use identity::{
     APPLICATION_IDENTITY_ENV, ApplicationIdentity, ApplicationIdentityConflict, ApplicationNames,
     DEVELOPMENT_NAMESPACE_ENV, KEYMAP_FILE_NAME, config_path_from_env,
-    development_names_for_workspace, development_namespace_for_workspace,
-    is_bootty_bundle_identifier, keymap_path_for_config, keymap_path_from_env,
-    legacy_config_path_from_env, unix_daemon_state_path, windows_daemon_state_path,
+    development_names_for_workspace, development_namespace_for_workspace, keymap_path_for_config,
+    keymap_path_from_env, legacy_config_path_from_env, unix_daemon_state_path,
+    windows_daemon_state_path,
 };
 pub use keymap::{
     KeymapBindingFlags, KeymapBindingSnapshot, KeymapBindingSource, KeymapInput, KeymapMatch,

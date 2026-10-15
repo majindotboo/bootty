@@ -202,6 +202,10 @@ impl NativeAgentService {
     /// # Errors
     /// Rejects stale targets, missing active turns or provider rejections.
     pub fn steer_followup(&self, target: &CommandTarget, id: &str) -> Result<(), String> {
+        // A refusal known before sending keeps the message queued for its normal turn.
+        if let Some(refusal) = self.resolve(target)?.snapshot().steer_refusal() {
+            return Err(refusal.to_owned());
+        }
         let input = {
             let _mutation = lock(&self.mutation);
             let mut candidate = lock(&self.store).clone();

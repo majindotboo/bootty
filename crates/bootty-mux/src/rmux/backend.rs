@@ -29,7 +29,9 @@ use crate::{
 
 const RMUX_FIELD_SEPARATOR: char = '\u{1f}';
 pub const RMUX_WINDOW_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{window_index}\u{1f}#{window_active}\u{1f}#{window_name}\u{1f}#{window_layout}";
-pub const RMUX_PANE_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{pane_id}\u{1f}#{pane_index}\u{1f}#{pane_active}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}";
+/// The pane's root process identifies its occupant: the foreground command changes whenever a
+/// program runs, so it cannot tell a respawned pane from a busy one.
+pub const RMUX_PANE_FORMAT: &str = "#{session_name}\u{1f}#{window_id}\u{1f}#{pane_id}\u{1f}#{pane_index}\u{1f}#{pane_active}\u{1f}#{pane_pid}\u{1f}#{pane_current_path}\u{1f}#{pane_current_command}";
 /// Names and rename-stable ids, which is what the Bootty tag is keyed by.
 pub const RMUX_SESSION_ID_FORMAT: &str = "#{session_name}\u{1f}#{session_id}";
 
@@ -194,6 +196,7 @@ pub struct RmuxPaneRow {
     pub(crate) pane_id: String,
     pub(crate) index: u32,
     pub(crate) active: bool,
+    pub(crate) pid: Option<u32>,
     pub(crate) cwd: Option<String>,
     pub(crate) process: Option<String>,
     pub(crate) native_agent: Option<String>,
@@ -278,7 +281,7 @@ fn parse_window_row(line: &str) -> Result<RmuxWindowRow> {
 }
 
 fn parse_pane_row(line: &str) -> Result<RmuxPaneRow> {
-    let mut fields = line.splitn(7, RMUX_FIELD_SEPARATOR);
+    let mut fields = line.splitn(8, RMUX_FIELD_SEPARATOR);
     let session_name = next_rmux_field(&mut fields, "pane session")?.to_owned();
     let window_id = next_rmux_field(&mut fields, "pane window id")?.to_owned();
     let pane_id = next_rmux_field(&mut fields, "pane id")?.to_owned();
@@ -286,6 +289,9 @@ fn parse_pane_row(line: &str) -> Result<RmuxPaneRow> {
         .parse::<u32>()
         .with_context(|| format!("invalid rmux pane index in {line:?}"))?;
     let active = parse_rmux_bool(next_rmux_field(&mut fields, "pane active")?);
+    let pid = next_rmux_field(&mut fields, "pane pid")?
+        .parse::<u32>()
+        .ok();
     let cwd = non_empty_rmux_field(next_rmux_field(&mut fields, "pane cwd")?);
     let process = non_empty_rmux_field(next_rmux_field(&mut fields, "pane process")?);
     Ok(RmuxPaneRow {
@@ -294,6 +300,7 @@ fn parse_pane_row(line: &str) -> Result<RmuxPaneRow> {
         pane_id,
         index,
         active,
+        pid,
         cwd,
         process,
         native_agent: None,
@@ -559,7 +566,7 @@ fn anchor_for_pane_row(session_name: &str, pane: &RmuxPaneRow) -> MuxPaneAnchor 
         native_agent: pane.native_agent.clone(),
         session_id: session_name.to_owned(),
         pane_id: Some(pane.pane_id.clone()),
-        pane_pid: None,
+        pane_pid: pane.pid,
         cwd: pane.cwd.clone(),
         process: pane.process.clone(),
     }

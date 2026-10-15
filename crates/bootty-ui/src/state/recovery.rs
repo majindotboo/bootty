@@ -28,8 +28,15 @@ pub struct RecoveryOverview {
     pub omitted_lines: u64,
     pub resumable: bool,
 }
-type PendingCapture =
-    bootty_terminal::terminal_session::PendingWorkerResponse<Result<TerminalCapture, String>>;
+enum PendingCapture {
+    /// A local terminal worker already queued this capture and answers from memory.
+    Queued(
+        bootty_terminal::terminal_session::PendingWorkerResponse<Result<TerminalCapture, String>>,
+    ),
+    /// The save worker starts backend captures one at a time. Starting them together opens one
+    /// remote session per pane at once, which can exceed what one SSH connection will carry.
+    Backend(Box<dyn FnOnce() -> Result<TerminalCapture, String> + Send>),
+}
 struct PendingArchive {
     archive: Option<OutputArchive>,
     pane: String,
@@ -700,7 +707,7 @@ impl AppState {
                 .transpose()?;
             return runtime
                 .capture_checkpoint(options)
-                .map(|capture| (capture, cwd));
+                .map(|capture| (PendingCapture::Queued(capture), cwd));
         }
         // Backend-owned panes can checkpoint before their display stream's first frame.
         let binding = self
@@ -708,14 +715,13 @@ impl AppState {
             .binding(spec.scope)
             .filter(|binding| binding.addresses_backend_panes())
             .context("Session checkpoint pane is unavailable")?;
-        let (request, response) = bootty_terminal::terminal_session::worker_request();
-        binding.capture_checkpoint_pane(&spec.pane, options, move |result| {
-            if !request.try_claim() {
-                return;
-            }
-            request.send(result.map_err(|error| error.to_string()));
-        });
-        Ok((response, None))
+        let capture = binding.checkpoint_pane_capture(&spec.pane, options);
+        Ok((
+            PendingCapture::Backend(Box::new(move || {
+                capture().map_err(|error| error.to_string())
+            })),
+            None,
+        ))
     }
 
     fn checkpoint_archive(&self, spec: ArchiveCapture, saved_at_ms: u64) -> OutputArchive {
@@ -801,12 +807,23 @@ impl PendingSessionCheckpoint {
         let mut captures = Vec::new();
         let mut archives = Vec::new();
         for mut item in self.panes {
-            let mut capture = item
-                .capture
-                // Hidden remote panes capture through the backend worker and network, not the
-                // foreground terminal's 50 ms response budget. This runs on the save worker.
-                .receive_for("checkpoint terminal", Duration::from_secs(5))?
-                .map_err(anyhow::Error::msg)?;
+            let mut capture = match item.capture {
+                // The budget only bounds a stalled worker; it never covers network round trips.
+                PendingCapture::Queued(response) => {
+                    response.receive_for("checkpoint terminal", Duration::from_secs(5))?
+                }
+                // The budget starts with this capture, not with the queue of panes before it.
+                PendingCapture::Backend(capture) => {
+                    let (sender, receiver) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let _ = sender.send(capture());
+                    });
+                    receiver
+                        .recv_timeout(Duration::from_secs(5))
+                        .context("Backend pane capture did not finish within 5 seconds")?
+                }
+            }
+            .map_err(anyhow::Error::msg)?;
             capture.text = bootty_terminal::terminal_history::sanitize_history(&capture.text)?;
             if let Some(archive) = &mut item.archive {
                 archive.cols = capture.cols;

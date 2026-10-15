@@ -14,6 +14,10 @@ use serde_json::{Value, json};
 
 const SESSION: &str = "01234567-89ab-4cde-8123-456789abcdef";
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "One provider script replays every observed Claude sequence"
+)]
 fn fixture(root: &Path) -> std::io::Result<String> {
     let path = root.join("claude-stream.py");
     fs::write(
@@ -31,14 +35,37 @@ def control(value): emit({'type':'control_response','response':{'subtype':'succe
 def result(reason='completed',subtype='success',identity=None,errors=None):
  emit({'type':'result','subtype':subtype,'session_id':identity or session,'uuid':'result-uuid-not-user-uuid','is_error':subtype!='success','terminal_reason':reason,'result':'Hello world','errors':errors or []})
 def event(value): emit({'type':'stream_event','session_id':session,'parent_tool_use_id':None,'event':value})
+def tool_use(ident,command): emit({'type':'assistant','uuid':'block-'+ident,'session_id':session,'parent_tool_use_id':None,'message':{'id':'message-'+ident,'content':[{'type':'tool_use','id':ident,'name':'Bash','input':{'command':command}}]}})
+def user_event(content,**extra): emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':content},**extra})
+running=None
 for line in sys.stdin:
  value=json.loads(line)
  if value['type']=='control_request':
-  if value['request']['subtype']=='interrupt': result('aborted_streaming')
+  if value['request']['subtype']=='interrupt':
+   # An idle Claude acknowledges an interrupt and reports nothing else.
+   if os.path.exists('ignore-interrupt'): control(value);continue
+   if running:
+    # Claude 2.1.296's observed order: acknowledge, reject the running tool, end the turn.
+    control(value)
+    user_event([{'type':'tool_result','tool_use_id':running,'content':"The user doesn't want to proceed with this tool use.",'is_error':True}],tool_result_meta=[{'id':running,'non_execution_kind':'user-rejected'}])
+    user_event([{'type':'text','text':'[Request interrupted by user]'}])
+    result('aborted_streaming','error_during_execution');running=None;continue
+   result('aborted_streaming')
   control(value)
  elif value['type']=='user':
   prompt=value['message']['content']
   urgent=value.get('priority')=='now'
+  if urgent and running:
+   with open('prompt.json','w') as output: json.dump(value,output)
+   # Observed: the running tool finishes, its turn ends, then the steer starts a new turn.
+   user_event([{'type':'tool_result','tool_use_id':running,'content':'one','is_error':False}])
+   result('aborted_tools')
+   emit({'type':'system','subtype':'init','session_id':session,'cwd':os.getcwd()})
+   # Claude downscales large images and echoes them re-encoded as JPEG.
+   echo=dict(value);echo['isReplay']=True
+   echo['message']=dict(value['message'],content=[dict(block,source=dict(block['source'],media_type='image/jpeg')) if block['type']=='image' else block for block in prompt])
+   emit(echo)
+   running='steer-call';tool_use(running,'sleep 20');continue
   if urgent: result('aborted_streaming')
   with open('prompt.json','w') as output: json.dump(value,output)
   if prompt=='oversize': sys.stdout.write('x'*(1024*1024+1)+'\n');sys.stdout.flush();continue
@@ -62,8 +89,7 @@ for line in sys.stdin:
     emit({'type':'assistant','uuid':'flood-'+str(i),'session_id':session,'parent_tool_use_id':None,'message':{'id':'flood-message-'+str(i),'content':[{'type':'tool_use','id':'flood-call-'+str(i),'name':'Bash','input':{'command':'true'}}]}})
     emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'flood-call-'+str(i),'content':[{'type':'text','text':'ok'}],'is_error':False}]}})
   if prompt=='tool-hold':
-   emit({'type':'assistant','uuid':'tool-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'tool-message','content':[{'type':'tool_use','id':'bash-call','name':'Bash','input':{'command':'sleep 60'}}]}})
-   continue
+   running='bash-call';tool_use(running,'sleep 60');continue
   event({'type':'message_start','message':{'id':'assistant-id'}})
   event({'type':'content_block_start','index':0,'content_block':{'type':'text','text':''}})
   event({'type':'content_block_delta','index':0,'delta':{'type':'text_delta','text':'Hello '}})
@@ -80,6 +106,12 @@ for line in sys.stdin:
    emit({'type':'system','subtype':'task_started','session_id':session,'task_id':'child','tool_use_id':'agent-call','description':'Review source'})
    emit({'type':'system','subtype':'task_notification','session_id':session,'task_id':'child','status':status,'summary':'Observed result'})
    emit({'type':'system','subtype':'task_progress','session_id':session,'task_id':'child'})
+  if prompt=='self-turn':
+   result()
+   # Claude reports a finished background task in a turn nobody sent.
+   emit({'type':'assistant','uuid':'self-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'self-message','content':[{'type':'text','text':'Background job finished'}]}})
+   result()
+   continue
   if prompt=='failed': result('model_error','error_during_execution')
   elif prompt=='failed-reason': result('model_error','error_during_execution',errors=['API Error: 529 overloaded'])
   elif prompt=='failed-turns': result('max_turns','error_max_turns')
@@ -554,6 +586,27 @@ fn claude_subagent_tasks_preserve_reported_results_and_reject_foreign_sessions(
     session.stop();
 }
 
+/// A turn Claude starts by itself, such as a background task report, is shown and settles.
+#[test]
+fn self_started_turns_appear_and_settle() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("self-turn").unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert!(
+        snapshot
+            .transcript
+            .iter()
+            .any(|item| item.role == "assistant" && item.text == "Background job finished")
+    );
+    assert_eq!(
+        (snapshot.status, snapshot.completed_turn),
+        (NativeSessionStatus::Idle, true)
+    );
+    session.stop();
+}
+
 /// A long turn keeps the prompt that started it, and empty thinking blocks take no slots in the
 /// bounded live view.
 #[test]
@@ -858,15 +911,18 @@ fn queued_preview_retains_attachments_and_hides_only_image_tokens(
 }
 
 #[rstest]
-fn rejected_queued_steer_remains_recoverable_until_explicit_retry() {
+fn refused_queued_steer_keeps_the_message_queued_for_the_next_turn() {
     use bootty_agents::{NativeAgentService, NativePrompt, NativeQueuedMessageStatus};
     use std::{
         sync::{Arc, mpsc},
         time::Duration,
     };
     let root = TempDir::new().unwrap();
-    let path = root.path().join("native.json");
-    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let (sender, receiver) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
     let record = service
         .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
         .unwrap();
@@ -876,46 +932,16 @@ fn rejected_queued_steer_remains_recoverable_until_explicit_retry() {
             &NativePrompt::text("Retain this instruction").unwrap(),
         )
         .unwrap();
-    assert!(
-        service
-            .steer_followup(&record.target(), &queued.id)
-            .is_err()
+    assert_eq!(
+        service.steer_followup(&record.target(), &queued.id),
+        Err("Wait for the previous message to reach the active turn".to_owned())
     );
     assert_eq!(
         service.sessions()[0].queued_messages[0].status,
-        NativeQueuedMessageStatus::Failed
+        NativeQueuedMessageStatus::Queued,
+        "nothing was sent, so the message keeps its place"
     );
-    service.shutdown().unwrap();
-    drop(service);
-    let service = Arc::new(NativeAgentService::open(&path).unwrap());
-    let (sender, receiver) = mpsc::channel();
-    service.set_change_handler(Arc::new(move || {
-        let _ = sender.send(());
-    }));
     service.start_followups().unwrap();
-    let stopped = service.sessions().remove(0);
-    let resumed = service.resume(&stopped.target()).unwrap();
-    assert!(
-        service
-            .cancel_followup(&record.target(), &queued.id)
-            .is_err(),
-        "stale generations cannot remove accepted input"
-    );
-    assert_eq!(
-        service.sessions()[0].queued_messages[0].status,
-        NativeQueuedMessageStatus::Failed
-    );
-    assert_eq!(
-        service
-            .resolve(&resumed.target())
-            .unwrap()
-            .snapshot()
-            .transcript,
-        Vec::new()
-    );
-    service
-        .retry_followup(&resumed.target(), &queued.id)
-        .unwrap();
     loop {
         let current = service.sessions().remove(0);
         if current.queued_messages.is_empty()
@@ -925,7 +951,7 @@ fn rejected_queued_steer_remains_recoverable_until_explicit_retry() {
         }
         receiver
             .recv_timeout(Duration::from_secs(5))
-            .expect("explicit retry reaches the provider");
+            .expect("the queue sends on the next idle turn");
     }
     let current = service.sessions().remove(0);
     assert_eq!(
@@ -937,6 +963,140 @@ fn rejected_queued_steer_remains_recoverable_until_explicit_retry() {
             .map(|item| item.text.as_str())
             .collect::<Vec<_>>(),
         vec!["Retain this instruction"]
+    );
+    service.shutdown().unwrap();
+}
+
+fn screenshot() -> Result<bootty_agents::NativePromptImage, Box<dyn std::error::Error>> {
+    let mut png = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        let mut writer = encoder.write_header()?;
+        writer.write_image_data(&[1, 2, 3, 255])?;
+    }
+    Ok(bootty_agents::NativePromptImage::from_host_png(
+        bootty_agents::NativeImageReference {
+            id: "screenshot".to_owned(),
+            pixel_width: 1,
+            pixel_height: 1,
+        },
+        png,
+    )?)
+}
+
+/// Provider events wake the follow-up owner; each wait is bounded for a broken fixture.
+fn wait_for_queue(
+    service: &NativeAgentService,
+    changes: &std::sync::mpsc::Receiver<()>,
+) -> Result<bootty_agents::NativeSessionRecord, std::sync::mpsc::RecvTimeoutError> {
+    loop {
+        let current = service.sessions().remove(0);
+        if current.queued_messages.is_empty()
+            && current.snapshot.status == NativeSessionStatus::Idle
+        {
+            return Ok(current);
+        }
+        changes.recv_timeout(std::time::Duration::from_secs(5))?;
+    }
+}
+
+/// Replays Claude's observed events for a screenshot steered into a running tool, then Stop.
+/// The stopped turn ends on Claude's own result, and the queued message goes out after it.
+#[test]
+fn stopping_a_steered_screenshot_turn_settles_and_sends_the_queue() {
+    use bootty_agents::NativePrompt;
+    use std::sync::{Arc, mpsc};
+    let root = TempDir::new().unwrap();
+    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let (sender, changes) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    service.start_followups().unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    service.prompt(&target, "tool-hold").unwrap();
+    let session = service.resolve(&target).unwrap();
+    barrier(&session).unwrap();
+    let steer = NativePrompt::new("Look at this".to_owned(), vec![screenshot().unwrap()]).unwrap();
+    service.prompt_input(&target, &steer).unwrap();
+    barrier(&session).unwrap();
+    service
+        .queue_input(&target, &NativePrompt::text("Queued after stop").unwrap())
+        .unwrap();
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Working);
+
+    service.interrupt(&target).unwrap();
+    let current = wait_for_queue(&service, &changes).unwrap();
+    let users = current
+        .snapshot
+        .transcript
+        .iter()
+        .filter(|item| item.role == "user")
+        .map(|item| (item.text.as_str(), item.complete))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        users,
+        vec![
+            ("tool-hold", true),
+            ("Look at this", true),
+            ("Queued after stop", true)
+        ]
+    );
+    let tools = current
+        .snapshot
+        .transcript
+        .iter()
+        .filter_map(|item| Some((item.id.as_str(), item.tool.as_ref()?.status)))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tools,
+        vec![
+            ("claude-tool-bash-call", NativeToolStatus::Completed),
+            ("claude-tool-steer-call", NativeToolStatus::Interrupted)
+        ]
+    );
+    let sent: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert_eq!(sent["message"]["content"], "Queued after stop");
+    assert!(sent.get("priority").is_none());
+    service.shutdown().unwrap();
+}
+
+/// Claude acknowledges an interrupt without a result when no turn is running. The session stays
+/// visibly stopping, and a steer is refused while the queued message keeps its place.
+#[test]
+fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
+    use bootty_agents::{NativePrompt, NativeQueuedMessageStatus};
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("ignore-interrupt"), "").unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    service.prompt(&target, "tool-hold").unwrap();
+    let session = service.resolve(&target).unwrap();
+    barrier(&session).unwrap();
+    let queued = service
+        .queue_input(&target, &NativePrompt::text("Wait for me").unwrap())
+        .unwrap();
+
+    service.interrupt(&target).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, NativeSessionStatus::Working);
+    assert!(snapshot.stopping());
+    assert_eq!(
+        service.steer_followup(&target, &queued.id),
+        Err("The agent is stopping; queued messages send after it stops".to_owned())
+    );
+    assert_eq!(
+        service.sessions()[0].queued_messages[0].status,
+        NativeQueuedMessageStatus::Queued
     );
     service.shutdown().unwrap();
 }

@@ -10,6 +10,7 @@ use bootty_control::{
 pub enum ComputerCommand {
     Status,
     Targets,
+    Icons(Vec<String>),
     HostCapture,
     HostSnapshot,
     HostSnapshotRegion(HostCaptureRegion),
@@ -30,6 +31,30 @@ pub struct ApplicationCommand {
     pub action: ComputerAction,
 }
 
+/// Whether an agent may use this window.
+///
+/// Agents never drive this Bootty process, whose windows hold their own approval cards, nor
+/// apps that run shell commands or change OS permissions outside the conversation's approvals.
+/// Other Bootty instances, such as a development build under test, stay usable.
+#[must_use]
+pub fn agent_may_use(target: &ComputerTarget) -> bool {
+    // Deliberate limit: a fixed list of well-known terminals. Extend it when users report
+    // another terminal, or replace it with an OS-level category check if macOS offers one.
+    const BLOCKED: [&str; 9] = [
+        "com.apple.Terminal",
+        "com.googlecode.iterm2",
+        "com.mitchellh.ghostty",
+        "dev.warp.Warp-Stable",
+        "net.kovidgoyal.kitty",
+        "org.alacritty",
+        "com.github.wez.wezterm",
+        "com.apple.systempreferences",
+        "com.apple.SecurityAgent",
+    ];
+    i32::try_from(std::process::id()).ok() != Some(target.process_id)
+        && !BLOCKED.contains(&target.bundle_id.as_str())
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "Keep the finite command schemas in one declarative table"
@@ -48,6 +73,13 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
             "List Computer Windows",
             "List exact local window tokens without enabling computer use or changing focus.",
             &[][..],
+            MutationClass::Read,
+        ),
+        (
+            "computer.icons",
+            "List App Icons",
+            "Return small PNG icons for apps named by a JSON array of bundle ids, without OS access.",
+            &["bundle-ids"][..],
             MutationClass::Read,
         ),
         (
@@ -178,6 +210,7 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
         "computer.targets" if invocation.arguments.is_empty() => {
             return Ok(ComputerCommand::Targets);
         }
+        "computer.icons" => return resolve_icons(&invocation.arguments).ok_or_else(invalid),
         _ => {}
     }
     let argument = |index: usize| {
@@ -244,6 +277,17 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
         action,
         destination,
     })
+}
+
+/// One JSON array of at most [`bootty_computer::MAX_ICON_REQUEST`] bundle ids.
+fn resolve_icons(arguments: &[String]) -> Option<ComputerCommand> {
+    let [bundle_ids] = arguments else {
+        return None;
+    };
+    serde_json::from_str::<Vec<String>>(bundle_ids)
+        .ok()
+        .filter(|ids| ids.len() <= bootty_computer::MAX_ICON_REQUEST)
+        .map(ComputerCommand::Icons)
 }
 
 fn resolve_host_snapshot(value: Option<&str>) -> Result<ComputerCommand, ()> {

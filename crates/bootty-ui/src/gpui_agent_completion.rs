@@ -7,6 +7,26 @@ use crate::{
 use gpui_kit::component::WindowExt as _;
 
 impl NativeAgentSessionView {
+    /// Chips for the apps a sent prompt mentioned.
+    pub(super) fn render_sent_applications(
+        item: &bootty_agents::NativeTranscriptItem,
+        cx: &App,
+    ) -> gpui_kit::Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .text_xs()
+            .children(item.applications.iter().map(|application| {
+                crate::gpui_prompt_attachments::application_chip(
+                    &application.bundle_id,
+                    &application.name,
+                    false,
+                    cx,
+                )
+            }))
+    }
+
     pub(crate) fn configure_speech_account(
         &self,
         codex: &bootty_config::config::AgentProviderConfig,
@@ -79,6 +99,16 @@ impl NativeAgentSessionView {
         let editor = self.composer.clone();
         let sender = self.sender.clone();
         let completion = cx.new(|cx| ComposerCompletion::new(scope, sender, editor, window, cx));
+        // Restored prompts show app chips; the completion registered the icon sender above.
+        crate::gpui_application_icons::load(
+            self.record
+                .snapshot
+                .transcript
+                .iter()
+                .flat_map(|item| &item.applications)
+                .map(|application| application.bundle_id.clone()),
+            cx,
+        );
         self.completion_subscriptions.clear();
         self.completion_subscriptions
             .push(cx.observe(&completion, |_, _, cx| cx.notify()));
@@ -99,11 +129,8 @@ impl NativeAgentSessionView {
                         cx.notify();
                         return;
                     }
-                    let id = format!("application:{}:{}", target.process_id, target.window_id);
-                    let label = format!(
-                        "@{}",
-                        crate::gpui_composer_completion::application_name(target)
-                    );
+                    let token = crate::gpui_prompt_attachments::application_token(target);
+                    let id = token.id().to_string();
                     let mention = bootty_agents::NativeApplicationMention {
                         id: id.clone(),
                         target: target.clone(),
@@ -113,11 +140,7 @@ impl NativeAgentSessionView {
                     this.applications.push(mention);
                     this.composer.update(cx, |input, cx| {
                         input.set_selected_range(selection.range.clone(), cx);
-                        if let Err(error) = input.replace_with_token(
-                            gpui_kit::component::input::InlineToken::new(id, label),
-                            window,
-                            cx,
-                        ) {
+                        if let Err(error) = input.replace_with_token(token, window, cx) {
                             this.error = Some(error.to_string());
                         }
                         input.focus_handle(cx).focus(window, cx);

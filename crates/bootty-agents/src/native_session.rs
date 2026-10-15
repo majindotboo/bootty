@@ -1013,10 +1013,8 @@ impl NativeAgentSession {
             .ok_or("Invalid active prompt parameters")?;
         let (turn, local_id) = {
             let mut snapshot = lock(&self.snapshot);
-            if snapshot.status != NativeSessionStatus::Working
-                || snapshot.pending_user_item.is_some()
-            {
-                return Err("Wait for the previous message to reach the active turn".to_owned());
+            if let Some(refusal) = snapshot.steer_refusal() {
+                return Err(refusal.to_owned());
             }
             let turn = snapshot
                 .turn_id
@@ -1109,6 +1107,34 @@ impl NativeAgentSession {
     /// # Errors
     /// Returns provider or transport errors; interrupt preserves the resumable session.
     pub fn interrupt(&self) -> Result<(), String> {
+        // Stopping starts with the request, so events right behind the provider's acknowledgement
+        // already read as a stop. Only the provider's report of the turn's end settles it.
+        let requested = {
+            let mut snapshot = lock(&self.snapshot);
+            let requested = snapshot.stop_requested_at.is_none()
+                && matches!(
+                    snapshot.status,
+                    NativeSessionStatus::Working | NativeSessionStatus::Waiting
+                );
+            if requested {
+                snapshot.stop_requested_at = Some((self.clock)());
+                snapshot.changed();
+            }
+            requested
+        };
+        publish_change(&self.change_handler);
+        let result = self.interrupt_provider();
+        if result.is_err() && requested {
+            let mut snapshot = lock(&self.snapshot);
+            snapshot.stop_requested_at = None;
+            snapshot.changed();
+            drop(snapshot);
+            publish_change(&self.change_handler);
+        }
+        result
+    }
+
+    fn interrupt_provider(&self) -> Result<(), String> {
         if self.config.provider == AgentKind::Pi {
             return self.interrupt_pi();
         }
@@ -1631,6 +1657,7 @@ fn read_frames(
                 route_reply(&value, pending, provider);
             } else {
                 let response = ingest_claude_frame(snapshot, claude, &value)?;
+                lock(snapshot).settle_stop_request();
                 if let Some(response) = response {
                     write_frame(input, closing, &response)?;
                 }
@@ -1643,6 +1670,7 @@ fn read_frames(
                 route_reply(&value, pending, provider);
             } else {
                 ingest_pi_frame(snapshot, &value)?;
+                lock(snapshot).settle_stop_request();
                 let waiting = !lock(snapshot).requests.is_empty();
                 update_input_wait(pending, waiting);
                 publish_change(change_handler);
@@ -1671,6 +1699,7 @@ fn read_frames(
             let now = Some(chrono::Utc::now().timestamp_millis());
             snapshot.with_message_times((now, now), |snapshot| snapshot.ingest(&value));
         }
+        snapshot.settle_stop_request();
         let deferred = if field(&value, "method") == "turn/started"
             && snapshot.accepts(&value)
             && cancel.swap(false, Ordering::AcqRel)
@@ -2584,8 +2613,9 @@ impl NativeAgentSession {
         request: &NativeAgentRequest,
         decision: crate::NativeApprovalDecision,
     ) -> Result<(), String> {
-        let application: crate::NativeApplication =
-            serde_json::from_value(request.parameters.clone()).map_err(|e| e.to_string())?;
+        let application = request
+            .application_access()
+            .ok_or("App access request is malformed")?;
         request
             .approval_response(decision)
             .ok_or("This request does not support that approval scope")?;
@@ -2603,7 +2633,11 @@ impl NativeAgentSession {
         let mut snapshot = lock(&self.snapshot);
         snapshot.requests.retain(|item| item.id != request.id);
         if snapshot.requests.is_empty() && snapshot.status == NativeSessionStatus::Waiting {
-            snapshot.status = NativeSessionStatus::Working;
+            snapshot.status = if snapshot.turn_id.is_some() {
+                NativeSessionStatus::Working
+            } else {
+                NativeSessionStatus::Idle
+            };
         }
         snapshot.changed();
         drop(snapshot);

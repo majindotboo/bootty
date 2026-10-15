@@ -72,7 +72,8 @@ impl NativeAgentSessionView {
                                             .id("native-queue-label")
                                             .debug_selector(|| "native-queue-label".into())
                                             .flex_1()
-                                            .child("Queued"),
+                                            .truncate()
+                                            .child(self.queue_label()),
                                     )
                                     .child(messages.len().to_string())
                                     .child(if self.queued_messages.expanded {
@@ -105,6 +106,22 @@ impl NativeAgentSessionView {
                         )
                     })
             })
+    }
+
+    /// Says when queued messages will go out, so a waiting queue never looks stuck.
+    fn queue_label(&self) -> String {
+        let snapshot = &self.record.snapshot;
+        let provider = self.record.config.provider.display_name();
+        match snapshot.status {
+            _ if snapshot.stopping() => format!("Queued · sends after {provider} stops"),
+            NativeSessionStatus::Working | NativeSessionStatus::Waiting => {
+                "Queued · sends after this turn".to_owned()
+            }
+            NativeSessionStatus::Stopped | NativeSessionStatus::Error => {
+                "Queued · sends after the conversation resumes".to_owned()
+            }
+            NativeSessionStatus::Starting | NativeSessionStatus::Idle => "Queued".to_owned(),
+        }
     }
 
     fn render_queued_message(
@@ -193,20 +210,27 @@ impl NativeAgentSessionView {
                         .text_color(cx.theme().muted_foreground)
                         .child("Couldn’t send"),
                 )
-                .child(Self::queued_action(message, QueueAction::Retry, cx))
+                .child(Self::queued_action(message, QueueAction::Retry, false, cx))
             })
             .when(
-                !failed && self.record.snapshot.status == NativeSessionStatus::Working,
-                |row| row.child(Self::queued_action(message, QueueAction::Steer, cx)),
+                !failed && self.record.snapshot.steer_refusal().is_none(),
+                |row| row.child(Self::queued_action(message, QueueAction::Steer, false, cx)),
             )
-            .child(Self::queued_action(message, QueueAction::Remove, cx).loading(sending))
+            .child(Self::queued_action(
+                message,
+                QueueAction::Remove,
+                sending,
+                cx,
+            ))
     }
 
+    /// Queued rows leave when the queue drains, often under a resting pointer.
     fn queued_action(
         message: &NativeQueuedMessage,
         action: QueueAction,
+        loading: bool,
         cx: &Context<Self>,
-    ) -> Button {
+    ) -> impl IntoElement {
         let (operation, label, icon) = match action {
             QueueAction::Retry => ("queue-retry", "Retry sending this message", None),
             QueueAction::Steer => (
@@ -221,7 +245,7 @@ impl NativeAgentSessionView {
             ),
         };
         let id = message.id.clone();
-        Button::new(SharedString::from(format!("{operation}:{id}")))
+        let button = Button::new(SharedString::from(format!("{operation}:{id}")))
             .ghost()
             .xsmall()
             .debug_selector({
@@ -237,10 +261,15 @@ impl NativeAgentSessionView {
                 button.label("Steer")
             })
             .disabled(message.status == NativeQueuedMessageStatus::Sending)
+            .loading(loading)
             .accessibility_label(label)
-            .tooltip(label)
             .on_click(cx.listener(move |this, _, window, cx| {
                 this.command(operation, vec![id.clone()], window, cx);
-            }))
+            }));
+        super::element_tooltip(
+            SharedString::from(format!("{operation}-tooltip:{}", message.id)),
+            label,
+            button,
+        )
     }
 }

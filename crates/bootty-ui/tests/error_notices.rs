@@ -21,6 +21,15 @@ use rstest::rstest;
     "the Terminal target is stale",
     "That pane or session no longer exists."
 )]
+// A refused steer says why instead of failing silently.
+#[case(
+    "The agent is stopping; queued messages send after it stops",
+    "The agent is stopping. Queued messages send after it stops."
+)]
+#[case(
+    "Wait for the previous message to reach the active turn",
+    "The previous message hasn't reached the agent yet. Try again in a moment."
+)]
 // Provider diagnostics are retained without becoming interface copy.
 #[case(
     "unknown variant `video`, expected `media`",

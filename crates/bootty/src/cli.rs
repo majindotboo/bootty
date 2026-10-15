@@ -44,6 +44,10 @@ pub enum Command {
         /// Read the command's string or number arguments as a JSON array from stdin.
         #[arg(long, conflicts_with = "arguments")]
         stdin_json: bool,
+        /// Exact target as HANDLE@GENERATION. `resource.current binding` names the current Space;
+        /// `agents.native.list --target SPACE` names its conversations.
+        #[arg(long, value_name = "HANDLE@GENERATION")]
+        target: Option<String>,
         #[arg(long)]
         yes: bool,
         #[arg(long = "detach")]

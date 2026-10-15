@@ -76,6 +76,7 @@ thread='thread-'+str(os.getpid())
 turn=0
 waiting=None
 held_start=None
+stuck=False
 methods=[]
 def emit(value): print(json.dumps(value),file=output,flush=True)
 def reply(ident,result): emit({'id':ident,'result':result})
@@ -127,6 +128,8 @@ for line in source:
   notice('turn/started',turn={'id':'turn-'+str(turn),'status':'inProgress','items':[]})
   notice('item/completed',item={'id':'user-'+str(turn),'type':'userMessage','content':params['input']})
   if text == 'wait': waiting=ident; continue
+  # The turn starts but never reports an end, even after an acknowledged interrupt.
+  if text == 'stuck': stuck=True; reply(ident,{'turn':{'id':'turn-'+str(turn)}}); continue
   notice('item/started',item={'id':'command-'+str(turn),'type':'commandExecution','command':'echo probe','aggregatedOutput':''})
   notice('item/commandExecution/outputDelta',itemId='command-'+str(turn),delta='tool output')
   notice('item/agentMessage/delta',itemId='answer-'+str(turn),delta='reply: '+text)
@@ -135,6 +138,7 @@ for line in source:
   reply(ident,{'turn':{'id':'turn-'+str(turn)}})
  elif method == 'turn/interrupt':
   assert params['threadId'] == thread and params['turnId'] == 'turn-'+str(turn)
+  if stuck: reply(ident,{}); continue
   notice('turn/completed',turn={'id':'turn-'+str(turn),'status':'interrupted','items':[]})
   if waiting is not None: reply(waiting,{'turn':{'id':'turn-'+str(turn)}}); waiting=None
   reply(ident,{})
@@ -926,6 +930,74 @@ fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() ->
             .filter(|method| method.as_str() == Some("turn/start"))
             .count(),
         2
+    );
+    Ok(())
+}
+
+/// A provider can acknowledge a stop and never end its turn. The conversation shows it is
+/// stopping; stopping again restarts the provider, and the queued message goes out afterwards.
+#[rstest]
+fn a_second_stop_restarts_a_provider_that_never_ends_its_turn() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let record = record(&host.start(&binding, "conversation", "task-stuck", "")?)?;
+    let target = record.target();
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .ok_or("deadline overflow")?;
+    success(host.submit(native_command(
+        "agents.native.prompt",
+        &target,
+        &["stuck"],
+        Caller::Socket,
+    ))?)?;
+    host.wait_working(&target, deadline)?;
+    let stop = native_command("agents.native.interrupt", &target, &[], Caller::Keybinding);
+    success(host.submit(stop.clone())?)?;
+    success(host.submit(native_command(
+        "agents.native.queue",
+        &target,
+        &["after restart"],
+        Caller::Socket,
+    ))?)?;
+    let service = host.state.native_agent_service().ok_or("owner missing")?;
+    let stopping = service.sessions().remove(0);
+    assert_eq!(stopping.snapshot.status, NativeSessionStatus::Working);
+    assert!(stopping.snapshot.stopping());
+    assert_eq!(stopping.queued_messages.len(), 1);
+
+    success(host.submit(stop)?)?;
+    let resumed = loop {
+        host.tick();
+        let current = service.sessions().remove(0);
+        if current.queued_messages.is_empty()
+            && current.snapshot.status == NativeSessionStatus::Idle
+            && current
+                .snapshot
+                .transcript
+                .iter()
+                .any(|item| item.text == "reply: after restart")
+        {
+            break current;
+        }
+        host.wakes
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+    };
+    assert!(
+        resumed.generation > record.generation,
+        "the provider restarted"
+    );
+    let calls = service
+        .resolve(&resumed.target())?
+        .rpc("__calls", json!({}))?;
+    let methods = calls["methods"]
+        .as_array()
+        .ok_or("Provider calls missing")?;
+    assert!(
+        methods
+            .iter()
+            .any(|method| method.as_str() == Some("thread/resume")),
+        "the restart resumes the captured thread: {methods:?}"
     );
     Ok(())
 }
@@ -3247,16 +3319,130 @@ fn agent_choice_splits_the_captured_pane_instead_of_creating_a_tab(
     )]
     backend: MultiplexerBackendConfig,
 ) -> TestResult<()> {
+    if matches!(backend, MultiplexerBackendConfig::Native) {
+        return agent_choice_split(command, conversation_parent, backend);
+    }
+    run_isolated_split(command, conversation_parent, &backend)
+}
+
+const SPLIT_ENV: &str = "BOOTTY_SPLIT_CHILD";
+const SPLIT_CHILD: &str = "isolated_split_child";
+
+/// rmux and tmux keep their servers in process-global, per-user locations, so their splits run
+/// in a child with private `RMUX_TMPDIR` and `TMUX_TMPDIR` instead of the developer's servers.
+fn run_isolated_split(
+    command: &str,
+    conversation_parent: bool,
+    backend: &MultiplexerBackendConfig,
+) -> TestResult<()> {
+    // Socket paths include the development namespace and must fit Unix socket limits.
+    let directory = assert_fs::TempDir::new_in("/tmp")?;
+    let executable = std::env::current_exe()?;
+    let mut child = std::process::Command::new(&executable);
+    child
+        .args(["--exact", SPLIT_CHILD, "--nocapture"])
+        .env(SPLIT_ENV, format!("{command} {conversation_parent}"))
+        .env("TMUX_TMPDIR", directory.path())
+        .env("RMUX_TMPDIR", directory.path())
+        // Panes inherit the server's environment; a developer's login shell must not decide timing.
+        .env("SHELL", "/bin/sh")
+        .env("ENV", "");
+    if matches!(backend, MultiplexerBackendConfig::Rmux) {
+        let helper = directory.path().join("bootty-daemon");
+        fs::write(
+            &helper,
+            format!(
+                "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact {SPLIT_CHILD} --nocapture\n",
+                bootty_host::shell_quote(&executable.to_string_lossy()),
+            ),
+        )?;
+        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700))?;
+        child
+            .env("BOOTTY_DAEMON_BINARY", &helper)
+            .env("BOOTTY_SPLIT_BACKEND", "rmux");
+    } else {
+        child.env("BOOTTY_SPLIT_BACKEND", "tmux");
+    }
+    let output = child.output()?;
+    // A tmux server outlives its last session; stop the private one with its directory.
+    for socket in fs::read_dir(directory.path())?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("tmux-"))
+        .flat_map(|entry| fs::read_dir(entry.path()).into_iter().flatten())
+        .filter_map(Result::ok)
+    {
+        let _ = std::process::Command::new("tmux")
+            .arg("-S")
+            .arg(socket.path())
+            .arg("kill-server")
+            .output();
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "isolated {backend:?} split failed: {}\n{}{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Runs inside `run_isolated_split`, as the split itself or as its rmux daemon helper.
+#[test]
+fn isolated_split_child() -> TestResult<()> {
+    if let Some(endpoint) = std::env::var_os("BOOTTY_RMUX_PIPE_ENDPOINT") {
+        return bootty_mux::rmux::run_pipe_helper(endpoint.into()).map_err(Into::into);
+    }
+    let Some(spec) = std::env::var_os(SPLIT_ENV) else {
+        return Ok(());
+    };
+    let spec = spec.to_string_lossy();
+    let (command, conversation_parent) = spec.split_once(' ').ok_or("malformed split spec")?;
+    if std::env::var_os("BOOTTY_SPLIT_BACKEND").is_some_and(|backend| backend == "tmux") {
+        return agent_choice_split(
+            command,
+            conversation_parent == "true",
+            MultiplexerBackendConfig::Tmux,
+        );
+    }
+    // A private daemon at this child's endpoint plays the app's rmux owner.
+    let endpoint =
+        bootty_mux::rmux::endpoint_path_for(bootty_config::ApplicationIdentity::for_process())?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(1)
+        .build()?;
+    let daemon = runtime.block_on(
+        rmux_server::ServerDaemon::new(rmux_server::DaemonConfig::new(endpoint)).bind(),
+    )?;
+    let result = agent_choice_split(
+        command,
+        conversation_parent == "true",
+        MultiplexerBackendConfig::Rmux,
+    );
+    runtime.block_on(daemon.shutdown())?;
+    // Pane I/O tasks belong to processes that end with this child; do not wait for them.
+    runtime.shutdown_background();
+    result
+}
+
+fn agent_choice_split(
+    command: &str,
+    conversation_parent: bool,
+    backend: MultiplexerBackendConfig,
+) -> TestResult<()> {
     let mut host = Host::new_with_backend(true, true, backend)?;
     let binding = host.binding(false)?;
+    let fixture = host
+        .directory
+        .path()
+        .file_name()
+        .ok_or("fixture directory")?;
     let name = format!(
         "split-{}",
-        host.directory
-            .path()
-            .file_name()
-            .ok_or("fixture directory")?
-            .to_string_lossy()
-            .trim_start_matches('.')
+        fixture.to_string_lossy().trim_start_matches('.')
     );
     let identity = format!("{name}-task");
     let started = host.start(&binding, &name, &identity, "")?;
@@ -3270,7 +3456,7 @@ fn agent_choice_splits_the_captured_pane_instead_of_creating_a_tab(
     let parent = if conversation_parent {
         native.target()
     } else {
-        serde_json::from_value(started["terminal"].clone())?
+        serde_json::from_value(started.get("terminal").cloned().ok_or("terminal target")?)?
     };
     let before = host
         .state
@@ -3319,29 +3505,27 @@ fn agent_choice_splits_the_captured_pane_instead_of_creating_a_tab(
         .ok_or("parent session")?
         .windows;
     assert_eq!(windows.len(), before.len());
-    assert_eq!(windows[0].id, before[0].id);
-    assert_eq!(windows[0].panes.len(), 2);
-    assert!(
-        windows[0]
-            .panes
-            .iter()
-            .any(|pane| pane.native_agent.as_deref() == Some(native.id.as_str()))
-    );
-    assert!(
-        windows[0]
-            .panes
-            .iter()
-            .any(|pane| pane.native_agent.as_deref() == Some(created.id.as_str()))
-    );
+    let (window, before) = windows.first().zip(before.first()).ok_or("parent window")?;
+    assert_eq!(window.id, before.id);
+    let agents = window
+        .panes
+        .iter()
+        .map(|pane| pane.native_agent.as_deref())
+        .collect::<Vec<_>>();
+    assert_eq!(agents.len(), 2);
+    assert!(agents.contains(&Some(native.id.as_str())));
+    assert!(agents.contains(&Some(created.id.as_str())));
     assert_eq!(created.task_identity, native.task_identity);
     let spaces = host.spaces()?;
     let target = spaces
         .as_array()
         .ok_or("Spaces")?
         .iter()
-        .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
-        .find(|session| session["name"] == name)
-        .ok_or("created session")?["target"]
+        .filter_map(|space| space.get("sessions").and_then(serde_json::Value::as_array))
+        .flatten()
+        .find(|session| session.get("name").and_then(serde_json::Value::as_str) == Some(&name))
+        .and_then(|session| session.get("target"))
+        .ok_or("created session")?
         .clone();
     let mut close = CommandInvocation::new("session.close", vec![], Caller::Socket);
     close.target = Some(serde_json::from_value(target)?);
@@ -3812,5 +3996,62 @@ fn native_child_uses_the_captured_other_provider_account_and_protocol() -> TestR
         .native_agent_service()
         .ok_or("owner")?
         .stop(&parent.target())?;
+    Ok(())
+}
+
+#[rstest]
+fn app_access_is_answered_only_in_bootty_and_always_allow_is_saved() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let record = record(&host.start(&binding, "app-user", "app-user-id", "")?)?;
+    let target = record.target();
+    // The first prompt binds the conversation's tools to it.
+    success(host.submit(native_command(
+        "agents.native.prompt",
+        &target,
+        &["hello"],
+        Caller::Internal,
+    ))?)?;
+    let app = bootty_agents::NativeApplication {
+        bundle_id: "dev.zed.Zed".into(),
+        name: "Zed".into(),
+    };
+    let answer = host
+        .state
+        .native_agent_service()
+        .ok_or("native owner missing")?
+        .request_application_access(&target, &app, Caller::Socket)?;
+    let approve = |caller| {
+        native_command(
+            "agents.native.approve",
+            &target,
+            &["computer-access:dev.zed.Zed", "always-allow"],
+            caller,
+        )
+    };
+
+    // An agent's shell reaches Bootty as the CLI; it must not approve its own card.
+    assert_eq!(
+        host.submit(approve(Caller::Cli))?,
+        CommandOutcome::Denied {
+            message: "Answer app access requests in Bootty".into()
+        }
+    );
+    assert_eq!(
+        answer.try_recv(),
+        Err(mpsc::TryRecvError::Empty),
+        "the card stays open"
+    );
+    assert_eq!(
+        host.state.config().computer.always_allowed_apps,
+        Vec::<String>::new()
+    );
+
+    success(host.submit(approve(Caller::Internal))?)?;
+    assert_eq!(answer.try_recv(), Ok(true));
+    assert_eq!(
+        host.state.config().computer.always_allowed_apps,
+        ["dev.zed.Zed"]
+    );
     Ok(())
 }

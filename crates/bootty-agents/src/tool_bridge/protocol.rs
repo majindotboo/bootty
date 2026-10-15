@@ -131,7 +131,7 @@ impl ToolProtocol {
             // Advertise before the first prompt so MCP clients can cache the catalog. Authority
             // comes from a user mention, an approval card or the user's always-allowed apps.
             tools.push(json!({"name":"computer_snapshot","description":"Capture a PNG of a macOS app's front window. application is the app's bundle id or name, such as dev.zed.Zed or Zed. The first use of an app in this conversation asks the user to allow it. Omit application to capture only the host-granted Bootty window.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
-            tools.push(json!({"name":"computer_input","description":"Focus, click, type, press a key, move or scroll in the window from the app's latest computer_snapshot. Take a snapshot first; coordinates refer to that window. Input requires the app to be focused, so focus it first. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"computer_input","description":"Focus, click, type, press a key, move or scroll in the window from the app's latest computer_snapshot. Take a snapshot first. x and y are desktop points; the snapshot caption maps its pixels to them. Input requires the app to be focused, so focus it first. After the window moves or resizes, take a new snapshot. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.spawn_enabled() {
             let labels = json!({
@@ -351,9 +351,8 @@ impl ToolProtocol {
         if reference.is_empty() || reference.len() > 256 {
             return (tool_error("Name an app by bundle id or name"), false);
         }
-        // The call stays open while the user answers an approval card. MCP clients commonly
-        // time out tools after 60 seconds, so the host answers well before that.
-        let Some(deadline) = now.checked_add(Duration::from_secs(50)) else {
+        // The call stays open while the user answers an approval card.
+        let Some(deadline) = now.checked_add(bootty_host::private_stdio::TOOL_CALL_TIMEOUT) else {
             return (tool_error("Tool deadline is unavailable"), false);
         };
         let image = action.is_capture();

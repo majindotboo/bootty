@@ -17,11 +17,73 @@ pub fn token(id: String, name: &str, bytes: u64) -> InlineToken {
     InlineToken::new(id, format!("[{name}]")).with_label(format!("{name} {}", size(bytes)))
 }
 
+/// A prompt token for one app window. The id carries the bundle so any composer can draw the
+/// app's icon without its mention list; bundle ids never contain `:`.
+pub fn application_token(target: &bootty_computer::ComputerTarget) -> InlineToken {
+    InlineToken::new(
+        format!(
+            "application:{}:{}:{}",
+            target.process_id, target.window_id, target.bundle_id
+        ),
+        format!(
+            "@{}",
+            crate::gpui_composer_completion::application_name(target)
+        ),
+    )
+}
+
+fn application_bundle(token_id: &str) -> Option<&str> {
+    token_id.strip_prefix("application:")?.splitn(3, ':').nth(2)
+}
+
+/// One look for an app mention in composers and transcripts: the app's icon and name.
+pub fn application_chip(bundle_id: &str, name: &str, selected: bool, cx: &App) -> gpui_kit::Div {
+    div()
+        .flex()
+        .flex_shrink_0()
+        .items_center()
+        .gap_1()
+        .px_1()
+        .rounded(cx.theme().radius)
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(if selected {
+            cx.theme().selection
+        } else {
+            cx.theme().muted.opacity(0.4)
+        })
+        .text_color(cx.theme().foreground)
+        .child(crate::gpui_application_icons::render(
+            bundle_id,
+            crate::gpui::IconSize::XSmall,
+            cx.theme().muted_foreground,
+            cx,
+        ))
+        .child(
+            div()
+                .min_w_0()
+                .max_w(gpui_kit::rems(18.))
+                .text_ellipsis()
+                .child(name.trim_start_matches('@').to_owned()),
+        )
+}
+
 pub fn render(
     context: &InlineTokenContext,
     _: &mut gpui_kit::Window,
     cx: &mut App,
 ) -> gpui_kit::AnyElement {
+    if let Some(bundle_id) = application_bundle(context.token().id()) {
+        return application_chip(
+            bundle_id,
+            context.token().label(),
+            context.is_selected(),
+            cx,
+        )
+        .h(context.line_height())
+        .max_w(context.available_width())
+        .into_any_element();
+    }
     let name = context
         .token()
         .text()
@@ -54,8 +116,6 @@ pub fn render(
             crate::gpui::sized_icon(
                 if context.token().id().starts_with("directory:") {
                     "folder"
-                } else if context.token().id().starts_with("application:") {
-                    "app-window"
                 } else if context.token().id().starts_with("skill:") {
                     "sparkles"
                 } else {

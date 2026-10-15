@@ -999,8 +999,14 @@ dependencies = [
 name = "bootty-computer"
 version = "0.7.1"
 dependencies = [
- "assert_fs",
  "base64 0.23.1",
+ "block2 0.6.2",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation 0.3.2",
+ "objc2-screen-capture-kit",
  "png 0.18.1",
  "pretty_assertions",
  "proptest",
@@ -1009,6 +1015,8 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.20",
  "tokio",
+ "windows 0.62.2",
+ "x11rb",
 ]
 
 [[package]]
@@ -1273,6 +1281,7 @@ dependencies = [
  "unic-langid",
  "unicode-segmentation",
  "unicode-width 0.2.2",
+ "ureq",
  "url",
  "windows 0.62.2",
  "windows-core 0.62.2",
@@ -6202,6 +6211,7 @@ checksum = "e022c9d066895efa1345f8e33e584b9f958da2fd4cd116792e15e07e4720a807"
 dependencies = [
  "bitflags 2.13.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
  "objc2-core-foundation",
  "objc2-io-surface",
@@ -6402,7 +6412,9 @@ checksum = "74b7c5390f477482f001bc354d6571a70db7e4f8d5288e860c45521fbce11394"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
+ "libc",
  "objc2 0.6.4",
+ "objc2-core-foundation",
  "objc2-core-graphics",
  "objc2-core-media",
  "objc2-foundation 0.3.2",

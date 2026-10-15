@@ -31,11 +31,7 @@ impl Backend {
             shown: snapshot,
         })
     }
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "The shared platform API transfers snapshots to the Linux DBus worker."
-    )]
-    /// Touch only what changed; every native status item mutation costs AppKit work.
+    /// Touch only what changed; every native status item mutation costs `AppKit` work.
     pub(super) fn update(&mut self, snapshot: Snapshot) {
         if snapshot == self.shown {
             return;

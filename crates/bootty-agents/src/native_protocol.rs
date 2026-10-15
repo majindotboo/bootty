@@ -89,6 +89,9 @@ pub struct NativeTranscriptItem {
     pub attachments: Vec<crate::NativeAttachmentReference>,
     #[serde(default)]
     pub citations: Vec<crate::NativeResponseCitation>,
+    /// Apps the user mentioned in this prompt, once each, for presentation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub applications: Vec<crate::NativeApplication>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -192,6 +195,14 @@ impl NativeAgentRequest {
         Some(serde_json::json!({"decision":value}))
     }
 
+    /// The app an agent asked to use, when this is Bootty's app access request.
+    #[must_use]
+    pub fn application_access(&self) -> Option<crate::NativeApplication> {
+        (self.method == crate::APPLICATION_ACCESS_METHOD)
+            .then(|| serde_json::from_value(self.parameters.clone()).ok())
+            .flatten()
+    }
+
     /// Presentation provenance for the captured attachment, including remote requests.
     /// This is never an authorization grant.
     #[must_use]
@@ -281,6 +292,10 @@ pub struct NativeSessionSnapshot {
     /// Unexpected remote EOF; never persisted or inferred from an error string.
     #[serde(skip)]
     pub transport_lost: bool,
+    /// When an interrupt of this turn was requested. Read it through `stopping()`; the provider
+    /// reader clears it when a turn ends.
+    #[serde(skip)]
+    pub(crate) stop_requested_at: Option<Instant>,
     /// An observed successful turn completion; imported history cannot establish this fact.
     #[serde(default)]
     pub completed_turn: bool,
@@ -315,6 +330,40 @@ pub struct NativeSessionSnapshot {
 }
 
 impl NativeSessionSnapshot {
+    /// An interrupt was acknowledged, but the provider has not reported the turn's end yet.
+    #[must_use]
+    pub const fn stopping(&self) -> bool {
+        self.stop_requested_at.is_some()
+            && matches!(
+                self.status,
+                NativeSessionStatus::Working | NativeSessionStatus::Waiting
+            )
+    }
+
+    /// Why the active turn can't take a steered message now. Callers keep the message queued.
+    #[must_use]
+    pub const fn steer_refusal(&self) -> Option<&'static str> {
+        if self.stopping() {
+            Some("The agent is stopping; queued messages send after it stops")
+        } else if !matches!(self.status, NativeSessionStatus::Working)
+            || self.pending_user_item.is_some()
+        {
+            Some("Wait for the previous message to reach the active turn")
+        } else {
+            None
+        }
+    }
+
+    /// The provider reader calls this after every event: a turn that ended is no longer stopping.
+    pub(crate) const fn settle_stop_request(&mut self) {
+        if !matches!(
+            self.status,
+            NativeSessionStatus::Working | NativeSessionStatus::Waiting
+        ) {
+            self.stop_requested_at = None;
+        }
+    }
+
     #[must_use]
     pub const fn provider_archived(&self) -> bool {
         matches!(self.provider_archive, NativeProviderArchiveState::Archived)
@@ -364,6 +413,7 @@ impl NativeSessionSnapshot {
             pi_dispatch_id: None,
             status: NativeSessionStatus::Starting,
             transport_lost: false,
+            stop_requested_at: None,
             completed_turn: false,
             transcript: Vec::new(),
             requests: Vec::new(),
@@ -489,6 +539,7 @@ impl NativeSessionSnapshot {
                 images: Vec::new(),
                 attachments: Vec::new(),
                 citations: Vec::new(),
+                applications: Vec::new(),
             });
         }
         self.trim_transcript();
@@ -604,6 +655,7 @@ impl NativeSessionSnapshot {
                 item.images.clone_from(&saved.images);
                 item.attachments.clone_from(&saved.attachments);
                 item.citations.clone_from(&saved.citations);
+                item.applications.clone_from(&saved.applications);
                 item.created_at = item.created_at.or(saved.created_at);
                 item.updated_at = saved.updated_at.or(item.updated_at);
             }
@@ -622,6 +674,13 @@ impl NativeSessionSnapshot {
             item.images = prompt.image_references();
             item.attachments = prompt.attachment_references();
             item.citations = prompt.citations().to_vec();
+            item.applications.clear();
+            for mention in prompt.applications() {
+                let application = crate::NativeApplication::from(&mention.target);
+                if !item.applications.contains(&application) {
+                    item.applications.push(application);
+                }
+            }
         }
         Ok(())
     }

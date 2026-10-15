@@ -172,15 +172,16 @@ impl BindingRuntime {
         });
     }
 
-    /// Capture a backend's latest complete styled rows within the checkpoint byte budget.
-    pub fn capture_checkpoint_pane(
+    /// Prepare a capture of a backend's latest complete styled rows within the checkpoint byte
+    /// budget. The returned job blocks on the backend, so run it off the UI thread; callers that
+    /// capture many panes run jobs one at a time so remote links never see a burst.
+    pub fn checkpoint_pane_capture(
         &self,
         pane_id: &str,
         options: bootty_terminal::terminal_capture::CaptureOptions,
-        done: impl FnOnce(Result<bootty_terminal::terminal_capture::TerminalCapture, MuxCommandError>)
-        + Send
-        + 'static,
-    ) {
+    ) -> impl FnOnce() -> Result<bootty_terminal::terminal_capture::TerminalCapture, MuxCommandError>
+    + Send
+    + 'static {
         let pending = self
             .terminal_owner
             .terminal
@@ -212,7 +213,7 @@ impl BindingRuntime {
                 )
             });
         let pane_id = pane_id.to_owned();
-        self.on_backend_thread(None, done, move |backend| {
+        self.backend_job(None, move |backend| {
             let captured =
                 bootty_terminal::terminal_history::capture_checkpoint(options, |options| {
                     let captured = backend.capture_pane(
@@ -265,33 +266,42 @@ impl BindingRuntime {
                 .saturating_add(omitted)
                 .saturating_add(captured.omitted_lines);
             Ok(merged)
-        });
+        })
     }
 
-    /// Run `run` against a fresh backend on a worker thread. It is claimed after the backend is
-    /// built, right before it acts, and fails as stale if this binding was closed or replaced in
-    /// the meantime.
+    /// Run `run` against a fresh backend on a worker thread.
     fn on_backend_thread<T: Send + 'static>(
         &self,
         execution: Execution,
         done: impl FnOnce(Result<T, MuxCommandError>) + Send + 'static,
         run: impl FnOnce(&dyn MuxBackend) -> Result<T> + Send + 'static,
     ) {
+        let job = self.backend_job(execution, run);
+        thread::spawn(move || done(job()));
+    }
+
+    /// A blocking job that runs `run` against a fresh backend. It is claimed after the backend is
+    /// built, right before it acts, and fails as stale if this binding was closed or replaced in
+    /// the meantime.
+    fn backend_job<T>(
+        &self,
+        execution: Execution,
+        run: impl FnOnce(&dyn MuxBackend) -> Result<T> + Send + 'static,
+    ) -> impl FnOnce() -> Result<T, MuxCommandError> + Send + 'static {
         let backends = self.backends.clone();
         let config = self.multiplexer.clone();
         let workspace = self.mux.workspace_path().map(std::path::Path::to_path_buf);
         let fence = self.mux.command_fence(&config);
-        thread::spawn(move || {
-            let result = backends
+        move || {
+            backends
                 .build_backend(&config, workspace.as_deref())
                 .map_err(failed)
                 .and_then(|backend| {
                     fence.claim()?;
                     begin_synchronous_command(execution)?;
                     run(backend.as_ref()).map_err(failed)
-                });
-            done(result);
-        });
+                })
+        }
     }
 }
 

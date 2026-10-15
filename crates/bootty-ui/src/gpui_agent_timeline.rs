@@ -17,6 +17,9 @@ pub(super) enum TranscriptRow {
     Message {
         index: usize,
         id: String,
+        /// Timestamp and actions belong to user messages and a settled turn's final reply,
+        /// not to the commentary between tools.
+        meta: bool,
     },
     Work {
         id: String,
@@ -28,7 +31,8 @@ pub(super) enum TranscriptRow {
 impl TranscriptRow {
     pub(super) fn key(&self) -> String {
         match self {
-            Self::Message { id, .. } => format!("message:{id}"),
+            // A reply gains its metadata when its turn settles; the new key remeasures it.
+            Self::Message { id, meta, .. } => format!("message:{id}:{meta}"),
             Self::Work { id, .. } => format!("work:{id}"),
         }
     }
@@ -74,6 +78,7 @@ pub(super) fn rows(
                 rows.push(TranscriptRow::Message {
                     index: end,
                     id: item.id.clone(),
+                    meta: true,
                 });
             }
             start = end.saturating_add(1);
@@ -127,6 +132,7 @@ fn append_turn(
             transcript.get(index).map(|item| TranscriptRow::Message {
                 index,
                 id: item.id.clone(),
+                meta: Some(index) == final_message,
             })
         }));
         return;
@@ -159,6 +165,7 @@ fn append_turn(
             rows.push(TranscriptRow::Message {
                 index,
                 id: item.id.clone(),
+                meta: Some(index) == final_message,
             });
         }
     }
@@ -189,6 +196,7 @@ fn append_live_turn(
         rows.push(TranscriptRow::Message {
             index,
             id: item.id.clone(),
+            meta: false,
         });
     }
     // Only the trailing run can still be working.
@@ -221,6 +229,7 @@ fn push_work_run(
             transcript.get(index).map(|item| TranscriptRow::Message {
                 index,
                 id: item.id.clone(),
+                meta: false,
             })
         }));
     }
@@ -275,7 +284,7 @@ impl NativeAgentSessionView {
             .iter()
             .enumerate()
             .filter_map(|(row, item)| {
-                let TranscriptRow::Message { index, id } = item else {
+                let TranscriptRow::Message { index, id, .. } = item else {
                     return None;
                 };
                 let message = self.record.snapshot.transcript.get(*index)?;
@@ -464,8 +473,8 @@ impl NativeAgentSessionView {
         cx: &App,
     ) -> gpui_kit::AnyElement {
         match self.timeline.get(ix) {
-            Some(TranscriptRow::Message { index, .. }) => {
-                self.render_message(*index, owner, window, cx)
+            Some(TranscriptRow::Message { index, meta, .. }) => {
+                self.render_message(*index, *meta, owner, window, cx)
             }
             Some(TranscriptRow::Work {
                 id,
@@ -553,34 +562,17 @@ impl NativeAgentSessionView {
                     .and_then(|item| item.tool.as_ref())
             })
             .collect::<Vec<_>>();
-        let label = if tools.is_empty() {
-            "Thought process"
-        } else {
-            "Worked"
-        };
         let active = tools
             .iter()
             .rev()
             .find(|tool| tool.status == NativeToolStatus::Running);
         if live && let Some(tool) = active {
-            let (_, detail) = super::tool_input_summary(tool);
-            format!("{} {}", super::tool_label(&tool.name), detail)
-                .trim()
-                .to_owned()
-        } else if tools.is_empty() {
-            label.to_owned()
-        } else {
-            let count = format!(
-                "{} {}",
-                tools.len(),
-                if tools.len() == 1 { "tool" } else { "tools" },
-            );
-            if live {
-                count
-            } else {
-                format!("{label} · {count}")
-            }
+            return running_label(tool);
         }
+        if tools.is_empty() {
+            return "Thought process".to_owned();
+        }
+        activity_summary(&tools)
     }
 
     fn render_work_group(
@@ -624,19 +616,29 @@ impl NativeAgentSessionView {
                         })
                         .small(),
                     )
-                    .child(div().flex_1().min_w_0().truncate().map(|summary_row| {
-                        if live
-                            && self.record.snapshot.status
-                                == bootty_agents::NativeSessionStatus::Working
-                        {
-                            summary_row.child(
-                                ShimmerText::new(summary)
-                                    .id(SharedString::from(format!("work-shimmer:{id}"))),
-                            )
-                        } else {
-                            summary_row.child(summary)
-                        }
-                    })),
+                    .child(
+                        div()
+                            .debug_selector({
+                                let summary = summary.clone();
+                                move || format!("native-work-summary:{summary}")
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .map(|summary_row| {
+                                if live
+                                    && self.record.snapshot.status
+                                        == bootty_agents::NativeSessionStatus::Working
+                                {
+                                    summary_row.child(
+                                        ShimmerText::new(summary)
+                                            .id(SharedString::from(format!("work-shimmer:{id}"))),
+                                    )
+                                } else {
+                                    summary_row.child(summary)
+                                }
+                            }),
+                    ),
             )
             .on_click(move |_, _, cx| {
                 _ = owner.update(cx, |this, cx| {
@@ -661,4 +663,134 @@ impl NativeAgentSessionView {
             )
             .into_any_element()
     }
+}
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+enum ToolActivity {
+    Command,
+    Read,
+    Edit,
+    Search,
+    Other,
+}
+
+fn tool_activity(tool: &bootty_agents::NativeToolCall) -> ToolActivity {
+    let (_, name) = super::tool_parts(&tool.name);
+    let input = serde_json::from_str::<serde_json::Value>(&tool.input).ok();
+    let has = |key: &str| input.as_ref().is_some_and(|input| input.get(key).is_some());
+    if matches!(
+        name,
+        "Edit"
+            | "MultiEdit"
+            | "Write"
+            | "NotebookEdit"
+            | "edit"
+            | "write"
+            | "apply_patch"
+            | "fileChange"
+    ) {
+        ToolActivity::Edit
+    } else if has("command")
+        || has("cmd")
+        || matches!(
+            name,
+            "Bash" | "bash" | "exec_command" | "commandExecution" | "shell"
+        )
+    {
+        ToolActivity::Command
+    } else if has("pattern")
+        || has("query")
+        || matches!(
+            name,
+            "Grep" | "Glob" | "grep" | "find" | "WebSearch" | "web_search"
+        )
+    {
+        ToolActivity::Search
+    } else if has("file_path") || has("filePath") || has("path") || matches!(name, "Read" | "read")
+    {
+        ToolActivity::Read
+    } else {
+        ToolActivity::Other
+    }
+}
+
+/// "Ran 3 commands, read 2 files, 1 failed": what a run of tools did, in a fixed order.
+fn activity_summary(tools: &[&bootty_agents::NativeToolCall]) -> String {
+    let mut counts = BTreeMap::new();
+    for tool in tools {
+        let count = counts.entry(tool_activity(tool)).or_insert(0_usize);
+        *count = count.saturating_add(1);
+    }
+    let phrases = counts
+        .into_iter()
+        .map(|(activity, count)| {
+            let plural = count != 1;
+            match activity {
+                ToolActivity::Command => {
+                    format!("ran {count} command{}", if plural { "s" } else { "" })
+                }
+                ToolActivity::Read => format!("read {count} file{}", if plural { "s" } else { "" }),
+                ToolActivity::Edit => {
+                    format!("edited {count} file{}", if plural { "s" } else { "" })
+                }
+                ToolActivity::Search => {
+                    format!("searched {count} time{}", if plural { "s" } else { "" })
+                }
+                ToolActivity::Other => {
+                    format!("used {count} tool{}", if plural { "s" } else { "" })
+                }
+            }
+        })
+        .chain(
+            Some(
+                tools
+                    .iter()
+                    .filter(|tool| tool.status == NativeToolStatus::Failed)
+                    .count(),
+            )
+            .filter(|failed| *failed > 0)
+            .map(|failed| format!("{failed} failed")),
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut chars = phrases.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
+/// A running command reads "Running cargo"; the full command stays in the expanded row.
+fn running_label(tool: &bootty_agents::NativeToolCall) -> String {
+    if tool_activity(tool) == ToolActivity::Command
+        && let Some(program) = command_program(&tool.input)
+    {
+        return format!("Running {program}");
+    }
+    let (_, detail) = super::tool_input_summary(tool);
+    format!("{} {}", super::tool_label(&tool.name), detail)
+        .trim()
+        .to_owned()
+}
+
+/// The program a shell line runs, past `cd` steps and environment assignments.
+fn command_program(input: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(input).ok()?;
+    let command = value
+        .get("command")
+        .or_else(|| value.get("cmd"))
+        .and_then(|command| {
+            command.as_str().map(str::to_owned).or_else(|| {
+                // Codex sends argv; its shell wrapper carries the line last.
+                command.as_array()?.last()?.as_str().map(str::to_owned)
+            })
+        })?;
+    command
+        .split(['&', ';', '|', '\n'])
+        .map(str::trim)
+        .filter(|step| !step.is_empty() && !step.starts_with("cd ") && *step != "cd")
+        .find_map(|step| {
+            step.split_whitespace()
+                .find(|word| !word.contains('='))
+                .map(|word| word.rsplit('/').next().unwrap_or(word).to_owned())
+        })
 }

@@ -35,6 +35,10 @@ fn saved_conversation_skips_empty_rows_and_keeps_a_readable_responsive_lane(
         gpui_kit::component::Root::new(view, window, cx)
     });
     verify_responsive_fold(visual);
+    assert!(
+        visual.debug_bounds("copy-message:reply").is_some(),
+        "a settled turn's reply keeps its actions"
+    );
 }
 
 fn saved_record(status: &str) -> NativeSessionRecord {
@@ -1148,6 +1152,81 @@ fn narrow_conversation_keeps_interrupt_and_send_inside_the_pane(cx: &mut TestApp
     pretty_assertions::assert_eq!(invocation.target, Some(target));
 }
 
+/// A control that leaves under a resting pointer takes its tooltip with it.
+#[gpui_kit::test]
+fn interrupt_tooltip_leaves_with_the_finished_turn(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("working");
+    let mut idle = serde_json::to_value(&record.snapshot).unwrap();
+    idle["status"] = "idle".into();
+    idle["revision"] = 2.into();
+    let inbox = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<bootty_control::AppCommandReceiver>,
+    ));
+    let queued = inbox.clone();
+    let (sender, receiver) = bootty_control::app_command_channel(
+        8,
+        std::sync::Arc::new(move || {
+            let inbox = queued.lock().unwrap();
+            while let Ok(request) = inbox.as_ref().unwrap().try_recv() {
+                // The queued follow-up's reply reports that the turn already ended.
+                let value = if request.invocation.command == "agents.native.queue" {
+                    idle.clone()
+                } else {
+                    serde_json::Value::Null
+                };
+                request
+                    .response
+                    .send(bootty_control::CommandOutcome::Success {
+                        value,
+                        warnings: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }),
+    );
+    *inbox.lock().unwrap() = Some(receiver);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_input("Wrap up");
+    let interrupt = visual
+        .debug_bounds("native-interrupt")
+        .expect("a working turn offers Interrupt");
+    visual.simulate_mouse_move(interrupt.center(), None, Modifiers::none());
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("tooltip:Interrupt").is_some());
+
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-interrupt").is_none());
+    assert!(
+        visual.debug_bounds("tooltip:Interrupt").is_none(),
+        "the tooltip leaves with its button"
+    );
+}
+
 #[gpui_kit::test]
 fn disconnected_conversation_offers_an_exact_resume_without_submitting_its_draft(
     cx: &mut TestAppContext,
@@ -1555,6 +1634,64 @@ fn live_turn_keeps_every_message_visible(cx: &mut TestAppContext) {
             .debug_bounds("native-work-group-first-tool")
             .is_some()
     );
+    // Commentary between tools carries no timestamp or actions; the prompt keeps them.
+    assert!(visual.debug_bounds("copy-message:status").is_none());
+    assert!(visual.debug_bounds("copy-message:prompt").is_some());
+}
+
+/// Folds say what their tools did, mark failures, and name a running command's program.
+#[gpui_kit::test]
+fn work_folds_summarize_what_their_tools_did(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let settled = serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Audit this", "complete": true},
+        {"id": "read", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Read", "input": "{\"file_path\":\"/tmp/a.rs\"}", "status": "completed"}},
+        {"id": "check", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cargo check\"}", "status": "completed"}},
+        {"id": "test", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cargo test\"}", "status": "failed"}},
+        {"id": "reply", "role": "assistant", "text": "One test fails.", "complete": true}
+    ]);
+    let live = serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Run the tests", "complete": true},
+        {"id": "test", "role": "tool", "text": "", "complete": false,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cd /tmp && RUST_LOG=1 cargo test\"}",
+                  "status": "running"}}
+    ]);
+    for (status, transcript, selector) in [
+        (
+            "idle",
+            settled,
+            "native-work-summary:Ran 2 commands, read 1 file, 1 failed",
+        ),
+        ("working", live, "native-work-summary:Running cargo"),
+    ] {
+        let mut record = saved_record(status);
+        record.snapshot.transcript = serde_json::from_value(transcript).unwrap();
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            visual.debug_bounds(selector).is_some(),
+            "{status} fold reads {selector}"
+        );
+    }
 }
 
 /// Pasting more images than one prompt carries stops at the limit instead of failing at send.
@@ -2000,4 +2137,68 @@ fn subagent_record_and_reply() -> (NativeSessionRecord, serde_json::Value) {
     });
     reply["agent"]["status"] = serde_json::json!("completed");
     (record, reply)
+}
+
+#[gpui_kit::test]
+fn app_access_card_offers_conversation_and_permanent_grants(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("waiting");
+    record.snapshot.requests = serde_json::from_value(serde_json::json!([{
+        "id":"computer-access:dev.zed.Zed", "method":bootty_agents::APPLICATION_ACCESS_METHOD,
+        "parameters":{"bundle_id":"dev.zed.Zed","name":"Zed"}
+    }]))
+    .expect("app access request");
+    let target = record.target();
+    let (sender, calls) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(600.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let card = "computer-access:dev.zed.Zed";
+    for selector in [
+        "deny:computer-access:dev.zed.Zed",
+        "allow-session:computer-access:dev.zed.Zed",
+        "always-allow:computer-access:dev.zed.Zed",
+    ] {
+        assert!(
+            visual.debug_bounds(selector).is_some(),
+            "{selector} is offered"
+        );
+    }
+    assert!(
+        visual
+            .debug_bounds("allow:computer-access:dev.zed.Zed")
+            .is_none(),
+        "a one-call grant is not offered"
+    );
+    let always = visual
+        .debug_bounds("always-allow:computer-access:dev.zed.Zed")
+        .expect("always allow control");
+    visual.simulate_click(always.center(), Modifiers::none());
+    let invocation = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|invocation| invocation.command == "agents.native.approve")
+        .cloned()
+        .expect("the decision submits through the command owner");
+    pretty_assertions::assert_eq!(invocation.target, Some(target));
+    pretty_assertions::assert_eq!(
+        invocation.arguments[2..],
+        [card.to_owned(), "always-allow".to_owned()]
+    );
 }

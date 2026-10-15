@@ -18,13 +18,6 @@ const PRODUCTION_BUNDLE_IDENTIFIER: &str = "dev.bootty.desktop";
 const DEVELOPMENT_BUNDLE_IDENTIFIER_PREFIX: &str = "dev.bootty.desktop.dev.";
 pub const KEYMAP_FILE_NAME: &str = "keymap.json";
 
-/// True for any Production or Development Bootty bundle, whatever its workspace.
-#[must_use]
-pub fn is_bootty_bundle_identifier(bundle_identifier: &str) -> bool {
-    bundle_identifier == PRODUCTION_BUNDLE_IDENTIFIER
-        || bundle_identifier.starts_with(DEVELOPMENT_BUNDLE_IDENTIFIER_PREFIX)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ApplicationNames {
     display_name: String,

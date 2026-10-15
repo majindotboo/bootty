@@ -10,9 +10,10 @@ use std::{
 
 use assert_fs::TempDir;
 use bootty_agents::{
-    AgentCommandExecutor, AgentKind, NativeAgentRequest, NativeAgentService, NativeSessionConfig,
-    TerminalAgentService, ToolBridge, ToolBridgeContext, ToolLease, ToolPolicy, ToolProtocol,
-    ToolScope, ToolSpawnContext, ToolSpawnRequest,
+    AgentCommandExecutor, AgentKind, NativeAgentRequest, NativeAgentService, NativeApplication,
+    NativeApprovalDecision, NativeSessionConfig, NativeSessionStatus, TerminalAgentService,
+    ToolBridge, ToolBridgeContext, ToolLease, ToolPolicy, ToolProtocol, ToolScope,
+    ToolSpawnContext, ToolSpawnRequest,
 };
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
@@ -182,6 +183,123 @@ fn mcp_requests_identify_only_the_captured_attachment(
     wire.as_object_mut().unwrap().remove("from_attached_tools");
     let previous: NativeAgentRequest = serde_json::from_value(wire).unwrap();
     assert!(!previous.is_from_attached_tools());
+}
+
+#[rstest]
+#[case::for_the_session(NativeApprovalDecision::AllowSession, true)]
+#[case::always(NativeApprovalDecision::AlwaysAllow, true)]
+#[case::denied(NativeApprovalDecision::Deny, false)]
+fn app_access_cards_answer_waiting_calls_without_the_provider(
+    #[case] decision: NativeApprovalDecision,
+    #[case] allowed: bool,
+) {
+    let root = TempDir::new().unwrap();
+    let commands = Arc::new(Commands::default());
+    let (tools, lease) = bridge(
+        &commands,
+        Caller::Socket,
+        Some(&target(ResourceKind::Terminal, "task pane")),
+    )
+    .unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create_for_task_with_tools(
+            "binding",
+            "task",
+            "Use an app",
+            provider(root.path()).unwrap(),
+            Arc::new(tools),
+        )
+        .unwrap();
+    let conversation = record.target();
+    lease.grant_applications(&conversation, &[]).unwrap();
+    let app = NativeApplication {
+        bundle_id: "dev.zed.Zed".into(),
+        name: "Zed".into(),
+    };
+    let granted = |service: &NativeAgentService| {
+        service
+            .application_access(&conversation, &app, false, Caller::Socket)
+            .unwrap()
+            .is_some()
+    };
+    assert!(!granted(&service));
+
+    let first = service
+        .request_application_access(&conversation, &app, Caller::Socket)
+        .unwrap();
+    let second = service
+        .request_application_access(&conversation, &app, Caller::Socket)
+        .unwrap();
+    let waiting = service.resolve(&conversation).unwrap().snapshot();
+    assert_eq!(waiting.status, NativeSessionStatus::Waiting);
+    assert_eq!(waiting.requests.len(), 1, "concurrent calls share one card");
+    let card = &waiting.requests[0];
+    assert_eq!(card.application_access(), Some(app.clone()));
+    assert_eq!(
+        NativeApprovalDecision::ALL
+            .into_iter()
+            .filter(|choice| card.approval_response(*choice).is_some())
+            .collect::<Vec<_>>(),
+        [
+            NativeApprovalDecision::Deny,
+            NativeApprovalDecision::AllowSession,
+            NativeApprovalDecision::AlwaysAllow,
+        ]
+    );
+
+    service
+        .approve_decision(&conversation, &card.id, decision)
+        .unwrap();
+    assert_eq!(
+        (first.try_recv(), second.try_recv()),
+        (Ok(allowed), Ok(allowed))
+    );
+    let answered = service.resolve(&conversation).unwrap().snapshot();
+    assert_eq!(answered.requests, Vec::new());
+    assert_eq!(answered.status, NativeSessionStatus::Idle);
+    assert_eq!(granted(&service), allowed);
+}
+
+#[rstest]
+fn always_allowed_apps_are_granted_without_a_card() {
+    let root = TempDir::new().unwrap();
+    let commands = Arc::new(Commands::default());
+    let (tools, lease) = bridge(
+        &commands,
+        Caller::Socket,
+        Some(&target(ResourceKind::Terminal, "task pane")),
+    )
+    .unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create_for_task_with_tools(
+            "binding",
+            "task",
+            "Use an app",
+            provider(root.path()).unwrap(),
+            Arc::new(tools),
+        )
+        .unwrap();
+    lease.grant_applications(&record.target(), &[]).unwrap();
+    let app = NativeApplication {
+        bundle_id: "dev.zed.Zed".into(),
+        name: "Zed".into(),
+    };
+    assert!(
+        service
+            .application_access(&record.target(), &app, true, Caller::Socket)
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        service
+            .application_access(&record.target(), &app, false, Caller::Cli)
+            .is_err(),
+        "only the conversation's own tool caller may use its grants"
+    );
+    let snapshot = service.resolve(&record.target()).unwrap().snapshot();
+    assert_eq!(snapshot.requests, Vec::new());
 }
 
 #[rstest]

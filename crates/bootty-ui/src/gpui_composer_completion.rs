@@ -94,6 +94,7 @@ impl ComposerCompletion {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::gpui_application_icons::register(&sender, cx);
         let subscription = cx.observe_in(&editor, window, |this, _, window, cx| {
             this.sync(window, cx);
             if this.trigger.is_some() {
@@ -312,6 +313,16 @@ impl ComposerCompletion {
                     Ok(CommandOutcome::Success { value, .. }) => {
                         if let Err(error) = this.receive(source, value) {
                             this.error = Some(error);
+                        } else if source == "applications" {
+                            this.load_application_icons(cx);
+                        } else if source == "catalog" {
+                            crate::gpui_application_icons::load_remote(
+                                this.catalog
+                                    .iter()
+                                    .flat_map(|catalog| &catalog.options)
+                                    .filter_map(|option| option.icon_url.clone()),
+                                cx,
+                            );
                         }
                     }
                     Ok(outcome) => this.error = crate::commands::command_outcome_message(&outcome),
@@ -322,6 +333,16 @@ impl ComposerCompletion {
             });
         })
         .detach();
+    }
+
+    fn load_application_icons(&self, cx: &mut Context<Self>) {
+        let bundle_ids = self
+            .applications
+            .iter()
+            .flatten()
+            .map(|target| target.bundle_id.clone())
+            .collect::<std::collections::BTreeSet<_>>();
+        crate::gpui_application_icons::load(bundle_ids, cx);
     }
 
     fn receive(&mut self, source: &str, value: serde_json::Value) -> Result<(), String> {
@@ -342,14 +363,19 @@ impl ComposerCompletion {
                 self.install_files(page);
             }
             "applications" => {
+                let targets: Vec<bootty_computer::ComputerTarget> = serde_json::from_value(
+                    value
+                        .get("targets")
+                        .cloned()
+                        .ok_or("Host returned no application windows")?,
+                )
+                .map_err(|e| e.to_string())?;
+                // Mentioning an app agents may not use would grant nothing.
                 self.applications = Some(
-                    serde_json::from_value(
-                        value
-                            .get("targets")
-                            .cloned()
-                            .ok_or("Host returned no application windows")?,
-                    )
-                    .map_err(|e| e.to_string())?,
+                    targets
+                        .into_iter()
+                        .filter(crate::commands::agent_may_use)
+                        .collect(),
                 );
             }
             _ => return Err("Unknown completion source".into()),
@@ -453,7 +479,9 @@ impl ComposerCompletion {
             cx.notify();
             return;
         };
-        let mut candidates = self.files.clone();
+        // Local apps, then connected apps, then files: a bare `@` in a busy directory would
+        // otherwise show only files. Ranking keeps this order among equal scores.
+        let mut candidates = Vec::new();
         if matches!(
             trigger.kind,
             CompletionKind::Command | CompletionKind::Skill
@@ -461,7 +489,6 @@ impl ComposerCompletion {
             candidates.extend(self.command_candidates(trigger.kind));
         }
         if trigger.kind == CompletionKind::Mention {
-            candidates.extend(self.integration_candidates());
             candidates.extend(
                 self.applications
                     .as_ref()
@@ -480,7 +507,9 @@ impl ComposerCompletion {
                         }
                     }),
             );
+            candidates.extend(self.integration_candidates());
         }
+        candidates.extend(self.files.iter().cloned());
         let mut ranked = candidates
             .into_iter()
             .filter_map(|item| {
@@ -508,6 +537,11 @@ impl ComposerCompletion {
                 let label = item.label.clone();
                 let detail = item.detail.clone();
                 let icon = item.icon;
+                let artwork = match &item.source {
+                    CompletionSource::Application(target) => Some(target.bundle_id.clone()),
+                    CompletionSource::Provider(option) => option.icon_url.clone(),
+                    _ => None,
+                };
                 CommandItem::new().label(label.clone()).child(move |_, cx| {
                     div()
                         .flex()
@@ -518,10 +552,22 @@ impl ComposerCompletion {
                         .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, _| {
                             window.prevent_default();
                         })
-                        .child(crate::gpui::sized_icon(
-                            icon,
-                            crate::gpui::IconSize::Small,
-                            cx.theme().muted_foreground,
+                        .child(artwork.as_deref().map_or_else(
+                            || {
+                                crate::gpui::sized_icon(
+                                    icon,
+                                    crate::gpui::IconSize::Small,
+                                    cx.theme().muted_foreground,
+                                )
+                            },
+                            |key| {
+                                crate::gpui_application_icons::render(
+                                    key,
+                                    crate::gpui::IconSize::Small,
+                                    cx.theme().muted_foreground,
+                                    cx,
+                                )
+                            },
                         ))
                         .child(
                             div()

@@ -55,10 +55,10 @@ impl ClaudeProtocol {
         id: &str,
         prompt: &crate::NativePrompt,
     ) -> Result<Value, String> {
-        if snapshot.status != NativeSessionStatus::Working
-            || !self.accepted()
-            || snapshot.pending_user_item.is_some()
-        {
+        if let Some(refusal) = snapshot.steer_refusal() {
+            return Err(refusal.into());
+        }
+        if !self.accepted() {
             return Err("Wait for the previous message to reach the active turn".into());
         }
         // Bound admitted input until Claude reports its results; increase only
@@ -125,6 +125,7 @@ impl ClaudeProtocol {
         snapshot: &mut NativeSessionSnapshot,
         value: &Value,
     ) -> Result<Option<Value>, String> {
+        self.adopt_self_started_turn(snapshot, value);
         match field(value, "type").as_str() {
             Some("system") if field(value, "subtype") == "init" => {
                 self.initialize(snapshot, value)?;
@@ -180,6 +181,37 @@ impl ClaudeProtocol {
         Ok(())
     }
 
+    /// Claude starts a turn on its own, for example to report a finished background task. While
+    /// idle, adopt that turn so its messages and tools appear instead of being dropped.
+    fn adopt_self_started_turn(&mut self, snapshot: &mut NativeSessionSnapshot, value: &Value) {
+        if self.dispatch.is_some()
+            || snapshot.status != NativeSessionStatus::Idle
+            || !matches!(
+                field(value, "type").as_str(),
+                Some("stream_event" | "assistant")
+            )
+            || snapshot.session_id.as_deref() != Some(self.session_id.as_str())
+            || field(value, "session_id").as_str() != Some(self.session_id.as_str())
+            || !field(value, "parent_tool_use_id").is_null()
+        {
+            return;
+        }
+        // Later events of this turn name the message that started it; keep that identity.
+        let id = field(value, "user_message_uuid")
+            .as_str()
+            .or_else(|| field(value, "uuid").as_str())
+            .filter(|id| valid_wire_id(id))
+            .map_or_else(|| "claude-self-started-turn".to_owned(), str::to_owned);
+        self.dispatch = Some(Dispatch {
+            id,
+            acknowledgement: Acknowledgement::Accepted,
+            image_count: 0,
+        });
+        snapshot.status = NativeSessionStatus::Working;
+        snapshot.completed_turn = false;
+        snapshot.error = None;
+    }
+
     fn accepts(&self, snapshot: &NativeSessionSnapshot, value: &Value) -> bool {
         snapshot.session_id.as_deref() == Some(self.session_id.as_str())
             && field(value, "session_id").as_str() == Some(self.session_id.as_str())
@@ -222,8 +254,10 @@ impl ClaudeProtocol {
             Some("user") => self.user_message(snapshot, value),
             Some("stream_event") if self.accepted() => self.stream(snapshot, field(value, "event")),
             Some("assistant") if self.accepted() => self.assistant(snapshot, value),
+            // After an acknowledged interrupt, the next result ends the stopped work even if
+            // Claude never confirmed the turn's message.
             Some("result")
-                if self.accepted()
+                if (self.accepted() || snapshot.stopping())
                     && matches!(
                         field(value, "subtype").as_str(),
                         Some(
@@ -256,19 +290,15 @@ impl ClaudeProtocol {
             .find(|dispatch| field(value, "uuid").as_str() == Some(dispatch.id.as_str()))
         else {
             if self.accepted() {
-                tool_results(snapshot, field(field(value, "message"), "content"));
+                tool_results(snapshot, value);
             }
             return;
         };
+        // The uuid names exactly this message. Claude may rewrite its content, for example by
+        // downscaling an image, and rejecting the echo would hide the whole turn.
         if field(value, "isReplay") == true
             && field(value, "uuid").as_str() == Some(dispatch.id.as_str())
             && field(field(value, "message"), "role") == "user"
-            && (field(field(value, "message"), "content").is_string()
-                || field(field(value, "message"), "content")
-                    .as_array()
-                    .is_some_and(|blocks| {
-                        !blocks.is_empty() && valid_claude_content(blocks, dispatch.image_count)
-                    }))
         {
             dispatch.acknowledgement = Acknowledgement::Accepted;
             snapshot.accept_first_turn(&dispatch.id);
@@ -285,7 +315,7 @@ impl ClaudeProtocol {
                 snapshot.pending_user_item = None;
             }
         } else if self.accepted() {
-            tool_results(snapshot, field(field(value, "message"), "content"));
+            tool_results(snapshot, value);
         }
     }
 
@@ -442,6 +472,7 @@ impl ClaudeProtocol {
     }
 }
 
+/// Bootty sends PNGs, but Claude downscales large images and echoes them re-encoded.
 fn valid_claude_content(blocks: &[Value], expected_images: usize) -> bool {
     let images = blocks
         .iter()
@@ -452,7 +483,10 @@ fn valid_claude_content(blocks: &[Value], expected_images: usize) -> bool {
             field(block, "type") == "text" && field(block, "text").is_string()
                 || field(block, "type") == "image"
                     && field(field(block, "source"), "type") == "base64"
-                    && field(field(block, "source"), "media_type") == "image/png"
+                    && matches!(
+                        field(field(block, "source"), "media_type").as_str(),
+                        Some("image/png" | "image/jpeg" | "image/gif" | "image/webp")
+                    )
                     && field(field(block, "source"), "data").is_string()
         })
 }
@@ -727,8 +761,19 @@ fn content_block(snapshot: &mut NativeSessionSnapshot, id: String, block: &Value
     }
 }
 
-fn tool_results(snapshot: &mut NativeSessionSnapshot, content: &Value) {
-    if let Some(blocks) = content.as_array() {
+fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
+    // Claude rejects the tool it was running when a stop arrives; that tool was interrupted.
+    let rejected = |id: &str| {
+        field(value, "tool_result_meta")
+            .as_array()
+            .is_some_and(|meta| {
+                meta.iter().any(|entry| {
+                    field(entry, "id").as_str() == Some(id)
+                        && field(entry, "non_execution_kind") == "user-rejected"
+                })
+            })
+    };
+    if let Some(blocks) = field(field(value, "message"), "content").as_array() {
         for block in blocks {
             if field(block, "type") == "tool_result"
                 && let Some(id) = field(block, "tool_use_id")
@@ -740,7 +785,9 @@ fn tool_results(snapshot: &mut NativeSessionSnapshot, content: &Value) {
                     None,
                     None,
                     crate::native_protocol::content_text(field(block, "content")),
-                    if field(block, "is_error") == true {
+                    if snapshot.stopping() && rejected(id) {
+                        NativeToolStatus::Interrupted
+                    } else if field(block, "is_error") == true {
                         NativeToolStatus::Failed
                     } else {
                         NativeToolStatus::Completed

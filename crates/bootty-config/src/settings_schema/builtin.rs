@@ -184,14 +184,22 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.push(spec(
         &["agents", "follow-up-behavior"],
         "Follow-up behavior",
-        "Queue messages for the next turn or steer the active turn. Command+Enter (Control+Enter on other platforms) uses the opposite behavior for one message.",
-        "general", "BEHAVIOR",
+        "Queue messages sent during a turn for the next turn, or steer them into the active turn.",
+        "general",
+        "BEHAVIOR",
         SettingKind::Choice {
-            options: [("queue", "Queue"), ("steer", "Steer")].into_iter().map(|(token, label)| SettingOption {
-                token: token.into(), label: label.into(), description: None,
-            }).collect(),
+            options: [("queue", "Queue"), ("steer", "Steer")]
+                .into_iter()
+                .map(|(token, label)| SettingOption {
+                    token: token.into(),
+                    label: label.into(),
+                    description: None,
+                })
+                .collect(),
         },
-        SettingDefault::Field(|config| SettingValue::Token(config.agents.follow_up_behavior.token().into())),
+        SettingDefault::Field(|config| {
+            SettingValue::Token(config.agents.follow_up_behavior.token().into())
+        }),
     ));
     specs.push(spec(
         &["agents", "quick-model"],
@@ -1825,10 +1833,10 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
         SettingDefault::Field(|config| SettingValue::Token(config.agents.default_provider.clone())),
     )];
     macro_rules! defaults {
-        ($provider:ident, $id:literal, $label:literal) => {
+        ($provider:ident, $id:literal) => {
             specs.push(spec(
                 &["agents", $id, "default-model"],
-                concat!($label, " model"),
+                "Model",
                 "Preferred advertised model; empty resolves the account's recommended model.",
                 "providers",
                 "DEFAULTS",
@@ -1839,7 +1847,7 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
             ));
             specs.push(spec(
                 &["agents", $id, "default-effort"],
-                concat!($label, " effort"),
+                "Effort",
                 "Preferred supported effort; empty resolves the model's advertised default.",
                 "providers",
                 "DEFAULTS",
@@ -1850,13 +1858,13 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
             ));
         };
     }
-    defaults!(codex, "codex", "Codex");
-    defaults!(claude, "claude", "Claude");
-    defaults!(pi, "pi", "Pi");
+    defaults!(codex, "codex");
+    defaults!(claude, "claude");
+    defaults!(pi, "pi");
     specs.push(spec(
         &["agents", "codex", "fast-mode"],
-        "Codex fast mode",
-        "Request the provider's fast service tier for new Codex conversations.",
+        "Fast mode",
+        "Request the fast service tier for new conversations.",
         "providers",
         "DEFAULTS",
         SettingKind::Bool,
@@ -1864,8 +1872,8 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
     ));
     specs.push(spec(
         &["agents", "claude", "fast-mode"],
-        "Claude fast mode",
-        "Enable the provider's fast mode for new Claude conversations.",
+        "Fast mode",
+        "Enable fast mode for new conversations.",
         "providers",
         "DEFAULTS",
         SettingKind::Bool,

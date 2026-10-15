@@ -2,7 +2,9 @@ use bootty_computer::{
     ComputerAction, ComputerTarget, DisplayBounds, HostCaptureRegion, Key, Modifier,
 };
 use bootty_control::{Caller, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind};
-use bootty_ui::commands::{CommandCatalog, CommandExecutor, ComputerCommand, CoreCommandExecutor};
+use bootty_ui::commands::{
+    CommandCatalog, CommandExecutor, ComputerCommand, CoreCommandExecutor, agent_may_use,
+};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
@@ -371,4 +373,26 @@ fn inline_capture_cannot_select_a_path_or_native_target(
     assert!(
         matches!(CommandCatalog::default().resolve(invocation), Err(CommandOutcome::Failed {code,..}) if code=="invalid_arguments")
     );
+}
+
+/// Agents never drive the Bootty they run in, whose windows hold their approval cards, nor
+/// terminals; another Bootty instance is an ordinary app.
+#[rstest]
+#[case::this_bootty(i32::try_from(std::process::id()).unwrap(), "dev.bootty.desktop", false)]
+#[case::another_bootty(123, "dev.bootty.desktop.dev.0123456789abcdef", true)]
+#[case::terminal(123, "com.mitchellh.ghostty", false)]
+#[case::system_settings(123, "com.apple.systempreferences", false)]
+#[case::editor(123, "dev.zed.Zed", true)]
+fn agents_use_any_app_except_their_host_and_shells(
+    target: ComputerTarget,
+    #[case] process_id: i32,
+    #[case] bundle_id: &str,
+    #[case] allowed: bool,
+) {
+    let window = ComputerTarget {
+        process_id,
+        bundle_id: bundle_id.into(),
+        ..target
+    };
+    assert_eq!(agent_may_use(&window), allowed);
 }

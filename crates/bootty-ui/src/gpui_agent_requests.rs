@@ -79,6 +79,13 @@ impl NativeRequestView {
         self.target = target;
         self.requests = requests.to_vec();
         self.pending.clone_from(pending);
+        crate::gpui_application_icons::load(
+            requests
+                .iter()
+                .filter_map(NativeAgentRequest::application_access)
+                .map(|application| application.bundle_id),
+            cx,
+        );
         self.sync_answers(window, cx);
         cx.notify();
     }
@@ -289,7 +296,27 @@ impl NativeRequestView {
                 .child(self.render_pi_request(request, pending, cx))
                 .into_any_element();
         }
-        if request.is_mcp_approval() || is_approval(&request.method) {
+        if let Some(application) = request.application_access() {
+            row = row
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Let the agent see and control")
+                        .child(crate::gpui_prompt_attachments::application_chip(
+                            &application.bundle_id,
+                            &application.name,
+                            false,
+                            cx,
+                        ))
+                        .child("for the rest of this conversation."),
+                )
+                .child(self.approval_buttons(request, pending, cx));
+        } else if request.is_mcp_approval() || is_approval(&request.method) {
             row = self.render_approval(row, request, pending, cx);
         } else if request.method == "mcpServer/elicitation/request" {
             row = self.render_mcp_input(row, request, pending, cx);
@@ -371,7 +398,6 @@ impl NativeRequestView {
         cx: &Context<Self>,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let id = request.id.clone();
-        let target = self.target.clone();
         // Permission scope comes from the provider request, never a generic allow label.
         let description = approval_description(
             &request.parameters,
@@ -382,42 +408,54 @@ impl NativeRequestView {
             gpui_kit::SharedString::from(format!("approval-scope:{id}")),
             description,
         ))
-        .child(
-            div().flex().flex_wrap().gap_2().children(
-                bootty_agents::NativeApprovalDecision::ALL
-                    .into_iter()
-                    .filter(|decision| request.approval_response(*decision).is_some())
-                    .map(|decision| {
+        .child(self.approval_buttons(request, pending, cx))
+    }
+
+    /// One button per decision this exact request supports.
+    fn approval_buttons(
+        &self,
+        request: &NativeAgentRequest,
+        pending: bool,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        use bootty_agents::NativeApprovalDecision as Decision;
+        let id = request.id.clone();
+        let target = self.target.clone();
+        let primary = [Decision::AllowOnce, Decision::AllowSession]
+            .into_iter()
+            .find(|decision| request.approval_response(*decision).is_some());
+        div().flex().flex_wrap().gap_2().children(
+            Decision::ALL
+                .into_iter()
+                .filter(|decision| request.approval_response(*decision).is_some())
+                .map(|decision| {
+                    let id = id.clone();
+                    let target = target.clone();
+                    Button::new(gpui_kit::SharedString::from(format!(
+                        "{}:{id}",
+                        decision.id()
+                    )))
+                    .debug_selector({
                         let id = id.clone();
-                        let target = target.clone();
-                        Button::new(gpui_kit::SharedString::from(format!(
-                            "{}:{id}",
-                            decision.id()
-                        )))
-                        .debug_selector({
-                            let id = id.clone();
-                            move || format!("{}:{id}", decision.id())
-                        })
-                        .label(decision.label())
-                        .small()
-                        .when(
-                            decision == bootty_agents::NativeApprovalDecision::AllowOnce,
-                            gpui_kit::component::button::ButtonVariants::primary,
-                        )
-                        .disabled(pending)
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
-                                this.request_command(
-                                    &target,
-                                    NativeRequestOperation::Approve,
-                                    vec![id.clone(), decision.id().to_owned()],
-                                    window,
-                                    cx,
-                                );
-                            },
-                        ))
-                    }),
-            ),
+                        move || format!("{}:{id}", decision.id())
+                    })
+                    .label(decision.label())
+                    .small()
+                    .when(
+                        Some(decision) == primary,
+                        gpui_kit::component::button::ButtonVariants::primary,
+                    )
+                    .disabled(pending)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.request_command(
+                            &target,
+                            NativeRequestOperation::Approve,
+                            vec![id.clone(), decision.id().to_owned()],
+                            window,
+                            cx,
+                        );
+                    }))
+                }),
         )
     }
 
@@ -811,23 +849,24 @@ impl NativeRequestView {
                 } else {
                     answer.read(cx).value().as_ref() == label.as_str()
                 };
-                Some(
+                let description = field(option, "description")
+                    .as_str()
+                    .unwrap_or(&label)
+                    .to_owned();
+                // The request can resolve elsewhere while the pointer rests on an option.
+                Some(super::element_tooltip(
+                    gpui_kit::SharedString::from(format!("{id}:tooltip")),
+                    description,
                     Button::new(id)
                         .label(label.clone())
                         .small()
                         .ghost()
                         .disabled(pending)
                         .selected(selected)
-                        .tooltip(
-                            field(option, "description")
-                                .as_str()
-                                .unwrap_or(&label)
-                                .to_owned(),
-                        )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.choose_question_option(&target, &key, &label, window, cx);
                         })),
-                )
+                ))
             });
         div()
             .flex()
@@ -923,6 +962,7 @@ fn request_title(request: &NativeAgentRequest) -> &str {
             "pi.confirm" => "Confirm",
             "mcpServer/elicitation/request" if request.is_mcp_approval() => "Allow this tool?",
             "mcpServer/elicitation/request" => "MCP request",
+            method if method == bootty_agents::APPLICATION_ACCESS_METHOD => "Allow app access?",
             _ => "Provider request",
         })
 }

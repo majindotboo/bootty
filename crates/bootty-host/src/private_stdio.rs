@@ -14,6 +14,9 @@ use std::{fs, io::BufReader, path::PathBuf};
 pub const MAX_TOOL_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Response budget includes a validated PNG up to 8 MiB.
 pub const MAX_TOOL_IMAGE_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+/// The longest one tool call may take, including an app approval the user answers. MCP clients
+/// commonly time tools out after 60 seconds.
+pub const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(55);
 
 #[cfg(unix)]
 #[derive(Deserialize, Serialize)]
@@ -63,9 +66,12 @@ pub fn tool_stdio(
             let request: Value =
                 serde_json::from_slice(&bytes).map_err(|_| invalid_connection())?;
             let mut stream = UnixStream::connect(&secret.socket)?;
-            let timeout = Some(std::time::Duration::from_secs(6));
-            stream.set_read_timeout(timeout)?;
-            stream.set_write_timeout(timeout)?;
+            // The host answers within its own call deadline; the margin lets that answer, not
+            // this read timeout, end a slow call.
+            stream.set_read_timeout(Some(
+                TOOL_CALL_TIMEOUT.saturating_add(std::time::Duration::from_secs(5)),
+            ))?;
+            stream.set_write_timeout(Some(std::time::Duration::from_secs(6)))?;
             serde_json::to_writer(
                 &mut stream,
                 &Envelope {

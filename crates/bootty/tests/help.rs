@@ -58,3 +58,27 @@ fn raw_stdin_is_separate_from_explicit_arguments_and_json_stdin() {
         .is_err()
     );
 }
+
+/// `bootty command` documents `--target` as its own option.
+#[rstest]
+fn explicit_command_documents_its_target_option() {
+    let cli = Cli::try_parse_from([
+        "bootty",
+        "command",
+        "agents.native.status",
+        "--target",
+        "native:claude:26@43",
+        "native:claude:26",
+        "43",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.subcommand(),
+        Some(bootty::cli::Command::Invoke { target: Some(target), arguments, .. })
+            if target == "native:claude:26@43" && arguments == &["native:claude:26", "43"]
+    ));
+    let help = Cli::try_parse_from(["bootty", "command", "--help"])
+        .expect_err("command help exits through clap")
+        .to_string();
+    assert!(help.contains("--target <HANDLE@GENERATION>"), "{help}");
+}

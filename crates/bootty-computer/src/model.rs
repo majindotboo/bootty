@@ -421,8 +421,8 @@ impl ComputerResult {
                 | ComputerAction::TypeText { .. }
                 | ComputerAction::Key { .. }
                 | ComputerAction::Scroll { .. },
-            ) => Err(ComputerError::Helper(
-                "helper returned an unexpected result".into(),
+            ) => Err(ComputerError::Platform(
+                "computer use returned an unexpected result".into(),
             )),
             (
                 Self::Snapshot {
@@ -441,26 +441,26 @@ impl ComputerResult {
                     _ => None,
                 };
                 if requested_region.as_ref() != expected_region {
-                    return Err(ComputerError::Helper(
+                    return Err(ComputerError::Platform(
                         "capture source geometry changed".into(),
                     ));
                 }
                 match (expected_region, region) {
                     (Some(requested), Some(actual)) => {
                         actual.validate().map_err(|_| {
-                            ComputerError::Helper("invalid capture geometry".into())
+                            ComputerError::Platform("invalid capture geometry".into())
                         })?;
                         if !requested.contains_rect(actual)
                             || !captured.bounds.contains_rect(actual)
                         {
-                            return Err(ComputerError::Helper(
+                            return Err(ComputerError::Platform(
                                 "capture lies outside the requested region".into(),
                             ));
                         }
                     }
                     (None, None) => {}
                     _ => {
-                        return Err(ComputerError::Helper(
+                        return Err(ComputerError::Platform(
                             "capture source geometry missing".into(),
                         ));
                     }
@@ -481,7 +481,7 @@ impl ComputerResult {
                     || png_base64.is_empty()
                     || png_base64.len() > 11_184_812
                 {
-                    return Err(ComputerError::Helper(
+                    return Err(ComputerError::Platform(
                         "screenshot exceeds the image limit".into(),
                     ));
                 }
@@ -512,10 +512,10 @@ pub enum ComputerError {
     SecureInput,
     #[error("invalid computer action: {0}")]
     InvalidAction(String),
-    #[error("computer-control helper timed out; the action was not retried")]
+    #[error("computer use timed out; the action was not retried")]
     Timeout,
-    #[error("computer-control helper failed: {0}")]
-    Helper(String),
+    #[error("computer use failed: {0}")]
+    Platform(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]

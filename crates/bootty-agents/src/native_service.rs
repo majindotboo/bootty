@@ -1608,6 +1608,7 @@ impl NativeAgentService {
         record.snapshot.requests.clear();
         record.snapshot.error = None;
         record.snapshot.pending_user_item = None;
+        record.snapshot.stop_requested_at = None;
         record.snapshot.first_turn = None;
         record.snapshot.interrupt_unfinished_work();
         self.commit(candidate)?;

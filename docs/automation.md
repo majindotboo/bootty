@@ -4,6 +4,21 @@ All actions use the command catalog. `bootty commands` lists it; `bootty describ
 NAME` describes arguments and targets. A target captures a resource generation,
 so replacing a pane cannot redirect a pending action to another process.
 
+## Target a resource
+
+`bootty command NAME` and discovered commands (`bootty NAME`) both take
+`--target HANDLE@GENERATION`, before or after the command's arguments. The
+target's kind comes from the command's description. To find a conversation,
+read the current Space, then list its conversations:
+
+```sh
+bootty --json command resource.current binding
+bootty --json command agents.native.list --target 'SPACE_HANDLE@GENERATION'
+bootty command agents.native.status --target native:claude:26@43 native:claude:26 43
+```
+
+Each listed conversation's `id` and `generation` form its target.
+
 ## Wait for a condition
 
 ```sh

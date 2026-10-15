@@ -113,19 +113,17 @@ fn run_command(
             arguments,
             stdin,
             stdin_json,
+            target,
             yes,
             detached,
         }) => {
-            let arguments = if *stdin_json {
-                cli_runtime::read_stdin_arguments()?
-            } else if *stdin {
-                std::iter::once(cli_runtime::read_stdin()?)
-                    .chain(arguments.iter().cloned())
-                    .collect()
-            } else {
-                arguments.clone()
-            };
-            let invocation = CommandInvocation::new(name, arguments, Caller::Cli);
+            let invocation = cli_runtime::command_invocation(
+                cli,
+                name,
+                arguments,
+                (*stdin, *stdin_json),
+                target.as_deref(),
+            )?;
             let response = cli_runtime::invoke_control_command(cli, invocation, *yes, *detached)?;
             if *detached {
                 cli_runtime::print_control_response(response, cli.json())?;

@@ -242,7 +242,6 @@ pub struct NativeAgentSessionView {
     availability: ProviderAvailability,
     requests: Entity<requests::NativeRequestView>,
     pending: BTreeSet<String>,
-    cancellation_requested: bool,
     error: Option<String>,
     dismissed_error: Option<String>,
     subscriptions: Vec<Subscription>,
@@ -407,7 +406,6 @@ impl NativeAgentSessionView {
             },
             requests,
             pending: BTreeSet::new(),
-            cancellation_requested: false,
             error: None,
             dismissed_error: None,
             subscriptions: vec![subscription, citation_subscription, request_subscription],
@@ -661,7 +659,6 @@ impl NativeAgentSessionView {
         } else {
             // A resumed generation owns fresh request tokens; old responses cannot affect it.
             self.pending.clear();
-            self.cancellation_requested = false;
             self.error = None;
             self.dismissed_error = None;
         }
@@ -690,9 +687,6 @@ impl NativeAgentSessionView {
                 self.model_picker = None;
                 self.model_picker_subscription = None;
             }
-        }
-        if !is_busy(self.record.snapshot.status) {
-            self.cancellation_requested = false;
         }
         if previous.snapshot.transcript != self.record.snapshot.transcript {
             self.sync_transcript(&previous.snapshot.transcript, window, cx);
@@ -982,9 +976,6 @@ impl NativeAgentSessionView {
                 this.pending.remove(&pending);
                 match result {
                     Ok(CommandOutcome::Success { value, .. }) => {
-                        if operation == "interrupt" {
-                            this.cancellation_requested = is_busy(this.record.snapshot.status);
-                        }
                         if value.get("provider_writer").and_then(Value::as_str) != Some("blocked")
                             && let Some(draft) = submitted_draft
                         {
@@ -1186,8 +1177,10 @@ impl NativeAgentSessionView {
                     } else {
                         self.follow_up_behavior
                     };
+                    // A stopping turn can't take a steer; its message waits in the queue.
                     let operation = if is_busy(self.record.snapshot.status)
-                        && behavior == bootty_config::config::FollowUpBehavior::Queue
+                        && (behavior == bootty_config::config::FollowUpBehavior::Queue
+                            || self.record.snapshot.stopping())
                     {
                         "queue"
                     } else {
@@ -1777,6 +1770,7 @@ impl NativeAgentSessionView {
     fn render_message(
         &self,
         ix: usize,
+        meta: bool,
         owner: gpui_kit::WeakEntity<Self>,
         window: &Window,
         cx: &App,
@@ -1813,14 +1807,10 @@ impl NativeAgentSessionView {
             .flex_col()
             .when(user, gpui_kit::Styled::items_end)
             .child(self.render_message_body(item, owner.clone(), cx))
-            .map(|row| match (item.complete, item.role.as_str()) {
-                (true, "user" | "assistant") => {
-                    row.child(self.message_metadata(item, focused, owner, cx))
-                }
-                // Hold the metadata lane while a reply streams so finishing never shifts it.
-                (false, "assistant") => row.child(div().h_8()),
-                _ => row,
-            });
+            .when(
+                meta && item.complete && matches!(item.role.as_str(), "user" | "assistant"),
+                |row| row.child(self.message_metadata(item, focused, owner, cx)),
+            );
         div()
             .w_full()
             .min_w_0()
@@ -1891,6 +1881,7 @@ impl NativeAgentSessionView {
             })
             .when(!item.citations.is_empty(), |row| row.child(Self::render_sent_citations(item, &owner, cx).mt_1()))
             .when(!item.attachments.is_empty(), |row| row.child(self.render_sent_attachments(item, cx).mt_1()))
+            .when(!item.applications.is_empty(), |row| row.child(Self::render_sent_applications(item, cx).mt_1()))
             .when(collapsible, |row| {
                 row.child(Button::new(gpui_kit::SharedString::from(format!("expand-message:{id}")))
                     .debug_selector({
@@ -2708,15 +2699,19 @@ impl NativeAgentSessionView {
                 )
             })
             .when(
-                !self.provider_enabled() || self.cancellation_requested,
+                !self.provider_enabled() || self.record.snapshot.stopping(),
                 |row| {
                     row.child(
                         div()
+                            .debug_selector(|| "native-composer-notice".into())
                             .flex_1()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
                             .child(if self.provider_enabled() {
-                                "Stopping…".to_owned()
+                                format!(
+                                    "Stopping… Stop again to restart {}.",
+                                    self.record.config.provider.display_name()
+                                )
                             } else {
                                 format!(
                                     "{} is disabled in Settings",
@@ -2766,11 +2761,20 @@ impl NativeAgentSessionView {
                     )
                     .child(self.speech.clone())
                     .when(interruptible, |row| {
-                        row.child(
+                        // The turn can end under a resting pointer.
+                        row.child(element_tooltip(
+                            "native-interrupt-tooltip",
+                            if self.record.snapshot.stopping() {
+                                format!(
+                                    "Restart {} to stop now",
+                                    self.record.config.provider.display_name()
+                                )
+                            } else {
+                                "Interrupt".to_owned()
+                            },
                             Button::new("native-interrupt")
                                 .debug_selector(|| "native-interrupt".into())
                                 .accessibility_label("Interrupt")
-                                .tooltip("Interrupt")
                                 .icon(gpui_kit::assets::IconName::Square)
                                 .small()
                                 .ghost()
@@ -2779,7 +2783,7 @@ impl NativeAgentSessionView {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.command("interrupt", vec![], window, cx);
                                 })),
-                        )
+                        ))
                     })
                     .when(resumable, |row| {
                         row.child(
@@ -2973,7 +2977,10 @@ impl NativeAgentSessionView {
     }
 
     fn render_jump_to_latest(cx: &Context<Self>) -> impl IntoElement {
-        div().flex().justify_center().child(
+        // Following new output hides this pill under a resting pointer.
+        div().flex().justify_center().child(element_tooltip(
+            "native-jump-latest-tooltip",
+            "Jump to latest",
             Button::new("native-jump-latest")
                 .debug_selector(|| "native-jump-latest".into())
                 .icon(IconName::ChevronDown)
@@ -2983,7 +2990,6 @@ impl NativeAgentSessionView {
                 .bg(cx.theme().background)
                 .small()
                 .accessibility_label("Jump to latest")
-                .tooltip("Jump to latest")
                 .on_click(cx.listener(|this, _, window, cx| {
                     if this
                         .history_page
@@ -2996,7 +3002,7 @@ impl NativeAgentSessionView {
                     }
                     cx.notify();
                 })),
-        )
+        ))
     }
 
     pub(crate) fn contains_focused(&self, window: &Window, cx: &App) -> bool {
@@ -3098,6 +3104,28 @@ impl Render for NativeAgentSessionView {
 }
 
 /// Token counts read at a glance: 950, 12k, 1.2M.
+/// Give `control` a tooltip that ends with it. `Button::tooltip` shows through a window overlay
+/// that hides only on hover-out, so a button that disappears under a still pointer leaves it up.
+fn element_tooltip(
+    id: impl Into<gpui_kit::ElementId>,
+    label: impl Into<gpui_kit::SharedString>,
+    control: impl IntoElement,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let label = label.into();
+    div()
+        .id(id)
+        .flex_shrink_0()
+        .child(control)
+        .tooltip(move |window, cx| {
+            let label = label.clone();
+            gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
+                let selector = format!("tooltip:{label}");
+                div().debug_selector(move || selector).child(label.clone())
+            })
+            .build(window, cx)
+        })
+}
+
 fn compact_tokens(tokens: u64) -> String {
     if tokens < 1_000 {
         tokens.to_string()

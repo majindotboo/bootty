@@ -318,8 +318,16 @@ impl AppState {
                 message: "Conversation identity or generation changed".into(),
             });
         }
+        if operation == "approve"
+            && let Err(outcome) = self.prepare_application_answer(&service, &invocation, effects)
+        {
+            return CommandDispatch::Complete(outcome);
+        }
         if let Err(outcome) = self.native_operation_enabled(&service, target, operation) {
             return CommandDispatch::Complete(outcome);
+        }
+        if operation == "interrupt" && stop_restarts(&service, target) {
+            return self.dispatch_native_resume(service, &invocation, execution);
         }
         if operation == "regenerate-title" {
             return self.dispatch_regenerate_title(service, &invocation, execution);
@@ -580,6 +588,47 @@ impl AppState {
         });
         CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
     }
+    /// App access is answered only in Bootty's own UI, so an agent cannot approve itself through
+    /// the CLI. Always allow is saved before the grant, so a failed write leaves the card open.
+    fn prepare_application_answer(
+        &mut self,
+        service: &NativeAgentService,
+        invocation: &CommandInvocation,
+        effects: &mut Vec<AppEffect>,
+    ) -> Result<(), CommandOutcome> {
+        let (Some(target), Some(id), Some(decision)) = (
+            invocation.target.as_ref(),
+            invocation.arguments.get(2),
+            invocation.arguments.get(3),
+        ) else {
+            return Ok(());
+        };
+        let Some(application) = service.resolve(target).ok().and_then(|session| {
+            session
+                .snapshot()
+                .requests
+                .iter()
+                .find(|request| &request.id == id)
+                .and_then(bootty_agents::NativeAgentRequest::application_access)
+        }) else {
+            return Ok(());
+        };
+        if invocation.caller != Caller::Internal {
+            return Err(CommandOutcome::Denied {
+                message: "Answer app access requests in Bootty".into(),
+            });
+        }
+        if decision == bootty_agents::NativeApprovalDecision::AlwaysAllow.id()
+            && !self.always_allow_application(&application.bundle_id, effects)
+        {
+            return Err(failure(format!(
+                "Couldn't save {} to always-allowed apps",
+                application.name
+            )));
+        }
+        Ok(())
+    }
+
     fn dispatch_native_computer(
         &self,
         service: Arc<NativeAgentService>,
@@ -1188,7 +1237,8 @@ impl AppState {
         } else {
             None
         };
-        let captured = match if permissions.is_some() {
+        let restart = invocation.command == "agents.native.interrupt";
+        let captured = match if permissions.is_some() || restart {
             self.capture_native_destination(&record, &launch_invocation)
         } else {
             self.capture_native_resume(&record, &launch_invocation)
@@ -1210,14 +1260,13 @@ impl AppState {
         };
         let target = record.target();
         std::thread::spawn(move || {
-            if let Some(outcome) = permissions.and_then(|mode| {
-                configure_native_permissions(
-                    &service,
-                    &record.target(),
-                    mode,
-                    (deadline, &cancellation),
-                )
-            }) {
+            if let Some(outcome) = prepare_native_resume(
+                &service,
+                &record.target(),
+                restart,
+                permissions,
+                (deadline, &cancellation),
+            ) {
                 let _ = sender.send(outcome);
                 repaint();
                 return;
@@ -2868,6 +2917,28 @@ fn submit_native_input(
         serde_json::to_value(service.prompt_input(target, &prompt)?)
     }
     .map_err(|error| error.to_string())
+}
+
+/// A second stop restarts a provider that acknowledged the first but never ended its turn.
+/// Resume replays the captured session, and queued messages send once it is idle.
+fn stop_restarts(service: &NativeAgentService, target: &CommandTarget) -> bool {
+    service
+        .resolve(target)
+        .is_ok_and(|session| session.snapshot().stopping())
+}
+
+/// Ends the live provider before a resume that replaces it: a restart, or a permission change.
+fn prepare_native_resume(
+    service: &NativeAgentService,
+    target: &CommandTarget,
+    restart: bool,
+    permissions: Option<bootty_agents::NativePermissionMode>,
+    execution: (Instant, &CommandCancellation),
+) -> Option<CommandOutcome> {
+    if restart && let Err(error) = service.stop(target) {
+        return Some(failure(error));
+    }
+    permissions.and_then(|mode| configure_native_permissions(service, target, mode, execution))
 }
 
 fn complete_native_operation(

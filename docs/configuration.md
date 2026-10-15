@@ -46,7 +46,7 @@ The Permissions settings page and `[computer]` table control local desktop compu
 `enabled` and `capture-enabled`, plus an existing macOS Screen Recording grant.
 Input requires both `enabled` and `input-enabled`, plus an existing Accessibility
 grant. Changing these settings does not request or grant OS permission.
-`computer.status` and `computer.targets` remain readable while disabled.
+`computer.status`, `computer.targets` and `computer.icons` remain readable while disabled.
 Manual browser screenshot attachments use the existing Screen Recording grant
 independently of these agent-command switches.
 
@@ -58,17 +58,21 @@ the rest of the conversation, **Always allow** also adds its bundle id to
 the prompt grants it the same way. This consent replaces the switches above for
 agent app use; macOS Screen Recording and Accessibility grants still apply.
 Input targets the window from the app's latest capture, so an agent captures an
-app before clicking or typing. Agents never use Bootty itself, terminals, or
-System Settings.
+app before clicking or typing. Agents never use the Bootty instance they run
+in, terminals, or System Settings; another Bootty instance, such as a
+development build, is an ordinary app.
 
 Computer commands use an exact window token returned by `computer.targets`;
 input requires that window to remain focused and pointer coordinates to remain
-uncovered. Window or process changes invalidate the token. The helper never
-activates another app or redirects input. Capture supports macOS 14 or later;
-input supports macOS 13 or later. Other platforms return `Unsupported`.
-`computer.snapshot` writes a bounded PNG to the supplied absolute local path
-and never replaces an existing file. Capture needs a packaged app with its
-signed helper; runtime does not install one.
+uncovered. Window or process changes invalidate the token. Only the focus
+command activates an app, and input is never redirected to another window.
+Computer use works on macOS, Windows and Linux on X11, including XWayland apps
+in a Wayland session; native Wayland windows are not listed. On macOS, capture
+needs macOS 14 or later and input goes straight to the target app, so the
+pointer never moves; Bootty shows its own cursor briefly where each click, move
+or scroll landed. On Windows and Linux, input drives the real pointer, and
+Command shortcuts are sent as Control. `computer.snapshot` writes a bounded PNG
+to the supplied absolute local path and never replaces an existing file.
 
 ```toml
 [computer]
@@ -979,8 +983,8 @@ than starting a new conversation.
 
 `agents.follow-up-behavior` defaults to `"queue"`. Messages sent during an active
 turn wait for it to finish; `"steer"` sends them into the active turn instead.
-Command+Enter (Control+Enter on other platforms) uses the opposite behavior for
-one message. The queued messages appear above the composer and remain with the
+`agents.send-shortcut` decides which keys send one message with the opposite
+behavior. The queued messages appear above the composer and remain with the
 conversation when its tab closes. Failed or interrupted deliveries remain
 available for an explicit retry.
 
@@ -1022,8 +1026,9 @@ tooltips describe their purpose and show the active configured shortcut.
 
 `agents.send-shortcut` accepts `"enter"` (default), `"mod-enter-multiline"`, or
 `"mod-enter"`. It applies to both the new-session and conversation composers.
-Shift+Enter inserts a newline with the default shortcut. When Command/Control+Enter
-is required, adding Shift uses the opposite follow-up behavior for that message.
+With the default shortcut, Shift+Enter inserts a newline and Command/Control+Enter
+sends with the opposite follow-up behavior. When Command/Control+Enter is required,
+adding Shift uses the opposite follow-up behavior for that message.
 
 
 `agents.response-streaming` selects `"live"` (default), `"paragraph"`, or `"complete"`.

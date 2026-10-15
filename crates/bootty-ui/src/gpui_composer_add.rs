@@ -68,13 +68,7 @@ impl ComposerCompletion {
                         this.add_menus.retain(|(menu, _)| menu.upgrade().is_some());
                         this.add_menus.push((popup, files.clone()));
                         this.load_add_catalog(window, cx);
-                        (
-                            this.catalog.clone(),
-                            this.applications.clone(),
-                            this.error.is_some(),
-                            this.plan_mode,
-                            this.draft_goal.clone(),
-                        )
+                        this.add_menu_state()
                     })
                     .ok();
                 build_menu(menu, &owner, catalog, &files, window, cx)
@@ -83,11 +77,11 @@ impl ComposerCompletion {
             .into_any_element()
     }
 
+    /// Each opening refreshes account capabilities and open apps. The last results stay on
+    /// screen until fresh ones arrive, so the menu keeps its shape instead of popping in.
     fn load_add_catalog(&mut self, window: &Window, cx: &Context<Self>) {
         self.error = None;
         if !self.pending.contains_key("catalog") {
-            // Each opening refreshes account capabilities; installed apps can change externally.
-            self.catalog = None;
             self.fetch(
                 self.scope.catalog.clone(),
                 "catalog",
@@ -100,7 +94,6 @@ impl ComposerCompletion {
             && cfg!(target_os = "macos")
             && !self.pending.contains_key("applications")
         {
-            self.applications = None;
             self.fetch(
                 CommandInvocation::new("computer.targets", Vec::new(), Caller::Internal),
                 "applications",
@@ -111,15 +104,25 @@ impl ComposerCompletion {
         }
     }
 
+    fn add_menu_state(&self) -> AddMenuState {
+        AddMenuState {
+            catalog: self.catalog.clone(),
+            applications: if !self.scope.applications || !cfg!(target_os = "macos") {
+                AddApplications::Unsupported
+            } else {
+                self.applications
+                    .clone()
+                    .map_or(AddApplications::Loading, AddApplications::Loaded)
+            },
+            failed: self.error.is_some(),
+            plan: self.plan_mode,
+            draft_goal: self.draft_goal.clone(),
+        }
+    }
+
     pub(super) fn refresh_add_menus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let owner = cx.weak_entity();
-        let catalog = Some((
-            self.catalog.clone(),
-            self.applications.clone(),
-            self.error.is_some(),
-            self.plan_mode,
-            self.draft_goal.clone(),
-        ));
+        let catalog = Some(self.add_menu_state());
         self.add_menus.retain(|(popup, files)| {
             let Some(popup) = popup.upgrade() else {
                 return false;
@@ -161,30 +164,45 @@ impl ComposerCompletion {
     }
 }
 
-type AddCatalog = Option<(
-    Option<NativeCompletionCatalog>,
-    Option<Vec<bootty_computer::ComputerTarget>>,
-    bool,
-    bool,
-    Option<String>,
-)>;
+#[derive(Clone)]
+struct AddMenuState {
+    catalog: Option<NativeCompletionCatalog>,
+    applications: AddApplications,
+    failed: bool,
+    plan: bool,
+    draft_goal: Option<String>,
+}
+
+#[derive(Clone)]
+enum AddApplications {
+    Unsupported,
+    Loading,
+    Loaded(Vec<bootty_computer::ComputerTarget>),
+}
 
 fn build_menu(
     mut menu: PopupMenu,
     owner: &WeakEntity<ComposerCompletion>,
-    state: AddCatalog,
+    state: Option<AddMenuState>,
     files: &ComposerFileActions,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     menu = file_menu(menu, files, window);
-    let Some((catalog, applications, failed, plan, draft_goal)) = state else {
+    let Some(AddMenuState {
+        catalog,
+        applications,
+        failed,
+        plan,
+        draft_goal,
+    }) = state
+    else {
         return menu;
     };
     menu = application_menu(menu, owner, applications, window, cx);
     if let Some(catalog) = &catalog {
         menu = task_menu(menu, owner, catalog, plan, draft_goal.as_deref());
-        menu = provider_menu(menu, owner, catalog);
+        menu = provider_menu(menu, owner, catalog, window, cx);
     } else {
         menu = menu.separator().item(
             PopupMenuItem::new(if failed {
@@ -253,55 +271,104 @@ fn file_menu(mut menu: PopupMenu, actions: &ComposerFileActions, window: &Window
 fn application_menu(
     menu: PopupMenu,
     owner: &WeakEntity<ComposerCompletion>,
-    applications: Option<Vec<bootty_computer::ComputerTarget>>,
+    applications: AddApplications,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    let Some(applications) = applications.filter(|apps| !apps.is_empty()) else {
+    if matches!(applications, AddApplications::Unsupported) {
         return menu;
-    };
+    }
     let owner = owner.clone();
-    menu.separator().submenu(
+    menu.separator().submenu_with_icon(
+        Some(gpui_kit::component::Icon::new(IconName::Monitor)),
         "Apps on this computer",
         window,
         cx,
-        move |mut menu, _, _| {
-            for target in &applications {
-                let app = owner.clone();
-                let target = target.clone();
-                let name = super::application_name(&target);
-                // Several windows of one app must stay distinguishable.
-                let label = target
-                    .title
-                    .as_deref()
-                    .filter(|title| !title.trim().is_empty())
-                    .map_or_else(
-                        || format!("Attach {name}"),
-                        |title| format!("Attach {name} — {title}"),
-                    );
-                menu = menu.item(PopupMenuItem::new(label).icon(IconName::Monitor).on_click(
-                    move |_, _, cx| {
-                        _ = app.update(cx, |this, cx| {
-                            let range = this.editor.read(cx).selected_range();
-                            let original = this
-                                .editor
-                                .read(cx)
-                                .value()
-                                .get(range.clone())
-                                .unwrap_or_default()
-                                .to_owned();
-                            cx.emit(CompletionSelection {
-                                source: CompletionSource::Application(target.clone()),
-                                range,
-                                original,
-                            });
-                        });
-                    },
-                ));
+        move |menu, window, _| {
+            let mut menu = bounded_submenu(menu, window);
+            let targets = match &applications {
+                AddApplications::Loaded(targets) if !targets.is_empty() => targets,
+                AddApplications::Loaded(_) => {
+                    return menu.item(PopupMenuItem::new("No open app windows").disabled(true));
+                }
+                _ => return menu.item(PopupMenuItem::new("Loading apps…").disabled(true)),
+            };
+            for target in targets {
+                menu = menu.item(application_item(&owner, target));
             }
             menu
         },
     )
+}
+
+/// Long lists scroll inside the window instead of running off-screen.
+fn bounded_submenu(menu: PopupMenu, window: &Window) -> PopupMenu {
+    menu.max_h(gpui_kit::px(f32::from(window.rem_size()).mul_add(24., 0.)))
+        .scrollable(true)
+}
+
+/// The app's icon and name, with the window title so several windows of one app stay distinct.
+fn application_item(
+    owner: &WeakEntity<ComposerCompletion>,
+    target: &bootty_computer::ComputerTarget,
+) -> PopupMenuItem {
+    let app = owner.clone();
+    let selection = target.clone();
+    let name = super::application_name(target).to_owned();
+    let bundle_id = target.bundle_id.clone();
+    let title = target
+        .title
+        .clone()
+        .filter(|title| !title.trim().is_empty());
+    let key = gpui_kit::SharedString::from(format!(
+        "composer-add-app-{}-{}",
+        target.process_id, target.window_id
+    ));
+    PopupMenuItem::element(move |_, cx| {
+        div()
+            .id(key.clone())
+            .role(gpui_kit::Role::MenuItem)
+            .aria_label(name.clone())
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .child(crate::gpui_application_icons::render(
+                &bundle_id,
+                crate::gpui::IconSize::XSmall,
+                cx.theme().muted_foreground,
+                cx,
+            ))
+            .child(div().flex_shrink_0().child(name.clone()))
+            .when_some(title.clone(), |row, title| {
+                row.child(
+                    div()
+                        .ml_1()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(title),
+                )
+            })
+    })
+    .on_click(move |_, _, cx| {
+        _ = app.update(cx, |this, cx| {
+            let range = this.editor.read(cx).selected_range();
+            let original = this
+                .editor
+                .read(cx)
+                .value()
+                .get(range.clone())
+                .unwrap_or_default()
+                .to_owned();
+            cx.emit(CompletionSelection {
+                source: CompletionSource::Application(selection.clone()),
+                range,
+                original,
+            });
+        });
+    })
 }
 
 fn task_menu(
@@ -399,85 +466,49 @@ fn task_menu(
     menu
 }
 
+/// Connected apps, plugins and skills each open a submenu, so the root menu stays short.
 fn provider_menu(
     mut menu: PopupMenu,
     owner: &WeakEntity<ComposerCompletion>,
     catalog: &NativeCompletionCatalog,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    if catalog.options.iter().any(|option| {
+        matches!(
+            option.kind,
+            NativeCompletionKind::App | NativeCompletionKind::Plugin | NativeCompletionKind::Skill
+        )
+    }) || !catalog.unavailable.is_empty()
+    {
+        menu = menu.separator();
+    }
     for (kind, title, icon) in [
-        (NativeCompletionKind::App, "Apps", "app-window"),
-        (NativeCompletionKind::Plugin, "Plugins", "plug"),
-        (NativeCompletionKind::Skill, "Skills", "book-open"),
+        (NativeCompletionKind::App, "Connected apps", IconName::Globe),
+        (NativeCompletionKind::Plugin, "Plugins", IconName::Wrench),
+        (NativeCompletionKind::Skill, "Skills", IconName::FileText),
     ] {
-        let options: Vec<_> = catalog
+        let options: Vec<NativeCompletionOption> = catalog
             .options
             .iter()
             .filter(|option| option.kind == kind)
+            .cloned()
             .collect();
         if !options.is_empty() {
-            menu = menu.separator().label(title);
-            for option in options {
-                let app = owner.clone();
-                let selection = option.clone();
-                let label = option.display_name.clone();
-                let description = option.description.clone();
-                let icon_url = option.icon_url.clone();
-                let key = gpui_kit::SharedString::from(format!(
-                    "composer-add-{:?}-{}",
-                    kind, option.name
-                ));
-                menu = menu.item(
-                    PopupMenuItem::element(move |_, cx| {
-                        div()
-                            .id(key.clone())
-                            .role(gpui_kit::Role::MenuItem)
-                            .aria_label(label.clone())
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            // Paint artwork in the icon slot reserved by PopupMenu.
-                            .ml_neg_4()
-                            .w_full()
-                            .min_w_0()
-                            .child(
-                                if matches!(
-                                    kind,
-                                    NativeCompletionKind::App | NativeCompletionKind::Plugin
-                                ) {
-                                    gpui_kit::component::avatar::Avatar::new()
-                                        .name(label.chars().take(1).collect::<String>())
-                                        .xsmall()
-                                        .size_3()
-                                        .when_some(
-                                            icon_url.clone(),
-                                            gpui_kit::component::avatar::Avatar::src,
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    crate::gpui::sized_icon(
-                                        icon,
-                                        crate::gpui::IconSize::XSmall,
-                                        cx.theme().muted_foreground,
-                                    )
-                                },
-                            )
-                            .child(div().flex_shrink_0().child(label.clone()))
-                            .when_some(description.clone(), |row, text| {
-                                row.child(
-                                    div()
-                                        .ml_1()
-                                        .min_w_0()
-                                        .text_ellipsis()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(text),
-                                )
-                            })
-                    })
-                    .on_click(move |_, window, cx| {
-                        _ = app.update(cx, |this, cx| this.add_provider(&selection, window, cx));
-                    }),
-                );
-            }
+            let owner = owner.clone();
+            menu = menu.submenu_with_icon(
+                Some(gpui_kit::component::Icon::new(icon)),
+                title,
+                window,
+                cx,
+                move |menu, window, _| {
+                    let mut menu = bounded_submenu(menu, window);
+                    for option in &options {
+                        menu = menu.item(provider_item(&owner, option));
+                    }
+                    menu
+                },
+            );
         }
         if catalog.unavailable.contains(&kind) {
             menu = menu.item(
@@ -487,4 +518,65 @@ fn provider_menu(
         }
     }
     menu
+}
+
+/// The provider's artwork, or a kind glyph, with the name and a muted description.
+fn provider_item(
+    owner: &WeakEntity<ComposerCompletion>,
+    option: &NativeCompletionOption,
+) -> PopupMenuItem {
+    let app = owner.clone();
+    let selection = option.clone();
+    let label = option.display_name.clone();
+    let description = option.description.clone();
+    let artwork = option.icon_url.clone();
+    let glyph = match option.kind {
+        NativeCompletionKind::App => "app-window",
+        NativeCompletionKind::Plugin => "plug",
+        _ => "book-open",
+    };
+    let key =
+        gpui_kit::SharedString::from(format!("composer-add-{:?}-{}", option.kind, option.name));
+    PopupMenuItem::element(move |_, cx| {
+        div()
+            .id(key.clone())
+            .role(gpui_kit::Role::MenuItem)
+            .aria_label(label.clone())
+            .flex()
+            .items_center()
+            .gap_2()
+            .w_full()
+            .min_w_0()
+            .max_w(gpui_kit::rems(28.))
+            .child(artwork.as_deref().map_or_else(
+                || {
+                    crate::gpui::sized_icon(
+                        glyph,
+                        crate::gpui::IconSize::XSmall,
+                        cx.theme().muted_foreground,
+                    )
+                },
+                |url| {
+                    crate::gpui_application_icons::render(
+                        url,
+                        crate::gpui::IconSize::XSmall,
+                        cx.theme().muted_foreground,
+                        cx,
+                    )
+                },
+            ))
+            .child(div().flex_shrink_0().child(label.clone()))
+            .when_some(description.clone(), |row, text| {
+                row.child(
+                    div()
+                        .min_w_0()
+                        .text_ellipsis()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(text),
+                )
+            })
+    })
+    .on_click(move |_, window, cx| {
+        _ = app.update(cx, |this, cx| this.add_provider(&selection, window, cx));
+    })
 }

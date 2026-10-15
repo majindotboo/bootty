@@ -94,6 +94,78 @@ pub fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
     }
 }
 
+/// Builds a `bootty command NAME` invocation. Like the discovered-command path, `--target` may
+/// follow the arguments and takes its kind from the command's descriptor; stdin stays data.
+/// # Errors
+/// Returns transport errors, unknown commands, unreadable stdin, or an invalid target.
+pub fn command_invocation(
+    cli: &Cli,
+    name: &str,
+    raw: &[String],
+    stdin: (bool, bool),
+    target: Option<&str>,
+) -> Result<CommandInvocation> {
+    let mut target = target.map(str::to_owned);
+    let mut arguments = Vec::new();
+    let mut input = raw.iter();
+    while let Some(argument) = input.next() {
+        if argument == "--target" {
+            anyhow::ensure!(target.is_none(), "--target was given more than once");
+            target = Some(
+                input
+                    .next()
+                    .context("--target requires HANDLE@GENERATION")?
+                    .clone(),
+            );
+        } else {
+            arguments.push(argument.clone());
+        }
+    }
+    let arguments = match stdin {
+        (_, true) => read_stdin_arguments()?,
+        (true, _) => std::iter::once(read_stdin()?).chain(arguments).collect(),
+        _ => arguments,
+    };
+    let target = target
+        .map(|value| {
+            let instance =
+                control::select_or_start(cli.start()).map_err(|error| transport_failure(&error))?;
+            let described = control_instance_request(
+                &instance,
+                "command.describe",
+                serde_json::json!({"command": name}),
+            )?;
+            if let Some(error) = described.error {
+                return Err(rpc_failure(&error));
+            }
+            let descriptor: CommandDescriptor = serde_json::from_value(
+                described
+                    .result
+                    .context("command descriptor response contained no result")?,
+            )?;
+            command_target(&descriptor, &value)
+        })
+        .transpose()?;
+    Ok(CommandInvocation {
+        target,
+        ..CommandInvocation::new(name, arguments, Caller::Cli)
+    })
+}
+
+/// Parses `--target HANDLE@GENERATION` for a described command; both CLI paths share it.
+fn command_target(descriptor: &CommandDescriptor, value: &str) -> Result<CommandTarget> {
+    let (handle, generation) = value
+        .rsplit_once('@')
+        .context("--target requires HANDLE@GENERATION")?;
+    Ok(CommandTarget {
+        kind: descriptor
+            .target
+            .context("command does not accept a target")?,
+        handle: handle.to_owned(),
+        generation: generation.parse().context("invalid target generation")?,
+    })
+}
+
 pub fn invoke_control_command(
     cli: &Cli,
     invocation: CommandInvocation,
@@ -192,16 +264,7 @@ fn parse_dynamic_arguments(
                 let value = input
                     .next()
                     .context("--target requires HANDLE@GENERATION")?;
-                let (handle, generation) = value
-                    .rsplit_once('@')
-                    .context("--target requires HANDLE@GENERATION")?;
-                target = Some(CommandTarget {
-                    kind: descriptor
-                        .target
-                        .context("command does not accept a target")?,
-                    handle: handle.to_owned(),
-                    generation: generation.parse().context("invalid target generation")?,
-                });
+                target = Some(command_target(descriptor, value)?);
             }
             "--stdin-json" => {
                 arguments.extend(read_stdin_arguments()?);

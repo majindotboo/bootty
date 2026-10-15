@@ -3765,6 +3765,7 @@ impl GpuiWorkspace {
         {
             self.advance_frame(window, cx);
         }
+        crate::agent_cursor::sync_pending(cx);
         self.sync_key_bindings(window, cx);
         let active_appearance_variant = self
             .state

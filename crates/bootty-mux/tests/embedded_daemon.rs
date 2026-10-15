@@ -734,16 +734,11 @@ mod scenario {
         let mut captures = Vec::new();
         for pane in session.windows.iter().flat_map(|window| &window.panes) {
             let id = pane.pane_id.as_deref().context("capture pane")?;
-            let (sender, receiver) = mpsc::channel();
-            workspace
+            let capture = workspace
                 .binding(scope)
                 .context("capture Binding")?
-                .capture_checkpoint_pane(id, options, move |result| {
-                    let _ = sender.send(result);
-                });
-            let capture = receiver
-                .recv_timeout(PANE_TIMEOUT)?
-                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                .checkpoint_pane_capture(id, options);
+            let capture = capture().map_err(|error| anyhow::anyhow!("{error}"))?;
             if id == hidden {
                 assert_eq!(capture.text.matches("HIDDEN_COLD_HISTORY_a").count(), 1);
                 anyhow::ensure!(capture.text.contains("38;2;210;80;170"));

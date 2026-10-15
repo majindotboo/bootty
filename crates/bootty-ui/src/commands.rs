@@ -53,7 +53,7 @@ mod surfaces;
 mod themes;
 
 pub use browser::{BrowserAction, BrowserRequest};
-pub use computer::{ApplicationCommand, ComputerCommand};
+pub use computer::{ApplicationCommand, ComputerCommand, agent_may_use};
 pub use dock::{DockAction, DockRequest, PANELS, PanelCreation, PanelDescriptor, panel_descriptor};
 pub use files::FileAction;
 pub use git::GitAction;

@@ -57,11 +57,8 @@ impl DialogView {
                         cx.notify();
                         return;
                     }
-                    let id = format!("application:{}:{}", target.process_id, target.window_id);
-                    let label = format!(
-                        "@{}",
-                        crate::gpui_composer_completion::application_name(target)
-                    );
+                    let token = crate::gpui_prompt_attachments::application_token(target);
+                    let id = token.id().to_string();
                     spec.applications.retain(|mention| mention.id != id);
                     spec.applications
                         .push(bootty_agents::NativeApplicationMention {
@@ -73,11 +70,7 @@ impl DialogView {
                     let applications = spec.applications.clone();
                     this.prompt_textarea.update(cx, |input, cx| {
                         input.set_selected_range(selection.range.clone(), cx);
-                        if let Err(error) = input.replace_with_token(
-                            gpui_kit::component::input::InlineToken::new(id, label),
-                            window,
-                            cx,
-                        ) {
+                        if let Err(error) = input.replace_with_token(token, window, cx) {
                             this.attachment_error = Some(error.to_string());
                         }
                         input.focus_handle(cx).focus(window, cx);

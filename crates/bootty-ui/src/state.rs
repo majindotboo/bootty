@@ -614,6 +614,23 @@ impl AppState {
         }
     }
 
+    /// Add an app to `computer.always-allowed-apps`, keeping existing entries.
+    pub(crate) fn always_allow_application(
+        &mut self,
+        bundle_id: &str,
+        effects: &mut Vec<AppEffect>,
+    ) -> bool {
+        let mut apps = self.config().computer.always_allowed_apps.clone();
+        if apps.iter().any(|app| app == bundle_id) {
+            return true;
+        }
+        apps.push(bundle_id.to_owned());
+        self.mutate_config_document(
+            |document| document.set_strings(&["computer", "always-allowed-apps"], &apps),
+            effects,
+        )
+    }
+
     pub(crate) fn toggle_session_grouping(&mut self, effects: &mut Vec<AppEffect>) -> bool {
         let grouped = !self.config().sidebar.group_by_project;
         self.mutate_config_document(
