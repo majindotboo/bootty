@@ -143,6 +143,12 @@ impl ComposerCompletion {
             .collect();
     }
 
+    pub(crate) fn provider_kind(&self, token_id: &str) -> Option<NativeCompletionKind> {
+        self.provider_mentions
+            .get(token_id)
+            .map(|option| option.kind)
+    }
+
     pub(super) fn provider_mentions(
         &self,
         cx: &App,

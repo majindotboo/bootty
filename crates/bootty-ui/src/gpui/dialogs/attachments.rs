@@ -51,8 +51,14 @@ impl DialogView {
     pub(super) fn attachment_textarea(&self, spec: &DialogSpec, cx: &Context<Self>) -> Textarea {
         let owner = cx.weak_entity();
         let token_owner = owner.clone();
+        let completion = self.completion.clone();
         Textarea::new(&self.prompt_textarea)
-            .token(crate::gpui_prompt_attachments::render)
+            .token(move |context, _, cx| {
+                let kind = completion
+                    .as_ref()
+                    .and_then(|completion| completion.read(cx).provider_kind(context.token().id()));
+                crate::gpui_prompt_attachments::render_with_provider(context, kind, cx)
+            })
             .on_token_click(move |event, window, cx| {
                 _ = token_owner.update(cx, |this, cx| {
                     this.open_new_session_attachment(event.token().id(), window, cx);
@@ -126,7 +132,17 @@ impl DialogView {
                         self.stage_new_session_attachment(path.clone(), None, window, cx);
                     }
                 }
-                gpui_kit::ClipboardEntry::Image(image) => {
+                entry => {
+                    let attachment =
+                        match crate::attachment_source::ClipboardAttachment::from_entry(entry) {
+                            Ok(Some(attachment)) => attachment,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                consumed = true;
+                                self.attachment_error = Some(error);
+                                continue;
+                            }
+                        };
                     consumed = true;
                     if self.spec.as_ref().is_some_and(|spec| {
                         spec.attachments
@@ -137,18 +153,13 @@ impl DialogView {
                         self.attachment_error = Some("Attach at most 16 files".into());
                         continue;
                     }
-                    if image.bytes().len() > bootty_agents::MAX_NATIVE_ATTACHMENT_IMAGE_BYTES {
-                        self.attachment_error = Some("Image exceeds 8 MB".into());
-                        continue;
-                    }
-                    let bytes = image.bytes().to_vec();
                     let dialog = dialog.clone();
                     let epoch = self.attachment_epoch;
                     self.attachment_imports = self.attachment_imports.saturating_add(1);
                     cx.spawn_in(window, async move |owner, cx| {
                         let result = cx
                             .background_executor()
-                            .spawn(async move { crate::gpui_agent_session::clipboard_png(&bytes) })
+                            .spawn(async move { attachment.write() })
                             .await;
                         _ = owner.update_in(cx, |this, window, cx| {
                             this.attachment_imports = this.attachment_imports.saturating_sub(1);
@@ -176,7 +187,6 @@ impl DialogView {
                     })
                     .detach();
                 }
-                gpui_kit::ClipboardEntry::String(_) => {}
             }
         }
         if consumed {

@@ -1683,3 +1683,50 @@ fn effort_commands_skip_hidden_levels_and_stop_at_the_model_bounds(cx: &TestAppC
         });
     }
 }
+
+/// The threshold counts UTF-8 bytes, and the temporary file retains the complete paste.
+#[gpui_kit::test]
+fn creation_composer_attaches_large_pastes_and_keeps_small_text_editable(cx: &TestAppContext) {
+    use pretty_assertions::assert_eq;
+    for text in [
+        "x".repeat(32 * 1024 - 1),
+        "x".repeat(32 * 1024),
+        "🥟".repeat(8192),
+    ] {
+        let (probe, mut cx) =
+            full_surface_probe_with_viewport(cx, native_agent_form_spec(), 1200., 900., 16.);
+        cx.simulate_input("Read ");
+        cx.update(|_, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone())));
+        cx.simulate_keystrokes("cmd-v");
+        cx.run_until_parked();
+        cx.simulate_input(" please");
+        cx.run_until_parked();
+        probe.read_with(&cx, |probe, _| {
+            let intents = probe.intents.borrow();
+            let prompt = intents
+                .iter()
+                .rev()
+                .find_map(|intent| match intent {
+                    DialogIntent::TextChanged { value, .. } => Some(value),
+                    _ => None,
+                })
+                .unwrap();
+            let attachments = intents.iter().rev().find_map(|intent| match intent {
+                DialogIntent::AttachmentsChanged { attachments, .. } => Some(attachments),
+                _ => None,
+            });
+            if text.len() < 32 * 1024 {
+                assert_eq!(prompt, &format!("Read {text} please"));
+                assert!(attachments.is_none_or(Vec::is_empty));
+            } else {
+                let attachments = attachments.unwrap();
+                assert_eq!(attachments.len(), 1);
+                let attachment = &attachments[0];
+                assert_eq!(std::fs::read_to_string(&attachment.path).unwrap(), text);
+                assert_eq!(attachment.path.extension().unwrap(), "txt");
+                assert!(prompt.starts_with("Read [pasted-text-"));
+                assert!(prompt.ends_with(".txt] please"));
+            }
+        });
+    }
+}

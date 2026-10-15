@@ -144,6 +144,14 @@ impl ComposerCompletion {
     ) {
         self.dismissed = None;
         self.trigger = None;
+        if option.kind == NativeCompletionKind::Command {
+            self.editor.update(cx, |input, cx| {
+                input.replace(format!("/{} ", option.name), window, cx);
+                input.focus_handle(cx).focus(window, cx);
+            });
+            cx.notify();
+            return;
+        }
         let token = if option.kind == NativeCompletionKind::Skill {
             InlineToken::new(
                 format!("skill:{}", option.name),
@@ -458,7 +466,7 @@ fn task_menu(
     menu
 }
 
-/// Connected apps, plugins and skills each open a submenu, so the root menu stays short.
+/// Provider entries use submenus to keep the root menu short.
 fn provider_menu(
     mut menu: PopupMenu,
     owner: &WeakEntity<ComposerCompletion>,
@@ -466,16 +474,15 @@ fn provider_menu(
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
-    if catalog.options.iter().any(|option| {
-        matches!(
-            option.kind,
-            NativeCompletionKind::App | NativeCompletionKind::Plugin | NativeCompletionKind::Skill
-        )
-    }) || !catalog.unavailable.is_empty()
-    {
+    if !catalog.options.is_empty() || !catalog.unavailable.is_empty() {
         menu = menu.separator();
     }
     for (kind, title, icon) in [
+        (
+            NativeCompletionKind::Command,
+            "Commands",
+            IconName::SquareTerminal,
+        ),
         (NativeCompletionKind::App, "Connected apps", IconName::Globe),
         (NativeCompletionKind::Plugin, "Plugins", IconName::Wrench),
         (NativeCompletionKind::Skill, "Skills", IconName::FileText),
@@ -525,13 +532,18 @@ fn provider_item(
     let glyph = match option.kind {
         NativeCompletionKind::App => "app-window",
         NativeCompletionKind::Plugin => "plug",
-        _ => "book-open",
+        NativeCompletionKind::Command => "square-terminal",
+        NativeCompletionKind::Skill => "book-open",
     };
     let key =
         gpui_kit::SharedString::from(format!("composer-add-{:?}-{}", option.kind, option.name));
     PopupMenuItem::element(move |_, cx| {
         div()
             .id(key.clone())
+            .debug_selector({
+                let key = key.clone();
+                move || key.to_string()
+            })
             .role(gpui_kit::Role::MenuItem)
             .aria_label(label.clone())
             .flex()

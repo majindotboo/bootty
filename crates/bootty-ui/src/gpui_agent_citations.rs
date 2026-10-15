@@ -471,11 +471,14 @@ impl NativeAgentSessionView {
     pub(super) fn render_prompt_token(
         &self,
         context: &InlineTokenContext,
-        window: &mut Window,
-        cx: &mut App,
+        cx: &App,
     ) -> gpui_kit::AnyElement {
         let Some(key) = context.token().id().strip_prefix("citation:") else {
-            return crate::gpui_prompt_attachments::render(context, window, cx);
+            let kind = self
+                .completion
+                .as_ref()
+                .and_then(|completion| completion.read(cx).provider_kind(context.token().id()));
+            return crate::gpui_prompt_attachments::render_with_provider(context, kind, cx);
         };
         let label = self
             .citations

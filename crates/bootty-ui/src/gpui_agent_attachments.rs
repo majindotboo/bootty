@@ -1,6 +1,6 @@
 //! Composer attachment ingress; the native service owns admitted bytes and identities.
 use super::*;
-use std::{io::Write as _, path::PathBuf};
+use std::path::PathBuf;
 
 #[derive(Clone)]
 pub(super) struct ComposerAttachment {
@@ -131,28 +131,35 @@ impl NativeAgentSessionView {
                         self.attach_path(path.clone(), window, cx);
                     }
                 }
-                gpui_kit::ClipboardEntry::Image(image) => {
+                entry => {
+                    let attachment =
+                        match crate::attachment_source::ClipboardAttachment::from_entry(entry) {
+                            Ok(Some(attachment)) => attachment,
+                            Ok(None) => continue,
+                            Err(error) => {
+                                consumed = true;
+                                self.error = Some(error);
+                                continue;
+                            }
+                        };
                     consumed = true;
                     if self.attachment_slots_full(cx) {
                         self.error = Some("Attach at most 16 files".into());
                         continue;
                     }
-                    if images >= bootty_agents::MAX_NATIVE_PROMPT_IMAGES {
+                    if attachment.is_image() && images >= bootty_agents::MAX_NATIVE_PROMPT_IMAGES {
                         self.error = Some(too_many_images());
                         continue;
                     }
-                    images = images.saturating_add(1);
-                    if image.bytes().len() > bootty_agents::MAX_NATIVE_ATTACHMENT_IMAGE_BYTES {
-                        self.error = Some("Image exceeds 8 MB".into());
-                        continue;
+                    if attachment.is_image() {
+                        images = images.saturating_add(1);
                     }
                     let target = self.record.target();
-                    let bytes = image.bytes().to_vec();
-                    let import = self.begin_attachment_import("Pasted image".into(), None);
+                    let import = self.begin_attachment_import(attachment.label().into(), None);
                     cx.spawn_in(window, async move |owner, cx| {
                         let result = cx
                             .background_executor()
-                            .spawn(async move { clipboard_png(&bytes) })
+                            .spawn(async move { attachment.write() })
                             .await;
                         _ = owner.update_in(cx, |this, window, cx| {
                             if this.attachment_imports.remove(&import).is_none() {
@@ -180,7 +187,6 @@ impl NativeAgentSessionView {
                     })
                     .detach();
                 }
-                gpui_kit::ClipboardEntry::String(_) => {}
             }
         }
         if consumed {
@@ -763,36 +769,6 @@ impl NativeAgentSessionView {
                 }),
             ))
     }
-}
-
-pub fn clipboard_png(bytes: &[u8]) -> Result<tempfile::NamedTempFile, String> {
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err("Image exceeds 8 MB".into());
-    }
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|_| "Unsupported image")?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
-    let image = reader.decode().map_err(|_| "Unsupported image")?;
-    let mut png = Cursor::new(Vec::new());
-    image
-        .write_to(&mut png, ImageFormat::Png)
-        .map_err(|_| "Could not read the image")?;
-    if png.get_ref().len() > 8 * 1024 * 1024 {
-        return Err("Image exceeds 8 MB".into());
-    }
-    let mut file = tempfile::Builder::new()
-        .prefix("Screenshot-")
-        .suffix(".png")
-        .tempfile()
-        .map_err(|_| "Could not attach the image")?;
-    file.write_all(png.get_ref())
-        .map_err(|_| "Could not attach the image")?;
-    Ok(file)
 }
 
 pub fn attachment_preview(path: &std::path::Path) -> Option<Arc<gpui_kit::RenderImage>> {

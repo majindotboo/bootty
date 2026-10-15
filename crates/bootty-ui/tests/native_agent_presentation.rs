@@ -3174,3 +3174,109 @@ fn async_question_answers_steer_without_consuming_the_composer_draft(cx: &mut Te
         pretty_assertions::assert_eq!(draft.arguments[2], "Unrelated draft");
     }
 }
+
+/// A conversation paste goes through the exact session's import instead of the prompt limit.
+#[gpui_kit::test]
+fn large_conversation_paste_uses_attachment_import(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let target = record.target();
+    let (sender, calls) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = visual.debug_bounds("native-composer").unwrap();
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_input("Existing draft");
+    visual.update(|_, cx| {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("🥟".repeat(8192)));
+    });
+    visual.simulate_keystrokes("cmd-v");
+    visual.run_until_parked();
+    let calls = calls.lock().unwrap();
+    let import = calls
+        .iter()
+        .find(|call| call.command == "agents.native.import")
+        .unwrap();
+    pretty_assertions::assert_eq!(import.target, Some(target));
+    pretty_assertions::assert_eq!(
+        std::path::Path::new(&import.arguments[2]).extension(),
+        Some(std::ffi::OsStr::new("txt"))
+    );
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call.command == "agents.native.prompt")
+    );
+    drop(calls);
+    // A rejected import keeps existing text, so the user can retry it.
+    visual.simulate_keystrokes("cmd-a cmd-c");
+    let draft = visual
+        .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap();
+    pretty_assertions::assert_eq!(draft, "Existing draft");
+}
+
+#[gpui_kit::test]
+fn add_menu_inserts_provider_commands_as_editable_slash_text(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            );
+            view.set_completion_binding(
+                Some(bootty_control::CommandTarget {
+                    kind: bootty_control::ResourceKind::Binding,
+                    handle: "captured-binding".into(),
+                    generation: 1,
+                }),
+                window,
+                cx,
+            );
+            view
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let add = visual.debug_bounds("native-attach").unwrap();
+    visual.simulate_click(add.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.simulate_keystrokes("up");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let command = visual
+        .debug_bounds("composer-add-Command-compact")
+        .expect("provider command submenu");
+    visual.simulate_click(command.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.simulate_keystrokes("cmd-a cmd-c");
+    let text = visual
+        .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+        .unwrap();
+    pretty_assertions::assert_eq!(text, "/compact ");
+}

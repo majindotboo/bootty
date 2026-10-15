@@ -2361,8 +2361,14 @@ impl DialogView {
             .colors
             .destructive;
         if spec.multiline {
+            let completion = self.completion.clone();
             Textarea::new(&self.prompt_textarea)
-                .token(crate::gpui_prompt_attachments::render)
+                .token(move |context, _, cx| {
+                    let kind = completion.as_ref().and_then(|completion| {
+                        completion.read(cx).provider_kind(context.token().id())
+                    });
+                    crate::gpui_prompt_attachments::render_with_provider(context, kind, cx)
+                })
                 .disabled(spec.busy)
                 .w_full()
                 .into_any_element()

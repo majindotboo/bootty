@@ -38,8 +38,8 @@ mod completion;
 
 #[path = "gpui_agent_attachments.rs"]
 mod attachments;
+pub use attachments::attachment_preview;
 use attachments::{ComposerAttachment, PendingAttachmentImport};
-pub use attachments::{attachment_preview, clipboard_png};
 #[path = "gpui_agent_models.rs"]
 mod models;
 #[path = "gpui_agent_subagents.rs"]
@@ -2909,12 +2909,10 @@ impl NativeAgentSessionView {
         let token_owner = owner.clone();
         let token_click_owner = owner.clone();
         Textarea::new(&self.composer)
-            .token(move |context, window, cx| {
+            .token(move |context, _, cx| {
                 token_owner.upgrade().map_or_else(
                     || div().into_any_element(),
-                    |owner| {
-                        owner.update(cx, |this, cx| this.render_prompt_token(context, window, cx))
-                    },
+                    |owner| owner.update(cx, |this, cx| this.render_prompt_token(context, cx)),
                 )
             })
             .on_token_click(move |event, window, cx| {

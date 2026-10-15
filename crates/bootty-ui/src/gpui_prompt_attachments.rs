@@ -68,10 +68,10 @@ pub fn application_chip(bundle_id: &str, name: &str, selected: bool, cx: &App) -
         )
 }
 
-pub fn render(
+pub fn render_with_provider(
     context: &InlineTokenContext,
-    _: &mut gpui_kit::Window,
-    cx: &mut App,
+    provider: Option<bootty_agents::NativeCompletionKind>,
+    cx: &App,
 ) -> gpui_kit::AnyElement {
     if let Some(bundle_id) = application_bundle(context.token().id()) {
         return application_chip(
@@ -105,26 +105,32 @@ pub fn render(
             cx.theme().muted.opacity(0.4)
         })
         .text_color(cx.theme().foreground)
-        .child(if name.to_ascii_lowercase().ends_with(".md") {
-            div()
-                .text_xs()
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                .text_color(cx.theme().muted_foreground)
-                .child("M↓")
-                .into_any_element()
-        } else {
-            crate::gpui::sized_icon(
-                if context.token().id().starts_with("directory:") {
-                    "folder"
-                } else if context.token().id().starts_with("skill:") {
-                    "sparkles"
-                } else {
-                    icon(name)
-                },
-                crate::gpui::IconSize::XSmall,
-                cx.theme().muted_foreground,
-            )
-        })
+        .child(
+            if provider.is_none() && name.to_ascii_lowercase().ends_with(".md") {
+                div()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("M↓")
+                    .into_any_element()
+            } else {
+                crate::gpui::sized_icon(
+                    if provider == Some(bootty_agents::NativeCompletionKind::App) {
+                        "app-window"
+                    } else if provider == Some(bootty_agents::NativeCompletionKind::Plugin) {
+                        "plug"
+                    } else if context.token().id().starts_with("directory:") {
+                        "folder"
+                    } else if context.token().id().starts_with("skill:") {
+                        "sparkles"
+                    } else {
+                        icon(name)
+                    },
+                    crate::gpui::IconSize::XSmall,
+                    cx.theme().muted_foreground,
+                )
+            },
+        )
         .child(
             div()
                 .min_w_0()
