@@ -133,7 +133,6 @@ impl NativeAgentSessionView {
     }
 
     fn render_implement(&self, cx: &Context<Self>) -> impl IntoElement {
-        let provider = self.record.config.provider.display_name();
         div()
             .h_8()
             .flex()
@@ -152,7 +151,7 @@ impl NativeAgentSessionView {
                         cx.theme().muted_foreground,
                     )),
             )
-            .child(div().flex_1().child("Plan ready · reply to refine it"))
+            .child(div().flex_1().child("Plan ready"))
             .child(
                 Button::new("native-implement-plan")
                     .debug_selector(|| "native-implement-plan".into())
@@ -160,9 +159,7 @@ impl NativeAgentSessionView {
                     .xsmall()
                     .label("Implement")
                     .loading(self.pending.contains("implement"))
-                    .tooltip(format!(
-                        "Leave Plan mode and ask {provider} to carry out this plan"
-                    ))
+                    .tooltip("Implement plan")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.command("implement", Vec::new(), window, cx);
                     })),

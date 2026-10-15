@@ -190,29 +190,19 @@ impl NativeAgentSessionView {
             }
             _ => "Compaction interrupted",
         };
-        let detail = if active {
-            item.created_at
-                .and_then(|started| {
-                    u64::try_from(
-                        chrono::Utc::now()
-                            .timestamp_millis()
-                            .saturating_sub(started),
-                    )
-                    .ok()
-                })
-                .map(std::time::Duration::from_millis)
-                .map_or_else(
-                    || "Making room in this conversation…".to_owned(),
-                    |elapsed| {
-                        format!(
-                            "Making room in this conversation · {}",
-                            crate::clock::format_working_duration(elapsed)
-                        )
-                    },
+        let elapsed = active
+            .then_some(item.created_at)
+            .flatten()
+            .and_then(|started| {
+                u64::try_from(
+                    chrono::Utc::now()
+                        .timestamp_millis()
+                        .saturating_sub(started),
                 )
-        } else {
-            String::new()
-        };
+                .ok()
+                .map(std::time::Duration::from_millis)
+                .map(crate::clock::format_working_duration)
+            });
         div()
             .w_full()
             .min_w_0()
@@ -256,8 +246,8 @@ impl NativeAgentSessionView {
                         div()
                             .min_w_0()
                             .flex()
-                            .flex_col()
-                            .gap_1()
+                            .items_center()
+                            .gap_2()
                             .child(
                                 div()
                                     .debug_selector(move || {
@@ -265,7 +255,7 @@ impl NativeAgentSessionView {
                                     })
                                     .child(label),
                             )
-                            .when(active, |column| column.child(div().text_xs().child(detail))),
+                            .when_some(elapsed, ParentElement::child),
                     ),
             )
             .into_any_element()
@@ -548,7 +538,7 @@ impl NativeAgentSessionView {
                         .justify_center()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child("Send a message to start the conversation."),
+                        .child("No messages"),
                 )
             })
             .child(div().flex_1().min_h_0().min_w_0().flex().flex_col().when(

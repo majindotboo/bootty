@@ -398,12 +398,14 @@ impl ProjectSettingsView {
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .child(label),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(help),
-                    ),
+                    .when(!help.is_empty(), |column| {
+                        column.child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(help),
+                        )
+                    }),
             )
             .child(div().flex_1().min_w_0().child(control))
     }
@@ -418,29 +420,126 @@ impl ProjectSettingsView {
     }
 }
 
+impl ProjectSettingsView {
+    fn render_header(&self, dirty: bool, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_4()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(self.model.name().to_owned()),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(bootty_git::project::display_path(
+                                self.model.cwd(),
+                                crate::strings::home_dir().as_deref(),
+                            )),
+                    ),
+            )
+            .child(
+                Button::new("project-save")
+                    .primary()
+                    .label(if self.saving {
+                        "Saving…"
+                    } else {
+                        "Save changes"
+                    })
+                    .loading(self.saving)
+                    .disabled(self.saving || !dirty)
+                    .on_click(cx.listener(|this, _, window, cx| this.save(window, cx))),
+            )
+    }
+}
+
 impl Render for ProjectSettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let [icon, provider, isolation] = self.project_choices(cx);
         let dirty = self.is_dirty(cx);
-        div().id("project-settings-page").size_full().overflow_y_scroll()
-            .child(div().w_full().max_w(rems(48.0)).mx_auto().p_6().flex().flex_col().gap_2()
-                .child(div().flex().items_center().justify_between().gap_4()
-                    .child(div().flex().flex_col().gap_1()
-                        .child(div().text_xl().font_weight(gpui_kit::FontWeight::SEMIBOLD).child(self.model.name().to_owned()))
-                        .child(div().text_sm().text_color(cx.theme().muted_foreground).child(bootty_git::project::display_path(self.model.cwd(), crate::strings::home_dir().as_deref()))))
-                    .child(Button::new("project-save").primary().label(if self.saving {"Saving…"} else {"Save changes"}).loading(self.saving).disabled(self.saving || !dirty)
-                        .on_click(cx.listener(|this, _, window, cx| this.save(window, cx)))))
-                .child(Self::section("General", cx))
-                .child(Self::row("Name", "Shown in the sidebar and project picker. Leave blank to use the folder name.", Input::new(&self.name).disabled(self.saving).aria_label("Project name"), cx))
-                .child(Self::row("Icon", "Choose a symbol for this project.", icon, cx))
-                .child(Self::row("Custom image", "Use an image instead of the project symbol.", self.image_control(cx), cx))
-                .child(Self::section("Agent defaults", cx))
-                .child(Self::row("Default agent", "Choose the provider for new sessions. Existing sessions keep their provider.", provider, cx))
-                .child(Self::section("Workspace", cx))
-                .child(Self::row("New sessions", "Worktrees give each new session a separate checkout.", isolation, cx))
-                .child(Self::row("Branch prefix", "Prefix for branches created with new worktrees. Leave blank to use bootty/.", Input::new(&self.branch_prefix).disabled(self.saving).aria_label("Branch prefix"), cx))
-                .child(Self::row("Starting ref", "Branch, tag or commit for new worktrees. Leave blank to use HEAD.", Input::new(&self.start_ref).disabled(self.saving).aria_label("Starting ref"), cx))
-                .when_some(self.model.error.as_ref(), |page, error| page.child(div().py_2().text_sm().text_color(cx.theme().semantic_tokens().colors.destructive).child(error.clone())))
-                .child(div().py_3().text_sm().text_color(cx.theme().muted_foreground).child(if dirty {"Unsaved changes"} else {"Changes apply to new sessions."})))
+        div()
+            .id("project-settings-page")
+            .size_full()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(rems(48.0))
+                    .mx_auto()
+                    .p_6()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(self.render_header(dirty, cx))
+                    .child(Self::section("General", cx))
+                    .child(Self::row(
+                        "Name",
+                        "Empty uses the folder name.",
+                        Input::new(&self.name)
+                            .disabled(self.saving)
+                            .aria_label("Project name"),
+                        cx,
+                    ))
+                    .child(Self::row("Icon", "", icon, cx))
+                    .child(Self::row("Custom image", "", self.image_control(cx), cx))
+                    .child(Self::section("Agent defaults", cx))
+                    .child(Self::row(
+                        "Default agent",
+                        "Applies to new sessions.",
+                        provider,
+                        cx,
+                    ))
+                    .child(Self::section("Workspace", cx))
+                    .child(Self::row(
+                        "New sessions",
+                        "Worktrees give each new session a separate checkout.",
+                        isolation,
+                        cx,
+                    ))
+                    .child(Self::row(
+                        "Branch prefix",
+                        "Empty uses bootty/.",
+                        Input::new(&self.branch_prefix)
+                            .disabled(self.saving)
+                            .aria_label("Branch prefix"),
+                        cx,
+                    ))
+                    .child(Self::row(
+                        "Starting ref",
+                        "Branch, tag or commit. Empty uses HEAD.",
+                        Input::new(&self.start_ref)
+                            .disabled(self.saving)
+                            .aria_label("Starting ref"),
+                        cx,
+                    ))
+                    .when_some(self.model.error.as_ref(), |page, error| {
+                        page.child(
+                            div()
+                                .py_2()
+                                .text_sm()
+                                .text_color(cx.theme().semantic_tokens().colors.destructive)
+                                .child(error.clone()),
+                        )
+                    })
+                    .when(dirty, |page| {
+                        page.child(
+                            div()
+                                .py_3()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Unsaved changes"),
+                        )
+                    }),
+            )
     }
 }

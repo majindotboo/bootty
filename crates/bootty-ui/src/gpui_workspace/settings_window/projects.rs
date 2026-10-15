@@ -19,22 +19,45 @@ impl GpuiSettingsWindow {
             .cloned()
             .collect();
         let add_target = target.clone();
-        let mut page = div().w_full().max_w(rems(48.0)).mx_auto().p_6().flex().flex_col().gap_4()
-            .child(div().flex().items_center().justify_between()
-                .child(div().text_xl().font_weight(gpui_kit::FontWeight::SEMIBOLD).child("Projects"))
-                .child(Button::new("settings-add-project").outline().label("Add project…").disabled(target.is_none())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if let Some(target) = &add_target {
-                            _ = this.workspace.update(cx, |_, cx| GpuiWorkspace::choose_project_directory(target.clone(), window, cx));
-                        }
-                    }))))
-            .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Registered folders in the current Space. Project defaults apply to new sessions."));
-        if projects.is_empty() {
-            page = page.child(
+        let mut page = div()
+            .w_full()
+            .max_w(rems(48.0))
+            .mx_auto()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(
                 div()
-                    .py_6()
-                    .child("No registered projects. Add a folder to get started."),
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_xl()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child("Projects"),
+                    )
+                    .child(
+                        Button::new("settings-add-project")
+                            .outline()
+                            .label("Add project…")
+                            .disabled(target.is_none())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(target) = &add_target {
+                                    _ = this.workspace.update(cx, |_, cx| {
+                                        GpuiWorkspace::choose_project_directory(
+                                            target.clone(),
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }
+                            })),
+                    ),
             );
+        if projects.is_empty() {
+            page = page.child(div().py_6().child("No projects"));
         }
         for project in projects {
             page = page.child(Self::project_row(&project, target.as_ref(), cx));

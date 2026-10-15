@@ -1039,9 +1039,7 @@ fn settings_content(
                 rows.push(SettingsRow::Action {
                     id: "keymap:open".to_owned(),
                     label: "Keymap".to_owned(),
-                    help:
-                        "Search every command and edit keybindings in the dedicated keymap editor."
-                            .to_owned(),
+                    help: String::new(),
                     button: "Open Keymap".to_owned(),
                     enabled: true,
                 });
@@ -1092,7 +1090,7 @@ fn remote_settings_rows(session: &SettingsSession, state: &AppState) -> Vec<Sett
     rows.push(SettingsRow::Action {
         id: "remote:new".to_owned(),
         label: "SSH profiles".to_owned(),
-        help: "Saved SSH connections for remote Spaces.".to_owned(),
+        help: String::new(),
         button: "Add remote".to_owned(),
         enabled: true,
     });
@@ -1131,11 +1129,8 @@ fn font_stack_row(
             "Terminal font stack",
             "Bootty tries the primary font first, followed by each fallback in order.",
         ),
-        "font.ui-family" => (
-            "UI font stack",
-            "Fonts used by settings, sidebar, status, and other application chrome.",
-        ),
-        _ => ("Values", "Ordered values."),
+        "font.ui-family" => ("UI font stack", ""),
+        _ => ("Values", ""),
     };
     SettingsRow::StringList {
         id: spec.id(),
@@ -1452,13 +1447,13 @@ fn structured_custom_setting(
     let (label, help, items, add_label) = match spec.id().as_str() {
         "sidebar.session-modules" => (
             "Session details",
-            "Modules shown for the selected session. Add a module name, then reorder it here.",
+            "",
             config.sidebar.session_modules.clone(),
             "Add session module",
         ),
         "sidebar.modules" => (
             "Sidebar footer",
-            "Modules shown at the bottom of the sidebar. Add a module name, then reorder it here.",
+            "",
             config.sidebar.modules.clone(),
             "Add sidebar module",
         ),
@@ -1476,7 +1471,7 @@ fn structured_custom_setting(
             return Some(SettingsRow::ModifierRemaps {
                 id: spec.id(),
                 label: "Modifier remapping".to_owned(),
-                help: "Remap physical modifiers before Bootty resolves shortcuts.".to_owned(),
+                help: String::new(),
                 mappings,
                 choices: modifier_remap_choices(),
                 enabled: true,
@@ -1676,18 +1671,10 @@ fn custom_color_rows(
             "Sidebar text override; unset uses the active theme.",
             config.sidebar.foreground,
         ),
-        "sidebar.selected" => editable_color_row(
-            spec,
-            "Sidebar selected",
-            "Selected sidebar item background override.",
-            config.sidebar.selected,
-        ),
-        "sidebar.hover" => editable_color_row(
-            spec,
-            "Sidebar hover",
-            "Hovered sidebar item background override.",
-            config.sidebar.hover,
-        ),
+        "sidebar.selected" => {
+            editable_color_row(spec, "Sidebar selected", "", config.sidebar.selected)
+        }
+        "sidebar.hover" => editable_color_row(spec, "Sidebar hover", "", config.sidebar.hover),
         "sidebar.border" => editable_color_row(
             spec,
             "Sidebar border",
@@ -1763,7 +1750,7 @@ fn theme_choice_row(
     vec![SettingsRow::Value {
         id: spec.id(),
         label: label.to_owned(),
-        help: "Search the built-in and user theme catalog.".to_owned(),
+        help: String::new(),
         value: ScalarValue::Token(current.to_owned()),
         control: SettingsControl::Theme(options),
         enabled: true,
@@ -1902,7 +1889,7 @@ fn ansi_palette_rows(
         SettingsRow::Value {
             id: format!("{prefix}.palette-generate"),
             label: "Generate 256-color cube".to_owned(),
-            help: "Generate the indexed ANSI palette from the theme colors.".to_owned(),
+            help: String::new(),
             value: ScalarValue::Bool(colors.palette_generate),
             control: SettingsControl::Toggle,
             enabled: true,

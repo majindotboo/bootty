@@ -105,6 +105,9 @@ fn custom_theme_switch_resets_editor_and_component_surfaces(cx: &TestAppContext)
             readable_color(light.primary, light.base),
         );
         assert_component_color(component.colors.group_box, light.surface);
+        assert_component_color(component.colors.popover, light.surface);
+        assert_component_color(component.tokens.popover.color, light.surface);
+        assert_component_color(component.colors.popover_foreground, light.text);
         assert_component_color(component.colors.table_head, light.pane);
         assert_component_color(component.colors.table_head_foreground, light.text);
         assert_component_color(component.colors.table, light.base);

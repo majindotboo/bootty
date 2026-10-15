@@ -114,7 +114,6 @@ impl Render for SnoozeView {
             .flex()
             .flex_col()
             .gap_3()
-            .child("Wake this session at a date and time in your local time zone.")
             .child(DatePicker::new(&self.picker))
             .when_some(self.error.clone(), |body, error| {
                 body.child(div().text_sm().text_color(cx.theme().danger).child(error))

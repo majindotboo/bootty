@@ -2907,19 +2907,17 @@ impl NativeAgentSessionView {
             .items_center()
             .gap_2()
             .when(self.record.config.provider != AgentKind::Pi, |row| {
-                row.child(
-                    crate::gpui::with_composer_tooltip(
-                        "native-permissions-tooltip",
-                        div()
-                            .track_focus(&self.permissions_focus)
-                            .child(self.render_permission_control(cx)),
-                        "Permissions for the next turn. Existing approval requests keep their captured permissions.",
-                        vec![crate::gpui::composer_focus_action(
-                            crate::gpui::ComposerControl::Permissions,
-                            self.permissions_focus.clone(),
-                        )],
-                    ),
-                )
+                row.child(crate::gpui::with_composer_tooltip(
+                    "native-permissions-tooltip",
+                    div()
+                        .track_focus(&self.permissions_focus)
+                        .child(self.render_permission_control(cx)),
+                    "Permissions",
+                    vec![crate::gpui::composer_focus_action(
+                        crate::gpui::ComposerControl::Permissions,
+                        self.permissions_focus.clone(),
+                    )],
+                ))
             })
             .when(
                 !self.provider_enabled() || self.record.snapshot.stopping(),

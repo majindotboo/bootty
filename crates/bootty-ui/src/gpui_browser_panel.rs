@@ -1300,8 +1300,7 @@ impl Render for BrowserPanel {
                                 .gap_2()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(Icon::new(IconName::Globe).large())
-                                .child("Search the web or open your development server")
-                                .child(div().text_sm().child("Enter a search or address above.")),
+                                .child("Enter a search or address"),
                         )
                     })
                     .child(

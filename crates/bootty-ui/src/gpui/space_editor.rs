@@ -554,7 +554,6 @@ impl GpuiSpaceEditor {
         &self,
         id: &'static str,
         title: &str,
-        detail: &str,
         children: impl IntoIterator<Item = AnyElement>,
     ) -> AnyElement {
         let colors = self.snapshot.colors;
@@ -566,13 +565,7 @@ impl GpuiSpaceEditor {
                     .flex_col()
                     .gap_1()
                     .text_color(colors.muted)
-                    .child(title.to_owned())
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(colors.muted)
-                            .child(detail.to_owned()),
-                    ),
+                    .child(title.to_owned()),
             )
             .children(children)
             .into_any_element()
@@ -743,12 +736,10 @@ impl GpuiSpaceEditor {
     }
 
     fn appearance_group(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let colors = self.snapshot.colors;
         let tint = self.snapshot.tint_sidebar;
         self.section_group(
             "space-editor-appearance",
             "Appearance",
-            "Choose how this Space looks in the sidebar.",
             [
                 Self::labeled("Icon", self.icon_picker(window, cx)),
                 Self::labeled("Color", self.color_editor(window, cx)),
@@ -758,18 +749,7 @@ impl GpuiSpaceEditor {
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .child(
-                        div()
-                            .min_w_0()
-                            .child("Tint sidebar with Space color")
-                            .child(
-                                div()
-                                    .mt(rems(0.125))
-                                    .text_xs()
-                                    .text_color(colors.muted)
-                                    .child("Use this Space’s color in the navigation sidebar."),
-                            ),
-                    )
+                    .child(div().min_w_0().child("Tint sidebar with Space color"))
                     .child(
                         div()
                             .id("space-tint-sidebar-wrapper")
@@ -1091,12 +1071,8 @@ impl Render for GpuiSpaceEditor {
         if let Some(remote) = self.remote_editor(window, cx) {
             connection_children.push(Self::labeled("Remote Space", remote));
         }
-        let connection_group = self.section_group(
-            "space-editor-connection",
-            "Connection",
-            "Select the backend and location for this Space.",
-            connection_children,
-        );
+        let connection_group =
+            self.section_group("space-editor-connection", "Connection", connection_children);
         let form = v_form()
             .with_size(Size::Medium)
             .child(field().label("Space name").child(name_field))

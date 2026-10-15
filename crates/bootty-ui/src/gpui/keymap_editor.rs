@@ -1665,7 +1665,7 @@ impl GpuiKeymapEditor {
             .label("Use built-in defaults")
             .outline()
             .xsmall()
-            .tooltip("Choose which keymap contexts include built-in bindings")
+            .tooltip("Contexts")
             .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
                 let mut menu = menu.label("Use built-in defaults");
                 for context in &contexts {
@@ -1727,8 +1727,8 @@ impl GpuiKeymapEditor {
                 "keymap-search-exact",
                 Button::new("kit-keymap-search-exact")
                     .icon(Icon::new(IconName::CaseSensitive))
-                    .accessibility_label("Toggle exact keystroke matching")
-                    .tooltip("Toggle exact keystroke matching")
+                    .accessibility_label("Exact keystrokes")
+                    .tooltip("Exact keystrokes")
                     .selected(self.exact_keystroke_search)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_exact_keystroke_search(!this.exact_keystroke_search, cx);

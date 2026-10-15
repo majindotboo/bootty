@@ -145,6 +145,37 @@ impl Focusable for AgentsPanel {
         self.focus.clone()
     }
 }
+impl AgentsPanel {
+    fn render_filters(&self, attention: usize, cx: &Context<Self>) -> impl IntoElement {
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(
+                Button::new("agents-all")
+                    .label(format!("All {}", self.entries.len()))
+                    .ghost()
+                    .small()
+                    .selected(!self.attention_only)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.attention_only = false;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("agents-attention")
+                    .label(format!("Needs attention {attention}"))
+                    .ghost()
+                    .small()
+                    .selected(self.attention_only)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.attention_only = true;
+                        cx.notify();
+                    })),
+            )
+    }
+}
+
 impl Render for AgentsPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if window.is_visible()
@@ -186,18 +217,58 @@ impl Render for AgentsPanel {
                     self.render_agent(entry, heading, cx)
                 })
             });
-        div().id("agents-panel").track_focus(&self.focus).size_full().min_w_0().overflow_y_scroll().flex().flex_col().gap_2().p_2()
+        div()
+            .id("agents-panel")
+            .track_focus(&self.focus)
+            .size_full()
+            .min_w_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_2()
             .child(Input::new(&self.query).small())
-            .child(div().flex().items_center().gap_1()
-                .child(Button::new("agents-all").label(format!("All {}", self.entries.len())).ghost().small().selected(!self.attention_only)
-                    .on_click(cx.listener(|this, _, _, cx| { this.attention_only = false; cx.notify(); })))
-                .child(Button::new("agents-attention").label(format!("Needs attention {attention}")).ghost().small().selected(self.attention_only)
-                    .on_click(cx.listener(|this, _, _, cx| { this.attention_only = true; cx.notify(); }))))
-            .when(no_matches, |body| body.child(div().p_2().text_sm().text_color(cx.theme().muted_foreground).child("No matching agents")))
-            .child(Button::new("next-agent").label("Next unread").ghost().small().disabled(self.pending.contains(&None) || !self.entries.iter().any(|entry| entry.unread)).on_click(cx.listener(|this, _, window, cx| this.invoke(None, "next", window, cx))))
-            .children(self.error.clone().map(|error| gpui_kit::component::alert::Alert::error("agent-command-error", error)
-                .on_close(cx.listener(|this, _, _, cx| { this.error = None; cx.notify(); }))))
-            .when(self.entries.is_empty(), |body| body.child(div().p_2().text_sm().text_color(cx.theme().muted_foreground).whitespace_normal().child("No active agents. Sessions appear here when an installed integration reports them.")))
+            .child(self.render_filters(attention, cx))
+            .when(no_matches, |body| {
+                body.child(
+                    div()
+                        .p_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("No matching agents"),
+                )
+            })
+            .child(
+                Button::new("next-agent")
+                    .label("Next unread")
+                    .ghost()
+                    .small()
+                    .disabled(
+                        self.pending.contains(&None)
+                            || !self.entries.iter().any(|entry| entry.unread),
+                    )
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.invoke(None, "next", window, cx)),
+                    ),
+            )
+            .children(self.error.clone().map(|error| {
+                gpui_kit::component::alert::Alert::error("agent-command-error", error).on_close(
+                    cx.listener(|this, _, _, cx| {
+                        this.error = None;
+                        cx.notify();
+                    }),
+                )
+            }))
+            .when(self.entries.is_empty(), |body| {
+                body.child(
+                    div()
+                        .p_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .whitespace_normal()
+                        .child("No active agents"),
+                )
+            })
             .children(rows)
             .children(self.chrome.read(cx).dock_codexbar())
     }

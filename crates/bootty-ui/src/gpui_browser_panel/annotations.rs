@@ -588,7 +588,7 @@ impl BrowserPanel {
                     !self.annotations.loaded
                         || self.selected_tab().is_none_or(|tab| tab.view.is_none()),
                 )
-                .tooltip("Annotate elements, regions, and drawings")
+                .tooltip("Annotate")
                 .on_click(cx.listener(|this, _, _, cx| this.pick_annotation(cx))),
         )
     }

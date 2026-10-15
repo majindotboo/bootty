@@ -110,7 +110,7 @@ impl NativeAgentSessionView {
                                             .debug_selector(|| "native-queue-label".into())
                                             .flex_1()
                                             .truncate()
-                                            .child(self.queue_label()),
+                                            .child("Queued"),
                                     )
                                     .child(messages.len().to_string())
                                     .child(if self.queued_messages.expanded {
@@ -143,22 +143,6 @@ impl NativeAgentSessionView {
                         )
                     })
             })
-    }
-
-    /// Says when queued messages will go out, so a waiting queue never looks stuck.
-    fn queue_label(&self) -> String {
-        let snapshot = &self.record.snapshot;
-        let provider = self.record.config.provider.display_name();
-        match snapshot.status {
-            _ if snapshot.stopping() => format!("Queued · sends after {provider} stops"),
-            NativeSessionStatus::Working | NativeSessionStatus::Waiting => {
-                "Queued · sends after this turn".to_owned()
-            }
-            NativeSessionStatus::Stopped | NativeSessionStatus::Error => {
-                "Queued · sends after the conversation resumes".to_owned()
-            }
-            NativeSessionStatus::Starting | NativeSessionStatus::Idle => "Queued".to_owned(),
-        }
     }
 
     fn render_queued_message(

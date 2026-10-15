@@ -92,7 +92,7 @@ impl SubagentsPanel {
                                 .p_2()
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
-                                .child("Subagents will appear here when an agent delegates work."),
+                                .child("No subagents"),
                         )
                     })
                     .children(groups.map(|parent| {

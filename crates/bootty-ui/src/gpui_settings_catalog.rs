@@ -43,8 +43,7 @@ pub fn advanced_configuration_rows(
         SettingsRow::Action {
             id: "config:reload".to_owned(),
             label: "Reload configuration".to_owned(),
-            help: "Re-read config.toml now and apply settings that can change in the running workspace."
-                .to_owned(),
+            help: String::new(),
             button: "Reload config.toml".to_owned(),
             enabled: true,
         },
@@ -62,7 +61,7 @@ fn read_only_path_row(id: &str, label: &str, path: &Path, home: Option<&Path>) -
     SettingsRow::Value {
         id: id.to_owned(),
         label: label.to_owned(),
-        help: "Read-only location.".to_owned(),
+        help: String::new(),
         value: ScalarValue::Text(bootty_git::project::display_path(
             &path.to_string_lossy(),
             home,

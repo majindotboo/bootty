@@ -982,11 +982,7 @@ impl ModelPickerView {
                 .min_w_0()
                 .track_focus(&self.trigger_focus)
                 .child(picker),
-            if self.providers.is_empty() {
-                "Choose the model and reasoning effort for the next turn."
-            } else {
-                "Choose a provider, model and reasoning effort."
-            },
+            "Model and reasoning effort",
             vec![crate::gpui::composer_focus_action(
                 crate::gpui::ComposerControl::Model,
                 self.trigger_focus.clone(),

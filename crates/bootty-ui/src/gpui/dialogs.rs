@@ -258,8 +258,8 @@ pub fn with_composer_tooltip(
                     .iter()
                     .filter_map(|(action, focus)| Kbd::binding_for_action_in(action, focus, window))
                     .collect::<Vec<_>>();
-                v_flex()
-                    .gap_1()
+                h_flex()
+                    .gap_3()
                     .child(div().child(description.clone()))
                     .when(!bindings.is_empty(), |tooltip| {
                         tooltip.child(h_flex().gap_1().children(bindings))
@@ -1805,23 +1805,13 @@ impl DialogView {
                     return Some((field.id.clone(), control.into_any_element()));
                 }
                 let (description, focus_controls) = match field.id.as_str() {
-                    "host" => (
-                        "Choose where the agent will run.",
-                        vec![ComposerControl::Space],
-                    ),
-                    "provider" | "model" => (
-                        "Choose a provider, model and reasoning effort.",
-                        vec![ComposerControl::Model],
-                    ),
-                    "reasoning" => (
-                        "Choose the model's reasoning effort.",
-                        vec![ComposerControl::Effort],
-                    ),
-                    "permissions" => (
-                        "Choose how the agent can access your system.",
-                        vec![ComposerControl::Permissions],
-                    ),
-                    _ => ("Choose an agent setting.", Vec::new()),
+                    "host" => ("Host", vec![ComposerControl::Space]),
+                    "provider" | "model" => {
+                        ("Model and reasoning effort", vec![ComposerControl::Model])
+                    }
+                    "reasoning" => ("Reasoning effort", vec![ComposerControl::Effort]),
+                    "permissions" => ("Permissions", vec![ComposerControl::Permissions]),
+                    _ => ("Settings", Vec::new()),
                 };
                 let focus = self
                     .model_picker
@@ -2083,21 +2073,30 @@ impl DialogView {
                 self.prompt_field(spec, &field, window, cx)
             })
             .collect::<Vec<_>>();
-        Some(gpui_kit::component::popover::Popover::new("dialog-worktree-options")
-            .anchor(gpui_kit::Anchor::BottomRight)
-            .track_focus(&focus)
-            .trigger(Button::new("dialog-worktree-options-trigger")
-                .debug_selector(|| "dialog-worktree-options-trigger".into())
-                .ghost()
-                .small()
-                .min_w_0()
-                .max_w(rems(18.))
-                .disabled(spec.busy)
-                .dropdown_caret(true)
-                .child(div().min_w_0().text_ellipsis().child(format!("Start from {start_ref}")))
-                .accessibility_label("Worktree options")
-                .tooltip("Choose the starting branch, tag or commit. Branch and folder names are generated from your prompt unless overridden."))
-            .child(v_flex().w(rems(22.)).gap_3().children(fields)))
+        Some(
+            gpui_kit::component::popover::Popover::new("dialog-worktree-options")
+                .anchor(gpui_kit::Anchor::BottomRight)
+                .track_focus(&focus)
+                .trigger(
+                    Button::new("dialog-worktree-options-trigger")
+                        .debug_selector(|| "dialog-worktree-options-trigger".into())
+                        .ghost()
+                        .small()
+                        .min_w_0()
+                        .max_w(rems(18.))
+                        .disabled(spec.busy)
+                        .dropdown_caret(true)
+                        .child(
+                            div()
+                                .min_w_0()
+                                .text_ellipsis()
+                                .child(format!("Start from {start_ref}")),
+                        )
+                        .accessibility_label("Worktree options")
+                        .tooltip("Starting branch, tag or commit"),
+                )
+                .child(v_flex().w(rems(22.)).gap_3().children(fields)),
+        )
     }
 
     fn new_session_start(spec: &DialogSpec, row: &DialogRow, cx: &Context<Self>) -> Button {
@@ -2284,7 +2283,7 @@ impl DialogView {
         with_composer_tooltip(
             "new-session-worktree-tooltip",
             switch,
-            "Create this session in a new Git worktree.",
+            "New worktree",
             actions,
         )
     }

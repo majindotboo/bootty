@@ -185,7 +185,7 @@ impl DialogView {
         super::with_composer_tooltip(
             "new-session-project-tooltip",
             picker_control,
-            "Choose a registered project for this session.",
+            "Project",
             vec![super::composer_focus_action(
                 super::ComposerControl::Project,
                 picker.state.focus_handle(cx),

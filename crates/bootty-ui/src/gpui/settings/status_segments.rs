@@ -122,7 +122,7 @@ impl GpuiSettings {
         let alignment = Self::render_dropdown(
             format!("settings-status-segment-{id}-{index}-alignment"),
             "Alignment",
-            "Position this module on the left, center, or right of the bar.",
+            "",
             alignment_token(segment.alignment),
             &alignment_choices(),
             true,

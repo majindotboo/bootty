@@ -156,13 +156,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(ssh_profiles_specs());
     specs.extend(agent_provider_specs());
     specs.extend(agent_defaults_specs());
-    specs.push(spec(
-        &["agents", "response-streaming"], "Response streaming",
-        "Show replies as they arrive, after each Markdown block finishes, or after the full response finishes.",
-        "general", "BEHAVIOR",
-        SettingKind::Choice { options: [("live", "Show text as it arrives"), ("paragraph", "Show finished paragraphs"), ("complete", "Show finished responses")].into_iter().map(|(token, label)| SettingOption { token: token.into(), label: label.into(), description: None }).collect() },
-        SettingDefault::Field(|config| SettingValue::Token(config.agents.response_streaming.token().into())),
-    ));
+    specs.push(response_streaming_spec());
     specs.push(spec(
         &["agents", "collapse-composer-on-scroll"], "Collapse composer on scroll",
         "Fold an empty conversation composer to one line while reading earlier messages. Click it to write a message.",
@@ -184,7 +178,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.push(spec(
         &["agents", "follow-up-behavior"],
         "Follow-up behavior",
-        "Queue messages sent during a turn for the next turn, or steer them into the active turn.",
+        "",
         "general",
         "BEHAVIOR",
         SettingKind::Choice {
@@ -231,6 +225,33 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs
 }
 
+fn response_streaming_spec() -> SettingSpec {
+    spec(
+        &["agents", "response-streaming"],
+        "Response streaming",
+        "",
+        "general",
+        "BEHAVIOR",
+        SettingKind::Choice {
+            options: [
+                ("live", "Show text as it arrives"),
+                ("paragraph", "Show finished paragraphs"),
+                ("complete", "Show finished responses"),
+            ]
+            .into_iter()
+            .map(|(token, label)| SettingOption {
+                token: token.into(),
+                label: label.into(),
+                description: None,
+            })
+            .collect(),
+        },
+        SettingDefault::Field(|config| {
+            SettingValue::Token(config.agents.response_streaming.token().into())
+        }),
+    )
+}
+
 fn token<T: Copy + Into<&'static str>>(value: &T) -> String {
     let token: &'static str = (*value).into();
     token.to_owned()
@@ -256,7 +277,7 @@ fn panel_specs() -> Vec<SettingSpec> {
             specs.push(spec(
                 &["panels", $name, "button"],
                 "Status bar button",
-                "Show a button that toggles this panel.",
+                "",
                 "panels",
                 $label,
                 SettingKind::Choice {
@@ -327,7 +348,7 @@ fn browser_specs() -> [SettingSpec; 2] {
         spec(
             &["browser", "search-engine"],
             "Search engine",
-            "Choose the search engine used for browser address-bar queries.",
+            "",
             "browser",
             "SEARCH",
             SettingKind::Choice {
@@ -348,7 +369,7 @@ fn browser_specs() -> [SettingSpec; 2] {
         spec(
             &["browser", "persist-site-data"],
             "Persist site data",
-            "Keep browser site data between launches.",
+            "",
             "browser",
             "SITE DATA",
             SettingKind::Bool,
@@ -396,7 +417,7 @@ fn tabs_specs() -> [SettingSpec; 4] {
         spec(
             &["chrome", "tabs", "appearance"],
             "Tab style",
-            "Choose the appearance of terminal and sidebar tabs.",
+            "",
             "panels",
             "TABS",
             SettingKind::Choice {
@@ -415,7 +436,7 @@ fn tabs_specs() -> [SettingSpec; 4] {
         spec(
             &["chrome", "tabs", "close-position"],
             "Close button side",
-            "Place the close button on the left or right side of each tab.",
+            "",
             "panels",
             "TABS",
             SettingKind::Choice {
@@ -431,7 +452,7 @@ fn tabs_specs() -> [SettingSpec; 4] {
         spec(
             &["chrome", "tabs", "close-button"],
             "Show close button",
-            "Show close buttons always, on hover, or never.",
+            "",
             "panels",
             "TABS",
             SettingKind::Choice {
@@ -462,7 +483,7 @@ fn interface_preferences_specs() -> [SettingSpec; 2] {
         spec(
             &["session", "scrollbar"],
             "Show scrollbar",
-            "Show the terminal scrollbar while scrolling, on hover, always, or never.",
+            "",
             "shell",
             "SCROLLBACK",
             SettingKind::Choice {
@@ -499,7 +520,7 @@ fn application_lifecycle_specs() -> [SettingSpec; 2] {
         spec(
             &["restore_on_startup"],
             "Restore on startup",
-            "Choose which persisted Space selection Bootty restores when it starts.",
+            "",
             "general",
             "STARTUP",
             SettingKind::Choice {
@@ -526,7 +547,7 @@ fn application_lifecycle_specs() -> [SettingSpec; 2] {
         spec(
             &["on_last_window_closed"],
             "On last window closed",
-            "Choose whether closing the last Bootty window also quits the application.",
+            "",
             "general",
             "WINDOWS",
             SettingKind::Choice {
@@ -555,7 +576,7 @@ fn open_behavior_specs() -> [SettingSpec; 3] {
         spec(
             &["cli_default_open_behavior"],
             "CLI open behavior",
-            "Choose whether a second Bootty CLI launch reuses the running window or opens another one.",
+            "",
             "general",
             "WINDOWS",
             SettingKind::Choice {
@@ -571,7 +592,7 @@ fn open_behavior_specs() -> [SettingSpec; 3] {
         spec(
             &["default_open_behavior"],
             "Space open behavior",
-            "Choose whether opening a Space from the UI reuses this window or opens another one.",
+            "",
             "general",
             "WINDOWS",
             SettingKind::Choice {
@@ -609,7 +630,7 @@ fn window_chrome_specs() -> [SettingSpec; 3] {
         spec(
             &["window", "title"],
             "Title",
-            "Shown in native window chrome.",
+            "",
             "window",
             "WINDOW",
             text("Bootty", false),
@@ -618,7 +639,7 @@ fn window_chrome_specs() -> [SettingSpec; 3] {
         spec(
             &["window", "macos-titlebar-style"],
             "Titlebar style",
-            "macOS window chrome treatment.",
+            "",
             "window",
             "WINDOW",
             SettingKind::Choice {
@@ -635,7 +656,7 @@ fn window_chrome_specs() -> [SettingSpec; 3] {
         spec(
             &["window", "window-decoration"],
             "Decoration",
-            "Choose who draws the outer window border.",
+            "",
             "window",
             "WINDOW",
             SettingKind::Choice {
@@ -674,7 +695,7 @@ fn fullscreen_specs() -> [SettingSpec; 2] {
         spec(
             &["window", "fullscreen-enabled"],
             "Fullscreen on launch",
-            "Start Bootty in the selected fullscreen style.",
+            "",
             "window",
             "WINDOW",
             SettingKind::Bool,
@@ -683,7 +704,7 @@ fn fullscreen_specs() -> [SettingSpec; 2] {
         spec(
             &["window", "fullscreen"],
             "Fullscreen style",
-            "Selects native fullscreen or a notch-aware borderless mode.",
+            "",
             "window",
             "WINDOW",
             SettingKind::Choice {
@@ -917,7 +938,7 @@ fn pane_appearance_specs() -> [SettingSpec; 6] {
         spec(
             &["chrome", "pane-divider-width"],
             "Divider width",
-            "Thickness of the divider between split panes.",
+            "",
             "window",
             "SPLIT PANES",
             number(0.0..=16.0, NumberControl::Slider, " px"),
@@ -937,7 +958,7 @@ fn pane_appearance_specs() -> [SettingSpec; 6] {
         spec(
             &["chrome", "pane-corner-radius"],
             "Corner radius",
-            "Rounding of split pane corners.",
+            "",
             "window",
             "SPLIT PANES",
             number(0.0..=40.0, NumberControl::Slider, " px"),
@@ -951,7 +972,7 @@ fn font_metrics_specs() -> [SettingSpec; 7] {
         spec(
             &["font", "size"],
             "Font size",
-            "Main terminal text size.",
+            "",
             "text",
             "TERMINAL METRICS",
             number(6.0..=48.0, NumberControl::Slider, "pt"),
@@ -996,7 +1017,7 @@ fn font_metrics_specs() -> [SettingSpec; 7] {
         spec(
             &["font", "underline-position"],
             "Underline position",
-            "Tune where underline decoration is drawn.",
+            "",
             "text",
             "GLYPH BEHAVIOR",
             number(-12.0..=12.0, NumberControl::Slider, "px"),
@@ -1005,7 +1026,7 @@ fn font_metrics_specs() -> [SettingSpec; 7] {
         spec(
             &["font", "underline-thickness"],
             "Underline thickness",
-            "Tune underline stroke thickness.",
+            "",
             "text",
             "GLYPH BEHAVIOR",
             number(0.0..=8.0, NumberControl::Slider, "px"),
@@ -1064,7 +1085,7 @@ fn notifications_specs() -> [SettingSpec; 4] {
         spec(
             &["session", "bell"],
             "Terminal bell",
-            "Choose visual, system audio, both, or no bell.",
+            "",
             "shell",
             "NOTIFICATIONS",
             SettingKind::Choice {
@@ -1231,7 +1252,7 @@ fn status_bar_specs() -> [SettingSpec; 3] {
         spec(
             &["chrome", "bottom-bar"],
             "Bottom bar",
-            "Show the module bar below the terminal.",
+            "",
             "status",
             "BARS",
             SettingKind::Bool,
@@ -1240,7 +1261,7 @@ fn status_bar_specs() -> [SettingSpec; 3] {
         spec(
             &["chrome", "status-height"],
             "Height",
-            "Module strip height.",
+            "",
             "status",
             "STATUS BARS",
             number(20.0..=80.0, NumberControl::Slider, " px"),
@@ -1285,7 +1306,7 @@ fn themes_specs() -> [SettingSpec; 7] {
         spec(
             &["appearance", "mode"],
             "Color mode",
-            "Follow the system appearance or choose light or dark.",
+            "",
             "colors",
             "COLOR MODE",
             SettingKind::Choice {
@@ -1338,7 +1359,7 @@ fn cursor_specs() -> [SettingSpec; 3] {
         spec(
             &["cursor", "blink"],
             "Blink cursor",
-            "Make the default cursor blink.",
+            "",
             "appearance",
             "CURSOR",
             SettingKind::Bool,
@@ -1392,7 +1413,7 @@ fn font_styles_specs() -> [SettingSpec; 9] {
         spec(
             &["font", "ui-use-terminal-family"],
             "Use terminal font for interface",
-            "Use the terminal font family throughout the interface.",
+            "",
             "text",
             "FONT",
             SettingKind::Bool,
@@ -1445,7 +1466,7 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
         spec(
             &["chrome", "notched-fullscreen-black-chrome"],
             "Black chrome in notched fullscreen",
-            "Use black chrome around the display notch in fullscreen.",
+            "",
             "appearance",
             "FULLSCREEN NOTCH",
             SettingKind::Bool,
@@ -1581,7 +1602,7 @@ fn backend_specs() -> [SettingSpec; 7] {
         spec(
             &["multiplexer", "backend"],
             "Terminal backend",
-            "Choose which backend owns terminal sessions and pane layout.",
+            "",
             "general",
             "MULTIPLEXER",
             SettingKind::Choice {
@@ -1726,7 +1747,7 @@ fn input_specs() -> impl Iterator<Item = SettingSpec> {
         spec(
             &["input", "macos-option-as-alt"],
             "Option as Alt",
-            "Choose which Option keys send Alt input on macOS.",
+            "",
             "keys",
             "INPUT",
             SettingKind::Choice {
@@ -1747,7 +1768,7 @@ fn input_specs() -> impl Iterator<Item = SettingSpec> {
         spec(
             &["input", "hide-mouse-pointer-while-typing"],
             "Hide mouse pointer while typing",
-            "Hide the pointer while entering terminal input.",
+            "",
             "appearance",
             "MOUSE POINTER",
             SettingKind::Bool,
@@ -1767,7 +1788,7 @@ fn input_specs() -> impl Iterator<Item = SettingSpec> {
         spec(
             &["input", "preset"],
             "Keybinding preset",
-            "Choose the base keyboard shortcuts.",
+            "",
             "keys",
             "KEYBINDS",
             SettingKind::Choice {
@@ -1851,7 +1872,7 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
     let mut specs = vec![spec(
         &["agents", "default-provider"],
         "Default provider",
-        "Provider selected for a fresh agent draft.",
+        "",
         "general",
         "NEW SESSIONS",
         SettingKind::Choice {
@@ -1907,7 +1928,7 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
     specs.push(spec(
         &["agents", "claude", "fast-mode"],
         "Fast mode",
-        "Enable fast mode for new conversations.",
+        "",
         "providers",
         "DEFAULTS",
         SettingKind::Bool,
