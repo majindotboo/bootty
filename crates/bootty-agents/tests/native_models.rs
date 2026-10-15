@@ -44,7 +44,7 @@ for line in sys.stdin:
  params=value['request'] if claude else value if pi else value.get('params',{})
  if method=='initialized': continue
  if method=='initialize':
-  catalog={'models':[{'value':'available','resolvedModel':'claude-test','displayName':'Available','supportsEffort':True,'supportedEffortLevels':['medium','high','max']}]}
+  catalog={'models':[{'value':'available','resolvedModel':'claude-test','displayName':'Available','supportsFastMode':True,'supportsEffort':True,'supportedEffortLevels':['medium','high','max']}]}
   if claude and os.path.exists('claude-catalog.json'):
    with open('claude-catalog.json') as source: catalog=json.load(source)
   reply(value,catalog if claude else {})
@@ -77,7 +77,12 @@ for line in sys.stdin:
   reply(value,{'cleared':True})
 
  elif method=='get_commands': reply(value,{'commands':[{'name':'review','description':'Review work','source':'extension'},{'name':'skill:project-skill','source':'skill','description':'Project work','sourceInfo':{'path':os.path.join(os.getcwd(),'SKILL.md'),'scope':'project'}}]})
- elif method=='model/list': reply(value,{'data':[{'id':'catalog-id','model':'available','displayName':'Available','supportedReasoningEfforts':[{'reasoningEffort':'medium'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'medium','isDefault':True}],'nextCursor':None})
+ elif method=='model/list':
+  advertised={'id':'catalog-id','model':'available','displayName':'Available','supportedReasoningEfforts':[{'reasoningEffort':'medium'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'medium','isDefault':True,'serviceTiers':[{'id':'fast'}]}
+  if os.path.exists('speed-capabilities.json'):
+   del advertised['serviceTiers']
+   with open('speed-capabilities.json') as source: advertised.update(json.load(source))
+  reply(value,{'data':[advertised],'nextCursor':None})
  elif method=='config/read':
   settings={'model':'available','model_reasoning_effort':'high'}
   if os.path.exists('codex-config.json'):
@@ -972,4 +977,60 @@ fn user_goal_controls_update_and_clear_the_provider_goal_without_sending_a_turn(
     assert_eq!(session.completions().unwrap().goal, None);
     assert!(!root.path().join("prompt.json").exists());
     session.stop();
+}
+
+#[rstest]
+#[case::codex_fast(AgentKind::Codex, json!({"serviceTiers":[{"id":"fast"}]}), true)]
+#[case::codex_legacy(AgentKind::Codex, json!({"additionalSpeedTiers":["fast"]}), true)]
+#[case::codex_standard(AgentKind::Codex, json!({"serviceTiers":[{"id":"default"}]}), false)]
+#[case::codex_unknown(AgentKind::Codex, json!({}), false)]
+#[case::claude_fast(AgentKind::Claude, json!({"supportsFastMode":true}), true)]
+#[case::claude_standard(AgentKind::Claude, json!({}), false)]
+fn speed_controls_follow_the_captured_models_advertised_capabilities(
+    #[case] provider: AgentKind,
+    #[case] fields: Value,
+    #[case] expected: bool,
+) {
+    let root = TempDir::new().unwrap();
+    if provider == AgentKind::Claude {
+        let mut model =
+            json!({"value":"available","resolvedModel":"claude-test","displayName":"Available"});
+        model
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        fs::write(
+            root.path().join("claude-catalog.json"),
+            json!({"models":[model]}).to_string(),
+        )
+        .unwrap();
+    } else {
+        fs::write(
+            root.path().join("speed-capabilities.json"),
+            fields.to_string(),
+        )
+        .unwrap();
+    }
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create(
+            "binding",
+            "Speed capabilities",
+            config(root.path(), provider).unwrap(),
+        )
+        .unwrap();
+    let catalog = service.models(&record.target()).unwrap();
+    assert_eq!(catalog[0].supports_fast_mode, expected);
+    let selection = NativeModelSelection {
+        plan_mode: None,
+        fast_mode: Some(true),
+        model: "available".into(),
+        reasoning_effort: None,
+    };
+    assert_eq!(
+        service.configure(&record.target(), &selection).is_ok(),
+        expected
+    );
+    assert_eq!(service.sessions()[0].config.fast_mode, expected);
+    service.shutdown().unwrap();
 }

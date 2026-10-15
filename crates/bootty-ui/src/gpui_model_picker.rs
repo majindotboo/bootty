@@ -357,16 +357,20 @@ impl ModelPickerView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let current = current.map(str::to_owned).or_else(|| {
+            models
+                .iter()
+                .find(|model| model.is_default)
+                .map(|model| model.id.clone())
+        });
         let selected = models
             .iter()
-            .find(|model| current == Some(model.id.as_str()))
-            .or_else(|| models.iter().find(|model| model.is_default));
+            .find(|model| current.as_ref() == Some(&model.id));
         let group = selected.map_or_else(
             || provider.to_string(),
             |model| model_group(provider, &model.id),
         );
         let expanded_legacy = selected.is_some_and(|model| model.is_legacy);
-        let current = selected.map(|model| model.id.clone());
         let mut delegate = ModelList {
             provider,
             models,
@@ -455,11 +459,7 @@ impl ModelPickerView {
         let changed_models = self.list.update(cx, |list, cx| {
             let delegate = list.delegate_mut();
             let changed_provider = delegate.provider != provider;
-            let selected = models
-                .iter()
-                .find(|model| Some(model.id.as_str()) == current)
-                .or_else(|| models.iter().find(|model| model.is_default))
-                .map(|model| model.id.clone());
+            let selected = current.map(str::to_owned).or_else(|| models.iter().find(|model| model.is_default).map(|model| model.id.clone()));
             if changed_provider || delegate.models != models || delegate.current != selected {
                 delegate.provider = provider;
                 delegate.models = models.to_vec();
@@ -713,25 +713,29 @@ impl ModelPickerView {
                 current.filter(|model| !model.reasoning_efforts.is_empty()),
                 |popup, model| popup.child(self.render_reasoning_options(model, cx)),
             )
-            .when(delegate.provider != AgentKind::Pi, |popup| {
-                popup.child(
-                    div()
-                        .debug_selector(|| "model-fast-mode".into())
-                        .p_2()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            Switch::new("model-fast-mode")
-                                .small()
-                                .label("Fast mode")
-                                .checked(self.fast_mode)
-                                .disabled(!self.enabled)
-                                .on_click(cx.listener(|_, fast, _, cx| {
-                                    cx.emit(ModelPickerEvent::FastMode(*fast));
-                                })),
-                        ),
-                )
-            })
+            .when(
+                delegate.provider != AgentKind::Pi
+                    && (self.fast_mode || current.is_some_and(|model| model.supports_fast_mode)),
+                |popup| {
+                    popup.child(
+                        div()
+                            .debug_selector(|| "model-fast-mode".into())
+                            .p_2()
+                            .border_t_1()
+                            .border_color(cx.theme().border)
+                            .child(
+                                Switch::new("model-fast-mode")
+                                    .small()
+                                    .label("Fast mode")
+                                    .checked(self.fast_mode)
+                                    .disabled(!self.enabled)
+                                    .on_click(cx.listener(|_, fast, _, cx| {
+                                        cx.emit(ModelPickerEvent::FastMode(*fast));
+                                    })),
+                            ),
+                    )
+                },
+            )
             .on_key_down(
                 cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     // A nested picker consumes Escape before the enclosing composer dialog.
@@ -887,7 +891,12 @@ impl Render for ModelPickerView {
             .iter()
             .find(|model| delegate.current.as_ref() == Some(&model.id));
         let label = current.map_or_else(
-            || delegate.provider.to_string(),
+            || {
+                delegate
+                    .current
+                    .clone()
+                    .unwrap_or_else(|| delegate.provider.display_name().to_owned())
+            },
             |model| model.display_name.clone(),
         );
         let integrated = !self.providers.is_empty();
@@ -914,6 +923,7 @@ impl Render for ModelPickerView {
             .track_focus(&focus)
             .trigger(
                 Button::new("model-picker-trigger")
+                    .debug_selector(|| "model-picker-trigger".into())
                     .ghost()
                     .small()
                     .min_w_0()
@@ -941,7 +951,10 @@ impl Render for ModelPickerView {
                     )
                     .child(
                         div()
-                            .debug_selector(|| "model-picker-trigger".into())
+                            .debug_selector({
+                                let label = label.clone();
+                                move || format!("model-label:{label}")
+                            })
                             .min_w_0()
                             .text_ellipsis()
                             .child(label),

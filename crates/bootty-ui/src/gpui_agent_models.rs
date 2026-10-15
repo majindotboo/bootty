@@ -194,13 +194,16 @@ impl NativeAgentSessionView {
             return;
         };
         if models.is_empty() {
+            self.model_picker = None;
+            self.model_picker_subscription = None;
             return;
         }
-        let selected = models
-            .iter()
-            .find(|model| self.record.config.model.as_deref() == Some(&model.id))
-            .or_else(|| models.iter().find(|model| model.is_default))
-            .map(|model| model.id.clone());
+        let selected = self.record.config.model.clone().or_else(|| {
+            models
+                .iter()
+                .find(|model| model.is_default)
+                .map(|model| model.id.clone())
+        });
         let enabled = !self.pending.contains("configure")
             && !self.pending.contains("favorite")
             && matches!(
@@ -243,7 +246,7 @@ impl NativeAgentSessionView {
         &mut self,
         event: &ModelPickerEvent,
         window: &Window,
-        cx: &Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         match event {
             ModelPickerEvent::Reasoning(selection) => self.select_model(selection, window, cx),
@@ -320,26 +323,14 @@ impl NativeAgentSessionView {
             // composer supplies provider choices to the shared picker.
             ModelPickerEvent::SelectProvider(_) => {}
         }
+        if matches!(event, ModelPickerEvent::Select(_)) {
+            cx.defer_in(window, |this, window, cx| {
+                this.composer.read(cx).focus_handle(cx).focus(window, cx);
+            });
+        }
     }
 
     pub(super) fn render_model_controls(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        let current = self
-            .models
-            .iter()
-            .flatten()
-            .find(|model| self.record.config.model.as_deref() == Some(&model.id))
-            .or_else(|| self.models.iter().flatten().find(|model| model.is_default));
-        let label = current.map_or_else(
-            || {
-                self.record
-                    .config
-                    .model
-                    .clone()
-                    .unwrap_or_else(|| self.record.config.provider.display_name().to_owned())
-            },
-            |model| model.display_name.clone(),
-        );
-        let provider = self.record.config.provider;
         let busy = self.pending.contains("configure")
             || !matches!(
                 self.record.snapshot.status,
@@ -347,19 +338,6 @@ impl NativeAgentSessionView {
                     | NativeSessionStatus::Working
                     | NativeSessionStatus::Waiting
             );
-        let trigger = move |cx: &App| {
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .min_w_0()
-                .child(crate::gpui::sized_icon(
-                    provider.icon(),
-                    crate::gpui::IconSize::Small,
-                    crate::gpui::provider_color(&provider.to_string(), cx),
-                ))
-                .child(div().min_w_0().text_ellipsis().child(label.clone()))
-        };
         div()
             .flex()
             .flex_shrink_0()
@@ -380,7 +358,11 @@ impl NativeAgentSessionView {
                         } else {
                             "Model for next message"
                         })
-                        .child(trigger(cx))
+                        .label(if self.pending.contains("models-info") {
+                            "Loading models"
+                        } else {
+                            "No models"
+                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.models = None;
                             this.error = None;
@@ -403,7 +385,7 @@ impl NativeAgentSessionView {
         };
         let provider = self.record.config.provider;
         let label = if mode == bootty_agents::NativePermissionMode::ProviderDefault {
-            "Policy unavailable"
+            "Provider default"
         } else {
             mode.label()
         };

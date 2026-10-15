@@ -1045,6 +1045,7 @@ fn agent_composer_handles_cancel_from_child_controls(cx: &TestAppContext) {
         is_default: true,
         is_legacy: false,
         is_favorite: false,
+        supports_fast_mode: false,
     });
     let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200.0, 900.0, 24.0);
     click(&mut cx, "model-picker-trigger");
@@ -1523,6 +1524,7 @@ fn composer_model_focus_action_reaches_the_real_picker(cx: &TestAppContext) {
         is_default: true,
         is_legacy: false,
         is_favorite: false,
+        supports_fast_mode: false,
     });
     let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec, 1200., 900., 16.);
     probe.update_in(&mut cx, |probe, window, cx| {
@@ -1584,6 +1586,7 @@ fn composer_control_shortcuts_open_and_select_without_an_extra_activation(cx: &T
                 default_reasoning_effort: Some("medium".into()),
                 is_default: true,
                 is_favorite: false,
+                supports_fast_mode: false,
                 is_legacy: false,
             });
             spec.selected_model = Some("current".into());
@@ -1646,6 +1649,7 @@ fn effort_commands_skip_hidden_levels_and_stop_at_the_model_bounds(cx: &TestAppC
         is_default: true,
         is_legacy: false,
         is_favorite: false,
+        supports_fast_mode: false,
     });
     let (probe, mut cx) = full_surface_probe_with_viewport(cx, spec.clone(), 1200., 900., 16.);
     for (current, action, expected) in [

@@ -5,6 +5,10 @@ use crate::{AgentKind, NativeAgentSession, NativePermissionMode, native_protocol
 
 /// Provider-advertised choices. IDs are wire selectors, never display labels.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Default, legacy, favorite and speed capability vary independently"
+)]
 pub struct NativeModelOption {
     pub id: String,
     pub display_name: String,
@@ -15,6 +19,9 @@ pub struct NativeModelOption {
     pub is_legacy: bool,
     #[serde(default)]
     pub is_favorite: bool,
+    /// Advertised by this model's provider catalog; absence does not imply support.
+    #[serde(default)]
+    pub supports_fast_mode: bool,
 }
 
 /// Catalog and effective permissions from the captured provider account and project.
@@ -37,6 +44,15 @@ pub struct NativeModelSelection {
     pub fast_mode: Option<bool>,
     pub model: String,
     pub reasoning_effort: Option<String>,
+}
+
+fn codex_fast_mode(model: &Value) -> bool {
+    field(model, "serviceTiers")
+        .as_array()
+        .is_some_and(|tiers| tiers.iter().any(|tier| field(tier, "id") == "fast"))
+        || field(model, "additionalSpeedTiers")
+            .as_array()
+            .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"))
 }
 
 impl NativeAgentSession {
@@ -174,6 +190,7 @@ impl NativeAgentSession {
                                     field(model, "model").as_str().unwrap_or_default(),
                                 ),
                             is_favorite: false,
+                            supports_fast_mode: codex_fast_mode(model),
                         });
                     }
                     if models.len() > 1024 {
@@ -221,6 +238,7 @@ impl NativeAgentSession {
                                     field(model, "id").as_str().unwrap_or_default(),
                                 ),
                             is_favorite: false,
+                            supports_fast_mode: false,
                         })
                     })
                     .collect()
@@ -453,6 +471,7 @@ pub fn decode_claude(response: &Value) -> Result<Vec<NativeModelOption>, String>
                 reasoning_efforts: efforts,
                 default_reasoning_effort: None,
                 is_favorite: false,
+                supports_fast_mode: field(model, "supportsFastMode") == true,
             })
         })
         .collect()

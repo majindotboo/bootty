@@ -765,6 +765,7 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
     mut form: NewSessionForm,
     #[case] duplicate_name: bool,
     #[case] model_label: &str,
+    #[values(false, true)] fast_supported: bool,
 ) {
     let model = bootty_agents::NativeModelOption {
         id: "provider-model".to_owned(),
@@ -774,6 +775,7 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
         is_default: true,
         is_legacy: false,
         is_favorite: false,
+        supports_fast_mode: fast_supported,
     };
     let mut catalog = vec![model.clone()];
     if duplicate_name {
@@ -782,6 +784,7 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
             is_default: false,
             is_legacy: false,
             is_favorite: false,
+            supports_fast_mode: fast_supported,
             ..model
         });
     }
@@ -814,7 +817,7 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
     assert_eq!(invocation.arguments[10], "");
     let selected: bootty_agents::NativeModelSelection =
         serde_json::from_str(&invocation.arguments[11]).unwrap();
-    assert_eq!(selected.fast_mode, Some(true));
+    assert_eq!(selected.fast_mode, Some(fast_supported));
     assert_eq!(selected.model, "provider-model");
     assert_eq!(selected.reasoning_effort.as_deref(), Some("high"));
     let mut surface = invocation.clone();
@@ -993,7 +996,10 @@ fn permission_choices_reset_with_provider_and_use_the_shared_invocation(mut form
     let bootty_ui::gpui::DialogFieldKind::Choice(options) = &permissions.kind else {
         panic!("Permission menu")
     };
-    assert_eq!(options, &["Supervised", "Auto-accept edits", "Full access"]);
+    assert_eq!(
+        options,
+        &["Supervised", "Auto-accept edits", "Auto", "Full access"]
+    );
     form.change_field("permissions", "Supervised");
     assert_eq!(
         form.invocation(&form.draft.cwd).unwrap().arguments[14],
@@ -1052,6 +1058,7 @@ fn composer_defaults_resolve_advertised_values_and_preserve_explicit_choices(
         is_default: true,
         is_legacy: false,
         is_favorite: false,
+        supports_fast_mode: false,
     };
     let catalog = vec![
         recommended.clone(),
@@ -1210,6 +1217,7 @@ fn provider_catalogs_restore_only_for_the_exact_provider_profile_and_target(
         is_default: true,
         is_legacy: false,
         is_favorite: false,
+        supports_fast_mode: false,
     };
     let catalog = |id: &str, permissions| NativeProviderCatalog {
         models: vec![model(id)],
@@ -1317,6 +1325,7 @@ fn refreshing_a_warm_catalog_preserves_choices_on_failure(mut form: NewSessionFo
                 is_default: true,
                 is_legacy: false,
                 is_favorite: false,
+                supports_fast_mode: false,
             }],
             permissions: Some(bootty_agents::NativePermissionMode::FullAccess),
         }),
@@ -1420,6 +1429,7 @@ fn changing_model_effort_and_catalog_preserves_plan_mode(mut form: NewSessionFor
         is_default: true,
         is_legacy: false,
         is_favorite: false,
+        supports_fast_mode: false,
     }];
     form.set_model_catalog(Ok(models.clone()));
     form.change_field("plan-mode", "true");

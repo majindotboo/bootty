@@ -43,6 +43,7 @@ fn model(id: &str, legacy: bool, favorite: bool) -> NativeModelOption {
         is_default: id.ends_with("current"),
         is_legacy: legacy,
         is_favorite: favorite,
+        supports_fast_mode: true,
     }
 }
 
@@ -220,4 +221,51 @@ fn fast_mode_is_a_shared_picker_control_and_pi_has_no_speed_control(cx: &mut Tes
             ModelPickerEvent::FastMode(false)
         ]
     );
+}
+
+#[gpui_kit::test]
+fn unavailable_explicit_models_are_kept_and_speed_requires_a_capability(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for current in [None, Some("removed-model")] {
+        let retained = Rc::new(RefCell::new(None));
+        let captured = retained.clone();
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let picker = cx.new(|cx| {
+                let mut option = model("current", false, false);
+                option.supports_fast_mode = false;
+                ModelPickerView::new(AgentKind::Codex, vec![option], current, window, cx)
+            });
+            *captured.borrow_mut() = Some(picker.clone());
+            gpui_kit::component::Root::new(picker, window, cx)
+        });
+        visual.simulate_resize(size(px(800.), px(600.)));
+        draw(visual);
+        let selector = if current.is_some() {
+            "model-label:removed-model"
+        } else {
+            "model-label:Current model"
+        };
+        assert!(visual.debug_bounds(selector).is_some());
+        click(visual, "model-picker-trigger");
+        assert!(visual.debug_bounds("model-fast-mode").is_none());
+        visual.simulate_keystrokes("escape");
+        let mut option = model("current", false, false);
+        option.supports_fast_mode = false;
+        retained
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .update_in(visual, |picker, window, cx| {
+                picker.set_models(&[option], Some("removed-after-refresh"), true, window, cx);
+            });
+        draw(visual);
+        assert!(
+            visual
+                .debug_bounds("model-label:removed-after-refresh")
+                .is_some()
+        );
+    }
 }

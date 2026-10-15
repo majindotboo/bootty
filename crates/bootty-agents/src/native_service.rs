@@ -1050,12 +1050,12 @@ impl NativeAgentService {
         if let Some(plan) = selection.plan_mode {
             record.config.plan_mode = Some(plan);
         }
-        if let Some(fast) = selection.fast_mode {
-            if fast && record.config.provider == crate::AgentKind::Pi {
-                return Err("Pi does not support fast mode".to_owned());
-            }
-            record.config.fast_mode = fast;
+        if selection.fast_mode == Some(true) && !option.supports_fast_mode {
+            return Err("Fast mode is not supported by this model".to_owned());
         }
+        record.config.fast_mode = selection
+            .fast_mode
+            .unwrap_or(record.config.fast_mode && option.supports_fast_mode);
         record.config.model = Some(selection.model.clone());
         record
             .config

@@ -79,8 +79,8 @@ impl DialogView {
             picker.set_fast_mode(fast, cx);
             picker.set_available_efforts(&spec.available_efforts, cx);
         });
-        let subscription = cx.subscribe_in(&state, window, |this, _, event, _, cx| {
-            this.new_model_picker_changed(event, cx);
+        let subscription = cx.subscribe_in(&state, window, |this, _, event, window, cx| {
+            this.new_model_picker_changed(event, window, cx);
         });
         self.control_focus
             .insert("provider", state.focus_handle(cx));
@@ -90,7 +90,12 @@ impl DialogView {
         });
     }
 
-    fn new_model_picker_changed(&self, event: &ModelPickerEvent, cx: &mut Context<Self>) {
+    fn new_model_picker_changed(
+        &self,
+        event: &ModelPickerEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(spec) = &self.spec else {
             return;
         };
@@ -122,6 +127,14 @@ impl DialogView {
             field: field.into(),
             value: value.clone(),
         });
+        if matches!(event, ModelPickerEvent::Select(_)) {
+            cx.defer_in(window, |this, window, cx| {
+                this.prompt_textarea
+                    .read(cx)
+                    .focus_handle(cx)
+                    .focus(window, cx);
+            });
+        }
     }
 
     pub(super) fn new_model_error(

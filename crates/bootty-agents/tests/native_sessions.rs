@@ -627,6 +627,7 @@ fn cached_provider_catalog_retains_permissions_and_uses_exact_account_and_projec
             is_default: true,
             is_legacy: false,
             is_favorite: false,
+            supports_fast_mode: false,
         }],
         permissions: Some(NativePermissionMode::FullAccess),
     };

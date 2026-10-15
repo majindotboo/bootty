@@ -412,6 +412,19 @@ impl NewSessionForm {
             "fast-mode" => {
                 if self.draft.provider != "pi"
                     && let Ok(fast) = value.parse::<bool>()
+                    && (!fast
+                        || self
+                            .model_options
+                            .iter()
+                            .find(|model| {
+                                self.draft
+                                    .model_selection
+                                    .as_ref()
+                                    .map_or(model.is_default, |selection| {
+                                        selection.model == model.id
+                                    })
+                            })
+                            .is_some_and(|model| model.supports_fast_mode))
                 {
                     if self.draft.model_selection.is_none()
                         && let Some(model) =
@@ -434,7 +447,7 @@ impl NewSessionForm {
                 }) {
                     self.draft.model_selection = Some(bootty_agents::NativeModelSelection {
                         plan_mode: plan,
-                        fast_mode: fast,
+                        fast_mode: fast.map(|fast| fast && option.supports_fast_mode),
                         model: option.id.clone(),
                         reasoning_effort: option
                             .default_reasoning_effort
@@ -968,7 +981,8 @@ impl NewSessionForm {
                                 self.providers
                                     .provider(&self.draft.provider)
                                     .map(|provider| provider.fast_mode)
-                            }),
+                            })
+                            .map(|fast| fast && option.supports_fast_mode),
                         model: option.id.clone(),
                         reasoning_effort: effort,
                     });

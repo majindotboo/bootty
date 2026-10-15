@@ -64,8 +64,12 @@ impl NativePermissionMode {
     #[must_use]
     pub const fn choices(provider: AgentKind) -> &'static [Self] {
         match provider {
-            AgentKind::Codex => &[Self::Supervised, Self::Auto, Self::FullAccess],
-            AgentKind::Claude => &[Self::Supervised, Self::AutoAcceptEdits, Self::FullAccess],
+            AgentKind::Codex | AgentKind::Claude => &[
+                Self::Supervised,
+                Self::AutoAcceptEdits,
+                Self::Auto,
+                Self::FullAccess,
+            ],
             AgentKind::Pi => &[],
         }
     }
