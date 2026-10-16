@@ -20,6 +20,7 @@ fn response(text: &str, role: &str) -> NativeTranscriptItem {
         questions: Vec::new(),
         steered: false,
         usage: None,
+        checkpoint: None,
     }
 }
 

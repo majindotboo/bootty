@@ -456,7 +456,9 @@ fn decode_pi(value: &Value) -> Result<NativeCompletionCatalog, String> {
         };
         if matches!(
             command_name.as_str(),
-            "compact" | crate::tool_bridge::PI_CHECKPOINT_COMMAND
+            "compact"
+                | crate::tool_bridge::PI_CHECKPOINT_COMMAND
+                | crate::tool_bridge::PI_REWIND_COMMAND
         ) {
             continue;
         }

@@ -43,6 +43,12 @@ running=None
 for line in sys.stdin:
  value=json.loads(line)
  if value['type']=='control_request':
+  if value['request']['subtype']=='rewind_conversation':
+   # Observed from Claude 2.1.301: a rewind it refuses still succeeds as a control request.
+   with open('rewind.json','w') as output: json.dump(value['request'],output)
+   outcome={'rewound':False,'error':'stale target','reason':'stale_target'} if os.path.exists('refuse-rewind') else {'rewound':True,'prefillText':'first','precedingAssistantUuid':None}
+   emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':outcome}})
+   continue
   if value['request']['subtype']=='stop_task':
    # Claude acknowledges a stop, then reports the task stopped.
    control(value)
@@ -466,6 +472,59 @@ fn stopping_a_claude_subagent_stops_its_task() {
     barrier(&session).unwrap();
     assert_eq!(status(&session), Some(NativeToolStatus::Interrupted));
     assert!(session.stop_subagent("child").is_err());
+    session.stop();
+}
+
+/// Rewinding asks Claude to forget a message and everything after it, naming the newest message
+/// shown so Claude can refuse when it has moved on, and the transcript lets them go. A refusal
+/// says why and leaves the transcript alone.
+#[rstest]
+#[case::rewound(false)]
+#[case::refused(true)]
+fn rewinding_asks_claude_to_forget_from_a_message(#[case] refuse: bool) {
+    let root = TempDir::new().unwrap();
+    if refuse {
+        fs::write(root.path().join("refuse-rewind"), "").unwrap();
+    }
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    for prompt in ["first", "second"] {
+        session.send_prompt(prompt).unwrap();
+        barrier(&session).unwrap();
+    }
+    let prompts = |session: &NativeAgentSession| {
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .filter(|item| item.role == "user")
+            .map(|item| (item.id.clone(), item.text.clone()))
+            .collect::<Vec<_>>()
+    };
+    let shown = prompts(&session);
+    let [(first, _), (second, _)] = shown.as_slice() else {
+        panic!("two prompts expected: {shown:?}");
+    };
+    let rewound = session.rewind_conversation(first);
+    let request: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.path().join("rewind.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        request,
+        json!({"subtype":"rewind_conversation","target_message_uuid":first,"last_seen_user_message_uuid":second})
+    );
+    if refuse {
+        assert_eq!(
+            rewound,
+            Err(
+                "Claude's conversation has messages this one doesn't show; reopen it and try again"
+                    .to_owned()
+            )
+        );
+        assert_eq!(prompts(&session), shown);
+    } else {
+        assert_eq!(rewound, Ok(()));
+        assert_eq!(prompts(&session), []);
+    }
     session.stop();
 }
 

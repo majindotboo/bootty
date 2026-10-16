@@ -5,6 +5,10 @@ use bootty_git::github::{PullRequestCreationContext, PullRequestCreationRequest}
 pub(super) enum CreationSubmission {
     Publish(PullRequestCreationContext),
     Create(PullRequestCreationRequest),
+    /// Codex writes the title and description from the branch's commits since `base`.
+    Write {
+        base: String,
+    },
 }
 
 pub(super) struct CreationEditor {
@@ -55,6 +59,24 @@ impl CreationEditor {
     pub(super) const fn set_saving(&mut self, saving: bool) {
         self.saving = saving;
     }
+    /// Fills the title and the description that are still empty with what Codex wrote.
+    pub(super) fn fill(
+        &self,
+        written: bootty_agents::GeneratedPullRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.title.read(cx).value().trim().is_empty() {
+            self.title
+                .update(cx, |title, cx| title.set_value(written.title, window, cx));
+        }
+        if self.body.read(cx).value().trim().is_empty() {
+            self.body
+                .update(cx, |body, cx| body.set_value(written.body, window, cx));
+        }
+        cx.notify();
+    }
+
     pub(super) fn published(&mut self, cx: &mut Context<Self>) {
         self.published = true;
         cx.notify();
@@ -132,6 +154,24 @@ impl Render for CreationEditor {
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.draft = !this.draft;
                                 cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("write-pr")
+                            .icon(gpui_kit::assets::IconName::Sparkles)
+                            .label("Write with Codex")
+                            .small()
+                            .ghost()
+                            .disabled(
+                                self.saving
+                                    || self.base.read(cx).value().trim().is_empty()
+                                    || !self.title.read(cx).value().trim().is_empty()
+                                        && !self.body.read(cx).value().trim().is_empty(),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.emit(CreationSubmission::Write {
+                                    base: this.base.read(cx).value().trim().to_owned(),
+                                });
                             })),
                     )
                     .child(

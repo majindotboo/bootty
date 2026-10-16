@@ -51,6 +51,8 @@ mod citations;
 pub use citations::init_reaction_keys;
 use citations::{ResponseCitation, ResponseSelection};
 pub use requests::init_request_keys;
+#[path = "gpui_agent_branch.rs"]
+mod branch;
 #[path = "gpui_agent_copy_mode.rs"]
 mod copy_mode;
 #[path = "gpui_agent_find.rs"]
@@ -132,6 +134,10 @@ fn annotation_thumbnail(bytes: &[u8]) -> Option<Arc<gpui_kit::RenderImage>> {
 pub enum OpenNativeSession {
     Speech {
         mode: crate::gpui_speech::SpeechMode,
+    },
+    /// Show what a turn changed, as a Git diff, in the session's Changes.
+    ShowTurnChanges {
+        diff: String,
     },
     /// Carry out `plan` in a new conversation beside this one, with the same provider and
     /// settings.
@@ -222,6 +228,7 @@ pub struct NativeAgentSessionView {
     /// What to call this conversation in writing, like `bootty-7c`.
     short_name: String,
     context_card: Option<ConversationContext>,
+    branch_choices: branch::BranchChoices,
     wide: bool,
     /// The context card fits in the margin beside the centered message column.
     card_beside: bool,
@@ -273,6 +280,8 @@ pub struct NativeAgentSessionView {
     message_focus: BTreeMap<String, FocusHandle>,
     expanded_messages: BTreeSet<String>,
     copied_message: Option<String>,
+    /// The message a rewind is taking back, to return to the composer once it has.
+    rewound: Option<(String, Vec<bootty_agents::NativeAttachmentReference>)>,
     copy_feedback: Option<gpui_kit::Task<()>>,
     find: Option<find::TranscriptFind>,
     anchor: Option<timeline::PromptAnchor>,
@@ -416,6 +425,7 @@ impl NativeAgentSessionView {
             related: Vec::new(),
             short_name: String::new(),
             context_card: None,
+            branch_choices: branch::BranchChoices::default(),
             wide: cx
                 .try_global::<context_card::LastWide>()
                 .is_some_and(|last| last.0),
@@ -466,6 +476,7 @@ impl NativeAgentSessionView {
             message_focus: BTreeMap::new(),
             expanded_messages: BTreeSet::new(),
             copied_message: None,
+            rewound: None,
             find: None,
             anchor: None,
             copy_mode: None,
@@ -1338,6 +1349,29 @@ impl NativeAgentSessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if operation == "rewind" {
+            if let Some((text, attachments)) = self.rewound.take() {
+                self.return_rewound(&text, &attachments, window, cx);
+            }
+            return;
+        }
+        if operation == "turn-diff" {
+            let diff = value
+                .get("diff")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if diff.trim().is_empty() {
+                self.command_error = Some((
+                    "This turn changed no files".to_owned(),
+                    "turn-diff: empty".to_owned(),
+                ));
+            } else {
+                cx.emit(OpenNativeSession::ShowTurnChanges {
+                    diff: diff.to_owned(),
+                });
+            }
+            return;
+        }
         if operation == "history" {
             match serde_json::from_value::<bootty_agents::NativeHistoryPage>(value) {
                 Ok(mut page) => {
@@ -2917,6 +2951,7 @@ impl NativeAgentSessionView {
                             .map(|usage| turn_usage(&item.id, usage)),
                     )
                     .child(self.copy_message_button(&id, owner.clone()))
+                    .children(self.turn_button(item, owner.clone()))
                     .when(
                         item.role == "assistant"
                             && crate::presentation::markdown_tables::has_table(&item.text),
@@ -2954,6 +2989,151 @@ impl NativeAgentSessionView {
                         },
                     ),
             )
+    }
+
+    /// On a prompt, rewinding to before it; on a turn's last reply, the files it changed, from the
+    /// snapshots Git kept around the turn.
+    fn turn_button(
+        &self,
+        item: &NativeTranscriptItem,
+        owner: gpui_kit::WeakEntity<Self>,
+    ) -> Option<Button> {
+        let id = item.id.clone();
+        if item.role == "user" {
+            // A side chat's copied messages belong to the conversation it came from.
+            return (self.subagent.is_none()
+                && self.provider_enabled()
+                && !item.id.starts_with("fork:"))
+            .then(|| {
+                Button::new(gpui_kit::SharedString::from(format!("rewind:{id}")))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("rewind:{id}")
+                    })
+                    .icon(IconName::Undo2)
+                    .ghost()
+                    .xsmall()
+                    .disabled(is_busy(self.record.snapshot.status))
+                    .accessibility_label("Rewind to before this message")
+                    .tooltip("Rewind to before this message")
+                    .on_click(move |_, window, cx| {
+                        _ = owner.update(cx, |this, cx| this.confirm_rewind(&id, window, cx));
+                    })
+            });
+        }
+        item.checkpoint.as_ref()?;
+        let earlier = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .take_while(|earlier| earlier.id != item.id)
+            .filter(|earlier| earlier.role == "user")
+            .last()
+            .is_some_and(|prompt| prompt.checkpoint.is_some());
+        (item.role == "assistant" && earlier).then(|| {
+            Button::new(gpui_kit::SharedString::from(format!("turn-changes:{id}")))
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("turn-changes:{id}")
+                })
+                .icon(gpui_kit::assets::IconName::FileDiff)
+                .ghost()
+                .xsmall()
+                .loading(self.pending.contains("turn-diff"))
+                .accessibility_label("Show the files this turn changed")
+                .tooltip("Show the files this turn changed")
+                .on_click(move |_, window, cx| {
+                    _ = owner.update(cx, |this, cx| {
+                        this.submit_command("turn-diff", vec![id.clone()], None, window, cx);
+                    });
+                })
+        })
+    }
+
+    /// Asks how far to rewind to before message `id`: the conversation, which brings the message
+    /// back to the composer, and when Git kept the files before it, the files too or alone.
+    fn confirm_rewind(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .find(|item| item.id == id)
+        else {
+            return;
+        };
+        let files = item.checkpoint.is_some();
+        let forget = format!(
+            "{} forgets this message and everything after it, and the message comes back to the composer.",
+            self.record.config.provider.display_name()
+        );
+        let detail = if files {
+            format!(
+                "{forget} Putting files back loses changes made since, by the agent or anyone. Ignored files stay."
+            )
+        } else {
+            forget
+        };
+        let mut answers = vec![gpui_kit::PromptButton::Other("Rewind conversation".into())];
+        if files {
+            answers.extend([
+                gpui_kit::PromptButton::Other("Rewind conversation and files".into()),
+                gpui_kit::PromptButton::Other("Put files back only".into()),
+            ]);
+        }
+        answers.push(gpui_kit::PromptButton::Cancel("Cancel".into()));
+        let answer = crate::gpui::prompt(
+            "Rewind to before this message?",
+            Some(&detail),
+            &answers,
+            window,
+            cx,
+        );
+        let message = (item.text.clone(), item.attachments.clone());
+        let (id, target) = (id.to_owned(), self.record.target());
+        cx.spawn_in(window, async move |owner, cx| {
+            let choice = answer.await;
+            _ = owner.update_in(cx, |this, window, cx| {
+                if this.record.target() != target {
+                    return;
+                }
+                match choice {
+                    Ok(0) => {
+                        this.rewound = Some(message);
+                        this.submit_command("rewind", vec![id], None, window, cx);
+                    }
+                    Ok(1) if files => {
+                        this.rewound = Some(message);
+                        this.submit_command("rewind", vec![id, "files".into()], None, window, cx);
+                    }
+                    Ok(2) if files => {
+                        this.submit_command("rewind-files", vec![id], None, window, cx);
+                    }
+                    _ => {}
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Brings a rewound message back: in place of an empty composer, with its files, or into the
+    /// draft where the cursor is.
+    fn return_rewound(
+        &mut self,
+        text: &str,
+        attachments: &[bootty_agents::NativeAttachmentReference],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.composer.read(cx).value().trim().is_empty() && self.attachments.is_empty() {
+            self.restore_draft(text, attachments, window, cx);
+        } else {
+            self.composer.update(cx, |composer, cx| {
+                composer.insert(text.to_owned(), window, cx);
+            });
+        }
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     fn copy_message_button(&self, id: &str, owner: gpui_kit::WeakEntity<Self>) -> Button {
@@ -4156,6 +4336,7 @@ impl NativeAgentSessionView {
                     .items_center()
                     .gap_2()
                     .child(self.render_context_usage(cx))
+                    .children(self.render_branch_picker(cx))
                     .child(
                         div()
                             .id("native-model-control")
@@ -4740,6 +4921,9 @@ fn command_failure(operation: &str, outcome: &CommandOutcome) -> (String, String
         "fork" => "Could not start the side chat",
         "resume" => "Could not resume the conversation",
         "attachment-open" => "Could not open the attachment",
+        "turn-diff" => "Could not show the turn's changes",
+        "rewind-files" => "Could not put the files back",
+        "rewind" => "Could not rewind the conversation",
         "attachment-reveal" => "Could not show the attachment",
         _ => "Could not update the conversation",
     };

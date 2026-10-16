@@ -113,6 +113,8 @@ pub(super) struct SessionPlace {
     pub project: Option<String>,
     pub branch: Option<String>,
     pub local: bool,
+    /// The session, and its project's scripts it can run in a new tab.
+    pub scripts: Option<(SessionTarget, Vec<String>)>,
 }
 
 fn current_sidebar_session(snapshot: &ChromeSnapshot) -> Option<&SessionTarget> {
@@ -1254,13 +1256,7 @@ fn command_icon(command: &str) -> Option<gpui_kit::assets::IconName> {
 }
 
 pub(super) fn color(value: Rgba) -> gpui_kit::Hsla {
-    gpui_kit::Rgba {
-        r: f32::from(value.red) / 255.0,
-        g: f32::from(value.green) / 255.0,
-        b: f32::from(value.blue) / 255.0,
-        a: f32::from(value.alpha) / 255.0,
-    }
-    .into()
+    value.into()
 }
 
 pub(super) fn navigation_hint(

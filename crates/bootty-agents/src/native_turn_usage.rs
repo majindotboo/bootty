@@ -134,6 +134,7 @@ impl NativeSessionSnapshot {
 
     /// Keeps the finished turn's usage on its last reply.
     pub(crate) fn settle_turn_usage(&mut self) {
+        self.turn_ended = true;
         let Some(usage) = self.turn_usage.take() else {
             return;
         };

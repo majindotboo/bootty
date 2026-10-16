@@ -18,10 +18,12 @@ pub use protocol::{MAX_TOOL_IMAGE_RESPONSE_BYTES, MAX_TOOL_MESSAGE_BYTES, ToolPr
 pub use transport::tool_stdio;
 
 pub const PI_CHECKPOINT_COMMAND: &str = "__bootty_checkpoint";
+pub const PI_REWIND_COMMAND: &str = "__bootty_rewind";
 
-// Pi defers an empty session's file until its first message. Use its public session entries
-// and reattach the same file before publishing the identity. Remove when Pi adds checkpoint RPC.
-const PI_CHECKPOINT_EXTENSION: &str = r"
+// Bootty's Pi session commands. Pi defers an empty session's file until its first message, so the
+// checkpoint uses its public session entries and reattaches the same file before publishing the
+// identity; remove it when Pi adds checkpoint RPC. Pi's RPC has no in-place rewind either.
+const PI_SESSION_EXTENSION: &str = r"
   if (process.argv.includes('rpc')) pi.registerCommand('__bootty_checkpoint', { handler: async (_args, ctx) => {
     const { existsSync, openSync, writeFileSync, fsyncSync, closeSync, linkSync, unlinkSync } = await import('node:fs');
     const { randomUUID } = await import('node:crypto');
@@ -42,6 +44,16 @@ const PI_CHECKPOINT_EXTENSION: &str = r"
       const fd = openSync(path, 'r');
       try { fsyncSync(fd); } finally { closeSync(fd); }
     }
+  }});
+  // Rewinds to before the user message sent at a timestamp. Pi keeps the abandoned turns in its
+  // file; the marker entry makes the earlier point the one Pi resumes from.
+  if (process.argv.includes('rpc')) pi.registerCommand('__bootty_rewind', { handler: async (args, ctx) => {
+    const at = Number(args.trim());
+    const entry = ctx.sessionManager.getBranch().find(entry => entry.type === 'message' && entry.message.role === 'user' && entry.message.timestamp === at);
+    if (!entry) throw new Error('Pi no longer has that message in this conversation');
+    const result = await ctx.navigateTree(entry.id, { summarize: false });
+    if (result.cancelled) throw new Error('Pi kept the conversation as it was');
+    pi.appendEntry('bootty-rewind', { at });
   }});
 ";
 
@@ -308,7 +320,7 @@ fn launch_spec(
             let config = serde_json::to_string(&config).map_err(|error| error.to_string())?;
             let tools = pi_extension::TOOLS;
             let extension = format!(
-                "import type {{ ExtensionAPI, ToolDefinition }} from '@earendil-works/pi-coding-agent';\nexport default async function attach(pi: ExtensionAPI) {{\n  const server = {name}; const config = {config};\n{tools}\n{PI_CHECKPOINT_EXTENSION}}}\n"
+                "import type {{ ExtensionAPI, ToolDefinition }} from '@earendil-works/pi-coding-agent';\nexport default async function attach(pi: ExtensionAPI) {{\n  const server = {name}; const config = {config};\n{tools}\n{PI_SESSION_EXTENSION}}}\n"
             );
             let files = vec![bootty_host::private_stdio::relay::PrivateFile {
                 name: "tools.ts".into(),

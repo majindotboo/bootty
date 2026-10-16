@@ -155,6 +155,18 @@ then declined here with a note saying so. A question's answer can carry files, b
 drop or Attach files…, which go to a local provider as their paths. In the Changes
 diff, and in a conversation's file changes, selected lines take a comment that goes
 into the conversation's draft with the file, the lines and their text.
+In a Git work tree, every turn snapshots the files before it starts and after it
+ends, untracked files included, without touching the index. A reply's file-diff
+button opens that turn's changes (`agents.native.turn-diff`). A prompt's rewind
+button asks how far to go back to before it. Rewinding the conversation
+(`agents.native.rewind PROMPT [files]`) makes the provider forget that message's
+turn and every later one, drops them from the transcript, and brings the message
+back to the composer. With `files`, or alone (`agents.native.rewind-files`), the
+files go back too. Both are refused while a turn runs. Codex reverts its thread
+before the turn (`thread/revert`), so a steering message goes with the turn it
+joined. Claude rewinds in place and refuses when its conversation has messages
+this one doesn't show. Pi moves back in its session tree through Bootty's Pi
+extension, which needs Bootty's tools, and keeps the abandoned turns in its file.
 Sketch and skill recording are not supported here yet.
 
 Session naming also updates the exact newly created conversation's tab title.

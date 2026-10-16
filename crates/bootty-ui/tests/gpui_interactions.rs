@@ -13,8 +13,8 @@ use bootty_ui::gpui::{
     GpuiPaneColors, GpuiPaneDividerSnapshot, GpuiPaneIntent, GpuiPaneSnapshot, GpuiPaneWorkspace,
     GpuiPaneWorkspaceSnapshot, NativeChromeAction, PaneRect, PaneSplitDirection, Rgba,
     SessionContextSnapshot, SessionTarget, SidebarAgent, SidebarFooterItem, SidebarPosition,
-    SidebarProject, SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceKey,
-    SpaceSnapshot, StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot,
+    SidebarProject, SidebarPullRequest, SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask,
+    SpaceKey, SpaceSnapshot, StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot,
     StatusSegmentSnapshot, TabContextSnapshot, UiPalette, UsageMeterSnapshot, init_theme,
 };
 use bootty_ui::usage::{UsageProvider, UsageWindow};
@@ -146,6 +146,8 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 artwork: None,
                 icon: None,
                 diff: None,
+                pull_request: None,
+                scripts: Vec::new(),
                 color: color(220, 220, 230),
                 dim_color: color(150, 150, 160),
                 kind: SidebarRowKind::Session,
@@ -184,6 +186,8 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 artwork: None,
                 icon: Some("folder".to_owned()),
                 diff: None,
+                pull_request: None,
+                scripts: Vec::new(),
                 color: color(180, 180, 190),
                 dim_color: color(130, 130, 140),
                 kind: SidebarRowKind::Detail,
@@ -3242,6 +3246,23 @@ fn a_branch_title_is_not_repeated(cx: &mut TestAppContext) {
     };
     assert!(!shows_branch("feature/login", cx));
     assert!(shows_branch("Session one", cx));
+}
+
+/// A session's branch shows its pull request beside it, and the row reads it out.
+#[gpui_kit::test]
+fn a_branch_shows_its_pull_request(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+    row.branch = Some("feature/login".to_owned());
+    row.pull_request = Some(SidebarPullRequest {
+        number: 42,
+        status: "Open · checks passing".to_owned(),
+        color: color(80, 200, 120),
+    });
+    let (_, cx) = cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("sidebar-pull-request-session").is_some());
 }
 
 /// The settled shelf lists the most recently active session first, whatever the manual order.

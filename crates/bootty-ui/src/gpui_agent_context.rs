@@ -1,11 +1,14 @@
 //! Conversation context reuses the workspace's committed project and cached Git projection.
 use super::*;
-use crate::gpui::chrome::{SessionTarget, SidebarDiffSummary};
+use crate::gpui::chrome::{SessionTarget, SidebarDiffSummary, SidebarPullRequest};
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConversationContext {
     pub project: Option<String>,
     pub branch: Option<String>,
+    pub pull_request: Option<SidebarPullRequest>,
+    /// The binding whose host runs Git for the conversation's checkout.
+    pub binding: Option<CommandTarget>,
     pub diff: Option<SidebarDiffSummary>,
     pub target: Option<SessionTarget>,
 }
@@ -16,13 +19,16 @@ pub(super) struct LastWide(pub(super) bool);
 impl gpui_kit::Global for LastWide {}
 
 impl NativeAgentSessionView {
-    pub(crate) fn set_conversation_context(
+    /// The project, branch and Git binding of the conversation's session, as the workspace sees
+    /// them.
+    pub fn set_conversation_context(
         &mut self,
         context: Option<ConversationContext>,
         cx: &mut Context<Self>,
     ) {
         if self.context_card != context {
             self.context_card = context;
+            self.refresh_branches(cx);
             cx.notify();
         }
     }
@@ -73,6 +79,11 @@ impl NativeAgentSessionView {
                             .child(branch),
                     )
                 },
+            )
+            .children(
+                context
+                    .and_then(|context| context.pull_request.clone())
+                    .map(|pull_request| Self::render_context_pull_request(pull_request, cx)),
             )
             .when_some(
                 context.and_then(|context| context.target.clone()),
@@ -133,6 +144,35 @@ impl NativeAgentSessionView {
                 self.subagents()
                     .into_iter()
                     .map(|agent| self.render_subagent_entry(agent, cx)),
+            )
+    }
+
+    /// The branch's pull request: its number in the color of where it stands, then in words.
+    fn render_context_pull_request(
+        pull_request: SidebarPullRequest,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        let tint = gpui_kit::Hsla::from(pull_request.color);
+        div()
+            .debug_selector(|| "native-context-pull-request".into())
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_sm()
+            .child(crate::gpui::sized_icon(
+                "git-pull-request",
+                crate::gpui::IconSize::Small,
+                tint,
+            ))
+            .child(
+                div()
+                    .text_color(tint)
+                    .child(format!("#{}", pull_request.number)),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(pull_request.status),
             )
     }
 

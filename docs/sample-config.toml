@@ -480,7 +480,7 @@ button = "none"
 # Parents can control only shells/native children created under this exact live grant.
 default-provider = "codex"
 allow-spawn = false
-quick-model = "gpt-6-luna"
+quick-model = "gpt-6-luna" # names sessions, writes commit messages and PR text
 follow-up-behavior = "queue" # queue | steer | interrupt
 send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
 response-streaming = "live" # live | paragraph | complete

@@ -1,4 +1,5 @@
 pub mod changes;
+pub mod checkpoint;
 pub mod cleanup;
 pub mod diff;
 pub mod facts;

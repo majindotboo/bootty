@@ -227,7 +227,7 @@ impl PullRequestView {
         }
     }
 
-    fn open(&mut self, number: u32, window: &Window, cx: &mut Context<Self>) {
+    pub(super) fn open(&mut self, number: u32, window: &Window, cx: &mut Context<Self>) {
         if self
             .snapshot
             .as_ref()
@@ -320,7 +320,10 @@ impl PullRequestView {
     ) -> Result<(), String> {
         if matches!(
             command,
-            "git.github.creation-context" | "git.github.publish-branch" | "git.github.create"
+            "git.github.creation-context"
+                | "git.github.publish-branch"
+                | "git.github.create"
+                | "git.write-pull-request"
         ) {
             return self.receive_creation(command, value, window, cx);
         }
@@ -1095,6 +1098,12 @@ impl PullRequestView {
                     editor.update(cx, CreationEditor::published);
                 }
             }
+            "git.write-pull-request" => {
+                let written = serde_json::from_value(value).map_err(|e| e.to_string())?;
+                if let Some(editor) = &self.creation_editor {
+                    editor.update(cx, |editor, cx| editor.fill(written, window, cx));
+                }
+            }
             "git.github.create" => {
                 let pr: bootty_git::github::PullRequest =
                     serde_json::from_value(value).map_err(|e| e.to_string())?;
@@ -1128,6 +1137,9 @@ impl PullRequestView {
                     }
                     CreationSubmission::Create(request) => {
                         ("git.github.create", serde_json::to_string(request))
+                    }
+                    CreationSubmission::Write { base } => {
+                        ("git.write-pull-request", Ok(base.clone()))
                     }
                 };
                 match value {

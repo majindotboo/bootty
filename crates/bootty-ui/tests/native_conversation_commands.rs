@@ -83,6 +83,8 @@ held_start=None
 stuck=False
 approval=False
 methods=[]
+turns=[]
+reverted=[]
 def emit(value): print(json.dumps(value),file=output,flush=True)
 def reply(ident,result): emit({'id':ident,'result':result})
 def notice(method,**params): emit({'method':method,'params':{'threadId':thread,'turnId':'turn-'+str(turn),**params}})
@@ -122,9 +124,17 @@ for line in source:
  elif method == 'model/list': reply(ident,{'data':[{'model':'qa-model','displayName':'QA Model','isDefault':True,'supportedReasoningEfforts':[{'reasoningEffort':'medium'}],'defaultReasoningEffort':'medium'}],'nextCursor':None})
  elif method == 'thread/fork': reply(ident,{'thread':{'id':'fork-'+str(os.getpid())}})
  elif method == 'thread/items/list': reply(ident,{'data':[],'nextCursor':None})
+ elif method == 'thread/turns/list':
+  # Newest first, a page at a time; the cursor is where the next page starts.
+  start=int(params.get('cursor') or 0);end=start+params['limit']
+  page=[{'id':'turn-'+str(n),'items':[{'id':'user-'+str(n),'type':'userMessage','content':[]}]} for n in reversed(turns)][start:end]
+  reply(ident,{'data':page,'nextCursor':str(end) if end<len(turns) else None})
+ elif method == 'thread/revert':
+  before=int(params['beforeTurnId'].removeprefix('turn-'));turns=[n for n in turns if n<before];reverted.append(params['beforeTurnId']);reply(ident,{'thread':{'id':thread}})
  elif method == 'turn/start':
   assert params['threadId'] == thread
   turn+=1
+  turns.append(turn)
   text=params['input'][0]['text']
   if text=='visual-image':
    import base64,struct
@@ -134,6 +144,9 @@ for line in source:
    assert struct.unpack('>II',png[16:24])==(2,2)
   if text=='reject-first':
    emit({'id':ident,'error':{'code':-32600,'message':'first prompt rejected'}});continue
+  # The turn edits the conversation's files, as an agent would.
+  if text.startswith('write '):
+   with open('turn.txt','w') as written: written.write(text[6:]+'\n')
   notice('turn/started',turn={'id':'turn-'+str(turn),'status':'inProgress','items':[]})
   notice('item/completed',item={'id':'user-'+str(turn),'type':'userMessage','content':params['input']})
   if text == 'wait': waiting=ident; continue
@@ -157,7 +170,7 @@ for line in source:
   reply(ident,{})
  elif method == '__spawn': reply(ident,tool_call(params))
  elif method == '__barrier': reply(ident,{})
- elif method == '__calls': reply(ident,{'methods':methods,'account_directory':os.environ.get('CODEX_HOME'),'bootty_tools':any(arg.startswith('mcp_servers.') for arg in sys.argv)})
+ elif method == '__calls': reply(ident,{'methods':methods,'reverted':reverted,'account_directory':os.environ.get('CODEX_HOME'),'bootty_tools':any(arg.startswith('mcp_servers.') for arg in sys.argv)})
  else: reply(ident,{})
 ",
     )?;
@@ -4446,4 +4459,144 @@ fn plans_carry_out_in_a_new_conversation_of_the_same_session() -> TestResult<()>
         Some("Implement this plan:\n\n1. Fix the bug")
     );
     Ok(())
+}
+
+/// Each turn keeps its files before and after: the turn's changes show as a diff, rewinding the
+/// conversation can take the files back with it, and the files alone can go back too.
+#[rstest]
+fn turns_keep_their_files_and_rewind_with_them() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let git = |args: &[&str]| -> TestResult<()> {
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(host.directory.path())
+            .args(args)
+            .output()?;
+        if status.status.success() {
+            Ok(())
+        } else {
+            Err(String::from_utf8_lossy(&status.stderr).into_owned().into())
+        }
+    };
+    for args in [
+        ["init", "--quiet"].as_slice(),
+        &["config", "user.name", "Bootty Test"],
+        &["config", "user.email", "test@example.invalid"],
+        &["config", "commit.gpgsign", "false"],
+        &["config", "core.hooksPath", "/dev/null"],
+        &["add", "-A"],
+        &["commit", "--quiet", "-m", "start"],
+    ] {
+        git(args)?;
+    }
+    let binding = host.binding(false)?;
+    let conversation =
+        record(&host.start(&binding, "conversation", "task-files", "write first")?)?;
+    let target = conversation.target();
+    let [(first, reply)] = checkpointed_turns(&mut host, &target)?;
+    let diff = success(host.submit(native_command(
+        "agents.native.turn-diff",
+        &target,
+        &[&reply],
+        Caller::Internal,
+    ))?)?;
+    let diff = diff["diff"].as_str().unwrap_or_default();
+    assert!(
+        diff.contains("+++ b/turn.txt") && diff.contains("+first"),
+        "{diff}"
+    );
+    success(host.submit(native_command(
+        "agents.native.prompt",
+        &target,
+        &["write second"],
+        Caller::Internal,
+    ))?)?;
+    let [_, (second, _)] = checkpointed_turns(&mut host, &target)?;
+    success(host.submit(native_command(
+        "agents.native.rewind",
+        &target,
+        &[&second, "files"],
+        Caller::Internal,
+    ))?)?;
+    let service = host
+        .state
+        .native_agent_service()
+        .ok_or("native owner missing")?;
+    let shown = service
+        .sessions()
+        .into_iter()
+        .find(|record| record.target() == target)
+        .ok_or("conversation missing")?
+        .snapshot
+        .transcript
+        .iter()
+        .filter(|item| matches!(item.role.as_str(), "user" | "assistant"))
+        .map(|item| item.text.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(shown, ["write first", "reply: write first"]);
+    assert_eq!(
+        fs::read_to_string(host.directory.path().join("turn.txt"))?,
+        "first\n"
+    );
+    let calls = service.resolve(&target)?.rpc("__calls", json!({}))?;
+    assert_eq!(calls["reverted"], json!(["turn-2"]));
+    // The provider and the transcript no longer have the message.
+    let again = host.submit(native_command(
+        "agents.native.rewind",
+        &target,
+        &[&second],
+        Caller::Internal,
+    ))?;
+    assert!(
+        format!("{again:?}").contains("That message is no longer in this conversation"),
+        "{again:?}"
+    );
+    success(host.submit(native_command(
+        "agents.native.rewind-files",
+        &target,
+        &[&first],
+        Caller::Internal,
+    ))?)?;
+    assert!(!host.directory.path().join("turn.txt").exists());
+    Ok(())
+}
+
+/// Waits for the conversation's `N` turns to record their files before and after, and returns
+/// each turn's prompt and last reply.
+fn checkpointed_turns<const N: usize>(
+    host: &mut Host,
+    target: &CommandTarget,
+) -> TestResult<[(String, String); N]> {
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .ok_or("deadline overflow")?;
+    loop {
+        host.tick();
+        let snapshot = host
+            .state
+            .native_agent_service()
+            .ok_or("native owner missing")?
+            .sessions()
+            .into_iter()
+            .find(|record| record.target() == *target)
+            .ok_or("conversation missing")?
+            .snapshot;
+        let recorded = |role: &str| {
+            snapshot
+                .transcript
+                .iter()
+                .filter(|item| item.role == role && item.checkpoint.is_some())
+                .map(|item| item.id.clone())
+                .collect::<Vec<_>>()
+        };
+        let turns = recorded("user")
+            .into_iter()
+            .zip(recorded("assistant"))
+            .collect::<Vec<_>>();
+        if let Ok(turns) = <[(String, String); N]>::try_from(turns) {
+            return Ok(turns);
+        }
+        host.wakes
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+    }
 }

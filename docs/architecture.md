@@ -32,7 +32,8 @@ This file describes the current production structure.
 | Saved terminal presentation contract | `bootty-control::terminal_history` | Bounded text and SGR styles only; headless and desktop readers reject the same unsafe controls. |
 | The live workspace and binding runtimes | `bootty-mux::workspace::{WorkspaceRuntime, BindingRuntime}` | A replacement appears only after validation and persistence. |
 | Backend processes and native topology | The selected provider under `bootty-mux` | Bootty reports backend failure and does not invent success. |
-| Git project, worktree, branch, and bounded diff facts | `bootty-git` | Git commands run through the owning host runner; remote paths never use local filesystem state. |
+| Git project, worktree, branch, bounded diff, and branch pull request facts | `bootty-git` | Git commands run through the owning host runner; remote paths never use local filesystem state. |
+| A conversation's per-turn file snapshots | `bootty-git::checkpoint`, driven by `bootty-agents::native_checkpoints` on the conversation's host | Snapshots are commits under `refs/bootty/checkpoints/<conversation>`, written through a scratch index so the person's index stays as it was; deleting the conversation lets them go. |
 | Removing Bootty's worktrees | `bootty-git::cleanup` on the checkouts' host | A checkout with uncommitted changes or commits no remote has stays, and the report says why. |
 | The installed remote Space catalog | `bootty-mux::remote_catalog::Catalog` | A backend-scoped lease serializes mutations; membership follows backend session tags. |
 | PTY and child lifecycle | `TerminalSession` and `TerminalWorker` | Runtime health reports asynchronous core failure. |

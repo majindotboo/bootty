@@ -677,8 +677,12 @@ impl AppState {
                 value,
                 warnings,
                 foreground,
+                setup,
             } => {
                 self.name_created_session(&value);
+                if let Some(repository) = setup {
+                    self.run_setup_scripts(&value, repository);
+                }
                 if foreground {
                     self.focus_created_session(&value);
                 }
@@ -930,6 +934,24 @@ impl AppState {
                 }
             }
         }
+    }
+
+    /// Runs the project's setup scripts in the session that just started in a new worktree of
+    /// `repository`, each in its own tab.
+    fn run_setup_scripts(&mut self, value: &serde_json::Value, repository: String) {
+        let Some(terminal) = value
+            .get("terminal")
+            .and_then(|terminal| serde_json::from_value(terminal.clone()).ok())
+        else {
+            return;
+        };
+        let mut setup = bootty_control::CommandInvocation::new(
+            "project.setup",
+            vec![repository],
+            Caller::Internal,
+        );
+        setup.target = Some(terminal);
+        self.commands.queue(setup);
     }
 
     pub(super) fn focus_created_session(&mut self, value: &serde_json::Value) {

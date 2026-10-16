@@ -10,6 +10,7 @@ use std::{
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{
+    github::PullRequestStatus,
     runner::{CommandRunner, SystemCommandRunner},
     worktree::Git,
 };
@@ -27,6 +28,10 @@ pub const COLD_REFRESH_BURST: usize = 1;
 /// Minimum gap between cold refreshes. A newly visible sidebar gets one deep refresh at a time.
 pub const COLD_REFRESH_SPACING: Duration = Duration::from_millis(50);
 pub const FACT_CACHE_TTL: Duration = Duration::from_mins(5);
+/// How often a branch's pull request is asked about. Each ask is a GitHub request, so these are
+/// far slower than the local facts; a new branch asks at once.
+pub const FOCUSED_PULL_REQUEST_INTERVAL: Duration = Duration::from_mins(1);
+pub const BACKGROUND_PULL_REQUEST_INTERVAL: Duration = Duration::from_mins(5);
 const WATCH_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Git facts shared by sidebar, chrome and future panels. `cache_key` is
@@ -41,6 +46,8 @@ pub struct GitFacts {
     pub worktree_revision: u64,
     /// The main checkout when the cwd is a linked worktree, so it groups with its project.
     pub project: Option<String>,
+    /// The branch's pull request, the last time GitHub answered.
+    pub pull_request: Option<PullRequestStatus>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -74,6 +81,7 @@ pub struct GitSessionFacts {
     pub worktree_revision: u64,
     pub project: Option<String>,
     pub display_process: Option<String>,
+    pub pull_request: Option<PullRequestStatus>,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +101,15 @@ struct CachedFacts {
     live_running: bool,
     diff_running: bool,
     project: ProjectFact,
+    pull_request: PullRequestAsk,
+}
+
+/// A branch's pull request is asked about on its own slow cadence: which branch was asked about
+/// last and when, and whether that ask is still out. `GitFacts::pull_request` answers for it.
+#[derive(Clone, Debug, Default)]
+struct PullRequestAsk {
+    asked: Option<(String, Instant)>,
+    running: bool,
 }
 
 /// A cwd's owning checkout cannot change, so each incarnation resolves it once.
@@ -130,6 +147,7 @@ impl CachedFacts {
             live_running: false,
             diff_running: false,
             project: ProjectFact::Unresolved,
+            pull_request: PullRequestAsk::default(),
         }
     }
 }
@@ -239,9 +257,7 @@ where
             self.revisions.ensure_watched(cwd.to_owned());
             revision
         };
-        let mut start_live = None;
-        let mut start_diff = None;
-        let mut resolve_project = false;
+        let (mut start_live, mut start_diff, mut start_pull_request) = (None, None, None);
         let mut snapshot = GitFacts::default();
         let mut schedule = self.schedule.lock().ok();
         if let Ok(mut entries) = self.entries.lock() {
@@ -259,26 +275,7 @@ where
             } else {
                 BACKGROUND_FACT_INTERVAL
             };
-            // Watcher changes get a quick refresh; unchanged and unwatched repositories use
-            // the focus cadence instead of spawning a Git process for every sidebar row at 4 Hz.
-            let live_interval = if revision != 0 && revision != entry.live_revision {
-                LIVE_FACT_INTERVAL
-            } else {
-                interval
-            };
-            if !entry.live_running
-                && entry
-                    .live_at
-                    .is_none_or(|at| now.saturating_duration_since(at) >= live_interval)
-            {
-                entry.live_at = Some(now);
-                entry.live_revision = revision;
-                if !cwd.is_empty() {
-                    entry.live_running = true;
-                    resolve_project = matches!(entry.project, ProjectFact::Unresolved);
-                    start_live = Some(Arc::clone(&entry.incarnation));
-                }
-            }
+            start_live = Self::live_due(entry, cwd, revision, interval, now);
 
             let due = entry
                 .refreshed_at
@@ -317,6 +314,7 @@ where
                     }
                 }
             }
+            start_pull_request = Self::pull_request_due(entry, cwd, selected, now);
             snapshot = GitFacts {
                 project: entry.project.path(),
                 ..entry.facts.clone()
@@ -324,7 +322,10 @@ where
         }
 
         drop(schedule);
-        if let Some(incarnation) = start_live {
+        if let Some((incarnation, branch)) = start_pull_request {
+            self.spawn_pull_request(cache_key.to_owned(), incarnation, cwd.to_owned(), branch);
+        }
+        if let Some((incarnation, resolve_project)) = start_live {
             self.spawn_live(
                 cache_key.to_owned(),
                 incarnation,
@@ -357,6 +358,7 @@ where
             diff_removed: facts.diff_removed,
             worktree_revision: facts.worktree_revision,
             project: facts.project.take(),
+            pull_request: facts.pull_request.take(),
             display_process: input
                 .process
                 .as_deref()
@@ -436,6 +438,113 @@ where
                     entry.facts.branch_status = BranchStatus::Unknown;
                 }
                 entry.live_running = false;
+            }
+        });
+    }
+
+    /// Starts reading the branch when the watcher saw a change or the last read is old, and says
+    /// whether the checkout's project still needs resolving.
+    fn live_due(
+        entry: &mut CachedFacts,
+        cwd: &str,
+        revision: u64,
+        interval: Duration,
+        now: Instant,
+    ) -> Option<(Arc<()>, bool)> {
+        // Watcher changes get a quick refresh; unchanged and unwatched repositories use
+        // the focus cadence instead of spawning a Git process for every sidebar row at 4 Hz.
+        let live_interval = if revision != 0 && revision != entry.live_revision {
+            LIVE_FACT_INTERVAL
+        } else {
+            interval
+        };
+        if entry.live_running
+            || entry
+                .live_at
+                .is_some_and(|at| now.saturating_duration_since(at) < live_interval)
+        {
+            return None;
+        }
+        entry.live_at = Some(now);
+        entry.live_revision = revision;
+        if cwd.is_empty() {
+            return None;
+        }
+        entry.live_running = true;
+        let resolve_project = matches!(entry.project, ProjectFact::Unresolved);
+        Some((Arc::clone(&entry.incarnation), resolve_project))
+    }
+
+    /// Starts asking about the branch's pull request when the branch is new or the last answer
+    /// is old; a new branch forgets the old branch's pull request first.
+    fn pull_request_due(
+        entry: &mut CachedFacts,
+        cwd: &str,
+        selected: bool,
+        now: Instant,
+    ) -> Option<(Arc<()>, String)> {
+        let branch =
+            entry.facts.branch.clone().filter(|_| {
+                entry.facts.branch_status == BranchStatus::Current && !cwd.is_empty()
+            })?;
+        let interval = if selected {
+            FOCUSED_PULL_REQUEST_INTERVAL
+        } else {
+            BACKGROUND_PULL_REQUEST_INTERVAL
+        };
+        let same = entry
+            .pull_request
+            .asked
+            .as_ref()
+            .filter(|(asked, _)| *asked == branch);
+        if entry.pull_request.running
+            || same.is_some_and(|(_, at)| now.saturating_duration_since(*at) < interval)
+        {
+            return None;
+        }
+        if same.is_none() {
+            entry.facts.pull_request = None;
+        }
+        entry.pull_request = PullRequestAsk {
+            asked: Some((branch.clone(), now)),
+            running: true,
+        };
+        Some((Arc::clone(&entry.incarnation), branch))
+    }
+
+    /// Asks GitHub about `branch`'s pull request. A failed ask keeps what GitHub said last.
+    fn spawn_pull_request(
+        &self,
+        cache_key: String,
+        incarnation: Arc<()>,
+        cwd: String,
+        branch: String,
+    ) {
+        let git = self.git.clone();
+        let entries = Arc::clone(&self.entries);
+        let retired = Arc::clone(&self.retired);
+        thread::spawn(move || {
+            if retired.load(Ordering::Acquire) {
+                return;
+            }
+            let answer = git.branch_pull_request(&cwd, &branch);
+            if retired.load(Ordering::Acquire) {
+                return;
+            }
+            if let Ok(mut entries) = entries.lock()
+                && let Some(entry) = entries.get_mut(&cache_key)
+                && Arc::ptr_eq(&entry.incarnation, &incarnation)
+            {
+                if let Ok(answer) = answer
+                    && entry
+                        .pull_request
+                        .asked
+                        .as_ref()
+                        .is_some_and(|(asked, _)| *asked == branch)
+                {
+                    entry.facts.pull_request = answer;
+                }
+                entry.pull_request.running = false;
             }
         });
     }

@@ -50,6 +50,10 @@ pub struct CleanupRequest {
     pub sessions: Vec<SessionCheckout>,
     /// Unix seconds.
     pub now: i64,
+    /// A command to run in a project's checkout before removing it, by the project's main
+    /// checkout.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub teardown: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -167,7 +171,7 @@ impl<R: CommandRunner> Git<R> {
             if worktree.claim != Claim::Orphan && (limit == 0 || report.remaining <= limit) {
                 break;
             }
-            match self.remove_owned_worktree(&worktree.path) {
+            match self.remove_owned_worktree(&worktree.path, &request.teardown) {
                 Ok(()) => {
                     report.remaining = report.remaining.saturating_sub(1);
                     report.removed.push(worktree.path.clone());
@@ -181,8 +185,13 @@ impl<R: CommandRunner> Git<R> {
         Ok(report)
     }
 
-    /// Remove one of Bootty's checkouts if nothing in it would be lost.
-    fn remove_owned_worktree(&self, path: &str) -> Result<(), String> {
+    /// Remove one of Bootty's checkouts if nothing in it would be lost, after its project's
+    /// teardown, if it has one, succeeds in it.
+    fn remove_owned_worktree(
+        &self,
+        path: &str,
+        teardown: &std::collections::BTreeMap<String, String>,
+    ) -> Result<(), String> {
         let status = self.status(path);
         if !status.in_repo || !status.is_linked_worktree {
             return Err("It isn't a linked worktree".to_owned());
@@ -199,6 +208,13 @@ impl<R: CommandRunner> Git<R> {
         let main = self
             .main_worktree(path)
             .ok_or("Git couldn't find its main checkout")?;
+        let same = |project: &str| {
+            project == main
+                || std::fs::canonicalize(project).ok() == std::fs::canonicalize(&main).ok()
+        };
+        if let Some((_, command)) = teardown.iter().find(|(project, _)| same(project)) {
+            self.run_teardown(path, command)?;
+        }
         self.remove_worktree(path, false)
             .map_err(|error| format!("Git kept it: {error}"))?;
         // Git's safe delete keeps a branch it can't prove merged or pushed.
@@ -206,6 +222,24 @@ impl<R: CommandRunner> Git<R> {
             _ = self.delete_branch(&main, &branch, false);
         }
         Ok(())
+    }
+
+    /// Runs a project's teardown `command` in its checkout at `path`.
+    fn run_teardown(&self, path: &str, command: &str) -> Result<(), String> {
+        let output = self
+            .runner
+            .run_in(path, "/bin/sh", &["-lc".to_owned(), command.to_owned()])
+            .map_err(|error| format!("Its teardown couldn't run: {error}"))?;
+        if output.success {
+            return Ok(());
+        }
+        let said = output
+            .stderr
+            .lines()
+            .rev()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("it gave no reason");
+        Err(format!("Its teardown failed: {said}"))
     }
 }
 

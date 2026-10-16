@@ -162,8 +162,24 @@ impl<R: CommandRunner> Git<R> {
     /// # Errors
     /// Returns an error if the path is invalid, no longer changed, or Git cannot produce the diff.
     pub fn file_diff(&self, root: &str, path: &str, group: ChangeGroup) -> Result<String, String> {
+        self.file_diff_with(root, path, group, false)
+    }
+
+    /// A file's diff in `group`, leaving out changes to whitespace when `ignore_whitespace`.
+    /// # Errors
+    /// Returns an error if the path is invalid, no longer changed, or Git cannot diff it.
+    pub fn file_diff_with(
+        &self,
+        root: &str,
+        path: &str,
+        group: ChangeGroup,
+        ignore_whitespace: bool,
+    ) -> Result<String, String> {
         let (root, file) = self.current_file(root, path)?;
         let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
+        if ignore_whitespace {
+            args.push("--ignore-all-space");
+        }
         match group {
             ChangeGroup::Staged => args.push("--cached"),
             ChangeGroup::Unstaged => {}
@@ -186,6 +202,117 @@ impl<R: CommandRunner> Git<R> {
         } else {
             Err(output.stderr.trim().to_owned())
         }
+    }
+
+    /// Every change since the last commit, staged or not, then each untracked file, in one diff.
+    // Deliberate limit: 50 untracked files show; raise it with a lazily loaded list if more are
+    // common.
+    /// # Errors
+    /// Returns a Git failure.
+    pub fn all_diff(&self, root: &str, ignore_whitespace: bool) -> Result<String, String> {
+        let changes = self.changes(root)?;
+        let root = changes.root.as_str();
+        let mut args = vec!["diff", "--no-ext-diff", "--no-textconv", "--no-color"];
+        if ignore_whitespace {
+            args.push("--ignore-all-space");
+        }
+        let mut diff = if self.head_exists(root)? {
+            args.push("HEAD");
+            self.checked_output(root, &args)?
+        } else {
+            let unstaged = self.checked_output(root, &args)?;
+            args.push("--cached");
+            self.checked_output(root, &args)? + &unstaged
+        };
+        for file in changes
+            .files
+            .iter()
+            .filter(|file| file.index == '?')
+            .take(50)
+        {
+            diff.push_str(&self.file_diff_with(
+                root,
+                &file.path,
+                ChangeGroup::Untracked,
+                ignore_whitespace,
+            )?);
+        }
+        Ok(diff)
+    }
+
+    /// What a commit message describes: the staged changes, after the latest subjects so the
+    /// message can follow the project's style.
+    /// # Errors
+    /// Returns a directory outside Git, nothing staged, or a Git failure.
+    pub fn commit_message_context(&self, root: &str) -> Result<String, String> {
+        let changes = self.changes(root)?;
+        let root = changes.root.as_str();
+        let staged = self.checked_output(
+            root,
+            &[
+                "diff",
+                "--cached",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+            ],
+        )?;
+        if staged.trim().is_empty() {
+            return Err("Stage the changes to describe first".to_owned());
+        }
+        let subjects = if self.head_exists(root)? {
+            self.checked_output(root, &["log", "-n", "10", "--format=%s"])?
+        } else {
+            String::new()
+        };
+        Ok(format!(
+            "Recent commits:\n{subjects}\nStaged changes:\n{staged}"
+        ))
+    }
+
+    /// What a pull request into `base` describes: the branch's commits since it left `base`, and
+    /// their changes. The base's upstream stands in for it when the branch has one, since the
+    /// local copy may be behind.
+    /// # Errors
+    /// Returns a directory outside Git, a base Git doesn't know, no commits since it, or a Git
+    /// failure.
+    pub fn pull_request_context(&self, root: &str, base: &str) -> Result<String, String> {
+        let changes = self.changes(root)?;
+        let root = changes.root.as_str();
+        if base.is_empty() || base.starts_with('-') {
+            return Err("Choose the branch the pull request goes into".to_owned());
+        }
+        let base = [format!("{base}@{{upstream}}"), base.to_owned()]
+            .into_iter()
+            .find(|candidate| {
+                self.checked_output(
+                    root,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--quiet",
+                        &format!("{candidate}^{{commit}}"),
+                    ],
+                )
+                .is_ok()
+            })
+            .ok_or_else(|| format!("Git doesn't know the branch {base}"))?;
+        let range = format!("{base}..HEAD");
+        let commits = self.checked_output(root, &["log", "--format=%s%n%n%b", &range])?;
+        if commits.trim().is_empty() {
+            return Err("This branch has no commits to describe yet".to_owned());
+        }
+        let diff = self.checked_output(
+            root,
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-color",
+                &format!("{base}...HEAD"),
+            ],
+        )?;
+        Ok(format!("Commits:\n{commits}\nChanges:\n{diff}"))
     }
 
     /// # Errors
@@ -211,6 +338,89 @@ impl<R: CommandRunner> Git<R> {
             args.push(previous);
         }
         self.checked_output(&root, &args).map(|_| ())
+    }
+
+    /// Stages every change, untracked files included.
+    /// # Errors
+    /// Returns a Git failure.
+    pub fn stage_all(&self, root: &str) -> Result<(), String> {
+        self.checked_output(root, &["add", "-A"]).map(|_| ())
+    }
+
+    /// Unstages everything, keeping the files as they are.
+    /// # Errors
+    /// Returns a Git failure.
+    pub fn unstage_all(&self, root: &str) -> Result<(), String> {
+        if self.head_exists(root)? {
+            self.checked_output(root, &["reset", "--quiet"])
+        } else {
+            self.checked_output(root, &["rm", "--cached", "-r", "--quiet", "--force", "."])
+        }
+        .map(|_| ())
+    }
+
+    /// Throws away a file's changes: staged and unstaged ones go back to the last commit, and a
+    /// file the last commit lacks is deleted.
+    /// # Errors
+    /// Returns an error if the path is invalid, no longer changed, or Git cannot discard it.
+    pub fn discard_file(&self, root: &str, path: &str) -> Result<(), String> {
+        let (root, file) = self.current_file(root, path)?;
+        if file.groups().any(|group| group == ChangeGroup::Staged) {
+            self.unstage_file(&root, path)?;
+        }
+        let committed = self.head_exists(&root)?
+            && self
+                .changes_output(&root, &["cat-file", "-e", &format!("HEAD:{path}")])?
+                .success;
+        if committed {
+            self.checked_output(&root, &["restore", "--worktree", "--", path])
+        } else {
+            self.checked_output(&root, &["clean", "--force", "--", path])
+        }
+        .map(|_| ())
+    }
+
+    /// Throws away every change: files go back to the last commit and untracked ones are
+    /// deleted. Ignored files stay.
+    /// # Errors
+    /// Returns a Git failure partway.
+    pub fn discard_all(&self, root: &str) -> Result<(), String> {
+        self.unstage_all(root)?;
+        if self.head_exists(root)? {
+            self.checked_output(root, &["restore", "--worktree", "--", "."])?;
+        }
+        self.checked_output(root, &["clean", "-d", "--force", "--", "."])
+            .map(|_| ())
+    }
+
+    /// Stages the hunks in `patch`, or unstages them when `reverse`.
+    /// # Errors
+    /// Returns a patch that no longer applies to the index.
+    pub fn apply_to_index(&self, root: &str, patch: &str, reverse: bool) -> Result<(), String> {
+        if patch.len() > 8 * 1024 * 1024 {
+            return Err("The selected changes are too large to stage this way".to_owned());
+        }
+        let mut args = vec!["-C", root, "apply", "--cached", "--recount"];
+        if reverse {
+            args.push("--reverse");
+        }
+        args.push("-");
+        let args = args.into_iter().map(str::to_owned).collect::<Vec<_>>();
+        let output = self
+            .runner
+            .run_with_input("git", &args, patch.as_bytes().to_vec())
+            .map_err(|error| error.to_string())?;
+        if output.success {
+            Ok(())
+        } else {
+            Err(output.stderr.trim().to_owned())
+        }
+    }
+
+    fn head_exists(&self, root: &str) -> Result<bool, String> {
+        Ok(self
+            .changes_output(root, &["rev-parse", "--verify", "--quiet", "HEAD"])?
+            .success)
     }
 
     /// # Errors
@@ -292,6 +502,12 @@ pub struct GitBranch {
     pub commit: String,
     pub current: bool,
     pub upstream: Option<String>,
+    /// Commits the branch has that its upstream lacks.
+    #[serde(default)]
+    pub ahead: u32,
+    /// Commits its upstream has that the branch lacks.
+    #[serde(default)]
+    pub behind: u32,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct GitStash {
@@ -351,7 +567,7 @@ impl<R: CommandRunner> Git<R> {
                 "for-each-ref",
                 "--count=500",
                 "--sort=-committerdate",
-                "--format=%(HEAD)%00%(refname:short)%00%(objectname)%00%(upstream:short)%00",
+                "--format=%(HEAD)%00%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00",
                 "refs/heads",
             ],
         )?;
@@ -361,11 +577,21 @@ impl<R: CommandRunner> Git<R> {
             let name = fields.next().ok_or("invalid Git branch list")?;
             let commit = fields.next().ok_or("invalid Git branch list")?;
             let upstream = fields.next().ok_or("invalid Git branch list")?;
+            let track = fields.next().ok_or("invalid Git branch list")?;
+            // Like "ahead 2, behind 1"; empty when even, and "gone" when the upstream is.
+            let count = |word: &str| {
+                track
+                    .split(", ")
+                    .find_map(|part| part.strip_prefix(word)?.trim().parse().ok())
+                    .unwrap_or(0)
+            };
             branches.push(GitBranch {
                 name: name.trim_start_matches('\n').into(),
                 commit: commit.into(),
                 current: current.trim_start_matches('\n') == "*",
                 upstream: (!upstream.is_empty()).then(|| upstream.into()),
+                ahead: count("ahead"),
+                behind: count("behind"),
             });
         }
         let stash = self.checked_output(
@@ -439,6 +665,43 @@ impl<R: CommandRunner> Git<R> {
         self.checked_output(&overview.root, &["switch", "--no-overwrite-ignore", name])
             .map(|_| ())
     }
+    /// Switches to local branch `name`, first stashing uncommitted changes, untracked files
+    /// included, under a message naming both branches. The stash stays for the person to apply
+    /// where they want the changes.
+    /// # Errors
+    /// Returns an unknown local branch, or Git failing to stash or switch; a failed switch after
+    /// stashing says where the changes went.
+    pub fn stash_and_switch(&self, root: &str, name: &str) -> Result<(), String> {
+        let changes = self.changes(root)?;
+        let overview = self.overview(&changes.root, 1)?;
+        if !overview.branches.iter().any(|branch| branch.name == name) {
+            return Err("branch is not a local repository branch".into());
+        }
+        let stashed = !changes.files.is_empty();
+        if stashed {
+            let from = changes.branch.as_deref().unwrap_or("a detached HEAD");
+            self.checked_output(
+                &changes.root,
+                &[
+                    "stash",
+                    "push",
+                    "--include-untracked",
+                    "--message",
+                    &format!("Stashed switching from {from} to {name}"),
+                ],
+            )?;
+        }
+        self.checked_output(&changes.root, &["switch", "--no-overwrite-ignore", name])
+            .map(|_| ())
+            .map_err(|error| {
+                if stashed {
+                    format!("{error} Your changes are in the newest stash.")
+                } else {
+                    error
+                }
+            })
+    }
+
     /// # Errors
     /// Returns an error for an invalid message or if Git cannot create the stash.
     pub fn stash_push(

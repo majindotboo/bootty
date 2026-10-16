@@ -664,6 +664,14 @@ pub fn command(id: &str, method: &str, params: &Value) -> Result<Value, String> 
                 .ok_or("Invalid Claude model selector")?;
             json!({"subtype":method,"model":model})
         }
+        "rewind_conversation" if fields.len() == 2 => {
+            let [Some(target), Some(seen)] = ["target_message_uuid", "last_seen_user_message_uuid"]
+                .map(|key| field(params, key).as_str().filter(|id| valid_wire_id(id)))
+            else {
+                return Err("Invalid Claude message identity".to_owned());
+            };
+            json!({"subtype":method,"target_message_uuid":target,"last_seen_user_message_uuid":seen})
+        }
         "stop_task" if fields.len() == 1 => {
             let task = field(params, "task_id")
                 .as_str()

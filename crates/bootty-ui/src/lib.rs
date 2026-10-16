@@ -104,6 +104,6 @@ mod gpui_sidebar_panel;
 
 pub use gpui_surface_chooser::{SurfaceCommand, SurfacePanel};
 
-pub use gpui_agent_session::{NativeAgentSessionView, OpenNativeSession};
+pub use gpui_agent_session::{ConversationContext, NativeAgentSessionView, OpenNativeSession};
 pub use gpui_git_panel::DiffComment;
 pub use gpui_subagent_panel::SubagentPanel;

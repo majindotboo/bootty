@@ -203,11 +203,19 @@ impl AppState {
             let ready =
                 !binding.tracks_session_membership() || binding.mux().has_session_snapshot();
             let checkouts = binding_checkouts(binding, now);
+            // Projects say what to run in their checkouts before they go.
+            let teardown = self
+                .workspace
+                .registered_projects(binding.scope())
+                .filter(|project| !project.settings.teardown.trim().is_empty())
+                .map(|project| (project.cwd.clone(), project.settings.teardown.clone()))
+                .collect::<Vec<_>>();
             if let Some((host, host_ready)) =
                 hosts.iter_mut().find(|(host, _)| host.remote == remote)
             {
                 *host_ready &= ready;
                 host.request.sessions.extend(checkouts);
+                host.request.teardown.extend(teardown);
                 continue;
             }
             hosts.push((
@@ -221,6 +229,7 @@ impl AppState {
                         limit: config.worktree_limit,
                         sessions: checkouts.collect(),
                         now,
+                        teardown: teardown.into_iter().collect(),
                     },
                 },
                 ready,

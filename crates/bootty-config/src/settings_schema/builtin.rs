@@ -203,8 +203,8 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     ));
     specs.push(spec(
         &["agents", "quick-model"],
-        "Session naming model",
-        "Codex model used to name sessions and worktrees from their first prompt.",
+        "Quick model",
+        "Codex model that names sessions and worktrees, and writes commit messages and pull request text.",
         "providers",
         "PROVIDERS",
         SettingKind::Text {

@@ -1331,6 +1331,15 @@ fn native_command_sender(
                     serde_json::json!({"transcript":history,"has_older":false,"has_newer":false,"at_latest":true})
                 } else if request.invocation.command == "agents.native.models-info" {
                     serde_json::json!({"models":[],"permissions":null})
+                } else if request.invocation.command == "git.overview" {
+                    serde_json::json!({"root":"/repo","history":[],"stashes":[],"branches":[
+                        {"name":"feature","commit":"1111","current":true,"upstream":null},
+                        {"name":"main","commit":"2222","current":false,"upstream":"origin/main",
+                            "ahead":0,"behind":2}]})
+                } else if request.invocation.command == "git.status" {
+                    serde_json::json!({"root":"/repo","branch":"feature","files":[]})
+                } else if request.invocation.command == "agents.native.turn-diff" {
+                    serde_json::json!({"diff":"diff --git a/turn.txt b/turn.txt\n+first\n"})
                 } else if request.invocation.command == "agents.native.completions" {
                     serde_json::json!({"options":[{"kind":"command","name":"compact",
                         "display_name":"compact","description":"Summarize the context",
@@ -5101,6 +5110,93 @@ fn context_meter_compacts_the_conversation(cx: &mut TestAppContext) {
     assert_eq!(prompts, ["/compact", "A draft"]);
 }
 
+/// The composer shows the conversation's branch and switches its checkout to another local
+/// branch through the conversation's binding.
+#[gpui_kit::test]
+fn the_composer_switches_the_checkout_branch(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let cwd = record.config.cwd.to_string_lossy().into_owned();
+    let (sender, commands) = native_command_sender(&record);
+    let binding = bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Binding,
+        handle: "binding".to_owned(),
+        generation: 1,
+    };
+    let context = bootty_ui::ConversationContext {
+        project: None,
+        branch: Some("feature".to_owned()),
+        pull_request: None,
+        binding: Some(binding.clone()),
+        diff: None,
+        target: None,
+    };
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.set_conversation_context(Some(context), cx);
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    redraw(visual);
+    let picker = visual.debug_bounds("native-branch-picker").unwrap();
+    visual.simulate_click(picker.center(), Modifiers::none());
+    redraw(visual);
+    visual.simulate_keystrokes("down enter");
+    redraw(visual);
+    let git = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.command.starts_with("git."))
+        .map(|call| {
+            (
+                call.command.clone(),
+                call.arguments.clone(),
+                call.target.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        git,
+        [
+            (
+                "git.overview".to_owned(),
+                vec![cwd.clone(), "1".to_owned()],
+                Some(binding.clone())
+            ),
+            (
+                "git.status".to_owned(),
+                vec![cwd.clone()],
+                Some(binding.clone())
+            ),
+            (
+                "git.branch-checkout".to_owned(),
+                vec![cwd.clone(), "main".to_owned()],
+                Some(binding.clone())
+            ),
+            // The branches are read again for the checkout's new state.
+            (
+                "git.overview".to_owned(),
+                vec![cwd.clone(), "1".to_owned()],
+                Some(binding.clone())
+            ),
+            ("git.status".to_owned(), vec![cwd], Some(binding)),
+        ]
+    );
+}
+
 /// The composer drawer shows the conversation's goal with what it has spent, and pauses or
 /// removes it.
 #[gpui_kit::test]
@@ -5312,6 +5408,98 @@ fn diff_comments_join_the_draft_with_their_lines(cx: &mut TestAppContext) {
         sent,
         [
             "@src/main.rs:2-3 (as it was before the change)\n```\n-- old comment\nlet x = 1;\n```\nWhy remove these?"
+        ]
+    );
+}
+
+/// A turn whose files Git kept shows what it changed, and its prompt rewinds the conversation
+/// and the files, bringing the message back to the composer.
+#[gpui_kit::test]
+fn turns_show_their_changes_and_rewind(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    for item in &mut record.snapshot.transcript {
+        if matches!(item.id.as_str(), "user" | "reply") {
+            item.checkpoint = Some(format!("{}-snapshot", item.id));
+        }
+    }
+    let (sender, commands) = native_command_sender(&record);
+    let shown = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let changes = shown.clone();
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &view,
+            move |_, _, event: &bootty_ui::OpenNativeSession, _| {
+                if let bootty_ui::OpenNativeSession::ShowTurnChanges { diff } = event {
+                    changes.lock().unwrap().push(diff.clone());
+                }
+            },
+        )
+        .detach();
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    redraw(visual);
+    let turn = visual.debug_bounds("turn-changes:reply").unwrap();
+    visual.simulate_click(turn.center(), Modifiers::none());
+    redraw(visual);
+    assert_eq!(
+        *shown.lock().unwrap(),
+        ["diff --git a/turn.txt b/turn.txt\n+first\n"]
+    );
+    assert!(visual.debug_bounds("turn-changes:user").is_none());
+    let rewind = visual.debug_bounds("rewind:user").unwrap();
+    visual.simulate_click(rewind.center(), Modifiers::none());
+    redraw(visual);
+    let both = visual
+        .debug_bounds("prompt-answer-Rewind conversation and files")
+        .unwrap();
+    visual.simulate_click(both.center(), Modifiers::none());
+    redraw(visual);
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    let asked = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| {
+            !matches!(
+                call.command.as_str(),
+                "agents.native.history" | "agents.native.models-info"
+            )
+        })
+        // The command and its leading words, past the conversation's identity.
+        .map(|call| {
+            std::iter::once(call.command.as_str())
+                .chain(
+                    call.arguments
+                        .iter()
+                        .skip(2)
+                        .take(2)
+                        .map(String::as_str)
+                        .filter(|argument| !argument.is_empty()),
+                )
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        asked,
+        [
+            "agents.native.turn-diff reply",
+            "agents.native.rewind user files",
+            "agents.native.prompt Review this change."
         ]
     );
 }

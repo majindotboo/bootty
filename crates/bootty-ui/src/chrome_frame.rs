@@ -585,6 +585,35 @@ pub fn snapshot(
     }
 }
 
+/// A pull request in words and color: merged in the accent, closed as a failure, a draft muted,
+/// and an open one by its checks.
+fn sidebar_pull_request(
+    status: Option<&bootty_git::github::PullRequestStatus>,
+    theme: crate::gpui::UiPalette,
+) -> Option<crate::gpui::chrome::SidebarPullRequest> {
+    use bootty_git::github::{ChecksState, PullRequestState};
+    let status = status?;
+    let (state, color) = match (status.state, status.checks) {
+        (PullRequestState::Merged, _) => ("Merged", theme.accent),
+        (PullRequestState::Closed, _) => ("Closed", theme.destructive),
+        (PullRequestState::Draft, _) => ("Draft", theme.muted),
+        (PullRequestState::Open, ChecksState::Failing) => ("Open", theme.destructive),
+        (PullRequestState::Open, ChecksState::Pending) => ("Open", theme.warning),
+        (PullRequestState::Open, _) => ("Open", theme.success),
+    };
+    let checks = match status.checks {
+        ChecksState::None => "",
+        ChecksState::Pending => " · checks running",
+        ChecksState::Passing => " · checks passing",
+        ChecksState::Failing => " · checks failing",
+    };
+    Some(crate::gpui::chrome::SidebarPullRequest {
+        number: status.number,
+        status: format!("{state}{checks}"),
+        color: ui_color!(color),
+    })
+}
+
 const fn chrome_palette(theme: crate::gpui::UiPalette) -> ChromePalette {
     ChromePalette {
         mantle: ui_color!(theme.mantle),
@@ -855,6 +884,8 @@ fn empty_project_row(
         artwork: None,
         icon: Some("folder".to_owned()),
         diff: None,
+        pull_request: None,
+        scripts: Vec::new(),
         color: palette.text,
         dim_color: palette.muted,
         kind: SidebarRowKind::Group,
@@ -897,6 +928,8 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             artwork: None,
             icon: Some("circle-dashed".to_owned()),
             diff: None,
+            pull_request: None,
+            scripts: Vec::new(),
             color: palette.text,
             dim_color: palette.muted,
             kind: SidebarRowKind::Group,
@@ -933,6 +966,8 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                 artwork: None,
                 icon: Some("bootty".to_owned()),
                 diff: None,
+                pull_request: None,
+                scripts: Vec::new(),
                 color: palette.text,
                 dim_color: palette.muted,
                 kind: SidebarRowKind::Other("unassigned".to_owned()),
@@ -1024,7 +1059,7 @@ fn sidebar_rows(
         if let Some(task) = base.task.as_mut() {
             task.name = names.get(&task.identity).cloned().unwrap_or_default();
         }
-        base.project_path = project_path.map(str::to_owned);
+        set_project(&mut base, state, project_path);
         let artwork = project_path.and_then(|path| {
             native.artwork.request(
                 &scope,
@@ -1035,22 +1070,13 @@ fn sidebar_rows(
             )
         });
         if grouped && last_group.as_ref() != Some(&group) {
-            rows.push(SidebarRow {
-                key: format!("project:{scope}:{group}"),
-                text: project.to_owned(),
-                trailing: None,
-                trailing_color: Some(palette.muted),
-                color: palette.text,
-                dim_color: palette.muted,
-                artwork: artwork.clone(),
-                icon: Some("folder".to_owned()),
-                kind: SidebarRowKind::Group,
-                active: false,
-                current: false,
-                target: None,
-                task: None,
-                ..base.clone()
-            });
+            rows.push(project_row(
+                &base,
+                format!("project:{scope}:{group}"),
+                project,
+                artwork.clone(),
+                palette,
+            ));
         }
         let explicit_title = session
             .identity
@@ -1065,6 +1091,10 @@ fn sidebar_rows(
                 artwork,
             }),
             branch: facts.branch,
+            pull_request: sidebar_pull_request(
+                facts.pull_request.as_ref(),
+                state.ui_theme().palette,
+            ),
             icon: Some("terminal".to_owned()),
             kind: if session.detached {
                 SidebarRowKind::DetachedSession
@@ -1088,6 +1118,52 @@ fn sidebar_rows(
         last_group = Some(group);
     }
     rows
+}
+
+/// A session row's project: its path, and the names of the scripts it can run.
+fn set_project(row: &mut SidebarRow, state: &AppState, path: Option<&str>) {
+    row.project_path = path.map(str::to_owned);
+    row.scripts = path
+        .and_then(|path| {
+            state
+                .workspace
+                .registered_projects(state.mux_scope())
+                .find(|project| project.cwd == path)
+        })
+        .map_or_else(Vec::new, |project| {
+            project
+                .settings
+                .scripts
+                .iter()
+                .map(|script| script.name.clone())
+                .collect()
+        });
+}
+
+/// The header a project's sessions group under, from one of its sessions' rows.
+fn project_row(
+    session: &SidebarRow,
+    key: String,
+    project: &str,
+    artwork: Option<std::sync::Arc<gpui_kit::RenderImage>>,
+    palette: ChromePalette,
+) -> SidebarRow {
+    SidebarRow {
+        key,
+        text: project.to_owned(),
+        trailing: None,
+        trailing_color: Some(palette.muted),
+        color: palette.text,
+        dim_color: palette.muted,
+        artwork,
+        icon: Some("folder".to_owned()),
+        kind: SidebarRowKind::Group,
+        active: false,
+        current: false,
+        target: None,
+        task: None,
+        ..session.clone()
+    }
 }
 
 /// A linked worktree belongs to its main checkout's project; other sessions to their cwd.
@@ -1435,6 +1511,8 @@ fn sidebar_session_base(
         artwork: None,
         icon: None,
         diff: None,
+        pull_request: None,
+        scripts: Vec::new(),
         color,
         dim_color,
         kind: SidebarRowKind::Detail,
@@ -1962,6 +2040,11 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
         ChromeIntent::SessionContext { target, action } => {
             apply_session_context(state, &scoped_target(&target), action)
         }
+        ChromeIntent::RunProjectScript {
+            session,
+            project,
+            name,
+        } => state.run_project_script(id(session.scope), &session.session_id, project, name),
         intent @ (ChromeIntent::CopyText(_)
         | ChromeIntent::RevealPath { .. }
         | ChromeIntent::OpenInEditor { .. }

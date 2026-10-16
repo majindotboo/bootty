@@ -32,7 +32,7 @@ def reply(value,data=None,command=None,success=True):
  if value['type']=='prompt' and os.path.exists('legacy-ack'): data={}
  emit({'id':value['id'],'type':'response','command':command or value['type'],'success':success,'data':data or {}})
 def state():
- return {'sessionId':session,'sessionFile':file if not os.path.exists('wrong-file') else file+'.wrong','isStreaming':working,'isCompacting':False}
+ return {'sessionId':session,'sessionFile':file if not os.path.exists('wrong-file') else file+'.wrong','isStreaming':working,'isCompacting':False,'messageCount':len(messages)}
 messages=[] if fresh else [{'role':'user','content':'Saved history','timestamp':1}]
 if os.path.exists('history.json') and not fresh:
  with open('history.json') as source: messages=json.load(source)
@@ -66,13 +66,21 @@ for line in sys.stdin:
   with open(file) as source: entries=[json.loads(line) for line in source if line.strip()]
   assert value.get('since')==entries[-1]['id']
   reply(value,{'entries':[],'leafId':open('history-leaf').read()})
- elif kind=='get_commands': reply(value,{'commands':[]})
+ elif kind=='get_commands': reply(value,{'commands':[] if os.path.exists('no-rewind') else [{'name':'__bootty_rewind','source':'extension'}]})
  elif kind=='compact':
   with open('compact.json','w') as output: json.dump(value,output)
   reply(value,{'summary':'Observed summary'})
  elif kind=='prompt':
   with open('prompt.json','w') as output: json.dump(value,output)
   if value['message']=='handled': reply(value,{'disposition':'handled'});continue
+  if value['message'].startswith('/__bootty_rewind '):
+   # Bootty's extension moves Pi back to before the user message sent then; a throw arrives as
+   # an extension error while the command still counts as handled.
+   at=int(value['message'].split(' ',1)[1])
+   found=[index for index,message in enumerate(messages) if message['role']=='user' and message['timestamp']==at]
+   if found and not os.path.exists('keep-rewind'): messages=messages[:found[0]]
+   else: emit({'type':'extension_error','extensionPath':'command:__bootty_rewind','event':'command','error':'Pi no longer has that message in this conversation'})
+   reply(value,{'disposition':'handled'});continue
   if value['message']=='/editor':
    waiting_command=value
    emit({'type':'extension_ui_request','id':'dialog','method':'editor','title':'Question','prefill':'First line\nSecond line'})
@@ -147,6 +155,70 @@ fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
         "fixture-model".to_owned(),
     ];
     Ok(config)
+}
+
+/// Rewinding runs Bootty's Pi command for the message's timestamp, and once Pi holds fewer
+/// messages the transcript lets the message and everything after it go. A Pi that kept them, or
+/// one without the command, says so and the transcript stays.
+#[rstest]
+#[case::rewound(None, Ok(()))]
+#[case::kept(Some("keep-rewind"), Err("Pi kept the conversation as it was"))]
+#[case::without_command(
+    Some("no-rewind"),
+    Err("This Pi conversation can't rewind without Bootty's tools")
+)]
+fn rewinding_moves_pi_back_to_before_a_message(
+    #[case] flag: Option<&str>,
+    #[case] expected: Result<(), &str>,
+) {
+    let root = TempDir::new().unwrap();
+    if let Some(flag) = flag {
+        fs::write(root.path().join(flag), "").unwrap();
+    }
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    for prompt in ["first", "second"] {
+        session.send_prompt(prompt).unwrap();
+        fs::write(root.path().join("settle"), "").unwrap();
+        session.rpc("get_state", json!({})).unwrap();
+    }
+    let prompts = |session: &NativeAgentSession| {
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .filter(|item| item.role == "user")
+            .map(|item| (item.id.clone(), item.text.clone()))
+            .collect::<Vec<_>>()
+    };
+    let shown = prompts(&session);
+    let second = shown
+        .iter()
+        .find(|(_, text)| text == "second")
+        .map(|(id, _)| id.clone())
+        .unwrap();
+    assert_eq!(
+        session.rewind_conversation(&second),
+        expected.map_err(str::to_owned)
+    );
+    let kept = if expected.is_ok() {
+        shown
+            .iter()
+            .take_while(|(id, _)| *id != second)
+            .cloned()
+            .collect()
+    } else {
+        shown
+    };
+    assert_eq!(prompts(&session), kept);
+    if flag != Some("no-rewind") {
+        let sent: Value =
+            serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+        assert_eq!(
+            sent["message"],
+            format!("/__bootty_rewind {}", second.trim_start_matches("pi-user-"))
+        );
+    }
+    session.stop();
 }
 
 #[rstest]
@@ -1329,6 +1401,7 @@ fn saved_native_transcript_presents_plain_text_without_rewriting_its_source(
         questions: Vec::new(),
         steered: false,
         usage: None,
+        checkpoint: None,
     };
     assert_eq!(item.display_text(), plain);
     assert_eq!(item.text, saved);

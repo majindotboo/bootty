@@ -713,6 +713,12 @@ closeable settings tab. Switching tabs preserves drafts; closing an unsaved draf
 before discarding it.
 The page edits its name, icon or local image, default agent, and defaults for
 creating worktrees (branch prefix and starting ref).
+It also keeps the project's scripts: named shell commands that a session's menu runs in
+a new terminal tab, in that session's directory (`project.script CWD NAME`). Scripts
+marked **Setup** also run, each in its own tab, in every session that starts in a new
+worktree of the project (`project.setup CWD`), such as installing dependencies.
+**Before removing a worktree** runs in a project's worktree when worktree cleanup is about
+to remove it; if it fails, the worktree stays and the cleanup report says what it said.
 Project settings live in the workspace database and apply to new sessions.
 Existing sessions keep their selected provider and model.
 
@@ -839,16 +845,40 @@ restores closed Changes; selecting a file restores and activates Diff. Layouts a
 saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
 Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.
 
-Changes separates staged, unstaged, and untracked files. Stage/Unstage updates the
-index without changing working files. Commit uses only the index; Amend explicitly
-replaces the last commit and asks before proceeding. Git errors stay visible in the
+Changes separates staged, unstaged, and untracked files, each grouped by folder.
+Stage/Unstage updates the index without changing working files; a group's header
+stages or unstages everything at once. Selecting lines in a file's diff stages or
+unstages their hunk alone. **Discard Changes…** on a file, or **Discard all** on the
+unstaged group, asks first and then puts files back to the last commit, deleting
+untracked ones; ignored files stay. **All changes** shows every change in one diff.
+The diff switches between unified and side by side, wraps long lines, and can hide
+whitespace changes. Commit uses only the index and needs a message and something staged;
+Amend explicitly replaces the last commit, needs a message, and asks before proceeding.
+The sparkle beside them asks the quick model to write the message from the staged changes
+and recent subjects (`git.write-message`); a message typed meanwhile stays. A new pull
+request's **Write with Codex** fills an empty title and description from the branch's
+commits and changes since its base (`git.write-pull-request REPOSITORY BASE`).
+
+The header shows the branch's pull request, with its state and checks, from the host's
+`gh` account (`git.pull-request`); it opens among the pull requests. Sidebar rows and a
+conversation's context card show the same pull request, asked about once a minute for
+the selected session and every five minutes for the rest. The branch list has a search,
+shows each branch's distance from its upstream, and switches from a tree with changes by
+stashing them first, untracked files included (`git.branch-stash-switch`); the stash
+stays for you to apply. A conversation's composer shows its branch and switches the
+checkout from a menu of recent local branches. Git errors stay visible in the
 panel. The message box remains disabled while its command is running. When the
 branch has an upstream, the header fetches, and shows ↓ and ↑ counts that pull
 (fast-forward only) and push (never forced) the commits the two don't share.
 
 CLI/socket/keybinding callers use the same commands: `git.open REPOSITORY`,
-`git.status REPOSITORY`, `git.diff REPOSITORY PATH staged|unstaged|untracked`,
-`git.stage REPOSITORY PATH`, `git.unstage REPOSITORY PATH`, `git.commit REPOSITORY MESSAGE`,
+`git.status REPOSITORY`, `git.diff REPOSITORY PATH staged|unstaged|untracked [show|ignore]`,
+`git.diff-all REPOSITORY [show|ignore]`, `git.stage REPOSITORY PATH`,
+`git.unstage REPOSITORY PATH`, `git.stage-all REPOSITORY`, `git.unstage-all REPOSITORY`,
+`git.stage-hunk REPOSITORY PATCH [reverse]`, `git.discard REPOSITORY PATH`,
+`git.discard-all REPOSITORY`, `git.write-message REPOSITORY`,
+`git.write-pull-request REPOSITORY BASE`, `git.pull-request REPOSITORY`,
+`git.branch-stash-switch REPOSITORY BRANCH`, `git.commit REPOSITORY MESSAGE`,
 `git.amend REPOSITORY MESSAGE`, `git.fetch REPOSITORY`, `git.pull REPOSITORY` and
 `git.push REPOSITORY`. `git.status` reports the upstream with its ahead and behind
 counts. Repository/file paths belong to the target binding's host. Paths are literal rather than Git pathspec patterns; invalid UTF-8 filenames are
@@ -1049,10 +1079,10 @@ The same keys apply to `agents.claude` and `agents.pi`. Account directories use 
 
 Start and resume open terminal tabs in the selected session. Changes affect future launches. Sign-in opens the provider's own terminal flow; Pi uses `/login`. Refresh status runs bounded, read-only version and account queries on a worker. Codex reports its account type and plan through its app server; Claude reports its own login state and subscription type; Pi reports the selected provider's existing authentication without inferring a subscription. An older refresh cannot replace a newer account selection. Update runs the proven owning native, Bun-global or npm-global installer in a local POSIX terminal tab. Its exit result stays visible until Enter closes the tab. Unknown installations require a manual update; active agent tabs prevent updates. Bootty does not update agents automatically.
 
-Codex's **Session naming model** (`agents.quick-model`) selects the model for session
-and worktree names. It defaults
-to `gpt-6-luna` and uses the selected Codex account. Naming runs only after submission,
-in an ephemeral read-only process, and does not create a conversation.
+Codex's **Quick model** (`agents.quick-model`) names sessions and worktrees, and writes
+commit messages and pull request text. It defaults to `gpt-6-luna` and uses the selected
+Codex account. Each query runs only when asked, in an ephemeral read-only process without
+tools, and does not create a conversation.
 
 `agents.allow-spawn = false` is the default. Enabling it in Settings → Permissions
 allows an attached agent to create child sessions only in its captured workspace,

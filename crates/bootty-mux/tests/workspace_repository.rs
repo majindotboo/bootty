@@ -1014,6 +1014,12 @@ fn project_customization_survives_restart_and_failed_validation(
         isolated: true,
         branch_prefix: "team/".to_owned(),
         start_ref: "main".to_owned(),
+        scripts: vec![bootty_mux::repository::ProjectScript {
+            name: "Install".to_owned(),
+            command: "pnpm install\npnpm build".to_owned(),
+            setup: true,
+        }],
+        teardown: "docker compose down".to_owned(),
     };
     repository
         .configure_project(scope, "/project", &settings)
@@ -1021,13 +1027,31 @@ fn project_customization_survives_restart_and_failed_validation(
     repository
         .toggle_project_collapsed(scope, "/project")
         .unwrap();
-    let mut invalid = settings.clone();
-    invalid.start_ref = "--bad".to_owned();
-    assert!(
-        repository
-            .configure_project(scope, "/project", &invalid)
-            .is_err()
-    );
+    let invalid = [
+        bootty_mux::repository::ProjectSettings {
+            start_ref: "--bad".to_owned(),
+            ..settings.clone()
+        },
+        // Two scripts can't share a name, and a script needs a command.
+        bootty_mux::repository::ProjectSettings {
+            scripts: vec![settings.scripts[0].clone(), settings.scripts[0].clone()],
+            ..settings.clone()
+        },
+        bootty_mux::repository::ProjectSettings {
+            scripts: vec![bootty_mux::repository::ProjectScript {
+                name: "Empty".to_owned(),
+                ..bootty_mux::repository::ProjectScript::default()
+            }],
+            ..settings.clone()
+        },
+    ];
+    for invalid in invalid {
+        assert!(
+            repository
+                .configure_project(scope, "/project", &invalid)
+                .is_err()
+        );
+    }
     drop(repository);
     let reopened = LoadedRepository::open(&directory.path().join("config.toml")).unwrap();
     let projects = reopened.registered_projects().unwrap();

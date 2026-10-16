@@ -8,6 +8,18 @@ pub struct Rgba {
     pub alpha: u8,
 }
 
+impl From<Rgba> for gpui_kit::Hsla {
+    fn from(value: Rgba) -> Self {
+        gpui_kit::Rgba {
+            r: f32::from(value.red) / 255.0,
+            g: f32::from(value.green) / 255.0,
+            b: f32::from(value.blue) / 255.0,
+            a: f32::from(value.alpha) / 255.0,
+        }
+        .into()
+    }
+}
+
 impl Rgba {
     #[must_use]
     pub const fn rgb(red: u8, green: u8, blue: u8) -> Self {
@@ -72,6 +84,15 @@ pub struct SidebarDiffSummary {
     pub removed: u64,
     pub added_color: Rgba,
     pub removed_color: Rgba,
+}
+
+/// A session branch's pull request, in words and in the theme's color for where it stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SidebarPullRequest {
+    pub number: u32,
+    /// Where it stands and how its checks went, like "Open · checks passing".
+    pub status: String,
+    pub color: Rgba,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -338,6 +359,9 @@ pub struct SidebarRow {
     pub artwork: Option<std::sync::Arc<gpui_kit::RenderImage>>,
     pub icon: Option<String>,
     pub diff: Option<SidebarDiffSummary>,
+    pub pull_request: Option<SidebarPullRequest>,
+    /// The names of its project's scripts, to run from its menu.
+    pub scripts: Vec<String>,
     pub color: Rgba,
     pub dim_color: Rgba,
     pub kind: SidebarRowKind,
@@ -556,6 +580,12 @@ pub enum ChromeIntent {
     SearchConversations(String),
     /// Put text on the clipboard, such as a session's path or branch.
     CopyText(String),
+    /// Run the project script with this name in a new tab of the session.
+    RunProjectScript {
+        session: SessionTarget,
+        project: String,
+        name: String,
+    },
     /// Show a session's directory in the file manager.
     RevealPath {
         scope: SpaceKey,

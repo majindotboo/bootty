@@ -13,6 +13,33 @@ pub struct ProjectSettings {
     pub isolated: bool,
     pub branch_prefix: String,
     pub start_ref: String,
+    /// Named commands to run in the project's sessions, each in a new terminal tab.
+    pub scripts: Vec<ProjectScript>,
+    /// A command run in a worktree before Bootty removes it, like stopping its services.
+    pub teardown: String,
+}
+
+/// A named command for a project's sessions.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProjectScript {
+    pub name: String,
+    pub command: String,
+    /// Runs in each new worktree's session as it starts, like installing dependencies.
+    pub setup: bool,
+}
+
+/// Scripts a project keeps at most.
+// Enough for setup, checks and services; raise it if projects outgrow a short list.
+pub const MAX_PROJECT_SCRIPTS: usize = 32;
+
+/// Whether `command` is a shell command a project can keep: some text, bounded, with lines and
+/// tabs but no other control characters.
+fn valid_command(command: &str) -> bool {
+    command.len() <= 4096
+        && !command
+            .chars()
+            .any(|c| c.is_control() && !matches!(c, '\n' | '\t'))
 }
 
 impl ProjectSettings {
@@ -57,6 +84,22 @@ impl ProjectSettings {
         }
         if let Some(path) = &self.icon_path {
             validate_path(path)?;
+        }
+        let mut names = std::collections::BTreeSet::new();
+        if self.scripts.len() > MAX_PROJECT_SCRIPTS
+            || !valid_command(&self.teardown)
+            || self.scripts.iter().any(|script| {
+                script.name.trim().is_empty()
+                    || script.name.chars().count() > 64
+                    || script.name.chars().any(char::is_control)
+                    || !names.insert(script.name.trim())
+                    || script.command.trim().is_empty()
+                    || !valid_command(&script.command)
+            })
+        {
+            return Err(super::WorkspacePersistenceError::operation(
+                "Give each script a unique name and a command, at most 32 scripts",
+            ));
         }
         Ok(())
     }

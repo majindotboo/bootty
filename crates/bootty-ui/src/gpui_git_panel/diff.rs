@@ -5,7 +5,7 @@ use bootty_git::{
     github::CodeComment,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffEvent, DiffFile, DiffLineRange, DiffSide as ViewSide, DiffState},
     dock::{BasePanel, Panel, PanelEvent},
@@ -71,6 +71,15 @@ fn component_files(file: &FileDiff) -> Result<Vec<DiffFile>, String> {
     DiffFile::parse(&patch).map_err(|error| error.to_string())
 }
 
+/// Whitespace changes were hidden or shown again; the Changes panel asks Git again.
+pub(super) struct WhitespaceChanged(pub bool);
+
+/// Hunks of a local diff to stage, or to unstage when `reverse`.
+pub(super) struct StageHunk {
+    pub patch: String,
+    pub reverse: bool,
+}
+
 /// A comment on lines of a local diff, for the session's conversation.
 #[derive(Clone, Debug)]
 pub struct DiffComment {
@@ -86,6 +95,7 @@ pub(super) struct DraftCodeComment {
     pub comment: CodeComment,
 }
 
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent view state.
 pub struct GitDiffPanel {
     pub(super) active: bool,
     pub(crate) group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
@@ -96,6 +106,14 @@ pub struct GitDiffPanel {
     review: Option<ReviewDiff>,
     /// The shown files' patches outside a review, to quote comments for the conversation.
     local: Vec<FileDiff>,
+    /// Whether the shown change can be staged by hunk: unstaged changes stage, staged ones
+    /// unstage (`true`).
+    stage: Option<bool>,
+    /// Whether the shown diff hides whitespace changes, when it came from the Changes panel,
+    /// which can ask Git again.
+    hide_whitespace: Option<bool>,
+    /// Long lines wrap rather than scroll sideways.
+    wrap: bool,
     selection: Option<(DiffAnchor, String)>,
     editing: bool,
     submitting: bool,
@@ -143,6 +161,9 @@ impl GitDiffPanel {
             notice: None,
             review: None,
             local: Vec::new(),
+            stage: None,
+            hide_whitespace: None,
+            wrap: false,
             selection: None,
             editing: false,
             submitting: false,
@@ -169,6 +190,8 @@ impl GitDiffPanel {
         self.source = None;
         self.review = None;
         self.local.clear();
+        self.stage = None;
+        self.hide_whitespace = None;
         self.selection = None;
         self.notice = files.as_ref().err().cloned();
         self.diff
@@ -178,7 +201,7 @@ impl GitDiffPanel {
         true
     }
 
-    pub(super) fn show(
+    pub(crate) fn show(
         &mut self,
         title: String,
         contents: String,
@@ -206,6 +229,111 @@ impl GitDiffPanel {
             self.local = FileDiff::parse_all(&source);
             self.source = Some(source);
         }
+    }
+
+    /// Marks the shown diff as the Changes panel's, which offers hiding whitespace changes, and
+    /// whether it hides them.
+    pub(super) fn mark_from_changes(&mut self, hide_whitespace: bool, cx: &mut Context<Self>) {
+        self.hide_whitespace = Some(hide_whitespace);
+        cx.notify();
+    }
+
+    /// The diff's view controls: unified or side by side, wrapped or not, and, for the
+    /// session's changes, whether whitespace changes show.
+    fn toolbar(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        let split = self.diff.read(cx).mode() == gpui_kit::component::diff::DiffMode::Split;
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .when_some(self.hide_whitespace, |row, hidden| {
+                row.child(
+                    Button::new("diff-whitespace")
+                        .debug_selector(move || format!("diff-whitespace:{hidden}"))
+                        .label("Hide whitespace")
+                        .xsmall()
+                        .ghost()
+                        .selected(hidden)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.hide_whitespace = Some(!hidden);
+                            cx.emit(WhitespaceChanged(!hidden));
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                Button::new("diff-wrap")
+                    .debug_selector({
+                        let wrap = self.wrap;
+                        move || format!("diff-wrap:{wrap}")
+                    })
+                    .label("Wrap lines")
+                    .xsmall()
+                    .ghost()
+                    .selected(self.wrap)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.wrap = !this.wrap;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("diff-mode")
+                    .debug_selector(move || {
+                        format!("diff-mode:{}", if split { "split" } else { "unified" })
+                    })
+                    .label(if split { "Unified" } else { "Side by side" })
+                    .xsmall()
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.diff.update(cx, |diff, cx| {
+                            diff.set_mode(
+                                if split {
+                                    gpui_kit::component::diff::DiffMode::Unified
+                                } else {
+                                    gpui_kit::component::diff::DiffMode::Split
+                                },
+                                cx,
+                            );
+                        });
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// Lets the shown change's hunks stage, from the `unstaged` group, or unstage, from the
+    /// `staged` one.
+    pub(super) fn allow_staging(&mut self, group: &str, cx: &mut Context<Self>) {
+        self.stage = match group {
+            "unstaged" => Some(false),
+            "staged" => Some(true),
+            _ => None,
+        };
+        cx.notify();
+    }
+
+    /// Stages the hunks the selection touches, or unstages them.
+    fn stage_selection(&mut self, cx: &mut Context<Self>) {
+        let (Some(reverse), Some((anchor, _))) = (self.stage, &self.selection) else {
+            return;
+        };
+        let Some(patch) = self
+            .local
+            .iter()
+            .find(|file| file.path == anchor.path)
+            .and_then(|file| file.hunk_patch(anchor))
+        else {
+            return;
+        };
+        cx.emit(StageHunk { patch, reverse });
+        self.selection = None;
+        self.diff
+            .update(cx, |diff, cx| diff.set_selected_lines(None, cx));
+        cx.notify();
     }
 
     pub(super) fn show_review(
@@ -337,6 +465,28 @@ impl GitDiffPanel {
         cx.notify();
     }
 
+    /// What selected lines offer: staging their hunk outside a review, and commenting on them.
+    fn selection_actions(&self, cx: &Context<Self>) -> Vec<Button> {
+        let stage = self.stage.filter(|_| self.review.is_none()).map(|reverse| {
+            Button::new("stage-hunk")
+                .debug_selector(|| "git-stage-hunk".into())
+                .label(if reverse {
+                    "Unstage hunk"
+                } else {
+                    "Stage hunk"
+                })
+                .ghost()
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| this.stage_selection(cx)))
+        });
+        let comment = Button::new("code-comment")
+            .label("Comment")
+            .ghost()
+            .small()
+            .on_click(cx.listener(|this, _, window, cx| this.start_comment(window, cx)));
+        stage.into_iter().chain([comment]).collect()
+    }
+
     fn review_controls(&self, cx: &Context<Self>) -> gpui_kit::Div {
         div()
             .flex()
@@ -372,15 +522,7 @@ impl GitDiffPanel {
                                     )),
                             )
                             .when(!self.editing, |row| {
-                                row.child(
-                                    Button::new("code-comment")
-                                        .label("Comment")
-                                        .ghost()
-                                        .small()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.start_comment(window, cx);
-                                        })),
-                                )
+                                row.children(self.selection_actions(cx))
                             }),
                     )
                     .when(self.editing, |view| {
@@ -432,6 +574,8 @@ impl GitDiffPanel {
 impl EventEmitter<PanelEvent> for GitDiffPanel {}
 impl EventEmitter<DraftCodeComment> for GitDiffPanel {}
 impl EventEmitter<DiffComment> for GitDiffPanel {}
+impl EventEmitter<StageHunk> for GitDiffPanel {}
+impl EventEmitter<WhitespaceChanged> for GitDiffPanel {}
 impl Focusable for GitDiffPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.diff.focus_handle(cx)
@@ -480,6 +624,9 @@ impl Render for GitDiffPanel {
             .flex_col()
             .size_full()
             .min_h_0()
+            .when(self.title.is_some() && self.notice.is_none(), |view| {
+                view.child(self.toolbar(cx))
+            })
             .child(div().flex_1().min_h_0().child(
                 if self.title.is_none() || self.notice.is_some() {
                     div()
@@ -496,8 +643,10 @@ impl Render for GitDiffPanel {
                         )
                         .into_any_element()
                 } else {
+                    // Several files need their names; one file's is the panel's title.
                     Diff::new(&self.diff)
-                        .header_visible(false)
+                        .header_visible(self.diff.read(cx).files().len() > 1)
+                        .soft_wrap(self.wrap)
                         .soft_wrap(true)
                         .size_full()
                         .into_any_element()

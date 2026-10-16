@@ -127,6 +127,10 @@ pub struct NativeTranscriptItem {
     /// The tokens its turn used, on a turn's last reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::NativeTurnUsage>,
+    /// A snapshot of the files, kept by Git: on a prompt, as they were before its turn; on a
+    /// turn's last reply, as they were after it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
 }
 
 /// One step of the plan the agent is following.
@@ -421,6 +425,7 @@ impl RealtimeCall {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[allow(clippy::struct_excessive_bools)] // Each flag is an independent fact about the session.
 pub struct NativeSessionSnapshot {
     pub provider: AgentKind,
     #[serde(default)]
@@ -516,6 +521,12 @@ pub struct NativeSessionSnapshot {
     /// The row of a review Codex is running.
     #[serde(skip)]
     review: Option<String>,
+    /// The files before the turn a prompt about to be shown starts.
+    #[serde(skip)]
+    pub(crate) pending_checkpoint: Option<String>,
+    /// A turn just ended, so its files after want recording.
+    #[serde(skip)]
+    pub(crate) turn_ended: bool,
     /// Codex's thread totals before the running turn, and that turn.
     #[serde(skip)]
     pub(crate) codex_usage_before: Option<(String, crate::NativeTurnUsage)>,
@@ -768,6 +779,8 @@ impl NativeSessionSnapshot {
             claude_tasks: Vec::new(),
             compaction: None,
             review: None,
+            pending_checkpoint: None,
+            turn_ended: false,
             codex_usage_before: None,
         }
     }
@@ -899,6 +912,7 @@ impl NativeSessionSnapshot {
                 questions,
                 steered: false,
                 usage: None,
+                checkpoint: None,
             });
         }
         self.trim_transcript();
@@ -1079,6 +1093,7 @@ impl NativeSessionSnapshot {
                 }
                 item.citations.clone_from(&saved.citations);
                 item.usage = item.usage.or(saved.usage);
+                item.checkpoint = item.checkpoint.take().or_else(|| saved.checkpoint.clone());
                 item.applications.clone_from(&saved.applications);
                 item.created_at = item.created_at.or(saved.created_at);
                 item.updated_at = saved.updated_at.or(item.updated_at);
@@ -1095,6 +1110,7 @@ impl NativeSessionSnapshot {
         self.image_echo_count = prompt.image_count();
         self.message(id.to_owned(), "user", prompt.message().to_owned(), false);
         if let Some(item) = self.transcript.iter_mut().find(|item| item.id == id) {
+            item.checkpoint = self.pending_checkpoint.take();
             item.images = prompt.image_references();
             item.attachments = prompt.attachment_references();
             item.citations = prompt.citations().to_vec();

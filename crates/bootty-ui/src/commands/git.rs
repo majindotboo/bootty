@@ -5,11 +5,20 @@ command_actions! {
     GitAction {
         Open => ("git.open", "Open Git Panels", ["repository"], Write),
         Status => ("git.status", "Git Changes", ["repository"], Read),
-        Diff => ("git.diff", "Git File Diff", ["repository", "path", "group"], Read),
+        Diff => ("git.diff", "Git File Diff", ["repository", "path", "group", "whitespace"], Read),
+        DiffAll => ("git.diff-all", "Git Diff of All Changes", ["repository", "whitespace"], Read),
         Stage => ("git.stage", "Stage File", ["repository", "path"], Write),
         Unstage => ("git.unstage", "Unstage File", ["repository", "path"], Write),
+        StageAll => ("git.stage-all", "Stage All Changes", ["repository"], Write),
+        UnstageAll => ("git.unstage-all", "Unstage All Changes", ["repository"], Write),
+        StageHunk => ("git.stage-hunk", "Stage or Unstage Hunks", ["repository", "patch", "reverse"], Write),
+        Discard => ("git.discard", "Discard File Changes", ["repository", "path"], Destructive),
+        DiscardAll => ("git.discard-all", "Discard All Changes", ["repository"], Destructive),
         Commit => ("git.commit", "Commit Staged Changes", ["repository", "message"], Write),
         Amend => ("git.amend", "Amend Last Commit", ["repository", "message"], Destructive),
+        WriteMessage => ("git.write-message", "Write Commit Message", ["repository"], Read),
+        PullRequest => ("git.pull-request", "Branch Pull Request", ["repository"], Read),
+        WritePullRequest => ("git.write-pull-request", "Write Pull Request Text", ["repository", "base"], Read),
         Fetch => ("git.fetch", "Fetch From Remote", ["repository"], Write),
         Pull => ("git.pull", "Pull From Upstream", ["repository"], Write),
         Push => ("git.push", "Push To Upstream", ["repository"], Write),
@@ -18,6 +27,7 @@ command_actions! {
         CommitDiff => ("git.commit-diff", "Git Commit Diff", ["repository", "commit"], Read),
         CreateBranch => ("git.branch-create", "Create Git Branch", ["repository", "branch", "start_ref"], Write),
         CheckoutBranch => ("git.branch-checkout", "Check Out Git Branch", ["repository", "branch"], Write),
+        StashSwitch => ("git.branch-stash-switch", "Stash Changes and Switch Branch", ["repository", "branch"], Write),
         StashPush => ("git.stash-push", "Stash Git Changes", ["repository", "message", "include_untracked"], Write),
         StashApply => ("git.stash-apply", "Apply Git Stash", ["repository", "stash", "expected_commit"], Write),
         StashDrop => ("git.stash-drop", "Drop Git Stash", ["repository", "stash", "expected_commit"], Destructive),
@@ -52,7 +62,10 @@ impl GitAction {
             .copied()
             .map(|name| {
                 let mut arg = super::argument(name, bootty_control::ValueType::String);
-                arg.required = !matches!(name, "folder" | "start_ref");
+                arg.required = !matches!(name, "folder" | "start_ref" | "whitespace");
+                if name == "whitespace" {
+                    arg.choices = ["show", "ignore"].map(str::to_owned).to_vec();
+                }
                 if name == "group" {
                     arg.choices = ["staged", "unstaged", "untracked"]
                         .map(str::to_owned)
@@ -100,6 +113,12 @@ impl GitAction {
         if self.metadata().0.starts_with("git.github.") {
             return self.execute_github(&git, root, args);
         }
+        if matches!(
+            self,
+            Self::PullRequest | Self::WriteMessage | Self::WritePullRequest
+        ) {
+            return self.execute_description(&git, root, args);
+        }
         match self {
             Self::Overview => serde_json::to_value(
                 git.overview(
@@ -114,12 +133,9 @@ impl GitAction {
             Self::CommitDiff => git
                 .commit_diff(root, arg(1)?)
                 .map(serde_json::Value::String),
-            Self::CreateBranch => git
-                .create_branch(root, arg(1)?, args.get(2).map_or("HEAD", String::as_str))
-                .map(|()| serde_json::Value::Null),
-            Self::CheckoutBranch => git
-                .checkout_branch(root, arg(1)?)
-                .map(|()| serde_json::Value::Null),
+            Self::CreateBranch | Self::CheckoutBranch | Self::StashSwitch => {
+                self.execute_branch(&git, root, arg(1)?, args)
+            }
             Self::StashPush => git
                 .stash_push(
                     root,
@@ -152,21 +168,85 @@ impl GitAction {
                     "untracked" => ChangeGroup::Untracked,
                     _ => return Err("Invalid Git change group".to_owned()),
                 };
-                git.file_diff(root, arg(1)?, group)
-                    .map(serde_json::Value::String)
+                git.file_diff_with(
+                    root,
+                    arg(1)?,
+                    group,
+                    args.get(3).is_some_and(|value| value == "ignore"),
+                )
+                .map(serde_json::Value::String)
             }
+            Self::DiffAll => git
+                .all_diff(root, args.get(1).is_some_and(|value| value == "ignore"))
+                .map(serde_json::Value::String),
             Self::Stage => git
                 .stage_file(root, arg(1)?)
                 .map(|()| serde_json::Value::Null),
             Self::Unstage => git
                 .unstage_file(root, arg(1)?)
                 .map(|()| serde_json::Value::Null),
+            Self::StageAll => git.stage_all(root).map(|()| serde_json::Value::Null),
+            Self::UnstageAll => git.unstage_all(root).map(|()| serde_json::Value::Null),
+            Self::StageHunk => git
+                .apply_to_index(root, arg(1)?, arg(2)? == "true")
+                .map(|()| serde_json::Value::Null),
+            Self::Discard => git
+                .discard_file(root, arg(1)?)
+                .map(|()| serde_json::Value::Null),
+            Self::DiscardAll => git.discard_all(root).map(|()| serde_json::Value::Null),
             Self::Commit | Self::Amend => git
                 .commit_index(root, arg(1)?, self == Self::Amend)
                 .map(|()| serde_json::Value::Null),
             _ => Err("GitHub commands require the GitHub host dispatcher".into()),
         }
     }
+    /// Creating `branch`, or switching to it, from a clean tree or by stashing the changes.
+    fn execute_branch<R: CommandRunner>(
+        self,
+        git: &Git<R>,
+        root: &str,
+        branch: &str,
+        args: &[String],
+    ) -> Result<serde_json::Value, String> {
+        match self {
+            Self::CreateBranch => {
+                git.create_branch(root, branch, args.get(2).map_or("HEAD", String::as_str))
+            }
+            Self::CheckoutBranch => git.checkout_branch(root, branch),
+            Self::StashSwitch => git.stash_and_switch(root, branch),
+            _ => Err("Not a branch command".to_owned()),
+        }
+        .map(|()| serde_json::Value::Null)
+    }
+
+    /// What describes the work: the branch's pull request, and what Codex writes commit messages
+    /// and pull request text from, which the runtime hands over.
+    fn execute_description<R: CommandRunner>(
+        self,
+        git: &Git<R>,
+        root: &str,
+        args: &[String],
+    ) -> Result<serde_json::Value, String> {
+        match self {
+            Self::PullRequest => {
+                let branch = git.changes(root)?.branch.unwrap_or_default();
+                serde_json::to_value(git.branch_pull_request(root, &branch)?)
+                    .map_err(|error| error.to_string())
+            }
+            Self::WriteMessage => git
+                .commit_message_context(root)
+                .map(serde_json::Value::String),
+            Self::WritePullRequest => git
+                .pull_request_context(
+                    root,
+                    args.get(1)
+                        .ok_or("Missing the pull request's base branch")?,
+                )
+                .map(serde_json::Value::String),
+            _ => Err("Not a describing command".to_owned()),
+        }
+    }
+
     fn execute_github(
         self,
         git: &Git<impl CommandRunner>,

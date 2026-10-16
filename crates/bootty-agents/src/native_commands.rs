@@ -195,6 +195,21 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             vec!["id", "generation", "status"],
             ResourceKind::Session,
         ),
+        (
+            "turn-diff",
+            vec!["id", "generation", "reply"],
+            ResourceKind::Session,
+        ),
+        (
+            "rewind-files",
+            vec!["id", "generation", "prompt"],
+            ResourceKind::Session,
+        ),
+        (
+            "rewind",
+            vec!["id", "generation", "prompt", "files"],
+            ResourceKind::Session,
+        ),
         ("models", vec!["id", "generation"], ResourceKind::Session),
         (
             "models-info",
@@ -297,9 +312,12 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                 | "catalog-completions"
                 | "subagent-read"
                 | "history"
+                | "turn-diff"
                 | "terminal"
         ) {
             MutationClass::Read
+        } else if matches!(operation, "rewind-files" | "rewind") {
+            MutationClass::Destructive
         } else {
             MutationClass::Write
         },
@@ -326,12 +344,14 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                             | "provider_mentions"
                             | "conversations"
                             | "goal"
+                            | "files"
                     ) || name == "permissions" && operation != "permissions"
                         || name == "response" && operation == "fork"),
                     choices: match (name, operation) {
                         ("direction", "pane") => vec!["right".into(), "down".into()],
                         ("direction", "queue-move") => vec!["earlier".into(), "later".into()],
                         ("status", "goal-status") => vec!["active".into(), "paused".into()],
+                        ("files", "rewind") => vec!["files".into()],
                         _ => Vec::new(),
                     },
                     minimum: None,

@@ -24,7 +24,7 @@ use crate::session_membership::{SessionMembership, SessionState, WorkspaceSessio
 pub use crate::membership::BackendMembership;
 use crate::{controller::SpaceId, membership::MembershipOperation};
 use bootty_config::config::{MultiplexerBackendConfig, RemoteConfig};
-pub use projects::{ProjectSettings, RegisteredProject};
+pub use projects::{MAX_PROJECT_SCRIPTS, ProjectScript, ProjectSettings, RegisteredProject};
 
 const WORKSPACE_SNAPSHOT_REVISION: i64 = 7;
 const DEFAULT_SPACE_NAME: &str = "Default Space";

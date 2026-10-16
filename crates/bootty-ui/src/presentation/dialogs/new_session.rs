@@ -31,6 +31,9 @@ pub struct NewSessionDialog {
     launch_direction: LaunchDirection,
     empty_enter_armed: bool,
     shell_fallback: bool,
+    /// The repository this dialog made a new worktree from, whose setup scripts the session runs
+    /// once it starts.
+    worktree_repository: Option<String>,
     surface_request_id: Option<u64>,
     registration_target: Option<bootty_control::CommandTarget>,
 }
@@ -177,6 +180,7 @@ impl NewSessionDialog {
             launch_direction: LaunchDirection::Foreground,
             empty_enter_armed: false,
             shell_fallback: false,
+            worktree_repository: None,
             surface_request_id: None,
             registration_target: None,
         }
@@ -230,6 +234,7 @@ impl NewSessionDialog {
             launch_direction: LaunchDirection::Foreground,
             empty_enter_armed: false,
             shell_fallback: false,
+            worktree_repository: None,
             surface_request_id: None,
             registration_target: None,
         }
@@ -347,6 +352,7 @@ impl NewSessionDialog {
                 value: serde_json::json!({"native": record, "terminal": terminal}),
                 warnings: Vec::new(),
                 foreground: self.launch_direction == LaunchDirection::Foreground,
+                setup: self.worktree_repository.take(),
             },
             reply,
         ))
@@ -700,6 +706,7 @@ impl NewSessionDialog {
                 value,
                 warnings,
                 foreground: self.launch_direction == LaunchDirection::Foreground,
+                setup: self.worktree_repository.take(),
             });
         }
         if let Some(form) = &mut self.form {
@@ -1265,7 +1272,11 @@ impl NewSessionDialog {
         }
     }
 
-    pub(crate) fn start_create_worktree(
+    /// The command that makes a worktree of `repo` for the session, which then starts in it
+    /// and runs the project's setup scripts.
+    /// # Errors
+    /// Rejects an invalid request, or a dialog without a host to make it on.
+    pub fn start_create_worktree(
         &mut self,
         repo: String,
         request: bootty_git::WorktreeRequest,
@@ -1278,6 +1289,7 @@ impl NewSessionDialog {
             .map(|destination| destination.target.clone())
             .or_else(|| self.registration_target.clone())
             .ok_or("The worktree host binding is unavailable")?;
+        self.worktree_repository = Some(repo.clone());
         let mut invocation = bootty_control::CommandInvocation::new(
             "worktree.create",
             vec![
@@ -1489,6 +1501,8 @@ pub enum NewSessionPickerEvent {
         value: serde_json::Value,
         warnings: Vec<bootty_control::CommandWarning>,
         foreground: bool,
+        /// The repository of the new worktree the session started in, to run its setup scripts.
+        setup: Option<String>,
     },
     Error(String),
     AddProject {

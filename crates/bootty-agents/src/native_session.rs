@@ -415,6 +415,8 @@ pub struct NativeAgentSession {
     pub(crate) claude_plan: Mutex<bool>,
     pub(crate) history_window: Mutex<Option<crate::native_history::HistoryPosition>>,
     pub(crate) history_quotes: Mutex<NativeSessionSnapshot>,
+    /// Where the conversation's files are, for the snapshots around its turns.
+    checkpoints: crate::native_checkpoints::CheckpointHost,
     _launch_resources: NativeLaunchResources,
 }
 
@@ -475,6 +477,11 @@ impl NativeAgentSession {
         let reader_workers = Arc::clone(&workers);
         let (reader_tools, reader_claude) = (tools.clone(), claude.clone());
         let reader_remote = config.remote.is_some();
+        let checkpoints = crate::native_checkpoints::CheckpointHost {
+            directory: config.cwd.to_string_lossy().into_owned(),
+            remote: config.remote.as_ref().map(|remote| remote.host.clone()),
+        };
+        let reader_checkpoints = checkpoints.clone();
         let reader_worker = spawn_worker("native-agent-protocol", move || {
             let fault = read_frames(
                 BufReader::new(stdout),
@@ -487,6 +494,7 @@ impl NativeAgentSession {
                 &reader_cancel,
                 &reader_workers,
                 reader_claude.as_deref(),
+                &reader_checkpoints,
             )
             .err();
             if let Some(tools) = &reader_tools {
@@ -550,6 +558,7 @@ impl NativeAgentSession {
             claude_plan: Mutex::new(config.plan_mode == Some(true)),
             history_window: Mutex::new(None),
             history_quotes: Mutex::new(NativeSessionSnapshot::new(config.provider)),
+            checkpoints,
             _launch_resources: launch_resources,
             config,
         })
@@ -827,6 +836,7 @@ impl NativeAgentSession {
                 Err("The conversation started another turn before sending".into())
             };
         }
+        self.record_turn_start();
         if self.config.provider == AgentKind::Pi {
             if let Some(selection) = selection {
                 if self.snapshot().status != NativeSessionStatus::Idle {
@@ -843,6 +853,16 @@ impl NativeAgentSession {
             return self.send_prompt_claude(prompt);
         }
         self.send_prompt_codex(prompt, selection)
+    }
+
+    /// Records the files before the turn a prompt starts; the prompt keeps them once shown.
+    fn record_turn_start(&self) {
+        let owner = self.snapshot().session_id;
+        let commit = owner.and_then(|owner| {
+            self.checkpoints
+                .capture(&owner, &crate::native_checkpoints::snapshot_name("before"))
+        });
+        lock(&self.snapshot).pending_checkpoint = commit;
     }
 
     /// Start a Codex voice call on this conversation's thread and return Codex's answer to the
@@ -1811,6 +1831,7 @@ fn read_frames(
     cancel: &Arc<AtomicBool>,
     workers: &NativeWorkers,
     claude: Option<&Mutex<crate::native_claude::ClaudeProtocol>>,
+    checkpoints: &crate::native_checkpoints::CheckpointHost,
 ) -> Result<(), String> {
     let provider = lock(snapshot).provider;
     loop {
@@ -1858,6 +1879,7 @@ fn read_frames(
                     write_frame(input, closing, &response)?;
                 }
                 publish_change(change_handler);
+                record_turn_end(snapshot, checkpoints, change_handler, workers);
             }
             continue;
         }
@@ -1876,6 +1898,7 @@ fn read_frames(
                 let waiting = lock(snapshot).waiting_for_input();
                 update_input_wait(pending, waiting);
                 publish_change(change_handler);
+                record_turn_end(snapshot, checkpoints, change_handler, workers);
             }
             continue;
         }
@@ -1916,6 +1939,7 @@ fn read_frames(
         drop(snapshot);
         let waiting = lock(&shared_snapshot).waiting_for_input();
         update_input_wait(pending, waiting);
+        record_turn_end(&shared_snapshot, checkpoints, change_handler, workers);
         if let Some(params) = deferred {
             let input = Arc::clone(input);
             let pending = Arc::clone(pending);
@@ -1952,6 +1976,40 @@ fn read_frames(
             lock(workers).push(worker);
         }
         publish_change(change_handler);
+    }
+}
+
+/// Records the files after a turn that just ended, off the reader so provider events keep
+/// flowing, and keeps them on the turn's last reply.
+fn record_turn_end(
+    snapshot: &Arc<Mutex<NativeSessionSnapshot>>,
+    checkpoints: &crate::native_checkpoints::CheckpointHost,
+    change_handler: &ChangePublisher,
+    workers: &NativeWorkers,
+) {
+    let owner = {
+        let mut snapshot = lock(snapshot);
+        if !std::mem::take(&mut snapshot.turn_ended) {
+            return;
+        }
+        snapshot.session_id.clone()
+    };
+    let Some(owner) = owner else {
+        return;
+    };
+    let (snapshot, checkpoints, handler) = (
+        Arc::clone(snapshot),
+        checkpoints.clone(),
+        Arc::clone(change_handler),
+    );
+    if let Ok(worker) = spawn_worker("native-agent-checkpoint", move || {
+        let name = crate::native_checkpoints::snapshot_name("after");
+        if let Some(commit) = checkpoints.capture(&owner, &name) {
+            lock(&snapshot).settle_checkpoint(commit);
+            publish_change(&handler);
+        }
+    }) {
+        lock(workers).push(worker);
     }
 }
 

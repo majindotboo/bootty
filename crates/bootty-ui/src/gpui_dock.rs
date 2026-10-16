@@ -559,6 +559,22 @@ impl WorkspaceDock {
         self.target == *target && self.panels.context.terminal.as_ref() == terminal
     }
 
+    /// Shows `contents`, a Git diff, in the session's diff panel, titled `title`.
+    pub(crate) fn show_turn_changes(
+        &self,
+        title: String,
+        contents: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let diff = self.panels.diff.clone();
+        diff.update(cx, |diff, cx| diff.show(title, contents, window, cx));
+        self.add_document_panel(panel_handle(diff.clone()), window, cx);
+        self.area.update(cx, |area, cx| {
+            area.select_panel(PanelId::from(diff.entity_id()), window, cx);
+        });
+    }
+
     fn request_document(&mut self, path: String, window: &Window, cx: &Context<Self>) {
         use bootty_control::{Caller, CommandInvocation};
         let mut invocation = CommandInvocation::from_action("files.open", Caller::Internal);

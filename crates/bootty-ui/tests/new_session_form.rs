@@ -663,6 +663,49 @@ fn launch_direction_is_retained_until_observed_success(
     );
 }
 
+/// A session that starts in a worktree the dialog just made names that worktree's repository,
+/// so its project's setup scripts run in it.
+#[rstest]
+fn a_session_in_a_new_worktree_runs_its_project_setup(form: NewSessionForm) {
+    use bootty_ui::presentation::dialogs::NewSessionPickerEvent;
+    let mut dialog = ready_dialog(form).expect("project discovery");
+    let create = dialog
+        .start_create_worktree(
+            "/repo".to_owned(),
+            bootty_git::WorktreeRequest {
+                branch: "topic".to_owned(),
+                name: None,
+                start_ref: None,
+                directory: None,
+            },
+        )
+        .expect("worktree request");
+    assert_eq!(create.command, "worktree.create");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    dialog.worktree_started(receiver);
+    sender
+        .send(bootty_control::CommandOutcome::Success {
+            value: serde_json::json!("/worktrees/topic"),
+            warnings: Vec::new(),
+        })
+        .expect("observed worktree");
+    let Some(NewSessionPickerEvent::Submit(_)) = dialog.poll() else {
+        panic!("the session launches in the new worktree");
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    dialog.started(receiver);
+    sender
+        .send(bootty_control::CommandOutcome::Success {
+            value: serde_json::json!({"terminal": {"kind": "terminal", "handle": "issued", "generation": 9}}),
+            warnings: Vec::new(),
+        })
+        .expect("observed session");
+    assert!(matches!(
+        dialog.poll(),
+        Some(NewSessionPickerEvent::Started { setup: Some(repository), .. }) if repository == "/repo"
+    ));
+}
+
 #[rstest]
 #[case("enter-session")]
 #[case("start-session")]

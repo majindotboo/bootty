@@ -1209,6 +1209,13 @@ impl GpuiWorkspace {
             OpenNativeSession::ImplementInNew { target, plan } => {
                 self.implement_in_new_conversation(target, plan);
             }
+            OpenNativeSession::ShowTurnChanges { diff } => {
+                if let Some(dock) = &self.tools {
+                    dock.update(cx, |dock, cx| {
+                        dock.show_turn_changes("Turn changes".to_owned(), diff.clone(), window, cx);
+                    });
+                }
+            }
         }
     }
 
@@ -1427,6 +1434,8 @@ impl GpuiWorkspace {
                 .map(|row| crate::gpui_agent_session::ConversationContext {
                     project: row.project.as_ref().map(|project| project.name.clone()),
                     branch: row.branch.clone(),
+                    pull_request: row.pull_request.clone(),
+                    binding: binding.clone(),
                     diff: row.diff,
                     target: row.target.clone(),
                 });

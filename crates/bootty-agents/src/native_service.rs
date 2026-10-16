@@ -2147,11 +2147,11 @@ impl NativeAgentService {
             return Err("Stop the native session before removing it".to_owned());
         }
         let mut candidate = lock(&self.store).clone();
-        let removed_id = candidate
+        let (removed_id, checkpoints) = candidate
             .records
             .iter()
             .find(|record| record.target() == *target)
-            .map(|record| record.id.clone())
+            .map(|record| (record.id.clone(), checkpoint_owner(record)))
             .ok_or("Native session target is unknown or stale")?;
         let before = candidate.records.len();
         candidate
@@ -2164,7 +2164,124 @@ impl NativeAgentService {
             .followups
             .retain(|input| input.session != removed_id);
         self.commit(candidate)?;
+        // The snapshots of its turns go with it; Git keeps nothing for them afterwards.
+        if let Some((host, owner)) = checkpoints {
+            _ = host.prune(&owner);
+        }
         self.attachment_store.remove_session(&removed_id)
+    }
+
+    /// What turn `reply` of this conversation changed: the files before its prompt against the
+    /// files after it, as a Git diff.
+    /// # Errors
+    /// Returns a stale target, a turn without snapshots, or a Git failure.
+    pub fn turn_diff(&self, target: &CommandTarget, reply: &str) -> Result<String, String> {
+        let (record, before, after) = self.turn_checkpoints(target, reply)?;
+        let after = after.ok_or("This turn's files after it weren't recorded")?;
+        let (host, _) =
+            checkpoint_owner(&record).ok_or("This conversation has no files to compare")?;
+        host.diff(&before, &after)
+    }
+
+    /// Puts this conversation's files back as they were before the turn `prompt` started.
+    /// # Errors
+    /// Returns a stale target, a running turn, a prompt without a snapshot, or a Git failure.
+    pub fn rewind_files(&self, target: &CommandTarget, prompt: &str) -> Result<(), String> {
+        let record = lock(&self.store)
+            .records
+            .iter()
+            .find(|record| record.target() == *target)
+            .cloned()
+            .ok_or("Native session target is unknown or stale")?;
+        if self
+            .resolve(target)
+            .is_ok_and(|session| session.snapshot().status == NativeSessionStatus::Working)
+        {
+            return Err("Stop the turn before putting files back".to_owned());
+        }
+        let before = record
+            .snapshot
+            .transcript
+            .iter()
+            .find(|item| item.id == prompt && item.role == "user")
+            .and_then(|item| item.checkpoint.clone())
+            .ok_or("This message has no record of the files before it")?;
+        let (host, _) =
+            checkpoint_owner(&record).ok_or("This conversation has no files to restore")?;
+        host.restore(&before)
+    }
+
+    /// Rewinds the conversation to before `prompt`, and with `files`, puts the files back as they
+    /// were then too. The conversation goes first, so a refusal leaves the files alone.
+    /// # Errors
+    /// Returns a stale or closed conversation, the provider's refusal, a persistence failure, or
+    /// a failure putting the files back after the conversation rewound.
+    pub fn rewind(&self, target: &CommandTarget, prompt: &str, files: bool) -> Result<(), String> {
+        let _mutation = lock(&self.mutation);
+        let session = self
+            .resolve(target)
+            .map_err(|_| "Open the conversation before rewinding it".to_owned())?;
+        let before = lock(&self.store)
+            .records
+            .iter()
+            .find(|record| record.target() == *target)
+            .and_then(|record| {
+                record
+                    .snapshot
+                    .transcript
+                    .iter()
+                    .find(|item| item.id == prompt && item.role == "user")
+                    .and_then(|item| item.checkpoint.clone())
+                    .zip(checkpoint_owner(record))
+            });
+        if files && before.is_none() {
+            return Err("This message has no record of the files before it".to_owned());
+        }
+        session.rewind_conversation(prompt)?;
+        let mut candidate = lock(&self.store).clone();
+        if let Some(record) = candidate
+            .records
+            .iter_mut()
+            .find(|record| record.target() == *target)
+        {
+            record.snapshot = session.snapshot();
+        }
+        self.commit(candidate)?;
+        match before {
+            Some((commit, (host, _))) if files => host.restore(&commit).map_err(|error| {
+                format!("The conversation rewound, but the files couldn't go back: {error}")
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// A turn's reply and the snapshots before its prompt and after it.
+    fn turn_checkpoints(
+        &self,
+        target: &CommandTarget,
+        reply: &str,
+    ) -> Result<(NativeSessionRecord, String, Option<String>), String> {
+        let record = lock(&self.store)
+            .records
+            .iter()
+            .find(|record| record.target() == *target)
+            .cloned()
+            .ok_or("Native session target is unknown or stale")?;
+        let transcript = &record.snapshot.transcript;
+        let at = transcript
+            .iter()
+            .position(|item| item.id == reply)
+            .ok_or("That reply is no longer in this conversation")?;
+        let before = transcript
+            .get(..at)
+            .unwrap_or_default()
+            .iter()
+            .rev()
+            .find(|item| item.role == "user")
+            .and_then(|item| item.checkpoint.clone())
+            .ok_or("This turn's files before it weren't recorded")?;
+        let after = transcript.get(at).and_then(|item| item.checkpoint.clone());
+        Ok((record, before, after))
     }
 
     /// Stop owned processes before saving their final state. Call on a shutdown worker and await
@@ -2248,6 +2365,25 @@ fn forget_saved_tool_images(
                 .retain(|pending| !images.contains(&pending.id));
         }
     }
+}
+
+/// Where a conversation's files are and the name its snapshots live under, once it has a
+/// provider identity.
+fn checkpoint_owner(
+    record: &NativeSessionRecord,
+) -> Option<(crate::native_checkpoints::CheckpointHost, String)> {
+    let owner = record.snapshot.session_id.clone()?;
+    Some((
+        crate::native_checkpoints::CheckpointHost {
+            directory: record.config.cwd.to_string_lossy().into_owned(),
+            remote: record
+                .config
+                .remote
+                .as_ref()
+                .map(|remote| remote.host.clone()),
+        },
+        owner,
+    ))
 }
 
 fn remote_attachment_directory(

@@ -17,6 +17,7 @@ num-traits.workspace = true
 bootty-computer = { path = "../bootty-computer" }
 bootty-control = { path = "../bootty-control" }
 bootty-host = { path = "../bootty-host" }
+bootty-git = { path = "../bootty-git" }
 bootty-config = { path = "../bootty-config" }
 bootty-write = { path = "../bootty-write" }
 serde.workspace = true

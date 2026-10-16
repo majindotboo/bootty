@@ -3011,6 +3011,21 @@ fn invoke(
             },
         ),
         "goal" => service.set_goal(target, arg(2)).map(|()| Value::Null),
+        "turn-diff" => service
+            .turn_diff(target, arg(2))
+            .map(|diff| json!({"diff": diff})),
+        "rewind-files" => service.rewind_files(target, arg(2)).map(|()| Value::Null),
+        // With `files`, the files go back to before the message too.
+        "rewind" => service
+            .rewind(
+                target,
+                arg(2),
+                invocation
+                    .arguments
+                    .get(3)
+                    .is_some_and(|files| files == "files"),
+            )
+            .map(|()| Value::Null),
         "goal-status" => match arg(2) {
             "active" | "paused" => service
                 .set_goal_active(target, arg(2) == "active")

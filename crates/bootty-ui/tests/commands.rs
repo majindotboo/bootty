@@ -381,6 +381,21 @@ fn modal_dismissal_restores_the_underlying_input_route(#[case] sidebar: bool) {
 #[case("git.status", MutationClass::Read, Some(ResourceKind::Binding))]
 #[case("git.stage", MutationClass::Write, Some(ResourceKind::Binding))]
 #[case("git.amend", MutationClass::Destructive, Some(ResourceKind::Binding))]
+#[case("git.stage-all", MutationClass::Write, Some(ResourceKind::Binding))]
+#[case("git.stage-hunk", MutationClass::Write, Some(ResourceKind::Binding))]
+#[case("git.discard", MutationClass::Destructive, Some(ResourceKind::Binding))]
+#[case(
+    "git.discard-all",
+    MutationClass::Destructive,
+    Some(ResourceKind::Binding)
+)]
+#[case("git.diff-all", MutationClass::Read, Some(ResourceKind::Binding))]
+#[case("git.write-message", MutationClass::Read, Some(ResourceKind::Binding))]
+#[case(
+    "git.write-pull-request",
+    MutationClass::Read,
+    Some(ResourceKind::Binding)
+)]
 #[case("terminal.read", MutationClass::Read, Some(ResourceKind::Terminal))]
 #[case("terminal.write", MutationClass::Write, Some(ResourceKind::Terminal))]
 #[case("terminal.paste", MutationClass::Write, Some(ResourceKind::Terminal))]
@@ -1417,6 +1432,76 @@ fn submit_command_from_caller(
     }
 }
 
+/// Writing a commit message hands Git's staged changes to the configured Codex quick model on the
+/// repository's host, and returns what it wrote as one message. Nothing staged stops before Codex.
+#[cfg(unix)]
+#[rstest]
+fn commit_messages_are_written_by_codex_from_the_staged_changes() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let root = directory.path().to_string_lossy().into_owned();
+    let git = |args: &[&str]| {
+        assert!(
+            Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    git(&["init", "--quiet"]);
+    let codex = directory.path().join("codex.py");
+    fs::write(
+        &codex,
+        r"#!/usr/bin/env python3
+import json,pathlib,sys
+args=sys.argv[1:]
+assert args[args.index('--model')+1]=='quick-model' and '+contents' in args[-1]
+pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'subject':'Add notes','body':'They start the list.'}))
+",
+    )
+    .unwrap();
+    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
+    let (wake, wakes) = mpsc::channel();
+    let mut config = test_config::config(
+        directory.path().join("settings/config.toml"),
+        MultiplexerBackendConfig::Native,
+    );
+    config.agents.codex.enabled = true;
+    config.agents.codex.program = codex.to_string_lossy().into_owned();
+    config.agents.quick_model = "quick-model".to_owned();
+    let mut state = AppState::new(
+        config,
+        support::backends(),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        None,
+        None,
+    )
+    .unwrap();
+    let started = Instant::now();
+    let write = |state: &mut AppState| {
+        let mut invocation = CommandInvocation::from_action("git.write-message", Caller::Socket);
+        invocation.arguments = vec![root.clone()];
+        submit_command_from_caller(state, &wakes, Caller::Socket, invocation, started)
+    };
+    assert!(
+        format!("{:?}", write(&mut state)).contains("Stage the changes to describe first"),
+        "nothing staged"
+    );
+    fs::write(directory.path().join("notes.txt"), "contents\n").unwrap();
+    git(&["add", "notes.txt"]);
+    let CommandOutcome::Success { value, .. } = write(&mut state) else {
+        panic!("writing the message failed");
+    };
+    assert_eq!(
+        value,
+        serde_json::json!({"message": "Add notes\n\nThey start the list."})
+    );
+}
+
 #[rstest]
 #[case(Caller::Socket)]
 #[case(Caller::Keybinding)]
@@ -1486,6 +1571,10 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
         .find(|file| file.path == "file[a].txt")
         .unwrap();
     assert_eq!(file.index, 'A');
+    let CommandOutcome::Success { value, .. } = run("git.diff-all", vec![root.clone()]) else {
+        panic!("Git diff of all changes failed");
+    };
+    assert!(value.as_str().unwrap().contains("b/file[a].txt"), "{value}");
     assert_eq!(
         fs::read_to_string(directory.path().join("file[a].txt")).unwrap(),
         "contents\n"
@@ -3925,6 +4014,78 @@ fn session_requests_leave_selection_and_the_active_space_alone() {
     assert_eq!(
         listed_session_names(&listed_space(&mut state, &home_name)),
         ["project"]
+    );
+}
+
+/// A project's script opens in a new tab of the session that asks, in its directory; asking for
+/// setup opens every setup script; an unknown name says so.
+#[cfg(unix)]
+#[rstest]
+fn project_scripts_open_in_new_tabs() {
+    let directory = assert_fs::TempDir::new().expect("private workspace");
+    let config = test_config::config(
+        directory.path().join("config.toml"),
+        MultiplexerBackendConfig::Native,
+    );
+    let (wake, wakes) = mpsc::channel();
+    let mut state = AppState::new(
+        config,
+        support::backends(),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        None,
+        None,
+    )
+    .expect("app state");
+    let started = Instant::now();
+    open_native_session(&mut state, directory.path(), started);
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let settings = serde_json::json!({"scripts": [
+        {"name": "Mark", "command": "printf ran > marked; exec cat", "setup": false},
+        {"name": "Install", "command": "printf done > installed; exec cat", "setup": true},
+    ]});
+    let configured = submit_command(
+        &mut state,
+        CommandInvocation::new(
+            "project.configure",
+            vec![cwd.clone(), settings.to_string()],
+            Caller::Socket,
+        ),
+        started,
+    );
+    assert_eq!(failure_kind(&configured), "success", "{configured:?}");
+    let mut run = |command: &str, arguments: &[&str], file: &str| {
+        let windows = state.mux().sessions()[0].windows.len();
+        let outcome = submit_command(
+            &mut state,
+            CommandInvocation::new(
+                command,
+                arguments.iter().map(|arg| (*arg).to_owned()).collect(),
+                Caller::Socket,
+            ),
+            started,
+        );
+        if !file.is_empty() {
+            // The tab opens from the queue once the command has answered.
+            let opened = (0..200).any(|_| {
+                state.update_frame(frames::idle_frame(started));
+                _ = wakes.recv_timeout(Duration::from_millis(10));
+                state.mux().sessions()[0].windows.len() > windows
+                    && directory.path().join(file).exists()
+            });
+            assert!(opened, "{command} opened no tab that ran its script");
+        }
+        outcome
+    };
+    let marked = run("project.script", &[&cwd, "Mark"], "marked");
+    assert_eq!(failure_kind(&marked), "success", "{marked:?}");
+    let set_up = run("project.setup", &[&cwd], "installed");
+    assert_eq!(failure_kind(&set_up), "success", "{set_up:?}");
+    let unknown = run("project.script", &[&cwd, "Deploy"], "");
+    assert!(
+        format!("{unknown:?}").contains("The project has no script with that name"),
+        "{unknown:?}"
     );
 }
 

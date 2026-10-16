@@ -1763,7 +1763,27 @@ impl SidebarRows {
                                         .child(name.clone()),
                                 )
                         },
-                    ),
+                    )
+                    .when_some(row.pull_request.as_ref(), |line, pull_request| {
+                        line.child(
+                            div()
+                                .debug_selector({
+                                    let key = row.key.clone();
+                                    move || format!("sidebar-pull-request-{key}")
+                                })
+                                .flex_none()
+                                .flex()
+                                .items_center()
+                                .gap_0p5()
+                                .text_color(color(pull_request.color))
+                                .child(crate::gpui::icon(
+                                    "git-pull-request",
+                                    self.icon_size * 0.85,
+                                    color(pull_request.color),
+                                ))
+                                .child(format!("#{}", pull_request.number)),
+                        )
+                    }),
             )
             .child(self.agent_stack(row))
             .into_any_element()
@@ -2273,6 +2293,7 @@ impl SidebarRows {
                     project: Some(path.to_owned()),
                     branch: None,
                     local: row.host.is_none(),
+                    scripts: None,
                 },
             )
         });
@@ -2338,6 +2359,7 @@ impl SidebarRows {
             project: row.project_path.clone(),
             branch: row.branch.clone(),
             local: row.host.is_none(),
+            scripts: Some((target.clone(), row.scripts.clone())),
         };
         Some(if matches!(row.kind, SidebarRowKind::DetachedSession) {
             ContextMenu::DetachedSession {
@@ -2603,6 +2625,12 @@ fn session_tooltip(row: &SidebarRow, age: Option<String>) -> Tooltip {
                     .filter(|branch| !branch.is_empty())
                     .map(|branch| line("git-branch", branch)),
             )
+            .children(row.pull_request.as_ref().map(|pull_request| {
+                line(
+                    "git-pull-request",
+                    format!("#{} · {}", pull_request.number, pull_request.status),
+                )
+            }))
             .child(line(
                 "laptop",
                 row.host.clone().unwrap_or_else(|| "This computer".into()),
@@ -2851,6 +2879,19 @@ pub(super) fn place_menu(scope: SpaceKey, place: &super::view::SessionPlace) -> 
             ChromeIntent::CopyText(branch.clone()),
         ));
     }
+    if let (Some(project), Some((session, scripts))) = (&place.project, &place.scripts) {
+        rows.extend(scripts.iter().enumerate().map(|(index, name)| {
+            row(
+                &format!("Run {name}"),
+                index == 0,
+                ChromeIntent::RunProjectScript {
+                    session: session.clone(),
+                    project: project.clone(),
+                    name: name.clone(),
+                },
+            )
+        }));
+    }
     // Editors differ by computer, so they follow the rows every session has.
     if let Some(path) = place.project.as_ref().filter(|_| place.local) {
         rows.extend(
@@ -2992,6 +3033,13 @@ fn row_accessible_label(row: &SidebarRow, now: i64) -> String {
     }
     if let Some(branch) = row.branch.as_ref().filter(|branch| **branch != row.text) {
         _ = write!(label, " · {branch}");
+    }
+    if let Some(pull_request) = &row.pull_request {
+        _ = write!(
+            label,
+            " · Pull request #{}, {}",
+            pull_request.number, pull_request.status
+        );
     }
     for agent in &row.agents {
         _ = write!(label, " · {}", agent.description);

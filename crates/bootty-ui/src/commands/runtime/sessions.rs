@@ -22,6 +22,104 @@ use crate::{
 };
 
 impl AppState {
+    /// Runs `project`'s script `name` in a new tab of `session`, as its sidebar menu asks.
+    pub(crate) fn run_project_script(
+        &mut self,
+        scope: SpaceId,
+        session: &str,
+        project: String,
+        name: String,
+    ) -> bool {
+        let Some(terminal) = self.session_terminal_target(scope, session) else {
+            self.record_message("The session's terminal is no longer available");
+            return false;
+        };
+        let mut invocation = bootty_control::CommandInvocation::new(
+            "project.script",
+            vec![project, name],
+            bootty_control::Caller::Internal,
+        );
+        invocation.target = Some(terminal);
+        self.commands.queue(invocation);
+        true
+    }
+
+    /// Opens a terminal tab in `session` for each script `action` picks from the project at
+    /// `arguments[0]`: the one named by `arguments[1]`, or every setup script.
+    fn run_project_scripts(
+        &mut self,
+        action: SessionAction,
+        scope: SpaceId,
+        session: &str,
+        arguments: &[String],
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        if let Err(error) = executor::begin_synchronous_command(execution) {
+            return self.reject_command(command_outcome_for_mux_error(error));
+        }
+        let failed = |message: &str| CommandOutcome::Failed {
+            code: "project_failed".into(),
+            message: message.to_owned(),
+        };
+        let Some(project) = arguments.first().and_then(|cwd| {
+            self.workspace
+                .registered_projects(scope)
+                .find(|project| project.cwd == *cwd)
+        }) else {
+            // A worktree of a directory that was never registered has nothing to set up.
+            if action == SessionAction::RunSetup {
+                return CommandDispatch::Complete(serialized_command_outcome(
+                    serde_json::json!({"tabs": 0}),
+                ));
+            }
+            return self.reject_command(failed("That project isn't registered in this Space"));
+        };
+        let scripts = project
+            .settings
+            .scripts
+            .iter()
+            .filter(|script| match action {
+                SessionAction::RunScript => arguments.get(1) == Some(&script.name),
+                _ => script.setup,
+            })
+            .map(|script| script.command.clone())
+            .collect::<Vec<_>>();
+        if action == SessionAction::RunScript && scripts.is_empty() {
+            return self.reject_command(failed("The project has no script with that name"));
+        }
+        let Some(binding) = self.workspace.binding(scope) else {
+            return self.reject_command(failed("The terminal's Space is no longer available"));
+        };
+        let remote = binding.multiplexer().remote.is_some();
+        let cwd = binding
+            .mux()
+            .all_sessions()
+            .iter()
+            .find(|candidate| candidate.id == session)
+            .and_then(|candidate| candidate.anchor.cwd.clone())
+            .unwrap_or_else(|| project.cwd.clone());
+        let Some(target) = self.mux_resource_target(scope, ResourceKind::Session, session, None)
+        else {
+            return self.reject_command(failed("The terminal's session is no longer available"));
+        };
+        for command in &scripts {
+            let argv = crate::presentation::new_session_form::shell_argv(command, remote);
+            let Ok(argv) = serde_json::to_string(&argv) else {
+                continue;
+            };
+            let mut tab = bootty_control::CommandInvocation::new(
+                "terminal.create_tab",
+                vec![argv, cwd.clone()],
+                bootty_control::Caller::Internal,
+            );
+            tab.target = Some(target.clone());
+            self.commands.queue(tab);
+        }
+        CommandDispatch::Complete(serialized_command_outcome(
+            serde_json::json!({"tabs": scripts.len()}),
+        ))
+    }
+
     fn dispatch_project_command(
         &mut self,
         action: SessionAction,
@@ -132,6 +230,14 @@ impl AppState {
             && let Some(ExactMuxTarget::Binding(scope)) = exact_target
         {
             return self.list_terminals_command(scope, execution);
+        }
+        if matches!(action, SessionAction::RunScript | SessionAction::RunSetup) {
+            let Some(ExactMuxTarget::Pane(scope, session, _, _)) = exact_target else {
+                return self.reject_command(CommandOutcome::StaleTarget {
+                    message: "The terminal is no longer available".to_owned(),
+                });
+            };
+            return self.run_project_scripts(action, scope, &session, arguments, execution);
         }
         if matches!(
             action,

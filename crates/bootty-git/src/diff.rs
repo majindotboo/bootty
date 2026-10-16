@@ -181,6 +181,46 @@ impl FileDiff {
             .collect()
     }
 
+    /// A patch of this file's hunks that touch the selected lines, to stage or unstage them.
+    #[must_use]
+    pub fn hunk_patch(&self, anchor: &DiffAnchor) -> Option<String> {
+        if anchor.path != self.path {
+            return None;
+        }
+        let hunks = self
+            .hunks
+            .iter()
+            .filter(|hunk| {
+                hunk.lines.iter().any(|line| {
+                    line.number(anchor.side)
+                        .is_some_and(|number| (anchor.start_line..=anchor.line).contains(&number))
+                })
+            })
+            .collect::<Vec<_>>();
+        if hunks.is_empty() {
+            return None;
+        }
+        let mut patch = format!(
+            "--- a/{}\n+++ b/{}\n",
+            self.previous_path.as_deref().unwrap_or(&self.path),
+            self.path
+        );
+        for hunk in hunks {
+            patch.push_str(&hunk.header);
+            patch.push('\n');
+            for line in &hunk.lines {
+                patch.push(match (line.old_line, line.new_line) {
+                    (None, _) => '+',
+                    (_, None) => '-',
+                    _ => ' ',
+                });
+                patch.push_str(&line.text);
+                patch.push('\n');
+            }
+        }
+        Some(patch)
+    }
+
     /// Return exact selected source text, refusing a stale, missing or cross-hunk anchor.
     /// # Errors
     /// The selection must name consecutive lines on one side of one current hunk.

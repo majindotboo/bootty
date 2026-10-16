@@ -217,3 +217,230 @@ fn sync_reports_and_closes_the_distance_to_the_upstream() {
     );
     assert_eq!(distance(&mine), None);
 }
+
+/// Everything stages and unstages at once, one hunk stages and unstages on its own, and changes
+/// can be thrown away file by file or all together.
+#[rstest]
+fn changes_stage_together_by_hunk_and_discard(repository: anyhow::Result<TempDir>) {
+    let repository = repository.expect("repository fixture");
+    let git = Git::new();
+    let root = repository.path().to_str().unwrap();
+    let lines = |changed: &[usize]| {
+        (1..=30)
+            .map(|n| {
+                if changed.contains(&n) {
+                    format!("changed {n}\n")
+                } else {
+                    format!("line {n}\n")
+                }
+            })
+            .collect::<String>()
+    };
+    repository.child("kept.txt").write_str(&lines(&[])).unwrap();
+    run(&repository, &["add", "kept.txt"]).unwrap();
+    run(&repository, &["commit", "--quiet", "-m", "start"]).unwrap();
+    // Two changes far apart make two hunks.
+    repository
+        .child("kept.txt")
+        .write_str(&lines(&[2, 28]))
+        .unwrap();
+    repository.child("loose.txt").write_str("new\n").unwrap();
+    let staged = || run(&repository, &["diff", "--cached", "--name-only"]).unwrap();
+    git.stage_all(root).unwrap();
+    assert_eq!(staged(), "kept.txt\nloose.txt\n");
+    git.unstage_all(root).unwrap();
+    assert_eq!(staged(), "");
+    let diff = git
+        .file_diff(root, "kept.txt", ChangeGroup::Unstaged)
+        .unwrap();
+    let file = bootty_git::diff::FileDiff::parse_all(&diff).remove(0);
+    let first = bootty_git::diff::DiffAnchor {
+        path: "kept.txt".into(),
+        side: bootty_git::diff::DiffSide::Right,
+        start_line: 2,
+        line: 2,
+    };
+    let patch = file.hunk_patch(&first).unwrap();
+    git.apply_to_index(root, &patch, false).unwrap();
+    let cached = run(&repository, &["diff", "--cached"]).unwrap();
+    assert!(
+        cached.contains("+changed 2") && !cached.contains("+changed 28"),
+        "{cached}"
+    );
+    git.apply_to_index(root, &patch, true).unwrap();
+    assert_eq!(staged(), "");
+    git.discard_file(root, "loose.txt").unwrap();
+    assert!(!repository.child("loose.txt").path().exists());
+    git.discard_file(root, "kept.txt").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(repository.child("kept.txt").path()).unwrap(),
+        lines(&[])
+    );
+    repository
+        .child("kept.txt")
+        .write_str(&lines(&[5]))
+        .unwrap();
+    repository.child("other.txt").write_str("loose\n").unwrap();
+    git.stage_all(root).unwrap();
+    git.discard_all(root).unwrap();
+    assert_eq!(run(&repository, &["status", "--porcelain"]).unwrap(), "");
+}
+
+/// One diff holds every change and each untracked file, and can leave out changes to
+/// whitespace alone.
+#[rstest]
+fn all_changes_diff_together_and_can_hide_whitespace(repository: anyhow::Result<TempDir>) {
+    let repository = repository.expect("repository fixture");
+    let git = Git::new();
+    let root = repository.path().to_str().unwrap();
+    repository
+        .child("spaced.txt")
+        .write_str("one two\n")
+        .unwrap();
+    repository.child("staged.txt").write_str("old\n").unwrap();
+    run(&repository, &["add", "-A"]).unwrap();
+    run(&repository, &["commit", "--quiet", "-m", "start"]).unwrap();
+    repository
+        .child("spaced.txt")
+        .write_str("one  two\n")
+        .unwrap();
+    repository.child("staged.txt").write_str("new\n").unwrap();
+    run(&repository, &["add", "staged.txt"]).unwrap();
+    repository.child("loose.txt").write_str("loose\n").unwrap();
+    let all = git.all_diff(root, false).unwrap();
+    for file in ["b/spaced.txt", "b/staged.txt", "b/loose.txt"] {
+        assert!(all.contains(file), "{file} in {all}");
+    }
+    let quiet = git.all_diff(root, true).unwrap();
+    assert!(
+        !quiet.contains("+one  two") && quiet.contains("+new"),
+        "{quiet}"
+    );
+}
+
+/// A commit message is written from the staged changes alone, after the latest subjects; with
+/// nothing staged there is nothing to describe.
+#[rstest]
+fn commit_messages_describe_only_what_is_staged(repository: anyhow::Result<TempDir>) {
+    let repository = repository.expect("repository fixture");
+    let git = Git::new();
+    let root = repository.path().to_str().unwrap();
+    repository.child("notes.txt").write_str("one\n").unwrap();
+    run(&repository, &["add", "notes.txt"]).unwrap();
+    run(
+        &repository,
+        &["commit", "--quiet", "-m", "feat: start notes"],
+    )
+    .unwrap();
+    assert_eq!(
+        git.commit_message_context(root),
+        Err("Stage the changes to describe first".to_owned())
+    );
+    repository
+        .child("notes.txt")
+        .write_str("one\ntwo\n")
+        .unwrap();
+    repository
+        .child("loose.txt")
+        .write_str("unstaged\n")
+        .unwrap();
+    run(&repository, &["add", "notes.txt"]).unwrap();
+    let context = git.commit_message_context(root).unwrap();
+    assert!(
+        context.starts_with("Recent commits:\nfeat: start notes\n"),
+        "{context}"
+    );
+    assert!(context.contains("+two"), "{context}");
+    assert!(!context.contains("loose.txt"), "{context}");
+}
+
+/// A pull request is written from the branch's commits since it left the base, and their
+/// changes; a base Git doesn't know, or a branch with nothing new, says so.
+#[rstest]
+fn pull_requests_describe_the_branch_since_its_base(repository: anyhow::Result<TempDir>) {
+    let repository = repository.expect("repository fixture");
+    let git = Git::new();
+    let root = repository.path().to_str().unwrap();
+    repository.child("notes.txt").write_str("one\n").unwrap();
+    run(&repository, &["add", "notes.txt"]).unwrap();
+    run(&repository, &["commit", "--quiet", "-m", "start"]).unwrap();
+    run(&repository, &["branch", "-M", "main"]).unwrap();
+    run(&repository, &["switch", "--quiet", "-c", "feature"]).unwrap();
+    assert_eq!(
+        git.pull_request_context(root, "main"),
+        Err("This branch has no commits to describe yet".to_owned())
+    );
+    assert_eq!(
+        git.pull_request_context(root, "missing"),
+        Err("Git doesn't know the branch missing".to_owned())
+    );
+    repository
+        .child("notes.txt")
+        .write_str("one\ntwo\n")
+        .unwrap();
+    run(
+        &repository,
+        &["commit", "--quiet", "-am", "Add a second note"],
+    )
+    .unwrap();
+    let context = git.pull_request_context(root, "main").unwrap();
+    assert!(
+        context.starts_with("Commits:\nAdd a second note\n"),
+        "{context}"
+    );
+    assert!(
+        context.contains("+two") && !context.contains("start"),
+        "{context}"
+    );
+}
+
+/// Each branch reports how far it is from its upstream, and switching away from changes stashes
+/// them, untracked files included, under a message naming both branches.
+#[rstest]
+fn branches_report_their_distance_and_switch_by_stashing(repository: anyhow::Result<TempDir>) {
+    let repository = repository.expect("repository fixture");
+    let git = Git::new();
+    let root = repository.path().to_str().unwrap();
+    repository.child("notes.txt").write_str("one\n").unwrap();
+    run(&repository, &["add", "notes.txt"]).unwrap();
+    run(&repository, &["commit", "--quiet", "-m", "start"]).unwrap();
+    run(&repository, &["branch", "-M", "main"]).unwrap();
+    run(&repository, &["switch", "--quiet", "-c", "feature"]).unwrap();
+    run(
+        &repository,
+        &["branch", "--quiet", "--set-upstream-to=main"],
+    )
+    .unwrap();
+    repository
+        .child("notes.txt")
+        .write_str("one\ntwo\n")
+        .unwrap();
+    run(&repository, &["commit", "--quiet", "-am", "two"]).unwrap();
+    let feature = git
+        .overview(root, 1)
+        .unwrap()
+        .branches
+        .into_iter()
+        .find(|branch| branch.name == "feature")
+        .unwrap();
+    assert_eq!((feature.ahead, feature.behind), (1, 0));
+    assert_eq!(
+        git.stash_and_switch(root, "missing"),
+        Err("branch is not a local repository branch".to_owned())
+    );
+    repository
+        .child("notes.txt")
+        .write_str("changed\n")
+        .unwrap();
+    repository.child("loose.txt").write_str("new\n").unwrap();
+    git.stash_and_switch(root, "main").unwrap();
+    let changes = git.changes(root).unwrap();
+    assert_eq!(
+        (changes.branch.as_deref(), changes.files.len()),
+        (Some("main"), 0)
+    );
+    assert_eq!(
+        run(&repository, &["stash", "list", "--format=%s"]).unwrap(),
+        "On feature: Stashed switching from feature to main\n"
+    );
+}

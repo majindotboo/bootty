@@ -7,12 +7,14 @@ mod metadata;
 mod model;
 mod queries;
 mod stacks;
+mod status;
 mod workflows;
 pub use checkout::PullRequestCheckoutRequest;
 pub use creation::{PullRequestCreationContext, PullRequestCreationRequest};
 pub use files::PullRequestDiffRequest;
 pub use model::*;
 pub use stacks::{StackMergeOperation, StackMergeRequest, StackMergeStatus};
+pub use status::{ChecksState, PullRequestState, PullRequestStatus};
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};

@@ -102,6 +102,7 @@ impl Host {
             sessions,
             // Every checkout is past its first hour.
             now: chrono_now().saturating_add(2 * 60 * 60),
+            teardown: std::collections::BTreeMap::new(),
         }
     }
 
@@ -166,6 +167,41 @@ fn orphaned_checkouts_go_unless_they_hold_unsaved_work(
                     }],
                     1
                 )
+            );
+            assert!(Path::new(&path).exists());
+        }
+    }
+}
+
+/// A project's teardown runs in a checkout before it goes; when the teardown fails, the checkout
+/// stays and the report says what the teardown said.
+#[rstest]
+#[case::succeeds("echo stopped > ../stopped", None)]
+#[case::fails(
+    "echo 'services still running' >&2; exit 1",
+    Some("Its teardown failed: services still running")
+)]
+fn teardown_runs_before_a_checkout_goes(#[case] command: &str, #[case] kept: Option<&str>) {
+    let host = Host::new();
+    let path = host.checkout("orphan", false);
+    let mut request = host.request(10, Vec::new());
+    request.teardown.insert(
+        host.main().to_string_lossy().into_owned(),
+        command.to_owned(),
+    );
+    let report = Git::new().clean_worktrees(&request).unwrap();
+    match kept {
+        None => {
+            assert_eq!(report.removed, vec![path]);
+            assert!(host.directory().join("project/stopped").exists());
+        }
+        Some(reason) => {
+            assert_eq!(
+                report.kept,
+                vec![KeptWorktree {
+                    path: path.clone(),
+                    reason: reason.to_owned()
+                }]
             );
             assert!(Path::new(&path).exists());
         }

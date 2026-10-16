@@ -7,11 +7,13 @@ mod launch;
 mod native_annotations;
 pub use native_annotations::{NativeResponseAnnotation, response_annotations};
 mod native_attachments;
+mod native_checkpoints;
 mod native_citations;
 mod native_claude;
 mod native_commands;
 mod native_completions;
 mod native_elicitation;
+mod native_rewind;
 pub use native_elicitation::{
     Elicitation, ElicitationField, FieldKind, FieldOption, TextFormat, form_response,
 };
@@ -39,6 +41,10 @@ pub use native_service::tool_activity::{
     MAX_NATIVE_ACTIVITY_ITEMS, NativeActivityItem, NativeActivityPage, NativeActivityTool,
 };
 mod native_session;
+mod quick_text;
+pub use quick_text::{
+    GeneratedCommitMessage, GeneratedPullRequest, generate_commit_message, generate_pull_request,
+};
 mod session_names;
 pub use session_names::{GeneratedSessionNames, generate_session_names};
 mod orchestration;

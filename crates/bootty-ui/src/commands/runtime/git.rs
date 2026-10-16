@@ -111,6 +111,18 @@ impl AppState {
             });
         };
         let remote = binding.multiplexer().remote.clone();
+        let writer = if matches!(
+            action,
+            GitAction::WriteMessage | GitAction::WritePullRequest
+        ) {
+            match self.quick_writer() {
+                Ok(writer) => Some(writer),
+                Err(outcome) => return CommandDispatch::Complete(outcome),
+            }
+        } else {
+            None
+        };
+        let (deadline, cancellation) = executor::command_execution(execution.clone());
         let worktree_directory = self
             .config()
             .session
@@ -119,9 +131,9 @@ impl AppState {
             .filter(|directory| !directory.trim().is_empty());
         self.dispatch_committed_command(execution, move || {
             let result = if action == GitAction::CreateWorktree {
-                create_worktree(remote, &arguments, worktree_directory)
+                create_worktree(remote.clone(), &arguments, worktree_directory)
             } else {
-                remote.map_or_else(
+                remote.clone().map_or_else(
                     || action.execute(SystemCommandRunner, &arguments),
                     |remote| {
                         action.execute(
@@ -130,6 +142,16 @@ impl AppState {
                         )
                     },
                 )
+            };
+            let result = match (writer, result) {
+                (Some(writer), Ok(context)) => writer.write(
+                    action,
+                    remote,
+                    arguments.first().map_or("", String::as_str),
+                    context.as_str().unwrap_or_default(),
+                    &|| cancellation.is_cancelled() || Instant::now() >= deadline,
+                ),
+                (_, result) => result,
             };
             match result {
                 Ok(value) => CommandOutcome::Success {
@@ -142,6 +164,78 @@ impl AppState {
                 },
             }
         })
+    }
+}
+
+/// The configured Codex account and quick model, captured to write commit messages and pull
+/// request text.
+struct QuickWriter {
+    preferences: bootty_config::config::AgentProviderConfig,
+    model: String,
+}
+
+impl AppState {
+    fn quick_writer(&self) -> Result<QuickWriter, CommandOutcome> {
+        let agents = &self.config().agents;
+        let preferences = agents
+            .provider("codex")
+            .filter(|preferences| preferences.enabled)
+            .cloned()
+            .ok_or_else(|| CommandOutcome::Unavailable {
+                message: "Enable Codex to write with its quick model".into(),
+            })?;
+        Ok(QuickWriter {
+            preferences,
+            model: agents.quick_model.clone(),
+        })
+    }
+}
+
+impl QuickWriter {
+    /// Asks Codex, on the repository's host, to write what `action` wants from Git's `context`.
+    fn write(
+        &self,
+        action: GitAction,
+        remote: Option<bootty_config::config::RemoteConfig>,
+        repository: &str,
+        context: &str,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<serde_json::Value, String> {
+        let launch = super::terminal_agents::prepare_launch(
+            &bootty_control::CommandInvocation::new(
+                "agents.codex.start",
+                vec![repository.to_owned()],
+                bootty_control::Caller::Internal,
+            ),
+            bootty_agents::AgentKind::Codex,
+            "start",
+            None,
+            &self.preferences,
+        )?;
+        let config = match remote {
+            Some(remote) => bootty_agents::NativeSessionConfig::capture_remote(
+                bootty_agents::AgentKind::Codex,
+                launch,
+                remote,
+            ),
+            None => bootty_agents::NativeSessionConfig::from_launch(
+                bootty_agents::AgentKind::Codex,
+                launch,
+            ),
+        }?;
+        if action == GitAction::WriteMessage {
+            let message =
+                bootty_agents::generate_commit_message(&config, &self.model, context, cancelled)?;
+            Ok(serde_json::json!({"message": message.message()}))
+        } else {
+            serde_json::to_value(bootty_agents::generate_pull_request(
+                &config,
+                &self.model,
+                context,
+                cancelled,
+            )?)
+            .map_err(|error| error.to_string())
+        }
     }
 }
 

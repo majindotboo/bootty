@@ -550,19 +550,8 @@ impl NewSessionForm {
             NewSessionMode::Terminal => {
                 let argv = if self.draft.command.trim().is_empty() {
                     Vec::new()
-                } else if cfg!(windows) && destination.remote.is_none() {
-                    vec![
-                        "powershell.exe".to_owned(),
-                        "-NoProfile".to_owned(),
-                        "-Command".to_owned(),
-                        self.draft.command.clone(),
-                    ]
                 } else {
-                    vec![
-                        "/bin/sh".to_owned(),
-                        "-lc".to_owned(),
-                        self.draft.command.clone(),
-                    ]
+                    shell_argv(&self.draft.command, destination.remote.is_some())
                 };
                 CommandInvocation::new(
                     "session.create",
@@ -1564,5 +1553,21 @@ fn provider_label(id: &str) -> &str {
         "claude" => "Claude",
         "pi" => "Pi",
         id => id,
+    }
+}
+
+/// The argv that runs a shell `command` on a host: PowerShell on this Windows computer, a login
+/// shell elsewhere.
+#[must_use]
+pub fn shell_argv(command: &str, remote: bool) -> Vec<String> {
+    if cfg!(windows) && !remote {
+        vec![
+            "powershell.exe".to_owned(),
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            command.to_owned(),
+        ]
+    } else {
+        vec!["/bin/sh".to_owned(), "-lc".to_owned(), command.to_owned()]
     }
 }

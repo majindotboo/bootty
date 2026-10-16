@@ -919,6 +919,7 @@ dependencies = [
  "bootty-computer",
  "bootty-config",
  "bootty-control",
+ "bootty-git",
  "bootty-host",
  "bootty-write",
  "chrono",
