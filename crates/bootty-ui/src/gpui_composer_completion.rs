@@ -1,6 +1,7 @@
 //! Both composers share a retained, provider-scoped completion menu.
 use crate::{
     completion::{CompletionKind, CompletionTrigger},
+    error_catalog::ErrorNotice,
     gpui::CommandAction,
 };
 use bootty_agents::{NativeCompletionCatalog, NativeCompletionKind, NativeCompletionOption};
@@ -319,10 +320,15 @@ impl ComposerCompletion {
                 if source == "files" && request != this.request {
                     return;
                 }
+                let failed = match source {
+                    "files" => "Could not search files",
+                    "applications" => "Could not list open apps",
+                    _ => "Could not load commands and skills",
+                };
                 match result {
                     Ok(CommandOutcome::Success { value, .. }) => {
                         if let Err(error) = this.receive(source, value) {
-                            this.error = Some(error);
+                            this.error = Some(ErrorNotice::failed(failed, error).to_string());
                         } else if source == "applications" {
                             this.load_application_icons(cx);
                         } else if source == "catalog" {
@@ -335,7 +341,10 @@ impl ComposerCompletion {
                             );
                         }
                     }
-                    Ok(outcome) => this.error = crate::commands::command_outcome_message(&outcome),
+                    Ok(outcome) => {
+                        this.error = crate::commands::command_outcome_message(&outcome)
+                            .map(|message| ErrorNotice::failed(failed, message).to_string());
+                    }
                     Err(_) => this.error = Some("Completion host disconnected".into()),
                 }
                 this.rebuild(window, cx);
@@ -418,6 +427,13 @@ impl ComposerCompletion {
                 },
             })
             .collect();
+    }
+
+    /// Whether the provider offers plan mode.
+    pub(crate) fn plan_mode(&self) -> bool {
+        self.catalog
+            .as_ref()
+            .is_some_and(|catalog| catalog.plan_mode)
     }
 
     /// Whether the provider advertises a slash command with this name.
@@ -683,7 +699,10 @@ impl ComposerCompletion {
             | CommandAction::ToggleFavorite
             | CommandAction::Focus(_)
             | CommandAction::Dictate
-            | CommandAction::Voice => return false,
+            | CommandAction::Voice
+            | CommandAction::TogglePlan
+            | CommandAction::ToggleFast
+            | CommandAction::FocusComposer => return false,
         }
         true
     }
@@ -851,19 +870,17 @@ impl Render for ComposerCompletion {
                                         .update(cx, |this, cx| this.select(index.row, window, cx));
                                 })
                         }))
-                        .when(self.items.is_empty(), |view| {
+                        .when_some(self.status(), |view, status| {
                             view.child(
                                 div()
+                                    .debug_selector({
+                                        let status = status.clone();
+                                        move || format!("composer-completion-status:{status}")
+                                    })
                                     .p_2()
                                     .text_xs()
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(if self.pending.is_empty() {
-                                        self.error
-                                            .clone()
-                                            .unwrap_or_else(|| "No matching suggestions".into())
-                                    } else {
-                                        "Loading…".into()
-                                    }),
+                                    .child(status),
                             )
                         })
                         .when(self.omitted > 0, |view| {
@@ -879,6 +896,47 @@ impl Render for ComposerCompletion {
         )
         .with_priority(1)
         .into_any_element()
+    }
+}
+
+impl ComposerCompletion {
+    /// What the menu says beside, or instead of, its suggestions: what is still loading, why
+    /// nothing matches, or what failed.
+    fn status(&self) -> Option<String> {
+        let kind = self.trigger.as_ref().map(|trigger| trigger.kind);
+        let query = self
+            .trigger
+            .as_ref()
+            .map_or("", |trigger| trigger.query.as_str());
+        if !self.pending.is_empty() {
+            return Some(
+                match kind {
+                    Some(CompletionKind::Mention) if self.pending.contains_key("files") => {
+                        "Searching files…"
+                    }
+                    Some(CompletionKind::Mention) => "Loading apps and plugins…",
+                    Some(CompletionKind::Skill) => "Loading skills…",
+                    _ => "Loading commands…",
+                }
+                .to_owned(),
+            );
+        }
+        if !self.items.is_empty() {
+            return None;
+        }
+        if let Some(error) = &self.error {
+            return Some(error.clone());
+        }
+        let subject = match kind {
+            Some(CompletionKind::Mention) => "files, apps or plugins",
+            Some(CompletionKind::Skill) => "skills",
+            _ => "commands",
+        };
+        Some(if query.is_empty() {
+            format!("No {subject}")
+        } else {
+            format!("No {subject} match “{query}”")
+        })
     }
 }
 

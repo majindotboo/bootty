@@ -5,79 +5,76 @@ use rstest::rstest;
 #[rstest]
 #[case(
     "Wait for the current voice call to end before starting another",
-    "Wait for the current voice call to end before starting another."
+    Some("Wait for the current voice call to end before starting another.")
 )]
 #[case(
     "Voice connection failed. Check your network and try again.",
-    "Voice connection failed. Check your network and try again."
+    Some("Voice connection failed. Check your network and try again.")
 )]
 #[case(
     "Voice connection was lost. Check your network and try again.",
-    "Voice connection was lost. Check your network and try again."
+    Some("Voice connection was lost. Check your network and try again.")
 )]
 #[case(
     "%14: rmux pane output ended: TransportLost",
-    "The terminal connection was lost. Try reopening this pane."
+    Some("The terminal connection was lost. Try reopening this pane.")
 )]
 // A local rmux daemon is not a remote workspace; only SSH failures say so.
 #[case(
     "connect to rmux daemon: connection refused",
-    "The connection was lost. Try again."
+    Some("The connection was lost. Try again.")
 )]
 #[case(
     "ssh: connect to host forge port 22: Operation timed out",
-    "Could not reach the remote workspace."
+    Some("Could not reach the remote workspace.")
 )]
-#[case("command deadline expired", "The command took too long. Try again.")]
+#[case(
+    "command deadline expired",
+    Some("The command took too long. Try again.")
+)]
 #[case(
     "the Terminal target is stale",
-    "That pane or session no longer exists."
+    Some("That pane or session no longer exists.")
 )]
-// Provider diagnostics are retained without becoming interface copy.
-#[case(
-    "unknown variant `video`, expected `media`",
-    "Could not complete the operation. Try again."
-)]
-#[case(
-    "pane %47 has no running terminal\ncaused by: gone",
-    "Could not complete the operation. Try again."
-)]
-#[case("", "Could not complete the operation. Try again.")]
-#[case(
-    "Could not read /Users/private/token.json: invalid secret-value",
-    "Could not complete the operation. Try again."
-)]
+// Provider diagnostics stay out of interface copy.
+#[case("unknown variant `video`, expected `media`", None)]
+#[case("pane %47 has no running terminal\ncaused by: gone", None)]
+#[case("", None)]
+#[case("Could not read /Users/private/token.json: invalid secret-value", None)]
 #[case(
     r#"{"code":-32600,"message":"thread secret-id already has an active writer"}"#,
-    "This conversation is open in another app. Close it there, then retry."
+    Some("This conversation is open in another app. Close it there, then retry.")
 )]
 #[case(
     "session 019a is archived. Run `codex unarchive 019a` to unarchive it first.",
-    "This conversation is archived. Unarchive it to continue."
+    Some("This conversation is archived. Unarchive it to continue.")
 )]
 #[case(
     "This conversation is archived in Codex.",
-    "This conversation is archived. Unarchive it to continue."
+    Some("This conversation is archived. Unarchive it to continue.")
 )]
-#[case(
-    "Could not read archived logs",
-    "Could not complete the operation. Try again."
-)]
+#[case("Could not read archived logs", None)]
 #[case(
     "Not logged in · /login",
-    "Sign in to the selected provider account, then retry."
+    Some("Sign in to the selected provider account, then retry.")
 )]
 // Provider and dictation keys share one neutral instruction.
 #[case(
     "Missing OpenAI API key",
-    "Add the missing API key in Settings, then retry."
+    Some("Add the missing API key in Settings, then retry.")
 )]
 #[case(
     "Invalid API key · Fix external API key",
-    "Add the missing API key in Settings, then retry."
+    Some("Add the missing API key in Settings, then retry.")
 )]
-fn technical_errors_have_useful_window_messages(#[case] raw: &str, #[case] message: &str) {
-    let notice = ErrorNotice::from_text(raw);
-    assert_eq!(notice.to_string(), message);
+/// A failure says what failed. A cause the catalog knows follows it; the raw text, which can hold
+/// paths and provider output, stays in the details.
+fn failures_name_their_action_and_a_known_cause(#[case] raw: &str, #[case] cause: Option<&str>) {
+    let notice = ErrorNotice::failed("Could not send the message", raw);
+    let expected = cause.map_or_else(
+        || "Could not send the message.".to_owned(),
+        |cause| format!("Could not send the message. {cause}"),
+    );
+    assert_eq!(notice.to_string(), expected);
     assert_eq!(notice.raw_message(), raw);
 }

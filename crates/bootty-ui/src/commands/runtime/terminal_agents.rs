@@ -46,7 +46,7 @@ impl AppState {
             return;
         };
         if let Some(error) = service.take_retirement_error() {
-            self.record_error(error);
+            self.record_error("Could not close a terminal agent", error);
         }
         for record in service.live_records() {
             let authoritative = self.workspace.all_bindings().any(|binding| {

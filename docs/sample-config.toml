@@ -484,6 +484,7 @@ quick-model = "gpt-6-luna"
 follow-up-behavior = "queue" # queue | steer | interrupt
 send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
 response-streaming = "live" # live | paragraph | complete
+transcript-width = "normal" # normal | wide | full
 collapse-composer-on-scroll = true
 
 [agents.codex]

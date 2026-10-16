@@ -931,8 +931,9 @@ fn new_tab_button_follows_the_last_tab_and_opens_the_shared_chooser(cx: &mut Tes
     });
 }
 
+/// A quota reads as words above its meter at every width and scale, and nothing overlaps.
 #[gpui_kit::test]
-fn quota_rows_keep_quota_meter_pacing_and_reset_inline(cx: &mut TestAppContext) {
+fn quota_rows_name_the_quota_above_its_meter_and_pace(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
     snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
@@ -944,7 +945,7 @@ fn quota_rows_keep_quota_meter_pacing_and_reset_inline(cx: &mut TestAppContext) 
             color: palette().text,
             meter: Some(UsageMeterSnapshot {
                 provider: UsageProvider::Codex,
-                label: format!("{label} 23%"),
+                label: format!("Codex {label} · 23% left"),
                 reset_at: Some("Oct 6 14:00".to_owned()),
                 description: "Codex remaining quota and estimated pace".to_owned(),
                 fill: palette().accent,
@@ -999,23 +1000,30 @@ fn quota_rows_keep_quota_meter_pacing_and_reset_inline(cx: &mut TestAppContext) 
                 let track = cx.debug_bounds(track).expect("quota track");
                 let pace = cx.debug_bounds(pace).expect("pacing delta");
                 let reset = cx.debug_bounds(reset).expect("reset countdown");
-                assert!(labels.right() <= track.left());
+                let inside = |part: gpui_kit::Bounds<gpui_kit::Pixels>| {
+                    part.left() >= row.left()
+                        && part.right() <= row.right()
+                        && part.top() >= row.top()
+                        && part.bottom() <= row.bottom()
+                };
+                for part in [labels, track, pace, reset] {
+                    assert!(inside(part), "quota parts stay in their row at {width}px");
+                }
+                assert!(
+                    labels.right() <= reset.left() || labels.bottom() <= reset.top(),
+                    "the reset sits beside the name or under it"
+                );
+                assert!(track.top() >= labels.bottom().max(reset.bottom()));
                 assert!(track.right() <= pace.left());
-                assert!(pace.right() <= reset.left());
-                assert!(reset.right() <= row.right());
+                assert!(
+                    (f32::from(track.center().y) - f32::from(pace.center().y)).abs() <= 0.5,
+                    "the pace reads beside its meter"
+                );
                 assert!(
                     track.size.width > px(0.0),
                     "meter stays visible at every scale"
                 );
                 assert_eq!(track.size.height, px(font_size * 0.375));
-                for part in [labels, track, pace, reset] {
-                    assert!(part.top() >= row.top() && part.bottom() <= row.bottom());
-                    assert!(
-                        (f32::from(part.center().y) - f32::from(row.center().y)).abs() <= 0.5,
-                        "quota information shares one horizontal center line"
-                    );
-                }
-                assert!(row.size.height <= px(font_size * 1.25));
                 assert!(row.top() >= previous_bottom);
                 previous_bottom = row.bottom();
             }
@@ -2752,8 +2760,46 @@ fn settled_session_that_needs_attention_leaves_the_shelf(cx: &mut TestAppContext
     row.trailing = Some("Approval".to_owned());
     let (_, cx) = cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     draw_chrome(cx);
-    assert!(cx.debug_bounds("sidebar-attention-section").is_some());
+    assert!(cx.debug_bounds("sidebar-sessions-section").is_some());
     assert_eq!(cx.debug_bounds("sidebar-settled-section"), None);
+}
+
+/// Rows keep their order, and so their numbered shortcuts, while their agents work or wait.
+#[gpui_kit::test]
+fn rows_keep_their_place_while_agents_work_or_wait(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState::default());
+    let rows = &mut snapshot.sidebar.as_mut().unwrap().rows;
+    let mut second = rows[0].clone();
+    second.key = "second".to_owned();
+    rows.push(second);
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    draw_chrome(cx);
+    let second_stays_second = |cx: &mut VisualTestContext| {
+        let first = cx.debug_bounds("sidebar-row-session").expect("first row");
+        let second = cx.debug_bounds("sidebar-row-second").expect("second row");
+        first.top() < second.top()
+    };
+    assert!(second_stays_second(cx));
+    for (working, needs_attention) in [(true, false), (false, true)] {
+        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[1];
+        row.working = working;
+        row.needs_attention = needs_attention;
+        cx.update(|window, cx| {
+            probe
+                .read(cx)
+                .chrome
+                .clone()
+                .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
+        });
+        draw_chrome(cx);
+        assert!(
+            second_stays_second(cx),
+            "working {working}, waiting {needs_attention}"
+        );
+    }
 }
 
 /// An idle session says how long it has been idle.

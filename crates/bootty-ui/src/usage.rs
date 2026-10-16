@@ -100,6 +100,14 @@ impl UsageProvider {
             Self::Claude => "claude",
         }
     }
+
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "Codex",
+            Self::Claude => "Claude",
+        }
+    }
 }
 
 fn query_provider(runner: &CancellableCommandRunner, provider: UsageProvider) -> ProviderUsage {

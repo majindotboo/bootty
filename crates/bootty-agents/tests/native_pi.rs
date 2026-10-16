@@ -1449,13 +1449,73 @@ fn pi_subagent_lifecycle_and_results_survive_history_without_inventing_threads()
         assert_eq!(agent.status, NativeToolStatus::Completed);
         assert!(agent.completed_at.is_some());
     }
-    assert!(
-        session
-            .read_subagent("/root/reviewer")
-            .unwrap_err()
-            .contains("task output")
-    );
     assert!(session.read_subagent("unknown").is_err());
+    session.stop();
+}
+
+/// A child of Pi's subagents extension reads from the session file its parent last named for it,
+/// and only from that child's own folder.
+#[rstest]
+fn pi_subagent_transcripts_read_the_file_their_parent_names() {
+    let root = TempDir::new().unwrap();
+    let directory = root.path().join("account/sessions/project");
+    let folder = directory.join("subagents/reviewer");
+    fs::create_dir_all(&folder).unwrap();
+    let parent = directory.join("owned.jsonl");
+    let lines = |entries: &[Value]| {
+        entries
+            .iter()
+            .map(|entry| entry.to_string() + "\n")
+            .collect::<String>()
+    };
+    let header = json!({"type":"session","id":"owned-pi-id","version":3});
+    fs::write(&parent, lines(std::slice::from_ref(&header))).unwrap();
+    let child = folder.join("2026-10-15T00-00-00-000Z_child-pi-id.jsonl");
+    fs::write(&child, lines(&[
+        json!({"type":"session","id":"child-pi-id","version":3}),
+        json!({"type":"message","id":"c1","parentId":null,"message":{"role":"user","timestamp":1,"content":[{"type":"text","text":"Review the patch"}]}}),
+        json!({"type":"message","id":"c2","parentId":"c1","message":{"role":"assistant","timestamp":2,"content":[{"type":"text","text":"Looks good"}]}}),
+    ])).unwrap();
+    let mut config = config(root.path()).unwrap();
+    config.session_id = Some("owned-pi-id".into());
+    config.session_file = Some(parent.to_string_lossy().into_owned());
+    let session = NativeAgentSession::spawn(config).unwrap();
+    let spawned = json!({"role":"toolResult","timestamp":2,"toolCallId":"spawn","toolName":"spawn_agent","content":[{"type":"text","text":"Started reviewer"}],"details":{"version":1,"tool":"spawn_agent","agent":{"id":"/root/reviewer","description":"Review the patch","status":"running","startedAt":1000}}});
+    fs::write(
+        root.path().join("events.json"),
+        json!([{"type":"message_end","message":spawned}]).to_string(),
+    )
+    .unwrap();
+    session.rpc("get_state", json!({})).unwrap();
+    let rows = |session: &NativeAgentSession| {
+        session.read_subagent("/root/reviewer").map(|detail| {
+            detail
+                .transcript
+                .into_iter()
+                .map(|item| (item.role, item.text))
+                .collect::<Vec<_>>()
+        })
+    };
+    assert_eq!(rows(&session), Ok(Vec::new()), "no file is named yet");
+
+    let named = |file: &Path| {
+        json!({"type":"custom","id":"state","parentId":null,"customType":"subagents:agent-v1",
+            "data":{"version":1,"agent":{"id":"/root/reviewer","transcriptFile":file}}})
+    };
+    fs::write(&parent, lines(&[header.clone(), named(&child)])).unwrap();
+    assert_eq!(
+        rows(&session),
+        Ok(vec![
+            ("user".to_owned(), "Review the patch".to_owned()),
+            ("assistant".to_owned(), "Looks good".to_owned())
+        ])
+    );
+
+    fs::write(&parent, lines(&[header, named(&parent)])).unwrap();
+    assert!(
+        rows(&session).is_err(),
+        "a file outside its folder is refused"
+    );
     session.stop();
 }
 

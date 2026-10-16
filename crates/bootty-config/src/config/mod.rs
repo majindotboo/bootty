@@ -1,7 +1,7 @@
 mod agents;
 pub use agents::{
     AgentProfileConfig, AgentProviderConfig, AgentProvidersConfig, ComposerSendShortcut,
-    FollowUpBehavior, ResponseStreaming,
+    FollowUpBehavior, ResponseStreaming, TranscriptWidth,
 };
 mod defaults;
 mod keybind_presets;

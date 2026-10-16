@@ -198,16 +198,19 @@ enum ProviderAvailability {
 struct PresentationPreferences {
     streaming: bootty_config::config::ResponseStreaming,
     collapse_composer_on_scroll: bool,
+    width: bootty_config::config::TranscriptWidth,
 }
 
 pub struct NativeAgentSessionView {
     record: NativeSessionRecord,
-    /// The provider subagent this view shows, by id. Such a view shows the subagent's transcript
-    /// and nothing that acts on the conversation.
-    subagent: Option<String>,
+    /// The provider subagent this view shows, as its parent reports it. Such a view shows the
+    /// subagent's transcript, and acts on the subagent only through its parent.
+    subagent: Option<bootty_agents::NativeSubagent>,
     related: Vec<RelatedConversation>,
     context_card: Option<ConversationContext>,
     wide: bool,
+    /// The context card fits in the margin beside the centered message column.
+    card_beside: bool,
     speech: Entity<crate::gpui_speech::SpeechInput>,
     _speech_subscription: Subscription,
     focus: FocusHandle,
@@ -263,7 +266,10 @@ pub struct NativeAgentSessionView {
     history_page: Option<bootty_agents::NativeHistoryPage>,
     history_live_snapshot: Option<NativeSessionSnapshot>,
     history_loaded: bool,
+    /// The turn whose preview shows: the one under the pointer, or the one picked from the rail
+    /// with the arrow keys.
     hovered_turn: Option<usize>,
+    history_rail_focus: FocusHandle,
     work_disclosures: BTreeMap<String, bool>,
     working_indicator: WorkingIndicator,
     tool_disclosures: BTreeMap<String, bool>,
@@ -351,7 +357,7 @@ impl NativeAgentSessionView {
                     cx.emit(OpenNativeSession::Speech { mode: *mode });
                 }
                 crate::gpui_speech::SpeechInputEvent::Error(error) => {
-                    crate::gpui_speech::notify_error(error, window, cx);
+                    crate::gpui_speech::notify_error("Voice input stopped", error, window, cx);
                 }
                 crate::gpui_speech::SpeechInputEvent::Final { text } => {
                     this.composer.update(cx, |input, cx| {
@@ -372,6 +378,7 @@ impl NativeAgentSessionView {
             wide: cx
                 .try_global::<context_card::LastWide>()
                 .is_some_and(|last| last.0),
+            card_beside: false,
             speech,
             _speech_subscription: speech_subscription,
             focus: cx.focus_handle(),
@@ -390,6 +397,7 @@ impl NativeAgentSessionView {
             presentation: PresentationPreferences {
                 streaming: bootty_config::config::ResponseStreaming::default(),
                 collapse_composer_on_scroll: true,
+                width: bootty_config::config::TranscriptWidth::default(),
             },
             queued_messages: followups::QueuedMessages::default(),
             applications: Vec::new(),
@@ -427,6 +435,7 @@ impl NativeAgentSessionView {
             history_live_snapshot: None,
             history_loaded: false,
             hovered_turn: None,
+            history_rail_focus: cx.focus_handle().tab_stop(true),
             work_disclosures: BTreeMap::new(),
             working_indicator: WorkingIndicator {
                 subagents_expanded: false,
@@ -1110,12 +1119,15 @@ impl NativeAgentSessionView {
         if !self.provider_enabled() && operation != "interrupt" {
             return;
         }
-        let pending = if matches!(operation, "approve" | "respond" | "subagent-read") {
+        let pending = if matches!(
+            operation,
+            "approve" | "respond" | "deny" | "subagent-read" | "subagent-stop"
+        ) {
             let Some(id) = arguments.first() else {
                 return;
             };
-            if operation == "subagent-read" {
-                format!("subagent-read:{id}")
+            if operation.starts_with("subagent-") {
+                format!("{operation}:{id}")
             } else {
                 format!("request:{id}")
             }
@@ -1436,11 +1448,18 @@ impl NativeAgentSessionView {
 
     pub(crate) fn set_presentation_preferences(
         &mut self,
-        streaming: bootty_config::config::ResponseStreaming,
-        collapse: bool,
+        (streaming, collapse, width): (
+            bootty_config::config::ResponseStreaming,
+            bool,
+            bootty_config::config::TranscriptWidth,
+        ),
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.presentation.width != width {
+            self.presentation.width = width;
+            cx.notify();
+        }
         if self.presentation.streaming != streaming {
             self.presentation.streaming = streaming;
             self.sync_transcript(&[], window, cx);
@@ -1449,6 +1468,14 @@ impl NativeAgentSessionView {
             self.presentation.collapse_composer_on_scroll = collapse;
             cx.notify();
         }
+    }
+
+    /// The width messages run to.
+    fn column_width(&self) -> gpui_kit::Length {
+        self.presentation.width.rems().map_or_else(
+            || gpui_kit::relative(1.).into(),
+            |column| gpui_kit::rems(column).into(),
+        )
     }
 
     pub(crate) fn set_animate_working(&mut self, animate: bool, cx: &mut Context<Self>) {
@@ -1535,7 +1562,7 @@ impl NativeAgentSessionView {
             .child(
                 div()
                     .w_full()
-                    .max_w(gpui_kit::rems(48.))
+                    .max_w(self.column_width())
                     .min_w_0()
                     .flex()
                     .items_center()
@@ -1583,6 +1610,19 @@ impl NativeAgentSessionView {
                                             .child(label),
                                     ),
                             )
+                        },
+                    )
+                    .when_some(
+                        self.subagent.as_ref().filter(|agent| agent.stoppable()),
+                        |row, agent| {
+                            let stopping = self
+                                .pending
+                                .contains(&format!("subagent-stop:{}", agent.id));
+                            row.child(div().flex_1()).child(Self::render_subagent_stop(
+                                agent,
+                                cx.entity().downgrade(),
+                                stopping,
+                            ))
                         },
                     )
                     .child(self.render_subagent_group(cx)),
@@ -1969,11 +2009,12 @@ impl NativeAgentSessionView {
                         .child(gpui_kit::component::spinner::Spinner::new().small())
                         .child("Loading changes…"),
                 ),
-                ToolDiffs::Failed(error) => {
-                    body.child(div().text_sm().text_color(cx.theme().danger).child(
-                        crate::error_catalog::ErrorNotice::from_text(error.as_str()).to_string(),
-                    ))
-                }
+                ToolDiffs::Failed(error) => body.child(
+                    div()
+                        .text_sm()
+                        .text_color(cx.theme().danger)
+                        .child(diagnostic("Could not load the changes", error)),
+                ),
                 ToolDiffs::Ready(files) => body.children(tool_diff_files(files, cx)),
             };
             return details.when_some(
@@ -2060,19 +2101,30 @@ impl NativeAgentSessionView {
         let header = subagent_header(agent, open, cx);
         let tab_owner = owner.clone();
         let tab_id = agent.id.clone();
+        let stopping = self
+            .pending
+            .contains(&format!("subagent-stop:{}", agent.id));
         let content = div()
             .child(
-                Button::new(format!("subagent-tab:{tab_id}"))
-                    .ghost()
-                    .small()
-                    .label("Open in tab")
-                    .on_click(move |_, _, cx| {
-                        _ = tab_owner.update(cx, |this, cx| {
-                            cx.emit(OpenNativeSession::Subagent {
-                                source: this.record.target(),
-                                id: tab_id.clone(),
-                            });
-                        });
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(
+                        Button::new(format!("subagent-tab:{tab_id}"))
+                            .ghost()
+                            .small()
+                            .label("Open in tab")
+                            .on_click(move |_, _, cx| {
+                                _ = tab_owner.update(cx, |this, cx| {
+                                    cx.emit(OpenNativeSession::Subagent {
+                                        source: this.record.target(),
+                                        id: tab_id.clone(),
+                                    });
+                                });
+                            }),
+                    )
+                    .when(agent.stoppable(), |row| {
+                        row.child(Self::render_subagent_stop(agent, owner.clone(), stopping))
                     }),
             )
             .pl_5()
@@ -2907,7 +2959,12 @@ impl NativeAgentSessionView {
                         .error
                         .as_deref()
                         .filter(|error| self.dismissed_error.as_deref() != Some(*error))
-                        .map(|error| (diagnostic(error), Some(error.to_owned()))),
+                        .map(|error| {
+                            (
+                                diagnostic("The agent hit an error", error),
+                                Some(error.to_owned()),
+                            )
+                        }),
                 )
                 .flatten()
             });
@@ -3041,7 +3098,7 @@ impl NativeAgentSessionView {
                 .debug_selector(|| "native-collapsed-composer".into())
                 .ghost()
                 .w_full()
-                .max_w(gpui_kit::rems(48.))
+                .max_w(self.column_width())
                 .accessibility_label(placeholder.clone())
                 .child(div().flex_1().min_w_0().truncate().child(placeholder))
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -3061,7 +3118,7 @@ impl NativeAgentSessionView {
             .child(
                 div()
                     .w_full()
-                    .max_w(gpui_kit::rems(48.))
+                    .max_w(self.column_width())
                     .min_w_0()
                     .flex()
                     .flex_col()
@@ -3162,7 +3219,7 @@ impl NativeAgentSessionView {
                 body.child(self.render_annotations(cx))
             })
             .child(self.render_composer_input(cx))
-            .child(self.render_composer_controls(cx))
+            .child(self.render_composer_controls(window, cx))
             .children(self.completion.clone());
         div().w_full().min_w_0().child(composer)
     }
@@ -3250,7 +3307,11 @@ impl NativeAgentSessionView {
         clippy::too_many_lines,
         reason = "One footer owns the adjacent composer controls"
     )]
-    fn render_composer_controls(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn render_composer_controls(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
+        // A narrow composer shows the permission control as its icon, as the new-session form
+        // does. Labels shrink with an ellipsis instead of scrolling the row sideways.
+        let width = f32::from(self.composer.read(cx).input_bounds().size.width);
+        let compact = width > 0. && width < f32::from(window.rem_size()) * 32.;
         let send_pending = self.pending.contains("prompt")
             || self.pending.contains("queue")
             || self.pending.contains("interrupt-send");
@@ -3287,7 +3348,7 @@ impl NativeAgentSessionView {
             .id("native-composer-options")
             .flex_1()
             .min_w_0()
-            .overflow_x_scroll()
+            .overflow_hidden()
             .flex()
             .items_center()
             .gap_2()
@@ -3296,7 +3357,7 @@ impl NativeAgentSessionView {
                     "native-permissions-tooltip",
                     div()
                         .track_focus(&self.permissions_focus)
-                        .child(self.render_permission_control(cx)),
+                        .child(self.render_permission_control(compact, cx)),
                     "Permissions",
                     vec![crate::gpui::composer_focus_action(
                         crate::gpui::ComposerControl::Permissions,
@@ -3359,10 +3420,10 @@ impl NativeAgentSessionView {
                     .child(self.render_context_usage(cx))
                     .child(
                         div()
-                            .id("native-model-control-scroll")
+                            .id("native-model-control")
                             .min_w_0()
                             .flex_1()
-                            .overflow_x_scroll()
+                            .overflow_hidden()
                             .child(self.render_model_controls(cx)),
                     )
                     .child(self.speech.clone())
@@ -3691,7 +3752,9 @@ impl Render for NativeAgentSessionView {
                 )
                 .child(self.render_context_geometry(cx))
             })
-            .when(wide, |view| view.pr(gpui_kit::rems(20.)))
+            .when(wide && !self.card_beside, |view| {
+                view.pr(gpui_kit::rems(20.))
+            })
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
@@ -3730,10 +3793,12 @@ impl Render for NativeAgentSessionView {
                 body.when(!wide, |body| {
                     body.child(self.render_related_conversations(cx).px_4())
                 })
-                .child(self.render_error_recovery(cx))
-                .child(self.render_composer(window, cx))
-                .child(self.render_selection_toolbar(window, cx))
-                .when(wide, |body| body.child(self.render_context_card(cx)))
+            })
+            .child(self.render_error_recovery(cx))
+            .when(conversation, |body| {
+                body.child(self.render_composer(window, cx))
+                    .child(self.render_selection_toolbar(window, cx))
+                    .when(wide, |body| body.child(self.render_context_card(cx)))
             })
     }
 }
@@ -3833,8 +3898,9 @@ fn sign_in_button(provider: AgentKind) -> Button {
         })
 }
 
-fn diagnostic(text: impl AsRef<str>) -> String {
-    crate::error_catalog::ErrorNotice::from_text(text.as_ref()).to_string()
+/// A failure of `action` as people should read it: what failed, and a cause the catalog knows.
+fn diagnostic(action: &str, text: impl AsRef<str>) -> String {
+    crate::error_catalog::ErrorNotice::failed(action, text.as_ref()).to_string()
 }
 
 /// Keep a failed action's scope beside its original diagnostic.
@@ -3846,19 +3912,20 @@ fn command_failure(operation: &str, outcome: &CommandOutcome) -> (String, String
         "prompt" | "queue" | "interrupt-send" => "Could not send the message",
         "rename" => "Could not rename the conversation",
         "interrupt" => "Could not interrupt the agent",
+        "subagent-stop" => "Could not stop the subagent",
         "fork" => "Could not start the side chat",
         "resume" => "Could not resume the conversation",
         _ => "Could not update the conversation",
     };
     (
-        format!("{action}. {}", diagnostic(&details)),
+        diagnostic(action, &details),
         format!("{operation}: {details}"),
     )
 }
 
 /// A failed command's message as people should read it.
-fn outcome_error(outcome: &CommandOutcome) -> Option<String> {
-    crate::commands::command_outcome_message(outcome).map(diagnostic)
+fn outcome_error(action: &str, outcome: &CommandOutcome) -> Option<String> {
+    crate::commands::command_outcome_message(outcome).map(|message| diagnostic(action, message))
 }
 
 fn compact_tokens(tokens: u64) -> String {
@@ -4453,7 +4520,53 @@ pub fn subagent_label(agent: &bootty_agents::NativeSubagent) -> String {
     label.chars().take(80).collect()
 }
 
+/// A subagent's initials: the first letters of its first two words.
+fn subagent_initials(agent: &bootty_agents::NativeSubagent) -> String {
+    subagent_label(agent)
+        .split(|c: char| !c.is_alphanumeric())
+        .filter_map(|word| word.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// Marks for subagents whose avatars show side by side: their initials, with a number where two
+/// share them, so "Review code" and "Review changes" read R1 and R2.
+#[must_use]
+pub fn subagent_marks(agents: &[&bootty_agents::NativeSubagent]) -> Vec<String> {
+    let initials = agents
+        .iter()
+        .map(|agent| subagent_initials(agent))
+        .collect::<Vec<_>>();
+    initials
+        .iter()
+        .enumerate()
+        .map(|(index, mark)| {
+            if initials.iter().filter(|other| *other == mark).count() < 2 {
+                return mark.clone();
+            }
+            let ordinal = initials
+                .iter()
+                .take(index)
+                .filter(|other| *other == mark)
+                .count()
+                .saturating_add(1);
+            format!("{}{ordinal}", mark.chars().next().unwrap_or('?'))
+        })
+        .collect()
+}
+
+/// A subagent's avatar beside its name: its initials.
 pub fn subagent_avatar(agent: &bootty_agents::NativeSubagent, cx: &App) -> gpui_kit::Div {
+    subagent_avatar_marked(agent, subagent_initials(agent), cx)
+}
+
+/// A subagent's avatar showing `mark`, in its own color, ringed while it runs, fails or stops.
+pub fn subagent_avatar_marked(
+    agent: &bootty_agents::NativeSubagent,
+    mark: String,
+    cx: &App,
+) -> gpui_kit::Div {
     let index = agent
         .id
         .bytes()
@@ -4468,16 +4581,23 @@ pub fn subagent_avatar(agent: &bootty_agents::NativeSubagent, cx: &App) -> gpui_
         3 => cx.theme().chart_4,
         _ => cx.theme().chart_5,
     };
-    let initials = subagent_label(agent)
-        .split(|c: char| !c.is_alphanumeric())
-        .filter_map(|word| word.chars().next())
-        .take(2)
-        .flat_map(char::to_uppercase)
-        .collect::<String>();
+    let ring = match agent.status {
+        bootty_agents::NativeToolStatus::Running => cx.theme().primary,
+        bootty_agents::NativeToolStatus::Failed => cx.theme().danger,
+        bootty_agents::NativeToolStatus::Interrupted
+        | bootty_agents::NativeToolStatus::Declined => cx.theme().muted_foreground,
+        bootty_agents::NativeToolStatus::Completed => gpui_kit::transparent_black(),
+    };
     div()
+        .debug_selector({
+            let selector = format!("subagent-avatar:{}:{mark}", agent.id);
+            move || selector
+        })
         .size_6()
         .flex_none()
         .rounded_full()
+        .border_2()
+        .border_color(ring)
         .flex()
         .items_center()
         .justify_center()
@@ -4485,7 +4605,7 @@ pub fn subagent_avatar(agent: &bootty_agents::NativeSubagent, cx: &App) -> gpui_
         .text_color(color)
         .text_xs()
         .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-        .child(initials)
+        .child(mark)
 }
 
 /// One status vocabulary for subagents wherever they are listed.

@@ -161,11 +161,18 @@ Codex approvals show the command, working directory and reason. Allow once retai
 no grant. Allow for this session uses Codex's session approval cache; Always allow
 applies only the exact proposed command-prefix rule displayed in the request.
 Provider-restricted decisions, altered rules and expired requests are rejected.
+Deny and stop declines and ends the turn that asked: Codex's `cancel` decision,
+or Claude's denial with `interrupt`. Deny with note tells the agent why: Claude
+reads the note as the reason for the denial; Codex and Pi decline, and the note
+steers the turn as the next message.
 A new approval takes focus unless the composer holds a draft; Enter then takes its
 primary choice and Escape denies it. Reusable scopes stay on their buttons.
 A blocking question takes focus the same way: digits 1–9 pick an option on the
 current question and move to the next, Enter moves on and sends from the last
 question once each has an answer, and Escape cancels a Claude question.
+Several questions show one at a time with their place ("Question 2 of 3"), and
+Back and Next move between them without losing answers. A typed answer can span
+lines with Shift+Enter; a secret answer stays on one masked line.
 A Codex subagent's request appears in its parent conversation with the
 subagent's name, and stays answerable after the parent's turn ends.
 A file-change approval shows the diff it would apply: Codex's for the file-change

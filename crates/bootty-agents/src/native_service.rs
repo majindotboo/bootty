@@ -820,6 +820,13 @@ impl NativeAgentService {
         self.resolve(target)?.read_subagent(id)
     }
 
+    /// Stop a running provider-reported child of the conversation.
+    /// # Errors
+    /// Returns stale targets, unknown or finished children, or provider errors.
+    pub fn stop_subagent(&self, target: &CommandTarget, id: &str) -> Result<(), String> {
+        self.resolve(target)?.stop_subagent(id)
+    }
+
     /// Project favorites for this exact provider account into its advertised catalog.
     /// Retain observed catalog data so starring a model does not restart provider discovery.
     /// # Errors
@@ -1174,6 +1181,27 @@ impl NativeAgentService {
         )
     }
 
+    /// Deny a request and tell the agent why: in the denial where the provider takes a reason,
+    /// and otherwise as the next message, which steers the turn that asked.
+    /// # Errors
+    /// Returns stale targets, empty or invalid notes, unknown requests, or provider errors.
+    pub fn deny_with_note(
+        &self,
+        target: &CommandTarget,
+        id: &str,
+        note: &str,
+    ) -> Result<(), String> {
+        let note = note.trim();
+        if note.is_empty() {
+            return Err("Write a note, or deny without one".to_owned());
+        }
+        let prompt = crate::NativePrompt::text(note)?;
+        if !self.resolve(target)?.deny_with_note(id, note)? {
+            self.prompt_input(target, &prompt)?;
+        }
+        Ok(())
+    }
+
     /// Approving Claude's plan ends Plan mode: Claude leaves it, and the saved choice follows.
     /// # Errors
     /// Returns stale targets, unavailable approval scopes, transport or persistence errors.
@@ -1184,7 +1212,7 @@ impl NativeAgentService {
         decision: crate::NativeApprovalDecision,
     ) -> Result<(), String> {
         let session = self.resolve(target)?;
-        let approves_plan = decision != crate::NativeApprovalDecision::Deny
+        let approves_plan = decision.allows()
             && session.snapshot().requests.iter().any(|request| {
                 request.id == id
                     && request.method == "claude.permission"

@@ -2940,6 +2940,7 @@ fn invoke(
         "subagent-read" => service
             .read_subagent(target, arg(2))
             .and_then(|detail| serde_json::to_value(detail).map_err(|error| error.to_string())),
+        "subagent-stop" => service.stop_subagent(target, arg(2)).map(|()| Value::Null),
         "history" => service
             .read_history(target, arg(2))
             .and_then(|page| serde_json::to_value(page).map_err(|error| error.to_string())),
@@ -2990,6 +2991,9 @@ fn invoke(
             .find(|decision| decision.id() == arg(3))
             .ok_or_else(|| "Unknown approval decision".to_owned())
             .and_then(|decision| service.approve_decision(target, arg(2), decision))
+            .map(|()| Value::Null),
+        "deny" => service
+            .deny_with_note(target, arg(2), arg(3))
             .map(|()| Value::Null),
         "respond" => serde_json::from_str(arg(3))
             .map_err(|error| error.to_string())

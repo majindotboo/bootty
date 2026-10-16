@@ -753,6 +753,11 @@ fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
         ("ctrl+alt+p", "ui.composer.focus-project"),
         ("ctrl+alt+w", "ui.composer.focus-worktree"),
         ("ctrl+alt+a", "ui.composer.focus-permissions"),
+        ("shift+tab", "ui.composer.toggle-plan"),
+        ("ctrl+alt+f", "ui.composer.toggle-fast"),
+        ("ctrl+alt+d", "ui.composer.dictate"),
+        ("ctrl+alt+v", "ui.composer.voice"),
+        ("ctrl+alt+i", "ui.composer.focus-composer"),
     ] {
         bindings.push(KeymapBindingSnapshot {
             context: KeymapContext::Composer,

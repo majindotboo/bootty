@@ -378,7 +378,7 @@ impl AppState {
             .terminal_mut()
             .write_paste(&text)
         {
-            self.record_error(error);
+            self.record_error("Could not paste the dropped files", error);
             return 0;
         }
         if let Some((scope, identity)) = activity {
@@ -409,7 +409,7 @@ impl AppState {
             match TerminalRuntime::copy_mode_active(self.workspace.active.binding.terminal_mut()) {
                 Ok(active) => active,
                 Err(error) => {
-                    self.record_error(error);
+                    self.record_error("Could not use copy mode", error);
                     false
                 }
             };
@@ -685,7 +685,7 @@ impl AppState {
         };
         let (result, hides_pointer) = Self::apply_terminal_input_to_runtime(terminal, command);
         if let Err(error) = result {
-            self.record_error(error);
+            self.record_error("Could not send input to the terminal", error);
         } else {
             if let Some((scope, identity)) = activity {
                 self.record_session_activity(

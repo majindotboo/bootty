@@ -350,6 +350,48 @@ fn approvals_answer_enter_and_escape_once_focused(cx: &mut TestAppContext) {
     );
 }
 
+/// An approval can be denied and the turn stopped, or denied with a note telling the agent why.
+#[gpui_kit::test]
+fn approvals_stop_the_turn_or_deny_with_a_note(cx: &mut TestAppContext) {
+    let (visual, commands) = open(command_approval(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let stop = visual
+        .debug_bounds("cancel:command-1")
+        .expect("deny and stop");
+    visual.simulate_click(stop.center(), Modifiers::none());
+    visual.run_until_parked();
+    assert_eq!(
+        approvals(&commands),
+        [vec!["command-1".to_owned(), "cancel".to_owned()]]
+    );
+    let (visual, commands) = open(command_approval(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let note = visual
+        .debug_bounds("deny-note:command-1")
+        .expect("note control");
+    visual.simulate_click(note.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_input("Run the unit tests only");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    let denials = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|invocation| invocation.command == "agents.native.deny")
+        .map(|invocation| invocation.arguments[2..].to_vec())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        denials,
+        [vec![
+            "command-1".to_owned(),
+            "Run the unit tests only".to_owned()
+        ]]
+    );
+    assert_eq!(approvals(&commands), Vec::<Vec<String>>::new());
+}
+
 /// An approval that arrives while the person is writing leaves focus in the composer, so their
 /// keys never answer it.
 #[gpui_kit::test]
@@ -427,6 +469,62 @@ fn question_enter_waits_for_every_answer(cx: &mut TestAppContext) {
     visual.simulate_keystrokes("9 enter 2 enter");
     visual.run_until_parked();
     assert_eq!(responses(&commands), Vec::<serde_json::Value>::new());
+}
+
+/// Several questions show one at a time, saying which one this is, and keep their answers when
+/// moving back and forth.
+#[gpui_kit::test]
+fn questions_show_one_at_a_time_with_their_place(cx: &mut TestAppContext) {
+    fn shown(visual: &mut gpui_kit::VisualTestContext, selector: &'static str) -> bool {
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.debug_bounds(selector).is_some()
+    }
+    let (visual, _) = open(codex_questions(), cx);
+    assert!(shown(visual, "question-progress:ask:1/2"));
+    assert!(shown(visual, "option:ask:color:Blue"));
+    assert!(!shown(visual, "option:ask:size:Large"));
+    visual.simulate_keystrokes("2");
+    visual.run_until_parked();
+    assert!(shown(visual, "question-progress:ask:2/2"));
+    assert!(shown(visual, "option:ask:size:Large"));
+    let back = visual.debug_bounds("question-back:ask").expect("back");
+    visual.simulate_click(back.center(), Modifiers::none());
+    visual.run_until_parked();
+    assert!(shown(visual, "question-progress:ask:1/2"));
+}
+
+/// A typed answer runs to several lines with Shift+Enter, and Enter still sends it.
+#[gpui_kit::test]
+fn typed_answers_keep_their_lines(cx: &mut TestAppContext) {
+    let (visual, commands) = open(
+        record(
+            AgentKind::Codex,
+            serde_json::json!({
+                "provider": "codex", "session_id": "thread", "turn_id": "turn",
+                "status": "waiting", "usage": null, "error": null, "revision": 1,
+                "transcript": [],
+                "requests": [{"id": "ask", "method": "item/tool/requestUserInput",
+                    "parameters": {"threadId": "thread", "turnId": "turn", "itemId": "tool",
+                        "questions": [{"id": "why", "header": "Why",
+                            "question": "Why this change?", "options": null}]}}]
+            }),
+        ),
+        cx,
+    );
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let answer = visual
+        .debug_bounds("question-answer:ask:why")
+        .expect("answer field");
+    visual.simulate_click(answer.center(), Modifiers::none());
+    visual.simulate_input("first line");
+    visual.simulate_keystrokes("shift-enter");
+    visual.simulate_input("second line");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    assert_eq!(
+        responses(&commands),
+        [serde_json::json!({"answers": {"why": {"answers": ["first line\nsecond line"]}}})]
+    );
 }
 
 /// Escape cancels a Claude question the way its Cancel button does.

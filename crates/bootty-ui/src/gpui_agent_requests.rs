@@ -43,12 +43,15 @@ pub fn init_request_keys(cx: &mut App) {
 pub(super) enum NativeRequestOperation {
     Approve,
     Respond,
+    /// Deny with a note for the agent.
+    Deny,
 }
 impl NativeRequestOperation {
     pub(super) const fn id(self) -> &'static str {
         match self {
             Self::Approve => "approve",
             Self::Respond => "respond",
+            Self::Deny => "deny",
         }
     }
 }
@@ -59,12 +62,49 @@ pub(super) struct NativeRequestResponse {
     pub arguments: Vec<String>,
 }
 
+/// A typed answer. A secret stays on one line, the only field that can mask it; other answers
+/// can run to several lines with Shift+Enter, while Enter still moves on.
+#[derive(Clone)]
+enum AnswerField {
+    Line(Entity<InputState>),
+    Text(Entity<TextareaState>),
+}
+
+impl AnswerField {
+    fn value(&self, cx: &App) -> String {
+        match self {
+            Self::Line(input) => input.read(cx).value().to_string(),
+            Self::Text(input) => input.read(cx).value().to_string(),
+        }
+    }
+
+    fn set_value(&self, value: String, window: &mut Window, cx: &mut App) {
+        match self {
+            Self::Line(input) => input.update(cx, |input, cx| input.set_value(value, window, cx)),
+            Self::Text(input) => input.update(cx, |input, cx| input.set_value(value, window, cx)),
+        }
+    }
+
+    fn render(&self, label: String, disabled: bool) -> gpui_kit::AnyElement {
+        match self {
+            Self::Line(input) => Input::new(input)
+                .aria_label(label)
+                .disabled(disabled)
+                .into_any_element(),
+            Self::Text(input) => Textarea::new(input)
+                .aria_label(label)
+                .disabled(disabled)
+                .into_any_element(),
+        }
+    }
+}
+
 pub(super) struct NativeRequestView {
     target: CommandTarget,
     requests: Vec<NativeAgentRequest>,
     provider_enabled: bool,
     pending: BTreeSet<String>,
-    answers: BTreeMap<(String, String), Entity<InputState>>,
+    answers: BTreeMap<(String, String), AnswerField>,
     selected_answers: BTreeMap<(String, String), BTreeSet<String>>,
     answer_subscriptions: BTreeMap<(String, String), Subscription>,
     editors: BTreeMap<String, Entity<TextareaState>>,
@@ -80,6 +120,8 @@ pub(super) struct NativeRequestView {
     question_cursor: BTreeMap<String, usize>,
     /// The panel has focus, so the front request shows its keys.
     keys_shown: bool,
+    /// Notes being written to go with a denial, by request.
+    notes: BTreeMap<String, (Entity<InputState>, Subscription)>,
 }
 
 impl NativeRequestView {
@@ -96,6 +138,7 @@ impl NativeRequestView {
             editor_subscriptions: BTreeMap::new(),
             diffs: BTreeMap::new(),
             forms: BTreeMap::new(),
+            notes: BTreeMap::new(),
             focus: cx.focus_handle(),
             seen_keyed: BTreeSet::new(),
             question_cursor: BTreeMap::new(),
@@ -173,6 +216,8 @@ impl NativeRequestView {
                 .map(|application| application.bundle_id),
             cx,
         );
+        self.notes
+            .retain(|id, _| requests.iter().any(|request| request.id == *id));
         self.sync_answers(window, cx);
         self.sync_forms(window, cx);
         self.diffs.retain(|id, _| changes.contains_key(id));
@@ -266,35 +311,57 @@ impl NativeRequestView {
                 else {
                     continue;
                 };
-                let answer = cx.new(|cx| {
-                    InputState::new(window, cx)
-                        .masked(field(question, "isSecret") == true)
-                        .placeholder(if is_claude_question(request) {
-                            "Other answer (optional)…"
-                        } else {
-                            "Your answer…"
-                        })
-                });
+                let placeholder = if is_claude_question(request) {
+                    "Other answer (optional)…"
+                } else {
+                    "Your answer…"
+                };
+                let answer = if field(question, "isSecret") == true {
+                    AnswerField::Line(cx.new(|cx| {
+                        InputState::new(window, cx)
+                            .masked(true)
+                            .placeholder(placeholder)
+                    }))
+                } else {
+                    AnswerField::Text(cx.new(|cx| {
+                        TextareaState::new(window, cx)
+                            .auto_grow(1, 6)
+                            .submit_on_enter(true)
+                            .placeholder(placeholder)
+                    }))
+                };
                 let clear_selection =
                     is_claude_question(request) && field(question, "multiSelect") != true;
                 let selection_key = key.clone();
                 let target = self.target.clone();
-                let subscription = cx.subscribe_in(
-                    &answer,
-                    window,
-                    move |this, answer, event: &InputEvent, _, cx| {
-                        if this.target != target {
-                            return;
-                        }
-                        if clear_selection
-                            && matches!(event, InputEvent::Change)
-                            && !answer.read(cx).value().trim().is_empty()
-                        {
-                            this.selected_answers.remove(&selection_key);
-                        }
-                        cx.notify();
-                    },
-                );
+                // Typing an answer of its own replaces a single choice.
+                let changed = move |this: &mut Self, event: &InputEvent, cx: &mut Context<Self>| {
+                    if this.target != target {
+                        return;
+                    }
+                    if clear_selection
+                        && matches!(event, InputEvent::Change)
+                        && this
+                            .answers
+                            .get(&selection_key)
+                            .is_some_and(|answer| !answer.value(cx).trim().is_empty())
+                    {
+                        this.selected_answers.remove(&selection_key);
+                    }
+                    cx.notify();
+                };
+                let subscription = match &answer {
+                    AnswerField::Line(input) => {
+                        cx.subscribe_in(input, window, move |this, _, event: &InputEvent, _, cx| {
+                            changed(this, event, cx);
+                        })
+                    }
+                    AnswerField::Text(input) => {
+                        cx.subscribe_in(input, window, move |this, _, event: &InputEvent, _, cx| {
+                            changed(this, event, cx);
+                        })
+                    }
+                };
                 entry.insert(answer);
                 self.answer_subscriptions.insert(key, subscription);
             }
@@ -315,7 +382,7 @@ impl NativeRequestView {
                 if let std::collections::btree_map::Entry::Vacant(entry) =
                     self.answers.entry(key.clone())
                 {
-                    let answer = cx.new(|cx| {
+                    let input = cx.new(|cx| {
                         InputState::new(window, cx).placeholder(
                             field(&request.parameters, "placeholder")
                                 .as_str()
@@ -326,7 +393,7 @@ impl NativeRequestView {
                     let id = request.id.clone();
                     let target = self.target.clone();
                     let subscription = cx.subscribe_in(
-                        &answer,
+                        &input,
                         window,
                         move |this, _, event: &InputEvent, window, cx| {
                             if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
@@ -335,7 +402,7 @@ impl NativeRequestView {
                             cx.notify();
                         },
                     );
-                    entry.insert(answer);
+                    entry.insert(AnswerField::Line(input));
                     self.answer_subscriptions.insert(key, subscription);
                 }
             } else if request.method == "pi.editor"
@@ -444,9 +511,7 @@ impl NativeRequestView {
         } else if request.method == "mcpServer/elicitation/request" {
             row = self.render_elicitation(row, request, pending, cx);
         } else if request.method == "item/tool/requestUserInput" {
-            for (index, question) in questions(request).enumerate() {
-                row = row.child(self.render_question(request, (index, question), pending, cx));
-            }
+            row = row.child(self.render_questions(request, pending, cx));
             row = row.child(
                 Button::new(gpui_kit::SharedString::from(format!("answer:{id}")))
                     .debug_selector({
@@ -508,7 +573,10 @@ impl NativeRequestView {
             && self
                 .front_keyed()
                 .is_some_and(|front| front.id == request.id);
-        div().flex().flex_wrap().gap_2().children(
+        let note = self.notes.get(&request.id).map(|(note, _)| note.clone());
+        let noted = request.approval_response(Decision::Deny).is_some()
+            && request.method != bootty_agents::APPLICATION_ACCESS_METHOD;
+        let buttons = div().flex().flex_wrap().gap_2().children(
             Decision::ALL
                 .into_iter()
                 .filter(|decision| request.approval_response(*decision).is_some())
@@ -550,7 +618,88 @@ impl NativeRequestView {
                         );
                     }))
                 }),
-        )
+        );
+        let opener = id.clone();
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(buttons.when(noted && note.is_none(), |row| {
+                row.child(
+                    Button::new(gpui_kit::SharedString::from(format!("deny-note:{id}")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("deny-note:{id}")
+                        })
+                        .label("Deny with note…")
+                        .small()
+                        .ghost()
+                        .disabled(pending)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.open_note(&opener, window, cx);
+                        })),
+                )
+            }))
+            .when_some(note, |body, note| {
+                let closing = id.clone();
+                body.child(
+                    div()
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("deny-note-input:{id}")
+                        })
+                        // Enter sends the note, never the card's Enter-to-allow, and Escape
+                        // closes the note rather than denying without it.
+                        .on_action(|_: &gpui_kit::component::input::Enter, _, cx| {
+                            cx.stop_propagation();
+                        })
+                        .on_action(cx.listener(
+                            move |this, _: &gpui_kit::component::input::Escape, _, cx| {
+                                this.notes.remove(&closing);
+                                cx.stop_propagation();
+                                cx.notify();
+                            },
+                        ))
+                        .child(
+                            Input::new(&note)
+                                .aria_label("Why the agent shouldn't do this")
+                                .disabled(pending),
+                        ),
+                )
+            })
+    }
+
+    /// Opens a note to go with denying `id`. Enter denies with it; Escape closes it.
+    fn open_note(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let note = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Tell the agent why, then press Enter…")
+        });
+        let (request, target) = (id.to_owned(), self.target.clone());
+        let subscription = cx.subscribe_in(
+            &note,
+            window,
+            move |this, note, event: &InputEvent, window, cx| {
+                if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                    let text = note.read(cx).value().trim().to_owned();
+                    if !text.is_empty() {
+                        this.request_command(
+                            &target,
+                            NativeRequestOperation::Deny,
+                            vec![request.clone(), text],
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            },
+        );
+        // Focus once the field is drawn; the button's own click takes focus first.
+        let focused = note.clone();
+        cx.defer_in(window, move |_, window, cx| {
+            focused.update(cx, |note, cx| note.focus(window, cx));
+        });
+        self.notes.insert(id.to_owned(), (note, subscription));
+        cx.notify();
     }
 
     fn render_claude_request(
@@ -577,11 +726,11 @@ impl NativeRequestView {
                 .children(self.render_diffs(&id, cx))
                 .child(self.approval_buttons(request, pending, cx));
         }
-        let body = div().flex().flex_col().gap_2().children(
-            questions(request)
-                .enumerate()
-                .map(|question| self.render_question(request, question, pending, cx)),
-        );
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(self.render_questions(request, pending, cx));
         let denied = id.clone();
         let denied_target = target.clone();
         let empty = !self.all_answered(request, cx);
@@ -641,7 +790,7 @@ impl NativeRequestView {
                     .cloned()
                     .collect::<Vec<_>>();
                 if let Some(answer) = self.answers.get(&state_key) {
-                    let value = answer.read(cx).value().to_string();
+                    let value = answer.value(cx);
                     if !value.trim().is_empty() {
                         selected.push(value);
                     }
@@ -670,10 +819,7 @@ impl NativeRequestView {
             .iter()
             .filter(|((request_id, _), _)| request_id == id)
             .map(|((_, question_id), answer)| {
-                (
-                    question_id.clone(),
-                    json!({"answers":[answer.read(cx).value().to_string()]}),
-                )
+                (question_id.clone(), json!({"answers":[answer.value(cx)]}))
             })
             .collect::<serde_json::Map<_, _>>();
         self.request_command(
@@ -714,7 +860,7 @@ impl NativeRequestView {
             || self
                 .answers
                 .get(&key)
-                .is_some_and(|answer| !answer.read(cx).value().trim().is_empty())
+                .is_some_and(|answer| !answer.value(cx).trim().is_empty())
     }
 
     fn all_answered(&self, request: &NativeAgentRequest, cx: &App) -> bool {
@@ -904,7 +1050,7 @@ impl NativeRequestView {
                 body = body.child(Textarea::new(editor).aria_label(label).disabled(pending));
             }
         } else if let Some(answer) = self.answers.get(&(id.clone(), "value".to_owned())) {
-            body = body.child(Input::new(answer).aria_label(label).disabled(pending));
+            body = body.child(answer.render(label, pending));
         }
         body.child(
             Button::new(gpui_kit::SharedString::from(format!("pi-answer:{id}")))
@@ -942,7 +1088,7 @@ impl NativeRequestView {
         } else if request.method == "pi.input" {
             self.answers
                 .get(&(id.to_owned(), "value".to_owned()))
-                .map(|answer| answer.read(cx).value().to_string())
+                .map(|answer| answer.value(cx))
         } else {
             None
         };
@@ -991,13 +1137,11 @@ impl NativeRequestView {
                 selected.insert(label.to_owned());
             }
             if !multiple {
-                answer.update(cx, |answer, cx| answer.set_value("", window, cx));
+                answer.set_value(String::new(), window, cx);
             }
             cx.notify();
         } else {
-            answer.update(cx, |answer, cx| {
-                answer.set_value(label.to_owned(), window, cx);
-            });
+            answer.set_value(label.to_owned(), window, cx);
         }
     }
 
@@ -1005,7 +1149,7 @@ impl NativeRequestView {
     fn render_option(
         &self,
         request: &NativeAgentRequest,
-        (question_id, answer): (&str, &Entity<InputState>),
+        (question_id, answer): (&str, &AnswerField),
         option: &Value,
         digit: Option<usize>,
         pending: bool,
@@ -1021,7 +1165,7 @@ impl NativeRequestView {
                 .get(&key)
                 .is_some_and(|selected| selected.contains(&label))
         } else {
-            answer.read(cx).value().as_ref() == label.as_str()
+            answer.value(cx) == label
         };
         let description = field(option, "description")
             .as_str()
@@ -1063,6 +1207,75 @@ impl NativeRequestView {
                     this.choose_question_option(&target, &key, &label, window, cx);
                 })),
         )
+    }
+
+    /// A request's questions one at a time, with where this one stands among them. Answers
+    /// already given stay when moving back and forth.
+    fn render_questions(
+        &self,
+        request: &NativeAgentRequest,
+        pending: bool,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        let count = questions(request).count();
+        let current = self.current_question(request).min(count.saturating_sub(1));
+        let question = questions(request)
+            .enumerate()
+            .nth(current)
+            .map(|question| self.render_question(request, question, pending, cx));
+        let id = request.id.clone();
+        let step = |label: &'static str, to: usize, enabled: bool| {
+            let id = id.clone();
+            Button::new(gpui_kit::SharedString::from(format!(
+                "question-{label}:{id}"
+            )))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("question-{label}:{id}")
+            })
+            .label(if label == "back" { "Back" } else { "Next" })
+            .xsmall()
+            .ghost()
+            .disabled(!enabled)
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.question_cursor.insert(id.clone(), to);
+                cx.notify();
+            }))
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .when(count > 1, |body| {
+                body.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(
+                            div()
+                                .debug_selector({
+                                    let id = id.clone();
+                                    let shown = current.saturating_add(1);
+                                    move || format!("question-progress:{id}:{shown}/{count}")
+                                })
+                                .flex_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format!(
+                                    "Question {} of {count}",
+                                    current.saturating_add(1)
+                                )),
+                        )
+                        .child(step("back", current.saturating_sub(1), current > 0))
+                        .child(step(
+                            "next",
+                            current.saturating_add(1),
+                            current.saturating_add(1) < count,
+                        )),
+                )
+            })
+            .children(question)
     }
 
     fn render_question(
@@ -1118,13 +1331,19 @@ impl NativeRequestView {
             )
             .child(div().flex().flex_col().gap_0p5().children(options))
             .child(
-                Input::new(answer)
-                    .aria_label(if is_claude_question(request) {
-                        format!("Other answer: {label}")
-                    } else {
-                        label.to_owned()
+                div()
+                    .debug_selector({
+                        let selector = format!("question-answer:{}:{question_id}", request.id);
+                        move || selector
                     })
-                    .disabled(pending),
+                    .child(answer.render(
+                        if is_claude_question(request) {
+                            format!("Other answer: {label}")
+                        } else {
+                            label.to_owned()
+                        },
+                        pending,
+                    )),
             )
             .into_any_element()
     }

@@ -89,9 +89,15 @@ pub enum ErrorNotice {
 }
 
 impl ErrorNotice {
-    pub fn from_text(message: impl Into<String>) -> Self {
-        let details = message.into().trim().to_owned();
-        let summary = technical_summary(&details);
+    /// A failure of `action`, which names what failed: "Could not open the keymap". A cause the
+    /// catalog recognizes follows it. The original text, which can hold provider output and
+    /// paths, stays in the details.
+    pub fn failed(action: &str, details: impl Into<String>) -> Self {
+        let details = details.into().trim().to_owned();
+        let summary = known_cause(&details).map_or_else(
+            || format!("{action}."),
+            |cause| format!("{action}. {cause}"),
+        );
         Self::Technical { summary, details }
     }
 
@@ -141,11 +147,12 @@ pub fn needs_sign_in(message: &str) -> bool {
     lower.contains("not logged in") || lower.contains("sign in") || lower.contains("unauthorized")
 }
 
-fn technical_summary(message: &str) -> String {
+/// A cause people can act on, recognized in a failure's text.
+fn known_cause(message: &str) -> Option<&'static str> {
     let message = bootty_agents::native_error_message(message);
     let lower = message.to_ascii_lowercase();
     if lower.contains("active writer") || lower.contains("open in another app") {
-        return "This conversation is open in another app. Close it there, then retry.".into();
+        return Some("This conversation is open in another app. Close it there, then retry.");
     }
     // Only an archived conversation has an unarchive action; other "archived" text doesn't.
     if lower.contains("is archived")
@@ -153,44 +160,43 @@ fn technical_summary(message: &str) -> String {
             .iter()
             .any(|subject| lower.contains(subject))
     {
-        return "This conversation is archived. Unarchive it to continue.".into();
+        return Some("This conversation is archived. Unarchive it to continue.");
     }
     if needs_sign_in(&message) {
-        return "Sign in to the selected provider account, then retry.".into();
+        return Some("Sign in to the selected provider account, then retry.");
     }
     if lower.contains("api key") {
-        return "Add the missing API key in Settings, then retry.".into();
+        return Some("Add the missing API key in Settings, then retry.");
     }
     if lower.contains("rate limit") || lower.contains("usage limit") {
-        return "The provider's usage limit was reached. Retry when it resets.".into();
+        return Some("The provider's usage limit was reached. Retry when it resets.");
     }
     if lower.contains("current voice call") {
-        return "Wait for the current voice call to end before starting another.".into();
+        return Some("Wait for the current voice call to end before starting another.");
     }
     if lower.contains("voice connection failed") {
-        return "Voice connection failed. Check your network and try again.".into();
+        return Some("Voice connection failed. Check your network and try again.");
     }
     if lower.contains("voice connection was lost") {
-        return "Voice connection was lost. Check your network and try again.".into();
+        return Some("Voice connection was lost. Check your network and try again.");
     }
     if lower.contains("microphone") || lower.contains("speech was detected") {
-        return "Check microphone access and the input device, then try recording again.".into();
+        return Some("Check microphone access and the input device, then try recording again.");
     }
     if lower.contains("command deadline expired") {
-        return "The command took too long. Try again.".to_owned();
+        return Some("The command took too long. Try again.");
     }
     if lower.contains("rmux pane output ended: transportlost") {
-        return "The terminal connection was lost. Try reopening this pane.".to_owned();
+        return Some("The terminal connection was lost. Try reopening this pane.");
     }
     if lower.contains("ssh") {
-        return "Could not reach the remote workspace.".to_owned();
+        return Some("Could not reach the remote workspace.");
     }
     if lower.contains("connection") {
-        return "The connection was lost. Try again.".to_owned();
+        return Some("The connection was lost. Try again.");
     }
     if lower.contains("target is stale") {
-        return "That pane or session no longer exists.".to_owned();
+        return Some("That pane or session no longer exists.");
     }
-    // Untrusted provider and transport diagnostics remain available through details().
-    "Could not complete the operation. Try again.".into()
+    None
 }

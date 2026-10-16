@@ -83,6 +83,43 @@ impl NativeAgentSessionView {
         }
     }
 
+    /// Turns fast mode on or off for the selected model, when it offers fast mode.
+    fn set_fast_mode(&mut self, fast: bool, window: &Window, cx: &Context<Self>) -> bool {
+        let Some(model) = self.models.iter().flatten().find(|model| {
+            self.record
+                .config
+                .model
+                .as_ref()
+                .map_or(model.is_default, |selected| selected == &model.id)
+        }) else {
+            return false;
+        };
+        if !model.supports_fast_mode {
+            return false;
+        }
+        self.select_model(
+            &NativeModelSelection {
+                plan_mode: None,
+                model: model.id.clone(),
+                reasoning_effort: self
+                    .record
+                    .config
+                    .reasoning_effort
+                    .clone()
+                    .or_else(|| model.default_reasoning_effort.clone()),
+                fast_mode: Some(fast),
+            },
+            window,
+            cx,
+        );
+        true
+    }
+
+    pub(super) fn toggle_fast_mode(&mut self, window: &Window, cx: &Context<Self>) -> bool {
+        let fast = !self.record.config.fast_mode;
+        self.set_fast_mode(fast, window, cx)
+    }
+
     pub(super) fn model_command(
         &mut self,
         operation: &str,
@@ -171,7 +208,14 @@ impl NativeAgentSessionView {
                         if matches!(operation.as_str(), "configure" | "favorite") {
                             this.models = None;
                         }
-                        this.error = super::outcome_error(&outcome);
+                        let action = match operation.as_str() {
+                            "models-info" => "Could not load the models",
+                            "favorite" => "Could not star the model",
+                            "goal" => "Could not set the goal",
+                            "permissions" => "Could not change permissions",
+                            _ => "Could not change the model",
+                        };
+                        this.error = super::outcome_error(action, &outcome);
                     }
                     Err(_) => this.error = Some("Model command stopped".to_owned()),
                 }
@@ -255,29 +299,7 @@ impl NativeAgentSessionView {
         match event {
             ModelPickerEvent::Reasoning(selection) => self.select_model(selection, window, cx),
             ModelPickerEvent::FastMode(fast) => {
-                if let Some(model) = self.models.iter().flatten().find(|model| {
-                    self.record
-                        .config
-                        .model
-                        .as_ref()
-                        .map_or(model.is_default, |selected| selected == &model.id)
-                }) {
-                    self.select_model(
-                        &NativeModelSelection {
-                            plan_mode: None,
-                            model: model.id.clone(),
-                            reasoning_effort: self
-                                .record
-                                .config
-                                .reasoning_effort
-                                .clone()
-                                .or_else(|| model.default_reasoning_effort.clone()),
-                            fast_mode: Some(*fast),
-                        },
-                        window,
-                        cx,
-                    );
-                }
+                self.set_fast_mode(*fast, window, cx);
             }
             ModelPickerEvent::Favorite(id) => {
                 self.model_command("favorite", vec![id.clone()], window, cx);
@@ -378,7 +400,12 @@ impl NativeAgentSessionView {
             ))
     }
 
-    pub(super) fn render_permission_control(&self, cx: &Context<Self>) -> impl IntoElement {
+    /// The permissions menu; `compact` shows only its icon, which keeps its accessible label.
+    pub(super) fn render_permission_control(
+        &self,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let mode = if self.record.config.permissions
             == bootty_agents::NativePermissionMode::ProviderDefault
         {
@@ -397,6 +424,7 @@ impl NativeAgentSessionView {
         Button::new("native-permissions")
             .ghost()
             .small()
+            .min_w_0()
             .dropdown_caret(true)
             .accessibility_label(format!("Permissions: {label}"))
             .disabled(
@@ -406,6 +434,7 @@ impl NativeAgentSessionView {
             .child(
                 div()
                     .flex()
+                    .min_w_0()
                     .items_center()
                     .gap_1()
                     .child(crate::gpui::sized_icon(
@@ -417,17 +446,22 @@ impl NativeAgentSessionView {
                             cx.theme().foreground
                         },
                     ))
-                    .child(
-                        div()
-                            .text_color(
-                                if mode == bootty_agents::NativePermissionMode::FullAccess {
-                                    cx.theme().warning
-                                } else {
-                                    cx.theme().foreground
-                                },
-                            )
-                            .child(label),
-                    ),
+                    .when(!compact, |row| {
+                        row.child(
+                            div()
+                                .debug_selector(|| "native-permissions-label".into())
+                                .min_w_0()
+                                .text_ellipsis()
+                                .text_color(
+                                    if mode == bootty_agents::NativePermissionMode::FullAccess {
+                                        cx.theme().warning
+                                    } else {
+                                        cx.theme().foreground
+                                    },
+                                )
+                                .child(label),
+                        )
+                    }),
             )
             .dropdown_menu(move |mut menu, _, _| {
                 for &choice in bootty_agents::NativePermissionMode::choices(provider) {

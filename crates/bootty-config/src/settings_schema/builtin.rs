@@ -164,6 +164,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
         "general", "BEHAVIOR", SettingKind::Bool,
         SettingDefault::Field(|config| SettingValue::Bool(config.agents.collapse_composer_on_scroll)),
     ));
+    specs.push(transcript_width_spec());
     specs.push(spec(
         &["agents", "send-shortcut"],
         "Send shortcut",
@@ -228,6 +229,33 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(font_weight_specs());
     specs.extend(panel_specs());
     specs
+}
+
+fn transcript_width_spec() -> SettingSpec {
+    spec(
+        &["agents", "transcript-width"],
+        "Message width",
+        "",
+        "general",
+        "BEHAVIOR",
+        SettingKind::Choice {
+            options: [
+                ("normal", "Normal"),
+                ("wide", "Wide"),
+                ("full", "Full width"),
+            ]
+            .into_iter()
+            .map(|(token, label)| SettingOption {
+                token: token.into(),
+                label: label.into(),
+                description: None,
+            })
+            .collect(),
+        },
+        SettingDefault::Field(|config| {
+            SettingValue::Token(config.agents.transcript_width.token().into())
+        }),
+    )
 }
 
 fn response_streaming_spec() -> SettingSpec {

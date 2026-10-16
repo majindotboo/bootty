@@ -132,7 +132,7 @@ impl NativeAgentSessionView {
             .children(
                 self.subagents()
                     .into_iter()
-                    .map(|agent| Self::render_subagent_entry(agent, cx)),
+                    .map(|agent| self.render_subagent_entry(agent, cx)),
             )
     }
 
@@ -182,27 +182,37 @@ impl NativeAgentSessionView {
         cx: &mut Context<Self>,
     ) {
         let wide = width >= gpui_kit::rems(76.).to_pixels(window.rem_size());
-        if self.wide != wide {
+        let beside = self.card_fits_beside(width, window.rem_size());
+        if self.wide != wide || self.card_beside != beside {
             self.wide = wide;
+            self.card_beside = beside;
             cx.notify();
         }
+    }
+
+    fn card_fits_beside(&self, width: gpui_kit::Pixels, rem: gpui_kit::Pixels) -> bool {
+        card_fits_beside(self.presentation.width.rems(), width, rem)
     }
 
     /// Wide mode follows the measured width, which arrives after the first paint, for hosts that
     /// don't pass it in.
     pub(super) fn render_context_geometry(&self, cx: &Context<Self>) -> impl IntoElement {
         let geometry_owner = cx.weak_entity();
-        let wide = self.wide;
+        let (wide, beside) = (self.wide, self.card_beside);
+        let column = self.presentation.width.rems();
         gpui_kit::canvas(
             move |bounds, window, cx| {
-                let next = bounds.size.width >= gpui_kit::rems(76.).to_pixels(window.rem_size());
-                if next != wide {
+                let rem = window.rem_size();
+                let next = bounds.size.width >= gpui_kit::rems(76.).to_pixels(rem);
+                let next_beside = card_fits_beside(column, bounds.size.width, rem);
+                if next != wide || next_beside != beside {
                     let owner = geometry_owner;
                     cx.defer(move |cx| {
                         cx.set_global(LastWide(next));
                         _ = owner.update(cx, |this, cx| {
-                            if this.wide != next {
+                            if this.wide != next || this.card_beside != next_beside {
                                 this.wide = next;
+                                this.card_beside = next_beside;
                                 cx.notify();
                             }
                         });
@@ -264,4 +274,11 @@ impl NativeAgentSessionView {
             })
             .collect()
     }
+}
+
+/// Whether the context card fits in the margin beside a centered message column `column` rems
+/// wide, so the column needn't move aside for it. A full-width column leaves no margin.
+fn card_fits_beside(column: Option<f32>, width: gpui_kit::Pixels, rem: gpui_kit::Pixels) -> bool {
+    // The card is 18rem wide, 1rem from the edge and 1rem from the column: 20rem each side.
+    column.is_some_and(|column| width >= gpui_kit::rems(column + 40.).to_pixels(rem))
 }

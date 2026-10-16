@@ -334,10 +334,10 @@ fn filtered_rows(
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Sections a person chooses. Status (working, waiting for an answer) shows on the row, so a
+/// row and its numbered shortcut stay put while its agent works.
 enum SessionSection {
     Pinned,
-    Attention,
-    Working,
     Active,
     Settled,
 }
@@ -815,8 +815,6 @@ impl SidebarRows {
                 group.key = match section {
                     SessionSection::Pinned => format!("pinned-{}", group.key),
                     SessionSection::Settled => format!("settled-{}", group.key),
-                    SessionSection::Attention => format!("attention-{}", group.key),
-                    SessionSection::Working => format!("working-{}", group.key),
                     SessionSection::Active => group.key,
                 };
                 result.push((group, section));
@@ -907,18 +905,15 @@ impl SidebarRows {
     fn section(&self, row: &SidebarRow) -> SessionSection {
         if row_is_pinned(row, self.snapshot.now_utc) {
             SessionSection::Pinned
-        } else if row.needs_attention {
-            // An approval, question or failure surfaces even from a settled session.
-            SessionSection::Attention
         } else if row_view(row, self.snapshot.now_utc) == TaskView::Settled
+            // An approval, question or failure brings a settled session back.
+            && !row.needs_attention
             && !row
                 .task
                 .as_ref()
                 .is_some_and(|task| task.state.is_overdue(self.snapshot.now_utc))
         {
             SessionSection::Settled
-        } else if row.working {
-            SessionSection::Working
         } else {
             SessionSection::Active
         }
@@ -938,8 +933,6 @@ impl SidebarRows {
             if previous_section != Some(section) {
                 let (selector, label) = match section {
                     SessionSection::Pinned => ("sidebar-pinned-section", "Pinned"),
-                    SessionSection::Attention => ("sidebar-attention-section", "Needs attention"),
-                    SessionSection::Working => ("sidebar-working-section", "Working"),
                     SessionSection::Active => ("sidebar-sessions-section", "Sessions"),
                     SessionSection::Settled => ("sidebar-settled-section", "Settled"),
                 };
@@ -2375,38 +2368,25 @@ fn sidebar_diff(diff: SidebarDiffSummary) -> gpui_kit::AnyElement {
         .into_any_element()
 }
 
+/// A quota in two rows: what it is, how much is left and when it resets; then the meter with the
+/// pace against an even spend.
 fn usage_meter(
     snapshot: &UsageMeterSnapshot,
     item: &super::SidebarFooterItem,
     colors: ChromePalette,
 ) -> gpui_kit::AnyElement {
-    let fill_width = (snapshot.meter.remaining_percent.clamp(0.0, 100.0) / 100.0)
-        .to_f32()
-        .unwrap_or(0.0);
-    let marker = snapshot
-        .meter
-        .expected_remaining_percent
-        .and_then(|value| (value.clamp(0.0, 100.0) / 100.0).to_f32());
-    let pace = snapshot
-        .meter
-        .expected_remaining_percent
-        .map(|expected| format!("{:+.0}%", snapshot.meter.remaining_percent - expected));
     let selector = |part: &str| {
         let name = format!("sidebar-footer-{}-{part}", item.key);
         move || name.clone()
     };
-    div()
-        .id(SharedString::from(format!("usage-meter-{}", item.key)))
-        .tooltip({
-            let description = snapshot.description.clone();
-            move |window, cx| Tooltip::new(description.clone()).build(window, cx)
-        })
+    // The reset moves under the name when both don't fit.
+    let words = div()
         .w_full()
         .min_w_0()
-        .h(gpui_kit::rems(1.25))
         .flex()
+        .flex_wrap()
         .items_center()
-        .gap_1()
+        .gap_x_1()
         .when_some(item.icon.as_deref(), |element, icon| {
             element.child(crate::gpui::sized_icon(
                 icon,
@@ -2417,13 +2397,60 @@ fn usage_meter(
         .child(
             div()
                 .debug_selector(selector("labels"))
-                .flex_none()
+                .flex_1()
+                .min_w(gpui_kit::rems(5.))
+                .text_ellipsis()
                 .text_color(color(item.color))
                 .child(snapshot.label.clone()),
         )
+        .when(!snapshot.meter.reset.is_empty(), |element| {
+            element.child(
+                div()
+                    .debug_selector(selector("reset"))
+                    .flex_none()
+                    .text_color(color(colors.muted))
+                    .child(format!("resets in {}", snapshot.meter.reset)),
+            )
+        });
+    div()
+        .id(SharedString::from(format!("usage-meter-{}", item.key)))
+        .tooltip({
+            let description = snapshot.description.clone();
+            move |window, cx| Tooltip::new(description.clone()).build(window, cx)
+        })
+        .w_full()
+        .min_w_0()
+        .py_0p5()
+        .flex()
+        .flex_col()
+        .gap_0p5()
+        .child(words)
+        .child(usage_track(snapshot, &item.key))
+        .into_any_element()
+}
+
+/// The meter: what is left, a mark where an even spend would be, and the pace against it.
+fn usage_track(snapshot: &UsageMeterSnapshot, key: &str) -> gpui_kit::Div {
+    let fill_width = (snapshot.meter.remaining_percent.clamp(0.0, 100.0) / 100.0)
+        .to_f32()
+        .unwrap_or(0.0);
+    let marker = snapshot
+        .meter
+        .expected_remaining_percent
+        .and_then(|value| (value.clamp(0.0, 100.0) / 100.0).to_f32());
+    let selector = |part: &str| {
+        let name = format!("sidebar-footer-{key}-{part}");
+        move || name.clone()
+    };
+    div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap_2()
         .child(
             div()
-                .id(SharedString::from(format!("usage-track-{}", item.key)))
+                .id(SharedString::from(format!("usage-track-{key}")))
                 .debug_selector(selector("track"))
                 .relative()
                 .flex_1()
@@ -2451,25 +2478,15 @@ fn usage_meter(
                     )
                 }),
         )
-        .when_some(pace, |element, pace| {
+        .when(!snapshot.meter.pace.is_empty(), |element| {
             element.child(
                 div()
                     .debug_selector(selector("pace"))
                     .flex_none()
                     .text_color(color(snapshot.pace))
-                    .child(pace),
+                    .child(snapshot.meter.pace.clone()),
             )
         })
-        .when(!snapshot.meter.reset.is_empty(), |element| {
-            element.child(
-                div()
-                    .debug_selector(selector("reset"))
-                    .flex_none()
-                    .text_color(color(colors.muted))
-                    .child(format!("↻ {}", snapshot.meter.reset.replace(' ', ""))),
-            )
-        })
-        .into_any_element()
 }
 
 pub(super) fn detached_session_menu(target: &SessionTarget) -> Vec<MenuRow> {

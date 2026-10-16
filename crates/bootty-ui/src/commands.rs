@@ -452,6 +452,13 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
         ),
         ("dictate", CommandAction::Dictate, "Dictate into composer"),
         ("voice", CommandAction::Voice, "Toggle voice mode"),
+        ("toggle-plan", CommandAction::TogglePlan, "Toggle plan mode"),
+        ("toggle-fast", CommandAction::ToggleFast, "Toggle fast mode"),
+        (
+            "focus-composer",
+            CommandAction::FocusComposer,
+            "Focus composer",
+        ),
     ]
     .into_iter()
     .chain(
@@ -483,6 +490,9 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
                             | CommandAction::EffortUp
                             | CommandAction::Dictate
                             | CommandAction::Voice
+                            | CommandAction::TogglePlan
+                            | CommandAction::ToggleFast
+                            | CommandAction::FocusComposer
                     ),
                 },
                 executor: CommandExecutorResolver::Composer(action),

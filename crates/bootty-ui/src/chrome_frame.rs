@@ -1529,13 +1529,18 @@ fn sidebar_footer(
                 meter: Some(UsageMeterSnapshot {
                     provider,
                     label: if stale {
-                        format!("{} updating", window.label)
+                        format!("{} {} · updating", provider.name(), window.label)
                     } else {
-                        format!("{} {:.0}%", window.label, meter.remaining_percent)
+                        format!(
+                            "{} {} · {:.0}% left",
+                            provider.name(),
+                            window.label,
+                            meter.remaining_percent
+                        )
                     },
                     description: format!(
                         "{} {}: {:.0}% remaining. {} (estimated). Resets {}{}.",
-                        provider.id(),
+                        provider.name(),
                         window.label,
                         meter.remaining_percent,
                         meter.pace,

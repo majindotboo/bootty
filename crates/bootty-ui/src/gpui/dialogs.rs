@@ -219,6 +219,9 @@ pub enum CommandAction {
     Focus(ComposerControl),
     Dictate,
     Voice,
+    TogglePlan,
+    ToggleFast,
+    FocusComposer,
 }
 use gpui_kit::EntityInputHandler as _;
 
@@ -747,7 +750,7 @@ impl DialogView {
                     });
                 }
                 crate::gpui_speech::SpeechInputEvent::Error(error) => {
-                    crate::gpui_speech::notify_error(error, window, cx);
+                    crate::gpui_speech::notify_error("Voice input stopped", error, window, cx);
                 }
                 // A draft has no conversation to hold a voice call.
                 crate::gpui_speech::SpeechInputEvent::Offer(_)
@@ -910,7 +913,11 @@ impl DialogView {
     pub fn perform(&mut self, action: CommandAction, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(
             action,
-            CommandAction::Focus(_) | CommandAction::EffortDown | CommandAction::EffortUp
+            CommandAction::Focus(_)
+                | CommandAction::EffortDown
+                | CommandAction::EffortUp
+                | CommandAction::TogglePlan
+                | CommandAction::FocusComposer
         ) {
             self.perform_completion(action, window, cx);
             return;
@@ -949,7 +956,10 @@ impl DialogView {
             | CommandAction::EffortDown
             | CommandAction::EffortUp
             | CommandAction::Dictate
-            | CommandAction::Voice => {}
+            | CommandAction::Voice
+            | CommandAction::TogglePlan
+            | CommandAction::ToggleFast
+            | CommandAction::FocusComposer => {}
         }
     }
 

@@ -127,6 +127,28 @@ impl NativeAgentSessionView {
     }
 
     pub(crate) fn render_subagent_entry(
+        &self,
+        agent: &bootty_agents::NativeSubagent,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let stopping = self
+            .pending
+            .contains(&format!("subagent-stop:{}", agent.id));
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(Self::render_subagent_open(agent, cx))
+            .when(agent.stoppable(), |row| {
+                row.child(Self::render_subagent_stop(
+                    agent,
+                    cx.entity().downgrade(),
+                    stopping,
+                ))
+            })
+    }
+
+    fn render_subagent_open(
         agent: &bootty_agents::NativeSubagent,
         cx: &Context<Self>,
     ) -> impl IntoElement {
@@ -139,7 +161,8 @@ impl NativeAgentSessionView {
             })
             .ghost()
             .small()
-            .w_full()
+            .flex_1()
+            .min_w_0()
             .justify_start()
             .accessibility_label(format!("Open subagent {}", subagent_label(agent)))
             .child(subagent_avatar(agent, cx))
@@ -166,6 +189,33 @@ impl NativeAgentSessionView {
                     .child(status),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.open_subagent(id.clone(), cx)))
+    }
+
+    /// The first three subagents' avatars, marked apart, and how many more there are.
+    fn render_avatar_stack(
+        agents: &[&bootty_agents::NativeSubagent],
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        let shown = agents.iter().take(3).copied().collect::<Vec<_>>();
+        let more = agents.len().saturating_sub(shown.len());
+        div()
+            .flex()
+            .items_center()
+            .gap_0p5()
+            .children(
+                shown
+                    .iter()
+                    .zip(super::subagent_marks(&shown))
+                    .map(|(agent, mark)| super::subagent_avatar_marked(agent, mark, cx)),
+            )
+            .when(more > 0, |stack| {
+                stack.child(
+                    div()
+                        .debug_selector(move || format!("subagent-avatars-more:{more}"))
+                        .text_xs()
+                        .child(format!("+{more}")),
+                )
+            })
     }
 
     pub(super) fn render_subagent_group(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -206,14 +256,7 @@ impl NativeAgentSessionView {
                                 .px_3()
                                 .bg(cx.theme().background)
                                 .text_color(cx.theme().muted_foreground)
-                                .child(
-                                    div().flex().items_center().children(
-                                        agents
-                                            .iter()
-                                            .take(3)
-                                            .map(|agent| subagent_avatar(agent, cx)),
-                                    ),
-                                )
+                                .child(Self::render_avatar_stack(&agents, cx))
                                 .child(div().text_sm().child(label))
                                 .when(working > 0, |pill| {
                                     pill.child(
@@ -249,7 +292,7 @@ impl NativeAgentSessionView {
                                 .children(
                                     agents
                                         .into_iter()
-                                        .map(|agent| Self::render_subagent_entry(agent, cx)),
+                                        .map(|agent| self.render_subagent_entry(agent, cx)),
                                 ),
                         ),
                 ),
@@ -330,14 +373,14 @@ impl NativeAgentSessionView {
     /// A view that shows a subagent's conversation from `record`, made by
     /// [`Self::subagent_record`].
     pub(crate) fn new_subagent(
+        agent: bootty_agents::NativeSubagent,
         record: NativeSessionRecord,
         sender: BoundAppCommandSender,
-        id: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut view = Self::new(record, sender, true, window, cx);
-        view.subagent = Some(id);
+        view.subagent = Some(agent);
         view.history_loaded = true;
         view
     }
@@ -345,13 +388,15 @@ impl NativeAgentSessionView {
     /// Show the subagent's latest name, status and transcript.
     pub(crate) fn show_subagent(
         &mut self,
+        agent: bootty_agents::NativeSubagent,
         record: NativeSessionRecord,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.shows(&record) {
+        if self.shows(&agent, &record) {
             return;
         }
+        self.subagent = Some(agent);
         let previous = std::mem::replace(&mut self.record, record)
             .snapshot
             .transcript;
@@ -359,10 +404,44 @@ impl NativeAgentSessionView {
         cx.notify();
     }
 
-    /// Whether `record` holds what this subagent view already shows.
-    pub(crate) fn shows(&self, record: &NativeSessionRecord) -> bool {
-        record.title == self.record.title
+    /// Whether `agent` and its `record` hold what this subagent view already shows.
+    pub(crate) fn shows(
+        &self,
+        agent: &bootty_agents::NativeSubagent,
+        record: &NativeSessionRecord,
+    ) -> bool {
+        self.subagent.as_ref() == Some(agent)
+            && record.title == self.record.title
             && record.snapshot.status == self.record.snapshot.status
             && record.snapshot.transcript == self.record.snapshot.transcript
+    }
+
+    /// Ask the provider, through the parent conversation, to stop a running subagent.
+    pub(super) fn stop_subagent(&mut self, id: String, window: &Window, cx: &mut Context<Self>) {
+        self.command("subagent-stop", vec![id], window, cx);
+    }
+
+    /// Stop for a subagent its parent can stop.
+    pub(super) fn render_subagent_stop(
+        agent: &bootty_agents::NativeSubagent,
+        owner: gpui_kit::WeakEntity<Self>,
+        stopping: bool,
+    ) -> impl IntoElement {
+        let id = agent.id.clone();
+        Button::new(format!("subagent-stop:{id}"))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("subagent-stop:{id}")
+            })
+            .ghost()
+            .small()
+            .icon(gpui_kit::assets::IconName::Square)
+            .label("Stop")
+            .loading(stopping)
+            .disabled(stopping)
+            .accessibility_label(format!("Stop subagent {}", subagent_label(agent)))
+            .on_click(move |_, window, cx| {
+                _ = owner.update(cx, |this, cx| this.stop_subagent(id.clone(), window, cx));
+            })
     }
 }

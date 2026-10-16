@@ -108,7 +108,7 @@ impl AppState {
                 message: error.to_string(),
             };
             if let Some(message) = command_outcome_message(&outcome) {
-                self.record_error(message);
+                self.record_command_failure(message);
             }
             outcome
         })
@@ -188,7 +188,7 @@ impl AppState {
             Ok(completion) => completion,
             Err(error) => {
                 let message = error.to_string();
-                self.record_error(message.clone());
+                self.record_command_failure(message.clone());
                 return CommandOutcome::Failed {
                     code: "persistence_failed".to_owned(),
                     message,
@@ -197,7 +197,7 @@ impl AppState {
         };
         let (completion, sync_error) = completion;
         if let Some(error) = sync_error {
-            self.record_error(error);
+            self.record_error("Could not update the panes", error);
         }
         match completion {
             Ok(completion) => {
@@ -207,7 +207,7 @@ impl AppState {
                         message: ErrorNotice::MuxOperationCapabilityStale.to_string(),
                     };
                     if let Some(message) = command_outcome_message(&outcome) {
-                        self.record_error(message);
+                        self.record_command_failure(message);
                     }
                     return outcome;
                 };
@@ -254,7 +254,7 @@ impl AppState {
             Err(error) => {
                 let outcome = command_outcome_for_mux_error(error);
                 if let Some(message) = command_outcome_message(&outcome) {
-                    self.record_error(message);
+                    self.record_command_failure(message);
                 }
                 outcome
             }

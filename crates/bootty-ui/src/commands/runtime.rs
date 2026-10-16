@@ -303,6 +303,8 @@ pub struct CommandRuntime {
     orchestration_observed_revision: (u64, u64, u64),
     agent_scope_index: Option<Arc<AgentScopeIndex>>,
     pending: Vec<PendingAppCommand>,
+    /// The title of the command being dispatched or polled, so a failure it records names it.
+    title: Option<String>,
     jobs: Arc<bootty_host::jobs::JobRegistry>,
     forwards: Vec<(SpaceId, u64, Arc<bootty_host::ssh_forward::ForwardLease>)>,
 }
@@ -447,6 +449,7 @@ impl CommandRuntime {
             orchestration_observed_revision: (0, 0, 0),
             agent_scope_index,
             pending: Vec::new(),
+            title: None,
             forwards: Vec::new(),
             jobs,
         }
@@ -583,9 +586,18 @@ impl AppState {
 
     fn reject_command(&mut self, outcome: CommandOutcome) -> CommandDispatch {
         if let Some(message) = command_outcome_message(&outcome) {
-            self.record_error(message);
+            self.record_command_failure(message);
         }
         CommandDispatch::Complete(outcome)
+    }
+
+    /// Records a failure of the command being dispatched or polled, named by its title.
+    pub(super) fn record_command_failure(&mut self, message: impl ToString) {
+        let action = self.commands.title.as_ref().map_or_else(
+            || "The command failed".to_owned(),
+            |title| format!("{title} failed"),
+        );
+        self.record_error(&action, message);
     }
 
     /// Cancel before work starts; once committed, publish the observed result. Atomic file writes,
@@ -721,7 +733,9 @@ impl AppState {
             // A caller with a response channel reports its own failure, including one that
             // completes later; converting its result must not leave a window notification.
             let previous_error = pending.response.is_some().then(|| self.last_error.clone());
+            let title = self.commands.title.replace(pending.label.clone());
             let polled = self.poll_pending_app_command(&mut pending, now, effects);
+            self.commands.title = title;
             if let Some(previous_error) = previous_error {
                 self.last_error = previous_error;
             }
@@ -736,9 +750,9 @@ impl AppState {
                         let _ = response.send(outcome);
                     } else if matches!(&outcome, CommandOutcome::Failed { code, .. } if code == "deadline_exceeded")
                     {
-                        self.record_error(format!("{} took too long. Try again.", pending.label));
+                        self.record_message(format!("{} took too long. Try again.", pending.label));
                     } else if let Some(message) = command_outcome_message(&outcome) {
-                        self.record_error(message);
+                        self.record_error(&format!("{} failed", pending.label), message);
                     }
                 }
             }
@@ -1065,6 +1079,24 @@ impl AppState {
     }
 
     fn dispatch_command_with_execution(
+        &mut self,
+        invocation: CommandInvocation,
+        viewport: ViewportSnapshot,
+        effects: &mut Vec<AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let title = self
+            .commands
+            .catalog
+            .describe(&invocation.command)
+            .map_or_else(|| invocation.command.clone(), |descriptor| descriptor.title);
+        let outer = self.commands.title.replace(title);
+        let dispatch = self.dispatch_titled_command(invocation, viewport, effects, execution);
+        self.commands.title = outer;
+        dispatch
+    }
+
+    fn dispatch_titled_command(
         &mut self,
         invocation: CommandInvocation,
         viewport: ViewportSnapshot,

@@ -686,9 +686,11 @@ The Settled heading and `ui.sidebar.toggle_settled` open and close the settled
 shelf, saved as `sidebar.settled-collapsed`. The shelf lists the most recently
 active sessions first, ten at a time.
 Each session owns its branch and agent marks; switching views preserves sessions,
-selection and terminal contents. Sessions are grouped into Pinned, Needs attention,
-Working, Sessions and Settled. Archive retains saved work; Delete permanently
-removes a closed session's saved record and requires confirmation.
+selection and terminal contents. Sessions are grouped into Pinned, Sessions and
+Settled. Working and waiting show on the row, so a row and its numbered shortcut
+stay put while its agent works; a settled session that needs an answer returns
+to Sessions. Archive retains saved work; Delete permanently removes a closed
+session's saved record and requires confirmation.
 
 Open **Settings → Projects** to add a registered folder, open its settings, or
 remove its registration. Removal preserves files and existing sessions.
@@ -960,7 +962,9 @@ Agent alerts use `session.agent-notifications = "unfocused"` by default. Set
 `"always"` to include the focused terminal or `"never"` to disable desktop alerts.
 Unread markers and sequence-safe acknowledgement remain available in all modes.
 Alerts cover native conversations, agents reporting through hooks, and agents
-Bootty starts in a terminal; each also lists in the Agents panel.
+Bootty starts in a terminal; each also lists in the Agents panel. Alerts play the
+system notification sound, subject to the system's notification settings, and on
+macOS the Dock icon shows how many agents wait on you.
 
 See [terminal image clipboard writes](clipboard-writes.md) for host keys, supported
 formats, limits and permission scope.
@@ -1078,6 +1082,11 @@ Composer controls have bindable commands: `ui.composer.focus-space`,
 `ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.
 Their default shortcuts are Ctrl+Alt+S/M/P/W/A for space, model,
 project, worktree, and permissions. Provider and effort have no separate default binding.
+Shift+Tab toggles plan mode (`ui.composer.toggle-plan`) when the provider offers it,
+Ctrl+Alt+F toggles fast mode (`ui.composer.toggle-fast`) for a model that offers it,
+Ctrl+Alt+D and Ctrl+Alt+V start dictation (`ui.composer.dictate`) and voice mode
+(`ui.composer.voice`), and Ctrl+Alt+I moves focus back to the composer
+(`ui.composer.focus-composer`).
 These defaults and the effort shortcuts live in the `Composer` context.
 Provider, model, and effort share one picker; their focus commands open it. Control
 tooltips describe their purpose and show the active configured shortcut.
@@ -1092,6 +1101,10 @@ adding Shift uses the opposite follow-up behavior for that message.
 `agents.response-streaming` selects `"live"` (default), `"paragraph"`, or `"complete"`.
 Paragraph mode waits for completed Markdown blocks and keeps unfinished fenced
 code blocks together. Final replies always display in full.
+`agents.transcript-width` sets how wide messages run: `"normal"` (default, 48rem),
+`"wide"` (72rem), or `"full"`. In a wide window the conversation details card
+sits in the margin beside centered messages, and moves them aside only when it
+would cover them.
 `agents.collapse-composer-on-scroll` defaults to true; an empty, unfocused composer
 folds to one line while reading older turns, and opens when focused. Drafts and
 attachments keep the composer expanded.

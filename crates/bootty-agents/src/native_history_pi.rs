@@ -144,6 +144,140 @@ impl NativeAgentSession {
     }
 }
 
+/// The custom entry Pi's subagents extension appends to the parent session for each child.
+const SUBAGENT_STATE: &str = "subagents:agent-v1";
+
+/// A child of Pi's subagents extension, read from its own session file. The parent session names
+/// that file in the child's latest state entry, inside the child's folder beside the parent.
+/// The transcript is empty until the child has written to it.
+pub fn subagent_transcript(
+    config: &crate::NativeSessionConfig,
+    snapshot: &NativeSessionSnapshot,
+    agent: &str,
+) -> Result<NativeSessionSnapshot, String> {
+    let relative = agent
+        .strip_prefix("/root/")
+        .filter(|path| path.split('/').all(task_name))
+        .map(|path| Path::new("subagents").join(path))
+        .ok_or("Pi reported an invalid subagent identity")?;
+    let parent = snapshot
+        .session_file
+        .as_deref()
+        .ok_or("Pi has no captured session file")?;
+    let empty = NativeSessionSnapshot::new(AgentKind::Pi);
+    let Some(mut reader) = open_history(config, snapshot)? else {
+        return Ok(empty);
+    };
+    let Some(file) = subagent_file(
+        &mut reader,
+        snapshot
+            .session_id
+            .as_deref()
+            .ok_or("Pi has no captured session identity")?,
+        agent,
+    )?
+    else {
+        return Ok(empty);
+    };
+    let file = Path::new(&file);
+    // Pi names a session file `<time>_<session id>.jsonl`. The extension may name it through a
+    // resolved link; the reader confines it to the child's real folder.
+    let session = file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".jsonl"))
+        .and_then(|name| name.rsplit_once('_'))
+        .map(|(_, id)| id)
+        .filter(|_| {
+            file.parent()
+                .is_some_and(|folder| folder.ends_with(&relative))
+        })
+        .ok_or("Pi named a subagent transcript outside its folder")?;
+    let folder = Path::new(parent)
+        .parent()
+        .ok_or("Pi's session file has no folder")?
+        .join(relative);
+    let Some(mut reader) = open_file(config, &folder, file)? else {
+        return Ok(empty);
+    };
+    let size = reader.get_ref().len();
+    if size > MAX_FILE_BYTES {
+        return Err("This subagent's transcript exceeds the bounded regular-file reader".into());
+    }
+    let entries = read_index(&mut reader, size, session)?;
+    // A child doesn't branch, so its last entry is its leaf.
+    let branch = history_branch(&entries, entries.last().map(|last| last.entry.id.as_str()))?;
+    let mut limit = PAGE_SIZE;
+    loop {
+        let start = branch.len().saturating_sub(limit);
+        if let Some(history) = project_branch(&mut reader, branch.get(start..).unwrap_or_default())?
+        {
+            reader
+                .get_mut()
+                .verify_source()
+                .map_err(|error| error.to_string())?;
+            return Ok(history);
+        }
+        if limit == 1 {
+            return Err("This subagent entry exceeds the bounded transcript view".into());
+        }
+        limit /= 2;
+    }
+}
+
+/// One segment of a subagent's path, as the extension names its tasks.
+fn task_name(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment.len() <= 128
+        && segment.split('-').all(|word| {
+            !word.is_empty()
+                && word
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
+}
+
+/// The session file the parent session last named for `agent`.
+/// Limit: each read scans the whole parent log, which a running child's tab repeats every few
+/// seconds. Index the state entries if parent logs near the bounded reader's size.
+fn subagent_file(
+    reader: &mut BufReader<FileReader>,
+    session: &str,
+    agent: &str,
+) -> Result<Option<String>, String> {
+    let header = read_line(reader)?;
+    if header.is_empty() {
+        return Ok(None);
+    }
+    let header: Entry = serde_json::from_slice(&header).map_err(|error| error.to_string())?;
+    if header.kind != "session" || header.version != Some(3) || header.id != session {
+        return Err("Pi history does not match the captured version-3 session".into());
+    }
+    let mut file = None;
+    loop {
+        let line = read_line(reader)?;
+        if line.is_empty() {
+            return Ok(file);
+        }
+        // Most entries aren't state entries; skip them without parsing.
+        if !line
+            .windows(SUBAGENT_STATE.len())
+            .any(|window| window == SUBAGENT_STATE.as_bytes())
+        {
+            continue;
+        }
+        let entry: Value = serde_json::from_slice(&line).map_err(|error| error.to_string())?;
+        let state = field(field(&entry, "data"), "agent");
+        if field(&entry, "type") == "custom"
+            && field(&entry, "customType") == SUBAGENT_STATE
+            && field(field(&entry, "data"), "version") == 1
+            && field(state, "id") == agent
+        {
+            file = field(state, "transcriptFile").as_str().map(str::to_owned);
+        }
+    }
+}
+
 /// The conversation's session file, or `None` while Pi hasn't written it.
 fn open_history(
     config: &crate::NativeSessionConfig,
@@ -161,16 +295,21 @@ fn open_history(
             .as_deref()
             .ok_or("Pi has no captured session file")?,
     );
+    open_file(config, &account.join("sessions"), path)
+}
+
+/// A session file under `root`, or `None` while Pi hasn't written it.
+fn open_file(
+    config: &crate::NativeSessionConfig,
+    root: &Path,
+    path: &Path,
+) -> Result<Option<BufReader<FileReader>>, String> {
     let remote = config
         .remote
         .as_ref()
         .map(|remote| RemoteHost::new(remote.host.clone()));
     let request = FileRequest::OpenReader {
-        root: account
-            .join("sessions")
-            .to_str()
-            .ok_or("Pi account is not UTF-8")?
-            .to_owned(),
+        root: root.to_str().ok_or("Pi account is not UTF-8")?.to_owned(),
         path: path
             .to_str()
             .ok_or("Pi history path is not UTF-8")?

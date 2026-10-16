@@ -3370,9 +3370,15 @@ fn palette_surface_choice_retains_its_exact_native_parent_and_rejects_replaced_g
             host.state.pending_new_surface().is_none(),
             "old palette target cannot retarget the successor"
         );
-        assert!(
-            host.state.last_error().is_some(),
-            "stale target is reported"
+        // The notice names the command that failed and why, not a generic sentence.
+        pretty_assertions::assert_eq!(
+            host.state
+                .last_error_notice()
+                .map(|notice| notice.to_string()),
+            Some(format!(
+                "{} failed. That pane or session no longer exists.",
+                bootty_ui::action_catalog::Command::SplitRight.title()
+            ))
         );
     } else {
         verify_palette_native_split_cancel(&mut host, &target, &before)?;

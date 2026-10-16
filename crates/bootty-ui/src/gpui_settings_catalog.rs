@@ -406,6 +406,7 @@ pub fn settings_section<'a>(
         SettingsCategory::Ai => match id {
             "agents.default-provider" => "NEW SESSIONS",
             "agents.response-streaming"
+            | "agents.transcript-width"
             | "agents.collapse-composer-on-scroll"
             | "agents.send-shortcut"
             | "agents.follow-up-behavior" => "CONVERSATION",
@@ -488,9 +489,10 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
         SettingsCategory::Ai => match id {
             "agents.default-provider" => 0,
             "agents.response-streaming" => 10,
-            "agents.collapse-composer-on-scroll" => 11,
-            "agents.send-shortcut" => 12,
-            "agents.follow-up-behavior" => 13,
+            "agents.transcript-width" => 11,
+            "agents.collapse-composer-on-scroll" => 12,
+            "agents.send-shortcut" => 13,
+            "agents.follow-up-behavior" => 14,
             "session.agent-notifications" => 20,
             "agents.allow-spawn" => 30,
             _ => 100,

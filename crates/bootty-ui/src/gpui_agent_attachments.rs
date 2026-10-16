@@ -179,7 +179,8 @@ impl NativeAgentSessionView {
                                     cx,
                                 ),
                                 Err(error) => {
-                                    this.error = Some(super::diagnostic(error));
+                                    this.error =
+                                        Some(super::diagnostic("Could not paste the image", error));
                                     cx.notify();
                                 }
                             }
@@ -253,7 +254,9 @@ impl NativeAgentSessionView {
                         });
                         this.import_attachment(path, None, window, cx);
                     }
-                    Err(error) => this.error = Some(super::diagnostic(error)),
+                    Err(error) => {
+                        this.error = Some(super::diagnostic("Could not attach the file", error));
+                    }
                 }
                 cx.notify();
             });
@@ -376,7 +379,7 @@ impl NativeAgentSessionView {
                         }
                     }
                     (Ok(outcome), _) => {
-                        this.error = super::outcome_error(&outcome);
+                        this.error = super::outcome_error("Could not attach the file", &outcome);
                     }
                     (Err(_), _) => this.error = Some("Could not attach the file".into()),
                 }

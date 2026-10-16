@@ -634,6 +634,13 @@ pub fn command(id: &str, method: &str, params: &Value) -> Result<Value, String> 
                 .ok_or("Invalid Claude model selector")?;
             json!({"subtype":method,"model":model})
         }
+        "stop_task" if fields.len() == 1 => {
+            let task = field(params, "task_id")
+                .as_str()
+                .filter(|task| valid_wire_id(task))
+                .ok_or("Invalid Claude task identity")?;
+            json!({"subtype":method,"task_id":task})
+        }
         "set_permission_mode" if fields.len() == 1 => {
             let mode = field(params, "mode")
                 .as_str()
@@ -731,7 +738,7 @@ pub fn permission_response(
         .filter(|fields| {
             fields
                 .keys()
-                .all(|key| matches!(key.as_str(), "decision" | "scope"))
+                .all(|key| matches!(key.as_str(), "decision" | "scope" | "interrupt" | "message"))
         })
         .ok_or("Claude permission response must contain only a decision and its scope")?;
     let decision = fields
@@ -767,7 +774,25 @@ pub fn permission_response(
         }
         allow
     } else {
-        json!({"behavior":"deny","message":"Denied by the user","toolUseID":tool})
+        // A note tells Claude why; stopping also ends the turn that asked.
+        let message = match fields.get("message") {
+            None => "Denied by the user",
+            Some(message) => message
+                .as_str()
+                .filter(|message| {
+                    !message.trim().is_empty() && message.len() <= 8192 && !message.contains('\0')
+                })
+                .ok_or("Invalid note for Claude")?,
+        };
+        let interrupt = match fields.get("interrupt") {
+            None => false,
+            Some(interrupt) => interrupt.as_bool().ok_or("Invalid Claude stop choice")?,
+        };
+        let mut deny = json!({"behavior":"deny","message":message,"toolUseID":tool});
+        if interrupt && let Some(deny) = deny.as_object_mut() {
+            deny.insert("interrupt".to_owned(), true.into());
+        }
+        deny
     };
     Ok(
         json!({"type":"control_response","response":{"subtype":"success","request_id":id,"response":permission}}),
@@ -785,6 +810,7 @@ pub fn approval_response(
     use crate::NativeApprovalDecision as D;
     let scope = match decision {
         D::Deny => return Some(json!({"decision":"decline"})),
+        D::Cancel => return Some(json!({"decision":"decline","interrupt":true})),
         D::AllowOnce => return Some(json!({"decision":"accept"})),
         D::AllowSession => "session",
         D::AlwaysAllow => "always",

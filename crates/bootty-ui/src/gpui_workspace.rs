@@ -55,7 +55,6 @@ use crate::gpui::{
 };
 use crate::{
     chrome_frame,
-    error_catalog::ErrorNotice,
     frame_facts::RendererMetrics,
     gpui_input::GpuiFrameFacts,
     gpui_terminal_view::{
@@ -754,7 +753,7 @@ impl GpuiWorkspace {
                     let _ = workspace.update(cx, |workspace, cx| {
                         workspace
                             .state
-                            .record_error(format!("open Bootty window: {error}"));
+                            .record_error("Could not open a Bootty window", error);
                         cx.notify();
                     });
                 }
@@ -887,7 +886,7 @@ impl GpuiWorkspace {
             cx,
         ) {
             self.state
-                .record_error(format!("load GPUI workspace key bindings: {error:#}"));
+                .record_error("Could not load key bindings", format!("{error:#}"));
         } else {
             // Native menu accelerators are built from the current GPUI keymap.
             #[cfg(target_os = "macos")]
@@ -1101,7 +1100,7 @@ impl GpuiWorkspace {
                 Ok(identity) => identity,
                 Err(error) => {
                     self.state
-                        .record_error(format!("identify file host: {error}"));
+                        .record_error("Could not open the tools panel", error);
                     return;
                 }
             };
@@ -1828,8 +1827,7 @@ impl GpuiWorkspace {
         let host_identity = match bootty_host::files::host_identity(remote) {
             Ok(identity) => identity,
             Err(error) => {
-                self.state
-                    .record_error(format!("identify file host: {error}"));
+                self.state.record_error("Could not open files", error);
                 return;
             }
         };
@@ -1894,8 +1892,7 @@ impl GpuiWorkspace {
         let host_identity = match bootty_host::files::host_identity(remote) {
             Ok(identity) => identity,
             Err(error) => {
-                self.state
-                    .record_error(format!("identify file host: {error}"));
+                self.state.record_error("Could not open changes", error);
                 return;
             }
         };
@@ -2039,7 +2036,8 @@ impl GpuiWorkspace {
         cx.spawn(async move |weak, cx| {
             if let Err(error) = work.await {
                 _ = weak.update(cx, |this, cx| {
-                    this.state.record_error(error);
+                    this.state
+                        .record_error("Could not show a desktop notification", error);
                     cx.notify();
                 });
             }
@@ -2136,7 +2134,8 @@ impl GpuiWorkspace {
                 Ok(frame) if view.read(cx).presents_frame(&frame) => {}
                 Ok(_) => return true,
                 Err(error) => {
-                    self.state.record_error(error);
+                    self.state
+                        .record_error("Could not draw the terminal", error);
                     return true;
                 }
             }
@@ -2352,12 +2351,12 @@ impl GpuiWorkspace {
         }
         self.last_error_notification.clone_from(&error);
         match error {
-            Some(error) => {
+            // The notice and the text come from the same two sources.
+            Some(_) => {
+                let Some(notice) = self.state.last_error_notice() else {
+                    return;
+                };
                 let workspace = cx.weak_entity();
-                let notice = self
-                    .state
-                    .last_error_notice()
-                    .unwrap_or_else(|| ErrorNotice::from_text(error));
                 let summary = gpui_kit::SharedString::from(notice.to_string());
                 // Diagnostics stay out of interface copy but remain one click away.
                 let details = notice
@@ -2400,7 +2399,8 @@ impl GpuiWorkspace {
                             })
                         })
                         .id::<BoottyErrorNotification>()
-                        .autohide(false)
+                        // After the action, which turns hiding off; hovering holds it open.
+                        .autohide(true)
                         .on_close(move |_, cx| {
                             let _ = workspace.update(cx, |workspace, cx| {
                                 workspace.state.clear_last_error();

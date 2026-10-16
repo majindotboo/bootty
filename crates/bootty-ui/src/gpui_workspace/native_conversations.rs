@@ -576,8 +576,11 @@ impl GpuiWorkspace {
                     view.set_follow_up_behavior(self.state.config().agents.follow_up_behavior, cx);
                     view.set_send_shortcut(self.state.config().agents.send_shortcut);
                     view.set_presentation_preferences(
-                        self.state.config().agents.response_streaming,
-                        self.state.config().agents.collapse_composer_on_scroll,
+                        (
+                            self.state.config().agents.response_streaming,
+                            self.state.config().agents.collapse_composer_on_scroll,
+                            self.state.config().agents.transcript_width,
+                        ),
                         window,
                         cx,
                     );
@@ -957,8 +960,11 @@ impl GpuiWorkspace {
             view.set_follow_up_behavior(self.state.config().agents.follow_up_behavior, cx);
             view.set_send_shortcut(self.state.config().agents.send_shortcut);
             view.set_presentation_preferences(
-                self.state.config().agents.response_streaming,
-                self.state.config().agents.collapse_composer_on_scroll,
+                (
+                    self.state.config().agents.response_streaming,
+                    self.state.config().agents.collapse_composer_on_scroll,
+                    self.state.config().agents.transcript_width,
+                ),
                 window,
                 cx,
             );
@@ -1313,7 +1319,8 @@ impl GpuiWorkspace {
         let browser = tools.read(cx).browser_session();
         let annotations = browser.read(cx).annotation_records().to_vec();
         if let Some(status) = browser.read(cx).annotation_status() {
-            self.state.record_error(status);
+            self.state
+                .record_error("Could not update browser annotations", status);
         }
         for record in &self.native_conversations.records {
             let Some(view) = self.native_conversations.views.get(&record.id) else {
@@ -1328,7 +1335,8 @@ impl GpuiWorkspace {
                 view.set_annotations(&record.target(), projection, cx)
             });
             if let Err(error) = result {
-                self.state.record_error(error);
+                self.state
+                    .record_error("Could not show browser annotations", error);
             }
         }
     }
@@ -1413,7 +1421,7 @@ fn host_subagent(
                 .map_or_else(String::new, |item| item.text.clone()),
             model: child.config.model.clone(),
             thread_id: None,
-            claude_file: false,
+            own_file: false,
             owner_session: parent.session_id.clone(),
             status,
             started_at: transcript.iter().find_map(|item| item.created_at),

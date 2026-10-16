@@ -579,7 +579,7 @@ impl GpuiSettingsWindow {
                 {
                     workspace
                         .state
-                        .record_error(format!("reload keymap: {error}"));
+                        .record_error("Could not reload the keymap", error);
                 }
                 workspace.last_keymap_editor_revision =
                     Some(workspace.state.keymap_snapshot().revision);
@@ -1044,7 +1044,7 @@ impl GpuiWorkspace {
                     bootty_control::CommandCancellation::new(),
                 ) {
                     self.state
-                        .record_error(format!("Provider status could not refresh: {error:?}"));
+                        .record_error("Could not refresh provider status", format!("{error:?}"));
                 }
             }
             (self.repaint)();
@@ -1120,15 +1120,18 @@ impl GpuiWorkspace {
         let loaded = match bootty_host::text_file::load_text_file(&path) {
             Ok(loaded) => loaded,
             Err(error) => {
-                self.state
-                    .record_error(format!("open {}: {error}", path.display()));
+                self.state.record_error(
+                    "Could not open config.toml",
+                    format!("{}: {error}", path.display()),
+                );
                 cx.notify();
                 return;
             }
         };
         let Some(settings_window) = self.settings_window.clone() else {
             self.state.record_error(
-                "open config.toml tab: Settings window is no longer available".to_owned(),
+                "Could not open config.toml",
+                "Settings window is no longer available",
             );
             cx.notify();
             return;
@@ -1145,7 +1148,7 @@ impl GpuiWorkspace {
         let loaded = match gpui_keymap_editor::load_keymap_text_file(&self.state) {
             Ok(loaded) => loaded,
             Err(error) => {
-                self.state.record_error(format!("open keymap: {error}"));
+                self.state.record_error("Could not open the keymap", error);
                 cx.notify();
                 return;
             }
@@ -1154,7 +1157,8 @@ impl GpuiWorkspace {
         let contents = loaded.contents;
         let Some(settings_window) = self.settings_window.clone() else {
             self.state.record_error(
-                "open keymap.json tab: Settings window is no longer available".to_owned(),
+                "Could not open the keymap",
+                "Settings window is no longer available",
             );
             cx.notify();
             return;
@@ -1234,11 +1238,14 @@ impl GpuiWorkspace {
             edit_intent => match persisted_keymap_edit(&edit_intent) {
                 Ok(Some(edit)) => {
                     if let Err(error) = self.state.edit_keymap(&edit) {
-                        self.state.record_error(format!("edit keymap: {error}"));
+                        self.state
+                            .record_error("Could not change the keymap", error);
                     }
                 }
                 Ok(None) => {}
-                Err(error) => self.state.record_error(format!("edit keymap: {error}")),
+                Err(error) => self
+                    .state
+                    .record_error("Could not change the keymap", error),
             },
         }
         self.last_keymap_editor_revision = Some(self.state.keymap_snapshot().revision);

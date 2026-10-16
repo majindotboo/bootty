@@ -127,13 +127,34 @@ pub fn show_desktop_notification(title: &str, body: &str) -> Result<()> {
     notification
         .appname(identity.display_name())
         .summary(title)
-        .body(body);
+        .body(body)
+        // The system's notification settings decide whether the sound plays.
+        .sound_name(if cfg!(target_os = "macos") {
+            "NSUserNotificationDefaultSoundName"
+        } else if cfg!(windows) {
+            "Default"
+        } else {
+            "message-new-instant"
+        });
     #[cfg(windows)]
     notification.app_id(identity.bundle_identifier());
     notification
         .show()
         .context("deliver desktop notification")?;
     Ok(())
+}
+
+/// Shows how many agents wait on the person on the app's Dock icon; zero clears it.
+pub fn set_dock_badge(count: usize) {
+    #[cfg(target_os = "macos")]
+    if let Some(main) = objc2::MainThreadMarker::new() {
+        let label = (count > 0).then(|| objc2_foundation::NSString::from_str(&count.to_string()));
+        objc2_app_kit::NSApplication::sharedApplication(main)
+            .dockTile()
+            .setBadgeLabel(label.as_deref());
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = count;
 }
 
 #[must_use]

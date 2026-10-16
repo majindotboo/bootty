@@ -14,23 +14,33 @@ pub enum NativePermissionUpdate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NativeApprovalDecision {
     Deny,
+    /// Deny, and stop the turn that asked.
+    Cancel,
     AllowOnce,
     AllowSession,
     AlwaysAllow,
 }
 
 impl NativeApprovalDecision {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Deny,
+        Self::Cancel,
         Self::AllowOnce,
         Self::AllowSession,
         Self::AlwaysAllow,
     ];
 
+    /// Whether the choice lets the request go ahead.
+    #[must_use]
+    pub const fn allows(self) -> bool {
+        !matches!(self, Self::Deny | Self::Cancel)
+    }
+
     #[must_use]
     pub const fn id(self) -> &'static str {
         match self {
             Self::Deny => "deny",
+            Self::Cancel => "cancel",
             Self::AllowOnce => "allow",
             Self::AllowSession => "allow-session",
             Self::AlwaysAllow => "always-allow",
@@ -41,6 +51,7 @@ impl NativeApprovalDecision {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Deny => "Deny",
+            Self::Cancel => "Deny and stop",
             Self::AllowOnce => "Allow once",
             Self::AllowSession => "Allow for this session",
             Self::AlwaysAllow => "Always allow",

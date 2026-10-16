@@ -70,6 +70,8 @@ struct AgentTray {
     revision: u64,
     backend: Option<platform::Backend>,
     failed: bool,
+    /// The agents-waiting count the Dock icon shows.
+    badge: usize,
 }
 impl Global for AgentTray {}
 
@@ -118,6 +120,14 @@ impl AgentTray {
         });
         snapshot.total = entries.len();
         snapshot.unread = entries.iter().filter(|(entry, _)| entry.unread).count();
+        let badge = entries
+            .iter()
+            .filter(|(entry, _)| crate::gpui_agents_panel::needs_attention(entry))
+            .count();
+        if badge != self.badge {
+            self.badge = badge;
+            crate::platform::set_dock_badge(badge);
+        }
         for (index, (entry, sender)) in entries.into_iter().take(128).enumerate() {
             let id = format!("bootty.agent-tray.{}.{index}", self.revision);
             let mut command = CommandInvocation::from_action("agents.focus", Caller::Internal);

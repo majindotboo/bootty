@@ -402,11 +402,24 @@ fn composer_shortcuts_reach_terminals_unless_a_composer_is_shown(cx: &mut TestAp
     );
     for (bindings, expected) in [
         (terminal, Vec::<&str>::new()),
-        (composer, vec!["ui.composer.effort-up"]),
+        (
+            composer,
+            vec![
+                "ui.composer.effort-up",
+                "ui.composer.toggle-plan",
+                "ui.composer.toggle-fast",
+                "ui.composer.dictate",
+                "ui.composer.voice",
+                "ui.composer.focus-composer",
+            ],
+        ),
     ] {
         cx.update(|cx| replace_workspace_key_bindings(bindings, cx).unwrap());
         received.borrow_mut().clear();
-        cx.simulate_keystrokes(*window, "alt-.");
+        cx.simulate_keystrokes(
+            *window,
+            "alt-. shift-tab ctrl-alt-f ctrl-alt-d ctrl-alt-v ctrl-alt-i",
+        );
         assert_eq!(received.borrow().as_slice(), expected.as_slice());
     }
 }

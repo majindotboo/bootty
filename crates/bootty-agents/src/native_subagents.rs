@@ -15,9 +15,14 @@ pub struct NativeSubagent {
     pub model: Option<String>,
     /// Only Codex reports a provider thread here. Pi's task IDs are not conversation IDs.
     pub thread_id: Option<String>,
-    /// Claude saved this subagent's conversation to its own file; a background shell has none.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub claude_file: bool,
+    /// The provider saved this subagent's conversation to its own file: a Claude agent task (a
+    /// background shell has none) or a child of Pi's subagents extension.
+    #[serde(
+        default,
+        alias = "claude_file",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub own_file: bool,
     pub owner_session: Option<String>,
     pub status: NativeToolStatus,
     pub started_at: Option<i64>,
@@ -25,10 +30,17 @@ pub struct NativeSubagent {
 }
 
 impl NativeSubagent {
-    /// Whether the subagent's own conversation can be read: a Codex thread or a Claude file.
+    /// Whether the subagent's own conversation can be read: a Codex thread or its own file.
     #[must_use]
     pub const fn readable(&self) -> bool {
-        self.thread_id.is_some() || self.claude_file
+        self.thread_id.is_some() || self.own_file
+    }
+
+    /// Whether its parent can ask the provider to stop it: a running Codex thread or Claude task.
+    #[must_use]
+    pub fn stoppable(&self) -> bool {
+        self.status == NativeToolStatus::Running
+            && (self.thread_id.is_some() || self.provider == Some(crate::AgentKind::Claude))
     }
 }
 
@@ -202,7 +214,7 @@ impl NativeSessionSnapshot {
                     prompt: text(field(item, "prompt"), 2048),
                     model: model(field(item, "model")),
                     thread_id: Some(id.into()),
-                    claude_file: false,
+                    own_file: false,
                     owner_session: self.session_id.clone(),
                     status,
                     started_at: None,
@@ -316,7 +328,7 @@ impl NativeSessionSnapshot {
                     prompt,
                     model: model(field(row, "model")),
                     thread_id: None,
-                    claude_file: false,
+                    own_file: false,
                     owner_session: self.session_id.clone(),
                     status,
                     started_at: None,
@@ -349,7 +361,8 @@ impl NativeSessionSnapshot {
                 prompt: text(field(row, "description"), 2048),
                 model: model(field(row, "model")),
                 thread_id: None,
-                claude_file: false,
+                // The extension gives each child its own session, named in the parent's.
+                own_file: true,
                 owner_session: self.session_id.clone(),
                 status,
                 started_at: field(row, "startedAt").as_i64(),
@@ -430,7 +443,7 @@ impl NativeSessionSnapshot {
                 model: model(field(&args, "model")),
                 thread_id: None,
                 // An agent task saves its conversation; a backgrounded shell doesn't.
-                claude_file: known.as_ref().is_some_and(|known| known.claude_file)
+                own_file: known.as_ref().is_some_and(|known| known.own_file)
                     || field(value, "task_type") == "local_agent"
                     || tool.is_some_and(|tool| matches!(tool.name.as_str(), "Agent" | "Task")),
                 owner_session: self.session_id.clone(),
@@ -468,17 +481,17 @@ impl crate::NativeAgentSession {
     /// Rejects unknown children, missing provider transcripts or mismatched read replies.
     pub fn read_subagent(&self, id: &str) -> Result<NativeSubagentDetail, String> {
         let snapshot = self.snapshot();
-        let mut agent = snapshot
-            .transcript
-            .iter()
-            .find_map(|item| item.subagent.as_ref().filter(|agent| agent.id == id))
-            .cloned()
-            .ok_or("The provider did not report this subagent")?;
-        if agent.owner_session != snapshot.session_id {
-            return Err("This subagent belongs to the source conversation".into());
-        }
+        let mut agent = own_subagent(&snapshot, id)?;
         if self.config.provider == crate::AgentKind::Claude {
             return self.read_claude_subagent(&snapshot, agent);
+        }
+        if self.config.provider == crate::AgentKind::Pi && agent.own_file {
+            let history =
+                crate::native_history_pi::subagent_transcript(&self.config, &snapshot, &agent.id)?;
+            return Ok(NativeSubagentDetail {
+                agent,
+                transcript: history.transcript,
+            });
         }
         let original = agent.clone();
         let thread = agent
@@ -564,4 +577,60 @@ impl crate::NativeAgentSession {
             transcript: history.transcript,
         })
     }
+
+    /// Ask the provider to stop a running child. Its own report of the stop settles the status.
+    /// # Errors
+    /// Rejects unknown or finished children, providers that can't stop one, or transport errors.
+    pub fn stop_subagent(&self, id: &str) -> Result<(), String> {
+        let snapshot = self.snapshot();
+        let agent = own_subagent(&snapshot, id)?;
+        if agent.status != NativeToolStatus::Running {
+            return Err("This subagent is not running".into());
+        }
+        match self.config.provider {
+            crate::AgentKind::Claude => {
+                self.rpc("stop_task", serde_json::json!({"task_id":id}))?;
+            }
+            crate::AgentKind::Codex => {
+                let thread = agent
+                    .thread_id
+                    .as_deref()
+                    .ok_or("The provider did not report this subagent's thread")?;
+                let result = self.rpc(
+                    "thread/read",
+                    serde_json::json!({"threadId":thread,"includeTurns":true}),
+                )?;
+                let turn = field(field(&result, "thread"), "turns")
+                    .as_array()
+                    .and_then(|turns| {
+                        turns
+                            .iter()
+                            .rev()
+                            .find(|turn| field(turn, "status") == "inProgress")
+                    })
+                    .and_then(|turn| field(turn, "id").as_str())
+                    .ok_or("This subagent has no running turn")?;
+                self.rpc(
+                    "turn/interrupt",
+                    serde_json::json!({"threadId":thread,"turnId":turn}),
+                )?;
+            }
+            crate::AgentKind::Pi => return Err("Pi cannot stop one subagent".into()),
+        }
+        Ok(())
+    }
+}
+
+/// The child this conversation reported, not one a source conversation reported before a fork.
+fn own_subagent(snapshot: &NativeSessionSnapshot, id: &str) -> Result<NativeSubagent, String> {
+    let agent = snapshot
+        .transcript
+        .iter()
+        .find_map(|item| item.subagent.as_ref().filter(|agent| agent.id == id))
+        .cloned()
+        .ok_or("The provider did not report this subagent")?;
+    if agent.owner_session != snapshot.session_id {
+        return Err("This subagent belongs to the source conversation".into());
+    }
+    Ok(agent)
 }

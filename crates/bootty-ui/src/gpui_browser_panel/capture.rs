@@ -246,9 +246,12 @@ impl BrowserPanel {
                     if let Some(message) = crate::commands::command_outcome_message(outcome) {
                         window.push_notification(
                             Notification::error(
-                                crate::error_catalog::ErrorNotice::from_text(message).to_string(),
-                            )
-                            .title("Capture failed"),
+                                crate::error_catalog::ErrorNotice::failed(
+                                    "Could not capture the page",
+                                    message,
+                                )
+                                .to_string(),
+                            ),
                             cx,
                         );
                     }

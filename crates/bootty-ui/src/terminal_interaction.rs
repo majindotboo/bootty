@@ -4,16 +4,17 @@ mod selection;
 
 use super::AppEffect;
 use crate::{
+    error_catalog::ErrorNotice,
+    input::focus::InputFocus,
+    platform::{write_clipboard_html, write_clipboard_text},
+};
+use crate::{
     gpui::{InputEvent, Modifiers, PointerButton},
     keymap::CopyToClipboard,
     product_dialogs::terminal_find::{
         FindDirection, TerminalFindIntent, TerminalFindModel, TerminalFindOutput,
         TerminalFindResult,
     },
-};
-use crate::{
-    input::focus::InputFocus,
-    platform::{write_clipboard_html, write_clipboard_text},
 };
 use anyhow::Result;
 use bootty_mux::terminal::{ActiveTerminal, TerminalRuntime};
@@ -58,7 +59,7 @@ pub enum TerminalFocusIntent {
 pub struct TerminalInteractionOutcome {
     pub(super) events: Vec<InputEvent>,
     pub(super) effects: Vec<AppEffect>,
-    pub(super) last_error: Option<String>,
+    pub(super) last_error: Option<ErrorNotice>,
     pub(super) focus_intent: TerminalFocusIntent,
     pub(super) handled_count: usize,
 }
@@ -80,7 +81,7 @@ pub struct TerminalDirectInputOutcome {
     pub(super) consumed: bool,
     pub(super) copy_mode_active: bool,
     pub(super) effects: Vec<AppEffect>,
-    pub(super) last_error: Option<String>,
+    pub(super) last_error: Option<ErrorNotice>,
     pub(super) focus_intent: TerminalFocusIntent,
 }
 
@@ -91,7 +92,7 @@ pub struct TerminalInteractionRuntime {
     last_search: String,
     search_options: TerminalSearchOptions,
     last_search_direction: TerminalSearchDirection,
-    last_error: Option<String>,
+    last_error: Option<ErrorNotice>,
     pending_focus_intent: TerminalFocusIntent,
 }
 
@@ -179,7 +180,7 @@ impl TerminalInteractionRuntime {
                 let direction = terminal_find_direction(direction);
                 let result = self.search_terminal(terminal, focused_pane_id, &query, direction);
                 dialog.set_result(result);
-                dialog.set_error(self.last_error.clone());
+                dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
                 if direction != TerminalSearchDirection::Current && self.find_return_focus {
                     outcome.focus_intent = TerminalFocusIntent::Terminal;
                 }
@@ -211,7 +212,7 @@ impl TerminalInteractionRuntime {
                 TerminalSearchDirection::Current,
             );
             dialog.set_result(result);
-            dialog.set_error(self.last_error.clone());
+            dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
         }
         self.find_dialog = Some(dialog);
         self.find_return_focus = false;
@@ -300,7 +301,7 @@ impl TerminalInteractionRuntime {
         let mut outcome = TerminalInteractionOutcome::default();
         match TerminalRuntime::enter_copy_mode(terminal) {
             Ok(()) => outcome.effects.push(AppEffect::RequestRepaint),
-            Err(error) => self.record_error(&error),
+            Err(error) => self.record_error("Could not enter copy mode", &error),
         }
         self.finish(outcome)
     }
@@ -438,7 +439,7 @@ impl TerminalInteractionRuntime {
         match TerminalRuntime::is_mouse_tracking(terminal) {
             Ok(mouse_tracking) => mouse_tracking,
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not select text", &error);
                 false
             }
         }
@@ -475,7 +476,7 @@ impl TerminalInteractionRuntime {
                         self.copy_selection(terminal, CopyToClipboard::Mixed);
                     }
                 }
-                Err(error) => self.record_error(&error),
+                Err(error) => self.record_error("Could not select text", &error),
             }
         }
         count
@@ -498,7 +499,7 @@ impl TerminalInteractionRuntime {
         let mut copy_mode_active = match TerminalRuntime::copy_mode_active(terminal) {
             Ok(active) => active,
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not use copy mode", &error);
                 false
             }
         };
@@ -614,7 +615,7 @@ impl TerminalInteractionRuntime {
                     );
                     if let Some(dialog) = self.find_dialog.as_mut() {
                         dialog.set_result(result);
-                        dialog.set_error(self.last_error.clone());
+                        dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
                     }
                     effects.push(AppEffect::RequestRepaint);
                 }
@@ -639,7 +640,7 @@ impl TerminalInteractionRuntime {
                 if let Some(bytes) = outcome.copied
                     && let Err(error) = write_clipboard_text(&String::from_utf8_lossy(&bytes))
                 {
-                    self.record_error(&error);
+                    self.record_error("Could not copy to the clipboard", &error);
                 }
                 if let Some(search) = outcome.search {
                     self.last_search = search.query;
@@ -653,14 +654,14 @@ impl TerminalInteractionRuntime {
                     let result = self.terminal_find_result_from_frame(terminal, search.found);
                     if let Some(dialog) = self.find_dialog.as_mut() {
                         dialog.set_result(result);
-                        dialog.set_error(self.last_error.clone());
+                        dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
                     }
                 }
                 effects.push(AppEffect::RequestRepaint);
                 outcome.active
             }
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not use copy mode", &error);
                 false
             }
         }
@@ -705,7 +706,7 @@ impl TerminalInteractionRuntime {
         match result {
             Ok(copied) => copied,
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not copy the selection", &error);
                 false
             }
         }
@@ -717,7 +718,7 @@ impl TerminalInteractionRuntime {
                 .filter(|text| !text.is_empty()),
             Ok(None) => None,
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not copy the selection", &error);
                 None
             }
         }
@@ -725,7 +726,7 @@ impl TerminalInteractionRuntime {
 
     fn clear_search(&mut self, terminal: &mut ActiveTerminal) {
         if let Err(error) = terminal.search_viewport("", TerminalSearchDirection::Current) {
-            self.record_error(&error);
+            self.record_error("Could not clear the search", &error);
         }
     }
 
@@ -769,7 +770,7 @@ impl TerminalInteractionRuntime {
         let copy_mode_active = match TerminalRuntime::copy_mode_active(terminal) {
             Ok(active) => active,
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not search the terminal", &error);
                 false
             }
         };
@@ -798,7 +799,7 @@ impl TerminalInteractionRuntime {
         match result {
             Ok(result) => result,
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not search the terminal", &error);
                 TerminalFindResult::default()
             }
         }
@@ -824,7 +825,7 @@ impl TerminalInteractionRuntime {
                     self.terminal_find_result_from_frame(terminal, search.found)
                 }),
             Err(error) => {
-                self.record_error(&error);
+                self.record_error("Could not search the terminal", &error);
                 TerminalFindResult::default()
             }
         }
@@ -837,7 +838,7 @@ impl TerminalInteractionRuntime {
     ) -> TerminalFindResult {
         let (active_index, match_count) = terminal.extract_frame().map_or_else(
             |error| {
-                self.record_error(&error);
+                self.record_error("Could not search the terminal", &error);
                 (None, 0)
             },
             |frame| (frame.active_search_match_index, frame.search_match_count),
@@ -860,8 +861,8 @@ impl TerminalInteractionRuntime {
         self.pending_focus_intent = TerminalFocusIntent::None;
     }
 
-    fn record_error(&mut self, error: &impl ToString) {
-        self.last_error = Some(error.to_string());
+    fn record_error(&mut self, action: &str, error: &impl ToString) {
+        self.last_error = Some(ErrorNotice::failed(action, error.to_string()));
     }
 
     fn finish(&mut self, mut outcome: TerminalInteractionOutcome) -> TerminalInteractionOutcome {
@@ -881,7 +882,7 @@ impl TerminalInteractionRuntime {
         outcome
     }
 
-    fn take_operation_state(&mut self) -> (Option<String>, TerminalFocusIntent) {
+    fn take_operation_state(&mut self) -> (Option<ErrorNotice>, TerminalFocusIntent) {
         (
             self.last_error.take(),
             std::mem::take(&mut self.pending_focus_intent),

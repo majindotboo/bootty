@@ -209,7 +209,7 @@ impl AppState {
                     // Keep its request revision so the newer store still triggers a refresh.
                     self.recovery.loaded_revision = revision;
                 }
-                Err(e) => self.record_error(e),
+                Err(e) => self.record_error("Could not load saved sessions", e),
             }
         }
         self.poll_session_checkpoints();
@@ -324,7 +324,7 @@ impl AppState {
             }
         }
         for e in errors {
-            self.record_error(e);
+            self.record_error("Could not save session checkpoints", e);
         }
         if self.recovery.saves.is_empty()
             && let Some(ticket) = self.recovery.checkpoint_ticket.take()
@@ -545,7 +545,7 @@ impl AppState {
                 Err(error) => {
                     self.recovery.checkpoint_failed = true;
                     ticket.record_failure(&error);
-                    self.record_error(error);
+                    self.record_error("Could not save session checkpoints", error);
                 }
             }
         }

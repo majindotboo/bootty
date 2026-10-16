@@ -1327,6 +1327,25 @@ impl NativeAgentSession {
         Ok(())
     }
 
+    /// Deny a request with a note for the agent. Claude reads the note as the reason it was
+    /// denied; other providers decline, and the caller sends the note as the next message.
+    /// Returns whether the provider already has the note.
+    /// # Errors
+    /// Rejects requests that are no longer pending, invalid notes, or transport failures.
+    pub fn deny_with_note(&self, id: &str, note: &str) -> Result<bool, String> {
+        let claude = self.snapshot().requests.iter().any(|request| {
+            request.id == id
+                && request.method == "claude.permission"
+                && field(&request.parameters, "tool_name") != "AskUserQuestion"
+        });
+        if claude {
+            self.respond(id, json!({"decision":"decline","message":note}))?;
+            return Ok(true);
+        }
+        self.approve_decision(id, crate::NativeApprovalDecision::Deny)?;
+        Ok(false)
+    }
+
     /// # Errors
     /// Returns an error if the request is not a command/file/tool permission request.
     pub fn approve(&self, id: &str, allow: bool) -> Result<(), String> {
@@ -2876,11 +2895,8 @@ impl NativeAgentSession {
             .as_ref()
             .ok_or("Conversation tools are not attached")?
             .lease()
-            .decide_application(
-                &application,
-                decision != crate::NativeApprovalDecision::Deny,
-            )?;
-        if decision != crate::NativeApprovalDecision::Deny {
+            .decide_application(&application, decision.allows())?;
+        if decision.allows() {
             self.track_computer_images();
         }
         let mut snapshot = lock(&self.snapshot);

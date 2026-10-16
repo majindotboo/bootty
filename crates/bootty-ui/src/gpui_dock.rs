@@ -584,6 +584,10 @@ impl WorkspaceDock {
         window: &Window,
         cx: &Context<Self>,
     ) {
+        let failed = crate::action_catalog::Command::from_action(&invocation.command).map_or_else(
+            || "The command failed".to_owned(),
+            |command| format!("{} failed", command.title()),
+        );
         let receiver = match self.sender.submit(
             invocation,
             std::time::Instant::now()
@@ -607,7 +611,7 @@ impl WorkspaceDock {
                     |_| Some("The command stopped before it finished.".to_owned()),
                     |outcome| {
                         crate::commands::command_outcome_message(&outcome).map(|message| {
-                            crate::error_catalog::ErrorNotice::from_text(message).to_string()
+                            crate::error_catalog::ErrorNotice::failed(&failed, message).to_string()
                         })
                     },
                 );

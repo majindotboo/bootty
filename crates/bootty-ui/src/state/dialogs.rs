@@ -113,21 +113,31 @@ impl AppState {
             .creation_replies
             .retain(|reply| match reply.try_recv() {
                 Ok(bootty_control::CommandOutcome::Success { warnings, .. }) => {
-                    messages.extend(warnings.into_iter().map(|warning| warning.message));
+                    messages.extend(
+                        warnings
+                            .into_iter()
+                            .map(|warning| ("The session started with a problem", warning.message)),
+                    );
                     false
                 }
                 Ok(outcome) => {
-                    messages.extend(crate::commands::command_outcome_message(&outcome));
+                    messages.extend(
+                        crate::commands::command_outcome_message(&outcome)
+                            .map(|message| ("Could not start the session", message)),
+                    );
                     false
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    messages.push("Session startup owner stopped".to_owned());
+                    messages.push((
+                        "Could not start the session",
+                        "Session startup owner stopped".to_owned(),
+                    ));
                     false
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => true,
             });
-        for message in messages {
-            self.record_error(message);
+        for (action, message) in messages {
+            self.record_error(action, message);
         }
     }
 
@@ -409,7 +419,7 @@ impl AppState {
                     &target.session_id,
                     &self.repaint,
                 ) {
-                    self.record_error(error);
+                    self.record_error("Could not move the session", error);
                     return;
                 }
                 self.activate_scoped_session_from_ui(&target);
@@ -673,6 +683,7 @@ impl AppState {
                 self.complete_creation(&value);
                 if !warnings.is_empty() {
                     self.record_error(
+                        "The session started with a problem",
                         warnings
                             .into_iter()
                             .map(|warning| warning.message)
@@ -692,12 +703,12 @@ impl AppState {
                 });
                 match result {
                     Some(Ok(())) => {}
-                    Some(Err(error)) => self.record_error(error),
+                    Some(Err(error)) => self.record_error("Could not add the project", error),
                     None => self.record_message("The project picker is no longer open"),
                 }
             }
             NewSessionPickerEvent::Error(error) => {
-                self.record_error(error);
+                self.record_error("Could not start the session", error);
             }
             NewSessionPickerEvent::CreateWorktree { repo, request } => {
                 self.create_picked_worktree(repo, request);
@@ -1001,7 +1012,7 @@ impl AppState {
         }
         if let Err(outcome) = self.validate_surface_request(request) {
             if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                self.record_error(message);
+                self.record_error("Could not open the agent form", message);
             }
             return;
         }

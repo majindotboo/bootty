@@ -130,6 +130,34 @@ impl DialogView {
             .as_ref()
             .is_some_and(|completion| completion.read(cx).blocks_submission(window, cx))
     }
+    /// Flips the form's plan mode when the provider offers it.
+    fn toggle_plan_mode(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let offered = self
+            .completion
+            .as_ref()
+            .is_some_and(|completion| completion.read(cx).plan_mode());
+        let Some(spec) = self
+            .spec
+            .as_ref()
+            .filter(|spec| Self::is_agent_session_spec(spec) && !spec.busy)
+        else {
+            return false;
+        };
+        if !offered || window.has_active_dialog(cx) {
+            return false;
+        }
+        let plan = spec
+            .fields
+            .iter()
+            .any(|field| field.id == "plan-mode" && field.value == "true");
+        cx.emit(DialogIntent::FieldChanged {
+            dialog: spec.id.clone(),
+            field: "plan-mode".into(),
+            value: (!plan).to_string(),
+        });
+        true
+    }
+
     pub(crate) fn perform_completion(
         &self,
         action: CommandAction,
@@ -148,6 +176,22 @@ impl DialogView {
                 speech.toggle(crate::gpui_speech::SpeechMode::Dictation, window, cx);
             });
             return true;
+        }
+        if action == CommandAction::FocusComposer {
+            if self
+                .spec
+                .as_ref()
+                .is_none_or(|spec| !Self::is_agent_session_spec(spec) || spec.busy)
+                || window.has_active_dialog(cx)
+            {
+                return false;
+            }
+            self.prompt_textarea
+                .update(cx, |prompt, cx| prompt.focus(window, cx));
+            return true;
+        }
+        if action == CommandAction::TogglePlan {
+            return self.toggle_plan_mode(window, cx);
         }
         if matches!(action, CommandAction::EffortDown | CommandAction::EffortUp) {
             if window.has_active_dialog(cx) {

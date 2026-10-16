@@ -98,6 +98,13 @@ impl AgentsPanel {
             }
         }
         commands.push(command);
+        let failed = match action {
+            "resume" => "Could not resume the agent",
+            "fork" => "Could not fork the agent",
+            "acknowledge" => "Could not mark the agent as seen",
+            "focus" => "Could not open the agent",
+            _ => "Could not update the agent",
+        };
         let sender = self.sender.clone();
         self.pending.push(key.clone());
         self.error = None;
@@ -122,9 +129,8 @@ impl AgentsPanel {
                             "The agent command stopped before it finished.".to_owned()
                         })?;
                         if let Some(error) = crate::commands::command_outcome_message(&outcome) {
-                            return Err(
-                                crate::error_catalog::ErrorNotice::from_text(error).to_string()
-                            );
+                            return Err(crate::error_catalog::ErrorNotice::failed(failed, error)
+                                .to_string());
                         }
                     }
                     Ok::<(), String>(())
@@ -274,7 +280,7 @@ impl Render for AgentsPanel {
     }
 }
 
-fn needs_attention(entry: &AgentOverview) -> bool {
+pub fn needs_attention(entry: &AgentOverview) -> bool {
     entry.unread || matches!(entry.status.as_str(), "waiting" | "error")
 }
 

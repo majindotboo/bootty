@@ -78,6 +78,7 @@ impl NativeAgentSessionView {
             Ok(receiver) => receiver,
             Err(error) => {
                 crate::gpui_speech::notify_error(
+                    "Could not start voice mode",
                     crate::error_catalog::command_send_message(error),
                     window,
                     cx,
@@ -114,7 +115,12 @@ impl NativeAgentSessionView {
                     .ok()
                     .and_then(|outcome| crate::commands::command_outcome_message(&outcome))
                     .unwrap_or_else(|| "Codex couldn't start voice mode".to_owned());
-                crate::gpui_speech::notify_error(&message, window, cx);
+                crate::gpui_speech::notify_error(
+                    "Could not start voice mode",
+                    &message,
+                    window,
+                    cx,
+                );
                 this.speech
                     .update(cx, super::super::gpui_speech::SpeechInput::stop);
             });
@@ -419,7 +425,7 @@ impl NativeAgentSessionView {
     }
     /// Runs a composer action, as its keybinding does: completion navigation, focus, dictation.
     pub fn perform_completion(
-        &self,
+        &mut self,
         action: CommandAction,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -442,6 +448,32 @@ impl NativeAgentSessionView {
             self.speech
                 .update(cx, |speech, cx| speech.toggle(mode, window, cx));
             return true;
+        }
+        if action == CommandAction::TogglePlan {
+            let offered = self
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.read(cx).plan_mode());
+            if window.has_active_dialog(cx) || !offered || !self.provider_enabled() {
+                return false;
+            }
+            let plan = !self.record.config.plan_mode.unwrap_or(false);
+            self.set_plan_mode(plan, window, cx);
+            return true;
+        }
+        if action == CommandAction::FocusComposer {
+            if window.has_active_dialog(cx) || self.subagent.is_some() {
+                return false;
+            }
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+            return true;
+        }
+        if action == CommandAction::ToggleFast {
+            if window.has_active_dialog(cx) || !self.provider_enabled() {
+                return false;
+            }
+            return self.toggle_fast_mode(window, cx);
         }
         if matches!(action, CommandAction::EffortDown | CommandAction::EffortUp) {
             if window.has_active_dialog(cx) {

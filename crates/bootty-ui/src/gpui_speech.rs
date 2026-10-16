@@ -6,8 +6,9 @@ use gpui_kit::component::{
     notification::Notification,
 };
 
-pub fn notify_error(error: &str, window: &mut Window, cx: &mut gpui_kit::App) {
-    let notice = crate::error_catalog::ErrorNotice::from_text(error);
+/// Shows a failure of `action`, such as "Could not start voice mode", with its details a click away.
+pub fn notify_error(action: &str, error: &str, window: &mut Window, cx: &mut gpui_kit::App) {
+    let notice = crate::error_catalog::ErrorNotice::failed(action, error);
     let details = notice.details().map(str::to_owned);
     window.push_notification(
         Notification::error(notice.to_string())

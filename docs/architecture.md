@@ -495,9 +495,13 @@ parent turn, but only that parent session can introduce a child. Codex child
 transcripts use `thread/read` after verifying reported ownership; viewing never
 resumes a child or acquires its writer. A child's tab draws its transcript with
 the conversation view in a transcript-only mode, reading it while the parent
-reports the child running. Pi task IDs are output/lifecycle identities,
-not invented conversation IDs. Claude Agent/Task notifications must name an
-observed parent tool. Unknown or foreign children remain inaccessible. A Codex
+reports the child running. Stopping a running child goes through its parent:
+Codex interrupts the child's in-progress turn from `thread/read`, Claude sends
+`stop_task` for its task ID, and the provider's report settles the status. Pi
+task IDs are output/lifecycle identities, not invented conversation IDs; a child
+of Pi's subagents extension is read from the session file its parent's latest
+`subagents:agent-v1` entry names, confined to that child's own folder. Claude
+Agent/Task notifications must name an observed parent tool. Unknown or foreign children remain inaccessible. A Codex
 child's approvals, questions and MCP requests arrive on its own thread and turn;
 the parent holds them, names the asking child, and keeps them past the end of its
 own turn. Requests from threads the parent never started are refused, and the

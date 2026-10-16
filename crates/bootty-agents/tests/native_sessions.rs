@@ -146,7 +146,7 @@ for line in sys.stdin:
    emit({'id':'wrong-thread','method':'item/commandExecution/requestApproval','params':{'threadId':'other','turnId':'turn-'+str(turn)}})
    emit({'id':'wrong-turn','method':'item/commandExecution/requestApproval','params':{'threadId':thread,'turnId':'other'}})
    scope={'threadId':thread,'turnId':'turn-'+str(turn),'itemId':'command','command':'echo approved'}
-   if text=='approval-scopes': scope.update(proposedExecpolicyAmendment=['echo'],availableDecisions=['accept','decline','acceptForSession',{'acceptWithExecpolicyAmendment':{'execpolicy_amendment':['echo']}}])
+   if text=='approval-scopes': scope.update(proposedExecpolicyAmendment=['echo'],availableDecisions=['accept','decline','acceptForSession',{'acceptWithExecpolicyAmendment':{'execpolicy_amendment':['echo']}},'cancel'])
    if text=='approval-once-only': scope.update(availableDecisions=['accept','decline'])
    emit({'id':900,'method':'item/commandExecution/requestApproval','params':scope})
    reply(ident,{'turn':{'id':'turn-'+str(turn)}})
@@ -190,6 +190,10 @@ for line in sys.stdin:
   notice('item/completed',item={'id':'steered-user-'+str(turn),'type':'userMessage','content':params['input']})
   reply(ident,{'turnId':'turn-'+str(turn)})
  elif method == 'turn/interrupt':
+  if params['threadId'] == 'child-thread':
+   with open('child-interrupt.json','w') as output: json.dump(params,output)
+   reply(ident,{})
+   continue
   assert params['threadId'] == thread and params['turnId'] == 'turn-'+str(turn)
   completed('interrupted')
   if waiting is not None: reply(waiting,{'turn':{'id':'turn-'+str(turn)}}); waiting=None
@@ -1499,6 +1503,7 @@ fn approves_only_first_hand_current_requests_without_durable_grants() {
 #[rstest]
 #[case(bootty_agents::NativeApprovalDecision::AllowOnce, json!({"decision":"accept"}))]
 #[case(bootty_agents::NativeApprovalDecision::Deny, json!({"decision":"decline"}))]
+#[case(bootty_agents::NativeApprovalDecision::Cancel, json!({"decision":"cancel"}))]
 #[case(bootty_agents::NativeApprovalDecision::AllowSession, json!({"decision":"acceptForSession"}))]
 #[case(bootty_agents::NativeApprovalDecision::AlwaysAllow, json!({"decision":{"acceptWithExecpolicyAmendment":{"execpolicy_amendment":["echo"]}}}))]
 fn approval_scopes_use_only_the_exact_advertised_provider_grant(
@@ -1519,6 +1524,7 @@ fn approval_scopes_use_only_the_exact_advertised_provider_grant(
     barrier(&session).unwrap();
     let request = session.snapshot().requests.remove(0);
     for reusable in [
+        bootty_agents::NativeApprovalDecision::Cancel,
         bootty_agents::NativeApprovalDecision::AllowSession,
         bootty_agents::NativeApprovalDecision::AlwaysAllow,
     ] {
@@ -2833,6 +2839,55 @@ fn spawned_codex_subagents_ask_through_their_parent() {
     let snapshot = session.snapshot();
     assert_eq!(snapshot.requests, Vec::new());
     assert_eq!(snapshot.status, NativeSessionStatus::Idle);
+    session.stop();
+}
+
+/// Stopping a running Codex subagent interrupts the turn it is running, on its own thread.
+#[rstest]
+fn stopping_a_codex_subagent_interrupts_its_running_turn() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let spawn = |status: &str| {
+        json!([{"method":"item/started","params":{"threadId":"native-thread","turnId":"turn-1","item":{
+            "type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child-thread"],
+            "agentNickname":"Scout","prompt":"Run the tests",
+            "agentsStates":{"child-thread":{"status":status}}}}}])
+    };
+    fs::write(
+        root.path().join("events.json"),
+        spawn("running").to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    fs::write(
+        root.path().join("child-read.json"),
+        json!({"id":"child-thread","status":{"type":"active"},"turns":[
+            {"id":"child-turn-1","status":"completed","items":[]},
+            {"id":"child-turn-2","status":"inProgress","items":[]},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    session.stop_subagent("child-thread").unwrap();
+    let interrupt: Value =
+        serde_json::from_slice(&fs::read(root.path().join("child-interrupt.json")).unwrap())
+            .unwrap();
+    pretty_assertions::assert_eq!(
+        interrupt,
+        json!({"threadId":"child-thread","turnId":"child-turn-2"})
+    );
+    assert!(session.stop_subagent("unreported-child").is_err());
+
+    fs::remove_file(root.path().join("child-interrupt.json")).unwrap();
+    fs::write(
+        root.path().join("events.json"),
+        spawn("completed").to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    assert!(session.stop_subagent("child-thread").is_err());
+    assert!(!root.path().join("child-interrupt.json").exists());
     session.stop();
 }
 

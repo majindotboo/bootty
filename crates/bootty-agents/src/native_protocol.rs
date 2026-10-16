@@ -249,13 +249,15 @@ impl NativeAgentRequest {
         }
         if self.method == crate::APPLICATION_ACCESS_METHOD {
             // An app grant lasts the conversation, so a one-call allowance is not offered.
-            return (decision != D::AllowOnce).then(|| Value::String(decision.id().into()));
+            return matches!(decision, D::Deny | D::AllowSession | D::AlwaysAllow)
+                .then(|| Value::String(decision.id().into()));
         }
         if self.method == "mcpServer/elicitation/request" {
             use crate::native_elicitation::{approval_response, is_approval};
             return match decision {
                 D::Deny => is_approval(&self.parameters)
                     .then(|| serde_json::json!({"action":"decline","content":null})),
+                D::Cancel => None,
                 D::AllowOnce => approval_response(&self.parameters, None),
                 D::AllowSession => approval_response(&self.parameters, Some("session")),
                 D::AlwaysAllow => approval_response(&self.parameters, Some("always")),
@@ -263,6 +265,7 @@ impl NativeAgentRequest {
         }
         let value = match decision {
             D::Deny => Value::String("decline".into()),
+            D::Cancel => Value::String("cancel".into()),
             D::AllowOnce => Value::String("accept".into()),
             D::AllowSession => Value::String("acceptForSession".into()),
             D::AlwaysAllow => {
@@ -278,7 +281,7 @@ impl NativeAgentRequest {
                 serde_json::json!({"acceptWithExecpolicyAmendment":{"execpolicy_amendment":amendment}})
             }
         };
-        if matches!(decision, D::AllowSession | D::AlwaysAllow)
+        if matches!(decision, D::Cancel | D::AllowSession | D::AlwaysAllow)
             && !matches!(
                 self.method.as_str(),
                 "item/commandExecution/requestApproval" | "item/fileChange/requestApproval"

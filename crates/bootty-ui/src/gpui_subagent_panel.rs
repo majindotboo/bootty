@@ -229,7 +229,10 @@ impl Render for SubagentPanel {
                 .child("Open the parent conversation from Sessions to reconnect this tab.")
                 .into_any_element();
         };
-        let Some(record) = parent.read(cx).subagent_record(&self.id) else {
+        let (Some(agent), Some(record)) = (
+            parent.read(cx).subagent(&self.id).cloned(),
+            parent.read(cx).subagent_record(&self.id),
+        ) else {
             return div()
                 .size_full()
                 .p_4()
@@ -240,18 +243,17 @@ impl Render for SubagentPanel {
         };
         let pending = parent.read(cx).subagent_pending(&self.id);
         if let Some(view) = &self.view {
-            if !view.read(cx).shows(&record) {
+            if !view.read(cx).shows(&agent, &record) {
                 let view = view.clone();
                 cx.defer_in(window, move |_, window, cx| {
-                    view.update(cx, |view, cx| view.show_subagent(record, window, cx));
+                    view.update(cx, |view, cx| view.show_subagent(agent, record, window, cx));
                 });
             }
         } else {
             let sender = parent.read(cx).command_sender();
-            let id = self.id.clone();
             self.view =
                 Some(cx.new(|cx| {
-                    NativeAgentSessionView::new_subagent(record, sender, id, window, cx)
+                    NativeAgentSessionView::new_subagent(agent, record, sender, window, cx)
                 }));
         }
         div()
@@ -268,7 +270,7 @@ impl Render for SubagentPanel {
                         .p_4()
                         .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(crate::error_catalog::ErrorNotice::from_text(&pending).to_string()),
+                        .child(pending),
                 )
             })
             .children(self.view.clone())

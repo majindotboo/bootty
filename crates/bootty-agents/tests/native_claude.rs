@@ -41,6 +41,11 @@ running=None
 for line in sys.stdin:
  value=json.loads(line)
  if value['type']=='control_request':
+  if value['request']['subtype']=='stop_task':
+   # Claude acknowledges a stop, then reports the task stopped.
+   control(value)
+   emit({'type':'system','subtype':'task_notification','session_id':session,'task_id':value['request']['task_id'],'status':'stopped','summary':'Stopped'})
+   continue
   if value['request']['subtype']=='interrupt':
    # An idle Claude acknowledges an interrupt and reports nothing else.
    if os.path.exists('ignore-interrupt'): control(value);continue
@@ -414,6 +419,29 @@ fn claude_subagent_transcripts_read_their_own_file() {
     session.stop();
 }
 
+/// Stopping a running Claude subagent stops its task, and Claude's report settles it.
+#[rstest]
+fn stopping_a_claude_subagent_stops_its_task() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("subagent-running").unwrap();
+    barrier(&session).unwrap();
+    let status = |session: &NativeAgentSession| {
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .find_map(|item| item.subagent.clone())
+            .map(|agent| agent.status)
+    };
+    assert_eq!(status(&session), Some(NativeToolStatus::Running));
+    session.stop_subagent("child").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(status(&session), Some(NativeToolStatus::Interrupted));
+    assert!(session.stop_subagent("child").is_err());
+    session.stop();
+}
+
 /// A running tool shows its arguments while Claude streams them.
 #[rstest]
 fn claude_tool_arguments_stream_into_the_running_row() {
@@ -686,6 +714,35 @@ fn reusable_approvals_apply_only_claudes_suggestions(
             (&json!("allow"), &permissions)
         );
     }
+    session.stop();
+}
+
+/// Deny and stop tells Claude to stop the turn, and a note tells it why it was denied.
+#[rstest]
+#[case::stop(Some(NativeApprovalDecision::Cancel), None, json!({"behavior":"deny",
+    "message":"Denied by the user","toolUseID":"tool-id","interrupt":true}))]
+#[case::note(None, Some("Use the staging bucket"), json!({"behavior":"deny",
+    "message":"Use the staging bucket","toolUseID":"tool-id"}))]
+fn denials_can_stop_the_turn_or_say_why(
+    #[case] decision: Option<NativeApprovalDecision>,
+    #[case] note: Option<&str>,
+    #[case] expected: Value,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("permission").unwrap();
+    barrier(&session).unwrap();
+    let request = session.snapshot().requests.remove(0);
+    if let Some(decision) = decision {
+        session.approve_decision(&request.id, decision).unwrap();
+    }
+    if let Some(note) = note {
+        assert!(session.deny_with_note(&request.id, note).unwrap());
+    }
+    barrier(&session).unwrap();
+    let answer: Value =
+        serde_json::from_slice(&fs::read(root.path().join("answer.json")).unwrap()).unwrap();
+    assert_eq!(answer["response"]["response"], expected);
     session.stop();
 }
 

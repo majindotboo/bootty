@@ -218,7 +218,7 @@ impl NativeAgentSessionView {
                         move || format!("native-compaction-{id}")
                     })
                     .w_full()
-                    .max_w(gpui_kit::rems(48.))
+                    .max_w(self.column_width())
                     .min_w_0()
                     .p_3()
                     .border_1()
@@ -338,10 +338,11 @@ impl NativeAgentSessionView {
         }
     }
 
-    // All loaded turns fit one strip; the transcript remains the only scroll owner.
+    // All loaded turns fit one strip; the transcript remains the only scroll owner. The gutter is
+    // reserved for any conversation with messages, so a second turn doesn't move the column.
     pub(super) fn render_history_gutter(
         &self,
-        _: &gpui_kit::Window,
+        window: &gpui_kit::Window,
         cx: &Context<Self>,
     ) -> gpui_kit::Div {
         use num_traits::ToPrimitive as _;
@@ -351,37 +352,52 @@ impl NativeAgentSessionView {
             .iter()
             .rposition(|(row, _, _)| *row <= top);
         let count = self.history_turns.len().to_f32().unwrap_or(1.);
+        let previewed = self
+            .hovered_turn
+            .or_else(|| active.filter(|_| self.history_rail_focus.contains_focused(window, cx)));
         div()
-            .w(gpui_kit::rems(if self.history_turns.len() > 1 {
-                2.25
-            } else {
+            .w(gpui_kit::rems(if self.timeline.is_empty() {
                 0.
+            } else {
+                2.25
             }))
             .flex_shrink_0()
             .min_h_0()
+            .pt_6()
             .flex()
             .flex_col()
-            .justify_center()
             .when(self.history_turns.len() > 1, |gutter| {
                 gutter.child(
                     div()
                         .id("native-history-rail")
                         .debug_selector(|| "native-history-rail".into())
+                        .track_focus(&self.history_rail_focus)
                         .relative()
                         .flex()
                         .flex_col()
-                        .h(gpui_kit::rems((count * 0.5).min(20.)))
+                        // At least 1rem a turn, so each is easy to point at.
+                        .h(gpui_kit::rems(count.min(24.)))
                         .max_h_full()
                         .min_h_0()
+                        .on_key_down(cx.listener(
+                            move |this, event: &gpui_kit::KeyDownEvent, _, cx| {
+                                if this.history_rail_key(&event.keystroke.key, active, cx) {
+                                    cx.stop_propagation();
+                                }
+                            },
+                        ))
                         .children(self.history_turns.iter().enumerate().map(
-                            |(ix, (_, id, preview))| self.history_turn(ix, id, preview, active, cx),
+                            |(ix, (_, id, preview))| {
+                                Self::history_turn(ix, id, preview, active, previewed, cx)
+                            },
                         ))
                         .when_some(
-                            self.hovered_turn
+                            previewed
                                 .and_then(|ix| self.history_turns.get(ix).map(|turn| (ix, turn))),
                             |rail, (ix, (_, _, preview))| {
                                 rail.child(gpui_kit::deferred(
                                     div()
+                                        .debug_selector(move || format!("history-preview:{ix}"))
                                         .absolute()
                                         .left(gpui_kit::rems(2.25))
                                         .top(gpui_kit::relative(ix.to_f32().unwrap_or(0.) / count))
@@ -407,15 +423,35 @@ impl NativeAgentSessionView {
             })
     }
 
+    /// Arrow keys pick a turn on the focused rail, Enter jumps to it, and Escape leaves it.
+    fn history_rail_key(
+        &mut self,
+        key: &str,
+        active: Option<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let last = self.history_turns.len().saturating_sub(1);
+        let current = self.hovered_turn.or(active).unwrap_or(0);
+        match key {
+            "up" => self.hovered_turn = Some(current.saturating_sub(1)),
+            "down" => self.hovered_turn = Some(current.saturating_add(1).min(last)),
+            "enter" => self.jump_to_turn(current, cx),
+            "escape" => self.hovered_turn = None,
+            _ => return false,
+        }
+        cx.notify();
+        true
+    }
+
     fn history_turn(
-        &self,
         ix: usize,
         id: &str,
         preview: &SharedString,
         active: Option<usize>,
+        previewed: Option<usize>,
         cx: &Context<Self>,
     ) -> Button {
-        let highlighted = self.hovered_turn == Some(ix) || active == Some(ix);
+        let highlighted = previewed == Some(ix) || active == Some(ix);
         Button::new(SharedString::from(format!("history-turn:{id}")))
             .debug_selector({
                 let id = id.to_owned();
@@ -428,6 +464,7 @@ impl NativeAgentSessionView {
             .border_0()
             .w(gpui_kit::rems(2.25))
             .p_0()
+            .tab_stop(false)
             .accessibility_label(format!(
                 "Jump to turn {}: {}",
                 ix.saturating_add(1),
@@ -435,20 +472,22 @@ impl NativeAgentSessionView {
             ))
             .child(
                 div()
-                    .h(gpui_kit::rems(0.125))
-                    .w(gpui_kit::rems(if highlighted { 1.5 } else { 0.5 }))
+                    .h(gpui_kit::rems(0.1875))
+                    .w(gpui_kit::rems(if highlighted { 1.5 } else { 0.75 }))
                     .rounded_full()
                     .bg(cx
                         .theme()
                         .foreground
-                        .opacity(if highlighted { 0.8 } else { 0.3 })),
+                        .opacity(if highlighted { 0.8 } else { 0.35 })),
             )
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                 this.hovered_turn = hovering.then_some(ix);
                 cx.notify();
             }))
-            .on_click(cx.listener(move |this, _, _, cx| {
+            // The rail keeps focus, so the arrow keys go on from the turn picked.
+            .on_click(cx.listener(move |this, _, window, cx| {
                 this.jump_to_turn(ix, cx);
+                this.history_rail_focus.focus(window, cx);
             }))
     }
 
@@ -766,7 +805,7 @@ impl NativeAgentSessionView {
             .child(
                 div()
                     .w_full()
-                    .max_w(gpui_kit::rems(48.))
+                    .max_w(self.column_width())
                     .min_w_0()
                     .child(content),
             )

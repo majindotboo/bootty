@@ -68,7 +68,7 @@ impl AppState {
             .focused_terminal_runtime(&destination.pane)
             && let Err(error) = runtime.write_input(bytes)
         {
-            self.record_error(error);
+            self.record_error("Could not answer the terminal", error);
         }
     }
     pub(super) fn apply_image_clipboard(
@@ -242,7 +242,7 @@ impl AppState {
             } else {
                 match result {
                     Err(error) => {
-                        self.record_error(error);
+                        self.record_error("Could not copy the image", error);
                         "EINVAL"
                     }
                     Ok(image) => match arboard::Clipboard::new()
@@ -250,7 +250,7 @@ impl AppState {
                     {
                         Ok(()) => "DONE",
                         Err(error) => {
-                            self.record_error(error);
+                            self.record_error("Could not copy the image", error);
                             "EIO"
                         }
                     },

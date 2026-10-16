@@ -54,7 +54,10 @@ impl AppState {
                 {
                     effects.push(AppEffect::OpenSetting(id));
                 } else {
-                    self.record_error(format!("Unknown setting: {id}"));
+                    self.record_error(
+                        "Could not open the setting",
+                        format!("Unknown setting: {id}"),
+                    );
                 }
             }
             KeybindAction::SettleSession => {
@@ -87,7 +90,7 @@ impl AppState {
                     .terminal_mut()
                     .write_input(&bytes)
                 {
-                    self.record_error(error);
+                    self.record_error("Could not send keys to the terminal", error);
                 } else {
                     self.hide_mouse_pointer_for_terminal_typing(effects);
                 }
@@ -143,13 +146,13 @@ impl AppState {
             AppAction::AgentHistory => {
                 let outcome = self.open_agent_history();
                 if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                    self.record_error(message);
+                    self.record_error("Could not open agent history", message);
                 }
             }
             AppAction::ResumeAgentSession(provider) => {
                 let outcome = self.open_saved_agent_session(provider);
                 if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                    self.record_error(message);
+                    self.record_error("Could not resume the agent session", message);
                 }
             }
 
@@ -283,7 +286,7 @@ impl AppState {
             .terminal_interaction
             .enter_copy_mode(self.workspace.active.binding.terminal_mut());
         if let Some(error) = outcome.last_error {
-            self.record_error(error);
+            self.last_error = Some(error);
         }
         effects.extend(outcome.effects);
     }
@@ -296,7 +299,7 @@ impl AppState {
             .terminal_interaction
             .copy_selection_or_request(self.workspace.active.binding.terminal_mut(), format);
         if let Some(error) = outcome.last_error {
-            self.record_error(error);
+            self.last_error = Some(error);
         }
         effects.extend(outcome.effects);
     }
@@ -342,7 +345,7 @@ impl AppState {
                 None,
                 &self.repaint,
             ) {
-                self.record_error(error);
+                self.record_error("Could not switch sessions", error);
             } else {
                 self.sync_terminal_panes_now();
             }
@@ -413,7 +416,7 @@ impl AppState {
             }
         };
         if let Err(error) = result {
-            self.record_error(error);
+            self.record_error("Could not scroll the terminal", error);
         }
     }
     fn apply_ui_font_size_action(&mut self, action: FontSizeAction, effects: &mut Vec<AppEffect>) {

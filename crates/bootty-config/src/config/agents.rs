@@ -95,6 +95,37 @@ impl ComposerSendShortcut {
     }
 }
 
+/// How wide a conversation's messages run.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum TranscriptWidth {
+    #[default]
+    Normal,
+    Wide,
+    Full,
+}
+
+impl TranscriptWidth {
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Wide => "wide",
+            Self::Full => "full",
+        }
+    }
+
+    /// The column's width in rems, or `None` for the full width of the view.
+    #[must_use]
+    pub const fn rems(self) -> Option<f32> {
+        match self {
+            Self::Normal => Some(48.),
+            Self::Wide => Some(72.),
+            Self::Full => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum FollowUpBehavior {
@@ -256,6 +287,8 @@ pub struct AgentProvidersConfig {
     pub send_shortcut: ComposerSendShortcut,
     #[serde(rename = "response-streaming")]
     pub response_streaming: ResponseStreaming,
+    #[serde(rename = "transcript-width")]
+    pub transcript_width: TranscriptWidth,
     #[serde(rename = "collapse-composer-on-scroll")]
     pub collapse_composer_on_scroll: bool,
     pub codex: AgentProviderConfig,
@@ -272,6 +305,7 @@ impl Default for AgentProvidersConfig {
             follow_up_behavior: FollowUpBehavior::default(),
             send_shortcut: ComposerSendShortcut::default(),
             response_streaming: ResponseStreaming::default(),
+            transcript_width: TranscriptWidth::default(),
             collapse_composer_on_scroll: true,
             codex: AgentProviderConfig::default(),
             claude: AgentProviderConfig::default(),
