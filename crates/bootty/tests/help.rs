@@ -80,5 +80,5 @@ fn explicit_command_documents_its_target_option() {
     let help = Cli::try_parse_from(["bootty", "command", "--help"])
         .expect_err("command help exits through clap")
         .to_string();
-    assert!(help.contains("--target <HANDLE@GENERATION>"), "{help}");
+    assert!(help.contains("--target <HANDLE@GENERATION|NAME>"), "{help}");
 }

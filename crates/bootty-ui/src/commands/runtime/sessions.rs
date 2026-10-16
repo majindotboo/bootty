@@ -227,8 +227,13 @@ impl AppState {
         exact_target: Option<ExactMuxTarget>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        if action == SessionAction::SettleCurrent {
-            return self.settle_captured_session(exact_target, execution);
+        if matches!(
+            action,
+            SessionAction::SettleCurrent
+                | SessionAction::TogglePinCurrent
+                | SessionAction::ArchiveCurrent
+        ) {
+            return self.change_captured_session(action, exact_target, execution);
         }
         // Native panes whose processes end once their topology close succeeds.
         let mut closed_native_panes = Vec::new();
@@ -533,30 +538,37 @@ impl AppState {
         )
     }
 
-    fn settle_captured_session(
+    /// Applies a current-session action to the saved identity behind the issued Session target.
+    fn change_captured_session(
         &mut self,
+        action: SessionAction,
         exact_target: Option<ExactMuxTarget>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
         let Some(ExactMuxTarget::Session(scope, session)) = exact_target else {
             return self.reject_command(CommandOutcome::Denied {
-                message: "Settle requires an issued Session target".to_owned(),
+                message: "This action requires an issued Session target".to_owned(),
             });
         };
-        let Some(identity) = self
+        let saved = self
             .workspace
             .session_identity(scope, &session)
-            .filter(|identity| {
-                self.workspace
-                    .binding(scope)
-                    .is_some_and(|binding| binding.sessions().get(identity).is_some())
-            })
-        else {
+            .and_then(|identity| {
+                let saved = self.workspace.binding(scope)?.sessions().get(&identity)?;
+                Some((identity, saved.state.pinned))
+            });
+        let Some((identity, pinned)) = saved else {
             return self.reject_command(CommandOutcome::Denied {
-                message: "This session has no saved work to settle".to_owned(),
+                message: "This session has no saved work".to_owned(),
             });
         };
-        self.saved_session_metadata(SessionAction::Settle, scope, &[identity], execution)
+        let change = match action {
+            SessionAction::TogglePinCurrent if pinned => SessionAction::Unpin,
+            SessionAction::TogglePinCurrent => SessionAction::Pin,
+            SessionAction::ArchiveCurrent => SessionAction::Archive,
+            _ => SessionAction::Settle,
+        };
+        self.saved_session_metadata(change, scope, &[identity], execution)
     }
 
     fn dispatch_session_create(
@@ -682,6 +694,42 @@ impl AppState {
             ExactMuxTarget::Binding(scope).command_target(ResourceKind::Binding, mux, &handle);
         invocation.target.as_ref()?;
         Some(invocation)
+    }
+
+    /// Offers to bring an archived session back. Sessions archived together, before the offer
+    /// shows, come back together.
+    pub(super) fn offer_unarchive(&mut self, scope: SpaceId, identity: String) {
+        let Some(label) = self
+            .workspace
+            .binding(scope)
+            .and_then(|binding| binding.sessions().get(&identity))
+            .map(|saved| saved.label().to_owned())
+        else {
+            return;
+        };
+        let Some(undo) = self.saved_session_invocation(scope, "session.unarchive", vec![identity])
+        else {
+            return;
+        };
+        let mut offer = self
+            .undo_offer
+            .take()
+            .filter(|offer| {
+                offer
+                    .undo
+                    .iter()
+                    .all(|undo| undo.command == "session.unarchive")
+            })
+            .unwrap_or_else(|| crate::state::UndoOffer {
+                message: String::new(),
+                undo: Vec::new(),
+            });
+        offer.undo.push(undo);
+        offer.message = match offer.undo.len() {
+            1 => format!("Archived “{label}”"),
+            count => format!("Archived {count} sessions"),
+        };
+        self.undo_offer = Some(offer);
     }
 
     /// Capture the exact saved destination before input can complete on a worker.

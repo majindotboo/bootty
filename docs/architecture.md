@@ -294,6 +294,13 @@ silently retarget a command.
 
 Detached tasks and event subscriptions use opaque owner-local capability IDs.
 
+`bootty-control::short_name` derives the short names, like `bootty-7c`, that people
+write for saved sessions and native conversations: the project folder's name and the
+start of a hash of the logical identity. Names are derived, never stored. A target
+written as a name resolves once, at dispatch, to the exact target and its current
+generation; conversation commands search `bootty-agents`, other commands search the
+saved sessions of every binding.
+
 ## Agents
 
 `bootty-agents::TerminalAgentService` owns native Pi, Codex and Claude observation,
@@ -398,6 +405,11 @@ once the turn can take it, or sends it as the next turn's message. Provider reje
 preserves the active turn and the composer draft. Context occupancy is
 shown only from reported token counts and provider-advertised capacity. File
 changes render the provider's diff rather than its raw JSON envelope.
+The live transcript keeps at most 256 items and 1 MiB, keeping user prompts as turn
+boundaries, and counts the items it lets go. History pages merge with it in the
+provider's order, so a reply the live view dropped stays between the prompts it
+kept; the conversation view reads the latest page again each time the live view
+lets go of half a page more.
 Pi history uses bounded seekable reads on its captured host and rejects files outside
 the captured account's session store. Source revisions are checked across pages.
 Pi's persisted parent tool results restore their bounded nested execution details;

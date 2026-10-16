@@ -734,6 +734,24 @@ impl NativeAgentSession {
         &self.config
     }
 
+    /// Moves on from a failed turn while the provider still runs, so the conversation takes its
+    /// next message; the failure stays in the transcript. Says whether there was one.
+    pub(crate) fn acknowledge_failure(&self) -> bool {
+        if self.closing.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut snapshot = lock(&self.snapshot);
+        if snapshot.status != NativeSessionStatus::Error {
+            return false;
+        }
+        snapshot.status = NativeSessionStatus::Idle;
+        snapshot.error = None;
+        snapshot.changed();
+        drop(snapshot);
+        publish_change(&self.change_handler);
+        true
+    }
+
     /// # Errors
     /// Returns validation, transport, timeout or first-hand provider rejection errors.
     pub fn send_prompt(&self, message: &str) -> Result<(), String> {
@@ -1141,6 +1159,7 @@ impl NativeAgentSession {
             let now = Some(chrono::Utc::now().timestamp_millis());
             snapshot
                 .with_message_times((now, now), |snapshot| snapshot.prompt_message(&id, prompt))?;
+            snapshot.mark_steered([id.as_str()]);
             snapshot.changed();
             drop(snapshot);
             (turn, id)

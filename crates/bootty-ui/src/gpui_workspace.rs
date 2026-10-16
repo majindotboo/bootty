@@ -115,6 +115,17 @@ fn gpui_color(color: crate::gpui::chrome::Rgba) -> Hsla {
 
 struct BoottyErrorNotification;
 
+struct BoottyUndoNotification;
+
+/// What the sidebar asked for that the workspace finishes later.
+#[derive(Default)]
+struct SidebarRequests {
+    /// A conversation to fork, started once a window is at hand.
+    side_chat: Option<bootty_control::CommandTarget>,
+    /// Counts searches, so a slower earlier one never replaces a newer one's results.
+    search: u64,
+}
+
 fn schedule_focus<T: 'static>(focus: FocusHandle, window: &Window, cx: &mut Context<T>) {
     cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
 }
@@ -266,6 +277,7 @@ pub struct GpuiWorkspace {
     display_id: Option<u32>,
     _chrome_subscription: Subscription,
     pending_window_move: bool,
+    sidebar_requests: SidebarRequests,
     pending_effects: Vec<AppEffect>,
     scheduled_repaint: Option<Instant>,
     scheduled_maintenance: Option<Instant>,
@@ -294,6 +306,10 @@ impl GpuiWorkspace {
         cx: &mut App,
     ) -> Result<(AnyWindowHandle, Entity<Self>)> {
         let options = crate::platform::native_options_for_config(&config, cx);
+        // Every window shares one stash of prompts put aside.
+        if !cx.has_global::<crate::prompt_stash::PromptStash>() {
+            cx.set_global(crate::prompt_stash::PromptStash::open(&config.config_path));
+        }
         // Prepare fallible state before GPUI's infallible entity constructor publishes a view.
         // The bounded wake channel retains work that arrives before the window subscribes.
         let (repaint_tx, repaint_rx) = async_channel::bounded(1);
@@ -429,6 +445,7 @@ impl GpuiWorkspace {
             last_background_material: None,
             _chrome_subscription: chrome_subscription,
             pending_window_move: false,
+            sidebar_requests: SidebarRequests::default(),
             pending_effects: Vec::new(),
             scheduled_repaint: None,
             scheduled_maintenance: None,
@@ -1431,6 +1448,14 @@ impl GpuiWorkspace {
         }
         if intent == ChromeIntent::StartWindowDrag {
             self.pending_window_move = true;
+        } else if let ChromeIntent::SearchConversations(query) = intent {
+            self.search_conversations(query, cx);
+        } else if let ChromeIntent::ForkConversation(target) = intent {
+            // The fork opens over its source, so the source comes forward first.
+            let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
+            focus.target = Some(target.clone());
+            self.state.commands.queue(focus);
+            self.sidebar_requests.side_chat = Some(target);
         } else {
             self.pending_effects
                 .extend(chrome_frame::apply(&mut self.state, intent));
@@ -1674,6 +1699,11 @@ impl GpuiWorkspace {
                     host,
                 } => self.open_git_changes(scope, target, directory, host, window, cx),
                 AppEffect::OpenFiles(request) => self.open_files(request, window, cx),
+                AppEffect::RevealPath(path) => cx.reveal_path(&path),
+                AppEffect::OpenInEditor { editor, path } => Self::open_in_editor(editor, path, cx),
+                AppEffect::AddSelectionToConversation => {
+                    self.add_selection_to_conversation(window, cx);
+                }
                 AppEffect::ChooseProjectDirectory(target) => {
                     Self::choose_project_directory(target, window, cx);
                 }
@@ -1754,6 +1784,9 @@ impl GpuiWorkspace {
     }
 
     fn focus_terminal_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving the sidebar lets go of sessions chosen together there.
+        self.chrome_view
+            .update(cx, GpuiChrome::clear_sidebar_selection);
         if self.sync_selected_native_pane(window, cx) {
             if let Some(view) = self.native_conversation_view(cx) {
                 view.focus_handle(cx).focus(window, cx);
@@ -2412,6 +2445,105 @@ impl GpuiWorkspace {
             }
             None => window.remove_notification::<BoottyErrorNotification>(cx),
         }
+    }
+
+    /// Finds the conversations that mention the sidebar's search, once typing pauses, off the UI
+    /// thread.
+    fn search_conversations(&mut self, query: String, cx: &mut Context<Self>) {
+        self.sidebar_requests.search = self.sidebar_requests.search.wrapping_add(1);
+        let search = self.sidebar_requests.search;
+        let Some(service) = self
+            .state
+            .native_agent_service()
+            .filter(|_| !query.is_empty())
+        else {
+            self.chrome_view.update(cx, |chrome, cx| {
+                chrome.set_conversation_matches(Vec::new(), cx);
+            });
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+            if this
+                .read_with(cx, |this, _| this.sidebar_requests.search != search)
+                .unwrap_or(true)
+            {
+                return;
+            }
+            let matches = cx
+                .background_executor()
+                .spawn(async move { service.search(&query) })
+                .await;
+            _ = this.update(cx, |this, cx| {
+                if this.sidebar_requests.search == search {
+                    this.chrome_view.update(cx, |chrome, cx| {
+                        chrome.set_conversation_matches(matches, cx);
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Hands a local path to an installed editor off the UI thread, and says when it refuses.
+    fn open_in_editor(editor: &'static str, path: std::path::PathBuf, cx: &Context<Self>) {
+        let Some(editor) = crate::editors::find(editor) else {
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_executor()
+                .spawn(async move { editor.open(&path) })
+                .await;
+            if let Err(error) = opened {
+                _ = this.update(cx, |this, cx| {
+                    this.state
+                        .record_error(&format!("Could not open it in {}", editor.name), error);
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Shows a change the person just made with a button that reverses it. A newer change
+    /// replaces the offer.
+    fn sync_undo_notification(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(offer) = self.state.take_undo_offer() else {
+            return;
+        };
+        let workspace = cx.weak_entity();
+        let message = gpui_kit::SharedString::from(offer.message);
+        window.push_notification(
+            Notification::new()
+                .content(move |_, _, _| {
+                    gpui_kit::div()
+                        .text_sm()
+                        .child(message.clone())
+                        .into_any_element()
+                })
+                .action(move |_, _, _| {
+                    let workspace = workspace.clone();
+                    let undo = offer.undo.clone();
+                    gpui_kit::component::button::Button::new("undo-change")
+                        .label("Undo")
+                        .on_click(move |_, window, cx| {
+                            _ = workspace.update(cx, |workspace, cx| {
+                                for undo in &undo {
+                                    workspace.state.commands.queue(undo.clone());
+                                }
+                                cx.notify();
+                            });
+                            window.remove_notification::<BoottyUndoNotification>(cx);
+                        })
+                })
+                .id::<BoottyUndoNotification>()
+                // After the action, which turns hiding off; hovering holds it open.
+                .autohide(true),
+            cx,
+        );
     }
 
     fn sync_dialog_overlay(
@@ -3895,6 +4027,7 @@ impl GpuiWorkspace {
     fn sync_frame_overlays(&mut self, colors: Colors, window: &mut Window, cx: &mut Context<Self>) {
         let error = self.state.last_error();
         self.sync_error_notification(error, window, cx);
+        self.sync_undo_notification(window, cx);
         let projection = self.state.dialog_projection().or_else(|| {
             self.state
                 .terminal_find_projection()
@@ -4086,6 +4219,9 @@ impl Render for GpuiWorkspace {
         if self.pending_window_move {
             self.pending_window_move = false;
             window.start_window_move();
+        }
+        if let Some(target) = self.sidebar_requests.side_chat.take() {
+            self.start_side_chat(&target, window, cx);
         }
         if let Some(tools) = &self.tools {
             let browser_visible = (self.state.dialog_projection().is_none()

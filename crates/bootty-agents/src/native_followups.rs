@@ -256,15 +256,75 @@ impl NativeAgentService {
         )
     }
 
-    /// Let a conversation's paused messages send again, in order.
+    /// Let a conversation's paused messages send again, in order, including after a failed turn.
     /// # Errors
     /// Returns catalog persistence failures.
     pub fn resume_followups(&self, target: &CommandTarget) -> Result<(), String> {
+        // Resuming after a failed turn moves on from it, without restarting the provider.
+        if let Ok(session) = self.resolve(target) {
+            session.acknowledge_failure();
+        }
         self.set_waiting_followups(
             target,
             NativeQueuedMessageStatus::Paused,
             NativeQueuedMessageStatus::Queued,
         )
+    }
+
+    /// Moves a waiting message one place earlier or later among its conversation's messages.
+    /// # Errors
+    /// Rejects stale targets, a message already being sent, or one at the end it moves toward.
+    pub fn move_followup(
+        &self,
+        target: &CommandTarget,
+        id: &str,
+        earlier: bool,
+    ) -> Result<(), String> {
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        if !candidate
+            .records
+            .iter()
+            .any(|record| record.target() == *target)
+        {
+            return Err("Native session target is stale".into());
+        }
+        let positions: Vec<usize> = candidate
+            .followups
+            .iter()
+            .enumerate()
+            .filter(|(_, input)| input.session == target.handle)
+            .map(|(position, _)| position)
+            .collect();
+        let at = positions
+            .iter()
+            .position(|position| {
+                candidate
+                    .followups
+                    .get(*position)
+                    .is_some_and(|input| input.id == id)
+            })
+            .ok_or("Queued message is no longer available")?;
+        let neighbor = if earlier {
+            at.checked_sub(1)
+        } else {
+            at.checked_add(1)
+        };
+        let (Some(&from), Some(&to)) =
+            (positions.get(at), neighbor.and_then(|at| positions.get(at)))
+        else {
+            return Err("This message can't move further".into());
+        };
+        if [from, to].iter().any(|position| {
+            candidate
+                .followups
+                .get(*position)
+                .is_some_and(|input| input.status == NativeQueuedMessageStatus::Sending)
+        }) {
+            return Err("A message being sent can't move".into());
+        }
+        candidate.followups.swap(from, to);
+        self.commit(candidate)
     }
 
     fn set_waiting_followups(
@@ -415,38 +475,61 @@ impl NativeAgentService {
         let _mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();
         let live = lock(&self.live);
-        let mut seen = std::collections::BTreeSet::new();
-        let (index, delivery) =
-            candidate
-                .followups
-                .iter()
-                .enumerate()
-                .find_map(|(index, input)| {
-                    if !seen.insert(&input.session)
-                        || input.status != NativeQueuedMessageStatus::Queued
-                    {
+        // One message per conversation goes at a time: one being sent or held holds the rest,
+        // while a failed one waits for Retry without holding anything.
+        let mut held = std::collections::BTreeSet::new();
+        let mut failed_turn = None;
+        let claimed = candidate
+            .followups
+            .iter()
+            .enumerate()
+            .find_map(|(index, input)| {
+                match input.status {
+                    NativeQueuedMessageStatus::Failed => return None,
+                    NativeQueuedMessageStatus::Sending | NativeQueuedMessageStatus::Paused => {
+                        held.insert(&input.session);
                         return None;
                     }
-                    let record = candidate
-                        .records
-                        .iter()
-                        .find(|record| record.id == input.session)?;
-                    let session = live.get(&record.id)?;
-                    let snapshot = session.snapshot();
-                    if snapshot.status == NativeSessionStatus::Idle
-                        && session.config.permissions == record.config.permissions
-                    {
-                        Some((index, NativePromptDelivery::Idle))
-                    } else if input.steer
-                        && snapshot.status == NativeSessionStatus::Working
-                        && snapshot.steer_refusal().is_none()
-                    {
-                        Some((index, NativePromptDelivery::Steer))
-                    } else {
-                        None
+                    NativeQueuedMessageStatus::Queued => {}
+                }
+                if !held.insert(&input.session) {
+                    return None;
+                }
+                let record = candidate
+                    .records
+                    .iter()
+                    .find(|record| record.id == input.session)?;
+                let session = live.get(&record.id)?;
+                let snapshot = session.snapshot();
+                if snapshot.status == NativeSessionStatus::Idle
+                    && session.config.permissions == record.config.permissions
+                {
+                    Some((index, NativePromptDelivery::Idle))
+                } else if input.steer
+                    && snapshot.status == NativeSessionStatus::Working
+                    && snapshot.steer_refusal().is_none()
+                {
+                    Some((index, NativePromptDelivery::Steer))
+                } else {
+                    if snapshot.status == NativeSessionStatus::Error {
+                        failed_turn.get_or_insert_with(|| record.id.clone());
                     }
-                })?;
+                    None
+                }
+            });
         drop(live);
+        // A failed turn holds its conversation's queue until the user resumes it.
+        let Some((index, delivery)) = claimed else {
+            if let Some(session) = failed_turn {
+                for input in candidate.followups.iter_mut().filter(|input| {
+                    input.session == session && input.status == NativeQueuedMessageStatus::Queued
+                }) {
+                    input.status = NativeQueuedMessageStatus::Paused;
+                }
+                _ = self.commit(candidate);
+            }
+            return None;
+        };
         let input = candidate.followups.get_mut(index)?;
         input.status = NativeQueuedMessageStatus::Sending;
         let input = input.clone();

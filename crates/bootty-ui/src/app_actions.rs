@@ -28,6 +28,8 @@ pub enum AppAction {
     NewMuxSession,
     ResumeAgentSession(bootty_agents::AgentKind),
     AgentHistory,
+    /// Add the focused document's or terminal's selection to the session's conversation.
+    AddSelectionToConversation,
     NewNativeAgentTab,
     SessionPicker,
     CommandPalette,
@@ -70,9 +72,8 @@ pub enum TerminalFindAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeybindAction {
     OpenSetting(String),
-    SettleSession,
-    /// Interrupt the conversation in the pane the command was issued for.
-    InterruptAgent,
+    /// Queue the command with this id for the session or pane the binding was issued for.
+    Invoke(&'static str),
     App(AppAction),
     Mux(MuxKeyAction),
     Scroll(TerminalScrollAction),
@@ -424,6 +425,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::AddProject => Keybind::App(AppAction::AddProject),
         Binding::NewMuxSession => Keybind::App(AppAction::NewMuxSession),
         Binding::AgentHistory => Keybind::App(AppAction::AgentHistory),
+        Binding::AddSelectionToConversation => Keybind::App(AppAction::AddSelectionToConversation),
         Binding::ResumeCodexSession => Keybind::App(AppAction::ResumeAgentSession(
             bootty_agents::AgentKind::Codex,
         )),
@@ -492,8 +494,10 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
             Keybind::App(AppAction::ChangeAppearance(appearance_mode(choice)))
         }
         Binding::SwitchTheme => Keybind::App(AppAction::SwitchTheme),
-        Binding::SettleSession => Keybind::SettleSession,
-        Binding::InterruptAgent => Keybind::InterruptAgent,
+        Binding::SettleSession => Keybind::Invoke("settle_session"),
+        Binding::TogglePinSession => Keybind::Invoke("toggle_session_pin"),
+        Binding::ArchiveSession => Keybind::Invoke("archive_session"),
+        Binding::InterruptAgent => Keybind::Invoke("interrupt_agent"),
         Binding::RenameSession => Keybind::App(AppAction::RenameSession),
         Binding::CleanWorktrees => Keybind::App(AppAction::CleanWorktrees),
         Binding::MoveSessionToSpace => Keybind::App(AppAction::MoveSessionToSpace),

@@ -818,7 +818,7 @@ fn unbound_command_alt_key_reaches_terminal_input_path() {
     let effects = state.update_frame(frames::frame(
         Instant::now(),
         vec![InputEvent::Key {
-            key: Key::Letter('a'),
+            key: Key::Letter('u'),
             pressed: true,
             repeat: false,
             modifiers: Modifiers {
@@ -845,15 +845,15 @@ fn direct_command_alt_key_writes_exact_kitty_bytes() {
     direct_input_tx
         .send(DirectKeyInput {
             input: KeyInput {
-                key: TerminalKey::A,
+                key: TerminalKey::U,
                 mods: KeyMods {
                     alt: true,
                     command: true,
                     ..KeyMods::default()
                 },
                 repeat: false,
-                utf8: Some("a"),
-                unshifted: Some('a'),
+                utf8: Some("u"),
+                unshifted: Some('u'),
             },
         })
         .expect("queue direct GPUI-equivalent input");
@@ -873,7 +873,7 @@ fn direct_command_alt_key_writes_exact_kitty_bytes() {
     wait_for_pane_hex(
         &mut state,
         &pane,
-        &["1b", "5b", "39", "37", "3b", "31", "31", "75"],
+        &["1b", "5b", "31", "31", "37", "3b", "31", "31", "75"],
     );
 }
 

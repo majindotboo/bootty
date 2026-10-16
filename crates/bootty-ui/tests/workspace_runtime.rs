@@ -648,7 +648,16 @@ fn submit_command(
     invocation: CommandInvocation,
     started: Instant,
 ) -> CommandOutcome {
-    let commands = state.app_command_sender(Caller::Socket);
+    submit_command_as(state, invocation, Caller::Socket, started)
+}
+
+fn submit_command_as(
+    state: &mut AppState,
+    invocation: CommandInvocation,
+    caller: Caller,
+    started: Instant,
+) -> CommandOutcome {
+    let commands = state.app_command_sender(caller);
     let (response, outcomes) = mpsc::channel();
     commands
         .try_send(AppCommandRequest {
@@ -4942,8 +4951,9 @@ fn saved_retry_cannot_claim_an_identity_owned_by_another_space(directory: assert
 }
 
 #[rstest]
-fn contextual_settle_uses_the_issued_saved_session_and_preserves_other_space_focus(
+fn current_session_actions_use_the_issued_saved_session_and_preserve_other_space_focus(
     directory: assert_fs::TempDir,
+    #[values("settle_session", "toggle_session_pin", "archive_session")] command: &str,
     #[values(false, true)] inactive: bool,
     #[values(false, true)] stale: bool,
 ) {
@@ -4980,9 +4990,9 @@ fn contextual_settle_uses_the_issued_saved_session_and_preserves_other_space_foc
     }
     let focus = state.mux_scope();
     let processes = sessions.lock().unwrap().clone();
-    let mut invocation = CommandInvocation::from_action("settle_session", Caller::Socket);
+    let mut invocation = CommandInvocation::from_action(command, Caller::Socket);
     invocation.target = Some(target);
-    let outcome = submit_command(&mut state, invocation, Instant::now());
+    let outcome = submit_command(&mut state, invocation.clone(), Instant::now());
     assert_eq!(state.mux_scope(), focus);
     assert_eq!(*sessions.lock().unwrap(), processes);
     assert_eq!(creates.load(Ordering::SeqCst), 0);
@@ -4998,24 +5008,147 @@ fn contextual_settle_uses_the_issued_saved_session_and_preserves_other_space_foc
             matches!(outcome, CommandOutcome::Success { .. }),
             "{outcome:?}"
         );
-        assert_eq!(
-            after[0]["state"]["lifecycle"],
-            serde_json::to_value(SessionLifecycle::Settled).unwrap()
-        );
+        let (field, value) = match command {
+            "settle_session" => (
+                "lifecycle",
+                serde_json::to_value(SessionLifecycle::Settled).unwrap(),
+            ),
+            "toggle_session_pin" => ("pinned", true.into()),
+            _ => ("archived", true.into()),
+        };
+        assert_eq!(after[0]["state"][field], value);
         assert_eq!(after[1], before[1]);
+        if command == "toggle_session_pin" {
+            submit_command(&mut state, invocation, Instant::now());
+            let unpinned = saved_metadata_listing(&mut state, spaces[0].2.clone());
+            assert_eq!(unpinned[0]["state"]["pinned"], false);
+        }
     }
 }
 
 #[rstest]
-fn contextual_settle_without_an_attached_session_is_unavailable_and_keeps_saved_work(
+fn archiving_from_bootty_offers_to_unarchive(
     directory: assert_fs::TempDir,
+    #[values(Caller::Keybinding, Caller::Socket)] caller: Caller,
+) {
+    let mut state = saved_lifecycle_workspace(directory.path(), true).state;
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let before = saved_metadata_listing(&mut state, binding.clone());
+    let outcome = submit_command_as(
+        &mut state,
+        CommandInvocation::from_action("archive_session", caller),
+        caller,
+        Instant::now(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let offer = state.take_undo_offer();
+    // Scripts receive the outcome; only Bootty's own surfaces offer to reverse it.
+    if caller == Caller::Socket {
+        assert_eq!(offer, None);
+        return;
+    }
+    let offer = offer.expect("an offer to unarchive");
+    assert_eq!(
+        offer.message,
+        format!("Archived “{}”", before[0]["title"].as_str().unwrap())
+    );
+    let [undo] = offer.undo.as_slice() else {
+        panic!("one session to unarchive: {:?}", offer.undo);
+    };
+    assert_eq!(
+        (undo.command.as_str(), undo.arguments.clone()),
+        (
+            "session.unarchive",
+            vec![before[0]["identity"].as_str().unwrap().to_owned()]
+        )
+    );
+    assert_eq!(state.take_undo_offer(), None, "offered once");
+    let undone = submit_command(&mut state, undo.clone(), Instant::now());
+    assert!(
+        matches!(undone, CommandOutcome::Success { .. }),
+        "{undone:?}"
+    );
+    assert_eq!(saved_metadata_listing(&mut state, binding), before);
+}
+
+/// A session's short name, or any unambiguous start of it, stands for its exact target when
+/// the command runs; a name nothing has says so.
+#[rstest]
+fn session_names_stand_for_their_targets(directory: assert_fs::TempDir) {
+    use bootty_mux::session_membership::SessionLifecycle;
+    let mut state = saved_lifecycle_workspace(directory.path(), true).state;
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let full = bootty_control::short_name::full_name(directory.path(), "saved");
+    let short = full.get(..full.len().saturating_sub(4)).unwrap().to_owned();
+    let settle = |handle: &str| CommandInvocation {
+        target: Some(bootty_control::CommandTarget {
+            kind: bootty_control::ResourceKind::Session,
+            handle: handle.to_owned(),
+            generation: 0,
+        }),
+        ..CommandInvocation::from_action("settle_session", Caller::Socket)
+    };
+    let missing = submit_command(&mut state, settle("nothing-1234"), Instant::now());
+    assert!(
+        matches!(&missing, CommandOutcome::StaleTarget { message } if message.contains("nothing-1234")),
+        "{missing:?}"
+    );
+    let outcome = submit_command(&mut state, settle(&short), Instant::now());
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let saved = saved_metadata_listing(&mut state, binding);
+    let settled = saved
+        .iter()
+        .find(|session| session["identity"] == "saved")
+        .unwrap();
+    assert_eq!(
+        settled["state"]["lifecycle"],
+        serde_json::to_value(SessionLifecycle::Settled).unwrap()
+    );
+}
+
+/// Sessions archived together come back together.
+#[rstest]
+fn archiving_several_sessions_offers_to_unarchive_them_all(directory: assert_fs::TempDir) {
+    let mut state = saved_lifecycle_workspace(directory.path(), true).state;
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let before = saved_metadata_listing(&mut state, binding.clone());
+    for saved in &before {
+        let archive = targeted(
+            "session.archive",
+            vec![saved["identity"].as_str().unwrap().to_owned()],
+            binding.clone(),
+        );
+        let outcome = submit_command_as(&mut state, archive, Caller::Internal, Instant::now());
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{outcome:?}"
+        );
+    }
+    let offer = state.take_undo_offer().expect("an offer to unarchive");
+    assert_eq!(offer.message, format!("Archived {} sessions", before.len()));
+    for undo in offer.undo {
+        submit_command(&mut state, undo, Instant::now());
+    }
+    assert_eq!(saved_metadata_listing(&mut state, binding), before);
+}
+
+#[rstest]
+fn current_session_actions_without_an_attached_session_are_unavailable_and_keep_saved_work(
+    directory: assert_fs::TempDir,
+    #[values("settle_session", "toggle_session_pin", "archive_session")] command: &str,
 ) {
     let mut state = saved_lifecycle_workspace(directory.path(), false).state;
     let binding = listed_spaces(&mut state)[0].2.clone();
     let before = saved_metadata_listing(&mut state, binding.clone());
     let outcome = submit_command(
         &mut state,
-        CommandInvocation::from_action("settle_session", Caller::Socket),
+        CommandInvocation::from_action(command, Caller::Socket),
         Instant::now(),
     );
     assert!(

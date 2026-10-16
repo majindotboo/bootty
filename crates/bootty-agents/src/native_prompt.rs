@@ -174,6 +174,8 @@ pub struct NativePrompt {
     applications: Vec<crate::NativeApplicationMention>,
     provider_mentions: Vec<crate::NativeProviderMention>,
     history_context: Option<String>,
+    /// Other conversations the message mentions, quoted for the provider only.
+    mentioned_conversations: Option<String>,
 }
 
 /// Private catalog payload. Restore attachment bytes through their owning store;
@@ -188,6 +190,8 @@ pub struct SavedNativePrompt {
     applications: Vec<crate::NativeApplicationMention>,
     #[serde(default)]
     provider_mentions: Vec<crate::NativeProviderMention>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mentioned_conversations: Option<String>,
 }
 
 impl SavedNativePrompt {
@@ -218,6 +222,7 @@ impl SavedNativePrompt {
             citations: prompt.citations.clone(),
             applications: prompt.applications.clone(),
             provider_mentions: prompt.provider_mentions.clone(),
+            mentioned_conversations: prompt.mentioned_conversations.clone(),
         }
     }
 
@@ -249,7 +254,8 @@ impl SavedNativePrompt {
         )?
         .with_applications(self.applications.clone())?
         .with_provider_mentions(self.provider_mentions.clone())?
-        .with_authored_prefix(self.authored_bytes)
+        .with_authored_prefix(self.authored_bytes)?
+        .with_mentioned_conversations(self.mentioned_conversations.clone())
     }
 }
 
@@ -298,6 +304,7 @@ impl NativePrompt {
             applications: Vec::new(),
             provider_mentions: Vec::new(),
             history_context: None,
+            mentioned_conversations: None,
         }
         .with_attachments(attachments)?;
         if prompt.text.is_empty()
@@ -736,6 +743,16 @@ impl NativePrompt {
         }
     }
 
+    /// Quotes other conversations the message mentions, for the provider; the transcript keeps
+    /// the message as written.
+    /// # Errors
+    /// Rejects a quote that doesn't fit the provider message.
+    pub fn with_mentioned_conversations(mut self, quoted: Option<String>) -> Result<Self, String> {
+        self.mentioned_conversations = quoted.filter(|quoted| !quoted.is_empty());
+        self.provider_message()?;
+        Ok(self)
+    }
+
     pub(crate) fn with_history(&self, history: String) -> Result<Self, String> {
         if history.len() > 2 * 1024 * 1024 {
             return Err("The conversation exceeds the side-chat context limit".into());
@@ -766,6 +783,11 @@ impl NativePrompt {
             message.push_str("\n</application_mentions>");
         }
         crate::native_citations::append_citation_context(&mut message, &self.citations)?;
+        if let Some(quoted) = &self.mentioned_conversations {
+            message.push_str("\n\n<mentioned_conversations>\n");
+            message.push_str(quoted);
+            message.push_str("\n</mentioned_conversations>");
+        }
         for file in &self.files {
             if !message.is_empty() {
                 message.push_str("\n\n");

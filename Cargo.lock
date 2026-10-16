@@ -1026,6 +1026,7 @@ dependencies = [
  "proptest-derive",
  "rmux-ipc",
  "rmux-os",
+ "rstest",
  "serde",
  "serde_json",
  "sysinfo 0.39.6",

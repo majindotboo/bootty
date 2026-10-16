@@ -114,7 +114,7 @@ pub fn command_invocation(
             target = Some(
                 input
                     .next()
-                    .context("--target requires HANDLE@GENERATION")?
+                    .context("--target requires HANDLE@GENERATION or a short name")?
                     .clone(),
             );
         } else {
@@ -152,15 +152,24 @@ pub fn command_invocation(
     })
 }
 
-/// Parses `--target HANDLE@GENERATION` for a described command; both CLI paths share it.
+/// Parses `--target HANDLE@GENERATION`, or a short name like `bootty-7c` that the app resolves
+/// when the command runs, for a described command; both CLI paths share it.
 fn command_target(descriptor: &CommandDescriptor, value: &str) -> Result<CommandTarget> {
+    let kind = descriptor
+        .target
+        .context("command does not accept a target")?;
+    if bootty_control::short_name::is_short_name(value) {
+        return Ok(CommandTarget {
+            kind,
+            handle: value.to_owned(),
+            generation: 0,
+        });
+    }
     let (handle, generation) = value
         .rsplit_once('@')
-        .context("--target requires HANDLE@GENERATION")?;
+        .context("--target requires HANDLE@GENERATION or a short name")?;
     Ok(CommandTarget {
-        kind: descriptor
-            .target
-            .context("command does not accept a target")?,
+        kind,
         handle: handle.to_owned(),
         generation: generation.parse().context("invalid target generation")?,
     })
@@ -263,7 +272,7 @@ fn parse_dynamic_arguments(
             "--target" => {
                 let value = input
                     .next()
-                    .context("--target requires HANDLE@GENERATION")?;
+                    .context("--target requires HANDLE@GENERATION or a short name")?;
                 target = Some(command_target(descriptor, value)?);
             }
             "--stdin-json" => {
@@ -354,7 +363,7 @@ fn print_dynamic_help(path: &str, descriptor: &CommandDescriptor) {
         }
     }
     if descriptor.target.is_some() {
-        println!("  --target HANDLE@GENERATION");
+        println!("  --target HANDLE@GENERATION|NAME");
     }
     if matches!(descriptor.mutation, MutationClass::Destructive) {
         println!("  --yes");

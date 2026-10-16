@@ -26,6 +26,8 @@ pub(super) enum TranscriptRow {
         open: bool,
         live: bool,
     },
+    /// The provider's report that the last turn failed, shown where the turn ended.
+    Failure { error: String },
 }
 impl TranscriptRow {
     pub(super) fn key(&self) -> String {
@@ -33,6 +35,7 @@ impl TranscriptRow {
             // A reply gains its metadata when its turn settles; the new key remeasures it.
             Self::Message { id, meta, .. } => format!("message:{id}:{meta}"),
             Self::Work { id, .. } => format!("work:{id}"),
+            Self::Failure { error } => format!("failure:{error}"),
         }
     }
 }
@@ -56,7 +59,12 @@ pub(super) fn rows(
     let mut rows = Vec::new();
     let mut start = 0;
     for end in 0..=transcript.len() {
-        if end == transcript.len() || transcript.get(end).is_some_and(|item| item.role == "user") {
+        // A steering message stays inside the turn it steered.
+        if end == transcript.len()
+            || transcript
+                .get(end)
+                .is_some_and(|item| item.role == "user" && !item.steered)
+        {
             append_turn(
                 &mut rows,
                 transcript,
@@ -120,15 +128,33 @@ fn append_turn(
             run.push(index);
             continue;
         }
-        push_work_run(rows, transcript, std::mem::take(&mut run), expanded, false);
+        // Work a steering message arrived during can still be running.
+        let running = live && running_tool(transcript, &run);
+        push_work_run(
+            rows,
+            transcript,
+            std::mem::take(&mut run),
+            expanded,
+            running,
+        );
         rows.push(TranscriptRow::Message {
             index,
             id: item.id.clone(),
-            meta: Some(index) == final_message,
+            // A steering message keeps its actions where it sits inside the turn.
+            meta: Some(index) == final_message || item.role == "user",
         });
     }
     // Only the trailing run can still be working.
     push_work_run(rows, transcript, run, expanded, live);
+}
+
+fn running_tool(transcript: &[NativeTranscriptItem], members: &[usize]) -> bool {
+    members.iter().any(|index| {
+        transcript
+            .get(*index)
+            .and_then(|item| item.tool.as_ref())
+            .is_some_and(|tool| tool.status == NativeToolStatus::Running)
+    })
 }
 
 fn is_work(item: &NativeTranscriptItem) -> bool {
@@ -263,10 +289,14 @@ impl NativeAgentSessionView {
     }
 
     pub(super) fn refresh_timeline(&mut self) {
-        let new = rows(
+        let mut new = rows(
             &self.record.snapshot.transcript,
             &self.work_disclosures,
             super::is_busy(self.record.snapshot.status),
+        );
+        new.extend(
+            self.turn_failure()
+                .map(|error| TranscriptRow::Failure { error }),
         );
         let old_keys = self
             .timeline
@@ -314,7 +344,7 @@ impl NativeAgentSessionView {
                     return None;
                 };
                 let message = self.record.snapshot.transcript.get(*index)?;
-                (message.role == "user").then(|| {
+                (message.role == "user" && !message.steered).then(|| {
                     let preview = previews.get(id.as_str()).map_or_else(
                         || {
                             SharedString::from(
@@ -547,6 +577,7 @@ impl NativeAgentSessionView {
                 open,
                 live,
             }) => self.render_work_group(id, members, *open, *live, owner, cx),
+            Some(TranscriptRow::Failure { error }) => self.render_turn_failure(error, owner, cx),
             None => div().into_any_element(),
         }
     }

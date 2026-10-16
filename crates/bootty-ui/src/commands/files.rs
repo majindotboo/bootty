@@ -11,6 +11,20 @@ command_actions! {
         Source => ("files.source", "Open File Source", ["path", "root"], Read),
         Save => ("files.save", "Save Document Revision", ["path", "digest", "content_base64"], Write),
         Format => ("files.format", "Format Document", ["path", "content_base64"], Read),
+        Reveal => ("files.reveal", "Reveal in File Manager", ["path"], Read),
+        OpenIn => ("files.open_in", "Open in Editor", ["path", "editor"], Read),
+    }
+}
+
+/// What this platform calls showing a file in its file manager.
+#[must_use]
+pub const fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(target_os = "windows") {
+        "Show in Explorer"
+    } else {
+        "Show in File Manager"
     }
 }
 
@@ -41,10 +55,18 @@ impl FileAction {
             .collect();
         CommandDescriptor {
             id: id.to_owned(),
-            title: title.to_owned(),
-            description: format!(
-                "{title} on the target binding's host. Paths must be absolute; UTF-8 text documents are limited to 512 KiB. Image/video reads return seekable media metadata. File sources return revision-checked metadata within their captured root."
-            ),
+            title: if self == Self::Reveal {
+                reveal_label().to_owned()
+            } else {
+                title.to_owned()
+            },
+            description: if self == Self::OpenIn {
+                "Open an absolute path on this computer in an installed editor: vscode, cursor, zed, windsurf, sublime, intellij or xcode. A remote host's files are unsupported.".to_owned()
+            } else {
+                format!(
+                    "{title} on the target binding's host. Paths must be absolute; UTF-8 text documents are limited to 512 KiB. Image/video reads return seekable media metadata. File sources return revision-checked metadata within their captured root."
+                )
+            },
             arguments: CompactSchema { arguments },
             mutation,
             target: Some(ResourceKind::Binding),
@@ -81,7 +103,7 @@ impl FileAction {
                 path: path.clone(),
                 content_base64: content.clone(),
             }),
-            (Self::Browse | Self::Open, _) => {
+            (Self::Browse | Self::Open | Self::Reveal | Self::OpenIn, _) => {
                 Err("Opening a file panel requires a window".to_owned())
             }
             _ => Err("Invalid file command arguments".to_owned()),

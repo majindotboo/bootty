@@ -14,6 +14,8 @@ pub struct TerminalHistoryQuery<'a> {
     pub account_directory: &'a Path,
     pub cwd: Option<&'a Path>,
     pub limit: usize,
+    /// Only sessions last updated before this UTC epoch millisecond: the next, older page.
+    pub before: Option<i64>,
 }
 
 /// Provider-owned saved identity and safe metadata; timestamps are UTC epoch milliseconds.
@@ -63,6 +65,19 @@ pub fn title(value: Option<String>) -> Option<String> {
     })
 }
 
+/// A prompt as a one-line title: whitespace collapsed, at most 120 characters.
+pub fn preview_title(text: &str) -> Option<String> {
+    let preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    title(Some(preview.chars().take(120).collect()))
+}
+
+/// Whether a session last updated at `updated_at` belongs on the page before `before`. A
+/// session without a time sorts last, on the first page only.
+#[must_use]
+pub fn before(updated_at: Option<i64>, before: Option<i64>) -> bool {
+    before.is_none_or(|before| updated_at.is_some_and(|updated| updated < before))
+}
+
 pub fn timestamp(value: Option<&str>) -> Option<i64> {
     value
         .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
@@ -90,6 +105,7 @@ pub fn terminal_provider_history(
         AgentKind::Codex => crate::terminal_history_codex::query(query)?,
         AgentKind::Claude | AgentKind::Pi => crate::terminal_history_files::query(query)?,
     };
+    entries.retain(|entry| before(entry.updated_at, query.before));
     let mut identities = BTreeSet::new();
     for entry in &entries {
         if !valid_id(&entry.session_id)

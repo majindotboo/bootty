@@ -354,6 +354,8 @@ pub struct SidebarRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarTask {
     pub identity: String,
+    /// What to call the session in writing, like `bootty-7c`.
+    pub name: String,
     /// The row's title, for confirmations that name the session.
     pub title: String,
     pub native_conversation: Option<bootty_control::CommandTarget>,
@@ -525,7 +527,10 @@ pub enum TabContextAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ChromeIntent {
     Command(bootty_control::CommandInvocation),
-    CustomSnooze(bootty_control::CommandInvocation),
+    /// One action on several sessions, in order.
+    Commands(Vec<bootty_control::CommandInvocation>),
+    /// Snooze these sessions until a time chosen next; each command takes it as its last argument.
+    CustomSnooze(Vec<bootty_control::CommandInvocation>),
     StartWindowDrag,
     ActivateSpace(SpaceKey),
     CreateSpace,
@@ -544,6 +549,28 @@ pub enum ChromeIntent {
     SessionContext {
         target: SessionTarget,
         action: SessionContextAction,
+    },
+    /// Start a side chat from a conversation, with its history so far.
+    ForkConversation(bootty_control::CommandTarget),
+    /// Look for the sidebar's search words inside conversations.
+    SearchConversations(String),
+    /// Put text on the clipboard, such as a session's path or branch.
+    CopyText(String),
+    /// Show a session's directory in the file manager.
+    RevealPath {
+        scope: SpaceKey,
+        path: String,
+    },
+    /// Open a session's directory in the installed editor with this id.
+    OpenInEditor {
+        scope: SpaceKey,
+        path: String,
+        editor: &'static str,
+    },
+    /// Start a new session in a session's project.
+    NewSessionInProject {
+        scope: SpaceKey,
+        path: String,
     },
     ReorderSession {
         source: String,

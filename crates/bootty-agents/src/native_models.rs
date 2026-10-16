@@ -22,6 +22,9 @@ pub struct NativeModelOption {
     /// Advertised by this model's provider catalog; absence does not imply support.
     #[serde(default)]
     pub supports_fast_mode: bool,
+    /// What the provider says fast mode costs or gives, such as "2x speed, increased usage".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_mode_detail: Option<String>,
 }
 
 /// Catalog and effective permissions from the captured provider account and project.
@@ -53,6 +56,20 @@ fn codex_fast_mode(model: &Value) -> bool {
         || field(model, "additionalSpeedTiers")
             .as_array()
             .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"))
+}
+
+/// Codex's description of the fast service tier it advertises for a model.
+fn codex_fast_mode_detail(model: &Value) -> Option<String> {
+    field(model, "serviceTiers")
+        .as_array()?
+        .iter()
+        .find(|tier| field(tier, "id") == "fast" || field(tier, "name") == "Fast")
+        .and_then(|tier| field(tier, "description").as_str())
+        .map(str::trim)
+        .filter(|detail| {
+            !detail.is_empty() && detail.len() <= 128 && !detail.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
 }
 
 impl NativeAgentSession {
@@ -191,6 +208,7 @@ impl NativeAgentSession {
                                 ),
                             is_favorite: false,
                             supports_fast_mode: codex_fast_mode(model),
+                            fast_mode_detail: codex_fast_mode_detail(model),
                         });
                     }
                     if models.len() > 1024 {
@@ -239,6 +257,7 @@ impl NativeAgentSession {
                                 ),
                             is_favorite: false,
                             supports_fast_mode: false,
+                            fast_mode_detail: None,
                         })
                     })
                     .collect()
@@ -472,6 +491,7 @@ pub fn decode_claude(response: &Value) -> Result<Vec<NativeModelOption>, String>
                 default_reasoning_effort: None,
                 is_favorite: false,
                 supports_fast_mode: field(model, "supportsFastMode") == true,
+                fast_mode_detail: None,
             })
         })
         .collect()

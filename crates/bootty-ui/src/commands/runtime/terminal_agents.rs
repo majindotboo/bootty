@@ -574,11 +574,16 @@ pub(super) fn effective_account_directory(
 
 const HISTORY_RESPONSE_MAX_BYTES: usize = 96 * 1024;
 
+/// Sessions in one page of provider history.
+const HISTORY_PAGE: usize = 200;
+
 #[derive(serde::Serialize)]
 struct HistoryEnvelope {
     entries: Vec<bootty_agents::TerminalHistoryEntry>,
     account_directory: std::path::PathBuf,
     omitted_entries: usize,
+    /// A full page, so the provider may have older sessions.
+    more: bool,
 }
 
 fn bounded_history(
@@ -589,6 +594,7 @@ fn bounded_history(
         entries: Vec::new(),
         account_directory,
         omitted_entries: entries.len(),
+        more: entries.len() == HISTORY_PAGE,
     };
     // The initial omitted count reserves enough digits for every retained-entry decision.
     let mut bytes = serde_json::to_vec(&response)
@@ -661,7 +667,14 @@ fn saved_history(
                 program: provider_program(provider, &context.preferences),
                 account_directory: &account,
                 cwd: cwd.map(std::path::Path::new),
-                limit: 200,
+                limit: HISTORY_PAGE,
+                before: invocation
+                    .arguments
+                    .get(3)
+                    .filter(|before| !before.is_empty())
+                    .map(|before| before.parse())
+                    .transpose()
+                    .map_err(|_| "The history page must start at a time in milliseconds")?,
             })?;
         bounded_history(entries, account)
     };

@@ -119,14 +119,21 @@ The selected account, project, task and conversation identity stay captured for
 the lifetime of that conversation. Local and remote conversations use the same
 captured provider protocol; the remote daemon owns the provider process transport.
 A conversation's unsent text and attachment chips are saved with it shortly after
-typing stops, and return when it reopens, including after a restart.
+typing stops, and return when it reopens, including after a restart. The New Session
+form's words and choices are saved beside the configuration, in
+`new-session-draft.json`, a second after they stop changing, and return when the form
+next opens on the same project; pasted files, which live in temporary files, don't.
 A conversation that finishes a turn shows Finished in the sidebar until its pane is
 seen; Mark unread in its row menu shows it again.
 
 The Add menu is shared by creation drafts and existing conversations. It includes
 files, local application windows, and the captured provider's enabled skills.
 Codex also supplies installed callable apps and enabled plugins, with typed
-mentions that remain intact when queued. Plan mode and conversation goals appear
+mentions that remain intact when queued. `@` followed by words also offers other
+conversations, by title or short name; the message keeps the name, and the provider
+reads each mentioned conversation's latest prompts and replies, oldest first, up to
+8 KiB each and four conversations a message. The transcript shows the message as
+written. Plan mode and conversation goals appear
 when advertised by that server. Claude always offers Plan mode, its own permission
 mode; approving Claude's plan leaves it. Goals use Codex's thread goal API; they
 are not added as prompt text. Sketch and skill recording are not supported here yet.
@@ -143,7 +150,10 @@ the provider account's configuration or permission policy.
 The transcript, composer, approval requests and questions live in a selectable
 backend pane beside terminals. Close stops that pane and provider while retaining
 the saved conversation and history. Up in an empty composer brings back the
-conversation's sent messages, newest first, and Down goes forward again.
+conversation's sent messages, newest first, and Down goes forward again. A sent
+message's pencil brings it back to change and send again, with its attachments; its
+browser notes return as notes, screenshots included, while they're still saved, and
+otherwise their text returns with the message.
 Choosing Agent in the split chooser creates its backend pane beside the captured
 parent, in the requested direction. The parent task and window stay unchanged.
 Interrupt cancels its current turn, as does Escape in the composer while a turn
@@ -245,9 +255,11 @@ the shared invocation owner once. A stale destination requires explicit Restart.
 ## Retained sessions and limits
 
 `agents.<provider>.history` reads bounded conversation metadata from the selected
-provider account, scoped to the current project or all projects. Stored titles
-take precedence; Claude and Pi conversations without a title use a short first-user-message
-preview from the bounded file prefix. Discovery does not rewrite or launch a conversation.
+provider account, scoped to the current project or all projects, 200 sessions a
+page; `before`, in UTC epoch milliseconds, asks for the page of sessions last
+updated before it. Stored titles take precedence; conversations without a title use
+a short first-user-message preview: Codex's thread preview, or the bounded file
+prefix for Claude and Pi. Discovery does not rewrite or launch a conversation.
 `resume` and `fork` accept an explicit provider session selector and launch the
 provider's own TUI with its supported native arguments. The provider owns the
 conversation history and displays it in that TUI. The metadata list is not a

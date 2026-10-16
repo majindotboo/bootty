@@ -39,6 +39,16 @@ pub(super) fn failure(message: String) -> CommandOutcome {
     }
 }
 
+/// What to do with a link once it resolves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkUse {
+    Open,
+    /// Show the file in this computer's file manager.
+    Reveal,
+    /// Open the file in the installed editor with this id.
+    Edit(&'static str),
+}
+
 impl AppState {
     pub(crate) fn take_link_forwards(&mut self) -> Vec<Arc<ForwardLease>> {
         self.commands
@@ -53,6 +63,7 @@ impl AppState {
         target: CommandTarget,
         exact: &ExactMuxTarget,
         arguments: &[String],
+        link_use: LinkUse,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
         let scope = exact.scope();
@@ -123,7 +134,56 @@ impl AppState {
             scope,
             target,
             result,
+            link_use,
         })
+    }
+
+    /// Shows a resolved file link in this computer's file manager, or opens it in an editor.
+    pub(super) fn finish_link_on_desktop(
+        &self,
+        scope: SpaceId,
+        link: ResolvedLink,
+        link_use: LinkUse,
+        effects: &mut Vec<AppEffect>,
+    ) -> CommandOutcome {
+        let Some(binding) = self.workspace.binding(scope) else {
+            return CommandOutcome::StaleTarget {
+                message: "Link host was closed".to_owned(),
+            };
+        };
+        match (link, link_use) {
+            (ResolvedLink::Url { .. }, LinkUse::Edit(_)) => {
+                failure("Only files open in an editor".to_owned())
+            }
+            (ResolvedLink::Url { .. }, _) => {
+                failure("Only files can be shown in the file manager".to_owned())
+            }
+            (ResolvedLink::File { .. }, LinkUse::Edit(_))
+                if binding.multiplexer().remote.is_some() =>
+            {
+                CommandOutcome::Unsupported {
+                    message: "A remote host's files can't be opened in this computer's editors"
+                        .to_owned(),
+                }
+            }
+            (ResolvedLink::File { .. }, _) if binding.multiplexer().remote.is_some() => {
+                CommandOutcome::Unsupported {
+                    message: "A remote host's files can't be shown in this computer's file manager"
+                        .to_owned(),
+                }
+            }
+            (ResolvedLink::File { path, .. }, LinkUse::Edit(editor)) => {
+                effects.push(AppEffect::OpenInEditor {
+                    editor,
+                    path: path.into(),
+                });
+                CommandOutcome::success()
+            }
+            (ResolvedLink::File { path, .. }, _) => {
+                effects.push(AppEffect::RevealPath(path.into()));
+                CommandOutcome::success()
+            }
+        }
     }
 
     pub(super) fn finish_link_open(

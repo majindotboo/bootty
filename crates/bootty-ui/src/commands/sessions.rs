@@ -18,6 +18,8 @@ command_actions! {
         Activity => ("session.activity", "Record accepted session activity", ["identity", "at"], Write),
         AcceptedInput => ("session.input_accepted", "Record new session input", ["identity", "at"], Write),
         SettleCurrent => ("settle_session", "Settle Session", [], Write),
+        TogglePinCurrent => ("toggle_session_pin", "Pin or Unpin Session", [], Write),
+        ArchiveCurrent => ("archive_session", "Archive Session", [], Write),
         Settle => ("session.settle", "Settle session", ["identity"], Write),
         Activate => ("session.activate", "Mark session active", ["identity"], Write),
         Archive => ("session.archive", "Archive session", ["identity"], Write),
@@ -81,6 +83,8 @@ impl SessionAction {
             Self::Activity => ("Record accepted input at non-negative absolute UTC seconds no later than the host clock. Preserve newer activity, identity, manual order and attachment.".to_owned(), Some(ResourceKind::Binding)),
             Self::AcceptedInput => ("Record newly accepted input and return settled work to the active list. Preserve newer activity, identity, order and attachment.".to_owned(), Some(ResourceKind::Binding)),
             Self::SettleCurrent => ("Resolve the exact issued session to its saved identity and settle that work without closing a terminal. Reject stale or unsaved sessions.".to_owned(), Some(ResourceKind::Session)),
+            Self::TogglePinCurrent => ("Resolve the exact issued session to its saved identity and pin it, or unpin it when already pinned. Reject stale or unsaved sessions.".to_owned(), Some(ResourceKind::Session)),
+            Self::ArchiveCurrent => ("Resolve the exact issued session to its saved identity and archive that work without closing a terminal. Reject stale or unsaved sessions.".to_owned(), Some(ResourceKind::Session)),
             Self::Settle => ("Mark saved work settled and remove its pin without closing any backend terminal.".to_owned(), Some(ResourceKind::Binding)),
             Self::Activate => ("Mark saved work active without starting or selecting any backend terminal.".to_owned(), Some(ResourceKind::Binding)),
             Self::Archive => ("Archive saved work while retaining its lifecycle, visibility, snooze and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
@@ -135,7 +139,10 @@ impl SessionAction {
             arguments: CompactSchema { arguments },
             mutation,
             target,
-            palette: self == Self::SettleCurrent,
+            palette: matches!(
+                self,
+                Self::SettleCurrent | Self::TogglePinCurrent | Self::ArchiveCurrent
+            ),
         }
     }
 }

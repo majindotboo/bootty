@@ -689,13 +689,27 @@ Each session owns its branch and agent marks; switching views preserves sessions
 selection and terminal contents. Sessions are grouped into Pinned, Sessions and
 Settled. Working and waiting show on the row, so a row and its numbered shortcut
 stay put while its agent works; a settled session that needs an answer returns
-to Sessions. Archive retains saved work; Delete permanently removes a closed
-session's saved record and requires confirmation.
+to Sessions. A session's tooltip shows its short name, like `bootty-7c`, which
+works in place of its target in commands, the CLI and the session switcher; see
+`docs/automation.md`. The search box matches titles, projects, branches, agents and
+short names, and
+finds sessions whose conversations mention the words, showing the line that
+matched; it reads the recent transcript Bootty keeps for each conversation. A
+closed session's row is dimmed and says Closed. Double-click a
+row, or choose **Rename…**, to edit its title in place: Enter or clicking away
+saves it, Escape keeps the old title. A conversation's menu can start a side
+chat from it. Command-click (Control-click on Linux and Windows) chooses several
+sessions and Shift-click a range; right-click one of them to pin, settle, snooze,
+mark unread, archive or delete them together. Escape, a plain click or returning to
+the terminal lets go. Archive retains saved work, asks first
+when the session is working, and offers Undo; Delete permanently removes a
+closed session's saved record and requires confirmation.
 
 Open **Settings → Projects** to add a registered folder, open its settings, or
 remove its registration. Removal preserves files and existing sessions.
-**Project settings…** in the sidebar opens the same page in a named, closeable
-settings tab. Switching tabs preserves drafts; closing an unsaved draft asks
+A project header's actions menu starts a session in the project, reveals or
+copies its path, and opens **Project settings…**, the same page in a named,
+closeable settings tab. Switching tabs preserves drafts; closing an unsaved draft asks
 before discarding it.
 The page edits its name, icon or local image, default agent, and defaults for
 creating worktrees (branch prefix and starting ref).
@@ -726,15 +740,33 @@ every host and reports what each removed and kept. It asks for confirmation from
 the CLI and socket.
 
 `settle_session` settles the exact current saved session without closing its
-terminal. It is available in the palette and keybinding presets; on macOS the
-standard shortcut is `Cmd+Shift+W`. `session.settle` accepts an explicit saved
-identity with its Binding target for detached work and other Spaces.
+terminal. `toggle_session_pin` pins it, or unpins it when already pinned, and
+`archive_session` archives it. All three are in the palette. Every preset binds:
+
+| Command                | macOS         | Linux and Windows  |
+| ---------------------- | ------------- | ------------------ |
+| `agent_history`        | `Cmd+Shift+H` | `Ctrl+Shift+H`     |
+| `toggle_changes_panel` | `Cmd+Shift+G` | `Ctrl+Shift+G`     |
+| `add_selection_to_conversation` | `Cmd+Shift+L` | `Ctrl+Shift+L` |
+| `toggle_session_pin`   | `Cmd+Opt+P`   | `Ctrl+Shift+Alt+P` |
+| `archive_session`      | `Cmd+Opt+A`   | `Ctrl+Shift+Alt+A` |
+
+`add_selection_to_conversation` adds the focused document's selected lines, as an
+`@path:12-18` mention, or the focused terminal's selected text, as a text file
+chip, to the conversation in the current session, and shows it.
+
+Settle is `Cmd+Opt+X` (`Ctrl+Shift+Alt+X`) in the Bootty and tmux presets and
+`Cmd+Shift+W` in the macOS Ghostty preset. `session.settle`, `session.pin` and
+`session.archive` accept an explicit saved identity with its Binding target for
+detached work and other Spaces.
 
 `sidebar.sort-order` defaults to `"manual"`. Choose **Manual** or **Recent activity**
 from the sidebar view menu or Sidebar settings. Recent activity uses persisted
 accepted session input and native prompts; equal or undated sessions keep their
 manual order. The shared commands are `ui.sidebar.sort_manual` and
-`ui.sidebar.sort_recent_activity`.
+`ui.sidebar.sort_recent_activity`. Drag a session to move it, or a project
+header to move all of its sessions. A drop in Recent activity order keeps the
+order shown as the manual order and switches to Manual.
 
 `sidebar.animate-working` defaults to `true`. Turn off **Animate Working ring**
 on the Sidebar settings page to keep the Working ring still. Reduced motion also
@@ -831,6 +863,16 @@ location on the target binding's host. The Files tree expands directories,
 filters loaded entries, shares Git decorations with Changes, and pages large
 directories. Refresh rereads the displayed directory; reopening a directory
 refreshes its children.
+`files.reveal ABSOLUTE_PATH` shows a file on this computer in its file manager
+(Finder on macOS); a remote host's files have no place there. A document's tab,
+a file link in a conversation, a changed file in Changes, and a session in the
+sidebar offer it on right-click, with Copy Path. A session's menu also starts a
+new session in its project and copies its branch.
+`files.open_in ABSOLUTE_PATH EDITOR` opens a file or folder on this computer in an
+installed editor: `vscode`, `cursor`, `zed`, `windsurf`, `sublime`, `intellij` or
+`xcode`. The same places offer **Open in** each editor Bootty finds: an app in
+`/Applications` or `~/Applications` on macOS, its launcher on `PATH` elsewhere.
+Bootty looks once per run.
 
 PNG, JPEG, GIF, and WebP files open as read-only images fitted to the panel.
 Animated images show their first frame. Encoded media has no document-size cap;
@@ -863,7 +905,8 @@ writing the host file.
 `files.source PATH ROOT` returns a seekable source descriptor after checking that
 the regular file stays inside the captured root. A composer's `@` file mention
 inserts the file's project path instead (`@src/main.rs`, quoted when it has
-spaces), so the agent reads and edits the real file.
+spaces), so the agent reads and edits the real file. Choosing a folder opens it;
+**This folder** names the folder itself.
 All paths belong to the selected binding's host, including remote paths.
 
 Shell completion notifications require live OSC 133 command-start and finish
@@ -1036,8 +1079,11 @@ and display names. It does not switch profiles or authorize another account.
 
 The sidebar's **History** opens a full view of saved conversations across Codex,
 Claude and Pi on the captured host. Provider and project filters are inside the
-view. Opening a result resumes its original provider session and account rather
-than starting a new conversation.
+view. Sessions group under Today, Yesterday, Previous 7 days, Previous 30 days
+and Older; a search ranks them instead. Each provider lists its 200 most recent
+sessions, and **Load older sessions** fetches the next 200. Opening a result
+resumes its original provider session and account rather than starting a new
+conversation.
 
 `agents.follow-up-behavior` defaults to `"queue"`. Messages sent during an active
 turn wait for it to finish; `"steer"` sends them into the active turn instead,
@@ -1045,9 +1091,11 @@ waiting in the queue until the turn can take them; `"interrupt"` stops the turn 
 sends them next.
 `agents.send-shortcut` decides which keys send one message with the opposite
 behavior. The queued messages appear above the composer and remain with the
-conversation when its tab closes. Stopping the agent pauses the queue so the next
-message doesn't go out at once; Resume, or sending a message, lets it go again. Failed or interrupted deliveries remain
-available for an explicit retry.
+conversation when its tab closes. Arrows move a waiting message sooner or later.
+Stopping the agent pauses the queue so the next message doesn't go out at once, and
+so does a failed turn; Resume, or sending a message, lets it go again, moving on from
+a failure without restarting the agent. A message that couldn't be sent waits for
+Retry without holding the ones behind it.
 
 `agents.default-provider` selects the provider for a fresh composer. Each provider's
 `default-model` and `default-effort` prefer advertised selections; empty values resolve
@@ -1059,8 +1107,9 @@ hashed cache identities, and changing that context selects a different entry.
 `agents.codex.fast-mode` requests Codex's fast service tier;
 `agents.claude.fast-mode` enables Claude's fast mode. These are defaults for new
 conversations. Both composers expose **Fast mode** in the model menu; its bolt
-indicates the selected speed. Existing conversations save speed changes for the
-next turn without interrupting active work. Switching Fast mode off explicitly
+indicates the selected speed. When Codex describes its fast tier, such as "2x
+speed, increased usage", that description shows under the switch. Existing
+conversations save speed changes for the next turn without interrupting active work. Switching Fast mode off explicitly
 clears the provider's previous fast selection. Pi has no fast-mode setting.
 
 New composers inherit the selected provider account's approval policy. The
@@ -1086,7 +1135,12 @@ Shift+Tab toggles plan mode (`ui.composer.toggle-plan`) when the provider offers
 Ctrl+Alt+F toggles fast mode (`ui.composer.toggle-fast`) for a model that offers it,
 Ctrl+Alt+D and Ctrl+Alt+V start dictation (`ui.composer.dictate`) and voice mode
 (`ui.composer.voice`), and Ctrl+Alt+I moves focus back to the composer
-(`ui.composer.focus-composer`).
+(`ui.composer.focus-composer`). Cmd+S (Ctrl+S elsewhere, `ui.composer.stash`) puts
+the composer's words aside, in a stash any conversation can use; on an empty
+composer it brings the newest stashed prompt back. The bookmark badge beside the
+controls lists the stash, and choosing a prompt brings it back. Attachments stay in
+the composer. The stash keeps fifty prompts, in `prompt-stash.json` beside the
+configuration.
 These defaults and the effort shortcuts live in the `Composer` context.
 Provider, model, and effort share one picker; their focus commands open it. Control
 tooltips describe their purpose and show the active configured shortcut.

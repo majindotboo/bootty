@@ -322,37 +322,45 @@ fn binding_action_grammar_preserves_defaults_and_validation() {
 #[case("ghostty")]
 #[case("bootty")]
 #[case("tmux")]
-fn presets_compile_and_settle_is_a_bindable_shared_session_command(#[case] preset: &str) {
+fn presets_bind_the_shared_session_shortcuts(#[case] preset: &str) {
     let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
     std::fs::write(file.path(), format!("[input]\npreset = \"{preset}\"\n")).unwrap();
     let config = bootty_config::config::load_config_from_path(file.path()).unwrap();
-    bootty_ui::app_actions::AppKeyBindings::from_config(&config.input)
+    let mut bindings = bootty_ui::app_actions::AppKeyBindings::from_config(&config.input)
         .expect("every preset action resolves");
-    let mut bindings = bootty_ui::app_actions::AppKeyBindings::from_keybinds(&[
-        "ctrl+shift+w=settle_session".to_owned(),
-    ])
-    .unwrap();
-    let invocation = bindings
-        .invocation_for_input(bootty_terminal::terminal::KeyInput {
-            key: TerminalKey::W,
-            mods: bootty_terminal::terminal::KeyMods {
-                ctrl: true,
-                shift: true,
-                ..bootty_terminal::terminal::KeyMods::default()
-            },
-            repeat: false,
-            utf8: None,
-            unshifted: Some('w'),
-        })
-        .unwrap();
-    assert_eq!(invocation.command, "settle_session");
-    assert_eq!(invocation.arguments, Vec::<String>::new());
+    let macos = cfg!(target_os = "macos");
     let catalog = bootty_ui::commands::CommandCatalog::default();
-    let descriptor = catalog.describe(&invocation.command).unwrap();
-    assert_eq!(
-        descriptor.target,
-        Some(bootty_control::ResourceKind::Session)
-    );
-    assert_eq!(descriptor.mutation, bootty_control::MutationClass::Write);
-    assert!(descriptor.palette);
+    for (key, letter, alt, command) in [
+        (TerminalKey::H, 'h', false, "agent_history"),
+        (TerminalKey::G, 'g', false, "toggle_changes_panel"),
+        (TerminalKey::L, 'l', false, "add_selection_to_conversation"),
+        (TerminalKey::P, 'p', true, "toggle_session_pin"),
+        (TerminalKey::A, 'a', true, "archive_session"),
+    ] {
+        let invocation = bindings
+            .invocation_for_input(bootty_terminal::terminal::KeyInput {
+                key,
+                mods: bootty_terminal::terminal::KeyMods {
+                    command: macos,
+                    ctrl: !macos,
+                    shift: !(macos && alt),
+                    alt,
+                    ..bootty_terminal::terminal::KeyMods::default()
+                },
+                repeat: false,
+                utf8: None,
+                unshifted: Some(letter),
+            })
+            .unwrap_or_else(|| panic!("{preset} binds {command}"));
+        assert_eq!(invocation.command, command);
+        if alt {
+            let descriptor = catalog.describe(command).unwrap();
+            assert_eq!(
+                descriptor.target,
+                Some(bootty_control::ResourceKind::Session)
+            );
+            assert_eq!(descriptor.mutation, bootty_control::MutationClass::Write);
+            assert!(descriptor.palette);
+        }
+    }
 }

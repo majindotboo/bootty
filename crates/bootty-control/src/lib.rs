@@ -6,6 +6,7 @@ mod lease;
 mod plane;
 mod protocol;
 mod server;
+pub mod short_name;
 mod state;
 pub mod terminal_history;
 mod wait;

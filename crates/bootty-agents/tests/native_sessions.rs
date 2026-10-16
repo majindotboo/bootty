@@ -632,6 +632,7 @@ fn cached_provider_catalog_retains_permissions_and_uses_exact_account_and_projec
             is_legacy: false,
             is_favorite: false,
             supports_fast_mode: false,
+            fast_mode_detail: None,
         }],
         permissions: Some(NativePermissionMode::FullAccess),
     };
@@ -1267,7 +1268,14 @@ fn active_followup_steers_the_existing_turn_and_rejection_preserves_work() {
         steered
             .transcript
             .iter()
-            .any(|item| item.role == "user" && item.text == "change course")
+            .any(|item| item.role == "user" && item.text == "change course" && item.steered),
+        "the steering message is marked as steering its turn"
+    );
+    assert!(
+        steered
+            .transcript
+            .iter()
+            .any(|item| item.role == "user" && item.text == "active" && !item.steered)
     );
     assert!(session.send_prompt("reject-steer").is_err());
     let rejected = session.snapshot();
@@ -1281,6 +1289,42 @@ fn active_followup_steers_the_existing_turn_and_rejection_preserves_work() {
             .any(|item| item.text == "reject-steer")
     );
     session.interrupt().unwrap();
+}
+
+/// In Codex history, a turn's first message starts it and any later message steered it.
+#[rstest]
+fn codex_history_marks_messages_that_steered_a_turn() {
+    let root = TempDir::new().unwrap();
+    let user = |id: &str, turn: &str| {
+        json!({"turnId":turn, "item":{"id":id, "type":"userMessage",
+            "content":[{"type":"text","text":id}]}})
+    };
+    let reply = |id: &str, turn: &str| json!({"turnId":turn, "item":{"id":id, "type":"agentMessage", "text":id}});
+    fs::write(
+        root.path().join("paged-history.json"),
+        serde_json::to_vec(&json!([
+            user("first", "turn-a"),
+            reply("first-reply", "turn-a"),
+            user("steer", "turn-a"),
+            reply("steer-reply", "turn-a"),
+            user("second", "turn-b"),
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let page = session.read_history("latest").unwrap();
+    let steered = page
+        .transcript
+        .iter()
+        .filter(|item| item.role == "user")
+        .map(|item| (item.text.as_str(), item.steered))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        steered,
+        [("first", false), ("steer", true), ("second", false)]
+    );
+    session.stop();
 }
 
 /// A stopped Codex turn leaves a mark in the transcript, and a resumed conversation shows its
@@ -2173,6 +2217,7 @@ fn bounds_recent_transcript_across_all_stream_items() {
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
     assert!(snapshot.transcript.len() <= 256);
+    assert!(snapshot.evicted > 0, "the live view counts what it let go");
     assert!(
         snapshot
             .transcript
@@ -3492,4 +3537,118 @@ fn codex_file_change_output_survives_settlement_and_history(
     let history = session.read_history("latest").unwrap();
     pretty_assertions::assert_eq!(history.transcript[0].text, patch.text);
     session.stop();
+}
+
+/// Conversations are found by what their prompts and replies said, ignoring case, with the line
+/// that matched; tool output and other conversations don't match.
+#[rstest]
+fn conversations_are_found_by_what_was_said() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    for title in ["Scrolling", "Unrelated"] {
+        let record = service
+            .create("binding", title, config(root.path()).unwrap())
+            .unwrap();
+        service.stop(&record.target()).unwrap();
+    }
+    service.shutdown().unwrap();
+    drop(service);
+    let long = format!(
+        "{} the needle sits here {}",
+        "word ".repeat(30),
+        "tail ".repeat(30)
+    );
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let item = |id: &str, role: &str, text: &str| json!({"id": id, "role": role, "text": text, "complete": true});
+    catalog["records"][0]["task_identity"] = json!("scrolling-task");
+    catalog["records"][0]["snapshot"]["transcript"] = json!([
+        item(
+            "u1",
+            "user",
+            "Why does it move?\nFix the Scroll jump on resize"
+        ),
+        item("t1", "tool", "grep found a rail"),
+        item("a1", "assistant", &long),
+    ]);
+    let essay = format!("{}the end", "x".repeat(9 * 1024));
+    catalog["records"][1]["snapshot"]["transcript"] = json!([
+        item("u2", "user", "Something else entirely"),
+        item("a2", "assistant", &essay),
+    ]);
+    fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let service = NativeAgentService::open(&path).unwrap();
+    let scrolling = service
+        .sessions()
+        .into_iter()
+        .find(|record| record.title == "Scrolling")
+        .unwrap();
+    let found = |query: &str| {
+        service
+            .search(query)
+            .into_iter()
+            .map(|found| (found.target, found.task_identity, found.snippet))
+            .collect::<Vec<_>>()
+    };
+    let in_scrolling = |snippet: &str| {
+        vec![(
+            scrolling.target(),
+            Some("scrolling-task".to_owned()),
+            snippet.to_owned(),
+        )]
+    };
+    assert_eq!(
+        found("scroll JUMP"),
+        in_scrolling("Fix the Scroll jump on resize")
+    );
+    // A long line shows whole words around the match.
+    let [(_, _, snippet)] = found("needle").try_into().unwrap();
+    let words = snippet.trim_matches('…');
+    assert!(
+        snippet.starts_with('…')
+            && snippet.ends_with('…')
+            && words.contains("the needle sits here"),
+        "{snippet}"
+    );
+    assert!(snippet.chars().count() <= 82, "{snippet}");
+    assert!(
+        words
+            .split_whitespace()
+            .all(|word| ["word", "the", "needle", "sits", "here", "tail"].contains(&word)),
+        "{snippet}"
+    );
+    assert_eq!(found("rail"), Vec::new(), "tool output isn't conversation");
+    assert_eq!(found("   "), Vec::new());
+    // A mention quotes prompts and replies, oldest first; a reply longer than the quote keeps
+    // its end.
+    let unrelated = service
+        .sessions()
+        .into_iter()
+        .find(|record| record.title == "Unrelated")
+        .unwrap();
+    let quoted = service
+        .conversation_context(&[scrolling.target(), unrelated.target()])
+        .unwrap();
+    let (first, second) = quoted.split_once("\n\nThe conversation").unwrap();
+    assert!(
+        first.contains("User: Why does it move?") && !first.contains("grep found a rail"),
+        "{first}"
+    );
+    assert!(
+        first.find("User: Why").unwrap() < first.find("Assistant:").unwrap(),
+        "{first}"
+    );
+    assert!(
+        second.contains("Assistant: …") && second.ends_with("the end") && second.len() < 9 * 1024,
+        "{}",
+        second.len()
+    );
+    assert!(
+        service
+            .conversation_context(&vec![scrolling.target(); 5])
+            .is_err()
+    );
+    let mut stale = scrolling.target();
+    stale.generation = stale.generation.saturating_add(1);
+    assert!(service.conversation_context(&[stale]).is_err());
 }

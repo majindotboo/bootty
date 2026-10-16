@@ -82,3 +82,30 @@ fn provider_history_recovers_only_matching_completed_truncated_replies(
     }
     assert_eq!(merged[1], restored);
 }
+
+/// History and the live view merge in the provider's order: a reply the live view let go stays
+/// between the prompts it kept, and live items past the page follow it.
+#[rstest]
+#[case::gap_in_the_live_view(
+    &["u1", "r1", "u2", "r2", "u3", "r3"],
+    &["u1", "u2", "r2", "u3", "r3", "r4"],
+    &["u1", "r1", "u2", "r2", "u3", "r3", "r4"]
+)]
+#[case::older_page(&["a", "b"], &["c", "d"], &["a", "b", "c", "d"])]
+#[case::live_only_between(&["u1", "r1"], &["u1", "note", "r1"], &["u1", "note", "r1"])]
+fn history_and_live_items_merge_in_provider_order(
+    #[case] history: &[&str],
+    #[case] live: &[&str],
+    #[case] expected: &[&str],
+) {
+    let history = page(history, true).unwrap();
+    let live = page(live, true).unwrap().transcript;
+    let merged = history.with_live_transcript(&live);
+    assert_eq!(
+        merged
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        expected
+    );
+}

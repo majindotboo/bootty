@@ -19,7 +19,7 @@ pub use annotation_images::{
 pub use annotation_protocol::AnnotationEvent;
 pub use annotations::{
     Annotation, AnnotationAnchor, AnnotationError, AnnotationSelection, AnnotationStore,
-    annotation_batch, apply_annotation_event,
+    annotation_batch, apply_annotation_event, split_annotation_batch,
 };
 pub use credential::{
     CredentialAccount, CredentialDecision, CredentialError, CredentialTarget, SecretPassword,

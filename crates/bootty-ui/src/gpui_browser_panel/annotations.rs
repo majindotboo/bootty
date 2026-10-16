@@ -39,6 +39,11 @@ enum AnnotationMutation {
         target: bootty_control::CommandTarget,
         records: Vec<Annotation>,
     },
+    /// Attach notes a sent message carried back to its conversation, to send again.
+    Reattach {
+        target: bootty_control::CommandTarget,
+        ids: Vec<u64>,
+    },
     #[cfg_attr(
         not(target_os = "macos"),
         allow(
@@ -604,6 +609,31 @@ impl BrowserPanel {
         &self.annotations.records
     }
 
+    /// Attaches the notes a sent message carried back to its conversation, when every one is
+    /// still saved and attached nowhere else. Says whether it could.
+    pub(crate) fn reattach_annotations(
+        &mut self,
+        target: bootty_control::CommandTarget,
+        ids: Vec<u64>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let available = ids.iter().all(|id| {
+            self.annotation_records().iter().any(|record| {
+                record.id == *id
+                    && !record.note.is_empty()
+                    && record
+                        .conversation
+                        .as_deref()
+                        .is_none_or(|conversation| conversation == target.handle)
+            })
+        });
+        if available {
+            self.queue_annotation(AnnotationMutation::Reattach { target, ids }, window, cx);
+        }
+        available
+    }
+
     pub(crate) fn detach_annotations(
         &mut self,
         target: bootty_control::CommandTarget,
@@ -872,6 +902,19 @@ fn annotation_candidate(
                 }
                 if let Some(record) = candidate.iter_mut().find(|record| record.id == snapshot.id) {
                     record.detach_if_unchanged(snapshot)?;
+                }
+            }
+            Ok(candidate)
+        }
+        AnnotationMutation::Reattach { target, ids } => {
+            let mut candidate = records.to_vec();
+            for id in ids {
+                let record = candidate
+                    .iter_mut()
+                    .find(|record| record.id == *id)
+                    .ok_or(bootty_browser::AnnotationError::Missing)?;
+                if record.conversation.is_none() {
+                    record.attach_to(&target.handle)?;
                 }
             }
             Ok(candidate)

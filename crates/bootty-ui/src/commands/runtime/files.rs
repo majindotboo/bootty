@@ -15,6 +15,9 @@ impl AppState {
         effects: &mut Vec<crate::state::AppEffect>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
+        if matches!(action, FileAction::Reveal | FileAction::OpenIn) {
+            return self.hand_file_to_desktop(scope, action, arguments, effects, execution);
+        }
         if matches!(action, FileAction::Open | FileAction::Browse) {
             if let Err(error) = executor::begin_synchronous_command(execution) {
                 return self.reject_command(super::command_outcome_for_mux_error(error));
@@ -56,6 +59,67 @@ impl AppState {
         } else {
             self.dispatch_file_command(scope, action, arguments, execution)
         }
+    }
+
+    /// Shows a file in this computer's file manager, or opens it in an installed editor. A
+    /// remote host's file has no place in either.
+    fn hand_file_to_desktop(
+        &mut self,
+        scope: SpaceId,
+        action: FileAction,
+        arguments: &[String],
+        effects: &mut Vec<crate::state::AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        if let Err(error) = executor::begin_synchronous_command(execution) {
+            return self.reject_command(super::command_outcome_for_mux_error(error));
+        }
+        let Some(binding) = self.workspace.binding(scope) else {
+            return self.reject_command(CommandOutcome::StaleTarget {
+                message: "Binding is no longer available".to_owned(),
+            });
+        };
+        if binding.multiplexer().remote.is_some() {
+            return self.reject_command(CommandOutcome::Unsupported {
+                message: if action == FileAction::Reveal {
+                    "A remote host's files can't be shown in this computer's file manager"
+                } else {
+                    "A remote host's files can't be opened in this computer's editors"
+                }
+                .to_owned(),
+            });
+        }
+        let Some(path) = arguments
+            .first()
+            .map(std::path::PathBuf::from)
+            .filter(|path| path.is_absolute())
+        else {
+            return self.reject_command(CommandOutcome::Failed {
+                code: "invalid_arguments".to_owned(),
+                message: "An absolute path is required".to_owned(),
+            });
+        };
+        if !path.exists() {
+            return self.reject_command(CommandOutcome::Failed {
+                code: "file_failed".to_owned(),
+                message: format!("{} no longer exists", path.display()),
+            });
+        }
+        if action == FileAction::Reveal {
+            effects.push(crate::state::AppEffect::RevealPath(path));
+            return CommandDispatch::Complete(CommandOutcome::success());
+        }
+        let requested = arguments.get(1).map_or("", String::as_str);
+        let Some(editor) = crate::editors::find(requested) else {
+            return self.reject_command(CommandOutcome::Unavailable {
+                message: format!("No editor called “{requested}” is installed"),
+            });
+        };
+        effects.push(crate::state::AppEffect::OpenInEditor {
+            editor: editor.id,
+            path,
+        });
+        CommandDispatch::Complete(CommandOutcome::success())
     }
 
     pub(super) fn dispatch_file_command(

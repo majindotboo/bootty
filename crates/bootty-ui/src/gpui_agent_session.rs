@@ -158,6 +158,13 @@ pub enum OpenNativeSession {
         target: CommandTarget,
         annotations: Vec<Annotation>,
     },
+    /// Bring back a sent message whose text ends with browser notes: its notes return as notes
+    /// when they're still saved, and otherwise its whole text returns.
+    EditAndResend {
+        target: CommandTarget,
+        text: String,
+        attachments: Vec<bootty_agents::NativeAttachmentReference>,
+    },
 }
 
 struct SubmittedPrompt {
@@ -207,6 +214,8 @@ pub struct NativeAgentSessionView {
     /// subagent's transcript, and acts on the subagent only through its parent.
     subagent: Option<bootty_agents::NativeSubagent>,
     related: Vec<RelatedConversation>,
+    /// What to call this conversation in writing, like `bootty-7c`.
+    short_name: String,
     context_card: Option<ConversationContext>,
     wide: bool,
     /// The context card fits in the margin beside the centered message column.
@@ -233,6 +242,10 @@ pub struct NativeAgentSessionView {
     presentation: PresentationPreferences,
     queued_messages: followups::QueuedMessages,
     applications: Vec<bootty_agents::NativeApplicationMention>,
+    /// Conversations chosen from `@`, while their tokens stay in the composer.
+    conversation_mentions: Vec<crate::gpui_composer_completion::MentionableConversation>,
+    /// The other conversations `@` offers.
+    mentionable_conversations: Vec<crate::gpui_composer_completion::MentionableConversation>,
     attachments: Vec<ComposerAttachment>,
     attachment_imports: BTreeMap<u64, PendingAttachmentImport>,
     next_attachment_import: u64,
@@ -258,14 +271,22 @@ pub struct NativeAgentSessionView {
     copy_feedback: Option<gpui_kit::Task<()>>,
     citations: Vec<ResponseCitation>,
     selected_response: Option<ResponseSelection>,
+    /// The link right-clicked in a message, and where.
+    link_menu: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
     reaction_menu: Option<(Entity<gpui_kit::component::menu::PopupMenu>, Subscription)>,
     citation_editor: Entity<TextareaState>,
     editing_citation: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
+    /// How far the transcript was scrolled when the comment editor opened, so the editor stays
+    /// beside its quote as the transcript scrolls.
+    citation_scroll: f32,
     timeline: Vec<TranscriptRow>,
     history_turns: Vec<(usize, String, gpui_kit::SharedString)>,
     history_page: Option<bootty_agents::NativeHistoryPage>,
     history_live_snapshot: Option<NativeSessionSnapshot>,
     history_loaded: bool,
+    /// How many live items the provider history was last read past. The live view lets its
+    /// oldest items go as a conversation grows; the history keeps them in view.
+    history_backfilled: u64,
     /// The turn whose preview shows: the one under the pointer, or the one picked from the rail
     /// with the arrow keys.
     hovered_turn: Option<usize>,
@@ -374,6 +395,7 @@ impl NativeAgentSessionView {
             record,
             subagent: None,
             related: Vec::new(),
+            short_name: String::new(),
             context_card: None,
             wide: cx
                 .try_global::<context_card::LastWide>()
@@ -401,6 +423,8 @@ impl NativeAgentSessionView {
             },
             queued_messages: followups::QueuedMessages::default(),
             applications: Vec::new(),
+            conversation_mentions: Vec::new(),
+            mentionable_conversations: Vec::new(),
             attachments: Vec::new(),
             attachment_imports: BTreeMap::new(),
             next_attachment_import: 0,
@@ -426,14 +450,17 @@ impl NativeAgentSessionView {
             copy_feedback: None,
             citations: Vec::new(),
             selected_response: None,
+            link_menu: None,
             reaction_menu: None,
             citation_editor,
             editing_citation: None,
+            citation_scroll: 0.,
             timeline: Vec::new(),
             history_turns: Vec::new(),
             history_page: None,
             history_live_snapshot: None,
             history_loaded: false,
+            history_backfilled: 0,
             hovered_turn: None,
             history_rail_focus: cx.focus_handle().tab_stop(true),
             work_disclosures: BTreeMap::new(),
@@ -729,6 +756,9 @@ impl NativeAgentSessionView {
                     let end = composer.value().len();
                     _ = composer.replace_range_with_token(end..end, chip, window, cx);
                 }
+                // Editing goes on from the end of the restored message.
+                let end = composer.value().len();
+                composer.set_selected_range(end..end, cx);
             });
             for reference in attachments {
                 if !self
@@ -783,6 +813,7 @@ impl NativeAgentSessionView {
         }
         if record.generation != self.record.generation {
             self.history_loaded = false;
+            self.history_backfilled = 0;
         }
         if let Some(page) = &self.history_page {
             self.history_live_snapshot = Some(record.snapshot.clone());
@@ -810,10 +841,13 @@ impl NativeAgentSessionView {
         }
         if generation_changed || previous.snapshot.transcript != self.record.snapshot.transcript {
             self.sync_transcript(&previous.snapshot.transcript, window, cx);
-        } else if previous.snapshot.status != self.record.snapshot.status {
+        } else if previous.snapshot.status != self.record.snapshot.status
+            || previous.snapshot.error != self.record.snapshot.error
+        {
             self.refresh_timeline();
         }
         self.sync_requests(window, cx);
+        self.backfill_history(window, cx);
         if matches!(
             self.record.snapshot.status,
             NativeSessionStatus::Stopped | NativeSessionStatus::Error
@@ -1090,6 +1124,11 @@ impl NativeAgentSessionView {
         self.command(operation, arguments, window, cx);
     }
 
+    /// Forks this conversation into a side chat, which opens once the provider creates it.
+    pub fn start_side_chat(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.command("fork", Vec::new(), window, cx);
+    }
+
     fn command(
         &mut self,
         operation: &str,
@@ -1240,6 +1279,11 @@ impl NativeAgentSessionView {
                         std::mem::replace(&mut self.record.snapshot.transcript, transcript);
                     let has_older = page.has_older;
                     self.history_page = Some(page);
+                    self.history_backfilled = self
+                        .history_live_snapshot
+                        .as_ref()
+                        .unwrap_or(&self.record.snapshot)
+                        .evicted;
                     self.sync_transcript(&previous, window, cx);
                     // Fill the turn index through bounded provider pages without moving the viewport.
                     if has_older
@@ -1321,6 +1365,9 @@ impl NativeAgentSessionView {
         let apps = self.active_applications(cx);
         self.applications
             .retain(|mention| apps.iter().any(|active| active.id == mention.id));
+        let conversations = self.active_conversation_mentions(cx);
+        self.conversation_mentions
+            .retain(|mention| conversations.contains(&mention.target));
         let active = self.active_attachment_ids(cx);
         self.attachments.retain(|attachment| {
             !attachments.contains(&attachment.reference.id)
@@ -1985,6 +2032,7 @@ impl NativeAgentSessionView {
                                 .get(*index)
                                 .is_some_and(|item| item.id == id)
                         }),
+                        TranscriptRow::Failure { .. } => false,
                     };
                     if contains {
                         this.list.remeasure_items(index..index.saturating_add(1));
@@ -2163,6 +2211,156 @@ impl NativeAgentSessionView {
         )
     }
 
+    /// The files the turn ending at `final_index` changed, in the order it first changed them,
+    /// with +/− summed across its file changes.
+    fn turn_changes(&self, final_index: usize) -> Vec<(String, Option<(usize, usize)>)> {
+        let transcript = &self.record.snapshot.transcript;
+        let start = transcript
+            .get(..final_index)
+            .unwrap_or_default()
+            .iter()
+            .rposition(|item| item.role == "user" && !item.steered)
+            .map_or(0, |user| user.saturating_add(1));
+        let mut changes: Vec<(String, Option<(usize, usize)>)> = Vec::new();
+        for item in transcript.get(start..final_index).unwrap_or_default() {
+            if item
+                .tool
+                .as_ref()
+                .is_none_or(|tool| tool.name != "fileChange")
+            {
+                continue;
+            }
+            let Some(ToolDiffs::Ready(files)) = self.tool_diffs.get(&item.id) else {
+                continue;
+            };
+            for file in files {
+                match changes.iter_mut().find(|(path, _)| *path == file.path) {
+                    Some((_, counts)) => {
+                        *counts = counts.zip(file.counts).map(|(total, more)| {
+                            (
+                                total.0.saturating_add(more.0),
+                                total.1.saturating_add(more.1),
+                            )
+                        });
+                    }
+                    None => changes.push((file.path.clone(), file.counts)),
+                }
+            }
+        }
+        changes
+    }
+
+    /// Under a settled turn's reply, every file the turn changed, each opening the file. A turn
+    /// that changed one file already shows it at its change.
+    fn render_turn_changes(
+        &self,
+        final_index: usize,
+        owner: &gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> Option<gpui_kit::Div> {
+        let changes = self.turn_changes(final_index);
+        if changes.len() < 2 {
+            return None;
+        }
+        let total = changes.iter().filter_map(|(_, counts)| *counts).fold(
+            (0_usize, 0_usize),
+            |total, counts| {
+                (
+                    total.0.saturating_add(counts.0),
+                    total.1.saturating_add(counts.1),
+                )
+            },
+        );
+        let counts = |row: gpui_kit::Div, (added, removed): (usize, usize)| {
+            row.child(
+                div()
+                    .text_color(cx.theme().success)
+                    .child(format!("+{added}")),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().danger)
+                    .child(format!("−{removed}")),
+            )
+        };
+        let summary = format!("+{}:-{}", total.0, total.1);
+        Some(
+            div()
+                .debug_selector(move || format!("native-turn-changes:{summary}"))
+                .mt_2()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(cx.theme().border)
+                .flex()
+                .flex_col()
+                .gap_1()
+                .text_sm()
+                .child(counts(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(format!("{} files changed", changes.len())),
+                        ),
+                    total,
+                ))
+                .children(changes.into_iter().map(|(path, file_counts)| {
+                    let open = owner.clone();
+                    let target = path.clone();
+                    let row = div().flex().items_center().gap_2().child(
+                        Button::new(gpui_kit::SharedString::from(format!("turn-change:{path}")))
+                            .debug_selector({
+                                let path = path.clone();
+                                move || format!("native-turn-change:{path}")
+                            })
+                            .ghost()
+                            .xsmall()
+                            .flex_1()
+                            .min_w_0()
+                            .justify_start()
+                            .label(path)
+                            .on_click(move |_, window, cx| {
+                                _ = open.update(cx, |this, cx| {
+                                    this.command("open-link", vec![target.clone()], window, cx);
+                                });
+                            }),
+                    );
+                    match file_counts {
+                        Some(file_counts) => counts(row, file_counts),
+                        None => row,
+                    }
+                })),
+        )
+    }
+
+    /// Under a user message: "Sending…" until the provider confirms it, then "Steered" if it
+    /// steered a running turn.
+    fn delivery_caption(&self, item: &NativeTranscriptItem, cx: &App) -> Option<gpui_kit::Div> {
+        let (label, selector) = if self.record.snapshot.sending(item) {
+            ("Sending…", format!("native-sending-{}", item.id))
+        } else if item.steered && item.role == "user" {
+            ("Steered", format!("native-steered-{}", item.id))
+        } else {
+            return None;
+        };
+        Some(
+            div()
+                .debug_selector(move || selector)
+                .h_8()
+                .flex()
+                .items_center()
+                .when(item.steered, gpui_kit::Styled::justify_end)
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label),
+        )
+    }
+
     fn render_message(
         &self,
         ix: usize,
@@ -2229,21 +2427,11 @@ impl NativeAgentSessionView {
                     .collect();
                 row.child(Self::undelivered_notice(item, held, owner.clone(), cx))
             })
-            .when(self.record.snapshot.sending(item), |row| {
-                row.child(
-                    div()
-                        .debug_selector({
-                            let id = item.id.clone();
-                            move || format!("native-sending-{id}")
-                        })
-                        .h_8()
-                        .flex()
-                        .items_center()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Sending…"),
-                )
-            })
+            .children(self.delivery_caption(item, cx))
+            .when(
+                meta && item.complete && matches!(item.role.as_str(), "assistant" | "plan"),
+                |row| row.children(self.render_turn_changes(ix, &owner, cx)),
+            )
             .when(
                 meta && item.complete
                     && matches!(item.role.as_str(), "user" | "assistant" | "plan"),
@@ -2354,7 +2542,15 @@ impl NativeAgentSessionView {
         TextView::new(state)
             .selectable(true)
             .code_block_actions(code_block_actions)
-            .on_link_click(move |url, _, window, cx| {
+            .on_link_click(move |url, event, window, cx| {
+                // A right-click offers what can be done with the link instead of opening it.
+                if event.is_right_click() {
+                    _ = owner.update(cx, |this, cx| {
+                        this.link_menu = Some((url.to_string(), event.position()));
+                        cx.notify();
+                    });
+                    return;
+                }
                 if let Some(ix) = url
                     .strip_prefix("bootty-citation:")
                     .and_then(|ix| ix.parse::<usize>().ok())
@@ -2386,6 +2582,109 @@ impl NativeAgentSessionView {
                     });
                 }
             })
+    }
+
+    /// What can be done with a right-clicked link: open it; for a file, show it in the file
+    /// manager or open it in an installed editor when it's on this computer, or copy its path;
+    /// for a web page, copy its address.
+    fn render_link_menu(&self, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        let Some((url, position)) = self.link_menu.clone() else {
+            return div().into_any_element();
+        };
+        if url.starts_with("bootty-") {
+            return div().into_any_element();
+        }
+        let file = link_file_path(&url, &self.record.config.cwd);
+        let local = self.record.config.remote.is_none();
+        let item = |id: &'static str, label: &str| {
+            Button::new(id)
+                .debug_selector(move || id.to_owned())
+                .label(label.to_owned())
+                .small()
+                .ghost()
+                .w_full()
+                .justify_start()
+        };
+        let (open, reveal, copy) = (url.clone(), url.clone(), file.clone().unwrap_or(url));
+        let surface = div()
+            .id("native-link-menu")
+            .debug_selector(|| "native-link-menu".into())
+            .map(|menu| gpui_kit::component::ThemeStyled::popover_style(menu, cx))
+            .p_1()
+            .min_w(gpui_kit::rems(11.))
+            .flex()
+            .flex_col()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.link_menu = None;
+                cx.notify();
+            }))
+            .child(
+                item(
+                    "native-link-open",
+                    if file.is_some() { "Open" } else { "Open Link" },
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.link_menu = None;
+                    this.command("open-link", vec![open.clone()], window, cx);
+                })),
+            )
+            .when(file.is_some() && local, |menu| {
+                let reveal = reveal.clone();
+                menu.child(
+                    item("native-link-reveal", crate::commands::reveal_label()).on_click(
+                        cx.listener(move |this, _, window, cx| {
+                            this.link_menu = None;
+                            this.command("reveal-link", vec![reveal.clone()], window, cx);
+                        }),
+                    ),
+                )
+            })
+            .child(
+                item(
+                    "native-link-copy",
+                    if file.is_some() {
+                        "Copy Path"
+                    } else {
+                        "Copy Link"
+                    },
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.link_menu = None;
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copy.clone()));
+                    cx.notify();
+                })),
+            )
+            // Editors differ by computer, so they follow the rows every link has.
+            .when(file.is_some() && local, |menu| {
+                menu.children(crate::editors::installed().iter().map(|editor| {
+                    let location = reveal.clone();
+                    Button::new(gpui_kit::SharedString::from(format!(
+                        "native-link-edit-{}",
+                        editor.id
+                    )))
+                    .debug_selector(move || format!("native-link-edit-{}", editor.id))
+                    .label(format!("Open in {}", editor.name))
+                    .small()
+                    .ghost()
+                    .w_full()
+                    .justify_start()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.link_menu = None;
+                        this.command(
+                            "edit-link",
+                            vec![location.clone(), editor.id.to_owned()],
+                            window,
+                            cx,
+                        );
+                    }))
+                }))
+            });
+        gpui_kit::deferred(
+            gpui_kit::base::Positioner::corner(gpui_kit::Anchor::TopLeft, position)
+                .occlude()
+                .child(surface),
+        )
+        .into_any_element()
     }
 
     /// A message the provider never confirmed says so, and its text and `attachments` can go back
@@ -2423,6 +2722,55 @@ impl NativeAgentSessionView {
                         });
                     }),
             )
+    }
+
+    /// A sent message comes back to an empty composer to change and send again.
+    fn edit_resend_button(
+        &self,
+        item: &NativeTranscriptItem,
+        owner: gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> Button {
+        let (text, attachments) = (item.text.clone(), item.attachments.clone());
+        let empty = self.composer.read(cx).value().trim().is_empty() && self.attachments.is_empty();
+        let id = item.id.clone();
+        Button::new(format!("edit-resend:{id}"))
+            .debug_selector(move || format!("edit-resend:{id}"))
+            .icon(gpui_kit::component::Icon::default().path("icons/pencil.svg"))
+            .ghost()
+            .xsmall()
+            .disabled(!empty)
+            .accessibility_label("Edit and resend")
+            .tooltip(if empty {
+                "Edit and resend"
+            } else {
+                "Send or clear your draft first"
+            })
+            .on_click(move |_, window, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    if bootty_browser::split_annotation_batch(&text).is_some() {
+                        cx.emit(OpenNativeSession::EditAndResend {
+                            target: this.record.target(),
+                            text: text.clone(),
+                            attachments: attachments.clone(),
+                        });
+                    } else {
+                        this.edit_and_resend(&text, &attachments, window, cx);
+                    }
+                });
+            })
+    }
+
+    /// Fills the empty composer with a sent message to change and send again.
+    pub(crate) fn edit_and_resend(
+        &mut self,
+        text: &str,
+        attachments: &[bootty_agents::NativeAttachmentReference],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.restore_draft(text, attachments, window, cx);
+        self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
 
     fn message_metadata(
@@ -2497,6 +2845,10 @@ impl NativeAgentSessionView {
                             }),
                     )
                     .when(
+                        item.role == "user" && self.subagent.is_none() && self.provider_enabled(),
+                        |bar| bar.child(self.edit_resend_button(item, owner.clone(), cx)),
+                    )
+                    .when(
                         item.role == "assistant"
                             && item.complete
                             && self.provider_enabled()
@@ -2524,6 +2876,22 @@ impl NativeAgentSessionView {
                         },
                     ),
             )
+    }
+
+    pub(crate) fn set_short_name(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.short_name != name {
+            self.short_name = name;
+            cx.notify();
+        }
+    }
+
+    /// The tab's tooltip: the conversation's title and the name to write it by.
+    pub(crate) fn tab_tooltip(&self) -> gpui_kit::SharedString {
+        if self.short_name.is_empty() {
+            self.record.title.clone().into()
+        } else {
+            format!("{} · {}", self.record.title, self.short_name).into()
+        }
     }
 
     pub(crate) fn set_related_conversations(
@@ -2644,16 +3012,10 @@ impl NativeAgentSessionView {
     }
 
     fn copy_message(&mut self, id: &str, window: &Window, cx: &mut Context<Self>) {
-        let Some(item) = self
-            .record
-            .snapshot
-            .transcript
-            .iter()
-            .find(|item| item.id == id)
-        else {
+        let Some(text) = copied_text(&self.record.snapshot.transcript, id) else {
             return;
         };
-        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(item.display_text()));
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
         self.copied_message = Some(id.to_owned());
         self.copy_feedback = Some(cx.spawn_in(window, async move |owner, cx| {
             cx.background_executor().timer(Duration::from_secs(2)).await;
@@ -2932,7 +3294,7 @@ impl NativeAgentSessionView {
                     .small()
                     .disabled(!self.provider_enabled() || self.pending.contains("fork"))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.command("fork", vec![], window, cx);
+                        this.start_side_chat(window, cx);
                     })),
             )
     }
@@ -2950,7 +3312,9 @@ impl NativeAgentSessionView {
                     .map(|(message, details)| (message, Some(details)))
             })
             .or_else(|| {
-                (!self.record.snapshot.transport_lost
+                // A failed turn shows where it ended; only a provider that stopped shows here.
+                (self.record.snapshot.status == NativeSessionStatus::Error
+                    && !self.record.snapshot.transport_lost
                     && !self.record.snapshot.provider_archived()
                     && !self.record.snapshot.provider_writer_blocked())
                 .then_some(
@@ -3009,13 +3373,14 @@ impl NativeAgentSessionView {
                     })
                     .child(
                         Button::new("conversation-recover-error")
+                            .debug_selector(|| "conversation-recover-error".into())
                             .ghost()
                             .small()
                             .label(
                                 if self.record.snapshot.status == NativeSessionStatus::Error {
-                                    "Retry"
+                                    format!("Restart {}", provider.display_name())
                                 } else {
-                                    "Dismiss"
+                                    "Dismiss".to_owned()
                                 },
                             )
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -3030,6 +3395,124 @@ impl NativeAgentSessionView {
                     ),
             )
         })
+    }
+
+    /// The provider's report that the last turn failed, while the provider still runs. A provider
+    /// that stopped shows its error with the composer instead.
+    pub(super) fn turn_failure(&self) -> Option<String> {
+        let snapshot = &self.record.snapshot;
+        (self.subagent.is_none()
+            && snapshot.status != NativeSessionStatus::Error
+            && !snapshot.transport_lost
+            && !snapshot.provider_archived()
+            && !snapshot.provider_writer_blocked())
+        .then(|| snapshot.error.clone())
+        .flatten()
+        .filter(|error| self.dismissed_error.as_deref() != Some(error))
+    }
+
+    /// A failed turn, where it ended: what failed, and Retry, which sends the turn's prompt again.
+    pub(super) fn render_turn_failure(
+        &self,
+        error: &str,
+        owner: gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let message = diagnostic("The turn failed", error);
+        let prompt = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .rfind(|item| item.role == "user")
+            .map(|item| (item.text.clone(), item.attachments.clone()));
+        let draft_empty = self.composer.read(cx).value().trim().is_empty()
+            && self.attachments.is_empty()
+            && self.annotations.is_empty();
+        let sign_in = crate::error_catalog::needs_sign_in(error);
+        let provider = self.record.config.provider;
+        let (details, dismissed, retried) = (error.to_owned(), error.to_owned(), error.to_owned());
+        let dismiss_owner = owner.clone();
+        div()
+            .w_full()
+            .min_w_0()
+            .px_4()
+            .py_1()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(self.column_width())
+                    .min_w_0()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .child(
+                        div()
+                            .debug_selector({
+                                let message = message.clone();
+                                move || format!("native-turn-failure:{message}")
+                            })
+                            .flex_1()
+                            .min_w_0()
+                            .text_color(cx.theme().danger)
+                            .child(message),
+                    )
+                    .when(sign_in, |row| row.child(sign_in_button(provider)))
+                    .when_some(prompt, |row, (text, attachments)| {
+                        row.child(
+                            Button::new("native-retry-turn")
+                                .debug_selector(|| "native-retry-turn".into())
+                                .ghost()
+                                .small()
+                                .label("Retry")
+                                .disabled(!draft_empty || !self.can_prompt())
+                                .tooltip(if draft_empty {
+                                    "Send this turn's message again"
+                                } else {
+                                    "Send or clear your draft first"
+                                })
+                                .on_click(move |_, window, cx| {
+                                    _ = owner.update(cx, |this, cx| {
+                                        this.dismissed_error = Some(retried.clone());
+                                        this.restore_draft(&text, &attachments, window, cx);
+                                        this.send_prompt(window, cx);
+                                        this.refresh_timeline();
+                                    });
+                                }),
+                        )
+                    })
+                    .child(
+                        Button::new("copy-turn-failure-details")
+                            .debug_selector(|| "copy-turn-failure-details".into())
+                            .ghost()
+                            .small()
+                            .label("Copy details")
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                    details.clone(),
+                                ));
+                            }),
+                    )
+                    .child(
+                        Button::new("native-dismiss-turn-failure")
+                            .debug_selector(|| "native-dismiss-turn-failure".into())
+                            .ghost()
+                            .small()
+                            .label("Dismiss")
+                            .on_click(move |_, _, cx| {
+                                _ = dismiss_owner.update(cx, |this, cx| {
+                                    this.dismissed_error = Some(dismissed.clone());
+                                    this.refresh_timeline();
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+            )
+            .into_any_element()
     }
 
     /// What Enter does with the draft: send, queue, steer or interrupt.
@@ -3411,6 +3894,7 @@ impl NativeAgentSessionView {
                 ),
             )
             .child(options)
+            .children(Self::render_stash(cx))
             .child(
                 div()
                     .flex()
@@ -3628,6 +4112,11 @@ fn history_transcript(
         .collect()
 }
 impl NativeAgentSessionView {
+    /// How far the transcript is scrolled from its top, in pixels.
+    pub(super) fn scroll_top(&self) -> f32 {
+        -f32::from(self.list.scroll_px_offset_for_scrollbar().y)
+    }
+
     /// How far the transcript is scrolled above its end, in pixels.
     fn distance_from_end(&self) -> f32 {
         let max = f32::from(self.list.max_offset_for_scrollbar().y);
@@ -3675,6 +4164,25 @@ impl NativeAgentSessionView {
     pub(crate) fn contains_focused(&self, window: &Window, cx: &App) -> bool {
         self.focus.contains_focused(window, cx)
     }
+    /// Reads the latest history page again once the live view has let go of half a page more,
+    /// before those items leave the page's reach. Loaded pages accumulate, so the view keeps
+    /// every reply the live view dropped.
+    fn backfill_history(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let evicted = self
+            .history_live_snapshot
+            .as_ref()
+            .unwrap_or(&self.record.snapshot)
+            .evicted;
+        let half_page = u64::try_from(bootty_agents::HISTORY_PAGE_SIZE / 2).unwrap_or(u64::MAX);
+        if self.history_page.is_some()
+            && evicted >= self.history_backfilled.saturating_add(half_page)
+            && !self.pending.contains("history")
+        {
+            self.history_backfilled = evicted;
+            self.command("history", vec!["latest".into()], window, cx);
+        }
+    }
+
     fn load_history(&mut self, window: &Window, cx: &mut Context<Self>) {
         if matches!(
             self.record.snapshot.status,
@@ -3758,7 +4266,8 @@ impl Render for NativeAgentSessionView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                if this.selected_response.take().is_some() {
+                // The selection toolbar closes; the comment editor follows its quote.
+                if this.selected_response.take().is_some() || this.editing_citation.is_some() {
                     cx.notify();
                 }
             }))
@@ -3795,6 +4304,7 @@ impl Render for NativeAgentSessionView {
                 })
             })
             .child(self.render_error_recovery(cx))
+            .child(self.render_link_menu(cx))
             .when(conversation, |body| {
                 body.child(self.render_composer(window, cx))
                     .child(self.render_selection_toolbar(window, cx))
@@ -4676,4 +5186,76 @@ fn subagent_header(agent: &bootty_agents::NativeSubagent, open: bool, cx: &App) 
                     .child(elapsed),
             )
         })
+}
+
+/// The file a message link names, resolved against the conversation's directory, or `None` for a
+/// web link.
+fn link_file_path(link: &str, cwd: &std::path::Path) -> Option<String> {
+    use bootty_terminal::terminal_links::{LinkTarget, parse_location};
+    match parse_location(link)? {
+        LinkTarget::Url(url) => url::Url::parse(&url)
+            .ok()
+            .filter(|url| url.scheme() == "file")
+            .and_then(|url| url.to_file_path().ok())
+            .map(|path| path.to_string_lossy().into_owned()),
+        LinkTarget::File { path, .. } => {
+            let path = std::path::Path::new(&path);
+            Some(if path.is_absolute() {
+                path.to_string_lossy().into_owned()
+            } else {
+                cwd.join(path).to_string_lossy().into_owned()
+            })
+        }
+    }
+}
+
+/// What copying message `id` puts on the clipboard. A prompt brings the passages it quoted and
+/// the files it attached; a turn's final reply brings every reply in its turn, since the
+/// commentary between tools is part of the answer.
+fn copied_text(transcript: &[NativeTranscriptItem], id: &str) -> Option<String> {
+    let index = transcript.iter().position(|item| item.id == id)?;
+    let item = transcript.get(index)?;
+    if item.role == "user" {
+        let mut text = item.display_text();
+        for citation in &item.citations {
+            text.push_str("\n\n");
+            for line in citation.quote.lines() {
+                text.push_str("> ");
+                text.push_str(line);
+                text.push('\n');
+            }
+            if !citation.comment.trim().is_empty() {
+                text.push_str(citation.comment.trim());
+            }
+        }
+        let names = item
+            .attachments
+            .iter()
+            .map(|attachment| attachment.name.as_str())
+            .collect::<Vec<_>>();
+        if !names.is_empty() {
+            text.push_str("\n\nAttached: ");
+            text.push_str(&names.join(", "));
+        }
+        return Some(text.trim_end().to_owned());
+    }
+    let start = transcript
+        .get(..index)
+        .unwrap_or_default()
+        .iter()
+        .rposition(|item| item.role == "user" && !item.steered)
+        .map_or(0, |user| user.saturating_add(1));
+    let replies = transcript
+        .get(start..=index)
+        .unwrap_or_default()
+        .iter()
+        .filter(|item| matches!(item.role.as_str(), "assistant" | "plan") && item.tool.is_none())
+        .map(NativeTranscriptItem::display_text)
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>();
+    Some(if replies.is_empty() {
+        item.display_text()
+    } else {
+        replies.join("\n\n")
+    })
 }

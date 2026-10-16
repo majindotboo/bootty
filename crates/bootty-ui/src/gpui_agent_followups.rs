@@ -44,6 +44,8 @@ enum QueueAction {
     Steer,
     Resume,
     Remove,
+    Earlier,
+    Later,
 }
 
 impl NativeAgentSessionView {
@@ -163,6 +165,13 @@ impl NativeAgentSessionView {
         let sending = message.status == NativeQueuedMessageStatus::Sending;
         let failed = message.status == NativeQueuedMessageStatus::Failed;
         let paused = message.status == NativeQueuedMessageStatus::Paused;
+        let queued = self.record.queued_messages.len();
+        let position = self
+            .record
+            .queued_messages
+            .iter()
+            .position(|queued| queued.id == message.id)
+            .unwrap_or_default();
         // Resume lets every paused message go, so only the first one offers it.
         let first_paused = paused
             && self
@@ -185,38 +194,7 @@ impl NativeAgentSessionView {
             .hover(|row| row.bg(cx.theme().muted.opacity(0.35)))
             .child(div().w_6().flex_shrink_0())
             .when(!message.attachments.is_empty(), |row| {
-                row.child(div().flex().flex_shrink_0().gap_1().children(
-                    message.attachments.iter().filter_map(|attachment| {
-                        self.attachment_previews.get(&attachment.id).map(|preview| {
-                            let preview = preview.clone();
-                            let name = attachment.name.clone();
-                            Button::new(SharedString::from(format!(
-                                "queued-preview:{}:{}",
-                                message.id, attachment.id
-                            )))
-                            .ghost()
-                            .p_0()
-                            .w_4()
-                            .h_4()
-                            .rounded_sm()
-                            .overflow_hidden()
-                            .accessibility_label(format!("View {name}"))
-                            .child(
-                                gpui_kit::img(preview.clone())
-                                    .size_full()
-                                    .object_fit(gpui_kit::ObjectFit::Cover),
-                            )
-                            .on_click(move |_, window, cx| {
-                                crate::gpui_prompt_attachments::open_image(
-                                    name.clone(),
-                                    preview.clone(),
-                                    window,
-                                    cx,
-                                );
-                            })
-                        })
-                    }),
-                ))
+                row.child(self.queued_previews(message))
             })
             .child(Self::queued_text(message, cx))
             .when(failed, |row| {
@@ -249,6 +227,18 @@ impl NativeAgentSessionView {
                     ),
                 |row| row.child(Self::queued_action(message, QueueAction::Steer, false, cx)),
             )
+            // Waiting messages trade places to go out in another order.
+            .when(!sending && position > 0, |row| {
+                row.child(Self::queued_action(
+                    message,
+                    QueueAction::Earlier,
+                    false,
+                    cx,
+                ))
+            })
+            .when(!sending && position.saturating_add(1) < queued, |row| {
+                row.child(Self::queued_action(message, QueueAction::Later, false, cx))
+            })
             .child(Self::queued_action(
                 message,
                 QueueAction::Remove,
@@ -256,6 +246,44 @@ impl NativeAgentSessionView {
                 cx,
             ))
             .child(self.queued_menu(message, cx))
+    }
+
+    /// Thumbnails of a queued message's attached images.
+    fn queued_previews(&self, message: &NativeQueuedMessage) -> gpui_kit::Div {
+        div()
+            .flex()
+            .flex_shrink_0()
+            .gap_1()
+            .children(message.attachments.iter().filter_map(|attachment| {
+                self.attachment_previews.get(&attachment.id).map(|preview| {
+                    let preview = preview.clone();
+                    let name = attachment.name.clone();
+                    Button::new(SharedString::from(format!(
+                        "queued-preview:{}:{}",
+                        message.id, attachment.id
+                    )))
+                    .ghost()
+                    .p_0()
+                    .w_4()
+                    .h_4()
+                    .rounded_sm()
+                    .overflow_hidden()
+                    .accessibility_label(format!("View {name}"))
+                    .child(
+                        gpui_kit::img(preview.clone())
+                            .size_full()
+                            .object_fit(gpui_kit::ObjectFit::Cover),
+                    )
+                    .on_click(move |_, window, cx| {
+                        crate::gpui_prompt_attachments::open_image(
+                            name.clone(),
+                            preview.clone(),
+                            window,
+                            cx,
+                        );
+                    })
+                })
+            }))
     }
 
     /// A queued message's one-line preview. Hovering shows the message wrapped in a card.
@@ -404,14 +432,33 @@ impl NativeAgentSessionView {
                 "Remove queued message",
                 Some(lucide("trash")),
             ),
+            QueueAction::Earlier => (
+                "queue-move",
+                "Send this message sooner",
+                Some(lucide("arrow-up")),
+            ),
+            QueueAction::Later => (
+                "queue-move",
+                "Send this message later",
+                Some(lucide("arrow-down")),
+            ),
+        };
+        let direction = match action {
+            QueueAction::Earlier => Some("earlier"),
+            QueueAction::Later => Some("later"),
+            _ => None,
         };
         let id = message.id.clone();
-        let button = Button::new(SharedString::from(format!("{operation}:{id}")))
+        let key = direction.map_or_else(
+            || operation.to_owned(),
+            |direction| format!("{operation}-{direction}"),
+        );
+        let button = Button::new(SharedString::from(format!("{key}:{id}")))
             .ghost()
             .xsmall()
             .debug_selector({
-                let id = message.id.clone();
-                move || format!("native-{operation}:{id}")
+                let (id, key) = (message.id.clone(), key.clone());
+                move || format!("native-{key}:{id}")
             })
             .text_color(cx.theme().muted_foreground)
             .when_some(icon, Button::icon)
@@ -432,12 +479,14 @@ impl NativeAgentSessionView {
                 let arguments = if operation == "queue-resume" {
                     Vec::new()
                 } else {
-                    vec![id.clone()]
+                    std::iter::once(id.clone())
+                        .chain(direction.map(str::to_owned))
+                        .collect()
                 };
                 this.command(operation, arguments, window, cx);
             }));
         super::element_tooltip(
-            SharedString::from(format!("{operation}-tooltip:{}", message.id)),
+            SharedString::from(format!("{key}-tooltip:{}", message.id)),
             label,
             button,
         )

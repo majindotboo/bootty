@@ -196,9 +196,11 @@ impl NativeAgentSessionView {
             .as_ref()
             .and_then(|completion| completion.read(cx).provider_mentions(cx).ok())
             .unwrap_or_default();
+        let conversations = self.mentionable_conversations.clone();
         let completion = cx.new(|cx| {
             let mut completion = ComposerCompletion::new(scope, sender, editor, window, cx);
             completion.restore_provider_mentions(&mentions);
+            completion.set_conversations(conversations);
             completion
         });
         // Restored prompts show app chips; the completion registered the icon sender above.
@@ -267,10 +269,159 @@ impl NativeAgentSessionView {
                 });
                 cx.notify();
             }
+            CompletionSource::Conversation(conversation) => {
+                if self.conversation_mentions.len() >= bootty_agents::MAX_MENTIONED_CONVERSATIONS {
+                    self.error = Some("Mention at most four conversations in one message".into());
+                    cx.notify();
+                    return;
+                }
+                let token = gpui_kit::component::input::InlineToken::new(
+                    format!("conversation:{}", conversation.target.handle),
+                    format!("@{}", conversation.name),
+                );
+                self.conversation_mentions
+                    .retain(|mention| mention.target != conversation.target);
+                self.conversation_mentions.push(conversation.clone());
+                self.composer.update(cx, |input, cx| {
+                    input.set_selected_range(selection.range.clone(), cx);
+                    if let Err(error) = input.replace_with_token(token, window, cx) {
+                        self.error = Some(error.to_string());
+                    }
+                    input.focus_handle(cx).focus(window, cx);
+                });
+                cx.notify();
+            }
             CompletionSource::Provider(_)
             | CompletionSource::File(_)
             | CompletionSource::Directory(_)
             | CompletionSource::Composer(_) => {}
+        }
+    }
+
+    /// Puts the composer's words aside, or brings the newest stashed prompt back into an empty
+    /// composer. Attachments stay in the composer.
+    fn stash_or_restore(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !cx.has_global::<crate::prompt_stash::PromptStash>() {
+            return false;
+        }
+        let text = self.composer.read(cx).value().to_string();
+        if text.trim().is_empty() {
+            return self.restore_stashed(None, window, cx);
+        }
+        let now = chrono::Utc::now().timestamp();
+        match cx
+            .update_global(|stash: &mut crate::prompt_stash::PromptStash, _| stash.stash(text, now))
+        {
+            Ok(()) => self.composer.update(cx, |composer, cx| {
+                composer.set_value("", window, cx);
+            }),
+            Err(error) => self.error = Some(super::diagnostic("Could not stash the prompt", error)),
+        }
+        cx.notify();
+        true
+    }
+
+    /// Takes a stashed prompt, the newest when `id` is `None`, back into the composer: in place
+    /// of an empty draft, or where the cursor is.
+    pub(super) fn restore_stashed(
+        &mut self,
+        id: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let taken =
+            cx.update_global(|stash: &mut crate::prompt_stash::PromptStash, _| stash.take(id));
+        match taken {
+            Ok(Some(entry)) if self.composer.read(cx).value().trim().is_empty() => {
+                self.restore_draft(&entry.text, &[], window, cx);
+            }
+            Ok(Some(entry)) => self.composer.update(cx, |composer, cx| {
+                composer.insert(entry.text, window, cx);
+            }),
+            Ok(None) => return false,
+            Err(error) => {
+                self.error = Some(super::diagnostic("Could not restore the prompt", error));
+            }
+        }
+        cx.notify();
+        true
+    }
+
+    /// The stashed prompts, from a badge beside the composer's controls when there are any.
+    pub(super) fn render_stash(cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
+        let entries = cx
+            .try_global::<crate::prompt_stash::PromptStash>()?
+            .entries()
+            .to_vec();
+        if entries.is_empty() {
+            return None;
+        }
+        let owner = cx.weak_entity();
+        Some(
+            Button::new("native-stash")
+                .debug_selector(|| "native-stash".into())
+                .ghost()
+                .xsmall()
+                .icon(gpui_kit::component::Icon::default().path("icons/bookmark.svg"))
+                .label(entries.len().to_string())
+                .text_color(cx.theme().muted_foreground)
+                .accessibility_label("Stashed prompts")
+                .dropdown_menu(move |menu, _, _| {
+                    entries.iter().fold(menu, |menu, entry| {
+                        let (owner, id) = (owner.clone(), entry.id.clone());
+                        let words = entry.text.split_whitespace().collect::<Vec<_>>().join(" ");
+                        let snippet = match words.char_indices().nth(60) {
+                            Some((end, _)) => format!("{}…", words.get(..end).unwrap_or(&words)),
+                            None => words,
+                        };
+                        menu.item(
+                            gpui_kit::component::menu::PopupMenuItem::new(snippet).on_click(
+                                move |_, window, cx| {
+                                    _ = owner.update(cx, |this, cx| {
+                                        this.restore_stashed(Some(&id), window, cx);
+                                    });
+                                },
+                            ),
+                        )
+                    })
+                }),
+        )
+    }
+
+    /// The conversations the composer still mentions, in the order they were chosen.
+    pub(super) fn active_conversation_mentions(&self, cx: &App) -> Vec<CommandTarget> {
+        let tokens: Vec<String> = self
+            .composer
+            .read(cx)
+            .tokens()
+            .iter()
+            .map(|span| span.token().id().to_string())
+            .collect();
+        self.conversation_mentions
+            .iter()
+            .filter(|mention| {
+                tokens
+                    .iter()
+                    .any(|id| *id == format!("conversation:{}", mention.target.handle))
+            })
+            .map(|mention| mention.target.clone())
+            .collect()
+    }
+
+    /// The other conversations this composer can mention.
+    pub fn set_mentionable_conversations(
+        &mut self,
+        conversations: Vec<crate::gpui_composer_completion::MentionableConversation>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.mentionable_conversations == conversations {
+            return;
+        }
+        self.mentionable_conversations.clone_from(&conversations);
+        if let Some(completion) = &self.completion {
+            completion.update(cx, |completion, _| {
+                completion.set_conversations(conversations);
+            });
         }
     }
 
@@ -474,6 +625,12 @@ impl NativeAgentSessionView {
                 return false;
             }
             return self.toggle_fast_mode(window, cx);
+        }
+        if action == CommandAction::Stash {
+            if window.has_active_dialog(cx) || self.subagent.is_some() {
+                return false;
+            }
+            return self.stash_or_restore(window, cx);
         }
         if matches!(action, CommandAction::EffortDown | CommandAction::EffortUp) {
             if window.has_active_dialog(cx) {

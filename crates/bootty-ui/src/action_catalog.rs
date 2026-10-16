@@ -239,6 +239,9 @@ command_catalog! {
     AgentHistory:
         "History", "Browse and continue saved conversations across agent providers",
         "agent_history", "history", Sessions, shown, Write, Binding, None;
+    AddSelectionToConversation:
+        "Add Selection to Conversation", "Add the selected document lines or terminal text to this session's conversation",
+        "add_selection_to_conversation", "message-square-plus", Sessions, shown, Write, ApplicationWindow, None;
     ResumeCodexSession:
         "Resume Codex session…", "Continue a saved Codex conversation from any application",
         "resume_codex_session", "history", Sessions, hidden, Write, Binding, None;
@@ -254,6 +257,12 @@ command_catalog! {
     SettleSession:
         "Settle Session", "Mark current saved work settled without closing its terminal",
         "settle_session", "circle-check", Sessions, shown, Write, Session, None;
+    TogglePinSession:
+        "Pin or Unpin Session", "Pin the current saved work, or unpin it when already pinned",
+        "toggle_session_pin", "pin", Sessions, shown, Write, Session, None;
+    ArchiveSession:
+        "Archive Session", "Archive the current saved work without closing its terminal",
+        "archive_session", "archive", Sessions, shown, Write, Session, None;
     InterruptAgent:
         "Interrupt Agent", "Stop the running turn of the conversation in the focused pane",
         "interrupt_agent", "square", Sessions, shown, Write, Pane, None;

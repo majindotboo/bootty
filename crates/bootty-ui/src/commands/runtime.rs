@@ -14,6 +14,7 @@ mod git;
 mod jobs;
 mod links;
 mod mux;
+mod names;
 mod orchestration;
 mod pane_input;
 mod recovery;
@@ -190,6 +191,7 @@ pub enum PendingCommandResult {
         scope: SpaceId,
         target: CommandTarget,
         result: mpsc::Receiver<Result<links::ResolvedLink, String>>,
+        link_use: links::LinkUse,
     },
     Clipboard {
         scope: SpaceId,
@@ -848,6 +850,28 @@ impl AppState {
         self.poll_started_pending_command(pending, now, effects)
     }
 
+    /// Opens, reveals or edits a link once it resolves, unless the caller cancelled first.
+    fn finish_link(
+        &mut self,
+        link: Result<Result<links::ResolvedLink, String>, mpsc::RecvError>,
+        (scope, target, link_use): (SpaceId, &CommandTarget, links::LinkUse),
+        cancellation: &CommandCancellation,
+        effects: &mut Vec<AppEffect>,
+    ) -> CommandOutcome {
+        match link {
+            Ok(Ok(link)) if cancellation.try_start() => {
+                if link_use == links::LinkUse::Open {
+                    self.finish_link_open(scope, target, link, effects)
+                } else {
+                    self.finish_link_on_desktop(scope, link, link_use, effects)
+                }
+            }
+            Ok(Ok(_)) => CommandOutcome::cancelled(),
+            Ok(Err(message)) => links::failure(message),
+            Err(mpsc::RecvError) => links::failure("link worker stopped".to_owned()),
+        }
+    }
+
     fn poll_started_pending_command(
         &mut self,
         pending: &mut PendingAppCommand,
@@ -897,14 +921,16 @@ impl AppState {
                 scope,
                 target,
                 result,
-            } => match ready!(poll_command_result(result)) {
-                Ok(Ok(link)) if pending.cancellation.try_start() => {
-                    self.finish_link_open(*scope, target, link, effects)
-                }
-                Ok(Ok(_)) => CommandOutcome::cancelled(),
-                Ok(Err(message)) => links::failure(message),
-                Err(mpsc::RecvError) => links::failure("link worker stopped".to_owned()),
-            },
+                link_use,
+            } => {
+                let link = ready!(poll_command_result(result));
+                self.finish_link(
+                    link,
+                    (*scope, target, *link_use),
+                    &pending.cancellation,
+                    effects,
+                )
+            }
             PendingCommandResult::Clipboard {
                 scope,
                 target,
@@ -1091,7 +1117,12 @@ impl AppState {
             .describe(&invocation.command)
             .map_or_else(|| invocation.command.clone(), |descriptor| descriptor.title);
         let outer = self.commands.title.replace(title);
-        let dispatch = self.dispatch_titled_command(invocation, viewport, effects, execution);
+        let dispatch = match self.named_target(invocation) {
+            Ok(invocation) => {
+                self.dispatch_titled_command(invocation, viewport, effects, execution)
+            }
+            Err(outcome) => self.reject_command(outcome),
+        };
         self.commands.title = outer;
         dispatch
     }
@@ -1346,7 +1377,7 @@ impl AppState {
             CoreCommandExecutor::Synchronous(executor) => {
                 self.dispatch_synchronous_command(executor, effects, execution)
             }
-            CoreCommandExecutor::Keybind(KeybindAction::InterruptAgent) => self
+            CoreCommandExecutor::Keybind(KeybindAction::Invoke("interrupt_agent")) => self
                 .interrupt_pane_conversation(
                     exact_target.as_ref(),
                     invocation.caller,
@@ -1427,7 +1458,22 @@ impl AppState {
                 message: "Session activity requires an accepted host input receipt".to_owned(),
             });
         }
-        self.dispatch_session_command(action, arguments, target, execution)
+        let scope = target.as_ref().map(ExactMuxTarget::scope);
+        let dispatch = self.dispatch_session_command(action, arguments, target, execution);
+        // Archiving from Bootty's own surfaces offers to reverse it; scripts get the outcome.
+        if matches!(
+            action,
+            crate::commands::SessionAction::Archive
+                | crate::commands::SessionAction::ArchiveCurrent
+        ) && !matches!(caller, Caller::Cli | Caller::Socket | Caller::Luau)
+            && let (Some(scope), CommandDispatch::Complete(CommandOutcome::Success { value, .. })) =
+                (scope, &dispatch)
+            && value["changed"] == true
+            && let Some(identity) = value["identity"].as_str()
+        {
+            self.offer_unarchive(scope, identity.to_owned());
+        }
+        dispatch
     }
 
     fn dispatch_attached_clipboard(
@@ -1455,7 +1501,7 @@ impl AppState {
             return self
                 .reject_command(links::failure("Link needs an attached terminal".to_owned()));
         };
-        self.dispatch_link_open(target, &exact, arguments, execution)
+        self.dispatch_link_open(target, &exact, arguments, links::LinkUse::Open, execution)
     }
 
     fn dispatch_captured_terminal(

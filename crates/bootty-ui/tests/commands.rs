@@ -3667,6 +3667,70 @@ fn session_create_refuses_a_bad_request_before_the_backend(
     );
 }
 
+/// Words typed into the New Session form come back after a restart, once they have stayed the
+/// same for a second; a cleared draft leaves nothing behind.
+#[test]
+fn the_new_session_draft_survives_a_restart() {
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let started = Instant::now();
+    let type_prompt = |state: &mut AppState, text: &str| {
+        let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
+            panic!("new session form");
+        };
+        let dialog = dialog.spec().id;
+        state.apply_dialog_intent(
+            &bootty_gpui::DialogIntent::TextChanged {
+                dialog,
+                value: text.to_owned(),
+            },
+            &mut Vec::new(),
+        );
+    };
+    let settle = |state: &mut AppState| {
+        for seconds in [0, 2] {
+            state.update_frame(frames::idle_frame(
+                started.checked_add(Duration::from_secs(seconds)).unwrap(),
+            ));
+        }
+    };
+    let prompt = |state: &AppState| match state.modal_dialog() {
+        Some(ModalDialog::NewSession(dialog)) => dialog.draft().map(|draft| draft.prompt.clone()),
+        _ => None,
+    };
+    let mut state = native_state(directory.path());
+    let project = directory.path().to_string_lossy().into_owned();
+    assert!(state.open_new_session_dialog_in(state.active_space_id(), project.clone()));
+    type_prompt(&mut state, "Keep this draft");
+    settle(&mut state);
+    drop(state);
+    let mut state = native_state(directory.path());
+    assert!(state.open_new_session_dialog_in(state.active_space_id(), project.clone()));
+    assert_eq!(prompt(&state).as_deref(), Some("Keep this draft"));
+    type_prompt(&mut state, "");
+    settle(&mut state);
+    drop(state);
+    let mut state = native_state(directory.path());
+    assert!(state.open_new_session_dialog_in(state.active_space_id(), project));
+    assert_eq!(prompt(&state).as_deref(), Some(""));
+}
+
+/// "New Session in Project" opens the form in that project's directory.
+#[test]
+fn new_sessions_can_start_in_a_sessions_project() {
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let mut state = native_state(directory.path());
+    let project = directory
+        .path()
+        .join("project")
+        .to_string_lossy()
+        .into_owned();
+    assert!(state.open_new_session_dialog_in(state.active_space_id(), project.clone()));
+    let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
+        panic!("new session form");
+    };
+    assert_eq!(dialog.draft().map(|draft| draft.cwd.clone()), Some(project));
+}
+
 /// Bootty's own notices keep their wording instead of collapsing into a generic sentence.
 #[test]
 fn closing_the_last_space_says_why() {

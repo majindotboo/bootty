@@ -19,19 +19,38 @@ pub struct NativeHistoryPage {
 impl NativeHistoryPage {
     /// Preserve live updates and recover completed replies truncated by older Bootty versions.
     #[must_use]
+    /// The page with the live transcript in place, in provider order: a live item replaces its
+    /// page entry, and live items the page doesn't hold follow the page item before them. A
+    /// reply the live view no longer keeps stays where the provider put it, between the prompts
+    /// the live view kept.
     pub fn with_live_transcript(&self, live: &[NativeTranscriptItem]) -> Vec<NativeTranscriptItem> {
-        self.transcript
-            .iter()
-            .filter(|item| !live.iter().any(|current| current.id == item.id))
-            .cloned()
-            .chain(live.iter().map(|current| {
-                let mut item = current.clone();
-                if let Some(provider) = recovered_reply(current, &self.transcript) {
-                    item.text.clone_from(&provider.text);
+        let current = |live: &NativeTranscriptItem| {
+            let mut item = live.clone();
+            if let Some(provider) = recovered_reply(live, &self.transcript) {
+                item.text.clone_from(&provider.text);
+            }
+            item
+        };
+        let mut merged = Vec::with_capacity(self.transcript.len().max(live.len()));
+        let mut next = 0;
+        for item in &self.transcript {
+            match live.iter().position(|candidate| candidate.id == item.id) {
+                Some(position) if position >= next => {
+                    merged.extend(
+                        live.get(next..=position)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(current),
+                    );
+                    next = position.saturating_add(1);
                 }
-                item
-            }))
-            .collect()
+                // Already placed, out of the provider's order.
+                Some(_) => {}
+                None => merged.push(item.clone()),
+            }
+        }
+        merged.extend(live.get(next..).unwrap_or_default().iter().map(current));
+        merged
     }
 
     /// Retain already loaded turns while admitting an adjacent provider page.
@@ -475,6 +494,8 @@ fn project_page(
     let mut history = NativeSessionSnapshot::new(AgentKind::Codex);
     let mut ids = std::collections::BTreeSet::new();
     let mut expected = std::collections::BTreeSet::new();
+    // A turn starts with one message; any after it steered the turn.
+    let mut started_turns = std::collections::BTreeSet::new();
     for index in 0..data.len() {
         let entry = data
             .get(if descending {
@@ -500,6 +521,12 @@ fn project_page(
             ),
             |history| history.history_item(item),
         );
+        if field(item, "type") == "userMessage"
+            && let Some(turn) = field(entry, "turnId").as_str()
+            && !started_turns.insert(turn)
+        {
+            history.mark_steered([id]);
+        }
     }
     if expected
         .iter()

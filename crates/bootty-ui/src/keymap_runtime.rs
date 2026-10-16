@@ -670,6 +670,13 @@ fn command_outcome_message(outcome: CommandOutcome) -> String {
     }
 }
 
+/// Stashing a prompt takes the platform's Save keystroke.
+const STASH_KEYSTROKE: &str = if cfg!(target_os = "macos") {
+    "cmd+s"
+} else {
+    "ctrl+s"
+};
+
 fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
     let mut bindings = Vec::new();
     for (keystrokes, command) in [
@@ -758,6 +765,7 @@ fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
         ("ctrl+alt+d", "ui.composer.dictate"),
         ("ctrl+alt+v", "ui.composer.voice"),
         ("ctrl+alt+i", "ui.composer.focus-composer"),
+        (STASH_KEYSTROKE, "ui.composer.stash"),
     ] {
         bindings.push(KeymapBindingSnapshot {
             context: KeymapContext::Composer,

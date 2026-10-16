@@ -10,8 +10,8 @@ use serde::Deserialize;
 use crate::{
     AgentKind,
     terminal_history::{
-        TerminalHistoryEntry, TerminalHistoryQuery, matches_project, timestamp, title, valid_id,
-        valid_path,
+        TerminalHistoryEntry, TerminalHistoryQuery, matches_project, preview_title, timestamp,
+        title, valid_id, valid_path,
     },
 };
 
@@ -301,8 +301,7 @@ fn first_user_title(record: Record, provider: AgentKind, session_id: &str) -> Op
                 .flatten()
         })
     })?;
-    let preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    title(Some(preview.chars().take(120).collect()))
+    preview_title(text)
 }
 
 pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntry>, String> {
@@ -321,11 +320,14 @@ pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntr
         );
     }
     let mut result = Vec::new();
-    for (index, candidate) in candidates(&root)?.iter().enumerate() {
+    let older = candidates(&root)?
+        .into_iter()
+        .filter(|candidate| crate::terminal_history::before(candidate.modified, query.before));
+    for (index, candidate) in older.enumerate() {
         if index >= MAX_READ_FILES {
             return Err("Provider history metadata scan exceeds 512 saved files".to_owned());
         }
-        if let Some(entry) = parse(query, candidate)? {
+        if let Some(entry) = parse(query, &candidate)? {
             result.push(entry);
             if result.len() == query.limit {
                 break;

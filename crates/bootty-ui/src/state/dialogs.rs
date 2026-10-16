@@ -81,6 +81,9 @@ impl AppState {
                 .collect();
             dialog.sync_registered_projects(projects);
         }
+        let names = matches!(self.dialogs.current(), Some(ModalDialog::SessionPicker(_)))
+            .then(|| self.saved_session_names())
+            .unwrap_or_default();
         let dialog = self.dialogs.current_mut()?;
         Some(match dialog {
             ModalDialog::NewSession(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
@@ -93,7 +96,7 @@ impl AppState {
                 DialogProjection::SpaceEditor(Box::new(dialog.snapshot()))
             }
             ModalDialog::SessionPicker(dialog) => {
-                dialog.update_groups(&groups);
+                dialog.update_groups(&groups, &names);
                 DialogProjection::Dialog(Box::new(dialog.spec(&groups)))
             }
             ModalDialog::RenameSession(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
@@ -1016,15 +1019,21 @@ impl AppState {
             }
             return;
         }
-        self.open_session_creation_dialog_for(true, Some(request));
+        self.open_session_creation_dialog_for(true, Some(request), None);
     }
     fn open_session_creation_dialog(&mut self, native_agent: bool) {
-        self.open_session_creation_dialog_for(native_agent, None);
+        self.open_session_creation_dialog_for(native_agent, None, None);
+    }
+    /// Opens the new-session form in a Space's directory, such as a session's project.
+    pub fn open_new_session_dialog_in(&mut self, scope: SpaceId, cwd: String) -> bool {
+        self.open_session_creation_dialog_for(false, None, Some((scope, cwd)));
+        true
     }
     fn open_session_creation_dialog_for(
         &mut self,
         native_agent: bool,
         request: Option<&crate::surface_creation::PendingNewSurface>,
+        place: Option<(SpaceId, String)>,
     ) {
         use crate::presentation::new_session_form::NewSessionForm;
         self.close_overlay_dialogs();
@@ -1039,6 +1048,16 @@ impl AppState {
             };
             destination.cwd.clone_from(&request.cwd);
             destination.scope
+        } else if let Some((scope, cwd)) = place {
+            let Some(destination) = destinations
+                .iter_mut()
+                .find(|destination| destination.scope == scope)
+            else {
+                self.record_message("That Space can't create a session");
+                return;
+            };
+            destination.cwd = cwd;
+            scope
         } else {
             self.mux_scope()
         };

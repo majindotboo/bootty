@@ -197,7 +197,10 @@ fn session_picker_preserves_display_identity_and_captured_targets_after_refresh(
                 anchor: MuxPaneAnchor::default(),
                 active_window_id: None,
                 windows: Vec::new(),
-                tag: MuxSessionTag::default(),
+                tag: MuxSessionTag {
+                    identity: Some("saved-identity".to_owned()),
+                    ..MuxSessionTag::default()
+                },
             },
             MuxSession {
                 id: "another-session".to_owned(),
@@ -215,13 +218,15 @@ fn session_picker_preserves_display_identity_and_captured_targets_after_refresh(
         display_names: HashMap::from([("session-id".to_owned(), "Friendly name".to_owned())]),
     }];
     let mut dialog = SessionPickerDialog::open();
-    dialog.update_groups(&groups);
+    let names = HashMap::from([("saved-identity".to_owned(), "project-7c".to_owned())]);
+    dialog.update_groups(&groups, &names);
 
     let spec = dialog.spec(&groups);
 
     let color = spec.rows[0].color.expect("session identity color");
     assert_ne!(Some(color), spec.rows[1].color);
-    for query in ["backend-name", "Friendly"] {
+    // A session is found by its backend name, what Bootty calls it, or its short name.
+    for query in ["backend-name", "Friendly", "project-7c"] {
         dialog.apply(&DialogIntent::TextChanged {
             dialog: spec.id.clone(),
             value: query.to_owned(),
@@ -242,7 +247,7 @@ fn session_picker_preserves_display_identity_and_captured_targets_after_refresh(
     } else {
         groups[0].sessions.reverse();
     }
-    dialog.update_groups(&groups);
+    dialog.update_groups(&groups, &names);
     let result = dialog.apply(&DialogIntent::Activate {
         dialog: spec.id.clone(),
         row: row.id.clone(),

@@ -19,6 +19,19 @@ bootty command agents.native.status --target native:claude:26@43 native:claude:2
 
 Each listed conversation's `id` and `generation` form its target.
 
+A session or conversation also has a short name, like `bootty-7c`: its project's
+name and the start of a hash of its identity. The sidebar shows a session's name
+in its tooltip, and `list_agents` and `agents.native.activities` list each
+conversation's `name`. A name works as `--target`, and resolves to the exact target
+and its current generation when the command runs; any unambiguous start of the hash
+works, as a short Git commit id does. For conversation commands, the name may also
+stand in for the `id` argument, with any `generation`:
+
+```sh
+bootty command agents.native.status --target bootty-7c bootty-7c 0
+bootty command session.close --target bootty-a3
+```
+
 ## Wait for a condition
 
 ```sh

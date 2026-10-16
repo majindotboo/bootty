@@ -543,6 +543,7 @@ impl NativeAgentSessionView {
         let comment = citation.comment.clone();
         self.selected_response = None;
         self.editing_citation = Some((key.to_owned(), position));
+        self.citation_scroll = self.scroll_top();
         self.citation_editor.update(cx, |editor, cx| {
             editor.set_value(comment, window, cx);
             editor.focus(window, cx);
@@ -721,7 +722,11 @@ impl NativeAgentSessionView {
                 .iter()
                 .find(|citation| citation_key(citation) == *key)
         {
-            return self.render_citation_editor(citation, *position, cx);
+            // The editor moves with its quote as the transcript scrolls.
+            let scrolled = self.scroll_top() - self.citation_scroll;
+            let position =
+                gpui_kit::point(position.x, gpui_kit::px(f32::from(position.y) - scrolled));
+            return self.render_citation_editor(citation, position, cx);
         }
         let Some(selection) = &self.selected_response else {
             return div().into_any_element();

@@ -18,6 +18,7 @@ use gpui_kit::component::{
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputState},
     list::ListItem,
+    menu::ContextMenuExt as _,
     tree::{Tree, TreeEntry, TreeItem, TreeState},
 };
 use gpui_kit::{
@@ -317,6 +318,121 @@ impl GitChangesPanel {
         ))
     }
 
+    /// A changed file's actions: show it in the file manager or open it in an installed editor
+    /// when it's on this computer, and copy its path.
+    fn file_menu(
+        owner: &gpui_kit::WeakEntity<Self>,
+        path: &str,
+        menu: gpui_kit::component::menu::PopupMenu,
+        cx: &App,
+    ) -> gpui_kit::component::menu::PopupMenu {
+        let Some(panel) = owner.upgrade() else {
+            return menu;
+        };
+        let panel = panel.read(cx);
+        let root = panel
+            .changes
+            .as_ref()
+            .map_or(&panel.context.directory, |changes| &changes.root);
+        let file = format!("{}/{path}", root.trim_end_matches('/'));
+        let local = panel.context.remote.is_none();
+        let menu = if local {
+            let (reveal, path) = (owner.clone(), file.clone());
+            menu.item(
+                gpui_kit::component::menu::PopupMenuItem::new(crate::commands::reveal_label())
+                    .on_click(move |_, window, cx| {
+                        _ = reveal.update(cx, |this, cx| {
+                            this.hand_to_desktop(
+                                "files.reveal",
+                                vec![path.clone()],
+                                "Could not show the file",
+                                window,
+                                cx,
+                            );
+                        });
+                    }),
+            )
+        } else {
+            menu
+        };
+        let copied = file.clone();
+        let menu = menu.item(
+            gpui_kit::component::menu::PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(copied.clone()));
+            }),
+        );
+        // Editors differ by computer, so they follow the rows every file has.
+        let editors = if local {
+            crate::editors::installed()
+        } else {
+            &[]
+        };
+        editors
+            .iter()
+            .enumerate()
+            .fold(menu, |menu, (index, editor)| {
+                let (edit, path) = (owner.clone(), file.clone());
+                let menu = if index == 0 { menu.separator() } else { menu };
+                menu.item(
+                    gpui_kit::component::menu::PopupMenuItem::new(format!(
+                        "Open in {}",
+                        editor.name
+                    ))
+                    .on_click(move |_, window, cx| {
+                        _ = edit.update(cx, |this, cx| {
+                            this.hand_to_desktop(
+                                "files.open_in",
+                                vec![path.clone(), editor.id.to_owned()],
+                                "Could not open the file",
+                                window,
+                                cx,
+                            );
+                        });
+                    }),
+                )
+            })
+    }
+
+    /// Hands a local file to this computer: `files.reveal` or `files.open_in`. A refusal
+    /// shows as `failure`.
+    fn hand_to_desktop(
+        &self,
+        command: &str,
+        arguments: Vec<String>,
+        failure: &'static str,
+        window: &Window,
+        cx: &Context<Self>,
+    ) {
+        let mut invocation = CommandInvocation::new(command, arguments, Caller::Internal);
+        invocation.target = Some(self.context.target.clone());
+        let Ok(receiver) = self.sender.submit(
+            invocation,
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .unwrap_or_else(Instant::now),
+            CommandCancellation::new(),
+        ) else {
+            return;
+        };
+        cx.spawn_in(window, async move |weak, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { receiver.recv() })
+                .await;
+            _ = weak.update(cx, |this, cx| {
+                if let Ok(outcome) = outcome
+                    && let Some(message) = crate::commands::command_outcome_message(&outcome)
+                {
+                    this.error = Some(
+                        crate::error_catalog::ErrorNotice::failed(failure, message).to_string(),
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn submit_command(
         &self,
         command: &str,
@@ -586,9 +702,14 @@ impl GitChangesPanel {
         let staged = group == "staged";
         let stage_path = path.to_owned();
         let stage_owner = owner.clone();
+        let (menu_owner, menu_path) = (owner.clone(), path.to_owned());
         row = row
             .child(
                 div()
+                    .id(SharedString::from(format!("git-file-menu:{id}")))
+                    .context_menu(move |menu, _, cx| {
+                        Self::file_menu(&menu_owner, &menu_path, menu, cx)
+                    })
                     .flex()
                     .items_center()
                     .gap_2()

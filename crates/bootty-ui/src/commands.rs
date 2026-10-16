@@ -55,7 +55,7 @@ mod themes;
 pub use browser::{BrowserAction, BrowserRequest};
 pub use computer::{ApplicationCommand, ComputerCommand, agent_may_use};
 pub use dock::{DockAction, DockRequest, PANELS, PanelCreation, PanelDescriptor, panel_descriptor};
-pub use files::FileAction;
+pub use files::{FileAction, reveal_label};
 pub use git::GitAction;
 pub use jobs::JobAction;
 pub use orchestration::{RunCommand, RunNodeRequest, capture_run_plan};
@@ -459,6 +459,7 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
             CommandAction::FocusComposer,
             "Focus composer",
         ),
+        ("stash", CommandAction::Stash, "Stash or restore prompt"),
     ]
     .into_iter()
     .chain(
@@ -493,6 +494,7 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
                             | CommandAction::TogglePlan
                             | CommandAction::ToggleFast
                             | CommandAction::FocusComposer
+                            | CommandAction::Stash
                     ),
                 },
                 executor: CommandExecutorResolver::Composer(action),

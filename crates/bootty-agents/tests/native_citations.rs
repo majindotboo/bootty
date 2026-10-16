@@ -18,6 +18,7 @@ fn response(text: &str, role: &str) -> NativeTranscriptItem {
         citations: Vec::new(),
         applications: Vec::new(),
         questions: Vec::new(),
+        steered: false,
     }
 }
 

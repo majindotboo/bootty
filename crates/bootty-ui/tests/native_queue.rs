@@ -167,3 +167,49 @@ fn a_paused_queue_offers_to_resume(cx: &mut TestAppContext) {
     // Only the conversation's id and generation: Resume names no single message.
     assert_eq!(resumed, Some(2));
 }
+
+/// Waiting messages move one place sooner or later; the first can't go sooner and the last
+/// can't go later.
+#[gpui_kit::test]
+fn queued_messages_trade_places(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let (visual, commands) = open(working_record(), cx);
+    assert!(
+        visual
+            .debug_bounds("native-queue-move-earlier:next")
+            .is_none()
+    );
+    assert!(
+        visual
+            .debug_bounds("native-queue-move-later:steering")
+            .is_none()
+    );
+    assert!(
+        visual
+            .debug_bounds("native-queue-move-earlier:steering")
+            .is_some()
+    );
+    let later = visual
+        .debug_bounds("native-queue-move-later:next")
+        .expect("the first message can go later");
+    visual.simulate_click(later.center(), Modifiers::none());
+    visual.run_until_parked();
+    let moved = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|invocation| invocation.command == "agents.native.queue-move")
+        .map(|invocation| invocation.arguments.clone());
+    assert_eq!(
+        moved,
+        Some(vec![
+            "queue".to_owned(),
+            "1".to_owned(),
+            "next".to_owned(),
+            "later".to_owned()
+        ])
+    );
+}

@@ -393,7 +393,12 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
             command.starts_with("pane.")
                 || matches!(
                     command,
-                    "session.close" | "terminal.create_tab" | "settle_session" | "new_tab"
+                    "session.close"
+                        | "terminal.create_tab"
+                        | "settle_session"
+                        | "toggle_session_pin"
+                        | "archive_session"
+                        | "new_tab"
                 )
                 || (command.starts_with("agents.") && command.rsplit('.').next() == Some("tab"))
         }

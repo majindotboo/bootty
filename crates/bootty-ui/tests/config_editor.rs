@@ -50,6 +50,44 @@ fn clicking_the_editor_acquires_keyboard_focus(cx: &mut TestAppContext) {
     });
 }
 
+/// The selected lines are one-based; a selection that ends at a line's start doesn't take
+/// that line, and with nothing selected the cursor's line is the selection.
+#[gpui_kit::test]
+fn selected_lines_count_from_one_and_skip_a_trailing_line_start(cx: &mut TestAppContext) {
+    init(cx);
+    let mut probe = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| ConfigEditorProbe::new("one\ntwo\nthree\n", window, cx));
+        probe = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let probe = probe.expect("editor probe");
+    cx.simulate_click(
+        gpui_kit::point(gpui_kit::px(60.0), gpui_kit::px(40.0)),
+        gpui_kit::Modifiers::none(),
+    );
+    let primary = if cfg!(target_os = "macos") {
+        "cmd"
+    } else {
+        "ctrl"
+    };
+    let lines = |cx: &mut gpui_kit::VisualTestContext| {
+        probe.update(cx, |probe, cx| probe.editor.read(cx).selected_lines(cx))
+    };
+    cx.simulate_keystrokes(&format!("{primary}-a"));
+    assert_eq!(lines(cx), (1, 3));
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-up down"
+    } else {
+        "ctrl-home down"
+    });
+    assert_eq!(lines(cx), (2, 2));
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(lines(cx), (2, 2));
+    cx.simulate_keystrokes("shift-down");
+    assert_eq!(lines(cx), (2, 3));
+}
+
 struct InputProbe {
     first: Entity<gpui_kit::component::input::InputState>,
     second: Entity<gpui_kit::component::input::InputState>,

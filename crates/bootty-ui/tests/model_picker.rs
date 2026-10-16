@@ -44,6 +44,7 @@ fn model(id: &str, legacy: bool, favorite: bool) -> NativeModelOption {
         is_legacy: legacy,
         is_favorite: favorite,
         supports_fast_mode: true,
+        fast_mode_detail: None,
     }
 }
 
@@ -184,7 +185,10 @@ fn fast_mode_is_a_shared_picker_control_and_pi_has_no_speed_control(cx: &mut Tes
         let picker = cx.new(|cx| {
             ModelPickerView::new_with_providers(
                 AgentKind::Codex,
-                vec![model("current", false, false)],
+                vec![NativeModelOption {
+                    fast_mode_detail: Some("2x speed, increased usage".into()),
+                    ..model("current", false, false)
+                }],
                 Some("current"),
                 vec!["Codex".into(), "Pi".into()],
                 window,
@@ -205,6 +209,9 @@ fn fast_mode_is_a_shared_picker_control_and_pi_has_no_speed_control(cx: &mut Tes
     visual.simulate_resize(size(px(800.), px(600.)));
     draw(visual);
     click(visual, "model-picker-trigger");
+    draw(visual);
+    // What the provider says fast mode trades shows under it.
+    assert!(visual.debug_bounds("model-fast-mode-detail").is_some());
     click(visual, "model-fast-mode");
     assert_eq!(*events.borrow(), vec![ModelPickerEvent::FastMode(true)]);
     retained

@@ -136,6 +136,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             ResourceKind::Session,
         ),
         (
+            "queue-move",
+            vec!["id", "generation", "message_id", "direction"],
+            ResourceKind::Session,
+        ),
+        (
             "attachment-preview",
             vec!["id", "generation", "attachment_id"],
             ResourceKind::Session,
@@ -193,6 +198,16 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         (
             "open-link",
             vec!["id", "generation", "location"],
+            ResourceKind::Session,
+        ),
+        (
+            "reveal-link",
+            vec!["id", "generation", "location"],
+            ResourceKind::Session,
+        ),
+        (
+            "edit-link",
+            vec!["id", "generation", "location", "editor"],
             ResourceKind::Session,
         ),
         (
@@ -294,13 +309,14 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                             | "applications"
                             | "selection"
                             | "provider_mentions"
+                            | "conversations"
                             | "goal"
                     ) || name == "permissions" && operation != "permissions"
                         || name == "response" && operation == "fork"),
-                    choices: if name == "direction" && operation == "pane" {
-                        vec!["right".into(), "down".into()]
-                    } else {
-                        Vec::new()
+                    choices: match (name, operation) {
+                        ("direction", "pane") => vec!["right".into(), "down".into()],
+                        ("direction", "queue-move") => vec!["earlier".into(), "later".into()],
+                        _ => Vec::new(),
                     },
                     minimum: None,
                     maximum: None,
@@ -332,6 +348,7 @@ fn prompt_arguments() -> Vec<&'static str> {
         "authored_bytes",
         "attachment_ranges",
         "provider_mentions",
+        "conversations",
     ]
 }
 

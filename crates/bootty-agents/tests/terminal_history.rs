@@ -58,6 +58,7 @@ const fn query<'a>(
         account_directory: account,
         cwd,
         limit: 50,
+        before: None,
     }
 }
 
@@ -457,25 +458,69 @@ fn codex_script(account: &Path, pages: &[Value]) -> FixtureResult<String> {
 
 #[cfg(unix)]
 #[rstest]
-fn codex_public_history_pages_retain_thread_id_without_preview_or_turns() {
+/// A thread keeps its id and name; one without a name is titled by its first prompt, as Claude
+/// and Pi conversations are. Turns never leave the provider.
+fn codex_public_history_pages_retain_thread_id_and_title_unnamed_threads_by_preview() {
     let directory = assert_fs::TempDir::new().unwrap();
     let cwd = project(directory.path(), "workspace").unwrap();
     let pages = [
         json!({"data":[{"id":"thread-one","sessionId":"root-tree-id","name":"Saved thread title","cwd":cwd,"createdAt":10,"updatedAt":20,"ephemeral":false,"preview":"secret preview","turns":["secret transcript"]}],"nextCursor":"next-page"}),
-        json!({"data":[{"id":"thread-two","cwd":cwd,"createdAt":5,"updatedAt":15,"ephemeral":false}],"nextCursor":null}),
+        json!({"data":[{"id":"thread-two","cwd":cwd,"createdAt":5,"updatedAt":15,"ephemeral":false,"preview":"Fix the\n  turn   rail"}],"nextCursor":"last-page"}),
+        json!({"data":[{"id":"thread-three","cwd":cwd,"createdAt":1,"updatedAt":2,"ephemeral":false}],"nextCursor":null}),
     ];
     let program = program(&directory, &codex_script(directory.path(), &pages).unwrap()).unwrap();
     let mut request = query(AgentKind::Codex, directory.path(), Some(&cwd));
     request.program = &program;
     let entries = terminal_provider_history(&request).unwrap();
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert_eq!(entries[0].session_id, "thread-one");
     assert_eq!(entries[0].resume_id, "thread-one");
     assert_eq!(entries[0].created_at, Some(10_000));
     assert_eq!(entries[0].updated_at, Some(20_000));
     assert_eq!(entries[0].title.as_deref(), Some("Saved thread title"));
-    assert_eq!(entries[1].title, None);
+    assert_eq!(entries[1].title.as_deref(), Some("Fix the turn rail"));
+    assert_eq!(entries[2].title, None);
     assert!(!serde_json::to_string(&entries).unwrap().contains("secret"));
+}
+
+/// The next page holds only sessions updated before the oldest one shown, from every store.
+#[cfg(unix)]
+#[rstest]
+#[case(AgentKind::Claude)]
+#[case(AgentKind::Pi)]
+#[case(AgentKind::Codex)]
+fn older_pages_hold_only_sessions_updated_before_the_cursor(#[case] provider: AgentKind) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let cwd = project(directory.path(), "workspace").unwrap();
+    let executable;
+    let mut request = query(provider, directory.path(), None);
+    if provider == AgentKind::Codex {
+        let thread = |id: &str, updated: i64| json!({"id":id,"cwd":cwd,"updatedAt":updated,"ephemeral":false});
+        let pages = [
+            json!({"data":[thread("newest", 30), thread("newer", 20)],"nextCursor":"older"}),
+            json!({"data":[thread("oldest", 10)],"nextCursor":null}),
+        ];
+        executable = program(&directory, &codex_script(directory.path(), &pages).unwrap()).unwrap();
+        request.program = &executable;
+    } else {
+        for (id, modified) in [("newest", 30), ("newer", 20), ("oldest", 10)] {
+            let record = if provider == AgentKind::Claude {
+                json!({"type":"user","sessionId":id,"cwd":cwd})
+            } else {
+                json!({"type":"session","version":3,"id":id,"cwd":cwd})
+            };
+            saved(directory.path(), provider, id, &[record], modified).unwrap();
+        }
+    }
+    request.before = Some(20_000);
+    let entries = terminal_provider_history(&request).unwrap();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["oldest"]
+    );
 }
 
 #[cfg(unix)]

@@ -41,6 +41,7 @@ use bootty_terminal::{
     terminal_session::DrainStats,
 };
 
+mod creation_draft;
 mod dialog_runtime;
 mod dialogs;
 mod input;
@@ -183,6 +184,13 @@ impl WindowChromeFacts {
 }
 
 /// A file or directory requested on the selected workspace host.
+/// A change that one click can reverse: what happened, and the commands that reverse it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UndoOffer {
+    pub message: String,
+    pub undo: Vec<CommandInvocation>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenFilesRequest {
     pub scope: bootty_mux::controller::SpaceId,
@@ -197,7 +205,7 @@ pub struct OpenFilesRequest {
 /// Host actions requested by a frame update, applied by the active window adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppEffect {
-    CustomSnooze(bootty_control::CommandInvocation),
+    CustomSnooze(Vec<bootty_control::CommandInvocation>),
     OpenSurfaceChooser(crate::surface_creation::PendingNewSurface),
     OpenSurfaceAgentForm(crate::surface_creation::PendingNewSurface),
     CloseSurfaceChooser(u64),
@@ -246,6 +254,15 @@ pub enum AppEffect {
     OpenThemeSettings,
     OpenSetting(String),
     OpenFiles(OpenFilesRequest),
+    /// Show a local file in this computer's file manager.
+    RevealPath(std::path::PathBuf),
+    /// Add the focused document's or terminal's selection to the session's conversation.
+    AddSelectionToConversation,
+    /// Open a local file or folder in the installed editor with this id.
+    OpenInEditor {
+        editor: &'static str,
+        path: std::path::PathBuf,
+    },
     ChooseProjectDirectory(bootty_control::CommandTarget),
     OpenGitChanges {
         scope: bootty_mux::controller::SpaceId,
@@ -278,6 +295,8 @@ pub struct AppState {
     pub(super) workspace: WorkspaceRuntime,
     repaint_scheduler: RepaintScheduler,
     pub(super) last_error: Option<ErrorNotice>,
+    /// A change the person just made that one click can reverse, until it is shown.
+    pub(super) undo_offer: Option<UndoOffer>,
     last_drain: DrainStats,
     notifications: notifications::TerminalNotifications,
     agent_notifications: agent_attention::AgentNotifications,
@@ -313,6 +332,7 @@ pub struct AppState {
     mouse_pointer_hidden_while_typing: bool,
     last_mouse_hover_pos: Option<Point>,
     dialogs: DialogRuntime,
+    creation_drafts: creation_draft::CreationDraftStore,
     sidebar_hovered_session: Option<ScopedSessionTarget>,
     displayed_sessions: Option<Vec<ScopedSessionTarget>>,
     theme_picker_restore_config: Option<(BoottyConfig, AppearanceVariant)>,
@@ -427,6 +447,8 @@ impl AppState {
         agent_events: Option<ControlEventSender>,
     ) -> Result<Self> {
         let config_runtime = AppConfigRuntime::new(config)?;
+        let (creation_drafts, creation_draft) =
+            creation_draft::CreationDraftStore::open(&config_runtime.current().config_path);
         let agent_state =
             agent_state_path(&config_runtime.current().config_path, &window_state_key);
         let commands = agent_events.map_or_else(
@@ -463,6 +485,7 @@ impl AppState {
             repaint_scheduler: RepaintScheduler::default(),
             last_error: keymap_diagnostic
                 .map(|error| ErrorNotice::failed("Some key bindings could not be used", error)),
+            undo_offer: None,
             last_drain: DrainStats::default(),
             recovery: recovery::RecoveryState::new(&window_state_key, repaint.clone())?,
             terminal_agent_recoveries: Vec::new(),
@@ -492,7 +515,8 @@ impl AppState {
             terminal_cursor_icon: CursorIcon::Text,
             mouse_pointer_hidden_while_typing: false,
             last_mouse_hover_pos: None,
-            dialogs: DialogRuntime::default(),
+            dialogs: DialogRuntime::with_creation_draft(creation_draft),
+            creation_drafts,
             sidebar_hovered_session: None,
             displayed_sessions: None,
             theme_picker_restore_config: None,
@@ -892,6 +916,20 @@ impl AppState {
     }
     pub(crate) fn record_notice(&mut self, notice: ErrorNotice) {
         self.last_error = Some(notice);
+    }
+    /// Keeps typed text in the New Session form across restarts; an empty form keeps nothing.
+    fn keep_creation_draft(&mut self, now: Instant) {
+        let draft = self.dialogs.creation_draft().filter(|draft| {
+            !draft.prompt.trim().is_empty()
+                || !draft.command.trim().is_empty()
+                || !draft.attachments.is_empty()
+        });
+        self.creation_drafts.observe(draft, now);
+    }
+
+    /// The reversible change to offer, taken once so it is offered once.
+    pub const fn take_undo_offer(&mut self) -> Option<UndoOffer> {
+        self.undo_offer.take()
     }
     pub fn clear_last_error(&mut self) {
         self.workspace.active.binding.mux_mut().set_error(None);
@@ -1673,6 +1711,7 @@ impl AppState {
         let mut effects = Vec::new();
 
         self.process_frame_commands(viewport, window_focused, &mut effects);
+        self.keep_creation_draft(now);
 
         self.sync_macos_non_native_fullscreen_presentation(&mut effects);
         self.update_terminal_metrics(

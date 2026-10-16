@@ -86,6 +86,29 @@ enum SaveStatus {
 }
 
 impl FileEditor {
+    /// The one-based first and last lines of the selection, or the cursor's line.
+    pub fn selected_lines(&self, cx: &gpui_kit::App) -> (usize, usize) {
+        let editor = self.editor.read(cx);
+        let text = editor.value();
+        let range = editor.selected_range();
+        let line = |offset: usize| {
+            text.get(..offset.min(text.len()))
+                .map_or(0, |before| before.matches('\n').count())
+                .saturating_add(1)
+        };
+        // A selection that ends at a line's start doesn't take that line.
+        let end = if range.end > range.start
+            && text
+                .get(..range.end)
+                .is_some_and(|before| before.ends_with('\n'))
+        {
+            range.end.saturating_sub(1)
+        } else {
+            range.end
+        };
+        (line(range.start), line(end))
+    }
+
     pub fn new(contents: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_for_path(contents, Path::new("config.toml"), window, cx)
     }

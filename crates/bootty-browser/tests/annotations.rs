@@ -4,6 +4,7 @@ use assert_fs::{TempDir, prelude::*};
 use bootty_browser::{
     Annotation, AnnotationAnchor, AnnotationEvent, AnnotationImageGeometry, AnnotationRect,
     AnnotationSelection, AnnotationStore, annotation_batch, apply_annotation_event,
+    split_annotation_batch,
 };
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
@@ -314,6 +315,35 @@ fn geometric_selection_survives_restart_and_attachment(
     let restored = store.load()?;
     assert_eq!(restored, vec![annotation]);
     assert!(annotation_batch(&restored)?.contains(&serde_json::to_string(&selection)?));
+    Ok(())
+}
+
+/// A sent message splits back into the words written with it and the notes its batch names,
+/// even when a note quotes a line that looks like a batch's.
+#[rstest]
+#[case::with_words("Fix both", "Fix both")]
+#[case::notes_only("", "")]
+fn sent_batches_split_back_into_words_and_notes(
+    mut annotation: Annotation,
+    #[case] words: &str,
+    #[case] authored: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    annotation.note = "Annotation 99: not a header".to_owned();
+    let mut second = annotation.clone();
+    second.id = annotation.id.saturating_add(1);
+    let batch = annotation_batch(&[annotation.clone(), second.clone()])?;
+    let message = if words.is_empty() {
+        batch
+    } else {
+        format!("{words}\n\n{batch}")
+    };
+    let (written, ids) = split_annotation_batch(&message).ok_or("a batch")?;
+    assert_eq!(written, authored);
+    assert!(
+        ids.contains(&annotation.id) && ids.contains(&second.id),
+        "{ids:?}"
+    );
+    assert_eq!(split_annotation_batch("Just words"), None);
     Ok(())
 }
 

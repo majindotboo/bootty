@@ -81,7 +81,8 @@ impl DialogView {
                 CompletionSource::Provider(_)
                 | CompletionSource::File(_)
                 | CompletionSource::Directory(_)
-                | CompletionSource::Composer(_) => {}
+                | CompletionSource::Composer(_)
+                | CompletionSource::Conversation(_) => {}
             },
         ));
         self.completion_subscriptions.push(cx.subscribe_in(

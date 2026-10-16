@@ -660,6 +660,68 @@ fn working_turn_keeps_work_visible_and_shows_activity(cx: &mut TestAppContext) {
     );
 }
 
+/// The quote's comment editor moves with its quote as the transcript scrolls.
+#[gpui_kit::test]
+fn quote_comment_editors_follow_their_quote(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("stopped");
+    record.snapshot.transcript.retain(|item| item.id == "reply");
+    record.snapshot.transcript[0].text = format!(
+        "A readable response to review.{}",
+        "\n\nMore of it.".repeat(60)
+    );
+    let (sender, _receiver) = bootty_control::app_command_channel(8, std::sync::Arc::new(|| {}));
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(800.), px(600.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    // Start from the top of the reply.
+    visual.simulate_event(ScrollWheelEvent {
+        position: point(px(400.), px(300.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(100_000.))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    visual.run_until_parked();
+    select_response(visual);
+    assert!(visual.debug_bounds("response-selection-toolbar").is_some());
+    visual.simulate_keystrokes("c");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let before = visual
+        .debug_bounds("response-quote-editor")
+        .expect("comment editor");
+    visual.simulate_event(ScrollWheelEvent {
+        position: point(px(400.), px(300.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let after = visual
+        .debug_bounds("response-quote-editor")
+        .expect("the editor stays open");
+    assert!(
+        after.top() < before.top(),
+        "the editor moved up with the transcript: {before:?} → {after:?}"
+    );
+}
+
 #[gpui_kit::test]
 fn selected_response_has_compact_comments_and_a_reaction_submenu(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -1871,6 +1933,112 @@ fn empty_conversation_explains_how_to_start(cx: &mut TestAppContext) {
     }
 }
 
+/// Copying a turn's reply copies every reply in the turn; copying a prompt brings the passage it
+/// quoted and the files it attached.
+#[gpui_kit::test]
+fn copies_keep_the_whole_reply_and_the_prompts_context(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "ask", "role": "user", "text": "Why [quote]?", "complete": true,
+            "citations": [{"message_id": "earlier", "source_range": {"start": 0, "end": 8},
+                "quote": "it fails", "comment": "this part",
+                "prompt_range": {"start": 4, "end": 11}}],
+            "attachments": [{"id": "log", "kind": "file", "name": "build.log",
+                "mime_type": "text/plain", "size_bytes": 3}]},
+        {"id": "found", "role": "assistant", "text": "Found it.", "complete": true},
+        {"id": "tool", "role": "tool", "text": "", "complete": true,
+            "tool": {"name": "Bash", "input": "{\"command\":\"ls\"}", "status": "completed"}},
+        {"id": "fixed", "role": "assistant", "text": "Fixed.", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(900.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let copied = |visual: &mut gpui_kit::VisualTestContext, selector: &'static str| {
+        let copy = visual.debug_bounds(selector).expect(selector);
+        visual.simulate_click(copy.center(), Modifiers::none());
+        visual.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+    };
+    assert_eq!(
+        copied(visual, "copy-message:fixed").as_deref(),
+        Some("Found it.\n\nFixed.")
+    );
+    let prompt = copied(visual, "copy-message:ask").unwrap_or_default();
+    assert!(prompt.contains("> it fails\nthis part"), "{prompt}");
+    assert!(prompt.ends_with("Attached: build.log"), "{prompt}");
+}
+
+/// A settled turn lists every file it changed under its reply, with +/− summed across its
+/// edits, and each opens the file.
+#[gpui_kit::test]
+fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let edit = |id: &str, path: &str, diff: &str| {
+        serde_json::json!({"id": id, "role": "tool", "text": "", "complete": true,
+            "tool": {"name": "fileChange", "status": "completed", "input":
+                serde_json::json!([{"path": format!("/tmp/project/{path}"), "diff": diff}]).to_string()}})
+    };
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Fix it", "complete": true},
+        edit("first", "src/main.rs", "@@ -1 +1,2 @@\n-old\n+new\n+more\n"),
+        edit("second", "src/lib.rs", "@@ -1 +1 @@\n-a\n+b\n"),
+        edit("third", "src/main.rs", "@@ -3 +3 @@\n-x\n+y\n"),
+        {"id": "done", "role": "assistant", "text": "Fixed.", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(900.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-turn-changes:+4:-3").is_some());
+    let main = visual
+        .debug_bounds("native-turn-change:src/main.rs")
+        .expect("main.rs once");
+    visual.simulate_click(main.center(), Modifiers::none());
+    visual.run_until_parked();
+    let opened = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|invocation| invocation.command == "agents.native.open-link")
+        .map(|invocation| invocation.arguments[2].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(opened, ["src/main.rs"]);
+}
+
 /// Progress messages and changed files remain visible after a turn settles or another begins.
 #[gpui_kit::test]
 fn turns_keep_progress_and_changed_files_visible(cx: &mut TestAppContext) {
@@ -2586,11 +2754,12 @@ fn conversation_errors_keep_bootty_wording_and_summarize_provider_text(cx: &mut 
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(
         visual
-            .debug_bounds("native-conversation-error:The agent hit an error.")
-            .is_some()
+            .debug_bounds("native-turn-failure:The turn failed.")
+            .is_some(),
+        "a failed turn says so where it ended"
     );
     let details = visual
-        .debug_bounds("copy-conversation-error-details")
+        .debug_bounds("copy-turn-failure-details")
         .expect("provider diagnostics remain available");
     visual.simulate_click(details.center(), Modifiers::none());
     visual.update(|_, cx| {
@@ -2610,6 +2779,147 @@ fn conversation_errors_keep_bootty_wording_and_summarize_provider_text(cx: &mut 
             .debug_bounds("native-conversation-error:Add the new title after /rename.")
             .is_some()
     );
+}
+
+/// Retry on a failed turn sends that turn's message again, and the failure goes away.
+#[gpui_kit::test]
+fn failed_turns_retry_by_sending_their_message_again(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.error = Some("stream disconnected before completion".into());
+    let prompt = record
+        .snapshot
+        .transcript
+        .iter()
+        .rfind(|item| item.role == "user")
+        .map(|item| item.text.clone())
+        .expect("a sent message");
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let retry = visual.debug_bounds("native-retry-turn").expect("retry");
+    visual.simulate_click(retry.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let sent = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|invocation| invocation.command == "agents.native.prompt")
+        .map(|invocation| invocation.arguments[2].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(sent, [prompt]);
+    assert!(visual.debug_bounds("native-retry-turn").is_none());
+}
+
+/// A message that steered a running turn stays inside that turn: it says so, and the turn rail
+/// counts turns, not steers.
+#[gpui_kit::test]
+fn steering_messages_stay_inside_their_turn(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id":"first", "role":"user", "text":"Fix the build.", "complete":true},
+        {"id":"first-reply", "role":"assistant", "text":"Looking.", "complete":true},
+        {"id":"steer", "role":"user", "text":"Skip the docs.", "complete":true, "steered":true},
+        {"id":"steer-reply", "role":"assistant", "text":"Skipping them.\n\n".repeat(40), "complete":true},
+        {"id":"second", "role":"user", "text":"Now the tests.", "complete":true},
+        {"id":"second-reply", "role":"assistant", "text":"Done.", "complete":true}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(500.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("history-turn:first").is_some());
+    assert!(visual.debug_bounds("history-turn:second").is_some());
+    assert!(
+        visual.debug_bounds("history-turn:steer").is_none(),
+        "a steer isn't a turn of its own"
+    );
+    let steer = visual.debug_bounds("history-turn:first").unwrap();
+    visual.simulate_click(steer.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-steered-steer").is_some());
+}
+
+/// A sent message comes back to the composer to change and send again.
+#[gpui_kit::test]
+fn sent_messages_come_back_to_edit_and_resend(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let prompt = record
+        .snapshot
+        .transcript
+        .iter()
+        .find(|item| item.id == "user")
+        .map(|item| item.text.clone())
+        .expect("a sent message");
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(700.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let edit = visual
+        .debug_bounds("edit-resend:user")
+        .expect("edit and resend");
+    visual.simulate_click(edit.center(), Modifiers::none());
+    visual.simulate_input(" again");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    let sent = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|invocation| invocation.command == "agents.native.prompt")
+        .map(|invocation| invocation.arguments[2].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(sent, [format!("{prompt} again")]);
 }
 
 /// A message the provider never confirmed says so, and its text can be sent again.
@@ -2877,6 +3187,69 @@ fn wide_conversations_center_messages_beside_the_context_card(cx: &mut TestAppCo
     }
 }
 
+/// Right-clicking a file link in a reply offers to open it, show it in the file manager, or
+/// copy its path, without opening it.
+#[gpui_kit::test]
+fn file_links_offer_their_file_actions(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript[4].text = "[notes](notes.md:2)".to_owned();
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(600.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let row = visual.debug_bounds("native-message-reply").expect("reply");
+    let link = point(row.left().add(px(12.)), row.top().add(px(10.)));
+    visual.simulate_mouse_down(link, MouseButton::Right, Modifiers::none());
+    visual.simulate_mouse_up(link, MouseButton::Right, Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-link-menu").is_some());
+    let opened = |commands: &CapturedCommands, name: &str| {
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|invocation| invocation.command == name)
+            .map(|invocation| invocation.arguments[2..].to_vec())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        opened(&commands, "agents.native.open-link"),
+        Vec::<Vec<String>>::new()
+    );
+    let copy = visual.debug_bounds("native-link-copy").expect("copy path");
+    visual.simulate_click(copy.center(), Modifiers::none());
+    let copied = visual.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some("/tmp/project/notes.md"));
+    visual.simulate_mouse_down(link, MouseButton::Right, Modifiers::none());
+    visual.simulate_mouse_up(link, MouseButton::Right, Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let reveal = visual.debug_bounds("native-link-reveal").expect("reveal");
+    visual.simulate_click(reveal.center(), Modifiers::none());
+    visual.run_until_parked();
+    assert_eq!(
+        opened(&commands, "agents.native.reveal-link"),
+        [vec!["notes.md:2".to_owned()]]
+    );
+}
+
 /// The completion menu says what it is loading and why nothing matches.
 #[gpui_kit::test]
 fn completion_menus_say_what_they_load_and_why_nothing_matches(cx: &mut TestAppContext) {
@@ -2923,6 +3296,221 @@ fn completion_menus_say_what_they_load_and_why_nothing_matches(cx: &mut TestAppC
             .debug_bounds("composer-completion-status:No skills match “zzz”")
             .is_some()
     );
+}
+
+/// `@` with words offers other conversations by title or short name; choosing one leaves its
+/// name in the message and sends the conversation along to be quoted. A folder can be chosen
+/// as itself rather than only drilled into.
+#[gpui_kit::test]
+fn composer_mentions_other_conversations_and_folders(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, calls) = replying_sender(|command| match command {
+        "agents.native.completions" => serde_json::json!({"options":[]}),
+        "files.complete" => serde_json::json!({"files":["src/"],"omitted":0}),
+        _ => serde_json::json!([]),
+    });
+    let other = bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Session,
+        handle: "native:codex:other".into(),
+        generation: 3,
+    };
+    let mut session = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            let mut view = NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            );
+            view.set_completion_binding(
+                Some(bootty_control::CommandTarget {
+                    kind: bootty_control::ResourceKind::Binding,
+                    handle: "captured-binding".into(),
+                    generation: 1,
+                }),
+                window,
+                cx,
+            );
+            view.set_mentionable_conversations(
+                vec![bootty_ui::MentionableConversation {
+                    target: other.clone(),
+                    name: "bootty-7c".into(),
+                    title: "Flaky test hunt".into(),
+                }],
+                cx,
+            );
+            view
+        });
+        session = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let session = session.unwrap();
+    let confirm = |visual: &mut gpui_kit::VisualTestContext| {
+        visual.update(|window, cx| {
+            session.update(cx, |view, cx| {
+                view.perform_completion(CommandAction::Confirm, window, cx);
+            });
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let composer = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("ask @flaky");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    confirm(visual);
+    let send = visual.debug_bounds("native-send").expect("send");
+    visual.simulate_click(send.center(), Modifiers::none());
+    visual.run_until_parked();
+    let prompt = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|call| call.command == "agents.native.prompt")
+        .cloned()
+        .expect("sent prompt");
+    assert_eq!(prompt.arguments[2], "ask @bootty-7c");
+    assert_eq!(
+        prompt.arguments[10],
+        serde_json::to_string(&[other]).unwrap()
+    );
+    // `@src/` offers the folder itself, which closes the menu with the folder named.
+    calls.lock().unwrap().clear();
+    visual.simulate_input("see @src/");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    confirm(visual);
+    visual.simulate_click(send.center(), Modifiers::none());
+    visual.run_until_parked();
+    let prompt = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|call| call.command == "agents.native.prompt")
+        .cloned()
+        .expect("sent prompt");
+    assert_eq!(prompt.arguments[2], "see @src/ ");
+}
+
+/// Lines added from a document name the project file and its lines, the way an `@` mention
+/// does; a file outside the project keeps its whole path.
+#[gpui_kit::test]
+fn document_lines_join_the_message_as_a_file_mention(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let (sender, calls) = replying_sender(|_| serde_json::json!([]));
+    let mut session = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                saved_record("idle"),
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        session = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let session = session.unwrap();
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        session.update(cx, |view, cx| {
+            view.mention_lines("/tmp/project/src/main.rs", (2, 3), window, cx);
+            view.mention_lines("/etc/hosts", (7, 7), window, cx);
+        });
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let send = visual.debug_bounds("native-send").expect("send");
+    visual.simulate_click(send.center(), Modifiers::none());
+    visual.run_until_parked();
+    let prompt = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|call| call.command == "agents.native.prompt")
+        .cloned()
+        .expect("sent prompt");
+    assert_eq!(prompt.arguments[2], "@src/main.rs:2-3 @/etc/hosts:7 ");
+}
+
+/// Cmd+S puts the composer's words aside, kept across restarts; on an empty composer it brings
+/// the newest stashed prompt back.
+#[gpui_kit::test]
+fn stashed_prompts_come_back(cx: &mut TestAppContext) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let config_path = directory.path().join("config.toml");
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+        cx.set_global(bootty_ui::prompt_stash::PromptStash::open(&config_path));
+    });
+    let (sender, calls) = replying_sender(|_| serde_json::json!([]));
+    let mut session = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                saved_record("idle"),
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        session = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let session = session.unwrap();
+    let stash = |visual: &mut gpui_kit::VisualTestContext| {
+        visual.update(|window, cx| {
+            session.update(cx, |view, cx| {
+                view.perform_completion(CommandAction::Stash, window, cx);
+            });
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let composer = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("Rename the flag later");
+    stash(visual);
+    assert!(visual.debug_bounds("native-stash").is_some());
+    let saved = bootty_ui::prompt_stash::PromptStash::open(&config_path);
+    assert_eq!(
+        saved
+            .entries()
+            .iter()
+            .map(|entry| entry.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Rename the flag later"]
+    );
+    stash(visual);
+    assert!(visual.debug_bounds("native-stash").is_none());
+    let send = visual.debug_bounds("native-send").expect("send");
+    visual.simulate_click(send.center(), Modifiers::none());
+    visual.run_until_parked();
+    let restored = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|call| call.command == "agents.native.prompt")
+        .map(|call| call.arguments[2].clone());
+    assert_eq!(restored.as_deref(), Some("Rename the flag later"));
 }
 
 /// Their shortcuts toggle plan mode and fast mode when the provider offers them.
@@ -3255,7 +3843,7 @@ fn app_chips_survive_a_rebuilt_completion(cx: &mut TestAppContext) {
     assert!(
         prompt
             .arguments
-            .last()
+            .get(9)
             .is_some_and(|mentions| mentions.contains("\"name\":\"github\"")),
         "{:?}",
         prompt.arguments

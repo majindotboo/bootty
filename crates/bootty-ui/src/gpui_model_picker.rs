@@ -719,19 +719,33 @@ impl ModelPickerView {
                 |popup| {
                     popup.child(
                         div()
-                            .debug_selector(|| "model-fast-mode".into())
                             .p_2()
                             .border_t_1()
                             .border_color(cx.theme().border)
                             .child(
-                                Switch::new("model-fast-mode")
-                                    .small()
-                                    .label("Fast mode")
-                                    .checked(self.fast_mode)
-                                    .disabled(!self.enabled)
-                                    .on_click(cx.listener(|_, fast, _, cx| {
-                                        cx.emit(ModelPickerEvent::FastMode(*fast));
-                                    })),
+                                div().debug_selector(|| "model-fast-mode".into()).child(
+                                    Switch::new("model-fast-mode")
+                                        .small()
+                                        .label("Fast mode")
+                                        .checked(self.fast_mode)
+                                        .disabled(!self.enabled)
+                                        .on_click(cx.listener(|_, fast, _, cx| {
+                                            cx.emit(ModelPickerEvent::FastMode(*fast));
+                                        })),
+                                ),
+                            )
+                            // What the provider says fast mode trades, to choose by.
+                            .children(
+                                current
+                                    .and_then(|model| model.fast_mode_detail.clone())
+                                    .map(|detail| {
+                                        div()
+                                            .debug_selector(|| "model-fast-mode-detail".into())
+                                            .pt_1()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(detail)
+                                    }),
                             ),
                     )
                 },

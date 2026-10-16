@@ -342,7 +342,7 @@ impl AppState {
         if operation == "terminal" {
             return CommandDispatch::Complete(self.native_terminal_destination(&service, target));
         }
-        if operation == "open-link" {
+        if matches!(operation, "open-link" | "reveal-link" | "edit-link") {
             return self.dispatch_native_link(&service, &invocation, execution);
         }
         if operation == "panel" {
@@ -390,7 +390,20 @@ impl AppState {
         };
         let location = invocation.arguments.get(2).cloned().unwrap_or_default();
         let cwd = record.config.cwd.to_string_lossy().into_owned();
-        self.dispatch_link_open(terminal, &exact, &[location, cwd], execution)
+        let link_use = if invocation.command.ends_with(".reveal-link") {
+            super::links::LinkUse::Reveal
+        } else if invocation.command.ends_with(".edit-link") {
+            let requested = invocation.arguments.get(3).map_or("", String::as_str);
+            let Some(editor) = crate::editors::find(requested) else {
+                return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                    message: format!("No editor called “{requested}” is installed"),
+                });
+            };
+            super::links::LinkUse::Edit(editor.id)
+        } else {
+            super::links::LinkUse::Open
+        };
+        self.dispatch_link_open(terminal, &exact, &[location, cwd], link_use, execution)
     }
 
     fn native_conversation_binding(
@@ -2650,17 +2663,25 @@ fn resume_saved_launch(
         let entry: bootty_agents::TerminalHistoryEntry = serde_json::from_str(saved)
             .map_err(|error| format!("Invalid saved session: {error}"))?;
         config.resume_saved(&entry)?;
-        let entries =
+        // A session from an older page lies past the newest; look where it was listed too.
+        let listed = |before: Option<i64>| {
             bootty_agents::terminal_provider_history(&bootty_agents::TerminalHistoryQuery {
                 provider: config.provider,
                 program: &config.program,
                 account_directory: &entry.account_directory,
                 cwd: Some(&entry.cwd),
                 limit: 200,
-            })?;
-        if !entries.iter().any(|candidate| {
-            candidate.session_id == entry.session_id && candidate.resume_id == entry.resume_id
-        }) {
+                before,
+            })
+            .map(|entries| {
+                entries.iter().any(|candidate| {
+                    candidate.session_id == entry.session_id
+                        && candidate.resume_id == entry.resume_id
+                })
+            })
+        };
+        let after_listing = entry.updated_at.and_then(|updated| updated.checked_add(1));
+        if !listed(None)? && (after_listing.is_none() || !listed(after_listing)?) {
             return Err(
                 "The saved provider session is no longer available; refresh the session list"
                     .into(),
@@ -2911,6 +2932,12 @@ fn invoke(
         "queue-retry" => service.retry_followup(target, arg(2)).map(|()| Value::Null),
         "queue-steer" => service.steer_followup(target, arg(2)).map(|()| Value::Null),
         "queue-resume" => service.resume_followups(target).map(|()| Value::Null),
+        "queue-move" => match arg(3) {
+            direction @ ("earlier" | "later") => service
+                .move_followup(target, arg(2), direction == "earlier")
+                .map(|()| Value::Null),
+            _ => Err("A queued message moves earlier or later".to_owned()),
+        },
         "import" if invocation.caller == Caller::Internal => service
             .import_attachment(target, std::path::Path::new(arg(2)))
             .and_then(|reference| {
@@ -3094,6 +3121,20 @@ fn resolve_native_prompt(
     cancellation: &CommandCancellation,
 ) -> Result<bootty_agents::NativePrompt, String> {
     let text = invocation.arguments.get(2).cloned().unwrap_or_default();
+    // The provider reads the conversations the message mentions, quoted, with it.
+    let mentioned = invocation
+        .arguments
+        .get(10)
+        .filter(|encoded| !encoded.is_empty())
+        .map(|encoded| {
+            if invocation.caller != Caller::Internal || encoded.len() > 4 * 1024 {
+                return Err("Conversation mentions require an internal user submission".to_owned());
+            }
+            let mentioned: Vec<CommandTarget> =
+                serde_json::from_str(encoded).map_err(|_| "Invalid conversation mentions")?;
+            service.conversation_context(&mentioned)
+        })
+        .transpose()?;
     let mut images = Vec::new();
     if let Some(encoded) = invocation
         .arguments
@@ -3178,7 +3219,7 @@ fn resolve_native_prompt(
     };
     let prompt =
         bootty_agents::NativePrompt::new_with_context(text, images, native_attachments, citations)?;
-    append_prompt_applications(prompt, invocation)
+    append_prompt_applications(prompt, invocation)?.with_mentioned_conversations(mentioned)
 }
 
 fn native_input_runner(

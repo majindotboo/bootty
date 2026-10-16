@@ -41,6 +41,19 @@ pub(super) struct DialogRuntime {
 }
 
 impl DialogRuntime {
+    /// Starts with the New Session draft kept from an earlier run.
+    pub(super) fn with_creation_draft(
+        draft: Option<crate::presentation::new_session_form::NewSessionDraft>,
+    ) -> Self {
+        Self {
+            new_session_isolated: draft
+                .as_ref()
+                .is_some_and(|draft| draft.isolation_preference),
+            new_session_draft: draft,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn open(&mut self, dialog: ModalDialog) {
         let overlays_creation = !matches!(dialog, ModalDialog::NewSession(_))
             && matches!(self.modal.as_deref(), Some(ModalDialog::NewSession(_)));
@@ -69,6 +82,22 @@ impl DialogRuntime {
         }
         self.modal = self.creation.take();
         self.command_palette_native_parent = None;
+    }
+
+    /// The New Session draft as it stands: the open form's, or the one kept when it closed.
+    pub(super) fn creation_draft(
+        &self,
+    ) -> Option<&crate::presentation::new_session_form::NewSessionDraft> {
+        [self.modal.as_deref(), self.creation.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|dialog| match dialog {
+                ModalDialog::NewSession(dialog) if dialog.retains_creation_draft() => {
+                    dialog.draft()
+                }
+                _ => None,
+            })
+            .or(self.new_session_draft.as_ref())
     }
 
     pub(super) fn creation_spec(&self) -> Option<crate::gpui::DialogSpec> {

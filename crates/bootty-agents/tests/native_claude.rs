@@ -94,6 +94,10 @@ for line in sys.stdin:
    if prompt=='cancel': emit({'type':'control_cancel_request','request_id':'permission-id'})
    continue
   if prompt=='hold': continue
+  if prompt=='fail-later':
+   # The test fails this turn once it has queued messages behind it.
+   while not os.path.exists('fail'): time.sleep(0.01)
+   result('model_error','error_during_execution');continue
   if prompt.startswith('write-'):
    emit({'type':'control_request','request_id':'write-id','request':{'subtype':'can_use_tool','tool_name':'Write','tool_use_id':'write-tool','input':{'file_path':'/tmp/large','content':'x'*int(prompt[6:])}}})
    continue
@@ -1669,6 +1673,135 @@ fn interrupt_and_send_goes_ahead_of_the_queue() {
         changes
             .recv_timeout(Duration::from_secs(5))
             .expect("both messages go out after the stop");
+    }
+    service.shutdown().unwrap();
+}
+
+/// Waiting messages trade places. A failed turn holds the queue instead of sending into the
+/// failure; resuming sends the rest to the same Claude, in their new order, without a restart.
+#[test]
+fn a_failed_turn_holds_the_queue_until_resumed_and_messages_trade_places() {
+    use bootty_agents::{NativePrompt, NativeQueuedMessageStatus};
+    use std::sync::{Arc, mpsc};
+    let root = TempDir::new().unwrap();
+    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let (sender, changes) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    service.start_followups().unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    service.prompt(&target, "fail-later").unwrap();
+    let ids: Vec<String> = ["First", "Second", "Third"]
+        .into_iter()
+        .map(|text| {
+            service
+                .queue_input(&target, &NativePrompt::text(text).unwrap())
+                .unwrap()
+                .id
+        })
+        .collect();
+    let queued = |service: &NativeAgentService| {
+        service.sessions()[0]
+            .queued_messages
+            .iter()
+            .map(|message| (message.text.clone(), message.status))
+            .collect::<Vec<_>>()
+    };
+    service.move_followup(&target, &ids[2], true).unwrap();
+    service.move_followup(&target, &ids[2], true).unwrap();
+    assert!(
+        service.move_followup(&target, &ids[2], true).is_err(),
+        "first already"
+    );
+    assert!(
+        service.move_followup(&target, &ids[1], false).is_err(),
+        "last already"
+    );
+    fs::write(root.path().join("fail"), "").unwrap();
+    loop {
+        if queued(&service)
+            .iter()
+            .all(|(_, status)| *status == NativeQueuedMessageStatus::Paused)
+        {
+            break;
+        }
+        changes
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the failed turn holds the queue");
+    }
+    assert_eq!(
+        service.resolve(&target).unwrap().snapshot().status,
+        NativeSessionStatus::Error
+    );
+    service.resume_followups(&target).unwrap();
+    let current = wait_for_queue(&service, &changes).unwrap();
+    let users = current
+        .snapshot
+        .transcript
+        .iter()
+        .filter(|item| item.role == "user")
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(users, ["fail-later", "Third", "First", "Second"]);
+    service.shutdown().unwrap();
+}
+
+/// A message whose delivery a crash left unknown waits for Retry, and the messages behind it
+/// still go out.
+#[test]
+fn a_failed_message_waits_without_holding_the_rest() {
+    use bootty_agents::{NativePrompt, NativeQueuedMessageStatus};
+    use std::sync::{Arc, mpsc};
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    service.prompt(&target, "hold").unwrap();
+    barrier(&service.resolve(&target).unwrap()).unwrap();
+    for text in ["Unknown", "Behind it"] {
+        service
+            .queue_input(&target, &NativePrompt::text(text).unwrap())
+            .unwrap();
+    }
+    service.shutdown().unwrap();
+    drop(service);
+    // The first message was on its way when the app ended.
+    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    catalog["followups"][0]["status"] = json!("sending");
+    fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let (sender, changes) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    service.start_followups().unwrap();
+    let stopped = service.sessions().remove(0);
+    service.resume(&stopped.target()).unwrap();
+    loop {
+        let current = service.sessions().remove(0);
+        let delivered = current
+            .snapshot
+            .transcript
+            .iter()
+            .any(|item| item.role == "user" && item.text == "Behind it" && item.complete);
+        let waiting = current
+            .queued_messages
+            .iter()
+            .map(|message| (message.text.as_str(), message.status))
+            .collect::<Vec<_>>();
+        if delivered && waiting == [("Unknown", NativeQueuedMessageStatus::Failed)] {
+            break;
+        }
+        changes
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the message behind the failed one goes out");
     }
     service.shutdown().unwrap();
 }

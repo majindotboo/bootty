@@ -72,7 +72,10 @@ pub enum ToolChildOperation {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolChildControlRequest {
+    /// The child's id, or its short name from `list_agents`.
     pub id: String,
+    /// The child's exact generation; a short name stands for the current one.
+    #[serde(default)]
     pub generation: u64,
     pub operation: ToolChildOperation,
 }
@@ -90,11 +93,12 @@ impl ToolChildControlRequest {
     }
 
     /// # Errors
-    /// Requires a bounded ID and a nonzero generation; the owner checks provenance.
+    /// Requires a bounded ID and a nonzero generation, or a short name; the owner checks
+    /// provenance.
     pub fn validate(&self) -> Result<(), String> {
         bounded_label(&self.id)?;
-        if self.generation == 0 {
-            return Err("Child control requires an exact live generation".into());
+        if self.generation == 0 && !bootty_control::short_name::is_short_name(&self.id) {
+            return Err("Child control requires an exact live generation or a name".into());
         }
         Ok(())
     }

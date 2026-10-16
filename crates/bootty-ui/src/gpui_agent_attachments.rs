@@ -83,6 +83,8 @@ impl NativeAgentSessionView {
                     .unwrap_or_default(),
             )
             .map_err(|error| error.to_string())?,
+            serde_json::to_string(&self.active_conversation_mentions(cx))
+                .map_err(|error| error.to_string())?,
         ])
     }
 
@@ -283,6 +285,85 @@ impl NativeAgentSessionView {
             .find(|reference| reference.id == id)
             .map_or("Image", |reference| reference.name.as_str());
         crate::gpui_prompt_attachments::open_image(name.to_owned(), preview.clone(), window, cx);
+    }
+
+    /// Attaches `text` as a file named from `prefix`, such as a terminal selection.
+    pub(crate) fn attach_text(
+        &mut self,
+        prefix: String,
+        text: String,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.attachment_slots_full(cx) {
+            self.error = Some("Attach at most 16 files".into());
+            cx.notify();
+            return;
+        }
+        let target = self.record.target();
+        let import = self.begin_attachment_import(prefix.clone(), None);
+        cx.spawn_in(window, async move |owner, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::attachment_source::text_file(&prefix, &text) })
+                .await;
+            _ = owner.update_in(cx, |this, window, cx| {
+                if this.attachment_imports.remove(&import).is_none()
+                    || this.record.target() != target
+                {
+                    cx.notify();
+                    return;
+                }
+                match result {
+                    Ok(file) => this.import_attachment(
+                        file.path().to_owned(),
+                        Some(crate::attachment_source::AttachmentTemporary::Clipboard(
+                            Arc::new(file),
+                        )),
+                        window,
+                        cx,
+                    ),
+                    Err(error) => {
+                        this.error =
+                            Some(super::diagnostic("Could not attach the selection", error));
+                        cx.notify();
+                    }
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Names lines of a project file in the message, the way an `@` file mention does, and
+    /// focuses the composer.
+    pub fn mention_lines(
+        &mut self,
+        path: &str,
+        (first, last): (usize, usize),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cwd = self.record.config.cwd.to_string_lossy();
+        let relative = path
+            .strip_prefix(cwd.as_ref())
+            .and_then(|rest| rest.strip_prefix('/'))
+            .unwrap_or(path);
+        let lines = if last > first {
+            format!("{first}-{last}")
+        } else {
+            first.to_string()
+        };
+        let mention = if relative.contains(char::is_whitespace) {
+            format!("@\"{relative}\":{lines} ")
+        } else {
+            format!("@{relative}:{lines} ")
+        };
+        self.composer.update(cx, |input, cx| {
+            input.insert(mention, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
     }
 
     pub(super) fn import_attachment(

@@ -567,6 +567,23 @@ pub(super) fn preset_global_keybinds(preset: KeybindPreset) -> Vec<String> {
     } else {
         "ctrl+alt+b=toggle_right_dock".to_owned()
     });
+    keybinds.extend(owned_keybinds(if cfg!(target_os = "macos") {
+        &[
+            "cmd+shift+h=agent_history",
+            "cmd+shift+g=toggle_changes_panel",
+            "cmd+shift+l=add_selection_to_conversation",
+            "cmd+alt+p=toggle_session_pin",
+            "cmd+alt+a=archive_session",
+        ]
+    } else {
+        &[
+            "ctrl+shift+h=agent_history",
+            "ctrl+shift+g=toggle_changes_panel",
+            "ctrl+shift+l=add_selection_to_conversation",
+            "ctrl+shift+alt+p=toggle_session_pin",
+            "ctrl+shift+alt+a=archive_session",
+        ]
+    }));
     if cfg!(target_os = "macos") {
         keybinds.extend((1..=9).map(|index| format!("ctrl+{index}=select_space:{index}")));
     }

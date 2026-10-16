@@ -11,11 +11,14 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    terminal_history::{TerminalHistoryEntry, TerminalHistoryQuery, title, valid_id, valid_path},
+    terminal_history::{
+        TerminalHistoryEntry, TerminalHistoryQuery, before, preview_title, title, valid_id,
+        valid_path,
+    },
     terminal_process,
 };
 
-// Thread lists include provider previews on the wire. Discard them after bounded decoding.
+// A thread without a name is titled by its preview, the first prompt, cut like other titles.
 const MAX_RESPONSE: u64 = 1024 * 1024;
 const MAX_PAGES: usize = 8;
 
@@ -31,6 +34,8 @@ struct Response {
 struct Thread {
     id: String,
     name: Option<String>,
+    #[serde(default)]
+    preview: String,
     created_at: Option<i64>,
     updated_at: Option<i64>,
     cwd: PathBuf,
@@ -136,7 +141,7 @@ fn list(
             return Err("Codex history response exceeds the requested limit".to_owned());
         }
         for saved in page.data {
-            if saved.ephemeral {
+            if saved.ephemeral || !before(epoch_millis(saved.updated_at)?, query.before) {
                 continue;
             }
             if !valid_id(&saved.id)
@@ -150,7 +155,7 @@ fn list(
             entries.push(TerminalHistoryEntry {
                 provider: query.provider,
                 session_id: saved.id.clone(),
-                title: title(saved.name),
+                title: title(saved.name).or_else(|| preview_title(&saved.preview)),
                 created_at: epoch_millis(saved.created_at)?,
                 updated_at: epoch_millis(saved.updated_at)?,
                 cwd: saved.cwd,
@@ -170,6 +175,10 @@ fn list(
             return Err("Codex history cursor is invalid".to_owned());
         }
         cursor = page.next_cursor;
+    }
+    // An older page may pass newer threads first; what eight pages found is that page.
+    if query.before.is_some() {
+        return Ok(entries);
     }
     Err("Codex history listing exceeds eight pages".to_owned())
 }
@@ -195,7 +204,7 @@ pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntr
         let account_directory = query.account_directory.to_owned();
         let cwd = query.cwd.map(std::path::Path::to_owned);
         let program = query.program.to_owned();
-        let limit = query.limit;
+        let (limit, before) = (query.limit, query.before);
         let (sender, receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
             let query = TerminalHistoryQuery {
@@ -204,6 +213,7 @@ pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntr
                 account_directory: &account_directory,
                 cwd: cwd.as_deref(),
                 limit,
+                before,
             };
             let result = list(&query, &mut writer, &mut BufReader::new(stdout));
             let _ = sender.send(result);

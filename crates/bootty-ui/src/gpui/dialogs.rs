@@ -222,6 +222,8 @@ pub enum CommandAction {
     TogglePlan,
     ToggleFast,
     FocusComposer,
+    /// Put the composer's words aside, or bring the newest stashed prompt back.
+    Stash,
 }
 use gpui_kit::EntityInputHandler as _;
 
@@ -959,7 +961,8 @@ impl DialogView {
             | CommandAction::Voice
             | CommandAction::TogglePlan
             | CommandAction::ToggleFast
-            | CommandAction::FocusComposer => {}
+            | CommandAction::FocusComposer
+            | CommandAction::Stash => {}
         }
     }
 

@@ -97,7 +97,7 @@ impl ToolProtocol {
             tools.push(json!({"name":"list_terminals","description":"List at most 128 observed terminal panes in your captured Space, excluding native agent carriers. Includes names and opaque targets, without process or directory fields or other Spaces. Detached tasks are not started.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("list_terminals"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.native_agents_enabled() {
-            tools.push(json!({"name":"list_agents","description":"List compact agent lifecycle metadata in your captured Space. Account paths and other Spaces are unavailable.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("list_agents"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"list_agents","description":"List compact agent lifecycle metadata in your captured Space, with each agent's short name, like bootty-7c, to write it by. Account paths and other Spaces are unavailable.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("list_agents"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
             tools.push(json!({"name":"list_profiles","description":"List at most 16 configured profile IDs and display names for your captured provider, together with your retained profile ID. This does not grant access to other accounts or change your profile. Account paths, arguments and executables are private.","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"outputSchema":native_output_schema("list_profiles"),"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.native_reads_enabled() {
@@ -148,12 +148,12 @@ impl ToolProtocol {
                 for (name, description, destructive) in [
                     (
                         "interrupt_spawned_agent",
-                        "Interrupt the current turn of a native child created under your exact live parent grant. Other agents and children from older grants are unavailable.",
+                        "Interrupt the current turn of a native child created under your exact live parent grant. id is the child's id with its generation, or its name from list_agents alone. Other agents and children from older grants are unavailable.",
                         false,
                     ),
                     (
                         "stop_spawned_agent",
-                        "Stop a native child created under your exact live parent grant, retaining its conversation and backend pane. Other agents and children from older grants are unavailable.",
+                        "Stop a native child created under your exact live parent grant, retaining its conversation and backend pane. id is the child's id with its generation, or its name from list_agents alone. Other agents and children from older grants are unavailable.",
                         true,
                     ),
                 ] {
@@ -161,7 +161,7 @@ impl ToolProtocol {
                         "inputSchema":{"type":"object","properties":{
                             "id":{"type":"string","minLength":1,"maxLength":256},
                             "generation":{"type":"integer","minimum":1}},
-                            "required":["id","generation"],"additionalProperties":false},
+                            "required":["id"],"additionalProperties":false},
                         "annotations":{"readOnlyHint":false,"destructiveHint":destructive,"openWorldHint":false}}));
                 }
             }
@@ -647,7 +647,7 @@ struct NativeRead {
 
 fn native_output_schema(name: &str) -> Value {
     let agent = json!({"type":"object","properties":{
-        "id":{"type":"string"},"title":{"type":"string"},"provider":{"type":"string"},
+        "id":{"type":"string"},"name":{"type":"string"},"title":{"type":"string"},"provider":{"type":"string"},
         "generation":{"type":"integer","minimum":1},"spawn_parent":{"type":"object"},
         "status":{"type":"string"},"approval":{"type":"boolean"},"input":{"type":"boolean"}},
         "required":["id","title","status"]});

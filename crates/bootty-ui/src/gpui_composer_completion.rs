@@ -7,6 +7,7 @@ use crate::{
 use bootty_agents::{NativeCompletionCatalog, NativeCompletionKind, NativeCompletionOption};
 use bootty_control::{
     BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
+    CommandTarget,
 };
 use gpui_kit::component::{
     ActiveTheme as _, IndexPath,
@@ -39,12 +40,24 @@ pub struct CompletionScope {
 #[derive(Clone)]
 pub enum CompletionSource {
     Provider(NativeCompletionOption),
-    /// A project file, by its path from the project root.
+    /// A project file, by its path from the project root; a folder itself when it ends in `/`.
     File(String),
     Directory(String),
     Application(bootty_computer::ComputerTarget),
     Composer(crate::composer_commands::ComposerCommand),
+    Conversation(MentionableConversation),
 }
+
+/// Another conversation the composer can mention by its short name; the message quotes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MentionableConversation {
+    pub target: CommandTarget,
+    pub name: String,
+    pub title: String,
+}
+
+/// Conversations one `@` offers, at most.
+const CONVERSATION_RESULTS: usize = 5;
 #[derive(Clone)]
 struct CompletionItem {
     label: String,
@@ -68,6 +81,7 @@ pub struct ComposerCompletion {
     dismissed: Option<(CompletionKind, usize)>,
     catalog: Option<NativeCompletionCatalog>,
     applications: Option<Vec<bootty_computer::ComputerTarget>>,
+    conversations: Vec<MentionableConversation>,
     provider_mentions: BTreeMap<String, NativeCompletionOption>,
     plan_mode: bool,
     draft_goal: Option<String>,
@@ -113,6 +127,7 @@ impl ComposerCompletion {
             dismissed: None,
             catalog: None,
             applications: None,
+            conversations: Vec::new(),
             provider_mentions: BTreeMap::new(),
             add_menus: Vec::new(),
             plan_mode: false,
@@ -132,6 +147,11 @@ impl ComposerCompletion {
         };
         this.load_add_catalog(window, cx);
         this
+    }
+
+    /// The other conversations `@` can mention.
+    pub(crate) fn set_conversations(&mut self, conversations: Vec<MentionableConversation>) {
+        self.conversations = conversations;
     }
 
     pub(super) fn restore_provider_mentions(
@@ -517,6 +537,28 @@ impl ComposerCompletion {
             .collect()
     }
 
+    /// Conversations whose title or short name holds `query`; a bare `@` stays files and apps.
+    fn conversation_candidates(&self, query: &str) -> Vec<CompletionItem> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.conversations
+            .iter()
+            .filter(|conversation| {
+                conversation.title.to_lowercase().contains(&query)
+                    || conversation.name.contains(&query)
+            })
+            .take(CONVERSATION_RESULTS)
+            .map(|conversation| CompletionItem {
+                label: format!("@{}", conversation.name),
+                detail: conversation.title.clone(),
+                icon: "message-square",
+                source: CompletionSource::Conversation(conversation.clone()),
+            })
+            .collect()
+    }
+
     fn rebuild(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let Some(trigger) = self.trigger.clone() else {
             self.items.clear();
@@ -552,6 +594,16 @@ impl ComposerCompletion {
                     }),
             );
             candidates.extend(self.integration_candidates());
+            candidates.extend(self.conversation_candidates(&trigger.query));
+            // A folder drills in when chosen, so the folder itself is a choice of its own.
+            if trigger.query.ends_with('/') {
+                candidates.push(CompletionItem {
+                    label: trigger.query.clone(),
+                    detail: "This folder".into(),
+                    icon: "folder",
+                    source: CompletionSource::File(trigger.query.clone()),
+                });
+            }
         }
         candidates.extend(self.files.iter().cloned());
         let mut ranked = candidates
@@ -702,7 +754,8 @@ impl ComposerCompletion {
             | CommandAction::Voice
             | CommandAction::TogglePlan
             | CommandAction::ToggleFast
-            | CommandAction::FocusComposer => return false,
+            | CommandAction::FocusComposer
+            | CommandAction::Stash => return false,
         }
         true
     }

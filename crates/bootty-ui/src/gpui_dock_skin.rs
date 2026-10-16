@@ -677,6 +677,30 @@ impl WorkspaceTabGroup {
             .map_or_else(|| header_focus.clone(), |_| panel_focus)
     }
 
+    /// A document's tab title offers the document's file actions on right-click.
+    fn with_file_menu(
+        &self,
+        title: gpui_kit::Stateful<gpui_kit::Div>,
+        id: gpui_kit::component::dock::PanelId,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let document = self.owner.upgrade().and_then(|owner| {
+            owner.read(cx).documents().into_iter().find(|document| {
+                gpui_kit::component::dock::PanelId::from(document.entity_id()) == id
+            })
+        });
+        match document {
+            Some(document) => gpui_kit::component::menu::ContextMenuExt::context_menu(
+                title,
+                move |menu, _, cx| {
+                    crate::gpui_document_panel::DocumentPanel::file_items(&document, menu, cx)
+                },
+            )
+            .into_any_element(),
+            None => title.into_any_element(),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn render_group_tab(
         &self,
@@ -717,6 +741,7 @@ impl WorkspaceTabGroup {
             .gap_1()
             .child(Icon::new(icon).small().text_color(foreground).flex_none())
             .child(title);
+        let title = self.with_file_menu(title, id, cx);
         let select = group.clone();
         let activate_focus = self.activation_focus(group, panel.focus_handle(cx), focus, cx);
         let click_focus = activate_focus.clone();
@@ -768,11 +793,7 @@ impl WorkspaceTabGroup {
             }
         })
         .accessibility_label(label.clone())
-        .tooltip({
-            move |window, cx| {
-                gpui_kit::component::tooltip::Tooltip::new(label.clone()).build(window, cx)
-            }
-        })
+        .tooltip(tab_tooltip(panel, &label, cx))
         .child(crate::gpui::tabs::content(
             title.into_any_element(),
             suffix,
@@ -1202,4 +1223,18 @@ fn dock_title_row(background: gpui_kit::Hsla) -> Div {
         .px_1()
         .bg(background)
         .window_control_area(WindowControlArea::Drag)
+}
+
+/// A tab's tooltip: its label, and for a conversation the name to write it by too.
+fn tab_tooltip(
+    panel: &Arc<dyn BasePanelView>,
+    label: &SharedString,
+    cx: &App,
+) -> impl Fn(&mut Window, &mut App) -> gpui_kit::AnyView + 'static {
+    let tooltip = panel
+        .view()
+        .downcast::<crate::gpui_agent_session::NativeAgentSessionView>()
+        .ok()
+        .map_or_else(|| label.clone(), |view| view.read(cx).tab_tooltip());
+    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
 }

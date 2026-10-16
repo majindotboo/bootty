@@ -683,6 +683,94 @@ fn native_conversation_commands_stream_through_every_shared_mailbox_caller() -> 
     Ok(())
 }
 
+/// A conversation's short name from the agent list stands for it, as the target and in place of
+/// its id, at its current generation.
+#[rstest]
+fn conversation_names_stand_for_their_targets() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let record = record(&host.start(&binding, "conversation", "task-names", "")?)?;
+    let mut list = CommandInvocation::new("agents.native.activities", Vec::new(), Caller::Socket);
+    list.target = Some(binding);
+    let listed = success(host.submit(list)?)?;
+    let name = listed[0]["name"].as_str().ok_or("listed name")?.to_owned();
+    assert!(bootty_control::short_name::names(
+        &name,
+        &record.full_name()
+    ));
+    let status = CommandInvocation {
+        target: Some(CommandTarget {
+            kind: ResourceKind::Session,
+            handle: name.clone(),
+            generation: 0,
+        }),
+        ..CommandInvocation::new(
+            "agents.native.status",
+            vec![name, "0".into()],
+            Caller::Socket,
+        )
+    };
+    let value = success(host.submit(status)?)?;
+    assert_eq!(value["id"], record.id);
+    assert_eq!(value["generation"], record.generation);
+    Ok(())
+}
+
+/// A message that mentions another conversation sends that conversation's recent words after
+/// it, while the transcript keeps the message as written.
+#[rstest]
+fn mentioned_conversations_follow_the_message_quoted() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let mentioned = record(&host.start(&binding, "earlier", "task-earlier", "")?)?;
+    success(host.submit(native_command(
+        "agents.native.prompt",
+        &mentioned.target(),
+        &["the flaky test is in scroll.rs"],
+        Caller::Internal,
+    ))?)?;
+    let asking = record(&host.start(&binding, "asking", "task-asking", "")?)?;
+    let message = "What did the other conversation find?";
+    let authored = message.len().to_string();
+    let conversations = serde_json::to_string(&[mentioned.target()])?;
+    let snapshot = success(host.submit(native_command(
+        "agents.native.prompt",
+        &asking.target(),
+        &[message, "", "", "", "", &authored, "", "", &conversations],
+        Caller::Internal,
+    ))?)?;
+    let transcript = snapshot["transcript"]
+        .as_array()
+        .ok_or("transcript missing")?;
+    assert!(
+        transcript
+            .iter()
+            .any(|item| item["role"] == "user" && item["text"] == message)
+    );
+    let reply = transcript
+        .iter()
+        .find(|item| item["role"] == "assistant")
+        .and_then(|item| item["text"].as_str())
+        .ok_or("reply missing")?;
+    assert!(
+        reply.contains(&format!("The conversation “{}”", mentioned.title))
+            && reply.contains("User: the flaky test is in scroll.rs"),
+        "{reply}"
+    );
+    // Only Bootty's own composer may attach another conversation's words.
+    let forged = host.submit(native_command(
+        "agents.native.prompt",
+        &asking.target(),
+        &[message, "", "", "", "", "", "", "", &conversations],
+        Caller::Socket,
+    ))?;
+    assert!(
+        !matches!(forged, CommandOutcome::Success { .. }),
+        "{forged:?}"
+    );
+    Ok(())
+}
+
 #[rstest]
 fn saved_annotation_batch_reaches_exact_native_conversation_alongside_message() -> TestResult<()> {
     let mut host = Host::new(true)?;
@@ -973,6 +1061,71 @@ fn reply_paths_open_relative_to_the_conversation() -> TestResult<()> {
         .collect::<Vec<_>>();
     let notes = fs::canonicalize(host.directory.path().join("notes.md"))?;
     assert_eq!(opened, [(notes.to_string_lossy().into_owned(), 2)]);
+    Ok(())
+}
+
+/// A reply's path and a document's path both show in the file manager: the reply's resolved
+/// against the conversation's directory, the way it would open.
+#[rstest]
+fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let conversation = record(&host.start(&binding, "conversation", "task-reveal", "")?)?;
+    fs::write(host.directory.path().join("notes.md"), "one\ntwo\n")?;
+    let notes = fs::canonicalize(host.directory.path().join("notes.md"))?;
+    let revealed = |host: &Host| {
+        host.effects
+            .iter()
+            .filter_map(|effect| match effect {
+                AppEffect::RevealPath(path) => Some(path.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    host.effects.clear();
+    success(host.submit(native_command(
+        "agents.native.reveal-link",
+        &conversation.target(),
+        &["notes.md:2"],
+        Caller::Internal,
+    ))?)?;
+    assert_eq!(revealed(&host), std::slice::from_ref(&notes));
+    host.effects.clear();
+    let mut reveal = CommandInvocation::new(
+        "files.reveal",
+        vec![notes.to_string_lossy().into_owned()],
+        Caller::Internal,
+    );
+    reveal.target = Some(binding.clone());
+    success(host.submit(reveal)?)?;
+    assert_eq!(revealed(&host), std::slice::from_ref(&notes));
+    // Editors are the ones this computer has; one it doesn't is refused by name.
+    host.effects.clear();
+    let mut edit = CommandInvocation::new(
+        "files.open_in",
+        vec![notes.to_string_lossy().into_owned(), "notepad".to_owned()],
+        Caller::Internal,
+    );
+    edit.target = Some(binding);
+    let link = native_command(
+        "agents.native.edit-link",
+        &conversation.target(),
+        &["notes.md:2", "notepad"],
+        Caller::Internal,
+    );
+    for invocation in [edit, link] {
+        let outcome = host.submit(invocation)?;
+        assert!(
+            matches!(&outcome, CommandOutcome::Unavailable { message } if message.contains("notepad")),
+            "{outcome:?}"
+        );
+    }
+    assert!(
+        !host
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, AppEffect::OpenInEditor { .. }))
+    );
     Ok(())
 }
 
@@ -2870,6 +3023,13 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
         )?["isError"],
         true
     );
+    // A name reaches only the parent's own children too.
+    for name in [parent.full_name(), foreign.full_name()] {
+        assert_eq!(
+            host.native_tool_reply(&parent, tool, json!({"id":name}))?["isError"],
+            true
+        );
+    }
     assert_eq!(
         host.native_tool_reply(
             &parent,
@@ -2899,7 +3059,12 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
     let controlled = host.native_tool_reply(
         &parent,
         tool,
-        json!({"id":child.id,"generation":child.generation}),
+        // Interrupting names the child; stopping gives its exact id and generation.
+        if operation == "interrupt" {
+            json!({"id":child.full_name()})
+        } else {
+            json!({"id":child.id,"generation":child.generation})
+        },
     )?;
     assert_eq!(controlled["isError"], false);
     let outcome: CommandOutcome = serde_json::from_str(

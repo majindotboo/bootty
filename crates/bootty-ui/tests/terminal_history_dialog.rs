@@ -180,12 +180,20 @@ fn selection_never_launches_and_open_keeps_saved_identity_account_and_session(
         .unwrap_or_else(|error| panic!("deliver command outcome: {error}"));
     assert!(dialog.poll().is_none());
     let spec = dialog.spec();
-    assert!(spec.rows.iter().any(|row| row.label == "Saved purpose"));
-    assert!(spec.rows.iter().any(|row| {
+    // A session from months ago sits under Older and shows its date.
+    let saved = chrono::DateTime::from_timestamp_millis(1_767_225_700_000)
+        .unwrap()
+        .with_timezone(&chrono::Local);
+    let [older, row] = [0, 1].map(|index| &spec.rows[index]);
+    assert_eq!(older.label, "Older");
+    assert_eq!(row.label, "Saved purpose");
+    assert!(
         row.trailing
-            .as_ref()
-            .is_some_and(|dates| dates.contains("Updated"))
-    }));
+            .as_deref()
+            .is_some_and(|date| date.starts_with(&saved.format("%b %-d").to_string())),
+        "{:?}",
+        row.trailing
+    );
     let selected = DialogIntent::SelectionChanged {
         dialog: spec.id,
         row: RowId::new("0"),
@@ -262,18 +270,11 @@ fn empty_history_still_freezes_account_before_scope_changes(mut dialog: Terminal
     dialog.started(receiver, false);
     sender
         .send(CommandOutcome::Success {
-            value: serde_json::json!({"entries": [], "account_directory": "/account/work", "omitted_entries": 17}),
+            value: serde_json::json!({"entries": [], "account_directory": "/account/work"}),
             warnings: Vec::new(),
         })
         .unwrap_or_else(|error| panic!("deliver command outcome: {error}"));
     assert!(dialog.poll().is_none());
-    assert!(
-        dialog
-            .spec()
-            .rows
-            .iter()
-            .any(|row| row.label.contains("17 additional sessions omitted") && !row.enabled)
-    );
     assert!(
         dialog
             .spec()
@@ -479,5 +480,78 @@ fn unified_history_provider_failures_do_not_leak_into_other_filters() {
             .rows
             .iter()
             .any(|row| row.label.contains("could not load"))
+    );
+}
+
+/// A full page offers older sessions; the next page starts before the oldest one shown, adds to
+/// the list, and the offer ends with the last page. Without a search, sessions group by when
+/// they were last used.
+#[rstest]
+fn older_sessions_load_page_by_page(mut dialog: TerminalHistoryDialog) {
+    let entry = |id: &str, updated_at: i64| TerminalHistoryEntry {
+        provider: AgentKind::Pi,
+        session_id: id.to_owned(),
+        title: Some(id.to_owned()),
+        created_at: None,
+        updated_at: Some(updated_at),
+        cwd: "/project/current".into(),
+        account_directory: "/account/work".into(),
+        resume_id: id.to_owned(),
+    };
+    let answer = |dialog: &mut TerminalHistoryDialog, entries: Vec<TerminalHistoryEntry>, more| {
+        let (sender, receiver) = mpsc::channel();
+        dialog.started(receiver, false);
+        sender
+            .send(CommandOutcome::Success {
+                value: serde_json::json!({
+                    "entries": entries,
+                    "account_directory": "/account/work",
+                    "more": more,
+                }),
+                warnings: Vec::new(),
+            })
+            .unwrap_or_else(|error| panic!("deliver command outcome: {error}"));
+        dialog.poll()
+    };
+    let labels = |dialog: &TerminalHistoryDialog| {
+        dialog
+            .spec()
+            .rows
+            .iter()
+            .map(|row| row.label.clone())
+            .collect::<Vec<_>>()
+    };
+    dialog.query();
+    assert!(
+        answer(
+            &mut dialog,
+            vec![entry("newest", 3_000), entry("newer", 2_000)],
+            true
+        )
+        .is_none()
+    );
+    assert_eq!(
+        labels(&dialog),
+        [
+            "Older",
+            "newest",
+            "newer",
+            "All projects",
+            "Load older sessions"
+        ]
+    );
+    let Some(TerminalHistoryEvent::Request { invocation, .. }) =
+        dialog.apply(&activate("older", "older"))
+    else {
+        panic!("older page")
+    };
+    assert_eq!(
+        invocation.arguments,
+        ["/project/current", "work", "/account/work", "2000"]
+    );
+    assert!(answer(&mut dialog, vec![entry("oldest", 1_000)], false).is_none());
+    assert_eq!(
+        labels(&dialog),
+        ["Older", "newest", "newer", "oldest", "All projects"]
     );
 }

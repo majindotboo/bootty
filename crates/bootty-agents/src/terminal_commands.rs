@@ -290,7 +290,7 @@ fn history_account_specs(label: &str) -> [TerminalCommandSpec; 7] {
         (
             "history",
             format!("{label} session history"),
-            vec!["cwd", "profile", "account_directory"],
+            vec!["cwd", "profile", "account_directory", "before"],
             0,
             Some(ResourceKind::Binding),
             MutationClass::Read,

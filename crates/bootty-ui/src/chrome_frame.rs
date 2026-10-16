@@ -995,6 +995,7 @@ fn sidebar_rows(
     let now = std::time::Instant::now();
     let mut rows = Vec::new();
     let grouped = state.config().sidebar.group_by_project;
+    let names = state.saved_session_names();
     let mut groups = Vec::<(Option<&str>, Vec<(usize, &SessionView)>)>::new();
     for (index, session) in sessions.iter().enumerate() {
         let group = session_project_path(projection, session);
@@ -1020,6 +1021,9 @@ fn sidebar_rows(
         let project = project_name(project_path);
         let group = project_path.unwrap_or("").to_owned();
         let mut base = sidebar_session_base(state, session, index, sessions.len(), palette);
+        if let Some(task) = base.task.as_mut() {
+            task.name = names.get(&task.identity).cloned().unwrap_or_default();
+        }
         base.project_path = project_path.map(str::to_owned);
         let artwork = project_path.and_then(|path| {
             native.artwork.request(
@@ -1447,6 +1451,7 @@ fn sidebar_session_base(
             let saved = binding.sessions().get(identity)?;
             Some(SidebarTask {
                 identity: identity.to_owned(),
+                name: String::new(),
                 title: String::new(),
                 native_conversation: session
                     .detached
@@ -1912,15 +1917,12 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
             effects.push(AppEffect::CustomSnooze(invocation));
             true
         }
-        ChromeIntent::Command(invocation) => {
-            state.dispatch_command(
-                invocation,
-                crate::state::ViewportSnapshot::default(),
-                &mut effects,
-            );
-            true
-        }
-        ChromeIntent::StartWindowDrag => false,
+        ChromeIntent::Command(invocation) => dispatch_all(state, vec![invocation], &mut effects),
+        ChromeIntent::Commands(invocations) => dispatch_all(state, invocations, &mut effects),
+        // The GPUI host owns window moves and conversation views.
+        ChromeIntent::StartWindowDrag
+        | ChromeIntent::ForkConversation(_)
+        | ChromeIntent::SearchConversations(_) => false,
         ChromeIntent::ActivateSpace(space) => {
             let space = id(space);
             if state.config().default_open_behavior == OpenBehavior::NewWindow {
@@ -1944,21 +1946,13 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
         ChromeIntent::ActivateSession(target) => {
             apply_session_activation(state, &scoped_target(&target), &mut effects)
         }
-        ChromeIntent::ReopenSession(target) => {
-            let scope = id(target.scope);
-            state
-                .saved_session_invocation(scope, "session.reopen", vec![target.session_id])
-                .is_some_and(|invocation| {
-                    matches!(
-                        state.dispatch_command(
-                            invocation,
-                            crate::state::ViewportSnapshot::default(),
-                            &mut effects
-                        ),
-                        bootty_control::CommandOutcome::Success { .. }
-                    )
-                })
-        }
+        ChromeIntent::ReopenSession(target) => dispatch_saved(
+            state,
+            id(target.scope),
+            "session.reopen",
+            vec![target.session_id],
+            &mut effects,
+        ),
         ChromeIntent::RenameSavedSession(target) => {
             state.open_rename_session_dialog_for(&target.session_id)
         }
@@ -1968,6 +1962,10 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
         ChromeIntent::SessionContext { target, action } => {
             apply_session_context(state, &scoped_target(&target), action)
         }
+        intent @ (ChromeIntent::CopyText(_)
+        | ChromeIntent::RevealPath { .. }
+        | ChromeIntent::OpenInEditor { .. }
+        | ChromeIntent::NewSessionInProject { .. }) => apply_place(state, intent, &mut effects),
         ChromeIntent::ReorderSession { source, before } => {
             state.reorder_session_before(&source, before.as_deref())
         }
@@ -2031,6 +2029,73 @@ fn apply_session_activation(
         )
     } else {
         state.activate_scoped_session_from_ui(target)
+    }
+}
+
+/// Runs `command` with one argument against a Space's binding; whether it succeeded.
+fn dispatch_all(
+    state: &mut AppState,
+    invocations: Vec<bootty_control::CommandInvocation>,
+    effects: &mut Vec<AppEffect>,
+) -> bool {
+    for invocation in invocations {
+        state.dispatch_command(
+            invocation,
+            crate::state::ViewportSnapshot::default(),
+            effects,
+        );
+    }
+    true
+}
+
+fn dispatch_saved(
+    state: &mut AppState,
+    scope: bootty_mux::controller::SpaceId,
+    command: &str,
+    arguments: Vec<String>,
+    effects: &mut Vec<AppEffect>,
+) -> bool {
+    state
+        .saved_session_invocation(scope, command, arguments)
+        .is_some_and(|invocation| {
+            matches!(
+                state.dispatch_command(
+                    invocation,
+                    crate::state::ViewportSnapshot::default(),
+                    effects
+                ),
+                bootty_control::CommandOutcome::Success { .. }
+            )
+        })
+}
+
+/// A session's place: copy its path or branch, show its directory, or start a session there.
+fn apply_place(state: &mut AppState, intent: ChromeIntent, effects: &mut Vec<AppEffect>) -> bool {
+    match intent {
+        ChromeIntent::CopyText(text) => {
+            if let Err(error) = crate::platform::write_clipboard_text(&text) {
+                state.record_error("Could not copy", error);
+            }
+            true
+        }
+        ChromeIntent::RevealPath { scope, path } => {
+            dispatch_saved(state, id(scope), "files.reveal", vec![path], effects)
+        }
+        ChromeIntent::OpenInEditor {
+            scope,
+            path,
+            editor,
+        } => dispatch_saved(
+            state,
+            id(scope),
+            "files.open_in",
+            vec![path, editor.to_owned()],
+            effects,
+        ),
+        ChromeIntent::NewSessionInProject { scope, path } => {
+            state.open_new_session_dialog_in(id(scope), path)
+        }
+        _ => false,
     }
 }
 

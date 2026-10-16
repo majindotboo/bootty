@@ -24,8 +24,9 @@ use gpui_kit::{
 use super::{
     ChromeIntent, ChromeLayout, ChromePalette, Confirmation, ContextMenu, GpuiChrome, MenuRow,
     Rgba, SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarDiffSummary,
-    SidebarPosition, SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceSnapshot,
-    SpaceTransition, TaskView, TitlebarSnapshot, UsageMeterSnapshot, color, space_switcher,
+    SidebarPosition, SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceKey,
+    SpaceSnapshot, SpaceTransition, TaskView, TitlebarSnapshot, UsageMeterSnapshot, color,
+    space_switcher,
 };
 use crate::gpui::theme::{mix, readable_color};
 
@@ -44,7 +45,48 @@ pub(super) struct DraggedSidebar;
 #[derive(Clone)]
 pub(super) struct DraggedSidebarRow {
     pub(super) source: String,
+    /// The rest of a dragged project's sessions, which move right after `source`.
+    pub(super) following: Vec<String>,
     pub(super) sessions: Vec<SessionTarget>,
+}
+
+impl DraggedSidebarRow {
+    /// Moves the dragged sessions, in order, before `before`; the end when it is `None`. Sorted
+    /// by recent activity, the order `shown` becomes the manual order first, and the sidebar
+    /// switches to it, so the drop lands where it was made.
+    fn reorder(
+        &self,
+        before: Option<&str>,
+        shown: Option<&[String]>,
+        cx: &mut Context<GpuiChrome>,
+    ) {
+        if before.is_some_and(|before| {
+            before == self.source || self.following.iter().any(|source| source == before)
+        }) {
+            return;
+        }
+        let moved = || std::iter::once(&self.source).chain(&self.following);
+        let kept = shown
+            .into_iter()
+            .flatten()
+            .filter(|source| moved().all(|moving| moving != *source))
+            .map(|source| (source, None));
+        let placed = moved().map(|source| (source, before.map(str::to_owned)));
+        for (source, before) in kept.chain(placed) {
+            cx.emit(ChromeIntent::ReorderSession {
+                source: source.clone(),
+                before,
+            });
+        }
+        if shown.is_some() {
+            cx.emit(ChromeIntent::Command(
+                bootty_control::CommandInvocation::from_action(
+                    "ui.sidebar.sort_manual",
+                    bootty_control::Caller::Internal,
+                ),
+            ));
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -102,6 +144,9 @@ pub(super) fn render(
     attention_only: bool,
     settled_shelf: SettledShelf,
     drag_order: Option<&(String, Option<String>)>,
+    rename: Option<&super::view::SidebarRename>,
+    selection: &[String],
+    conversation_matches: &[(String, String)],
     title: &TitlebarSnapshot,
     pointer_hovered_session: Option<&SessionTarget>,
     spaces: &[SpaceSnapshot],
@@ -121,9 +166,13 @@ pub(super) fn render(
     let width = layout.effective_sidebar_width();
     let position = layout.sidebar_position;
     let query = search.read(cx).value().trim().to_lowercase();
-    let views = task_view_counts(snapshot, &query, project_filter);
+    let words = Search {
+        query: &query,
+        conversations: conversation_matches,
+    };
+    let views = task_view_counts(snapshot, &words, project_filter);
     let rows = SidebarRows {
-        snapshot: task_view_snapshot(snapshot, &query, project_filter, task_view),
+        snapshot: task_view_snapshot(snapshot, &words, project_filter, task_view),
         search: search.clone(),
         project_filter: project_filter.map(str::to_owned),
         projects: project_paths(&snapshot.rows),
@@ -131,6 +180,15 @@ pub(super) fn render(
         attention_only,
         settled_shelf,
         drag_order: drag_order.cloned(),
+        rename: rename.map(|rename| (rename.task.identity.clone(), rename.input.clone())),
+        selection: selection.to_vec(),
+        visible_sessions: Rc::default(),
+        conversation_matches: words.found().to_vec(),
+        shown_anchors: Rc::default(),
+        scope: spaces
+            .iter()
+            .find(|space| space.active)
+            .map(|space| space.key),
         width,
         task_view,
         views,
@@ -184,24 +242,13 @@ pub(super) fn render(
             v_flex()
                 .flex_none()
                 .w_full()
-                .when_some(header, ParentElement::child)
+                .children(header)
                 .child(toolbar),
         )
         .child(content)
         .child(component_footer);
 
-    div()
-        // Empty chrome must not transfer focus to its dock panel. Child controls
-        // still handle their own clicks and keyboard focus.
-        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
-        .id("bootty-gpui-sidebar-shell")
-        .debug_selector(|| "bootty-gpui-sidebar-shell".to_owned())
-        .relative()
-        .flex()
-        .w(px(width))
-        .when(docked, gpui_kit::Styled::w_full)
-        .h_full()
-        .overflow_hidden()
+    shell(width, docked)
         .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
             if !hovered && this.pointer_hovered_session.take().is_some() {
                 cx.notify();
@@ -209,29 +256,46 @@ pub(super) fn render(
         }))
         .child(sidebar)
         .when(!layout.fullscreen, |element| {
-            element.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .bottom_0()
-                    .w(px(1.0))
-                    .when(position == SidebarPosition::Left, gpui_kit::Styled::right_0)
-                    .when(position == SidebarPosition::Right, gpui_kit::Styled::left_0)
-                    .bg(color(snapshot.border)),
-            )
+            element.child(edge(position, snapshot.border))
         })
         .when(!docked, |element| element.child(resize_handle))
         .into_any_element()
 }
 
+/// What the sidebar looks for: words in a row's own labels, and saved sessions whose
+/// conversations mention them, by identity.
+struct Search<'a> {
+    query: &'a str,
+    conversations: &'a [(String, String)],
+}
+
+impl Search<'_> {
+    /// The conversation matches that apply: none once the search is cleared.
+    const fn found(&self) -> &[(String, String)] {
+        if self.query.is_empty() {
+            &[]
+        } else {
+            self.conversations
+        }
+    }
+
+    fn in_conversation(&self, row: &SidebarRow) -> bool {
+        row.task.as_ref().is_some_and(|task| {
+            self.conversations
+                .iter()
+                .any(|(identity, _)| *identity == task.identity)
+        })
+    }
+}
+
 fn task_view_counts(
     snapshot: &SidebarSnapshot,
-    query: &str,
+    search: &Search<'_>,
     project_filter: Option<&str>,
 ) -> [(TaskView, usize); 5] {
     let view_rows = filtered_rows(
         &snapshot.rows,
-        query,
+        search,
         project_filter,
         None,
         snapshot.now_utc,
@@ -249,14 +313,14 @@ fn task_view_counts(
 
 fn task_view_snapshot(
     snapshot: &SidebarSnapshot,
-    query: &str,
+    search: &Search<'_>,
     project_filter: Option<&str>,
     task_view: TaskView,
 ) -> SidebarSnapshot {
     SidebarSnapshot {
         rows: filtered_rows(
             &snapshot.rows,
-            query,
+            search,
             project_filter,
             Some(task_view),
             snapshot.now_utc,
@@ -267,11 +331,12 @@ fn task_view_snapshot(
 
 fn filtered_rows(
     rows: &[SidebarRow],
-    query: &str,
+    search: &Search<'_>,
     project_filter: Option<&str>,
     task_view: Option<TaskView>,
     now: i64,
 ) -> Vec<SidebarRow> {
+    let query = search.query;
     if query.is_empty() && project_filter.is_none() && task_view.is_none() {
         return rows.to_vec();
     }
@@ -307,7 +372,9 @@ fn filtered_rows(
             .chain(group.iter().map(|group| group.text.as_str()))
             .chain(row.branch.as_deref())
             .chain(row.agents.iter().map(|agent| agent.description.as_str()))
-            .any(|text| text.to_lowercase().contains(query));
+            .chain(row.task.iter().map(|task| task.name.as_str()))
+            .any(|text| text.to_lowercase().contains(query))
+            || (!query.is_empty() && search.in_conversation(row));
         if matches && project_filter.is_none_or(|path| row.project_path.as_deref() == Some(path)) {
             if !group_added && let Some(group) = group {
                 filtered.push(group.clone());
@@ -352,6 +419,18 @@ struct SidebarRows {
     attention_only: bool,
     settled_shelf: SettledShelf,
     drag_order: Option<(String, Option<String>)>,
+    /// The saved identity whose title is being edited in place, and its field.
+    rename: Option<(String, Entity<InputState>)>,
+    /// The Space whose sessions the sidebar lists.
+    scope: Option<SpaceKey>,
+    /// Saved session rows chosen together, by key.
+    selection: Vec<String>,
+    /// Saved session rows in the order this render shows them, for choosing a range.
+    visible_sessions: Rc<std::cell::RefCell<Vec<String>>>,
+    /// While searching, saved sessions whose conversations mention the search, with the line.
+    conversation_matches: Vec<(String, String)>,
+    /// Session reorder anchors in the order this render shows them.
+    shown_anchors: Rc<std::cell::RefCell<Vec<String>>>,
     width: f32,
     task_view: TaskView,
     views: [(TaskView, usize); 5],
@@ -1082,7 +1161,10 @@ impl SidebarRows {
                     ))
                 }
             }))
-            .child(div().flex_1().min_w_0().truncate().child(row.text.clone()))
+            .child(self.title_or_rename(
+                row,
+                div().flex_1().min_w_0().truncate().child(row.text.clone()),
+            ))
             .children(context.map(|context| {
                 let key = row.key.clone();
                 div()
@@ -1176,10 +1258,14 @@ impl SidebarRows {
         .into_any_element()
     }
 
+    /// The order to make manual before a drop: the shown one, unless it already is manual.
+    fn shown_order(&self) -> Option<Rc<std::cell::RefCell<Vec<String>>>> {
+        (self.snapshot.sort_order != bootty_config::config::SidebarSortOrder::Manual)
+            .then(|| self.shown_anchors.clone())
+    }
+
     fn reorder_end(&self) -> gpui_kit::AnyElement {
-        if self.snapshot.sort_order != bootty_config::config::SidebarSortOrder::Manual {
-            return Empty.into_any_element();
-        }
+        let shown = self.shown_order();
         div()
             .id("sidebar-reorder-end")
             .h(px(12.0))
@@ -1204,15 +1290,41 @@ impl SidebarRows {
                 move |dragged: &DraggedSidebarRow, window, cx| {
                     _ = owner.update(cx, |this, cx| {
                         this.finish_sidebar_drag(window, cx, true);
-                        cx.emit(ChromeIntent::ReorderSession {
-                            source: dragged.source.clone(),
-                            before: None,
-                        });
+                        let shown = shown.as_ref().map(|shown| shown.borrow().clone());
+                        dragged.reorder(None, shown.as_deref(), cx);
                     });
                 }
             })
             .into_any_element()
     }
+}
+
+/// The sidebar's outer frame: its own width, or the dock's when docked.
+fn shell(width: f32, docked: bool) -> Stateful<Div> {
+    div()
+        // Empty chrome must not transfer focus to its dock panel. Child controls
+        // still handle their own clicks and keyboard focus.
+        .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
+        .id("bootty-gpui-sidebar-shell")
+        .debug_selector(|| "bootty-gpui-sidebar-shell".to_owned())
+        .relative()
+        .flex()
+        .w(px(width))
+        .when(docked, gpui_kit::Styled::w_full)
+        .h_full()
+        .overflow_hidden()
+}
+
+/// The line between the sidebar and the workspace.
+fn edge(position: SidebarPosition, border: Rgba) -> Div {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .w(px(1.0))
+        .when(position == SidebarPosition::Left, gpui_kit::Styled::right_0)
+        .when(position == SidebarPosition::Right, gpui_kit::Styled::left_0)
+        .bg(color(border))
 }
 
 fn resize_handle(position: SidebarPosition, cx: &Context<GpuiChrome>) -> gpui_kit::AnyElement {
@@ -1311,9 +1423,10 @@ impl SidebarRows {
     }
 
     fn row_background(&self, row: &SidebarRow, hovered: bool) -> Rgba {
-        let base = if row.current && hovered {
+        let current = row.current || self.selection.contains(&row.key);
+        let base = if current && hovered {
             mix(self.snapshot.current, self.snapshot.hover, 0.5)
-        } else if row.current {
+        } else if current {
             self.snapshot.current
         } else if hovered {
             self.snapshot.hover
@@ -1321,7 +1434,7 @@ impl SidebarRows {
             self.snapshot.tint
         };
         if row.kind.is_session() {
-            mix(base, row.color, if row.current { 0.18 } else { 0.055 })
+            mix(base, row.color, if current { 0.18 } else { 0.055 })
         } else {
             base
         }
@@ -1367,34 +1480,39 @@ impl SidebarRows {
                     .min_w_0()
                     .gap_1p5()
                     .child(
-                        div()
-                            .debug_selector({
-                                let key = row.key.clone();
-                                move || format!("sidebar-title-{key}")
-                            })
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .when(is_group, gpui_kit::Styled::text_xs)
-                            .when(!is_group, |title| title.font_weight(FontWeight::MEDIUM))
-                            .text_color(color(self.text_color(
-                                row,
-                                if row.kind.is_session() {
-                                    if self.section(row) == SessionSection::Settled && !row.current
-                                    {
-                                        self.colors.muted
+                        self.title_or_rename(
+                            row,
+                            div()
+                                .debug_selector({
+                                    let key = row.key.clone();
+                                    move || format!("sidebar-title-{key}")
+                                })
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .when(is_group, gpui_kit::Styled::text_xs)
+                                .when(!is_group, |title| title.font_weight(FontWeight::MEDIUM))
+                                .text_color(color(self.text_color(
+                                    row,
+                                    if row.kind.is_session() {
+                                        if (self.section(row) == SessionSection::Settled
+                                            || row.kind == SidebarRowKind::DetachedSession)
+                                            && !row.current
+                                        {
+                                            self.colors.muted
+                                        } else {
+                                            snapshot.foreground
+                                        }
+                                    } else if is_group {
+                                        if current { row.color } else { row.dim_color }
+                                    } else if row.active {
+                                        row.color
                                     } else {
                                         snapshot.foreground
-                                    }
-                                } else if is_group {
-                                    if current { row.color } else { row.dim_color }
-                                } else if row.active {
-                                    row.color
-                                } else {
-                                    snapshot.foreground
-                                },
-                            )))
-                            .child(row_text),
+                                    },
+                                )))
+                                .child(row_text),
+                        ),
                     )
                     .when_some(
                         row.secondary.clone().filter(|_| !row.kind.is_session()),
@@ -1422,6 +1540,48 @@ impl SidebarRows {
             .when(!row.kind.is_session(), |label| {
                 label.children(self.trailing_label(row))
             })
+            .into_any_element()
+    }
+
+    /// The line that matched the search in this session's conversation.
+    fn conversation_line(&self, row: &SidebarRow) -> Option<String> {
+        let identity = &row.task.as_ref()?.identity;
+        self.conversation_matches
+            .iter()
+            .find(|(matched, _)| matched == identity)
+            .map(|(_, line)| line.clone())
+    }
+
+    fn rename_input(&self, row: &SidebarRow) -> Option<&Entity<InputState>> {
+        let (identity, input) = self.rename.as_ref()?;
+        (row.task.as_ref()?.identity == *identity).then_some(input)
+    }
+
+    /// The row's title, or the field editing it in place.
+    fn title_or_rename(&self, row: &SidebarRow, title: Div) -> gpui_kit::AnyElement {
+        let Some(input) = self.rename_input(row) else {
+            return title.into_any_element();
+        };
+        let owner = self.owner.clone();
+        div()
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("sidebar-rename-{key}")
+            })
+            .flex_1()
+            .min_w_0()
+            // Enter saves the title rather than opening the row, and Escape keeps the old title
+            // even while the field holds a selection.
+            .on_action(|_: &gpui_kit::component::input::Enter, _, cx| cx.stop_propagation())
+            .capture_action(move |_: &gpui_kit::component::input::Escape, _, cx| {
+                _ = owner.update(cx, |chrome, cx| chrome.finish_sidebar_rename(false, cx));
+                cx.stop_propagation();
+            })
+            .child(
+                gpui_kit::component::input::Input::new(input)
+                    .xsmall()
+                    .aria_label("Session title"),
+            )
             .into_any_element()
     }
 
@@ -1561,9 +1721,30 @@ impl SidebarRows {
                     .flex()
                     .items_center()
                     .gap_1()
+                    // While searching, a session found by its conversation shows the line.
+                    .when_some(self.conversation_line(row), |line, text| {
+                        line.child(crate::gpui::icon(
+                            "message-square",
+                            self.icon_size * 0.85,
+                            color(self.colors.muted),
+                        ))
+                        .child(
+                            div()
+                                .debug_selector({
+                                    let key = row.key.clone();
+                                    move || format!("sidebar-match-{key}")
+                                })
+                                .min_w_0()
+                                .truncate()
+                                .child(text),
+                        )
+                    })
                     // A session titled with its branch doesn't repeat it here.
                     .when_some(
-                        row.branch.as_ref().filter(|branch| **branch != row.text),
+                        row.branch
+                            .as_ref()
+                            .filter(|branch| **branch != row.text)
+                            .filter(|_| self.conversation_line(row).is_none()),
                         |branch, name| {
                             branch
                                 .child(crate::gpui::icon(
@@ -1656,20 +1837,22 @@ impl SidebarRows {
         if let Some(button) = self.settle_button(row) {
             return Some(button);
         }
-        let lifecycle = row.task.as_ref().and_then(|task| {
-            if task.state.is_overdue(self.snapshot.now_utc) {
-                Some(("Woke", "alarm-clock", self.colors.accent))
-            } else {
-                match task.state.view(self.snapshot.now_utc) {
-                    TaskView::Active => None,
-                    TaskView::Settled => Some(("Settled", "check", self.colors.muted)),
-                    TaskView::Archived => Some(("Archived", "archive", self.colors.muted)),
-                    TaskView::Snoozed => Some(("Snoozed", "clock", self.colors.muted)),
-                    TaskView::Hidden => Some(("Hidden", "eye-off", self.colors.muted)),
-                    TaskView::Deleted => Some(("Deleted", "trash", self.colors.muted)),
+        let lifecycle =
+            row.task.as_ref().and_then(|task| {
+                if task.state.is_overdue(self.snapshot.now_utc) {
+                    Some(("Woke", "alarm-clock", self.colors.accent))
+                } else {
+                    match task.state.view(self.snapshot.now_utc) {
+                        TaskView::Active => (row.kind == SidebarRowKind::DetachedSession)
+                            .then_some(("Closed", "power-off", self.colors.muted)),
+                        TaskView::Settled => Some(("Settled", "check", self.colors.muted)),
+                        TaskView::Archived => Some(("Archived", "archive", self.colors.muted)),
+                        TaskView::Snoozed => Some(("Snoozed", "clock", self.colors.muted)),
+                        TaskView::Hidden => Some(("Hidden", "eye-off", self.colors.muted)),
+                        TaskView::Deleted => Some(("Deleted", "trash", self.colors.muted)),
+                    }
                 }
-            }
-        });
+            });
         let (trailing, icon, tone) = if let Some((text, icon, tone)) = lifecycle
             && (row.trailing.is_none() || row.trailing.as_deref() == Some("Finished"))
         {
@@ -1924,15 +2107,36 @@ impl SidebarRows {
     }
 
     fn drag_row(&self, element: Stateful<Div>, row: &SidebarRow) -> Stateful<Div> {
-        if self.snapshot.sort_order != bootty_config::config::SidebarSortOrder::Manual {
+        if self.rename_input(row).is_some() {
             return element;
         }
-        let Some(source) = row.reorder_anchor.clone() else {
+        // A project header carries every session it groups, in order.
+        let members: Vec<&SidebarRow> = if row.kind == SidebarRowKind::Group {
+            self.snapshot
+                .rows
+                .iter()
+                .filter(|member| {
+                    member.kind.is_session()
+                        && member.reorder_anchor.is_some()
+                        && member.project_path == row.project_path
+                })
+                .collect()
+        } else {
+            vec![row]
+        };
+        let mut anchors = members
+            .iter()
+            .filter_map(|member| member.reorder_anchor.clone());
+        let Some(source) = anchors.next() else {
             return element;
         };
         let drag = DraggedSidebarRow {
             source,
-            sessions: row.target.clone().into_iter().collect(),
+            following: anchors.collect(),
+            sessions: members
+                .iter()
+                .filter_map(|member| member.target.clone())
+                .collect(),
         };
         let preview = DraggedSidebarPreview {
             rows: self.clone(),
@@ -1946,12 +2150,10 @@ impl SidebarRows {
     }
 
     fn drop_target(&self, element: Stateful<Div>, row: &SidebarRow) -> Stateful<Div> {
-        if self.snapshot.sort_order != bootty_config::config::SidebarSortOrder::Manual {
-            return element;
-        }
         let Some(source) = row.reorder_anchor.clone() else {
             return element;
         };
+        let shown = self.shown_order();
         element
             .on_drag_move::<DraggedSidebarRow>({
                 let source = source.clone();
@@ -1983,12 +2185,8 @@ impl SidebarRows {
                             .filter(|(from, _)| from == &dragged.source)
                             .map_or_else(|| Some(source.clone()), |(_, before)| before);
                         this.finish_sidebar_drag(window, cx, true);
-                        if before.as_ref() != Some(&dragged.source) {
-                            cx.emit(ChromeIntent::ReorderSession {
-                                source: dragged.source.clone(),
-                                before,
-                            });
-                        }
+                        let shown = shown.as_ref().map(|shown| shown.borrow().clone());
+                        dragged.reorder(before.as_deref(), shown.as_deref(), cx);
                     });
                 }
             })
@@ -2030,9 +2228,7 @@ impl SidebarRows {
                     row.text
                 ))
                 .child(element);
-            let settings_owner = self.owner.clone();
-            let settings_path = path.clone();
-            let settings_target = target.clone();
+            let actions = self.project_actions(row, &path, &target);
             let disclosure = super::button::activated_button(
                 div().w_full().h(gpui_kit::rems(row_height)),
                 button,
@@ -2053,32 +2249,7 @@ impl SidebarRows {
                 .w_full()
                 .min_w_0()
                 .child(div().flex_1().min_w_0().child(disclosure))
-                .child(
-                    Button::new(SharedString::from(format!("project-settings-{}", row.key)))
-                        .ghost()
-                        .xsmall()
-                        .icon(gpui_kit::component::IconName::Ellipsis)
-                        .tooltip("Project actions")
-                        .accessibility_label(format!("Project actions for {}", row.text))
-                        .dropdown_menu(move |menu, _, _| {
-                            let owner = settings_owner.clone();
-                            let path = settings_path.clone();
-                            let target = settings_target.clone();
-                            menu.item(PopupMenuItem::new("Project settings…").on_click(
-                                move |_, _, cx| {
-                                    _ = owner.update(cx, |_, cx| {
-                                        let mut invocation = bootty_control::CommandInvocation::new(
-                                            "project.edit",
-                                            vec![path.clone()],
-                                            bootty_control::Caller::Internal,
-                                        );
-                                        invocation.target = Some(target.clone());
-                                        cx.emit(ChromeIntent::Command(invocation));
-                                    });
-                                },
-                            ))
-                        }),
-                )
+                .child(actions)
                 .into_any_element()
         } else if row.selectable {
             self.row_activation(element, row, accessible_label, row_height)
@@ -2087,11 +2258,75 @@ impl SidebarRows {
         }
     }
 
+    /// A project header's actions: start a session there, reveal or copy its path, and open its
+    /// settings.
+    fn project_actions(
+        &self,
+        row: &SidebarRow,
+        path: &str,
+        target: &bootty_control::CommandTarget,
+    ) -> impl IntoElement + use<> {
+        let mut rows = self.scope.map_or_else(Vec::new, |scope| {
+            place_menu(
+                scope,
+                &super::view::SessionPlace {
+                    project: Some(path.to_owned()),
+                    branch: None,
+                    local: row.host.is_none(),
+                },
+            )
+        });
+        let mut settings = bootty_control::CommandInvocation::new(
+            "project.edit",
+            vec![path.to_owned()],
+            bootty_control::Caller::Internal,
+        );
+        settings.target = Some(target.clone());
+        rows.push(MenuRow {
+            confirm: None,
+            label: "Project settings…".to_owned(),
+            enabled: true,
+            destructive: false,
+            starts_group: true,
+            intent: ChromeIntent::Command(settings),
+        });
+        let owner = self.owner.clone();
+        Button::new(SharedString::from(format!("project-actions-{}", row.key)))
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("project-actions-{key}")
+            })
+            .ghost()
+            .xsmall()
+            .icon(gpui_kit::component::IconName::Ellipsis)
+            .tooltip("Project actions")
+            .accessibility_label(format!("Project actions for {}", row.text))
+            .dropdown_menu(move |menu, _, _| {
+                rows.iter().cloned().fold(menu, |menu, row| {
+                    super::view::append_menu_row(menu, row, &owner)
+                })
+            })
+    }
+
     fn row_menu(&self, row: &SidebarRow) -> Option<ContextMenu> {
         if row.task.as_ref().is_some_and(|task| task.pending) {
             return None;
         }
         let now = self.snapshot.now_utc;
+        if self.selection.len() > 1 && self.selection.contains(&row.key) {
+            let tasks = self
+                .snapshot
+                .rows
+                .iter()
+                .filter(|chosen| self.selection.contains(&chosen.key))
+                .filter_map(|chosen| {
+                    let mut task = chosen.task.clone()?;
+                    task.title.clone_from(&chosen.text);
+                    Some((task, chosen.kind == SidebarRowKind::Session))
+                })
+                .collect();
+            return Some(ContextMenu::Sessions { tasks, now });
+        }
         // Confirmations name the session as its row shows it.
         let task = row.task.clone().map(|mut task| {
             task.title.clone_from(&row.text);
@@ -2099,14 +2334,26 @@ impl SidebarRows {
         });
         let target = row.target.clone()?;
         let options = row.context?;
+        let place = super::view::SessionPlace {
+            project: row.project_path.clone(),
+            branch: row.branch.clone(),
+            local: row.host.is_none(),
+        };
         Some(if matches!(row.kind, SidebarRowKind::DetachedSession) {
-            ContextMenu::DetachedSession { target, task, now }
+            ContextMenu::DetachedSession {
+                target,
+                task,
+                now,
+                place,
+            }
         } else {
             ContextMenu::Session {
                 target,
                 options,
                 task,
                 now,
+                place,
+                working: row.working,
             }
         })
     }
@@ -2118,6 +2365,17 @@ impl SidebarRows {
         accessible_label: String,
         row_height: f32,
     ) -> gpui_kit::AnyElement {
+        let hitbox_selector = format!("sidebar-row-hitbox-{}", row.key);
+        let hitbox_debug_selector = format!("sidebar-row-hitbox-{}", row.key);
+        let hitbox = div()
+            .id(SharedString::from(hitbox_selector))
+            .debug_selector(move || hitbox_debug_selector)
+            .w_full()
+            .h(gpui_kit::rems(row_height));
+        // The title field takes the row's clicks and keys while it edits.
+        if self.rename_input(row).is_some() {
+            return hitbox.child(element).into_any_element();
+        }
         let owner = self.owner.clone();
         let activation_target = row.target.clone();
         let activation_kind = row.kind.clone();
@@ -2140,8 +2398,38 @@ impl SidebarRows {
             accessible_label
         })
         .child(element);
-        let activated =
-            super::button::activated_button(div().w_full().h_full(), button, move |_, app| {
+        let renames = row.task.is_some();
+        let (key, visible) = (row.key.clone(), self.visible_sessions.clone());
+        let activated = div().w_full().h_full().child(button.on_click(
+            move |event: &gpui_kit::ClickEvent, window, app| {
+                let modifiers = event.modifiers();
+                // Command-click (Control-click elsewhere) chooses saved work for one action
+                // together; Shift-click chooses a range.
+                if renames && (modifiers.secondary() || modifiers.shift) {
+                    _ = owner.update(app, |chrome, cx| {
+                        chrome.choose_sidebar_row(
+                            &key,
+                            modifiers.shift,
+                            &visible.borrow(),
+                            window,
+                            cx,
+                        );
+                    });
+                    return;
+                }
+                _ = owner.update(app, GpuiChrome::clear_sidebar_selection);
+                // A second click on saved work edits its title.
+                if renames
+                    && event.click_count() >= 2
+                    && let Some(target) = &activation_target
+                    && owner
+                        .update(app, |chrome, cx| {
+                            chrome.begin_sidebar_rename(target, window, cx)
+                        })
+                        .unwrap_or(false)
+                {
+                    return;
+                }
                 _ = owner.update(app, |_, cx| {
                     if let Some(target) = native_conversation.clone() {
                         let mut invocation = bootty_control::CommandInvocation::from_action(
@@ -2164,19 +2452,18 @@ impl SidebarRows {
                         cx.emit(intent);
                     }
                 });
-            });
-        let hitbox_selector = format!("sidebar-row-hitbox-{}", row.key);
-        let hitbox_debug_selector = format!("sidebar-row-hitbox-{}", row.key);
-        div()
-            .id(SharedString::from(hitbox_selector))
-            .debug_selector(move || hitbox_debug_selector)
-            .w_full()
-            .h(gpui_kit::rems(row_height))
-            .child(activated)
-            .into_any_element()
+            },
+        ));
+        hitbox.child(activated).into_any_element()
     }
 
     fn render_row(&self, row: &SidebarRow, in_session_block: bool) -> gpui_kit::AnyElement {
+        if row.kind.is_session() && row.task.is_some() {
+            self.visible_sessions.borrow_mut().push(row.key.clone());
+        }
+        if let Some(anchor) = row.reorder_anchor.clone().filter(|_| row.kind.is_session()) {
+            self.shown_anchors.borrow_mut().push(anchor);
+        }
         let shortcut = if row.kind.is_session() && row.target.is_some() {
             let ordinal = self.session_ordinal.get().saturating_add(1);
             self.session_ordinal.set(ordinal);
@@ -2323,6 +2610,13 @@ fn session_tooltip(row: &SidebarRow, age: Option<String>) -> Tooltip {
             .children(
                 age.clone()
                     .map(|age| line("clock", format!("Active {age} ago"))),
+            )
+            // The name to write the session by, in commands, prompts and the CLI.
+            .children(
+                row.task
+                    .as_ref()
+                    .filter(|task| !task.name.is_empty())
+                    .map(|task| line("at-sign", task.name.clone())),
             )
             .children(row.agents.iter().map(|agent| {
                 div()
@@ -2512,6 +2806,73 @@ pub(super) fn detached_session_menu(target: &SessionTarget) -> Vec<MenuRow> {
     .collect()
 }
 
+/// What can be done with where a session works: start another session there, show its
+/// directory in the file manager or open it in an installed editor when it's on this computer,
+/// and copy its path or branch.
+pub(super) fn place_menu(scope: SpaceKey, place: &super::view::SessionPlace) -> Vec<MenuRow> {
+    let row = |label: &str, starts_group: bool, intent| MenuRow {
+        confirm: None,
+        label: label.to_owned(),
+        enabled: true,
+        destructive: false,
+        starts_group,
+        intent,
+    };
+    let mut rows = Vec::new();
+    if let Some(path) = &place.project {
+        rows.push(row(
+            "New Session in Project",
+            true,
+            ChromeIntent::NewSessionInProject {
+                scope,
+                path: path.clone(),
+            },
+        ));
+        if place.local {
+            rows.push(row(
+                crate::commands::reveal_label(),
+                false,
+                ChromeIntent::RevealPath {
+                    scope,
+                    path: path.clone(),
+                },
+            ));
+        }
+        rows.push(row(
+            "Copy Path",
+            false,
+            ChromeIntent::CopyText(path.clone()),
+        ));
+    }
+    if let Some(branch) = &place.branch {
+        rows.push(row(
+            "Copy Branch",
+            place.project.is_none(),
+            ChromeIntent::CopyText(branch.clone()),
+        ));
+    }
+    // Editors differ by computer, so they follow the rows every session has.
+    if let Some(path) = place.project.as_ref().filter(|_| place.local) {
+        rows.extend(
+            crate::editors::installed()
+                .iter()
+                .enumerate()
+                .map(|(index, editor)| {
+                    row(
+                        &format!("Open in {}", editor.name),
+                        index == 0,
+                        ChromeIntent::OpenInEditor {
+                            scope,
+                            path: path.clone(),
+                            editor: editor.id,
+                        },
+                    )
+                }),
+        );
+    }
+    rows
+}
+
 pub(super) fn session_menu(
     target: &SessionTarget,
     options: SessionContextSnapshot,
@@ -2639,6 +3000,8 @@ fn row_accessible_label(row: &SidebarRow, now: i64) -> String {
         let view = task.state.view(now);
         if view != TaskView::Active {
             _ = write!(label, " · {}", task_view_label(view));
+        } else if row.kind == SidebarRowKind::DetachedSession {
+            label.push_str(" · Closed");
         }
         if task.state.is_overdue(now) {
             label.push_str(" · Woke");
@@ -2672,7 +3035,7 @@ fn row_view(row: &SidebarRow, now: i64) -> TaskView {
         .map_or(TaskView::Active, |task| task.state.view(now))
 }
 
-fn saved_state_invocation(
+pub(super) fn saved_state_invocation(
     task: &SidebarTask,
     command: &str,
     extra: Vec<String>,
@@ -2688,8 +3051,14 @@ fn saved_state_invocation(
     Some(invocation)
 }
 
-/// `live` sessions still hold a terminal; the store only deletes closed ones.
-pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, live: bool) -> Vec<MenuRow> {
+/// `live` sessions still hold a terminal; the store only deletes closed ones. Archiving
+/// `working` sessions asks first, since their work goes on out of sight.
+pub(super) fn saved_session_menu(
+    task: &SidebarTask,
+    now: i64,
+    live: bool,
+    working: bool,
+) -> Vec<MenuRow> {
     use bootty_mux::session_membership::SessionLifecycle;
     let row = |label: &str, command, starts_group| {
         saved_state_invocation(task, command, Vec::new()).map(|invocation| MenuRow {
@@ -2701,28 +3070,10 @@ pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, live: bool) -> Ve
             intent: ChromeIntent::Command(invocation),
         })
     };
-    let mut rows = Vec::new();
-    if let Some(target) = &task.native_conversation {
-        for (label, command) in [
-            ("Regenerate title", "agents.native.regenerate-title"),
-            ("Mark unread", "agents.native.mark-unread"),
-        ] {
-            let mut invocation = bootty_control::CommandInvocation::new(
-                command,
-                vec![target.handle.clone(), target.generation.to_string()],
-                bootty_control::Caller::Internal,
-            );
-            invocation.target = Some(target.clone());
-            rows.push(MenuRow {
-                confirm: None,
-                label: label.to_owned(),
-                enabled: !task.pending,
-                destructive: false,
-                starts_group: false,
-                intent: ChromeIntent::Command(invocation),
-            });
-        }
-    }
+    let mut rows = task
+        .native_conversation
+        .as_ref()
+        .map_or_else(Vec::new, |target| conversation_menu(target, task.pending));
     if !task.state.archived {
         rows.extend(row(
             if task.state.pinned { "Unpin" } else { "Pin" },
@@ -2761,25 +3112,157 @@ pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, live: bool) -> Ve
             false,
         ));
     }
-    rows.extend(row(
-        if task.state.archived {
-            "Unarchive"
-        } else {
-            "Archive"
-        },
-        if task.state.archived {
-            "session.unarchive"
-        } else {
-            "session.archive"
-        },
-        true,
-    ));
+    rows.extend(
+        row(
+            if task.state.archived {
+                "Unarchive"
+            } else {
+                "Archive"
+            },
+            if task.state.archived {
+                "session.unarchive"
+            } else {
+                "session.archive"
+            },
+            true,
+        )
+        .map(|mut archive| {
+            if working && !task.state.archived {
+                archive.confirm = Some(archive_confirmation(&task.title));
+            }
+            archive
+        }),
+    );
     rows.extend(row("Delete…", "session.delete", false).map(|mut delete| {
         delete.enabled &= !live;
         delete.confirm = Some(delete_confirmation(&task.title));
         delete
     }));
     rows
+}
+
+/// One action on several saved sessions: pin or unpin, settle, mark unread, archive, or delete
+/// the closed ones.
+pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)], now: i64) -> Vec<MenuRow> {
+    use bootty_mux::session_membership::SessionLifecycle;
+    let count = tasks.len();
+    let all = |command: &str, chosen: &dyn Fn(&SidebarTask, bool) -> bool| {
+        tasks
+            .iter()
+            .filter(|(task, live)| chosen(task, *live))
+            .filter_map(|(task, _)| saved_state_invocation(task, command, Vec::new()))
+            .collect::<Vec<_>>()
+    };
+    let row = |label: String, invocations: Vec<_>, starts_group: bool| MenuRow {
+        confirm: None,
+        label,
+        enabled: !invocations.is_empty() && tasks.iter().all(|(task, _)| !task.pending),
+        destructive: false,
+        starts_group,
+        intent: ChromeIntent::Commands(invocations),
+    };
+    let pinned = tasks.iter().all(|(task, _)| task.state.pinned);
+    let mut rows = vec![
+        if pinned {
+            row(
+                format!("Unpin {count} sessions"),
+                all("session.unpin", &|_, _| true),
+                false,
+            )
+        } else {
+            row(
+                format!("Pin {count} sessions"),
+                all("session.pin", &|task, _| {
+                    !task.state.pinned && !task.state.archived
+                }),
+                false,
+            )
+        },
+        row(
+            format!("Settle {count} sessions"),
+            all("session.settle", &|task, _| {
+                task.state.lifecycle != SessionLifecycle::Settled || task.state.is_overdue(now)
+            }),
+            false,
+        ),
+    ];
+    let unread = tasks
+        .iter()
+        .filter_map(|(task, _)| task.native_conversation.as_ref())
+        .map(|target| {
+            let mut invocation = bootty_control::CommandInvocation::new(
+                "agents.native.mark-unread",
+                vec![target.handle.clone(), target.generation.to_string()],
+                bootty_control::Caller::Internal,
+            );
+            invocation.target = Some(target.clone());
+            invocation
+        })
+        .collect::<Vec<_>>();
+    if !unread.is_empty() {
+        rows.push(row(format!("Mark {count} unread"), unread, false));
+    }
+    rows.push(row(
+        format!("Archive {count} sessions"),
+        all("session.archive", &|task, _| !task.state.archived),
+        true,
+    ));
+    let closed = all("session.delete", &|_, live| !live);
+    let mut delete = row(format!("Delete {count} sessions…"), closed, false);
+    delete.enabled &= tasks.iter().all(|(_, live)| !live);
+    delete.destructive = true;
+    delete.confirm = Some(Confirmation {
+        question: format!("Delete {count} sessions permanently?"),
+        detail: "This removes their saved history from Bootty. Archive keeps them recoverable instead.",
+        action: "Delete permanently",
+    });
+    rows.push(delete);
+    rows
+}
+
+/// What a session's conversation offers: a new title, marking it unread, and a side chat.
+fn conversation_menu(target: &bootty_control::CommandTarget, pending: bool) -> Vec<MenuRow> {
+    let mut rows = Vec::new();
+    for (label, command) in [
+        ("Regenerate title", "agents.native.regenerate-title"),
+        ("Mark unread", "agents.native.mark-unread"),
+    ] {
+        let mut invocation = bootty_control::CommandInvocation::new(
+            command,
+            vec![target.handle.clone(), target.generation.to_string()],
+            bootty_control::Caller::Internal,
+        );
+        invocation.target = Some(target.clone());
+        rows.push(MenuRow {
+            confirm: None,
+            label: label.to_owned(),
+            enabled: !pending,
+            destructive: false,
+            starts_group: false,
+            intent: ChromeIntent::Command(invocation),
+        });
+    }
+    rows.push(MenuRow {
+        confirm: None,
+        label: "Start side chat".to_owned(),
+        enabled: !pending,
+        destructive: false,
+        starts_group: false,
+        intent: ChromeIntent::ForkConversation(target.clone()),
+    });
+    rows
+}
+
+fn archive_confirmation(title: &str) -> Confirmation {
+    Confirmation {
+        question: if title.is_empty() {
+            "Archive this session while it works?".to_owned()
+        } else {
+            format!("Archive “{title}” while it works?")
+        },
+        detail: "It keeps working, out of the active list.",
+        action: "Archive",
+    }
 }
 
 /// Deleting can't be undone, so the question names the session.
@@ -2795,14 +3278,28 @@ fn delete_confirmation(title: &str) -> Confirmation {
     }
 }
 
-pub(super) fn saved_snooze_menu(task: &SidebarTask, now: i64) -> Vec<MenuRow> {
+/// When `tasks` can sleep until: presets in the local time zone, then a chosen time. One task's
+/// rows carry one command; several tasks' rows carry one per task that can snooze.
+pub(super) fn snooze_menu(tasks: &[SidebarTask], now: i64) -> Vec<MenuRow> {
     use chrono::{Datelike as _, TimeZone as _};
-    if task.state.archived
-        || task.state.deleted
-        || task.state.snoozed_until.is_some_and(|until| until > now)
-    {
+    let snoozable: Vec<&SidebarTask> = tasks
+        .iter()
+        .filter(|task| {
+            !task.state.archived
+                && !task.state.deleted
+                && task.state.snoozed_until.is_none_or(|until| until <= now)
+        })
+        .collect();
+    if snoozable.is_empty() {
         return Vec::new();
     }
+    let enabled = snoozable.iter().all(|task| !task.pending);
+    let intent =
+        |invocations: Vec<bootty_control::CommandInvocation>| match <[_; 1]>::try_from(invocations)
+        {
+            Ok([one]) => ChromeIntent::Command(one),
+            Err(several) => ChromeIntent::Commands(several),
+        };
     let local =
         chrono::DateTime::from_timestamp(now, 0).map(|date| date.with_timezone(&chrono::Local));
     let morning = |days: u64| {
@@ -2826,25 +3323,32 @@ pub(super) fn saved_snooze_menu(task: &SidebarTask, now: i64) -> Vec<MenuRow> {
     .filter_map(|(label, until)| {
         let until = until?;
         let date = chrono::DateTime::from_timestamp(until, 0)?.with_timezone(&chrono::Local);
-        let invocation = saved_state_invocation(task, "session.snooze", vec![until.to_string()])?;
+        let invocations = snoozable
+            .iter()
+            .map(|task| saved_state_invocation(task, "session.snooze", vec![until.to_string()]))
+            .collect::<Option<Vec<_>>>()?;
         Some(MenuRow {
             confirm: None,
             label: format!("{label} ({})", date.format("%b %-d, %-I:%M %p")),
-            enabled: !task.pending,
+            enabled,
             destructive: false,
             starts_group: false,
-            intent: ChromeIntent::Command(invocation),
+            intent: intent(invocations),
         })
     })
     .collect::<Vec<_>>();
-    if let Some(invocation) = saved_state_invocation(task, "session.snooze", Vec::new()) {
+    if let Some(invocations) = snoozable
+        .iter()
+        .map(|task| saved_state_invocation(task, "session.snooze", Vec::new()))
+        .collect::<Option<Vec<_>>>()
+    {
         rows.push(MenuRow {
             confirm: None,
             label: "Custom…".into(),
-            enabled: !task.pending,
+            enabled,
             destructive: false,
             starts_group: true,
-            intent: ChromeIntent::CustomSnooze(invocation),
+            intent: ChromeIntent::CustomSnooze(invocations),
         });
     }
     rows

@@ -120,6 +120,10 @@ pub struct NativeTranscriptItem {
     pub applications: Vec<crate::NativeApplication>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub questions: Vec<NativeAsyncQuestion>,
+    /// A message sent into a turn that was already running: it steers that turn rather than
+    /// starting the next one.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steered: bool,
 }
 
 /// One step of the plan the agent is following.
@@ -444,6 +448,10 @@ pub struct NativeSessionSnapshot {
     /// How many turns this conversation has completed while Bootty watched.
     #[serde(default)]
     pub completed_turns: u64,
+    /// How many items the bounded live view has let go; the provider's history still holds
+    /// them.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub evicted: u64,
     pub transcript: Vec<NativeTranscriptItem>,
     /// The plan the current turn reported, step by step. A new turn starts without one.
     #[serde(default)]
@@ -705,6 +713,7 @@ impl NativeSessionSnapshot {
             stop_requested_at: None,
             completed_turn: false,
             completed_turns: 0,
+            evicted: 0,
             transcript: Vec::new(),
             todos: Vec::new(),
             requests: Vec::new(),
@@ -852,6 +861,7 @@ impl NativeSessionSnapshot {
                 citations: Vec::new(),
                 applications: Vec::new(),
                 questions,
+                steered: false,
             });
         }
         self.trim_transcript();
@@ -912,6 +922,7 @@ impl NativeSessionSnapshot {
             .position(|item| item.role != "user")
             .unwrap_or_default();
         self.transcript.remove(index);
+        self.evicted = self.evicted.saturating_add(1);
     }
 
     pub(crate) fn tool_message(
@@ -1005,6 +1016,19 @@ impl NativeSessionSnapshot {
             }
         }
         Ok(())
+    }
+
+    /// Marks the user messages `ids` as steering the turn they arrived in.
+    pub(crate) fn mark_steered<'a>(&mut self, ids: impl IntoIterator<Item = &'a str>) {
+        for id in ids {
+            if let Some(item) = self
+                .transcript
+                .iter_mut()
+                .find(|item| item.id == id && item.role == "user")
+            {
+                item.steered = true;
+            }
+        }
     }
 
     pub(crate) fn delta(&mut self, id: String, role: &str, delta: &str) {
@@ -1290,8 +1314,16 @@ impl NativeSessionSnapshot {
         self.with_message_times(
             (milliseconds("startedAt"), milliseconds("completedAt")),
             |snapshot| {
+                // A turn starts with one message; any after it steered the turn.
+                let mut started = false;
                 for item in field(turn, "items").as_array().into_iter().flatten() {
                     snapshot.history_item(item);
+                    if field(item, "type") == "userMessage" {
+                        if started && let Some(id) = field(item, "id").as_str() {
+                            snapshot.mark_steered([id]);
+                        }
+                        started = true;
+                    }
                 }
                 if field(turn, "status") == "interrupted"
                     && let Some(id) = field(turn, "id").as_str()
@@ -1722,4 +1754,12 @@ impl anstyle_parse::Perform for TranscriptText {
             self.0.push(char::from(byte));
         }
     }
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes fields by reference"
+)]
+const fn is_zero(value: &u64) -> bool {
+    *value == 0
 }

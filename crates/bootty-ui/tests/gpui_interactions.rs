@@ -425,6 +425,136 @@ fn dropping_on_task_title_reorders_the_whole_session(cx: &mut TestAppContext) {
     });
 }
 
+/// Sorted by recent activity, a drop keeps the order shown, moves the session, and switches
+/// the sidebar to manual order.
+#[gpui_kit::test]
+fn dragging_in_recent_order_makes_the_shown_order_manual(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState::default());
+    let sidebar = snapshot.sidebar.as_mut().unwrap();
+    sidebar.sort_order = bootty_config::config::SidebarSortOrder::RecentActivity;
+    let template = sidebar.rows[0].clone();
+    // Manual order a, b, c; the most recent first shows c, b, a.
+    sidebar.rows = [("a", 10), ("b", 20), ("c", 30)]
+        .into_iter()
+        .map(|(key, active)| {
+            let mut row = template.clone();
+            row.key = key.to_owned();
+            row.kind = SidebarRowKind::Session;
+            row.current = false;
+            row.reorder_anchor = Some(key.to_owned());
+            row.target = Some(SessionTarget {
+                scope: SpaceKey(1),
+                session_id: key.to_owned(),
+            });
+            let task = row.task.as_mut().unwrap();
+            task.identity = key.to_owned();
+            task.state.last_activity_at = Some(active);
+            row
+        })
+        .collect();
+    let (probe, cx) =
+        cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let start = center(cx.debug_bounds("sidebar-row-hitbox-a").expect("a"));
+    let end = center(cx.debug_bounds("sidebar-row-hitbox-c").expect("c"));
+    assert!(end.y < start.y, "the most recent shows first");
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(start.x.add(px(15.0)), start.y.sub(px(15.0))),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_event(MouseUpEvent {
+        position: end,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+    });
+    let reorder = |source: &str, before: Option<&str>| ChromeIntent::ReorderSession {
+        source: source.to_owned(),
+        before: before.map(str::to_owned),
+    };
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().as_slice(),
+            [
+                reorder("c", None),
+                reorder("b", None),
+                reorder("a", Some("c")),
+                ChromeIntent::Command(bootty_control::CommandInvocation::from_action(
+                    "ui.sidebar.sort_manual",
+                    bootty_control::Caller::Internal,
+                )),
+            ]
+        );
+    });
+}
+
+#[gpui_kit::test]
+fn dragging_a_project_header_moves_all_its_sessions(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    sidebar.group_by_project = true;
+    let template = sidebar.rows[0].clone();
+    let session = |key: &str, project: &str| {
+        let mut row = template.clone();
+        row.key = key.to_owned();
+        row.text = key.to_owned();
+        row.current = false;
+        row.project_path = Some(project.to_owned());
+        row.reorder_anchor = Some(key.to_owned());
+        row.target = Some(SessionTarget {
+            scope: SpaceKey(1),
+            session_id: key.to_owned(),
+        });
+        row
+    };
+    let header = |first: &SidebarRow| {
+        let mut row = first.clone();
+        row.key = format!("project{}", first.project_path.as_deref().unwrap());
+        row.kind = SidebarRowKind::Group;
+        row.target = None;
+        row.task = None;
+        row.selectable = false;
+        row
+    };
+    let (a0, a1, b0) = (
+        session("a0", "/a"),
+        session("a1", "/a"),
+        session("b0", "/b"),
+    );
+    sidebar.rows = vec![header(&a0), a0, a1, header(&b0), b0];
+    let (probe, cx) =
+        cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let start = center(cx.debug_bounds("sidebar-row-project/a").expect("project a"));
+    let end = center(cx.debug_bounds("sidebar-row-project/b").expect("project b"));
+    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
+    cx.simulate_mouse_move(
+        point(start.x.add(px(15.0)), start.y.add(px(15.0))),
+        Some(MouseButton::Left),
+        Modifiers::none(),
+    );
+    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+    cx.simulate_event(MouseUpEvent {
+        position: end,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 1,
+    });
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().as_slice(),
+            ["a0", "a1"].map(|source| ChromeIntent::ReorderSession {
+                source: source.to_owned(),
+                before: Some("b0".to_owned()),
+            })
+        );
+    });
+}
+
 #[gpui_kit::test]
 fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
@@ -834,9 +964,14 @@ fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping
     assert!(cx.debug_bounds("sidebar-row-task-0").is_none());
     probe.update(cx, |probe, _| {
         assert!(
-            probe.intents.borrow().is_empty(),
+            probe
+                .intents
+                .borrow()
+                .iter()
+                .all(|intent| matches!(intent, ChromeIntent::SearchConversations(_))),
             "search never activates a session"
         );
+        probe.intents.borrow_mut().clear();
     });
     cx.simulate_keystrokes(if cfg!(target_os = "macos") {
         "cmd-a backspace"
@@ -845,6 +980,14 @@ fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping
     });
     cx.run_until_parked();
     assert!(cx.debug_bounds("sidebar-row-task-0").is_some());
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().as_slice(),
+            [ChromeIntent::SearchConversations(String::new())],
+            "a cleared search clears what conversations matched"
+        );
+        probe.intents.borrow_mut().clear();
+    });
     cx.simulate_click(center(create), Modifiers::none());
     probe.update(cx, |probe, _| assert!(matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)] if invocation.command == "new_mux_session")));
 }
@@ -1240,6 +1383,61 @@ fn context_menu_escape_and_action_restore_focus_and_emit(cx: &mut TestAppContext
             }]
         );
     });
+}
+
+/// A session's menu offers where it works: a new session in its project, its directory in the
+/// file manager, and its path and branch to copy.
+#[gpui_kit::test]
+fn session_menus_offer_the_sessions_place(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    let row = &mut snapshot.sidebar.as_mut().expect("sidebar").rows[0];
+    row.project_path = Some("/tmp/project".to_owned());
+    row.branch = Some("feature/rail".to_owned());
+    row.host = None;
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let row = center(cx.debug_bounds("sidebar-row-session").expect("session row"));
+    // Rename and Move to Space come first, then the session's place.
+    for (keys, expected) in [
+        (
+            "down down down enter",
+            ChromeIntent::NewSessionInProject {
+                scope: target().scope,
+                path: "/tmp/project".to_owned(),
+            },
+        ),
+        (
+            "down down down down enter",
+            ChromeIntent::RevealPath {
+                scope: target().scope,
+                path: "/tmp/project".to_owned(),
+            },
+        ),
+        (
+            "down down down down down enter",
+            ChromeIntent::CopyText("/tmp/project".to_owned()),
+        ),
+        (
+            "down down down down down down enter",
+            ChromeIntent::CopyText("feature/rail".to_owned()),
+        ),
+    ] {
+        probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
+        cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            _ = window.draw(cx);
+        });
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        probe.update(cx, |probe, _| {
+            assert_eq!(
+                probe.intents.borrow().as_slice(),
+                std::slice::from_ref(&expected)
+            );
+        });
+    }
 }
 
 #[gpui_kit::test]
@@ -2573,6 +2771,214 @@ fn detached_session_row_reopens_and_edits_metadata_with_stable_height(cx: &mut T
 }
 
 #[gpui_kit::test]
+fn sidebar_search_finds_sessions_by_their_conversations(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState::default());
+    let sidebar = snapshot.sidebar.as_mut().unwrap();
+    sidebar.rows[0].kind = SidebarRowKind::Session;
+    let mut other = sidebar.rows[0].clone();
+    other.key = "other".to_owned();
+    other.text = "Other work".to_owned();
+    other.target = Some(SessionTarget {
+        scope: SpaceKey(1),
+        session_id: "session-2".to_owned(),
+    });
+    other.task.as_mut().unwrap().identity = "other-identity".to_owned();
+    sidebar.rows.push(other);
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let input = cx.debug_bounds("sidebar-search").expect("session search");
+    cx.simulate_click(center(input), Modifiers::none());
+    cx.simulate_input("flaky test");
+    draw_chrome(cx);
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().last(),
+            Some(&ChromeIntent::SearchConversations("flaky test".to_owned()))
+        );
+    });
+    assert_eq!(cx.debug_bounds("sidebar-row-other"), None);
+    // The host answers with the conversations that mention it.
+    cx.update(|_, cx| {
+        probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
+            chrome.set_conversation_matches(
+                vec![bootty_agents::NativeSearchMatch {
+                    target: bootty_control::CommandTarget {
+                        kind: bootty_control::ResourceKind::Session,
+                        handle: "native:codex:other".to_owned(),
+                        generation: 1,
+                    },
+                    task_identity: Some("other-identity".to_owned()),
+                    snippet: "the flaky test fails on CI".to_owned(),
+                }],
+                cx,
+            );
+        });
+    });
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("sidebar-match-other").is_some());
+    assert_eq!(cx.debug_bounds("sidebar-row-session"), None);
+}
+
+#[gpui_kit::test]
+fn sessions_chosen_together_take_one_action(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState::default());
+    let sidebar = snapshot.sidebar.as_mut().unwrap();
+    sidebar.rows[0].kind = SidebarRowKind::Session;
+    sidebar.rows[0].current = false;
+    let mut other = sidebar.rows[0].clone();
+    other.key = "other".to_owned();
+    other.target = Some(SessionTarget {
+        scope: SpaceKey(1),
+        session_id: "session-2".to_owned(),
+    });
+    other.task.as_mut().unwrap().identity = "other-identity".to_owned();
+    sidebar.rows.push(other);
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let first = center(cx.debug_bounds("sidebar-row-session").unwrap());
+    let second = center(cx.debug_bounds("sidebar-row-other").unwrap());
+    // Command-clicking chooses without opening; Escape lets go.
+    cx.simulate_click(first, Modifiers::secondary_key());
+    draw_chrome(cx);
+    cx.simulate_keystrokes("escape");
+    cx.simulate_click(first, Modifiers::secondary_key());
+    cx.simulate_click(second, Modifiers::secondary_key());
+    draw_chrome(cx);
+    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
+    let saved = |command: &str, identity: &str, extra: &[&str]| {
+        let mut invocation = bootty_control::CommandInvocation::new(
+            command,
+            std::iter::once(identity)
+                .chain(extra.iter().copied())
+                .map(str::to_owned)
+                .collect(),
+            bootty_control::Caller::Internal,
+        );
+        invocation.target = saved_task(SessionState::default()).binding;
+        invocation
+    };
+    // Pin, Settle, Snooze, then Archive both; Snooze's first choice is an hour away.
+    for (keys, command, extra) in [
+        ("down down down right enter", "session.snooze", vec!["4600"]),
+        ("down down down down enter", "session.archive", Vec::new()),
+    ] {
+        probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
+        cx.simulate_mouse_down(second, MouseButton::Right, Modifiers::none());
+        draw_chrome(cx);
+        cx.simulate_keystrokes(keys);
+        draw_chrome(cx);
+        probe.update(cx, |probe, _| {
+            assert_eq!(
+                probe.intents.borrow().as_slice(),
+                [ChromeIntent::Commands(vec![
+                    saved(command, "saved-identity", &extra),
+                    saved(command, "other-identity", &extra),
+                ])]
+            );
+        });
+        // An action ends the choice; choose both again for the next one.
+        if command == "session.snooze" {
+            cx.simulate_click(first, Modifiers::secondary_key());
+            cx.simulate_click(second, Modifiers::secondary_key());
+            draw_chrome(cx);
+        }
+    }
+    // The choice ends with its action, so a plain click opens a session again.
+    cx.simulate_click(first, Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert!(matches!(
+            probe.intents.borrow().last(),
+            Some(ChromeIntent::ActivateSession(_))
+        ));
+    });
+}
+
+#[gpui_kit::test]
+fn closed_sessions_say_so_in_their_sidebar_row(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    for (kind, closed) in [
+        (SidebarRowKind::DetachedSession, true),
+        (SidebarRowKind::Session, false),
+    ] {
+        let mut snapshot = saved_task_snapshot(SessionState::default());
+        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+        row.kind = kind;
+        row.trailing = None;
+        row.trailing_icon = None;
+        let (_, cx) =
+            cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+        assert_eq!(
+            cx.debug_bounds("sidebar-status-icon-session").is_some(),
+            closed
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn saved_sessions_rename_in_their_sidebar_row(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState::default());
+    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+    row.kind = SidebarRowKind::Session;
+    row.text = "Review keyboard input".to_owned();
+    let (probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let bounds = cx.debug_bounds("sidebar-row-session").unwrap();
+    let row = center(bounds);
+    // A double click edits the title with all of it selected; Enter saves the new one.
+    cx.simulate_click(row, Modifiers::none());
+    cx.simulate_mouse_down(row, MouseButton::Left, Modifiers::none());
+    cx.simulate_event(MouseUpEvent {
+        position: row,
+        modifiers: Modifiers::none(),
+        button: MouseButton::Left,
+        click_count: 2,
+    });
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("sidebar-rename-session").is_some());
+    assert_eq!(cx.debug_bounds("sidebar-row-session"), Some(bounds));
+    cx.simulate_input("Fix scrolling");
+    cx.simulate_keystrokes("enter");
+    draw_chrome(cx);
+    assert_eq!(cx.debug_bounds("sidebar-rename-session"), None);
+    probe.update(cx, |probe, _| {
+        let intents = probe.intents.borrow();
+        let [
+            ChromeIntent::ActivateSession(_),
+            ChromeIntent::Command(rename),
+        ] = intents.as_slice()
+        else {
+            panic!("{intents:?}");
+        };
+        assert_eq!(
+            (rename.command.as_str(), rename.arguments.as_slice()),
+            (
+                "session.set_title",
+                ["saved-identity".to_owned(), "Fix scrolling".to_owned()].as_slice()
+            )
+        );
+        assert_eq!(rename.target, saved_task(SessionState::default()).binding);
+    });
+    // The menu's Rename edits in place too, and Escape keeps the old title.
+    cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
+    draw_chrome(cx);
+    cx.simulate_keystrokes("down enter");
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("sidebar-rename-session").is_some());
+    cx.simulate_input("Discarded");
+    cx.simulate_keystrokes("escape");
+    draw_chrome(cx);
+    assert_eq!(cx.debug_bounds("sidebar-rename-session"), None);
+    probe.update(cx, |probe, _| assert_eq!(probe.intents.borrow().len(), 2));
+}
+
+#[gpui_kit::test]
 fn project_filter_retains_search_and_does_not_activate_a_hidden_session(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = task_row_snapshot(false);
@@ -2611,6 +3017,7 @@ fn project_filter_retains_search_and_does_not_activate_a_hidden_session(cx: &mut
 
 fn saved_task(state: bootty_mux::session_membership::SessionState) -> SidebarTask {
     SidebarTask {
+        name: "bootty-7c".to_owned(),
         title: String::new(),
         native_conversation: None,
         identity: "saved-identity".to_owned(),
@@ -2880,8 +3287,8 @@ fn saved_task_without_a_terminal_has_no_connection_status(cx: &mut TestAppContex
     row.trailing_icon = None;
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
+    // Its row says Closed (see `closed_sessions_say_so_in_their_sidebar_row`), not a connection.
     let active = cx.debug_bounds("sidebar-row-session").unwrap();
-    assert_eq!(cx.debug_bounds("sidebar-status-session"), None);
     assert_eq!(cx.debug_bounds("sidebar-lifecycle-session"), None);
 
     snapshot.sidebar.as_mut().unwrap().rows[0].task = Some(saved_task(SessionState {
@@ -3081,38 +3488,46 @@ fn saved_task_keyboard_menu_captures_binding_identity_and_absolute_snooze(cx: &m
 }
 
 #[gpui_kit::test]
-fn native_task_title_menu_captures_the_conversation_generation(cx: &mut TestAppContext) {
+fn native_task_menu_captures_the_conversation_generation(cx: &mut TestAppContext) {
     use bootty_mux::session_membership::SessionState;
     cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let target = bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Session,
+        handle: "native:codex:captured".into(),
+        generation: 17,
+    };
+    let mut regenerate = bootty_control::CommandInvocation::new(
+        "agents.native.regenerate-title",
+        vec![target.handle.clone(), target.generation.to_string()],
+        bootty_control::Caller::Internal,
+    );
+    regenerate.target = Some(target.clone());
     for kind in [SidebarRowKind::Session, SidebarRowKind::DetachedSession] {
-        let mut snapshot = saved_task_snapshot(SessionState::default());
-        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-        row.kind = kind;
-        let target = bootty_control::CommandTarget {
-            kind: bootty_control::ResourceKind::Session,
-            handle: "native:codex:captured".into(),
-            generation: 17,
-        };
-        row.task.as_mut().unwrap().native_conversation = Some(target.clone());
-        let (probe, cx) =
-            cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-        let bounds = cx.debug_bounds("sidebar-row-session").unwrap();
-        cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
-        draw_chrome(cx);
-        cx.simulate_keystrokes("down down down enter");
-        draw_chrome(cx);
-        let mut expected = bootty_control::CommandInvocation::new(
-            "agents.native.regenerate-title",
-            vec![target.handle.clone(), target.generation.to_string()],
-            bootty_control::Caller::Internal,
-        );
-        expected.target = Some(target);
-        probe.update(cx, |probe, _| {
-            assert_eq!(
-                probe.intents.borrow().as_slice(),
-                [ChromeIntent::Command(expected)]
-            );
-        });
+        for (keys, expected) in [
+            (
+                "down down down enter",
+                ChromeIntent::Command(regenerate.clone()),
+            ),
+            (
+                "down down down down down enter",
+                ChromeIntent::ForkConversation(target.clone()),
+            ),
+        ] {
+            let mut snapshot = saved_task_snapshot(SessionState::default());
+            let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+            row.kind = kind.clone();
+            row.task.as_mut().unwrap().native_conversation = Some(target.clone());
+            let (probe, cx) =
+                cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+            let bounds = cx.debug_bounds("sidebar-row-session").unwrap();
+            cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+            draw_chrome(cx);
+            cx.simulate_keystrokes(keys);
+            draw_chrome(cx);
+            probe.update(cx, |probe, _| {
+                assert_eq!(probe.intents.borrow().as_slice(), [expected]);
+            });
+        }
     }
 }
 
@@ -3973,6 +4388,23 @@ fn project_disclosure_hides_sessions_and_empty_projects_remain_operable(cx: &mut
     snapshot.sidebar.as_mut().unwrap().projects[0].collapsed = false;
     update_chrome(&probe, &snapshot, cx);
     assert!(cx.debug_bounds("sidebar-row-session").is_some());
+    // A project's actions start a session there, as a session's own menu does.
+    let actions = cx
+        .debug_bounds("project-actions-registered-project")
+        .expect("project actions");
+    cx.simulate_click(actions.center(), Modifiers::none());
+    draw_chrome(cx);
+    cx.simulate_keystrokes("down enter");
+    draw_chrome(cx);
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().last(),
+            Some(&ChromeIntent::NewSessionInProject {
+                scope: SpaceKey(1),
+                path: "/work/project".to_owned(),
+            })
+        );
+    });
 }
 
 #[gpui_kit::test]
@@ -4011,6 +4443,55 @@ fn permanent_session_deletion_requires_the_visible_confirmation(cx: &mut TestApp
     probe.update(visual, |probe, _| {
         assert!(probe.intents.borrow().is_empty());
     });
+}
+
+#[gpui_kit::test]
+fn archiving_a_working_session_asks_first(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    for working in [false, true] {
+        let mut snapshot = saved_task_snapshot(SessionState::default());
+        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+        row.kind = SidebarRowKind::Session;
+        row.working = working;
+        let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let capture = holder.clone();
+        let (_, visual) = cx.add_window_view(move |window, cx| {
+            let probe = cx.new(|cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+            *capture.borrow_mut() = Some(probe.clone());
+            gpui_kit::component::Root::new(probe, window, cx)
+        });
+        let probe = holder.borrow().clone().unwrap();
+        let row = visual.debug_bounds("sidebar-row-session").unwrap();
+        visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
+        draw_chrome(visual);
+        for _ in 0..8 {
+            visual.simulate_keystrokes("down");
+        }
+        visual.simulate_keystrokes("enter");
+        draw_chrome(visual);
+        if working {
+            probe.update(visual, |probe, _| {
+                assert!(probe.intents.borrow().is_empty());
+            });
+            let archive = visual
+                .debug_bounds("prompt-answer-Archive")
+                .expect("Archive confirmation");
+            visual.simulate_click(archive.center(), Modifiers::none());
+            draw_chrome(visual);
+        }
+        probe.update(visual, |probe, _| {
+            assert!(
+                matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)]
+                    if invocation.command == "session.archive"),
+                "{:?}",
+                probe.intents.borrow()
+            );
+        });
+    }
 }
 
 #[gpui_kit::test]

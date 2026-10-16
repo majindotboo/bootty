@@ -15,7 +15,7 @@ use gpui_kit::{
 
 impl GpuiWorkspace {
     pub(super) fn open_custom_snooze(
-        invocation: CommandInvocation,
+        invocations: Vec<CommandInvocation>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -34,15 +34,19 @@ impl GpuiWorkspace {
                 );
                 picker
             }),
-            invocation,
+            invocations,
             workspace,
             error: None,
         });
+        let title = match view.read(cx).invocations.len() {
+            1 => "Snooze session".to_owned(),
+            count => format!("Snooze {count} sessions"),
+        };
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let submit = view.clone();
             dialog
                 .confirm()
-                .title("Snooze session")
+                .title(title.clone())
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Snooze")
@@ -56,7 +60,8 @@ impl GpuiWorkspace {
 
 struct SnoozeView {
     picker: Entity<DatePickerState>,
-    invocation: CommandInvocation,
+    /// One command per session, each missing only its time.
+    invocations: Vec<CommandInvocation>,
     workspace: WeakEntity<GpuiWorkspace>,
     error: Option<String>,
 }
@@ -78,15 +83,25 @@ impl SnoozeView {
             cx.notify();
             return false;
         };
-        let mut invocation = self.invocation.clone();
-        invocation.arguments.push(until.timestamp().to_string());
+        let invocations = self.invocations.iter().cloned().map(|mut invocation| {
+            invocation.arguments.push(until.timestamp().to_string());
+            invocation
+        });
         let outcome = self.workspace.update(cx, |workspace, cx| {
             let mut effects = Vec::new();
-            let outcome = workspace.state.dispatch_command(
-                invocation,
-                crate::ViewportSnapshot::default(),
-                &mut effects,
-            );
+            // The first refusal is the one to show; the rest are already snoozed.
+            let outcome = invocations
+                .map(|invocation| {
+                    workspace.state.dispatch_command(
+                        invocation,
+                        crate::ViewportSnapshot::default(),
+                        &mut effects,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .find(|outcome| !matches!(outcome, CommandOutcome::Success { .. }))
+                .unwrap_or_else(CommandOutcome::success);
             workspace.pending_effects.extend(effects);
             cx.notify();
             outcome

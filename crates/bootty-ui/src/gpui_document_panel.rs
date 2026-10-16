@@ -173,6 +173,101 @@ pub struct DocumentPanel {
 }
 
 impl DocumentPanel {
+    /// The document's file actions, for its tab and its menu: show a local file in the file
+    /// manager or open it in an installed editor, and copy its path. A remote host's file has no
+    /// place in this computer's.
+    pub(crate) fn file_items(this: &Entity<Self>, menu: PopupMenu, cx: &App) -> PopupMenu {
+        let document = this.read(cx);
+        let path = document.path.clone();
+        let local = document.context.remote.is_none();
+        let menu = if local {
+            let reveal = this.downgrade();
+            menu.item(
+                PopupMenuItem::new(crate::commands::reveal_label()).on_click(
+                    move |_, window, cx| {
+                        _ = reveal.update(cx, |this, cx| {
+                            this.hand_to_desktop("files.reveal", None, window, cx);
+                        });
+                    },
+                ),
+            )
+        } else {
+            menu
+        };
+        let menu = menu.item(PopupMenuItem::new("Copy Path").on_click(move |_, _, cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
+        }));
+        // Editors differ by computer, so they follow the rows every document has.
+        let editors = if local {
+            crate::editors::installed()
+        } else {
+            &[]
+        };
+        editors
+            .iter()
+            .enumerate()
+            .fold(menu, |menu, (index, editor)| {
+                let edit = this.downgrade();
+                let menu = if index == 0 { menu.separator() } else { menu };
+                menu.item(
+                    PopupMenuItem::new(format!("Open in {}", editor.name)).on_click(
+                        move |_, window, cx| {
+                            _ = edit.update(cx, |this, cx| {
+                                this.hand_to_desktop("files.open_in", Some(editor.id), window, cx);
+                            });
+                        },
+                    ),
+                )
+            })
+    }
+
+    /// Shows this file in the file manager with `files.reveal`, or opens it in `editor` with
+    /// `files.open_in`.
+    fn hand_to_desktop(
+        &self,
+        command: &str,
+        editor: Option<&str>,
+        window: &Window,
+        cx: &Context<Self>,
+    ) {
+        let failure = if editor.is_some() {
+            "Could not open the file"
+        } else {
+            "Could not show the file"
+        };
+        let arguments = std::iter::once(self.path.clone())
+            .chain(editor.map(str::to_owned))
+            .collect();
+        let mut invocation = CommandInvocation::new(command, arguments, Caller::Internal);
+        invocation.target = Some(self.context.target.clone());
+        let Ok(receiver) = self.sender.submit(
+            invocation,
+            Instant::now()
+                .checked_add(Duration::from_secs(30))
+                .unwrap_or_else(Instant::now),
+            CommandCancellation::new(),
+        ) else {
+            return;
+        };
+        cx.spawn_in(window, async move |weak, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { receiver.recv() })
+                .await;
+            _ = weak.update(cx, |this, cx| {
+                if let Ok(outcome) = outcome
+                    && let Some(message) = crate::commands::command_outcome_message(&outcome)
+                {
+                    this.error = Some(
+                        crate::error_catalog::ErrorNotice::failed(failure, message).to_string(),
+                    );
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     pub(crate) fn new(
         context: GitPanelContext,
         host_identity: String,
@@ -282,6 +377,11 @@ impl DocumentPanel {
 
     pub(crate) fn path(&self) -> &str {
         &self.path
+    }
+
+    /// The selected lines of an editable document, one-based.
+    pub(crate) fn selected_lines(&self, cx: &App) -> Option<(usize, usize)> {
+        Some(self.editor.as_ref()?.read(cx).selected_lines(cx))
     }
     pub(crate) fn host_identity(&self) -> &str {
         &self.host_identity
@@ -1031,6 +1131,7 @@ impl Panel for DocumentPanel {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) -> PopupMenu {
+        let menu = Self::file_items(&cx.entity(), menu, cx).separator();
         let save = cx.weak_entity();
         let revert = save.clone();
         let format = save.clone();

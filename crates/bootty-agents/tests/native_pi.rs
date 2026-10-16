@@ -1327,6 +1327,7 @@ fn saved_native_transcript_presents_plain_text_without_rewriting_its_source(
         citations: Vec::new(),
         applications: Vec::new(),
         questions: Vec::new(),
+        steered: false,
     };
     assert_eq!(item.display_text(), plain);
     assert_eq!(item.text, saved);

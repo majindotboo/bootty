@@ -776,6 +776,7 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
         is_legacy: false,
         is_favorite: false,
         supports_fast_mode: fast_supported,
+        fast_mode_detail: None,
     };
     let mut catalog = vec![model.clone()];
     if duplicate_name {
@@ -785,6 +786,7 @@ fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_cha
             is_legacy: false,
             is_favorite: false,
             supports_fast_mode: fast_supported,
+            fast_mode_detail: None,
             ..model
         });
     }
@@ -1059,6 +1061,7 @@ fn composer_defaults_resolve_advertised_values_and_preserve_explicit_choices(
         is_legacy: false,
         is_favorite: false,
         supports_fast_mode: false,
+        fast_mode_detail: None,
     };
     let catalog = vec![
         recommended.clone(),
@@ -1248,6 +1251,7 @@ fn provider_catalogs_restore_only_for_the_exact_provider_profile_and_target(
         is_legacy: false,
         is_favorite: false,
         supports_fast_mode: false,
+        fast_mode_detail: None,
     };
     let catalog = |id: &str, permissions| NativeProviderCatalog {
         models: vec![model(id)],
@@ -1356,6 +1360,7 @@ fn refreshing_a_warm_catalog_preserves_choices_on_failure(mut form: NewSessionFo
                 is_legacy: false,
                 is_favorite: false,
                 supports_fast_mode: false,
+                fast_mode_detail: None,
             }],
             permissions: Some(bootty_agents::NativePermissionMode::FullAccess),
         }),
@@ -1460,6 +1465,7 @@ fn changing_model_effort_and_catalog_preserves_plan_mode(mut form: NewSessionFor
         is_legacy: false,
         is_favorite: false,
         supports_fast_mode: false,
+        fast_mode_detail: None,
     }];
     form.set_model_catalog(Ok(models.clone()));
     form.change_field("plan-mode", "true");

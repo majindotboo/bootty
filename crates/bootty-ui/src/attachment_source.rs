@@ -49,21 +49,24 @@ impl ClipboardAttachment {
     pub(crate) fn write(self) -> Result<tempfile::NamedTempFile, String> {
         match self {
             Self::Image(bytes) => clipboard_png(&bytes),
-            Self::Text(text) => {
-                if text.len() > 50 * 1024 * 1024 {
-                    return Err("File exceeds 50 MB".into());
-                }
-                let mut file = tempfile::Builder::new()
-                    .prefix("pasted-text-")
-                    .suffix(".txt")
-                    .tempfile()
-                    .map_err(|_| "Could not attach the text")?;
-                file.write_all(text.as_bytes())
-                    .map_err(|_| "Could not attach the text")?;
-                Ok(file)
-            }
+            Self::Text(text) => text_file("pasted-text-", &text),
         }
     }
+}
+
+/// A temporary `.txt` file named from `prefix`, holding `text`.
+pub(crate) fn text_file(prefix: &str, text: &str) -> Result<tempfile::NamedTempFile, String> {
+    if text.len() > 50 * 1024 * 1024 {
+        return Err("File exceeds 50 MB".into());
+    }
+    let mut file = tempfile::Builder::new()
+        .prefix(prefix)
+        .suffix(".txt")
+        .tempfile()
+        .map_err(|_| "Could not attach the text")?;
+    file.write_all(text.as_bytes())
+        .map_err(|_| "Could not attach the text")?;
+    Ok(file)
 }
 
 fn clipboard_png(bytes: &[u8]) -> Result<tempfile::NamedTempFile, String> {

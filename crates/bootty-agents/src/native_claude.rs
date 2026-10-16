@@ -74,6 +74,7 @@ impl ClaudeProtocol {
             "parent_tool_use_id":null,"priority":"next",
             "message":{"role":"user","content":prompt.claude_content()?}});
         snapshot.prompt_message(id, prompt)?;
+        snapshot.mark_steered([id]);
         snapshot.pending_user_item = Some(id.to_owned());
         self.steering.push_back(Dispatch {
             id: id.to_owned(),

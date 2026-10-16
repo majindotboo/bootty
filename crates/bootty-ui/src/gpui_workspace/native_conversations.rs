@@ -418,6 +418,76 @@ impl GpuiWorkspace {
             .cloned()
     }
 
+    /// Adds the focused document's selected lines, or the focused terminal's selection, to
+    /// the conversation in the current session, and shows it.
+    pub(super) fn add_selection_to_conversation(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let document = self
+            .tools
+            .iter()
+            .flat_map(|tools| tools.read(cx).documents())
+            .find(|document| document.focus_handle(cx).contains_focused(window, cx));
+        let Some(record) = self
+            .selected_mux_native_record()
+            .or_else(|| self.session_native_record())
+        else {
+            self.state
+                .record_message("Open a conversation in this session to add a selection to it");
+            cx.notify();
+            return;
+        };
+        let lines = document.and_then(|document| {
+            let document = document.read(cx);
+            Some((document.path().to_owned(), document.selected_lines(cx)?))
+        });
+        let selection = if lines.is_none() {
+            self.state.terminal_selection()
+        } else {
+            None
+        };
+        if lines.is_none() && selection.is_none() {
+            self.state
+                .record_message("Select lines in a document or text in a terminal first");
+            cx.notify();
+            return;
+        }
+        let target = record.target();
+        let view = self.ensure_native_conversation_view(record, window, cx);
+        view.update(cx, |view, cx| {
+            if let Some((path, lines)) = lines {
+                view.mention_lines(&path, lines, window, cx);
+            } else if let Some((prefix, text)) = selection {
+                view.attach_text(prefix, text, window, cx);
+            }
+        });
+        let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
+        focus.target = Some(target);
+        self.invoke_gpui_command(focus, window, cx);
+    }
+
+    /// The conversation in the current session, when its pane isn't the one in front.
+    fn session_native_record(&self) -> Option<NativeSessionRecord> {
+        let binding = &self.state.workspace.active.binding;
+        let session_id = binding.mux().selected_session()?;
+        let in_session = |record: &&NativeSessionRecord| {
+            self.state
+                .native_panel_target(record)
+                .is_some_and(|(exact, _)| {
+                    exact.scope() == binding.scope() && exact.ids().0 == Some(session_id)
+                })
+        };
+        let requested = self.native_conversations.requested.as_ref();
+        let mut records = self.native_conversations.records.iter().filter(in_session);
+        let first = records.clone().next();
+        records
+            .find(|record| requested.is_some_and(|requested| requested.handle == record.id))
+            .or(first)
+            .cloned()
+    }
+
     pub(super) fn sync_selected_native_pane(
         &mut self,
         window: &mut Window,
@@ -1077,7 +1147,67 @@ impl GpuiWorkspace {
             } => {
                 self.detach_native_annotations(target, annotations.clone(), false, window, cx);
             }
+            OpenNativeSession::EditAndResend {
+                target,
+                text,
+                attachments,
+            } => self.edit_and_resend(target, text, attachments, window, cx),
         }
+    }
+
+    /// Brings back a sent message with browser notes: the notes go back to the conversation as
+    /// notes, and the composer gets the words written with them, or the whole text when a note
+    /// is gone.
+    fn edit_and_resend(
+        &self,
+        target: &CommandTarget,
+        text: &str,
+        attachments: &[bootty_agents::NativeAttachmentReference],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self
+            .native_conversations
+            .records
+            .iter()
+            .find(|record| record.target() == *target)
+            .and_then(|record| self.native_conversations.views.get(&record.id).cloned())
+        else {
+            return;
+        };
+        let reattached =
+            bootty_browser::split_annotation_batch(text).and_then(|(authored, ids)| {
+                let browser = self.tools.as_ref()?.read(cx).browser_session();
+                browser
+                    .update(cx, |browser, cx| {
+                        browser.reattach_annotations(target.clone(), ids, window, cx)
+                    })
+                    .then_some(authored)
+            });
+        let restored = reattached.unwrap_or(text).to_owned();
+        view.update(cx, |view, cx| {
+            view.edit_and_resend(&restored, attachments, window, cx);
+        });
+    }
+
+    /// Forks the conversation behind `target` into a side chat.
+    pub(super) fn start_side_chat(
+        &mut self,
+        target: &CommandTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(record) = self
+            .native_conversations
+            .records
+            .iter()
+            .find(|record| record.target() == *target)
+            .cloned()
+        else {
+            return;
+        };
+        let view = self.ensure_native_conversation_view(record, window, cx);
+        view.update(cx, |view, cx| view.start_side_chat(window, cx));
     }
 
     fn present_side_chat(
@@ -1133,8 +1263,37 @@ impl GpuiWorkspace {
     }
 
     fn sync_related_conversations(&self, cx: &mut Context<Self>) {
-        for record in &self.native_conversations.records {
+        let names: Vec<String> = self
+            .native_conversations
+            .records
+            .iter()
+            .map(NativeSessionRecord::full_name)
+            .collect();
+        let mentionable: Vec<crate::gpui_composer_completion::MentionableConversation> = self
+            .native_conversations
+            .records
+            .iter()
+            .zip(&names)
+            .map(
+                |(record, name)| crate::gpui_composer_completion::MentionableConversation {
+                    target: record.target(),
+                    name: bootty_control::short_name::shortest(name, &names),
+                    title: record.title.clone(),
+                },
+            )
+            .collect();
+        for (record, name) in self.native_conversations.records.iter().zip(&mentionable) {
             if let Some(view) = self.native_conversations.views.get(&record.id) {
+                // A conversation mentions the others, never itself.
+                let others = mentionable
+                    .iter()
+                    .filter(|other| other.target.handle != record.id)
+                    .cloned()
+                    .collect();
+                view.update(cx, |view, cx| {
+                    view.set_short_name(name.name.clone(), cx);
+                    view.set_mentionable_conversations(others, cx);
+                });
                 let related = self
                     .native_conversations
                     .records

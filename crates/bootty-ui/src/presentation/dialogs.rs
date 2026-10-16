@@ -945,7 +945,13 @@ impl SessionPickerDialog {
         }
     }
 
-    pub fn update_groups(&mut self, groups: &[BindingSessionGroup]) {
+    /// Lists the sessions in `groups`; `names` holds each saved session's short name, by
+    /// identity, so typing a name finds it.
+    pub fn update_groups(
+        &mut self,
+        groups: &[BindingSessionGroup],
+        names: &HashMap<String, String>,
+    ) {
         let entries = groups
             .iter()
             .flat_map(|group| {
@@ -955,6 +961,14 @@ impl SessionPickerDialog {
                     entry.secondary = Some(group.label.clone());
                     entry.trailing.clone_from(&session.anchor.process);
                     entry.keywords.push(session.name.clone());
+                    entry.keywords.extend(
+                        session
+                            .tag
+                            .identity
+                            .as_ref()
+                            .and_then(|identity| names.get(identity))
+                            .cloned(),
+                    );
                     entry
                 })
             })

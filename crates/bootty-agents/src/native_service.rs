@@ -2,6 +2,8 @@
 mod followups;
 #[path = "native_fork.rs"]
 pub mod fork;
+#[path = "native_search.rs"]
+pub mod search;
 #[path = "native_tool_activity.rs"]
 pub mod tool_activity;
 pub use followups::{NativeQueuedMessage, NativeQueuedMessageStatus};
@@ -103,6 +105,13 @@ impl std::fmt::Display for NativeCreationError {
 impl std::error::Error for NativeCreationError {}
 
 impl NativeSessionRecord {
+    /// The conversation's full short name, from its project and identity; any unambiguous
+    /// start of it names the conversation too.
+    #[must_use]
+    pub fn full_name(&self) -> String {
+        bootty_control::short_name::full_name(&self.config.cwd, &self.id)
+    }
+
     fn restore_stopped(&mut self) {
         if let Some(error) = &self.snapshot.error {
             if self.config.provider == crate::AgentKind::Codex
@@ -154,6 +163,10 @@ impl NativeSessionRecord {
 )]
 pub struct NativeSessionActivity {
     pub id: String,
+    /// What to call the conversation in writing, like `bootty-7c`; see
+    /// [`bootty_control::short_name`].
+    #[serde(default)]
+    pub name: String,
     pub title: String,
     pub generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1833,11 +1846,19 @@ impl NativeAgentService {
     #[must_use]
     pub fn activities(&self) -> Vec<NativeSessionActivity> {
         let now = (self.clock)();
-        lock(&self.store)
+        let store = lock(&self.store);
+        let names: Vec<String> = store
             .records
             .iter()
-            .map(|record| NativeSessionActivity {
+            .map(NativeSessionRecord::full_name)
+            .collect();
+        store
+            .records
+            .iter()
+            .zip(&names)
+            .map(|(record, name)| NativeSessionActivity {
                 id: record.id.clone(),
+                name: bootty_control::short_name::shortest(name, &names),
                 title: record.title.clone(),
                 generation: record.generation,
                 spawn_parent: record.spawn_parent.clone(),
@@ -1876,6 +1897,25 @@ impl NativeAgentService {
                 running_subagents: record.snapshot.running_subagents(),
             })
             .collect()
+    }
+
+    /// The conversation a short name like `bootty-7c` names, at its current generation.
+    /// # Errors
+    /// Says when no conversation, or more than one, has that name.
+    pub fn named(&self, written: &str) -> Result<CommandTarget, String> {
+        let named: Vec<CommandTarget> = lock(&self.store)
+            .records
+            .iter()
+            .filter(|record| bootty_control::short_name::names(written, &record.full_name()))
+            .map(NativeSessionRecord::target)
+            .collect();
+        match <[_; 1]>::try_from(named) {
+            Ok([target]) => Ok(target),
+            Err(named) if named.is_empty() => Err(format!("No conversation is called “{written}”")),
+            Err(_) => Err(format!(
+                "“{written}” names more than one conversation; write more of its name"
+            )),
+        }
     }
 
     /// Read compact accepted status for the exact captured conversation, without its transcript.
@@ -1984,18 +2024,37 @@ impl NativeAgentService {
         cancellation: &bootty_control::CommandCancellation,
     ) -> Result<NativeSessionActivity, String> {
         request.validate()?;
-        let child = request.target();
         let store = lock(&self.store);
         let parent = store
             .records
             .iter()
             .find(|record| record.target() == *parent)
             .ok_or("Parent conversation changed")?;
-        let record = store
-            .records
-            .iter()
-            .find(|record| record.target() == child)
-            .ok_or("Child conversation changed")?;
+        // A name stands for the parent's child it names, at its current generation.
+        let record = if bootty_control::short_name::is_short_name(&request.id) {
+            let mut named = store.records.iter().filter(|record| {
+                record.spawn_parent.as_ref() == Some(&parent.target())
+                    && bootty_control::short_name::names(&request.id, &record.full_name())
+            });
+            match (named.next(), named.next()) {
+                (Some(record), None) => record,
+                (None, _) => return Err(format!("No child is called “{}”", request.id)),
+                (Some(_), Some(_)) => {
+                    return Err(format!(
+                        "“{}” names more than one child; write more of its name",
+                        request.id
+                    ));
+                }
+            }
+        } else {
+            let child = request.target();
+            store
+                .records
+                .iter()
+                .find(|record| record.target() == child)
+                .ok_or("Child conversation changed")?
+        };
+        let child = record.target();
         if record.spawn_parent.as_ref() != Some(&parent.target())
             || record.binding_id != parent.binding_id
         {

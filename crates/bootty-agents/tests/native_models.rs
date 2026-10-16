@@ -980,16 +980,20 @@ fn user_goal_controls_update_and_clear_the_provider_goal_without_sending_a_turn(
 }
 
 #[rstest]
-#[case::codex_fast(AgentKind::Codex, json!({"serviceTiers":[{"id":"fast"}]}), true)]
-#[case::codex_legacy(AgentKind::Codex, json!({"additionalSpeedTiers":["fast"]}), true)]
-#[case::codex_standard(AgentKind::Codex, json!({"serviceTiers":[{"id":"default"}]}), false)]
-#[case::codex_unknown(AgentKind::Codex, json!({}), false)]
-#[case::claude_fast(AgentKind::Claude, json!({"supportsFastMode":true}), true)]
-#[case::claude_standard(AgentKind::Claude, json!({}), false)]
+#[case::codex_fast(AgentKind::Codex, json!({"serviceTiers":[{"id":"fast"}]}), true, None)]
+#[case::codex_legacy(AgentKind::Codex, json!({"additionalSpeedTiers":["fast"]}), true, None)]
+#[case::codex_priority(AgentKind::Codex, json!({"additionalSpeedTiers":["fast"],
+    "serviceTiers":[{"id":"priority","name":"Fast","description":"2x speed, increased usage"}]}),
+    true, Some("2x speed, increased usage"))]
+#[case::codex_standard(AgentKind::Codex, json!({"serviceTiers":[{"id":"default"}]}), false, None)]
+#[case::codex_unknown(AgentKind::Codex, json!({}), false, None)]
+#[case::claude_fast(AgentKind::Claude, json!({"supportsFastMode":true}), true, None)]
+#[case::claude_standard(AgentKind::Claude, json!({}), false, None)]
 fn speed_controls_follow_the_captured_models_advertised_capabilities(
     #[case] provider: AgentKind,
     #[case] fields: Value,
     #[case] expected: bool,
+    #[case] detail: Option<&str>,
 ) {
     let root = TempDir::new().unwrap();
     if provider == AgentKind::Claude {
@@ -1021,6 +1025,8 @@ fn speed_controls_follow_the_captured_models_advertised_capabilities(
         .unwrap();
     let catalog = service.models(&record.target()).unwrap();
     assert_eq!(catalog[0].supports_fast_mode, expected);
+    // What the provider says fast mode trades comes with it.
+    assert_eq!(catalog[0].fast_mode_detail.as_deref(), detail);
     let selection = NativeModelSelection {
         plan_mode: None,
         fast_mode: Some(true),

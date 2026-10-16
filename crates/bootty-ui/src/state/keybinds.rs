@@ -60,17 +60,10 @@ impl AppState {
                     );
                 }
             }
-            KeybindAction::SettleSession => {
+            KeybindAction::Invoke(command) => {
                 self.commands
                     .queue(bootty_control::CommandInvocation::from_action(
-                        "settle_session",
-                        bootty_control::Caller::Internal,
-                    ));
-            }
-            KeybindAction::InterruptAgent => {
-                self.commands
-                    .queue(bootty_control::CommandInvocation::from_action(
-                        "interrupt_agent",
+                        command,
                         bootty_control::Caller::Internal,
                     ));
             }
@@ -148,6 +141,9 @@ impl AppState {
                 if let Some(message) = crate::commands::command_outcome_message(&outcome) {
                     self.record_error("Could not open agent history", message);
                 }
+            }
+            AppAction::AddSelectionToConversation => {
+                effects.push(AppEffect::AddSelectionToConversation);
             }
             AppAction::ResumeAgentSession(provider) => {
                 let outcome = self.open_saved_agent_session(provider);
@@ -290,6 +286,35 @@ impl AppState {
         }
         effects.extend(outcome.effects);
     }
+    /// The focused terminal's selected text, with a file name start that says which session it
+    /// came from.
+    pub(crate) fn terminal_selection(&mut self) -> Option<(String, String)> {
+        let binding = &mut self.workspace.active.binding;
+        let session = binding
+            .mux()
+            .selected_session()
+            .and_then(|id| binding.mux().session_by_id_or_name(id))
+            .map_or_else(String::new, |session| {
+                session
+                    .name
+                    .chars()
+                    .map(|character| {
+                        if character.is_alphanumeric() {
+                            character
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect()
+            });
+        let bytes = binding
+            .terminal_mut()
+            .format_selection(bootty_terminal::terminal_engine::TerminalSelectionFormat::PlainText)
+            .ok()??;
+        let text = String::from_utf8_lossy(&bytes).trim_end().to_owned();
+        (!text.is_empty()).then(|| (format!("terminal-{session}-"), text))
+    }
+
     fn copy_terminal_selection_or_request_copy(
         &mut self,
         format: CopyToClipboard,
