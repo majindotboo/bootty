@@ -54,19 +54,17 @@ for line in sys.stdin:
   control(value)
  elif value['type']=='user':
   prompt=value['message']['content']
-  urgent=value.get('priority')=='now'
-  if urgent and running:
+  steer=value.get('priority')=='next'
+  if steer and running:
    with open('prompt.json','w') as output: json.dump(value,output)
-   # Observed: the running tool finishes, its turn ends, then the steer starts a new turn.
+   # Observed from Claude 2.1.300: the running tool finishes, Claude replays the steer right
+   # after its result, and the same turn continues to one result.
    user_event([{'type':'tool_result','tool_use_id':running,'content':'one','is_error':False}])
-   result('aborted_tools')
-   emit({'type':'system','subtype':'init','session_id':session,'cwd':os.getcwd()})
    # Claude downscales large images and echoes them re-encoded as JPEG.
    echo=dict(value);echo['isReplay']=True
    if isinstance(prompt,list): echo['message']=dict(value['message'],content=[dict(block,source=dict(block['source'],media_type='image/jpeg')) if block['type']=='image' else block for block in prompt])
    emit(echo)
    running='steer-call';tool_use(running,'sleep 20');continue
-  if urgent: result('aborted_streaming')
   with open('prompt.json','w') as output: json.dump(value,output)
   if prompt=='oversize': sys.stdout.write('x'*(1024*1024+1)+'\n');sys.stdout.flush();continue
   if prompt=='partial': sys.stdout.write('{"type":"result"}');sys.stdout.flush();break
@@ -185,7 +183,8 @@ fn barrier(session: &NativeAgentSession) -> Result<(), String> {
 }
 
 /// A Claude conversation reads earlier turns from its session file, with the rows the live view
-/// would show: the main thread only, and a tool's result on its call.
+/// would show: the main thread only, and a tool's result on its call. A record Claude is still
+/// writing isn't read yet.
 #[rstest]
 fn claude_history_reads_the_session_file() {
     let root = TempDir::new().unwrap();
@@ -223,12 +222,14 @@ fn claude_history_reads_the_session_file() {
                 {"type":"text","text":"The test fails on overflow."}]}}),
         json!({"type":"last-prompt","lastPrompt":"Find the bug"}),
     ];
+    // Claude is still writing its next record, so the file ends partway through it.
     fs::write(
         directory.join(format!("{SESSION}.jsonl")),
         entries
             .iter()
             .map(|entry| entry.to_string() + "\n")
-            .collect::<String>(),
+            .collect::<String>()
+            + r#"{"type":"assistant","uuid":"a3","parentU"#,
     )
     .unwrap();
     let mut config = config(root.path()).unwrap();
@@ -251,6 +252,24 @@ fn claude_history_reads_the_session_file() {
         ]
     );
     assert_eq!((page.has_older, page.at_latest), (false, true));
+    session.stop();
+}
+
+/// A conversation Claude hasn't written to its session file yet has no history, rather than a
+/// failed read.
+#[rstest]
+fn claude_history_before_the_first_record_is_empty() {
+    let root = TempDir::new().unwrap();
+    let mut config = config(root.path()).unwrap();
+    config.fresh_session_id = None;
+    config.session_id = Some(SESSION.to_owned());
+    let session = NativeAgentSession::spawn(config).unwrap();
+    barrier(&session).unwrap();
+    let page = session.read_history("latest").unwrap();
+    assert_eq!(
+        (page.transcript.len(), page.has_older, page.at_latest),
+        (0, false, true)
+    );
     session.stop();
 }
 
@@ -1128,7 +1147,7 @@ fn active_follow_up_uses_claudes_live_stream_without_restarting() {
     barrier(&session).unwrap();
     let sent: Value =
         serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
-    assert_eq!(sent["priority"], "now");
+    assert_eq!(sent["priority"], "next");
     assert_eq!(sent["session_id"], SESSION);
     assert_eq!(fs::read(root.path().join("launch.json")).unwrap(), launch);
     let final_state = session.snapshot();
@@ -1498,11 +1517,22 @@ fn a_message_sent_before_the_previous_one_lands_follows_it_into_the_turn() {
             &NativePrompt::text("Also check the tests").unwrap(),
         )
         .unwrap();
+    let waiting = service.sessions().remove(0);
     assert_eq!(
-        service.sessions()[0].queued_messages.len(),
+        waiting.queued_messages.len(),
         1,
         "the message waits for the first to land"
     );
+    let sending = |record: &bootty_agents::NativeSessionRecord| {
+        record
+            .snapshot
+            .transcript
+            .iter()
+            .filter(|item| record.snapshot.sending(item))
+            .map(|item| item.text.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(sending(&waiting), ["slow-ack"]);
     fs::write(root.path().join("ack"), "").unwrap();
     loop {
         let current = service.sessions().remove(0);
@@ -1526,11 +1556,62 @@ fn a_message_sent_before_the_previous_one_lands_follows_it_into_the_turn() {
                 ]
             );
             assert_eq!(current.snapshot.status, NativeSessionStatus::Working);
+            assert_eq!(sending(&current), Vec::<String>::new());
             break;
         }
         changes
             .recv_timeout(Duration::from_secs(5))
             .expect("the queued message steers the turn");
+    }
+    service.shutdown().unwrap();
+}
+
+/// Interrupt and send stops the running turn and sends its message next, ahead of messages
+/// already waiting, without pausing the queue as a plain stop does.
+#[test]
+fn interrupt_and_send_goes_ahead_of_the_queue() {
+    use bootty_agents::NativePrompt;
+    use std::{
+        sync::{Arc, mpsc},
+        time::Duration,
+    };
+    let root = TempDir::new().unwrap();
+    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let (sender, changes) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = sender.send(());
+    }));
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let target = record.target();
+    service.start_followups().unwrap();
+    service.prompt(&target, "tool-hold").unwrap();
+    barrier(&service.resolve(&target).unwrap()).unwrap();
+    service
+        .queue_input(&target, &NativePrompt::text("Later").unwrap())
+        .unwrap();
+    service
+        .interrupt_and_send(&target, &NativePrompt::text("Now").unwrap())
+        .unwrap();
+    loop {
+        let current = service.sessions().remove(0);
+        let users = current
+            .snapshot
+            .transcript
+            .iter()
+            .filter(|item| item.role == "user" && item.complete)
+            .map(|item| item.text.clone())
+            .collect::<Vec<_>>();
+        if current.queued_messages.is_empty()
+            && current.snapshot.status == NativeSessionStatus::Idle
+        {
+            assert_eq!(users, ["tool-hold", "Now", "Later"]);
+            break;
+        }
+        changes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("both messages go out after the stop");
     }
     service.shutdown().unwrap();
 }
@@ -1570,9 +1651,10 @@ fn wait_for_queue(
 }
 
 /// Replays Claude's observed events for a screenshot steered into a running tool, then Stop.
-/// The stopped turn ends on Claude's own result, and the queued message goes out after it.
+/// The stopped turn ends on Claude's own result, the queue waits instead of sending at once, and
+/// resuming it sends the queued message.
 #[test]
-fn stopping_a_steered_screenshot_turn_settles_and_sends_the_queue() {
+fn stopping_a_steered_screenshot_turn_settles_and_pauses_the_queue() {
     use bootty_agents::NativePrompt;
     use std::sync::{Arc, mpsc};
     let root = TempDir::new().unwrap();
@@ -1598,6 +1680,21 @@ fn stopping_a_steered_screenshot_turn_settles_and_sends_the_queue() {
     assert_eq!(session.snapshot().status, NativeSessionStatus::Working);
 
     service.interrupt(&target).unwrap();
+    loop {
+        let current = service.sessions().remove(0);
+        if current.snapshot.status == NativeSessionStatus::Idle {
+            assert_eq!(
+                current.queued_messages[0].status,
+                bootty_agents::NativeQueuedMessageStatus::Paused,
+                "stopping holds the queue"
+            );
+            break;
+        }
+        changes
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the stopped turn settles");
+    }
+    service.resume_followups(&target).unwrap();
     let current = wait_for_queue(&service, &changes).unwrap();
     let users = current
         .snapshot
@@ -1661,7 +1758,8 @@ fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
     assert_eq!(service.steer_followup(&target, &queued.id), Ok(()));
     assert_eq!(
         service.sessions()[0].queued_messages[0].status,
-        NativeQueuedMessageStatus::Queued
+        NativeQueuedMessageStatus::Paused,
+        "stopping holds the queue"
     );
     service.shutdown().unwrap();
 }

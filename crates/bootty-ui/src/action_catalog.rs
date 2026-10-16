@@ -254,6 +254,9 @@ command_catalog! {
     SettleSession:
         "Settle Session", "Mark current saved work settled without closing its terminal",
         "settle_session", "circle-check", Sessions, shown, Write, Session, None;
+    InterruptAgent:
+        "Interrupt Agent", "Stop the running turn of the conversation in the focused pane",
+        "interrupt_agent", "square", Sessions, shown, Write, Pane, None;
     RenameSession:
         "Rename Session", "Rename the current session",
         "rename_session", "pencil", Sessions, shown, Write, Session, None;

@@ -813,12 +813,22 @@ impl GpuiWorkspace {
             return None;
         }
         Some(self.native_mux_pane_view(pane, window, cx).map_or_else(
-            || crate::gpui_terminal_panel::WorkspacePaneView::NativePlaceholder {
-                loading: self.state.native_agent_service().is_some()
-                    && (self.native_conversations.refreshing
-                        || self.native_conversations.revision == 0),
-                background: cx.theme().background,
-                foreground: cx.theme().muted_foreground,
+            || {
+                use crate::gpui_terminal_panel::NativePlaceholder;
+                let state = if self.state.native_agent_service().is_none() {
+                    NativePlaceholder::Unavailable
+                } else if self.native_conversations.refreshing
+                    || self.native_conversations.revision == 0
+                {
+                    NativePlaceholder::Loading
+                } else {
+                    NativePlaceholder::Missing(self.state.pane_command_target(pane))
+                };
+                crate::gpui_terminal_panel::WorkspacePaneView::NativePlaceholder {
+                    state,
+                    background: cx.theme().background,
+                    foreground: cx.theme().muted_foreground,
+                }
             },
             crate::gpui_terminal_panel::WorkspacePaneView::NativeAgent,
         ))
@@ -863,6 +873,11 @@ impl GpuiWorkspace {
             .cloned()
             .filter_map(|(pane, _, rect)| {
                 let view = self.native_mux_pane_content(&pane, window, cx)?;
+                if let Some(conversation) = self.native_mux_pane_view(&pane, window, cx) {
+                    conversation.update(cx, |conversation, cx| {
+                        conversation.fit_width(gpui_kit::px(rect.width()), window, cx);
+                    });
+                }
                 let target = self
                     .native_conversations
                     .records

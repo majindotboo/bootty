@@ -67,22 +67,15 @@ impl NativeAgentSession {
             .as_deref()
             .or(self.config.session_id.as_deref())
         else {
-            let position = HistoryPosition {
-                at_latest: true,
-                ..HistoryPosition::default()
-            };
-            let page = NativeHistoryPage {
-                transcript: Vec::new(),
-                has_older: false,
-                has_newer: false,
-                at_latest: true,
-            };
-            return Ok((position, page));
+            return Ok(empty_history());
         };
         if !crate::terminal_history::valid_id(session) {
             return Err("Claude has an invalid session identity".into());
         }
-        let mut reader = open_history(&self.config, &format!("{session}.jsonl"))?;
+        // Claude writes the file with the conversation's first record; until then it has none.
+        let Some(mut reader) = open_history(&self.config, &format!("{session}.jsonl"))? else {
+            return Ok(empty_history());
+        };
         let size = reader.get_ref().len();
         if size > MAX_FILE_BYTES {
             return Err("Claude history exceeds the bounded regular-file reader".into());
@@ -134,6 +127,21 @@ impl NativeAgentSession {
     }
 }
 
+/// The history of a conversation that hasn't written any yet.
+fn empty_history() -> (HistoryPosition, NativeHistoryPage) {
+    let position = HistoryPosition {
+        at_latest: true,
+        ..HistoryPosition::default()
+    };
+    let page = NativeHistoryPage {
+        transcript: Vec::new(),
+        has_older: false,
+        has_newer: false,
+        at_latest: true,
+    };
+    (position, page)
+}
+
 /// Claude names a project's session folder after its directory, with every character that isn't
 /// a letter or digit replaced by `-`.
 fn project_folder(cwd: &Path) -> String {
@@ -162,7 +170,12 @@ pub fn subagent_transcript(
     {
         return Err("Claude reported an invalid subagent identity".into());
     }
-    let mut reader = open_history(config, &format!("{session}/subagents/agent-{agent}.jsonl"))?;
+    let Some(mut reader) =
+        open_history(config, &format!("{session}/subagents/agent-{agent}.jsonl"))?
+    else {
+        // The subagent hasn't written its first record yet.
+        return Ok(NativeSessionSnapshot::new(AgentKind::Claude));
+    };
     let size = reader.get_ref().len();
     if size > MAX_FILE_BYTES {
         return Err("This subagent's transcript exceeds the bounded regular-file reader".into());
@@ -187,11 +200,12 @@ pub fn subagent_transcript(
     }
 }
 
-/// Opens a file under the project's session folder in the conversation's account.
+/// Opens a file under the project's session folder in the conversation's account, or `None`
+/// while Claude hasn't written it.
 fn open_history(
     config: &crate::NativeSessionConfig,
     file: &str,
-) -> Result<BufReader<FileReader>, String> {
+) -> Result<Option<BufReader<FileReader>>, String> {
     let projects = Path::new(
         config
             .account_directory
@@ -227,11 +241,13 @@ fn open_history(
             |remote| request.execute_remote(remote, SystemCommandRunner),
         )
         .map_err(|error| error.to_string())?;
-    let FileResponse::Source(descriptor) = response else {
-        return Err("Claude history requires its captured file descriptor".into());
+    let descriptor = match response {
+        FileResponse::Source(descriptor) => descriptor,
+        FileResponse::Missing => return Ok(None),
+        _ => return Err("Claude history requires its captured file descriptor".into()),
     };
-    FileReader::open(&descriptor, remote.as_ref())
-        .map(BufReader::new)
+    FileReader::open_log(&descriptor, remote.as_ref())
+        .map(|reader| Some(BufReader::new(reader)))
         .map_err(|error| error.to_string())
 }
 

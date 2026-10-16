@@ -1,7 +1,9 @@
 //! Window identity and action rules shared by every platform.
 //!
-//! An action reaches only the exact window token it names, input needs that window focused and
-//! uncovered, and captures never include pixels outside the requested window or region.
+//! An action reaches only the exact window token it names. Keys need that window to be the one
+//! its process sends keys to. Pointer input addressed to the window reaches it wherever it is;
+//! shared pointer input also needs it focused and uncovered. Captures never include pixels
+//! outside the requested window or region.
 use std::{io::Cursor, thread, time::Duration};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -9,7 +11,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use crate::{
     ComputerAction, ComputerElement, ComputerError, ComputerResult, ComputerTarget, DisplayBounds,
     ElementState, MAX_ELEMENTS, MouseButton, Permission, PermissionStatus, PressMethod,
-    desktop::{Desktop, Image, InputEvent, NativeWindow, pixel_count, pixel_edge},
+    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count, pixel_edge},
 };
 
 /// Quartz rejects text events longer than 20 UTF-16 units; every platform uses the same pieces.
@@ -19,7 +21,7 @@ pub const MAX_CAPTURE_EDGE: f64 = 1600.0;
 const MAX_PNG_BYTES: usize = 8 * 1024 * 1024;
 // AppKit may merge adjacent synthetic text events that arrive without input spacing.
 const TEXT_SPACING: Duration = Duration::from_millis(50);
-// Raising a window is asynchronous; focus is confirmed within this many short waits.
+// Focusing a window is asynchronous; focus is confirmed within this many short waits.
 const FOCUS_CHECKS: usize = 10;
 const FOCUS_WAIT: Duration = Duration::from_millis(20);
 
@@ -64,17 +66,7 @@ pub fn execute(
             snapshot(desktop, target, action)
         }
         ComputerAction::Focus => focus(desktop, target),
-        ComputerAction::Click { x, y, button } => pointer(
-            desktop,
-            target,
-            *x,
-            *y,
-            &InputEvent::Click {
-                x: *x,
-                y: *y,
-                button: *button,
-            },
-        ),
+        ComputerAction::Click { x, y, button } => click(desktop, target, *x, *y, *button),
         ComputerAction::Move { x, y } => {
             pointer(desktop, target, *x, *y, &InputEvent::Move { x: *x, y: *y })
         }
@@ -99,7 +91,7 @@ pub fn execute(
         ComputerAction::Elements => elements(desktop, target),
         ComputerAction::Press { element } => press(desktop, target, element),
         ComputerAction::Key { key, modifiers } => {
-            let window = validate(desktop, target, true)?;
+            let window = validate(desktop, target, Need::Keys)?;
             desktop.post(
                 &window,
                 &InputEvent::Key {
@@ -112,12 +104,24 @@ pub fn execute(
     }
 }
 
-/// The current window for a token. Input additionally needs the window to be the focused window
-/// of the frontmost application and unambiguous among that application's windows.
+/// What an action needs from its window beyond identity.
+#[derive(Clone, Copy)]
+enum Need {
+    /// Captures and element listings only read the window.
+    Read,
+    /// The OS delivers an accessibility action to the element itself, wherever its window is.
+    Element,
+    /// Keys reach the window the target's process sends keys to.
+    Keys,
+    /// A pointer event at this desktop point.
+    Pointer(f64, f64),
+}
+
+/// The current window for a token, once it meets what the action needs.
 fn validate(
     desktop: &dyn Desktop,
     expected: &ComputerTarget,
-    input: bool,
+    need: Need,
 ) -> Result<NativeWindow, ComputerError> {
     expected.validate()?;
     let windows = desktop.windows();
@@ -136,22 +140,45 @@ fn validate(
     {
         return Err(ComputerError::StaleTarget);
     }
-    if input {
-        require(desktop.status().accessibility, Permission::Accessibility)?;
-        if desktop.secure_input() {
-            return Err(ComputerError::SecureInput);
-        }
-        let focus = desktop.focus().ok_or(ComputerError::TargetNotFocused)?;
-        if focus.process_id != current.process_id || focus.window.as_ref() != Some(&current.bounds)
-        {
-            return Err(ComputerError::TargetNotFocused);
-        }
-        // Focus is matched by bounds; two windows of one app at the same bounds are ambiguous.
-        if same_frame_windows(&windows, current) != 1 {
-            return Err(ComputerError::TargetNotFocused);
+    if matches!(need, Need::Read) {
+        return Ok(window.clone());
+    }
+    require(desktop.status().accessibility, Permission::Accessibility)?;
+    if desktop.secure_input() {
+        return Err(ComputerError::SecureInput);
+    }
+    match (need, desktop.route()) {
+        (Need::Read | Need::Element, _) => {}
+        (Need::Keys, _) => receives_keys(desktop, &windows, current)?,
+        (Need::Pointer(x, y), route) => {
+            if !contains(&window.bounds, x, y) {
+                return Err(ComputerError::InvalidAction(
+                    "coordinates are outside the target".into(),
+                ));
+            }
+            // Shared pointer input lands on whatever is in front at the point.
+            if route == InputRoute::Shared {
+                receives_keys(desktop, &windows, current)?;
+                uncovered(&windows, window, x, y)?;
+            }
         }
     }
     Ok(window.clone())
+}
+
+/// The target must be the window its process sends keys to. The OS reports that window by
+/// bounds, so two windows of one process at the same bounds are ambiguous.
+fn receives_keys(
+    desktop: &dyn Desktop,
+    windows: &[NativeWindow],
+    target: &ComputerTarget,
+) -> Result<(), ComputerError> {
+    if desktop.focus(target.process_id).as_ref() != Some(&target.bounds)
+        || same_frame_windows(windows, target) != 1
+    {
+        return Err(ComputerError::TargetNotFocused);
+    }
+    Ok(())
 }
 
 fn same_frame_windows(windows: &[NativeWindow], target: &ComputerTarget) -> usize {
@@ -173,21 +200,15 @@ const fn require(status: PermissionStatus, permission: Permission) -> Result<(),
     }
 }
 
-/// A pointer action must land inside the window and on no other visible window.
+/// Shared pointer input must land on no other visible window.
 fn uncovered(
-    desktop: &dyn Desktop,
+    windows: &[NativeWindow],
     window: &NativeWindow,
     x: f64,
     y: f64,
 ) -> Result<(), ComputerError> {
-    if !contains(&window.bounds, x, y) {
-        return Err(ComputerError::InvalidAction(
-            "coordinates are outside the target".into(),
-        ));
-    }
-    let hit = desktop
-        .windows()
-        .into_iter()
+    let hit = windows
+        .iter()
         .find(|candidate| candidate.visible && contains(&candidate.bounds, x, y));
     if hit.is_none_or(|hit| hit.id != window.id) {
         return Err(ComputerError::TargetNotFocused);
@@ -206,9 +227,32 @@ fn pointer(
     y: f64,
     event: &InputEvent,
 ) -> Result<ComputerResult, ComputerError> {
-    let window = validate(desktop, target, true)?;
-    uncovered(desktop, &window, x, y)?;
+    let window = validate(desktop, target, Need::Pointer(x, y))?;
     desktop.post(&window, event)?;
+    Ok(ComputerResult::Posted)
+}
+
+/// `AppKit` ignores a click in a background app's window on views that need their window active,
+/// such as web content, and macOS will not activate the app for it. A left click there presses
+/// the element under the point instead when it has its own press action. Every click on the
+/// frontmost app is posted as it is, where a first click keys its window as it would for a user.
+fn click(
+    desktop: &dyn Desktop,
+    target: &ComputerTarget,
+    x: f64,
+    y: f64,
+    button: MouseButton,
+) -> Result<ComputerResult, ComputerError> {
+    let window = validate(desktop, target, Need::Pointer(x, y))?;
+    if button == MouseButton::Left
+        && desktop.route() == InputRoute::Window
+        && desktop.frontmost() != Some(target.process_id)
+        && let Some(path) = desktop.pressable_at(&window, x, y)?
+        && desktop.press(&window, &path)?
+    {
+        return Ok(ComputerResult::Posted);
+    }
+    desktop.post(&window, &InputEvent::Click { x, y, button })?;
     Ok(ComputerResult::Posted)
 }
 
@@ -217,11 +261,11 @@ fn elements(
     target: &ComputerTarget,
 ) -> Result<ComputerResult, ComputerError> {
     require(desktop.status().accessibility, Permission::Accessibility)?;
-    let window = validate(desktop, target, false)?;
+    let window = validate(desktop, target, Need::Read)?;
     let token = window.app.clone().ok_or(ComputerError::TargetUnavailable)?;
     let (elements, omitted) = desktop.elements(&window, MAX_ELEMENTS)?;
     // The elements describe the window as it was listed; a move or resize makes them stale.
-    validate(desktop, target, false)?;
+    validate(desktop, target, Need::Read)?;
     Ok(ComputerResult::Elements {
         elements,
         omitted,
@@ -236,7 +280,7 @@ fn press(
     target: &ComputerTarget,
     element: &ComputerElement,
 ) -> Result<ComputerResult, ComputerError> {
-    let window = validate(desktop, target, true)?;
+    let window = validate(desktop, target, Need::Element)?;
     let current = desktop
         .element(&window, &element.path)?
         .filter(|current| current.same_as(element))
@@ -252,12 +296,7 @@ fn press(
         });
     }
     let (x, y) = element.center();
-    let click = InputEvent::Click {
-        x,
-        y,
-        button: MouseButton::Left,
-    };
-    pointer(desktop, target, x, y, &click)?;
+    click(desktop, target, x, y, MouseButton::Left)?;
     Ok(ComputerResult::Pressed {
         method: PressMethod::Click,
     })
@@ -272,7 +311,7 @@ fn type_text(
         if index > 0 {
             thread::sleep(TEXT_SPACING);
         }
-        let window = validate(desktop, target, true)?;
+        let window = validate(desktop, target, Need::Keys)?;
         desktop.post(&window, &InputEvent::Text(piece))?;
     }
     Ok(ComputerResult::Posted)
@@ -300,9 +339,11 @@ pub fn text_pieces(text: &str) -> Vec<String> {
     pieces
 }
 
+/// Make the window the one its process sends keys to. Pointer input addressed to a window needs
+/// no focus, so this matters for keys, or where input drives the shared pointer.
 fn focus(desktop: &dyn Desktop, target: &ComputerTarget) -> Result<ComputerResult, ComputerError> {
     require(desktop.status().accessibility, Permission::Accessibility)?;
-    let window = validate(desktop, target, false)?;
+    let window = validate(desktop, target, Need::Read)?;
     let app = window
         .app
         .as_ref()
@@ -312,12 +353,12 @@ fn focus(desktop: &dyn Desktop, target: &ComputerTarget) -> Result<ComputerResul
     }
     desktop.raise(&window)?;
     for _ in 0..FOCUS_CHECKS {
-        if validate(desktop, target, true).is_ok() {
+        if validate(desktop, target, Need::Keys).is_ok() {
             return Ok(ComputerResult::Posted);
         }
         thread::sleep(FOCUS_WAIT);
     }
-    validate(desktop, target, true)?;
+    validate(desktop, target, Need::Keys)?;
     Ok(ComputerResult::Posted)
 }
 
@@ -330,7 +371,7 @@ fn snapshot(
         desktop.status().screen_recording,
         Permission::ScreenRecording,
     )?;
-    let window = validate(desktop, target, false)?;
+    let window = validate(desktop, target, Need::Read)?;
     let token = window.app.clone().ok_or(ComputerError::TargetUnavailable)?;
     let bounds = &window.bounds;
     let scale = (MAX_CAPTURE_EDGE / bounds.width.max(bounds.height)).min(1.0);
@@ -351,7 +392,7 @@ fn snapshot(
     if desktop.secure_input() {
         return Err(ComputerError::SecureInput);
     }
-    validate(desktop, target, false)?;
+    validate(desktop, target, Need::Read)?;
     let (image, actual) = match &region {
         Some(rect) => {
             let (cropped, actual) = crop(&image, bounds, rect)?;

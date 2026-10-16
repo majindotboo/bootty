@@ -739,6 +739,7 @@ fn ui_request(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(),
             method: format!("pi.{method}"),
             parameters: value.clone(),
             from_attached_tools: false,
+            subagent: None,
             wire_id: Value::String(id),
         });
         snapshot.status = NativeSessionStatus::Waiting;

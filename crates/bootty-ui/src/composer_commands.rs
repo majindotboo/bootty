@@ -5,6 +5,7 @@
 pub enum ComposerCommand {
     New,
     Model,
+    Plan,
     Rename,
     Stop,
     Diff,
@@ -12,9 +13,10 @@ pub enum ComposerCommand {
 }
 
 impl ComposerCommand {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::New,
         Self::Model,
+        Self::Plan,
         Self::Rename,
         Self::Stop,
         Self::Diff,
@@ -26,6 +28,7 @@ impl ComposerCommand {
         match self {
             Self::New => "new",
             Self::Model => "model",
+            Self::Plan => "plan",
             Self::Rename => "rename",
             Self::Stop => "stop",
             Self::Diff => "diff",
@@ -38,6 +41,7 @@ impl ComposerCommand {
         match self {
             Self::New => "Start a new agent tab",
             Self::Model => "Choose the model and effort",
+            Self::Plan => "Turn plan mode on or off",
             Self::Rename => "Rename this conversation",
             Self::Stop => "Stop the current turn",
             Self::Diff => "Show Git changes",

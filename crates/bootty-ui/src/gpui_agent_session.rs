@@ -51,6 +51,7 @@ pub use models::reasoning_label;
 mod citations;
 pub use citations::init_reaction_keys;
 use citations::{ResponseCitation, ResponseSelection};
+pub use requests::init_request_keys;
 #[path = "gpui_agent_timeline.rs"]
 mod timeline;
 use timeline::TranscriptRow;
@@ -201,6 +202,9 @@ struct PresentationPreferences {
 
 pub struct NativeAgentSessionView {
     record: NativeSessionRecord,
+    /// The provider subagent this view shows, by id. Such a view shows the subagent's transcript
+    /// and nothing that acts on the conversation.
+    subagent: Option<String>,
     related: Vec<RelatedConversation>,
     context_card: Option<ConversationContext>,
     wide: bool,
@@ -211,6 +215,12 @@ pub struct NativeAgentSessionView {
     available_efforts: Vec<String>,
     sender: BoundAppCommandSender,
     composer: Entity<TextareaState>,
+    /// Which sent message Up last put in the composer, newest first.
+    recalled_prompt: Option<usize>,
+    /// A plan mode toggle waiting for the model catalog it rides on.
+    pending_plan: Option<bool>,
+    /// The composer's current placeholder, so it changes only when its text does.
+    shown_placeholder: String,
     completion: Option<Entity<crate::gpui_composer_completion::ComposerCompletion>>,
     completion_subscriptions: Vec<Subscription>,
     draft_revision: u64,
@@ -317,7 +327,7 @@ impl NativeAgentSessionView {
                 }
                 cx.notify();
             });
-        let requests = cx.new(|_| requests::NativeRequestView::new(record.target()));
+        let requests = cx.new(|cx| requests::NativeRequestView::new(record.target(), cx));
         let request_subscription = cx.subscribe_in(
             &requests,
             window,
@@ -356,15 +366,21 @@ impl NativeAgentSessionView {
         );
         let mut this = Self {
             record,
+            subagent: None,
             related: Vec::new(),
             context_card: None,
-            wide: false,
+            wide: cx
+                .try_global::<context_card::LastWide>()
+                .is_some_and(|last| last.0),
             speech,
             _speech_subscription: speech_subscription,
             focus: cx.focus_handle(),
             permissions_focus: cx.focus_handle(),
             sender,
             composer,
+            recalled_prompt: None,
+            pending_plan: None,
+            shown_placeholder: String::new(),
             completion: None,
             completion_subscriptions: Vec::new(),
             draft_revision: 0,
@@ -1014,7 +1030,8 @@ impl NativeAgentSessionView {
         let enabled = self.provider_enabled()
             && self.can_prompt()
             && !self.pending.contains("prompt")
-            && !self.pending.contains("queue");
+            && !self.pending.contains("queue")
+            && !self.pending.contains("interrupt-send");
         for questions in self.async_questions.values() {
             questions.update(cx, |questions, cx| questions.set_enabled(enabled, cx));
         }
@@ -1028,7 +1045,7 @@ impl NativeAgentSessionView {
                     .map(|change| (request.id.clone(), change))
             })
             .collect::<BTreeMap<_, _>>();
-        self.requests.update(cx, |requests, cx| {
+        let arrived = self.requests.update(cx, |requests, cx| {
             requests.set_enabled(self.provider_enabled(), cx);
             requests.update(
                 self.record.target(),
@@ -1037,8 +1054,17 @@ impl NativeAgentSessionView {
                 (&changes, &self.record.config.cwd),
                 window,
                 cx,
-            );
+            )
         });
+        // A new approval takes focus unless the person is writing; focus returns once none
+        // are left.
+        let requests = self.requests.read(cx);
+        let composer = self.composer.read(cx);
+        if arrived && composer.value().is_empty() {
+            requests.focus_handle().focus(window, cx);
+        } else if !requests.has_keyed() && requests.focus_handle().contains_focused(window, cx) {
+            composer.focus_handle(cx).focus(window, cx);
+        }
     }
 
     fn request_command(
@@ -1062,13 +1088,14 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let submitted_draft = matches!(operation, "prompt" | "queue").then(|| SubmittedPrompt {
-            text: self.composer.read(cx).value().to_string(),
-            revision: self.draft_revision,
-            annotations: self.annotations.clone(),
-            citations: self.active_citations(cx),
-            attachments: self.active_attachment_ids(cx),
-        });
+        let submitted_draft =
+            matches!(operation, "prompt" | "queue" | "interrupt-send").then(|| SubmittedPrompt {
+                text: self.composer.read(cx).value().to_string(),
+                revision: self.draft_revision,
+                annotations: self.annotations.clone(),
+                citations: self.active_citations(cx),
+                attachments: self.active_attachment_ids(cx),
+            });
         self.submit_command(operation, arguments, submitted_draft, window, cx);
     }
 
@@ -1146,7 +1173,7 @@ impl NativeAgentSessionView {
                             this.clear_submitted_draft(draft, target, window, cx);
                         }
                         if operation == "subagent-read" {
-                            this.accept_subagent_read(&pending, value, cx);
+                            this.accept_subagent_read(&pending, value);
                         } else {
                             this.accept_command_result(&operation, value, window, cx);
                         }
@@ -1312,6 +1339,7 @@ impl NativeAgentSessionView {
             || !self.can_prompt()
             || self.pending.contains("prompt")
             || self.pending.contains("queue")
+            || self.pending.contains("interrupt-send")
             || self.pending.contains("configure")
             || !self.attachment_imports.is_empty()
         {
@@ -1355,13 +1383,16 @@ impl NativeAgentSessionView {
                         self.follow_up_behavior
                     };
                     // A stopping turn can't take a steer; its message waits in the queue.
-                    let operation = if is_busy(self.record.snapshot.status)
-                        && (behavior == bootty_config::config::FollowUpBehavior::Queue
-                            || self.record.snapshot.stopping())
-                    {
+                    let operation = if !is_busy(self.record.snapshot.status) {
+                        "prompt"
+                    } else if self.record.snapshot.stopping() {
                         "queue"
                     } else {
-                        "prompt"
+                        match behavior {
+                            bootty_config::config::FollowUpBehavior::Queue => "queue",
+                            bootty_config::config::FollowUpBehavior::Steer => "prompt",
+                            bootty_config::config::FollowUpBehavior::Interrupt => "interrupt-send",
+                        }
                     };
                     self.command(operation, arguments, window, cx);
                 }
@@ -1377,12 +1408,12 @@ impl NativeAgentSessionView {
         if self.record.snapshot.provider_writer_blocked() {
             return false;
         }
+        // A turn waiting on an approval can't take a steer yet; the service holds one until it
+        // can, so the composer sends in either follow-up mode.
         (self.record.snapshot.status == NativeSessionStatus::Idle
             && !self.record.permissions_pending
             && !self.resuming())
-            || self.record.snapshot.status == NativeSessionStatus::Working
-            || (self.record.snapshot.status == NativeSessionStatus::Waiting
-                && self.follow_up_behavior == bootty_config::config::FollowUpBehavior::Queue)
+            || is_busy(self.record.snapshot.status)
     }
 
     pub(crate) fn set_follow_up_behavior(
@@ -1457,7 +1488,11 @@ impl NativeAgentSessionView {
                                 this.working_indicator.tick = None;
                                 return false;
                             }
-                            cx.notify();
+                            // Working motion already redraws every frame; the tick only
+                            // advances the clocks without it.
+                            if !(is_busy(this.record.snapshot.status) && this.moving(cx)) {
+                                cx.notify();
+                            }
                             true
                         })
                         .unwrap_or(false);
@@ -1539,7 +1574,14 @@ impl NativeAgentSessionView {
                                         .small()
                                         .into_any_element()
                                     })
-                                    .child(label),
+                                    // Even-width digits keep the ticking clock from shifting.
+                                    .child(
+                                        div()
+                                            .font_features(gpui_kit::FontFeatures(
+                                                std::sync::Arc::new(vec![("tnum".into(), 1)]),
+                                            ))
+                                            .child(label),
+                                    ),
                             )
                         },
                     )
@@ -1657,16 +1699,109 @@ impl NativeAgentSessionView {
         ))
         .child(self.render_tool_heading(item, open, cx))
         .on_click(move |_, _, cx| {
-            _ = owner.update(cx, |this, cx| {
-                this.tool_disclosures.insert(id.clone(), !open);
-                if let Some(ix) = this.timeline.iter().position(|row| {
-                    matches!(row, TranscriptRow::Message { id: message, .. } if message == &id)
-                }) {
-                    this.list.remeasure_items(ix..ix.saturating_add(1));
-                }
-                cx.notify();
-            });
+            _ = owner.update(cx, |this, cx| this.toggle_disclosure(&id, open, cx));
         })
+    }
+
+    /// Opens or closes one tool or thought row and remeasures it.
+    fn toggle_disclosure(&mut self, id: &str, open: bool, cx: &mut Context<Self>) {
+        self.tool_disclosures.insert(id.to_owned(), !open);
+        if let Some(ix) = self.timeline.iter().position(
+            |row| matches!(row, TranscriptRow::Message { id: message, .. } if message == id),
+        ) {
+            self.list.remeasure_items(ix..ix.saturating_add(1));
+        }
+        cx.notify();
+    }
+
+    /// A thought inside an expanded Work row: one line, like a tool, until opened.
+    fn render_thinking(
+        &self,
+        item: &NativeTranscriptItem,
+        owner: gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let id = item.id.clone();
+        let open = self.tool_disclosures.get(&id).copied().unwrap_or(false);
+        let label = if item.complete { "Thought" } else { "Thinking" };
+        // Reasoning summaries often open with a bold title; it reads as plain text here.
+        let summary = item
+            .text
+            .lines()
+            .map(|line| line.trim().trim_matches(['#', '*', ' ']))
+            .find(|line| !line.is_empty())
+            .unwrap_or_default()
+            .to_owned();
+        let heading = div()
+            .debug_selector({
+                let title = format!("native-thinking-title:{id}:{label} {summary}");
+                move || title.trim_end().to_owned()
+            })
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_color(cx.theme().foreground.opacity(0.72))
+            .child(gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Lightbulb).small())
+            .child(div().flex_shrink_0().child(label))
+            .child(div().flex_1().min_w_0().truncate().child(summary))
+            .child(
+                gpui_kit::component::Icon::new(if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                })
+                .small(),
+            );
+        let toggle = Button::new(gpui_kit::SharedString::from(format!(
+            "thinking:{}:{id}",
+            self.record.id
+        )))
+        .debug_selector({
+            let id = id.clone();
+            move || format!("thinking-disclosure:{id}")
+        })
+        .w_full()
+        .px_0()
+        .small()
+        .ghost()
+        .accessibility_label(format!("{} {label}", if open { "Hide" } else { "Show" }))
+        .child(heading)
+        .on_click({
+            let owner = owner.clone();
+            let id = id.clone();
+            move |_, _, cx| {
+                _ = owner.update(cx, |this, cx| this.toggle_disclosure(&id, open, cx));
+            }
+        });
+        let body = div()
+            .pt_1()
+            .text_sm()
+            .text_color(cx.theme().muted_foreground)
+            .when_some(self.transcript.get(&id), |body, state| {
+                body.child(capped_scroll(
+                    format!("thinking-scroll:{id}"),
+                    20.,
+                    Self::message_text(state, &id, owner),
+                ))
+            });
+        div()
+            .w_full()
+            .min_w_0()
+            .px_4()
+            .py_1()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .w_full()
+                    .max_w(gpui_kit::rems(48.0))
+                    .min_w_0()
+                    .debug_selector(move || format!("native-message-{id}"))
+                    .child(Collapsible::new().open(open).child(toggle).content(body)),
+            )
+            .into_any_element()
     }
 
     fn tool_name<'a>(&self, item: &'a NativeTranscriptItem) -> std::borrow::Cow<'a, str> {
@@ -1681,10 +1816,17 @@ impl NativeAgentSessionView {
                 files.len(),
                 if files.len() == 1 { "file" } else { "files" }
             )),
-            _ => item
-                .tool
-                .as_ref()
-                .map_or_else(|| "Execution details".into(), |tool| tool_label(&tool.name)),
+            _ => item.tool.as_ref().map_or_else(
+                || "Execution details".into(),
+                |tool| {
+                    let label = tool_label(&tool.name);
+                    if tool.status == bootty_agents::NativeToolStatus::Completed {
+                        std::borrow::Cow::Owned(past_tense(&label))
+                    } else {
+                        label
+                    }
+                },
+            ),
         }
     }
 
@@ -1723,6 +1865,10 @@ impl NativeAgentSessionView {
             .child(gpui_kit::component::Icon::new(icon).small())
             .child(
                 div()
+                    .debug_selector({
+                        let title = format!("native-tool-title:{}:{name} {summary}", item.id);
+                        move || title.trim_end().to_owned()
+                    })
                     .flex_shrink_0()
                     .max_w(gpui_kit::rems(12.0))
                     .truncate()
@@ -1912,11 +2058,8 @@ impl NativeAgentSessionView {
         let id = item.id.clone();
         let open = self.tool_disclosures.get(&id).copied().unwrap_or(false);
         let header = subagent_header(agent, open, cx);
-        let read_owner = owner.clone();
         let tab_owner = owner.clone();
         let tab_id = agent.id.clone();
-        let child_id = agent.id.clone();
-        let pending = self.pending.contains(&format!("subagent-read:{child_id}"));
         let content = div()
             .child(
                 Button::new(format!("subagent-tab:{tab_id}"))
@@ -1947,40 +2090,6 @@ impl NativeAgentSessionView {
             })
             .when_some(self.transcript.get(&item.id), |view, state| {
                 view.child(TextView::new(state).selectable(true))
-            })
-            .when(
-                agent.readable() && agent.owner_session == self.record.snapshot.session_id,
-                |view| {
-                    view.child(
-                        Button::new(format!("subagent-read:{child_id}"))
-                            .ghost()
-                            .small()
-                            .label(if pending {
-                                "Loading transcript…"
-                            } else {
-                                "View transcript"
-                            })
-                            .disabled(pending)
-                            .on_click(move |_, window, cx| {
-                                _ = read_owner.update(cx, |this, cx| {
-                                    this.command(
-                                        "subagent-read",
-                                        vec![child_id.clone()],
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }),
-                    )
-                },
-            )
-            .when_some(self.subagent_details.get(&agent.id), |view, states| {
-                view.children(
-                    states
-                        .states
-                        .iter()
-                        .map(|state| TextView::new(state).selectable(true)),
-                )
             });
         div().px_4().py_1().child(
             Collapsible::new()
@@ -2024,8 +2133,11 @@ impl NativeAgentSessionView {
         if is_tool_output(&item.role) || item.tool.is_some() {
             return self.render_tool_output(item, owner, cx);
         }
+        if matches!(item.role.as_str(), "thinking" | "reasoning") {
+            return self.render_thinking(item, owner, cx);
+        }
         let user = item.role == "user";
-        let quiet = matches!(item.role.as_str(), "notice" | "thinking" | "reasoning");
+        let quiet = item.role == "notice";
         let focus = self.message_focus.get(&item.id);
         let focused = focus.is_some_and(|focus| focus.contains_focused(window, cx));
         let row = div()
@@ -2051,7 +2163,34 @@ impl NativeAgentSessionView {
                 row.gap_3().child(questions.clone())
             })
             .when(self.record.snapshot.undelivered(item), |row| {
-                row.child(Self::undelivered_notice(item, owner.clone(), cx))
+                // Attachments the conversation still holds go back with the text.
+                let held = item
+                    .attachments
+                    .iter()
+                    .filter(|attachment| {
+                        self.record
+                            .attachments
+                            .iter()
+                            .any(|held| held.id == attachment.id)
+                    })
+                    .cloned()
+                    .collect();
+                row.child(Self::undelivered_notice(item, held, owner.clone(), cx))
+            })
+            .when(self.record.snapshot.sending(item), |row| {
+                row.child(
+                    div()
+                        .debug_selector({
+                            let id = item.id.clone();
+                            move || format!("native-sending-{id}")
+                        })
+                        .h_8()
+                        .flex()
+                        .items_center()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Sending…"),
+                )
             })
             .when(
                 meta && item.complete
@@ -2090,7 +2229,6 @@ impl NativeAgentSessionView {
         let expanded = self.expanded_messages.contains(&item.id);
         let bubble_background = cx.theme().accent.mix_oklab(cx.theme().background, 0.5);
         let title = match item.role.as_str() {
-            "thinking" | "reasoning" => "Thinking",
             "change" => "Changes",
             "plan" => "Plan",
             _ => "",
@@ -2110,7 +2248,7 @@ impl NativeAgentSessionView {
                 row.w_full().max_w(gpui_kit::relative(0.8)).p_2().rounded(cx.theme().radius)
                     .bg(bubble_background).text_color(cx.theme().accent_foreground)
             })
-            .when(matches!(item.role.as_str(), "notice" | "thinking" | "reasoning"), |row| {
+            .when(item.role == "notice", |row| {
                 row.text_sm().text_color(cx.theme().muted_foreground)
             })
             .when(item.role == "plan", |row| {
@@ -2198,9 +2336,11 @@ impl NativeAgentSessionView {
             })
     }
 
-    /// A message the provider never confirmed says so, and its text can go back to the composer.
+    /// A message the provider never confirmed says so, and its text and `attachments` can go back
+    /// to the composer.
     fn undelivered_notice(
         item: &NativeTranscriptItem,
+        attachments: Vec<bootty_agents::NativeAttachmentReference>,
         owner: gpui_kit::WeakEntity<Self>,
         cx: &App,
     ) -> gpui_kit::Div {
@@ -2226,10 +2366,8 @@ impl NativeAgentSessionView {
                     .label("Edit and resend")
                     .on_click(move |_, window, cx| {
                         _ = owner.update(cx, |this, cx| {
-                            this.composer.update(cx, |composer, cx| {
-                                composer.set_value(text.clone(), window, cx);
-                                composer.focus_handle(cx).focus(window, cx);
-                            });
+                            this.restore_draft(&text, &attachments, window, cx);
+                            this.composer.read(cx).focus_handle(cx).focus(window, cx);
                         });
                     }),
             )
@@ -2307,7 +2445,10 @@ impl NativeAgentSessionView {
                             }),
                     )
                     .when(
-                        item.role == "assistant" && item.complete && self.provider_enabled(),
+                        item.role == "assistant"
+                            && item.complete
+                            && self.provider_enabled()
+                            && self.subagent.is_none(),
                         |bar| {
                             let response = item.id.clone();
                             bar.child(
@@ -2346,7 +2487,7 @@ impl NativeAgentSessionView {
                     .find(|old| old.target == child.target)
                     .is_none_or(|old| old.revision != child.revision)
             {
-                self.accept_subagent_detail(detail.clone(), cx);
+                self.accept_subagent_detail(detail.clone());
             }
         }
         // Every revision resends the list; only a changed one redraws. A child's detail follows
@@ -2770,7 +2911,11 @@ impl NativeAgentSessionView {
                 )
                 .flatten()
             });
+        let provider = self.record.config.provider;
         div().when_some(message, |body, (message, details)| {
+            let sign_in = details
+                .as_deref()
+                .is_some_and(crate::error_catalog::needs_sign_in);
             body.child(
                 div()
                     .flex()
@@ -2790,6 +2935,7 @@ impl NativeAgentSessionView {
                             .text_color(cx.theme().danger)
                             .child(message),
                     )
+                    .when(sign_in, |row| row.child(sign_in_button(provider)))
                     .when_some(details, |row, details| {
                         row.child(
                             Button::new("copy-conversation-error-details")
@@ -2829,8 +2975,67 @@ impl NativeAgentSessionView {
         })
     }
 
+    /// What Enter does with the draft: send, queue, steer or interrupt.
+    fn composer_placeholder(&self) -> String {
+        use bootty_config::config::FollowUpBehavior;
+        let provider = self.record.config.provider.display_name();
+        if !is_busy(self.record.snapshot.status) {
+            return format!("Message {provider}…");
+        }
+        if self.record.snapshot.stopping() {
+            return "Queue a follow-up…".to_owned();
+        }
+        match self.follow_up_behavior {
+            FollowUpBehavior::Queue => "Queue a follow-up…".to_owned(),
+            FollowUpBehavior::Steer => format!("Steer {provider}…"),
+            FollowUpBehavior::Interrupt => "Interrupt and send…".to_owned(),
+        }
+    }
+
+    fn sync_placeholder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let placeholder = self.composer_placeholder();
+        if self.shown_placeholder != placeholder {
+            self.shown_placeholder.clone_from(&placeholder);
+            self.composer.update(cx, |composer, cx| {
+                composer.set_placeholder(placeholder, window, cx);
+            });
+        }
+    }
+
+    /// Why Send can't go right now, in words, or `None` when only an empty draft stops it.
+    fn send_blocker(&self) -> Option<&'static str> {
+        let snapshot = &self.record.snapshot;
+        if !self.provider_enabled() {
+            return Some(if self.resuming() {
+                "Reconnecting to the agent…"
+            } else {
+                "This provider is turned off in Settings"
+            });
+        }
+        if snapshot.provider_writer_blocked() {
+            return Some("This conversation is open in another app");
+        }
+        if !self.can_prompt() {
+            return Some(match snapshot.status {
+                NativeSessionStatus::Starting => "The agent is starting…",
+                NativeSessionStatus::Stopped | NativeSessionStatus::Error => {
+                    "Resume the conversation to send"
+                }
+                _ if self.record.permissions_pending => "Applying the new permissions…",
+                _ => "Reconnecting to the agent…",
+            });
+        }
+        if self.pending.contains("configure") {
+            return Some("Changing the model…");
+        }
+        if !self.attachment_imports.is_empty() {
+            return Some("Attaching files…");
+        }
+        None
+    }
+
     fn render_collapsed_composer(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        let placeholder = format!("Message {}…", self.record.config.provider.display_name());
+        let placeholder = self.composer_placeholder();
         div().flex().child(
             Button::new("expand-composer")
                 .debug_selector(|| "native-collapsed-composer".into())
@@ -2902,6 +3107,34 @@ impl NativeAgentSessionView {
             .when(self.completion_active(window, cx), |view| {
                 view.key_context("ComposerCompletion")
             })
+            // Escape the text area had nothing to dismiss interrupts a running turn.
+            .on_action(
+                cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
+                    if is_busy(this.record.snapshot.status)
+                        && !this.record.snapshot.stopping()
+                        && !this.pending.contains("interrupt")
+                    {
+                        this.command("interrupt", Vec::new(), window, cx);
+                    } else {
+                        cx.propagate();
+                    }
+                }),
+            )
+            // The text area binds the arrows itself, so recall takes its actions first.
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                    if this.recall_prompt(true, window, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
+                    if this.recall_prompt(false, window, cx) {
+                        cx.stop_propagation();
+                    }
+                },
+            ))
             .relative()
             .w_full()
             .max_w(gpui_kit::rems(48.0))
@@ -2914,7 +3147,13 @@ impl NativeAgentSessionView {
             .rounded_xl()
             .bg(cx.theme().muted.opacity(0.35))
             .border_1()
-            .border_color(cx.theme().border)
+            .border_color(
+                if self.composer.read(cx).focus_handle(cx).is_focused(window) {
+                    cx.theme().ring
+                } else {
+                    cx.theme().border
+                },
+            )
             .when(
                 !self.attachments.is_empty() || !self.attachment_imports.is_empty(),
                 |body| body.child(self.render_attachments(cx)),
@@ -2926,6 +3165,50 @@ impl NativeAgentSessionView {
             .child(self.render_composer_controls(cx))
             .children(self.completion.clone());
         div().w_full().min_w_0().child(composer)
+    }
+
+    /// Up in an empty composer brings back the last sent message, then older ones; Down goes
+    /// back toward an empty composer. Editing a recalled message ends recall.
+    fn recall_prompt(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.completion_active(window, cx) {
+            return false;
+        }
+        let mut prompts = Vec::<&str>::new();
+        for item in self.record.snapshot.transcript.iter().rev() {
+            if item.role == "user"
+                && item.complete
+                && !item.text.trim().is_empty()
+                && prompts.last() != Some(&item.text.as_str())
+            {
+                prompts.push(&item.text);
+            }
+        }
+        let value = self.composer.read(cx).value();
+        if value.is_empty() {
+            self.recalled_prompt = None;
+        } else if self
+            .recalled_prompt
+            .and_then(|index| prompts.get(index))
+            .is_none_or(|recalled| *recalled != value.as_ref())
+        {
+            return false;
+        }
+        let next = match (up, self.recalled_prompt) {
+            (true, None) if !prompts.is_empty() => Some(0),
+            (true, Some(index)) => {
+                Some(index.saturating_add(1).min(prompts.len().saturating_sub(1)))
+            }
+            (false, Some(index)) => index.checked_sub(1),
+            _ => return false,
+        };
+        let text = next
+            .and_then(|index| prompts.get(index))
+            .map_or_else(String::new, |text| (*text).to_owned());
+        self.recalled_prompt = next;
+        self.composer
+            .update(cx, |composer, cx| composer.set_value(text, window, cx));
+        cx.notify();
+        true
     }
 
     fn render_composer_input(&self, cx: &Context<Self>) -> Textarea {
@@ -2968,17 +3251,20 @@ impl NativeAgentSessionView {
         reason = "One footer owns the adjacent composer controls"
     )]
     fn render_composer_controls(&self, cx: &Context<Self>) -> impl IntoElement {
-        let send_pending = self.pending.contains("prompt") || self.pending.contains("queue");
+        let send_pending = self.pending.contains("prompt")
+            || self.pending.contains("queue")
+            || self.pending.contains("interrupt-send");
         let send_label = if is_busy(self.record.snapshot.status) {
-            if self.follow_up_behavior == bootty_config::config::FollowUpBehavior::Queue {
-                "Queue message"
-            } else {
-                "Steer agent"
+            match self.follow_up_behavior {
+                bootty_config::config::FollowUpBehavior::Queue => "Queue message",
+                bootty_config::config::FollowUpBehavior::Steer => "Steer agent",
+                bootty_config::config::FollowUpBehavior::Interrupt => "Interrupt and send",
             }
         } else {
             "Send message"
         };
         let interrupt_pending = self.pending.contains("interrupt");
+        let send_blocker = self.send_blocker();
         let ready = self.can_prompt();
         let inactive = matches!(
             self.record.snapshot.status,
@@ -3134,8 +3420,8 @@ impl NativeAgentSessionView {
                                 .small()
                                 .primary()
                                 .rounded_full()
-                                .accessibility_label(send_label)
-                                .tooltip(send_label)
+                                .accessibility_label(send_blocker.unwrap_or(send_label))
+                                .tooltip(send_blocker.unwrap_or(send_label))
                                 .loading(send_pending)
                                 .disabled(
                                     !self.provider_enabled()
@@ -3361,8 +3647,13 @@ impl Render for NativeAgentSessionView {
             || self.record.snapshot.status == NativeSessionStatus::Starting
             || is_busy(self.record.snapshot.status)
             || self.pending.contains("prompt");
-        self.load_models(window, cx);
-        self.load_history(window, cx);
+        // A subagent's view shows its transcript; the conversation's controls stay with the parent.
+        let conversation = self.subagent.is_none();
+        if conversation {
+            self.load_models(window, cx);
+            self.load_history(window, cx);
+            self.sync_placeholder(window, cx);
+        }
         self.sync_activity_tick(window, cx);
         if busy && window.is_visible() && self.moving(cx) {
             crate::motion::request_frame(cx.entity_id(), cx);
@@ -3376,7 +3667,7 @@ impl Render for NativeAgentSessionView {
             );
         self.speech
             .update(cx, |speech, cx| speech.set_enabled(enabled, cx));
-        let wide = self.wide;
+        let wide = self.wide && conversation;
         div()
             .id(gpui_kit::SharedString::from(self.record.id.clone()))
             .relative()
@@ -3386,17 +3677,21 @@ impl Render for NativeAgentSessionView {
             .min_h_0()
             .flex()
             .flex_col()
-            .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| style.bg(cx.theme().accent))
-            .on_drop(
-                cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
-                    cx.stop_propagation();
-                    for path in &paths.0 {
-                        this.attach_path(path.clone(), window, cx);
-                    }
-                }),
-            )
+            .when(conversation, |view| {
+                view.drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
+                    style.bg(cx.theme().accent)
+                })
+                .on_drop(
+                    cx.listener(|this, paths: &gpui_kit::ExternalPaths, window, cx| {
+                        cx.stop_propagation();
+                        for path in &paths.0 {
+                            this.attach_path(path.clone(), window, cx);
+                        }
+                    }),
+                )
+                .child(self.render_context_geometry(cx))
+            })
             .when(wide, |view| view.pr(gpui_kit::rems(20.)))
-            .child(self.render_context_geometry(cx))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
@@ -3431,13 +3726,15 @@ impl Render for NativeAgentSessionView {
             .when(busy || !self.subagents().is_empty(), |body| {
                 body.child(self.render_activity(busy, window, cx))
             })
-            .when(!wide, |body| {
-                body.child(self.render_related_conversations(cx).px_4())
+            .when(conversation, |body| {
+                body.when(!wide, |body| {
+                    body.child(self.render_related_conversations(cx).px_4())
+                })
+                .child(self.render_error_recovery(cx))
+                .child(self.render_composer(window, cx))
+                .child(self.render_selection_toolbar(window, cx))
+                .when(wide, |body| body.child(self.render_context_card(cx)))
             })
-            .child(self.render_error_recovery(cx))
-            .child(self.render_composer(window, cx))
-            .child(self.render_selection_toolbar(window, cx))
-            .when(wide, |body| body.child(self.render_context_card(cx)))
     }
 }
 
@@ -3516,6 +3813,26 @@ fn element_tooltip(
 
 /// Text from providers, commands, and lower layers, as people should read it. The view's own
 /// messages are already written for people and skip this.
+/// Runs the provider's own sign-in flow, the same one Settings offers.
+fn sign_in_button(provider: AgentKind) -> Button {
+    Button::new("conversation-sign-in")
+        .debug_selector(|| "conversation-sign-in".into())
+        .small()
+        .primary()
+        .label("Sign in")
+        .on_click(move |_, window, cx| {
+            window.dispatch_action(
+                Box::new(crate::gpui_actions::InvokeCommand::new(
+                    CommandInvocation::from_action(
+                        &format!("agents.{provider}.account.login"),
+                        Caller::Internal,
+                    ),
+                )),
+                cx,
+            );
+        })
+}
+
 fn diagnostic(text: impl AsRef<str>) -> String {
     crate::error_catalog::ErrorNotice::from_text(text.as_ref()).to_string()
 }
@@ -3526,7 +3843,7 @@ fn command_failure(operation: &str, outcome: &CommandOutcome) -> (String, String
         .unwrap_or_else(|| "Agent command failed".to_owned());
     let action = match operation {
         "history" => "Could not load conversation history",
-        "prompt" | "queue" => "Could not send the message",
+        "prompt" | "queue" | "interrupt-send" => "Could not send the message",
         "rename" => "Could not rename the conversation",
         "interrupt" => "Could not interrupt the agent",
         "fork" => "Could not start the side chat",
@@ -3649,11 +3966,20 @@ fn tool_label(name: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(match name {
         "commandExecution" | "Bash" | "bash" | "exec_command" => "Run",
         "Read" | "read" | "read_file" => "Read",
-        "fileChange" | "Edit" | "edit" | "Write" | "write" | "apply_patch" => "Edit",
-        "Grep" | "grep" | "Glob" | "glob" | "search" | "web_search" | "webSearch" => "Search",
+        "fileChange" | "Edit" | "edit" | "MultiEdit" | "Write" | "write" | "apply_patch" => "Edit",
+        "NotebookEdit" => "Edit notebook",
+        "Grep" | "grep" | "Glob" | "glob" | "search" | "web_search" | "webSearch" | "WebSearch" => {
+            "Search"
+        }
+        "WebFetch" | "web_fetch" => "Fetch",
+        "Task" | "Agent" => "Run agent",
+        "TodoWrite" => "Update tasks",
+        "Skill" => "Use skill",
+        "ExitPlanMode" => "Propose plan",
+        "KillShell" | "KillBash" => "Stop command",
         "imageView" => "View image",
         "codemode" | "code_mode" => "Run code",
-        "write_stdin" => "Read command output",
+        "write_stdin" | "BashOutput" => "Read command output",
         "terminal_read" => "Read terminal",
         "list_terminals" => "List terminals",
         "get_workspace_info" => "Read Space",
@@ -3684,6 +4010,37 @@ fn tool_label(name: &str) -> std::borrow::Cow<'_, str> {
     })
 }
 
+/// A completed tool reads "Ran" rather than "Run"; labels without a known verb stay as they are.
+fn past_tense(label: &str) -> String {
+    let (verb, rest) = label.split_once(' ').unwrap_or((label, ""));
+    let past = match verb {
+        "Run" => "Ran",
+        "Read" => "Read",
+        "Edit" => "Edited",
+        "Search" => "Searched",
+        "Fetch" => "Fetched",
+        "Update" => "Updated",
+        "Use" => "Used",
+        "Propose" => "Proposed",
+        "Stop" => "Stopped",
+        "View" => "Viewed",
+        "List" => "Listed",
+        "Inspect" => "Inspected",
+        "Capture" => "Captured",
+        "Start" => "Started",
+        "Paste" => "Pasted",
+        "Submit" => "Submitted",
+        "Interrupt" => "Interrupted",
+        "Close" => "Closed",
+        _ => return label.to_owned(),
+    };
+    if rest.is_empty() {
+        past.to_owned()
+    } else {
+        format!("{past} {rest}")
+    }
+}
+
 const fn tool_status_label(status: bootty_agents::NativeToolStatus) -> &'static str {
     match status {
         bootty_agents::NativeToolStatus::Running => "Running",
@@ -3698,36 +4055,32 @@ fn tool_input_summary(
     tool: &bootty_agents::NativeToolCall,
 ) -> (gpui_kit::assets::IconName, String) {
     let input = serde_json::from_str::<Value>(&tool.input).ok();
-    let command = input.as_ref().and_then(|input| {
+    let text = |keys: &[&str]| {
+        input.as_ref().and_then(|input| {
+            keys.iter()
+                .find_map(|key| input.get(*key).and_then(Value::as_str))
+        })
+    };
+    let command = text(&["command", "cmd"]);
+    let path = text(&["file_path", "filePath", "notebook_path", "path"]).or_else(|| {
         input
-            .get("command")
-            .or_else(|| input.get("cmd"))
+            .as_ref()
+            .and_then(Value::as_array)
+            .and_then(|changes| changes.first())
+            .and_then(|change| change.get("path"))
             .and_then(Value::as_str)
     });
-    let path = input.as_ref().and_then(|input| {
-        input
-            .get("file_path")
-            .or_else(|| input.get("filePath"))
-            .or_else(|| input.get("path"))
-            .or_else(|| {
-                input
-                    .as_array()
-                    .and_then(|changes| changes.first())
-                    .and_then(|change| change.get("path"))
-            })
-            .and_then(Value::as_str)
-    });
-    let query = input.as_ref().and_then(|input| {
-        input
-            .get("pattern")
-            .or_else(|| input.get("query"))
-            .and_then(Value::as_str)
-            .or_else(|| input.get("url").and_then(Value::as_str))
-    });
-    let code = input
+    let query = text(&["pattern", "query"]);
+    let url = text(&["url"]);
+    let code = text(&["code"]);
+    let todos = input
         .as_ref()
-        .and_then(|input| input.get("code"))
-        .and_then(Value::as_str);
+        .and_then(|input| input.get("todos"))
+        .and_then(Value::as_array)
+        .map(|todos| todo_summary(todos));
+    // A task's description and a plan's opening line name the work better than its fields.
+    let detail =
+        text(&["description", "skill", "plan"]).map(|detail| detail.trim_start_matches(['#', ' ']));
     let (_, name) = tool_parts(&tool.name);
     let icon = if command.is_some()
         || matches!(
@@ -3736,6 +4089,9 @@ fn tool_input_summary(
                 | "Bash"
                 | "bash"
                 | "exec_command"
+                | "BashOutput"
+                | "KillShell"
+                | "KillBash"
                 | "terminal_read"
                 | "list_terminals"
                 | "spawn_shell"
@@ -3748,11 +4104,13 @@ fn tool_input_summary(
         gpui_kit::assets::IconName::SquareTerminal
     } else if matches!(name, "computer_snapshot" | "computer_input") {
         gpui_kit::assets::IconName::Monitor
-    } else if name == "browser_snapshot" {
+    } else if name == "browser_snapshot" || url.is_some() {
         gpui_kit::assets::IconName::Globe
     } else if matches!(
         name,
-        "spawn_agent"
+        "Task"
+            | "Agent"
+            | "spawn_agent"
             | "list_agents"
             | "get_agent_status"
             | "get_agent_activity"
@@ -3760,6 +4118,8 @@ fn tool_input_summary(
             | "stop_spawned_agent"
     ) {
         gpui_kit::assets::IconName::Bot
+    } else if todos.is_some() || name == "ExitPlanMode" {
+        gpui_kit::assets::IconName::List
     } else if code.is_some() {
         gpui_kit::assets::IconName::SquareCode
     } else if query.is_some() {
@@ -3772,8 +4132,11 @@ fn tool_input_summary(
     // A search's pattern says more than the directory it ran in.
     let summary = command
         .or(query)
+        .or(url)
         .or(path)
         .or(code)
+        .or(detail)
+        .or(todos.as_deref())
         .unwrap_or_else(|| if input.is_some() { "" } else { &tool.input })
         .lines()
         .find(|line| !line.trim().is_empty())
@@ -3781,6 +4144,31 @@ fn tool_input_summary(
         .trim()
         .to_owned();
     (icon, summary)
+}
+
+/// The task in progress, or how far the list has come.
+fn todo_summary(todos: &[Value]) -> String {
+    fn status(todo: &Value) -> Option<&str> {
+        todo.get("status").and_then(Value::as_str)
+    }
+    todos
+        .iter()
+        .find(|todo| status(todo) == Some("in_progress"))
+        .and_then(|todo| {
+            todo.get("activeForm")
+                .or_else(|| todo.get("content"))
+                .and_then(Value::as_str)
+        })
+        .map_or_else(
+            || {
+                let done = todos
+                    .iter()
+                    .filter(|todo| status(todo) == Some("completed"))
+                    .count();
+                format!("{done} of {} done", todos.len())
+            },
+            str::to_owned,
+        )
 }
 
 fn transcript_markdown(item: &NativeTranscriptItem) -> String {
@@ -3933,20 +4321,58 @@ fn parse_tool_diffs(
         .collect()
 }
 
+/// A tool's input as a reader wants it: a command as shell, a prompt or plan as prose, a task
+/// list as a list. Anything else stays JSON.
 fn tool_input_markdown(tool: &bootty_agents::NativeToolCall) -> String {
+    let Ok(Value::Object(input)) = serde_json::from_str::<Value>(&tool.input) else {
+        // Codex reports a command as its plain shell line.
+        let language = if tool.name == "commandExecution" {
+            "sh"
+        } else {
+            ""
+        };
+        return code_block(&tool.input, language);
+    };
+    let text = |key: &str| input.get(key).and_then(Value::as_str);
     if matches!(tool.name.as_str(), "codemode" | "code_mode")
-        && let Ok(Value::Object(input)) = serde_json::from_str::<Value>(&tool.input)
         && input.len() == 1
-        && let Some(code) = input.get("code").and_then(Value::as_str)
+        && let Some(code) = text("code")
     {
         return code_block(code, "javascript");
     }
-    let input = serde_json::from_str::<Value>(&tool.input)
-        .ok()
-        .and_then(|input| serde_json::to_string_pretty(&input).ok());
+    if let Some(command) = text("command").or_else(|| text("cmd")) {
+        let block = code_block(command, "sh");
+        return match text("description") {
+            Some(description) => format!("{description}\n\n{block}"),
+            None => block,
+        };
+    }
+    let prose = match tool_parts(&tool.name).1 {
+        "Task" | "Agent" => text("prompt"),
+        "ExitPlanMode" => text("plan"),
+        _ => None,
+    };
+    if let Some(prose) = prose {
+        return prose.to_owned();
+    }
+    if let Some(todos) = input.get("todos").and_then(Value::as_array) {
+        return todos
+            .iter()
+            .filter_map(|todo| {
+                let content = todo.get("content").and_then(Value::as_str)?;
+                let mark = match todo.get("status").and_then(Value::as_str) {
+                    Some("completed") => "✓",
+                    Some("in_progress") => "→",
+                    _ => "○",
+                };
+                Some(format!("- {mark} {content}"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
     code_block(
-        input.as_deref().unwrap_or(&tool.input),
-        if input.is_some() { "json" } else { "" },
+        &serde_json::to_string_pretty(&input).unwrap_or_else(|_| tool.input.clone()),
+        "json",
     )
 }
 

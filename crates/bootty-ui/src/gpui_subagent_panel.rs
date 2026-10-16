@@ -1,8 +1,8 @@
-//! Read-only child conversation tabs; the provider retains the child writer.
+//! A provider subagent's conversation in its own tab, drawn the way its parent's is. The
+//! provider keeps the subagent's writer; the tab reads it through the parent.
 use crate::gpui_agent_session::NativeAgentSessionView;
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _,
     dock::{BasePanel, Panel, PanelEvent, PanelInfo, PanelState},
 };
 use gpui_kit::prelude::*;
@@ -25,6 +25,10 @@ pub struct SubagentPanel {
     active: bool,
     tick: Option<Task<()>>,
     observe: Option<Subscription>,
+    /// The subagent's conversation, drawn by the conversation view.
+    view: Option<Entity<NativeAgentSessionView>>,
+    /// The child's status when this tab last read it.
+    read_status: Option<bootty_agents::NativeToolStatus>,
 }
 
 impl SubagentPanel {
@@ -68,6 +72,8 @@ impl SubagentPanel {
             active: false,
             tick: None,
             observe: None,
+            view: None,
+            read_status: None,
         }
     }
 
@@ -109,12 +115,21 @@ impl SubagentPanel {
         cx.notify();
     }
 
-    fn refresh(&self, window: &Window, cx: &mut Context<Self>) {
+    fn refresh(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.read_status = self.status(cx);
         if let Some(parent) = &self.parent {
             parent.update(cx, |parent, cx| {
                 parent.refresh_subagent(&self.id, window, cx);
             });
         }
+    }
+
+    /// The child's status as its parent last reported it.
+    fn status(&self, cx: &App) -> Option<bootty_agents::NativeToolStatus> {
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.read(cx).subagent(&self.id))
+            .map(|agent| agent.status)
     }
 }
 impl EventEmitter<PanelEvent> for SubagentPanel {}
@@ -147,9 +162,15 @@ impl BasePanel for SubagentPanel {
                         if !this.active {
                             return false;
                         }
-                        // Read-only provider threads have no subscription. Keep following
-                        // the displayed child, including later turns after it becomes idle.
-                        this.refresh(window, cx);
+                        // Read-only provider threads have no subscription. Follow the child while
+                        // it runs, and read once more when its parent reports it settled or
+                        // started a later turn.
+                        let status = this.status(cx);
+                        if status == Some(bootty_agents::NativeToolStatus::Running)
+                            || status != this.read_status
+                        {
+                            this.refresh(window, cx);
+                        }
                         true
                     })
                     .unwrap_or(false);
@@ -208,7 +229,31 @@ impl Render for SubagentPanel {
                 .child("Open the parent conversation from Sessions to reconnect this tab.")
                 .into_any_element();
         };
-        let source = parent.clone();
+        let Some(record) = parent.read(cx).subagent_record(&self.id) else {
+            return div()
+                .size_full()
+                .p_4()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("This subagent is no longer in its parent conversation.")
+                .into_any_element();
+        };
+        let pending = parent.read(cx).subagent_pending(&self.id);
+        if let Some(view) = &self.view {
+            if !view.read(cx).shows(&record) {
+                let view = view.clone();
+                cx.defer_in(window, move |_, window, cx| {
+                    view.update(cx, |view, cx| view.show_subagent(record, window, cx));
+                });
+            }
+        } else {
+            let sender = parent.read(cx).command_sender();
+            let id = self.id.clone();
+            self.view =
+                Some(cx.new(|cx| {
+                    NativeAgentSessionView::new_subagent(record, sender, id, window, cx)
+                }));
+        }
         div()
             .id("subagent-conversation-tab")
             .size_full()
@@ -216,52 +261,17 @@ impl Render for SubagentPanel {
             .flex()
             .flex_col()
             .bg(cx.theme().background)
-            .child(
-                div()
-                    .p_3()
-                    .flex()
-                    .justify_between()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Subagent · read-only"),
-                    )
-                    .child(
-                        Button::new("subagent-refresh")
-                            .ghost()
-                            .small()
-                            .label("Refresh")
-                            .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
-                    )
-                    .child(
-                        Button::new("subagent-parent")
-                            .ghost()
-                            .small()
-                            .label("Open parent")
-                            .on_click(move |_, _, cx| {
-                                parent.update(cx, |parent, cx| parent.open_parent(cx));
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .id("subagent-conversation-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .p_4()
-                    .child(
-                        div()
-                            .max_w(gpui_kit::rems(48.))
-                            .mx_auto()
-                            .child(source.read(cx).render_subagent_conversation(&self.id, cx)),
-                    ),
-            )
+            .when_some(pending, |tab, pending| {
+                tab.child(
+                    div()
+                        .debug_selector(|| "subagent-pending".into())
+                        .p_4()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(crate::error_catalog::ErrorNotice::from_text(&pending).to_string()),
+                )
+            })
+            .children(self.view.clone())
             .into_any_element()
     }
 }

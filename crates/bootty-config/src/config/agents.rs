@@ -101,6 +101,8 @@ pub enum FollowUpBehavior {
     #[default]
     Queue,
     Steer,
+    /// Stop the running turn and send the message next.
+    Interrupt,
 }
 
 impl FollowUpBehavior {
@@ -109,13 +111,15 @@ impl FollowUpBehavior {
         match self {
             Self::Queue => "queue",
             Self::Steer => "steer",
+            Self::Interrupt => "interrupt",
         }
     }
+    /// The one-message alternative the send shortcut's other modifier gives.
     #[must_use]
     pub const fn opposite(self) -> Self {
         match self {
             Self::Queue => Self::Steer,
-            Self::Steer => Self::Queue,
+            Self::Steer | Self::Interrupt => Self::Queue,
         }
     }
 }

@@ -64,6 +64,13 @@ impl AppState {
                         bootty_control::Caller::Internal,
                     ));
             }
+            KeybindAction::InterruptAgent => {
+                self.commands
+                    .queue(bootty_control::CommandInvocation::from_action(
+                        "interrupt_agent",
+                        bootty_control::Caller::Internal,
+                    ));
+            }
             KeybindAction::Mux(action) => {
                 self.apply_mux_key_action(action);
                 effects.push(AppEffect::RequestRepaint);

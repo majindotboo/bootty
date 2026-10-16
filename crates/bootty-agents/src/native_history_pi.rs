@@ -56,7 +56,20 @@ impl NativeAgentSession {
         ) {
             return Err("Resume Pi before reading earlier history".into());
         }
-        let mut reader = open_history(&self.config, current)?;
+        // Pi writes its session file with the conversation's first entry; until then it has none.
+        let Some(mut reader) = open_history(&self.config, current)? else {
+            let position = HistoryPosition {
+                at_latest: true,
+                ..HistoryPosition::default()
+            };
+            let page = NativeHistoryPage {
+                transcript: Vec::new(),
+                has_older: false,
+                has_newer: false,
+                at_latest: true,
+            };
+            return Ok((position, page));
+        };
         let size = reader.get_ref().len();
         if size > MAX_FILE_BYTES {
             return Err("Pi history exceeds the bounded regular-file reader".into());
@@ -131,10 +144,11 @@ impl NativeAgentSession {
     }
 }
 
+/// The conversation's session file, or `None` while Pi hasn't written it.
 fn open_history(
     config: &crate::NativeSessionConfig,
     snapshot: &NativeSessionSnapshot,
-) -> Result<BufReader<FileReader>, String> {
+) -> Result<Option<BufReader<FileReader>>, String> {
     let account = Path::new(
         config
             .account_directory
@@ -169,11 +183,13 @@ fn open_history(
             |remote| request.execute_remote(remote, SystemCommandRunner),
         )
         .map_err(|error| error.to_string())?;
-    let FileResponse::Source(descriptor) = response else {
-        return Err("Pi history requires its captured file descriptor".into());
+    let descriptor = match response {
+        FileResponse::Source(descriptor) => descriptor,
+        FileResponse::Missing => return Ok(None),
+        _ => return Err("Pi history requires its captured file descriptor".into()),
     };
-    FileReader::open(&descriptor, remote.as_ref())
-        .map(BufReader::new)
+    FileReader::open_log(&descriptor, remote.as_ref())
+        .map(|reader| Some(BufReader::new(reader)))
         .map_err(|error| error.to_string())
 }
 
@@ -211,6 +227,10 @@ fn read_index(
     session_id: &str,
 ) -> Result<Vec<IndexedEntry>, String> {
     let header = read_line(reader)?;
+    // Pi hasn't finished writing its session header, so there is no history yet.
+    if header.is_empty() {
+        return Ok(Vec::new());
+    }
     let header: Entry = serde_json::from_slice(&header).map_err(|error| error.to_string())?;
     if header.kind != "session" || header.version != Some(3) || header.id != session_id {
         return Err("Pi history does not match the captured version-3 session".into());
@@ -323,10 +343,13 @@ pub fn read_line(reader: &mut impl BufRead) -> Result<Vec<u8>, String> {
         .take(MAX_LINE_BYTES + 1)
         .read_until(b'\n', &mut bytes)
         .map_err(|error| error.to_string())?;
-    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_LINE_BYTES
-        || !bytes.is_empty() && bytes.last() != Some(&b'\n')
-    {
-        return Err("Provider history contains an oversized or incomplete record".into());
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_LINE_BYTES {
+        return Err("Provider history contains an oversized record".into());
+    }
+    // The log is read at the length it had when it opened. A last record without its newline is
+    // one the agent is still writing, so the log ends before it.
+    if bytes.last() != Some(&b'\n') {
+        bytes.clear();
     }
     Ok(bytes)
 }

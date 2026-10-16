@@ -437,6 +437,14 @@ impl ComposerCompletion {
             .then_some(crate::composer_commands::ComposerCommand::ALL)
             .into_iter()
             .flatten()
+            // Only a provider with plan mode offers /plan.
+            .filter(|command| {
+                *command != crate::composer_commands::ComposerCommand::Plan
+                    || self
+                        .catalog
+                        .as_ref()
+                        .is_some_and(|catalog| catalog.plan_mode)
+            })
             .map(|command| CompletionItem {
                 label: format!("/{}", command.label(|name| self.provider_command(name))),
                 detail: command.description().to_owned(),

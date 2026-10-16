@@ -2079,6 +2079,179 @@ fn work_folds_summarize_what_their_tools_did(cx: &mut TestAppContext) {
     }
 }
 
+/// Each tool row names what it did in plain words and keeps the imperative for a failed step.
+#[gpui_kit::test]
+fn tool_rows_name_what_each_tool_did(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Check the docs", "complete": true},
+        {"id": "fetch", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "WebFetch", "input": "{\"url\":\"https://example.com/guide\",\"prompt\":\"Summarize\"}",
+                  "status": "completed"}},
+        {"id": "agent", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Task", "input": "{\"description\":\"Audit the parser\",\"prompt\":\"Read src/parse.rs\"}",
+                  "status": "completed"}},
+        {"id": "todos", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "TodoWrite", "status": "completed", "input": serde_json::json!({"todos": [
+             {"content": "Read docs", "status": "completed", "activeForm": "Reading docs"},
+             {"content": "Write tests", "status": "in_progress", "activeForm": "Writing tests"}
+         ]}).to_string()}},
+        {"id": "plan", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "ExitPlanMode", "input": "{\"plan\":\"# Ship the guide\\n\\n1. Write it\"}",
+                  "status": "completed"}},
+        {"id": "test", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cargo test\"}", "status": "failed"}},
+        {"id": "reply", "role": "assistant", "text": "Done.", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(1600.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let fold = visual
+        .debug_bounds("native-work-summary:Ran 1 command, used 4 tools, 1 failed")
+        .expect("work fold");
+    visual.simulate_click(fold.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    for title in [
+        "native-tool-title:fetch:Fetched https://example.com/guide",
+        "native-tool-title:agent:Ran agent Audit the parser",
+        "native-tool-title:todos:Updated tasks Writing tests",
+        "native-tool-title:plan:Proposed plan Ship the guide",
+        "native-tool-title:test:Run cargo test",
+    ] {
+        assert!(visual.debug_bounds(title).is_some(), "row reads {title}");
+    }
+}
+
+/// Opening a Work row lists each thought as one line; its text shows only once opened.
+#[gpui_kit::test]
+fn thoughts_in_work_rows_open_one_at_a_time(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Fix it", "complete": true},
+        {"id": "think", "role": "reasoning", "complete": true,
+         "text": "**Planning the fix**\n\nRead the parser first, then the tests."},
+        {"id": "check", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Bash", "input": "{\"command\":\"cargo check\"}", "status": "completed"}},
+        {"id": "reply", "role": "assistant", "text": "Fixed.", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(1600.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let fold = visual
+        .debug_bounds("native-work-summary:Ran 1 command")
+        .expect("work fold");
+    visual.simulate_click(fold.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("native-thinking-title:think:Thought Planning the fix")
+            .is_some()
+    );
+    assert!(visual.debug_bounds("thinking-scroll:think").is_none());
+    let toggle = visual
+        .debug_bounds("thinking-disclosure:think")
+        .expect("thought toggle");
+    visual.simulate_click(toggle.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("thinking-scroll:think").is_some());
+}
+
+/// The context card's Sources lists the files messages carry; images already show in their
+/// messages, so a conversation with only images has no Sources section.
+#[gpui_kit::test]
+fn context_sources_list_files_but_not_images(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let attachment = |id: &str, kind: &str, name: &str| {
+        serde_json::json!({"id": id, "kind": kind, "name": name, "mime_type": "image/png",
+            "size_bytes": 10})
+    };
+    for (attachments, file_shown) in [
+        (
+            vec![
+                attachment("shot", "image", "shot.png"),
+                attachment("notes", "file", "notes.md"),
+            ],
+            true,
+        ),
+        (vec![attachment("shot", "image", "shot.png")], false),
+    ] {
+        let mut record = saved_record("idle");
+        record.attachments = serde_json::from_value(serde_json::json!(attachments)).unwrap();
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+            {"id": "prompt", "role": "user", "text": "Look", "complete": true,
+             "attachments": attachments}
+        ]))
+        .unwrap();
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        visual.simulate_resize(size(px(1600.), px(900.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            visual.debug_bounds("native-context-sources").is_some(),
+            file_shown
+        );
+        assert_eq!(
+            visual.debug_bounds("context-source:notes").is_some(),
+            file_shown
+        );
+        assert!(visual.debug_bounds("context-source:shot").is_none());
+    }
+}
+
 /// Pasting more images than one prompt carries stops at the limit instead of failing at send.
 #[gpui_kit::test]
 fn pasted_images_stop_at_the_prompt_image_limit(cx: &mut TestAppContext) {
@@ -2327,8 +2500,13 @@ fn undelivered_messages_offer_to_resend_their_text(cx: &mut TestAppContext) {
         init_theme(UiPalette::default(), cx);
     });
     let mut record = saved_record("idle");
+    // The attachment the conversation still holds goes back with the text.
+    let notes = serde_json::json!({"id": "notes", "kind": "file", "name": "notes.txt",
+        "mime_type": "text/plain", "size_bytes": 12, "prompt_ranges": [[13, 24]]});
+    record.attachments = vec![serde_json::from_value(notes.clone()).unwrap()];
     record.snapshot.transcript = serde_json::from_value(serde_json::json!([
-        {"id": "lost", "role": "user", "text": "Lost message", "complete": false}
+        {"id": "lost", "role": "user", "text": "Lost message [notes.txt]", "complete": false,
+            "attachments": [notes]}
     ]))
     .unwrap();
     let (sender, commands) = native_command_sender(&record);
@@ -2351,16 +2529,214 @@ fn undelivered_messages_offer_to_resend_their_text(cx: &mut TestAppContext) {
     visual.simulate_click(resend.center(), Modifiers::none());
     visual.simulate_keystrokes("enter");
     visual.run_until_parked();
+    let prompt = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|invocation| invocation.command == "agents.native.prompt")
+        .map(|invocation| invocation.arguments.join("\n"))
+        .expect("the restored message is sent again");
+    assert!(prompt.contains("Lost message"), "{prompt}");
     assert!(
-        commands.lock().unwrap().iter().any(|invocation| {
-            invocation.command == "agents.native.prompt"
-                && invocation
-                    .arguments
-                    .iter()
-                    .any(|argument| argument == "Lost message")
-        }),
-        "the restored text is sent again"
+        prompt.contains("\"notes\""),
+        "the held attachment goes too: {prompt}"
     );
+}
+
+/// Up in an empty composer brings back sent messages, newest first, and Down goes forward.
+#[gpui_kit::test]
+fn arrow_keys_recall_sent_messages(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "one", "role": "user", "text": "First idea", "complete": true},
+        {"id": "reply", "role": "assistant", "text": "Done.", "complete": true},
+        {"id": "two", "role": "user", "text": "Second idea", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let composer = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(composer.center(), Modifiers::none());
+    // Up past the oldest message stays on it.
+    visual.simulate_keystrokes("up up up down enter");
+    visual.run_until_parked();
+    let sent = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|invocation| invocation.command == "agents.native.prompt")
+        .map(|invocation| invocation.arguments.join("\n"))
+        .collect::<Vec<_>>();
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].contains("Second idea"), "{sent:?}");
+}
+
+/// Whether Escape in the composer of a conversation in `status` interrupts it.
+fn escape_interrupts(status: &str, cx: &mut TestAppContext) -> bool {
+    let record = saved_record(status);
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let composer = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    commands
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|invocation| invocation.command == "agents.native.interrupt")
+}
+
+/// Escape in the composer interrupts a running turn and leaves an idle conversation alone.
+#[gpui_kit::test]
+fn escape_interrupts_only_a_running_turn(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    assert!(escape_interrupts("working", cx));
+    assert!(!escape_interrupts("idle", cx));
+}
+
+/// `/plan` turns plan mode on, waiting for the model catalog when it hasn't loaded yet instead
+/// of doing nothing.
+#[gpui_kit::test]
+fn plan_command_waits_for_models_and_turns_plan_mode_on(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.config = NativeSessionConfig::new(AgentKind::Claude, "/tmp/project");
+    record.snapshot.provider = AgentKind::Claude;
+    let mailbox = std::sync::Arc::new(std::sync::Mutex::new(
+        None::<bootty_control::AppCommandReceiver>,
+    ));
+    let inbox = mailbox.clone();
+    let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = calls.clone();
+    let (sender, receiver) = bootty_control::app_command_channel(
+        16,
+        std::sync::Arc::new(move || {
+            loop {
+                let next = {
+                    let inbox = inbox.lock().unwrap();
+                    inbox.as_ref().unwrap().try_recv()
+                };
+                let Ok(request) = next else {
+                    break;
+                };
+                let value = if request.invocation.command == "agents.native.models-info" {
+                    serde_json::json!({"models":[{"id":"opus","display_name":"Opus",
+                        "reasoning_efforts":[],"default_reasoning_effort":null,
+                        "is_default":true}],"permissions":null})
+                } else {
+                    serde_json::json!([])
+                };
+                captured.lock().unwrap().push(request.invocation.clone());
+                request
+                    .response
+                    .send(bootty_control::CommandOutcome::Success {
+                        value,
+                        warnings: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }),
+    );
+    *mailbox.lock().unwrap() = Some(receiver);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let composer = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("/plan");
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    let configured = calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|invocation| invocation.command == "agents.native.configure")
+        .filter_map(|invocation| invocation.arguments.last())
+        .filter_map(|selection| serde_json::from_str::<serde_json::Value>(selection).ok())
+        .map(|selection| selection["plan_mode"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(configured, [serde_json::json!(true)]);
+}
+
+/// Whether a conversation that failed with `error` offers to sign in.
+fn offers_sign_in(error: &str, cx: &mut TestAppContext) -> bool {
+    let mut record = saved_record("error");
+    record.snapshot.error = Some(error.to_owned());
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.debug_bounds("conversation-sign-in").is_some()
+}
+
+/// A provider that needs signing in offers its sign-in flow; another failure doesn't.
+#[gpui_kit::test]
+fn sign_in_failures_offer_to_sign_in(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    assert!(offers_sign_in("Not logged in · Please run /login", cx));
+    assert!(!offers_sign_in("stream disconnected before completion", cx));
 }
 
 /// A proposed plan shows its steps above the composer, and Implement carries it out.
@@ -2813,8 +3189,10 @@ fn verify_queue_drawer_geometry(visual: &mut gpui_kit::VisualTestContext) {
     }
 }
 
+/// A subagent's tab draws its conversation with the conversation view's own rows, follows it
+/// while it runs, rests while hidden, and stops once the subagent settles.
 #[gpui_kit::test]
-fn child_tabs_load_and_follow_provider_updates_until_hidden_or_closed(cx: &mut TestAppContext) {
+fn child_tabs_draw_the_conversation_and_follow_it_while_running(cx: &mut TestAppContext) {
     use bootty_ui::SubagentPanel;
     use gpui_kit::AppContext as _;
     use gpui_kit::component::dock::{DockArea, DockLayout, DockSkin, PanelId, panel_handle};
@@ -2824,7 +3202,8 @@ fn child_tabs_load_and_follow_provider_updates_until_hidden_or_closed(cx: &mut T
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
     });
-    let (record, reply) = subagent_record_and_reply();
+    let (record, mut reply) = subagent_record_and_reply();
+    reply["agent"]["status"] = serde_json::json!("running");
     let reply = Arc::new(Mutex::new(reply));
     let (sender, reads) = subagent_command_sender(reply.clone());
     let mut panels = None;
@@ -2854,65 +3233,71 @@ fn child_tabs_load_and_follow_provider_updates_until_hidden_or_closed(cx: &mut T
                 cx,
             );
         });
-        panels = Some((parent, child, other, area.clone()));
+        panels = Some((child, other, area.clone()));
         gpui_kit::component::Root::new(area, window, cx)
     });
-    let (_parent, child, other, area) = panels.unwrap();
+    let (child, other, area) = panels.unwrap();
+    visual.simulate_resize(size(px(900.), px(900.)));
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(
         !reads.lock().unwrap().is_empty(),
-        "opening the child loads it without Refresh"
+        "opening the tab reads it"
     );
     assert!(
-        visual
-            .debug_bounds("subagent-message:audit-answer")
-            .is_some()
+        visual.debug_bounds("native-message-audit-answer").is_some(),
+        "the reply is a conversation row"
     );
+    assert!(visual.debug_bounds("native-working").is_some());
     assert!(
-        visual.debug_bounds("subagent-status:Completed").is_some(),
-        "the read reply replaces stale Working status"
+        visual.debug_bounds("native-composer").is_none(),
+        "a subagent's tab has no composer"
     );
-    reply.lock().unwrap()["agent"]["status"] = serde_json::json!("running");
     let before = reads.lock().unwrap().len();
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_secs(2));
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
+    wait(visual, 2);
     assert!(
         reads.lock().unwrap().len() > before,
-        "an idle child remains followed for later turns"
+        "a running subagent is followed"
     );
-    assert!(visual.debug_bounds("subagent-status:Running").is_some());
 
-    visual.update(|window, cx| {
-        area.update(cx, |area, cx| {
-            area.select_panel(PanelId::from(other.entity_id()), window, cx);
+    let select = |panel: PanelId, visual: &mut gpui_kit::VisualTestContext| {
+        visual.update(|window, cx| {
+            area.update(cx, |area, cx| area.select_panel(panel, window, cx));
         });
-    });
-    visual.run_until_parked();
-    let before = reads.lock().unwrap().len();
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_secs(4));
-    visual.run_until_parked();
+        visual.run_until_parked();
+    };
+    select(PanelId::from(other.entity_id()), visual);
+    let hidden = reads.lock().unwrap().len();
+    wait(visual, 4);
+    assert_eq!(reads.lock().unwrap().len(), hidden, "a hidden tab rests");
+    select(PanelId::from(child.entity_id()), visual);
+    assert!(
+        reads.lock().unwrap().len() > hidden,
+        "showing it reads again"
+    );
+
+    // Once the subagent settles, the tab reads it once more and then rests.
+    reply.lock().unwrap()["agent"]["status"] = serde_json::json!("completed");
+    wait(visual, 2);
+    wait(visual, 2);
+    let settled = reads.lock().unwrap().len();
+    wait(visual, 6);
     assert_eq!(
         reads.lock().unwrap().len(),
-        before,
-        "hidden children stop polling"
+        settled,
+        "a finished subagent rests"
     );
-    visual.update(|window, cx| area.update(cx, |area, cx| area.remove_panel(child, window, cx)));
-    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds("native-working").is_none());
+    assert!(visual.debug_bounds("native-message-audit-answer").is_some());
+}
+
+/// Lets `seconds` of the test clock pass and settles the window.
+fn wait(visual: &gpui_kit::VisualTestContext, seconds: u64) {
     visual
         .executor()
-        .advance_clock(std::time::Duration::from_secs(4));
+        .advance_clock(std::time::Duration::from_secs(seconds));
     visual.run_until_parked();
-    assert_eq!(
-        reads.lock().unwrap().len(),
-        before,
-        "closed children stop polling"
-    );
 }
 
 fn subagent_command_sender(

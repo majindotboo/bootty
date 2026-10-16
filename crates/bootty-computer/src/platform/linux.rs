@@ -1,6 +1,9 @@
 //! Linux on X11, including `XWayland` apps in a Wayland session: EWMH window lists, `GetImage`
 //! capture and `XTest` input. `XTest` drives the real pointer, so input needs the window in front.
 //!
+//! Deliberate limit: `SendEvent` reaches background windows, but marks events as synthetic and
+//! many toolkits ignore them. Address input to the window that way if those toolkits accept it.
+//!
 //! Deliberate limit: native Wayland windows are not listed, because Wayland exposes no window
 //! list or input injection to other clients. Support them through the desktop portals'
 //! `ScreenCast` and `RemoteDesktop` sessions when users need it.
@@ -23,7 +26,7 @@ use x11rb::{
 use crate::{
     ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier, MouseButton,
     PermissionStatus,
-    desktop::{Desktop, Focus, Image, InputEvent, NativeWindow, pixel_count},
+    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count},
 };
 
 // About 40 pixels of scrolling is one wheel click.
@@ -90,16 +93,21 @@ impl Desktop for X11Desktop {
         .unwrap_or_default()
     }
 
-    fn focus(&self) -> Option<Focus> {
+    fn route(&self) -> InputRoute {
+        InputRoute::Shared
+    }
+
+    fn frontmost(&self) -> Option<i32> {
+        self.with(|display| display.active().map(|(owner, _)| owner))
+    }
+
+    /// Keys go to the active window, so a process in the background receives none.
+    fn focus(&self, process_id: i32) -> Option<DisplayBounds> {
         self.with(|display| {
-            let window = *display
-                .cardinals(display.root, "_NET_ACTIVE_WINDOW")?
-                .first()?;
-            Some(Focus {
-                process_id: i32::try_from(*display.cardinals(window, "_NET_WM_PID")?.first()?)
-                    .ok()?,
-                window: display.bounds(window),
-            })
+            let (owner, window) = display.active()?;
+            (owner == process_id)
+                .then(|| display.bounds(window))
+                .flatten()
         })
     }
 
@@ -235,6 +243,13 @@ impl Display {
         let instance = parts.next();
         let class = parts.next().or(instance)?;
         Some(String::from_utf8_lossy(class).into_owned())
+    }
+
+    /// The active window and its process.
+    fn active(&self) -> Option<(i32, Window)> {
+        let window = *self.cardinals(self.root, "_NET_ACTIVE_WINDOW")?.first()?;
+        let owner = i32::try_from(*self.cardinals(window, "_NET_WM_PID")?.first()?).ok()?;
+        Some((owner, window))
     }
 
     fn bounds(&self, window: Window) -> Option<DisplayBounds> {

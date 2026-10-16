@@ -595,9 +595,12 @@ impl AppState {
             .unwrap_or_default();
         let (deadline, cancellation) = executor::command_execution(execution);
         let repaint = self.repaint.clone();
-        let activity = matches!(operation, "prompt" | "queue" | "queue-steer" | "implement")
-            .then(|| self.native_activity_invocation(&service, target))
-            .flatten();
+        let activity = matches!(
+            operation,
+            "prompt" | "queue" | "interrupt-send" | "queue-steer" | "implement"
+        )
+        .then(|| self.native_activity_invocation(&service, target))
+        .flatten();
         let commands = self.commands.sender.clone();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
@@ -915,6 +918,60 @@ impl AppState {
                 result,
             }),
         })
+    }
+
+    /// Interrupts the conversation shown in `pane`, the pane the command was issued for, the same
+    /// way `agents.native.interrupt` does.
+    pub(super) fn interrupt_pane_conversation(
+        &mut self,
+        pane: Option<&ExactMuxTarget>,
+        caller: Caller,
+        effects: &mut Vec<AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let record = self.native_agent_service().and_then(|service| {
+            service.sessions().into_iter().find(|record| {
+                self.native_panel_target(record)
+                    .is_some_and(|(exact, _)| Some(&exact) == pane)
+            })
+        });
+        let Some(record) = record else {
+            return CommandDispatch::Complete(CommandOutcome::Failed {
+                code: "no_conversation".to_owned(),
+                message: "The focused pane holds no conversation".to_owned(),
+            });
+        };
+        let mut interrupt = CommandInvocation::new(
+            "agents.native.interrupt",
+            vec![record.id.clone(), record.generation.to_string()],
+            caller,
+        );
+        interrupt.target = Some(record.target());
+        self.dispatch_native_agent(interrupt, effects, execution)
+    }
+
+    /// The exact target of a pane in the current Space, for acting on that pane and no other.
+    pub(crate) fn pane_command_target(&self, pane_id: &str) -> Option<CommandTarget> {
+        let binding = self.workspace.binding(self.mux_scope())?;
+        let mux = binding.mux();
+        let exact = mux.sessions().iter().find_map(|session| {
+            session.windows.iter().find_map(|window| {
+                window
+                    .panes
+                    .iter()
+                    .any(|pane| pane.pane_id.as_deref() == Some(pane_id))
+                    .then(|| {
+                        ExactMuxTarget::Pane(
+                            binding.scope(),
+                            session.id.clone(),
+                            window.id.clone(),
+                            pane_id.to_owned(),
+                        )
+                    })
+            })
+        })?;
+        let handle = self.binding_target_handle(binding.scope(), mux.binding_generation());
+        exact.command_target(ResourceKind::Pane, mux, &handle)
     }
 
     fn native_panel_exact(&self, id: &str, binding_id: &str, task: &str) -> Option<ExactMuxTarget> {
@@ -2843,7 +2900,7 @@ fn invoke(
     };
     let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
     let operation = invocation.command.strip_prefix("agents.native.");
-    if matches!(operation, Some("prompt" | "queue")) {
+    if matches!(operation, Some("prompt" | "queue" | "interrupt-send")) {
         let result = submit_native_input(service, invocation, deadline, cancellation);
         return complete_native_operation(service, target, operation, result);
     }
@@ -2853,6 +2910,7 @@ fn invoke(
             .map(|()| Value::Null),
         "queue-retry" => service.retry_followup(target, arg(2)).map(|()| Value::Null),
         "queue-steer" => service.steer_followup(target, arg(2)).map(|()| Value::Null),
+        "queue-resume" => service.resume_followups(target).map(|()| Value::Null),
         "import" if invocation.caller == Caller::Internal => service
             .import_attachment(target, std::path::Path::new(arg(2)))
             .and_then(|reference| {
@@ -2974,6 +3032,8 @@ fn submit_native_input(
         .ok_or("Missing conversation target")?;
     if invocation.command == "agents.native.queue" {
         serde_json::to_value(service.queue_input(target, &prompt)?)
+    } else if invocation.command == "agents.native.interrupt-send" {
+        serde_json::to_value(service.interrupt_and_send(target, &prompt)?)
     } else {
         serde_json::to_value(service.prompt_input(target, &prompt)?)
     }

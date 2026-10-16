@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 
-use bootty_agents::{AgentKind, AgentPaneKey, NativeSessionActivity, NativeSessionStatus};
+use bootty_agents::{
+    AgentKind, AgentPaneKey, NativeSessionActivity, NativeSessionStatus, TerminalAgentStatus,
+};
 use bootty_control::{Caller, CommandCancellation, CommandInvocation, CommandTarget, ResourceKind};
 use serde::{Deserialize, Serialize};
 
@@ -58,6 +60,55 @@ pub(super) struct AgentNotifications {
     native: HashMap<String, (u64, NativeSessionStatus)>,
     /// Conversations already sent `agents.native.seen` for their current unread turn.
     native_seen: std::collections::HashSet<String>,
+    /// Each observed terminal agent's last status, by its terminal target and generation.
+    terminal: HashMap<(String, u64), TerminalAgentStatus>,
+}
+
+/// An agent Bootty observes in a terminal pane, and where that pane is.
+struct TerminalAttention {
+    provider: AgentKind,
+    status: TerminalAgentStatus,
+    session_id: Option<String>,
+    target: CommandTarget,
+    scope: String,
+    pane: String,
+    host: String,
+    title: String,
+}
+
+/// A terminal agent's status in the words the Agents panel and sidebar use.
+const fn terminal_status(status: TerminalAgentStatus) -> &'static str {
+    match status {
+        TerminalAgentStatus::Working => "working",
+        TerminalAgentStatus::Approval
+        | TerminalAgentStatus::Input
+        | TerminalAgentStatus::Waiting => "waiting",
+        TerminalAgentStatus::Finished => "complete",
+        TerminalAgentStatus::Error => "error",
+        TerminalAgentStatus::Stopped => "stopped",
+        TerminalAgentStatus::Starting
+        | TerminalAgentStatus::Idle
+        | TerminalAgentStatus::Unavailable => "idle",
+    }
+}
+
+/// What a terminal agent's status change means to the person following it, if anything.
+const fn terminal_event(
+    before: TerminalAgentStatus,
+    now: TerminalAgentStatus,
+) -> Option<&'static str> {
+    use TerminalAgentStatus as Status;
+    match (before, now) {
+        (Status::Working, Status::Idle | Status::Finished) => Some("Finished"),
+        (before, Status::Approval) if !matches!(before, Status::Approval) => Some("Needs approval"),
+        (before, Status::Input | Status::Waiting)
+            if !matches!(before, Status::Input | Status::Waiting) =>
+        {
+            Some("Needs input")
+        }
+        (before, Status::Error) if !matches!(before, Status::Error) => Some("Failed"),
+        _ => None,
+    }
 }
 
 /// A native conversation and the pane that shows it.
@@ -140,6 +191,77 @@ impl AppState {
             .collect()
     }
 
+    /// Agents Bootty started and observes in terminal panes of this workspace.
+    fn terminal_attention(&self) -> Vec<TerminalAttention> {
+        let Some(service) = self.terminal_agent_service() else {
+            return Vec::new();
+        };
+        service
+            .records()
+            .into_iter()
+            .filter_map(|record| {
+                let location = record.location.as_ref()?;
+                let binding = self.workspace.all_bindings().find(|binding| {
+                    binding.scope().persistence_value().to_string() == record.binding_id
+                })?;
+                let title = binding.member_sessions().into_iter().find_map(|session| {
+                    session
+                        .windows
+                        .iter()
+                        .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
+                        .any(|pane| pane.pane_id.as_deref() == Some(location.pane_id.as_str()))
+                        .then(|| session.name.clone())
+                })?;
+                Some(TerminalAttention {
+                    provider: record.provider,
+                    status: record.observation.status,
+                    session_id: record.observation.session_id.clone(),
+                    target: record.target.clone(),
+                    scope: record.binding_id.clone(),
+                    pane: location.pane_id.clone(),
+                    host: binding
+                        .multiplexer()
+                        .remote
+                        .as_ref()
+                        .map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label),
+                    title,
+                })
+            })
+            .collect()
+    }
+
+    /// Terminal agents as Agents panel rows, except panes the agent hooks already report.
+    fn terminal_overview(&self, reported: &[AgentOverview]) -> Vec<AgentOverview> {
+        self.terminal_attention()
+            .into_iter()
+            .filter(|agent| {
+                !reported
+                    .iter()
+                    .any(|entry| entry.scope == agent.scope && entry.pane == agent.pane)
+            })
+            .map(|agent| AgentOverview {
+                provider: agent.provider,
+                target: agent.target,
+                scope: agent.scope,
+                pane: agent.pane,
+                host: agent.host,
+                title: agent.title,
+                status: terminal_status(agent.status).to_owned(),
+                unread: false,
+                attention_sequence: "0".to_owned(),
+                can_resume: false,
+                cwd: None,
+                source: "terminal".to_owned(),
+                session_id: agent.session_id,
+                session_file: None,
+                last_event: None,
+                last_message: None,
+                last_message_truncated: false,
+                turn_ended_at: None,
+            })
+            .collect()
+    }
+
     /// Native conversations as Agents panel rows; focusing one shows its pane.
     fn native_overview(&self) -> Vec<AgentOverview> {
         self.native_attention()
@@ -170,6 +292,8 @@ impl AppState {
     pub fn agent_overview(&self) -> Vec<AgentOverview> {
         let mut result = self.native_overview();
         let Some(agents) = self.agent_service() else {
+            let terminal = self.terminal_overview(&result);
+            result.extend(terminal);
             return result;
         };
         for provider in AgentKind::ALL {
@@ -246,6 +370,8 @@ impl AppState {
                 }
             }
         }
+        let terminal = self.terminal_overview(&result);
+        result.extend(terminal);
         result.sort_by(|a, b| {
             b.unread
                 .cmp(&a.unread)
@@ -275,7 +401,10 @@ impl AppState {
             .to_string();
         let mut live = HashMap::new();
         let mut acknowledgements = HashMap::new();
-        for entry in entries.into_iter().filter(|entry| entry.source != "native") {
+        for entry in entries
+            .into_iter()
+            .filter(|entry| !matches!(entry.source.as_str(), "native" | "terminal"))
+        {
             let key = AgentPaneKey::new(&entry.scope, &entry.pane);
             let state =
                 agents.snapshot_scoped(entry.provider, Some(&entry.scope), Some(&entry.pane));
@@ -335,6 +464,42 @@ impl AppState {
         }
         self.agent_notifications.observed = live;
         self.agent_notifications.acknowledgements = acknowledgements;
+    }
+
+    /// Notifies when a terminal agent finishes, needs approval or input, or fails. An agent seen
+    /// for the first time never notifies.
+    pub(super) fn sync_terminal_attention(
+        &mut self,
+        window_focused: bool,
+        effects: &mut Vec<AppEffect>,
+    ) {
+        let focused = self.focused_pane();
+        let active = self
+            .workspace
+            .active
+            .binding
+            .scope()
+            .persistence_value()
+            .to_string();
+        let mut seen = HashMap::new();
+        for agent in self.terminal_attention() {
+            let key = (agent.target.handle.clone(), agent.target.generation);
+            let before = self.agent_notifications.terminal.get(&key).copied();
+            seen.insert(key, agent.status);
+            let Some(event) = before.and_then(|before| terminal_event(before, agent.status)) else {
+                continue;
+            };
+            let visible = window_focused
+                && agent.scope == active
+                && focused.as_deref() == Some(agent.pane.as_str());
+            if self.config().session.agent_notifications.allows(visible) {
+                effects.push(AppEffect::DesktopNotification {
+                    title: format!("{}: {event}", agent.provider.display_name()),
+                    body: format!("{} · {}", agent.host, agent.title),
+                });
+            }
+        }
+        self.agent_notifications.terminal = seen;
     }
 
     /// Notifies when a native conversation finishes, needs approval or input, or fails. A

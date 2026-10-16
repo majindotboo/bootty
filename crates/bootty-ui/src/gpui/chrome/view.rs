@@ -80,10 +80,6 @@ pub(super) enum ContextMenu {
         task: Option<SidebarTask>,
         now: i64,
     },
-    SavedSession {
-        task: SidebarTask,
-        now: i64,
-    },
     Space(SpaceSnapshot),
     Tab(TabContextSnapshot),
 }
@@ -434,9 +430,6 @@ impl GpuiChrome {
                     rows.extend(sidebar::saved_session_menu(task, *now, false));
                 }
                 rows
-            }
-            ContextMenu::SavedSession { task, now } => {
-                sidebar::saved_session_menu(task, *now, false)
             }
             ContextMenu::Space(space) => space_switcher::space_menu(space),
             ContextMenu::Tab(tab) => status_bar::tab_menu(tab.clone()),
@@ -844,6 +837,15 @@ pub(super) struct MenuRow {
     pub destructive: bool,
     pub starts_group: bool,
     pub intent: ChromeIntent,
+    /// Asked before the row runs.
+    pub confirm: Option<Confirmation>,
+}
+
+#[derive(Clone)]
+pub(super) struct Confirmation {
+    pub question: String,
+    pub detail: &'static str,
+    pub action: &'static str,
 }
 
 pub(super) fn popup_menu(
@@ -868,7 +870,6 @@ pub(super) fn popup_session_menu(
         ContextMenu::Session { task, now, .. } | ContextMenu::DetachedSession { task, now, .. } => {
             (task.as_ref(), *now)
         }
-        ContextMenu::SavedSession { task, now } => (Some(task), *now),
         _ => return popup_menu(menu, context, owner),
     };
     let mut snooze = task.map_or_else(Vec::new, |task| sidebar::saved_snooze_menu(task, now));
@@ -954,6 +955,7 @@ fn append_menu_row(
     let icon = menu_icon(&row.intent);
     let owner = owner.clone();
     let intent = row.intent;
+    let confirm = row.confirm;
     let enabled = row.enabled;
     let label = row.label;
     let item = if row.destructive {
@@ -971,13 +973,19 @@ fn append_menu_row(
     .when_some(icon, PopupMenuItem::icon)
     .disabled(!enabled)
     .on_click(move |_, window, cx| {
-        if !enabled { return; }
-        if matches!(&intent, ChromeIntent::Command(invocation) if invocation.command == "session.delete") {
+        if !enabled {
+            return;
+        }
+        if let Some(confirm) = &confirm {
             let receiver = crate::gpui::dialogs::prompt(
-                "Delete this session permanently?",
-                Some("This removes its saved history from Bootty. Archive keeps it recoverable instead."),
-                &[gpui_kit::PromptButton::Cancel("Cancel".into()), gpui_kit::PromptButton::Other("Delete permanently".into())],
-                window, cx,
+                &confirm.question,
+                Some(confirm.detail),
+                &[
+                    gpui_kit::PromptButton::Cancel("Cancel".into()),
+                    gpui_kit::PromptButton::Other(confirm.action.into()),
+                ],
+                window,
+                cx,
             );
             let owner = owner.clone();
             let intent = intent.clone();
@@ -985,7 +993,8 @@ fn append_menu_row(
                 if receiver.await == Ok(1) {
                     _ = owner.update(cx, |_, cx| cx.emit(intent));
                 }
-            }).detach();
+            })
+            .detach();
         } else {
             _ = owner.update(cx, |_, cx| cx.emit(intent.clone()));
         }

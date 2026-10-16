@@ -15,7 +15,9 @@ mod theme_catalog;
 pub mod theme_file;
 mod writeback;
 
-pub use defaults::{config_path_from_env, default_config_path, default_working_directory};
+pub use defaults::{
+    DEFAULT_BRANCH_PREFIX, config_path_from_env, default_config_path, default_working_directory,
+};
 pub use keybind_presets::split_keybind_entry;
 pub use load::{
     ConfigDocument, ConfigFileSnapshot, ConfigLoadError, ConfigResult, config_file_snapshot,

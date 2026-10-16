@@ -68,7 +68,8 @@ fn display_prompt(
                     text.get((*range).clone()) == Some(format!("[{}]", attachment.name).as_str())
                 })
                 .map(move |range| {
-                    if omit_images && attachment.kind == crate::NativeAttachmentKind::Image {
+                    // An image shows as its own preview, so its token leaves the text.
+                    if attachment.kind == crate::NativeAttachmentKind::Image {
                         return (range.clone(), String::new());
                     }
                     if omit_images {

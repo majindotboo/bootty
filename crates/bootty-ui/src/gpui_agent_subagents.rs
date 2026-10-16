@@ -1,20 +1,15 @@
-//! Provider-owned children share their parent's read-only transcript path.
+//! Provider-owned subagents: their conversations read through the parent, and their tabs show
+//! them the way the parent's view shows its own.
 use super::*;
 use bootty_agents::NativeToolStatus;
 
 #[derive(Default)]
 pub(super) struct SubagentConversation {
     pub(super) items: Vec<NativeTranscriptItem>,
-    pub(super) states: Vec<Entity<TextViewState>>,
     pub(super) error: Option<String>,
 }
 
 impl NativeAgentSessionView {
-    pub(crate) fn open_parent(&self, cx: &mut Context<Self>) {
-        cx.emit(OpenNativeSession::Related {
-            target: self.record.target(),
-        });
-    }
     pub(crate) fn subagent(&self, id: &str) -> Option<&bootty_agents::NativeSubagent> {
         if let Some(agent) = self
             .related
@@ -31,12 +26,7 @@ impl NativeAgentSessionView {
             .find_map(|item| item.subagent.as_ref().filter(|agent| agent.id == id))
     }
 
-    pub(super) fn accept_subagent_read(
-        &mut self,
-        pending: &str,
-        value: Value,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn accept_subagent_read(&mut self, pending: &str, value: Value) {
         let Ok(detail) = serde_json::from_value::<bootty_agents::NativeSubagentDetail>(value)
         else {
             self.subagent_read_error(pending);
@@ -46,14 +36,10 @@ impl NativeAgentSessionView {
             self.subagent_read_error(pending);
             return;
         }
-        self.accept_subagent_detail(detail, cx);
+        self.accept_subagent_detail(detail);
     }
 
-    pub(super) fn accept_subagent_detail(
-        &mut self,
-        detail: bootty_agents::NativeSubagentDetail,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn accept_subagent_detail(&mut self, detail: bootty_agents::NativeSubagentDetail) {
         for item in &mut self.record.snapshot.transcript {
             if let Some(agent) = &mut item.subagent
                 && agent.id == detail.agent.id
@@ -62,33 +48,10 @@ impl NativeAgentSessionView {
                 *agent = detail.agent.clone();
             }
         }
-        if self
-            .subagent_details
-            .get(&detail.agent.id)
-            .is_some_and(|old| old.items == detail.transcript && old.error.is_none())
-        {
-            return;
-        }
-        let states = detail
-            .transcript
-            .iter()
-            .filter(|item| !item.text.is_empty() || item.tool.is_some())
-            .map(|item| {
-                let markdown = if item.text.is_empty() {
-                    item.tool
-                        .as_ref()
-                        .map_or_else(String::new, tool_input_markdown)
-                } else {
-                    transcript_markdown(item)
-                };
-                cx.new(|cx| TextViewState::markdown(&markdown, cx))
-            })
-            .collect();
         self.subagent_details.insert(
             detail.agent.id,
             SubagentConversation {
                 items: detail.transcript,
-                states,
                 error: None,
             },
         );
@@ -294,48 +257,112 @@ impl NativeAgentSessionView {
         })
     }
 
-    pub(crate) fn render_subagent_conversation(&self, id: &str, cx: &App) -> gpui_kit::AnyElement {
-        let Some(agent) = self.subagent(id) else {
-            return div()
-                .p_4()
-                .child("This subagent is no longer available in the parent conversation.")
-                .into_any_element();
+    /// The command sender subagent views share with this conversation.
+    pub(crate) fn command_sender(&self) -> BoundAppCommandSender {
+        self.sender.clone()
+    }
+
+    /// A subagent's conversation as its tab shows it: this conversation's record carrying the
+    /// subagent's name and transcript. A subagent without a readable conversation shows its prompt
+    /// and the result this conversation saw.
+    pub(crate) fn subagent_record(&self, id: &str) -> Option<NativeSessionRecord> {
+        let agent = self.subagent(id)?;
+        let transcript = if agent.readable() {
+            self.subagent_details
+                .get(id)
+                .map_or_else(Vec::new, |detail| detail.items.clone())
+        } else {
+            let result = self
+                .record
+                .snapshot
+                .transcript
+                .iter()
+                .find(|item| item.subagent.as_ref().is_some_and(|agent| agent.id == id))
+                .map_or_else(String::new, |item| item.text.clone());
+            [
+                ("prompt", "user", agent.prompt.clone()),
+                ("result", "assistant", result),
+            ]
+            .into_iter()
+            .filter(|(_, _, text)| !text.is_empty())
+            .filter_map(|(key, role, text)| {
+                serde_json::from_value(serde_json::json!({
+                    "id": format!("subagent-{key}:{id}"), "role": role, "text": text,
+                    "complete": true
+                }))
+                .ok()
+            })
+            .collect()
         };
-        let unavailable = self
-            .subagent_details
-            .get(id)
-            .is_some_and(|detail| detail.error.is_some());
-        div().w_full().flex().flex_col().gap_4()
-            .child(div().debug_selector({ let status = agent.status; move || format!("subagent-status:{status:?}") })
-                .flex().items_center().gap_2().text_xs().text_color(cx.theme().muted_foreground)
-                .child(if unavailable { "Status unavailable" } else { super::subagent_status_label(agent.status) })
-                .when_some(agent.model.clone(), ParentElement::child))
-            .when(!agent.prompt.is_empty(), |view| view.child(div().p_3().rounded_lg()
-                .bg(cx.theme().muted).text_sm().child(agent.prompt.clone())))
-            .when_some(self.subagent_details.get(id), |view, conversation| {
-                view.when_some(conversation.error.as_ref(), |view, error| view.child(div().text_sm()
-                    .text_color(cx.theme().muted_foreground).child(crate::error_catalog::ErrorNotice::from_text(error).to_string())))
-                .children(conversation.items.iter().filter(|item| !item.text.is_empty() || item.tool.is_some()).zip(&conversation.states)
-                    .map(|(item, state)| div().id(format!("subagent-message:{}", item.id))
-                        .debug_selector({ let id = item.id.clone(); move || format!("subagent-message:{id}") })
-                        .flex().flex_col().gap_1()
-                        .child(div().text_xs().text_color(cx.theme().muted_foreground)
-                            .child(item.tool.as_ref().map_or_else(|| item.role.clone(), |tool| super::tool_label(&tool.name).into_owned())))
-                        .child(TextView::new(state).selectable(true))))
-            })
-            .when(!agent.readable(), |view| {
-                let item = self.record.snapshot.transcript.iter().find(|item| item.subagent.as_ref().is_some_and(|agent| agent.id == id));
-                view.when_some(item.and_then(|item| self.transcript.get(&item.id)), |view, state| {
-                    view.child(TextView::new(state).selectable(true))
-                })
-            })
-            .when(!self.subagent_details.contains_key(id), |view| view.child(div().text_sm()
-                .text_color(cx.theme().muted_foreground)
-                .child(if agent.readable() {
-                    "Loading conversation…"
-                } else {
-                    "This provider reports the subagent's progress and result in the parent conversation."
-                })))
-            .into_any_element()
+        let mut snapshot =
+            NativeSessionSnapshot::new(agent.provider.unwrap_or(self.record.config.provider));
+        snapshot.status = if agent.status == NativeToolStatus::Running {
+            NativeSessionStatus::Working
+        } else {
+            NativeSessionStatus::Idle
+        };
+        snapshot.transcript = transcript;
+        let mut record = self.record.clone();
+        record.title = subagent_label(agent);
+        record.snapshot = snapshot;
+        record.queued_messages.clear();
+        record.attachments.clear();
+        record.draft = None;
+        record.side_chat = None;
+        record.pending_initial_message = None;
+        Some(record)
+    }
+
+    /// Why a readable subagent's tab has nothing to show yet: its first read is on its way, or
+    /// failed.
+    pub(crate) fn subagent_pending(&self, id: &str) -> Option<String> {
+        let agent = self.subagent(id)?;
+        if !agent.readable() {
+            return None;
+        }
+        match self.subagent_details.get(id) {
+            None => Some("Loading conversation…".to_owned()),
+            Some(detail) if detail.items.is_empty() => detail.error.clone(),
+            Some(_) => None,
+        }
+    }
+
+    /// A view that shows a subagent's conversation from `record`, made by
+    /// [`Self::subagent_record`].
+    pub(crate) fn new_subagent(
+        record: NativeSessionRecord,
+        sender: BoundAppCommandSender,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut view = Self::new(record, sender, true, window, cx);
+        view.subagent = Some(id);
+        view.history_loaded = true;
+        view
+    }
+
+    /// Show the subagent's latest name, status and transcript.
+    pub(crate) fn show_subagent(
+        &mut self,
+        record: NativeSessionRecord,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.shows(&record) {
+            return;
+        }
+        let previous = std::mem::replace(&mut self.record, record)
+            .snapshot
+            .transcript;
+        self.sync_transcript(&previous, window, cx);
+        cx.notify();
+    }
+
+    /// Whether `record` holds what this subagent view already shows.
+    pub(crate) fn shows(&self, record: &NativeSessionRecord) -> bool {
+        record.title == self.record.title
+            && record.snapshot.status == self.record.snapshot.status
+            && record.snapshot.transcript == self.record.snapshot.transcript
     }
 }

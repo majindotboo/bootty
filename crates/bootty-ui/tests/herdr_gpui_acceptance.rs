@@ -245,7 +245,8 @@ fn write_remote_herdr_transport(path: &std::path::Path) -> Result<()> {
             "IFS= read -r resized\n",
             "printf '\\033[6;1HBOOTTY_HERDR_REMOTE_SIZE='\n",
             "stty size\n",
-            "while :; do sleep 1; done\n",
+            // The pane stays open until the test that started it ends.
+            "while kill -0 \"$PPID\" 2>/dev/null; do sleep 0.1; done\n",
         ),
     )
     .context("write remote Herdr transport")?;

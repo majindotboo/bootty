@@ -42,6 +42,7 @@ fn lucide(slug: &str) -> Icon {
 enum QueueAction {
     Retry,
     Steer,
+    Resume,
     Remove,
 }
 
@@ -110,7 +111,16 @@ impl NativeAgentSessionView {
                                             .debug_selector(|| "native-queue-label".into())
                                             .flex_1()
                                             .truncate()
-                                            .child("Queued"),
+                                            .child(
+                                                if messages.iter().any(|message| {
+                                                    message.status
+                                                        == NativeQueuedMessageStatus::Paused
+                                                }) {
+                                                    "Paused"
+                                                } else {
+                                                    "Queued"
+                                                },
+                                            ),
                                     )
                                     .child(messages.len().to_string())
                                     .child(if self.queued_messages.expanded {
@@ -152,6 +162,15 @@ impl NativeAgentSessionView {
     ) -> impl IntoElement {
         let sending = message.status == NativeQueuedMessageStatus::Sending;
         let failed = message.status == NativeQueuedMessageStatus::Failed;
+        let paused = message.status == NativeQueuedMessageStatus::Paused;
+        // Resume lets every paused message go, so only the first one offers it.
+        let first_paused = paused
+            && self
+                .record
+                .queued_messages
+                .iter()
+                .find(|queued| queued.status == NativeQueuedMessageStatus::Paused)
+                .is_some_and(|queued| queued.id == message.id);
         let id = message.id.clone();
         div()
             .id(SharedString::from(format!("queued-row:{id}")))
@@ -210,6 +229,9 @@ impl NativeAgentSessionView {
                 .child(Self::queued_action(message, QueueAction::Retry, false, cx))
             })
             // A message marked to steer goes in as soon as the turn can take it.
+            .when(first_paused, |row| {
+                row.child(Self::queued_action(message, QueueAction::Resume, false, cx))
+            })
             .when(!failed && message.steer, |row| {
                 row.child(
                     div()
@@ -372,6 +394,11 @@ impl NativeAgentSessionView {
                 "Steer with this queued message",
                 Some(lucide("corner-down-right")),
             ),
+            QueueAction::Resume => (
+                "queue-resume",
+                "Send the paused messages",
+                Some(lucide("play")),
+            ),
             QueueAction::Remove => (
                 "queue-cancel",
                 "Remove queued message",
@@ -394,11 +421,20 @@ impl NativeAgentSessionView {
             .when(matches!(action, QueueAction::Steer), |button| {
                 button.label("Steer")
             })
+            .when(matches!(action, QueueAction::Resume), |button| {
+                button.label("Resume")
+            })
             .disabled(message.status == NativeQueuedMessageStatus::Sending)
             .loading(loading)
             .accessibility_label(label)
             .on_click(cx.listener(move |this, _, window, cx| {
-                this.command(operation, vec![id.clone()], window, cx);
+                // Resume names the conversation, not one message.
+                let arguments = if operation == "queue-resume" {
+                    Vec::new()
+                } else {
+                    vec![id.clone()]
+                };
+                this.command(operation, arguments, window, cx);
             }));
         super::element_tooltip(
             SharedString::from(format!("{operation}-tooltip:{}", message.id)),

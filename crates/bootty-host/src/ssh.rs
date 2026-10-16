@@ -45,9 +45,10 @@ impl Eq for SshRemote {}
 impl SshRemote {
     #[must_use]
     pub fn new(config: SshTarget) -> Self {
+        static READY: crate::remote::Readiness<SshTarget> = std::sync::OnceLock::new();
         Self {
+            daemon_ready: crate::remote::shared_readiness(&READY, &config),
             config,
-            daemon_ready: Arc::new(Mutex::new(false)),
         }
     }
 

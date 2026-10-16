@@ -608,8 +608,10 @@ fn section_navigation_stops_at_the_real_content_end(cx: &mut TestAppContext) {
     );
 }
 
+/// A collapsed category hides its sections; opening another category leaves an expanded one's
+/// sections listed.
 #[gpui_kit::test]
-fn category_navigation_only_shows_sections_of_the_selected_page(cx: &mut TestAppContext) {
+fn expanded_categories_keep_their_sections_while_another_is_open(cx: &mut TestAppContext) {
     init_zed_ui(cx);
     let (_, cx) = cx.add_window_view(|_, cx| {
         SettingsWindowProbe::with_snapshot(snapshot_with_category(SettingsCategory::General), cx)
@@ -621,7 +623,7 @@ fn category_navigation_only_shows_sections_of_the_selected_page(cx: &mut TestApp
         .expect("Appearance category remains visible");
     cx.simulate_click(bounds_center(appearance), Modifiers::none());
     cx.refresh().expect("switch settings category");
-    assert!(cx.debug_bounds("settings-section-general").is_none());
+    assert!(cx.debug_bounds("settings-section-general").is_some());
     assert!(cx.debug_bounds("settings-section-colors").is_some());
 }
 

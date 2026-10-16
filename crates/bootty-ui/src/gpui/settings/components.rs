@@ -167,7 +167,8 @@ impl GpuiSettings {
                         .unwrap_or(false)
                 },
             );
-            if included && (entry.is_root || entry.category == self.category) {
+            // An expanded category lists its sections whichever category is open.
+            if included {
                 visible.push(index);
             }
             index = index.saturating_add(1);
@@ -1801,11 +1802,17 @@ impl GpuiSettings {
                 cx,
             )
         } else {
+            // Thinking levels read as the model picker names them, not as config tokens.
+            let efforts = id.ends_with(".available-efforts");
             let choices = options
                 .iter()
                 .map(|option| SettingsChoice {
                     token: option.clone(),
-                    label: option.clone(),
+                    label: if efforts {
+                        crate::gpui_agent_session::reasoning_label(option)
+                    } else {
+                        option.clone()
+                    },
                     description: None,
                 })
                 .collect::<Vec<_>>();

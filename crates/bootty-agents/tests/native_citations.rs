@@ -155,6 +155,32 @@ proptest! {
     }
 }
 
+/// An image shows as its own preview, so its token leaves the message text; a file keeps its
+/// name in place.
+#[rstest]
+#[case::image(bootty_agents::NativeAttachmentKind::Image, "Look at  and fix it")]
+#[case::file(
+    bootty_agents::NativeAttachmentKind::File,
+    "Look at ` shot.png ` and fix it"
+)]
+fn image_tokens_leave_the_text_and_file_tokens_stay(
+    #[case] kind: bootty_agents::NativeAttachmentKind,
+    #[case] expected: &str,
+) {
+    let mut item = response("Look at [shot.png] and fix it", "user");
+    item.attachments = vec![bootty_agents::NativeAttachmentReference {
+        id: "shot".into(),
+        kind,
+        name: "shot.png".into(),
+        mime_type: "image/png".into(),
+        size_bytes: 10,
+        pixel_width: None,
+        pixel_height: None,
+        prompt_ranges: std::iter::once(8..18).collect(),
+    }];
+    assert_eq!(item.display_text(), expected);
+}
+
 #[rstest]
 #[case(
     "Handled. :codex-annotation{index=\"1\"}",

@@ -1319,16 +1319,7 @@ impl NativeAgentSession {
         drop(response);
         self.write(&value)?;
         snapshot.requests.retain(|item| item.id != request.id);
-        if !snapshot.waiting_for_input() && snapshot.status == NativeSessionStatus::Waiting {
-            snapshot.status = if request.method == "mcpServer/elicitation/request"
-                && snapshot.turn_id.is_none()
-                && snapshot.pending_user_item.is_none()
-            {
-                NativeSessionStatus::Idle
-            } else {
-                NativeSessionStatus::Working
-            };
-        }
+        snapshot.settle_waiting();
         snapshot.changed();
         drop(snapshot);
         self.publish_input_wait();
@@ -1379,10 +1370,10 @@ impl NativeAgentSession {
             return self.respond(id, json!({"confirmed":allow}));
         }
         if request.method == "mcpServer/elicitation/request" {
-            return self.respond(
-                id,
-                json!({"action":if allow {"accept"} else {"decline"}, "content":if allow {json!({})} else {Value::Null}}),
-            );
+            let response = request
+                .approval_response(decision)
+                .ok_or("This request requires a structured answer")?;
+            return self.respond(id, response);
         }
         if !matches!(
             request.method.as_str(),
@@ -1829,7 +1820,8 @@ fn read_frames(
         let shared_snapshot = Arc::clone(snapshot);
         let mut snapshot = lock(snapshot);
         if value.get("id").is_some() {
-            if !snapshot.accepts(&value) {
+            let subagent = snapshot.requesting_subagent(&value);
+            if subagent.is_none() && !snapshot.accepts(&value) {
                 write_frame(
                     input,
                     closing,
@@ -1837,7 +1829,7 @@ fn read_frames(
                 )?;
                 continue;
             }
-            if let Some(reply) = capture_request(&mut snapshot, &value)? {
+            if let Some(reply) = capture_request(&mut snapshot, &value, subagent)? {
                 write_frame(input, closing, &reply)?;
             }
         } else {
@@ -2320,6 +2312,7 @@ fn image_blocks(content: &Value, count: usize, image_kind: &str) -> bool {
 fn capture_request(
     snapshot: &mut NativeSessionSnapshot,
     value: &Value,
+    subagent: Option<String>,
 ) -> Result<Option<Value>, String> {
     let method = field(value, "method").as_str().unwrap_or_default();
     let wire_id = field(value, "id").clone();
@@ -2373,6 +2366,7 @@ fn capture_request(
         method: method.to_owned(),
         parameters,
         from_attached_tools,
+        subagent,
         wire_id,
     });
     if snapshot.waiting_for_input() {
@@ -2855,6 +2849,7 @@ impl NativeAgentSession {
                 method: crate::APPLICATION_ACCESS_METHOD.into(),
                 parameters: serde_json::to_value(application).map_err(|e| e.to_string())?,
                 from_attached_tools: true,
+                subagent: None,
                 wire_id: Value::Null,
             });
             snapshot.status = NativeSessionStatus::Waiting;

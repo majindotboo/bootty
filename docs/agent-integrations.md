@@ -142,10 +142,13 @@ the provider account's configuration or permission policy.
 
 The transcript, composer, approval requests and questions live in a selectable
 backend pane beside terminals. Close stops that pane and provider while retaining
-the saved conversation and history.
+the saved conversation and history. Up in an empty composer brings back the
+conversation's sent messages, newest first, and Down goes forward again.
 Choosing Agent in the split chooser creates its backend pane beside the captured
 parent, in the requested direction. The parent task and window stay unchanged.
-Interrupt cancels its current turn. Opening a stopped conversation automatically
+Interrupt cancels its current turn, as does Escape in the composer while a turn
+runs and the composer has nothing else to dismiss, and Interrupt Agent in the
+palette (`interrupt_agent`) for the conversation in the focused pane. Opening a stopped conversation automatically
 reattaches its exact provider selector: a Codex thread, Pi session file or Claude
 session UUID. Pi's launch extension checkpoints its public session header and
 entries before a fresh identity is published, then Pi reattaches that same file.
@@ -158,9 +161,23 @@ Codex approvals show the command, working directory and reason. Allow once retai
 no grant. Allow for this session uses Codex's session approval cache; Always allow
 applies only the exact proposed command-prefix rule displayed in the request.
 Provider-restricted decisions, altered rules and expired requests are rejected.
+A new approval takes focus unless the composer holds a draft; Enter then takes its
+primary choice and Escape denies it. Reusable scopes stay on their buttons.
+A blocking question takes focus the same way: digits 1–9 pick an option on the
+current question and move to the next, Enter moves on and sends from the last
+question once each has an answer, and Escape cancels a Claude question.
+A Codex subagent's request appears in its parent conversation with the
+subagent's name, and stays answerable after the parent's turn ends.
 A file-change approval shows the diff it would apply: Codex's for the file-change
 item it names, and Claude's Edit, MultiEdit and Write built from their old and new
 text, numbered within the snippet since the request has no file positions.
+
+An MCP server's request shows what it asks for. A tool approval offers Allow for
+this session and Always allow only when the server names those scopes. A form
+shows its fields, typed and checked against the server's schema before Submit
+sends them. A sign-in page shows its address, and only http and https pages open,
+from the button that names their host. Bootty declines anything else it can't
+fill in.
 
 Permission changes during a turn are saved for the next turn. The current prompt
 and approval keep their captured policy. After the turn becomes idle, Bootty
@@ -267,4 +284,11 @@ transcript shows only the delegated request. Ending voice mode stops the call.
 Other conversations and drafts show no voice button.
 
 Speech notifications and conversation errors offer **Copy details** for the original
-diagnostic.
+diagnostic. A conversation that failed because its provider account needs signing
+in also offers **Sign in**, which runs the same sign-in flow as Settings.
+
+Claude loads the connectors of the Claude account it signs in with, the same ones
+Claude Desktop has; Bootty passes only its own tool server beside them. A Claude
+signed in with an Anthropic Console key has no account connectors, and its status
+in Settings says so. **Sign in** runs `claude auth login`, which uses the Claude
+subscription.

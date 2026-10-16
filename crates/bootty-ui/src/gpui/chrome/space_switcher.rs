@@ -193,6 +193,7 @@ fn with_opacity(mut color: Rgba, opacity: f32) -> Rgba {
 
 pub(super) fn space_menu(space: &SpaceSnapshot) -> Vec<MenuRow> {
     let row = |label: &str, enabled: bool, destructive: bool, starts_group: bool, intent| MenuRow {
+        confirm: None,
         label: label.to_owned(),
         enabled,
         destructive,

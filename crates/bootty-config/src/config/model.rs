@@ -484,8 +484,14 @@ pub struct ChromeConfig {
 /// Sidebar placement and color overrides. Colors layer on top of the active theme; an unset slot
 /// falls back to the theme-derived value.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Each flag is an independent sidebar preference"
+)]
 pub struct SidebarConfig {
     pub group_by_project: bool,
+    /// The Settled shelf shows only its heading.
+    pub settled_collapsed: bool,
     pub sort_order: SidebarSortOrder,
     pub animate_working: bool,
     /// Inactive sessions settle after this many days; zero disables automatic settlement.
@@ -757,6 +763,8 @@ pub struct SessionConfig {
     pub worktree_directory: Option<String>,
     /// At most this many of Bootty's worktrees stay on each host; 0 keeps every one still used.
     pub worktree_limit: u16,
+    /// What a new worktree's branch name starts with, unless its project sets its own.
+    pub branch_prefix: String,
     pub env: Vec<(String, String)>,
     pub term: String,
     pub colorterm: String,

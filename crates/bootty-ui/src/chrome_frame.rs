@@ -751,6 +751,7 @@ fn sidebar_snapshot(
         },
         title_visible: config.window.custom_chrome_title_visible(),
         group_by_project: sidebar_config.group_by_project,
+        settled_collapsed: sidebar_config.settled_collapsed,
         sort_order: sidebar_config.sort_order,
         animate_working: sidebar_config.animate_working,
         focused: state.sidebar_focused(),
@@ -951,17 +952,14 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
     rows
 }
 
-fn session_title<'a>(
-    name: &'a str,
-    project: &str,
-    branch: Option<&str>,
-    explicit: bool,
-) -> &'a str {
+fn session_title<'a>(name: &'a str, project: &str, explicit: bool) -> &'a str {
     if explicit {
         return name;
     }
     let title = name.strip_prefix(&format!("{project}/")).unwrap_or(name);
-    if title == project || branch == Some(title) || std::path::Path::new(title).is_absolute() {
+    // A session named after its project or a path has no name of its own; one named after its
+    // branch keeps the branch, which tells worktree sessions apart.
+    if title == project || std::path::Path::new(title).is_absolute() {
         "Terminal"
     } else {
         title
@@ -1055,7 +1053,7 @@ fn sidebar_rows(
             .as_deref()
             .and_then(|identity| state.workspace.active.binding.sessions().get(identity))
             .is_some_and(|saved| saved.explicit);
-        let title = session_title(name, project, facts.branch.as_deref(), explicit_title);
+        let title = session_title(name, project, explicit_title);
         let mut row = SidebarRow {
             text: title.to_owned(),
             project: Some(SidebarProject {
@@ -1183,9 +1181,9 @@ fn sidebar_native_activity(
             key: activity.id.clone(),
             icon: activity.provider.icon().to_owned(),
             description: format!(
-                "{} · {:?}",
+                "{} · {}",
                 activity.provider.display_name(),
-                activity.status
+                native_status_word(activity.status)
             ),
             model: activity.model.clone(),
         }));
@@ -1248,15 +1246,45 @@ fn sidebar_native_activity(
     }
 }
 
+/// A conversation's status in the words the Agents panel uses.
+const fn native_status_word(status: bootty_agents::NativeSessionStatus) -> &'static str {
+    use bootty_agents::NativeSessionStatus as Status;
+    match status {
+        Status::Starting => "Starting",
+        Status::Idle => "Idle",
+        Status::Working => "Working",
+        Status::Waiting => "Waiting",
+        Status::Stopped => "Stopped",
+        Status::Error => "Failed",
+    }
+}
+
+/// A terminal agent's status in the words the Agents panel uses.
+const fn terminal_status_word(status: bootty_agents::TerminalAgentStatus) -> &'static str {
+    use bootty_agents::TerminalAgentStatus as Status;
+    match status {
+        Status::Starting => "Starting",
+        Status::Idle => "Idle",
+        Status::Working => "Working",
+        Status::Approval => "Needs approval",
+        Status::Input => "Needs input",
+        Status::Waiting => "Waiting",
+        Status::Finished => "Finished",
+        Status::Stopped => "Stopped",
+        Status::Error => "Failed",
+        Status::Unavailable => "Unavailable",
+    }
+}
+
 fn sidebar_agent(activity: &bootty_agents::TerminalAgentActivity) -> SidebarAgent {
     SidebarAgent {
         key: activity.target.handle.clone(),
         icon: activity.provider.icon().to_owned(),
         model: None,
         description: format!(
-            "{} · {:?}{}",
+            "{} · {}{}",
             activity.provider.display_name(),
-            activity.status,
+            terminal_status_word(activity.status),
             activity
                 .detail
                 .as_ref()
@@ -1419,6 +1447,7 @@ fn sidebar_session_base(
             let saved = binding.sessions().get(identity)?;
             Some(SidebarTask {
                 identity: identity.to_owned(),
+                title: String::new(),
                 native_conversation: session
                     .detached
                     .then(|| {
@@ -1717,15 +1746,24 @@ fn window_status_items(
             {
                 name.text = native.title;
                 name.icon = Some(native.provider.icon().to_owned());
-                name.progress = matches!(
-                    native.status,
-                    bootty_agents::NativeSessionStatus::Starting
-                        | bootty_agents::NativeSessionStatus::Working
-                )
-                .then_some(StatusProgress {
-                    value: None,
-                    color: theme.accent,
-                });
+                // A conversation waiting on an approval or answer fills its bar in the warning
+                // color; a working one runs it.
+                name.progress = if native.approval || native.input {
+                    Some(StatusProgress {
+                        value: Some(100),
+                        color: theme.warning,
+                    })
+                } else {
+                    matches!(
+                        native.status,
+                        bootty_agents::NativeSessionStatus::Starting
+                            | bootty_agents::NativeSessionStatus::Working
+                    )
+                    .then_some(StatusProgress {
+                        value: None,
+                        color: theme.accent,
+                    })
+                };
                 return [index, name];
             }
             name.progress = window.progress.map(|value| StatusProgress {

@@ -43,6 +43,26 @@ fn retained_search_input_filters_settings_without_an_activation_shell(cx: &mut T
     );
 }
 
+/// Settings open with focus in the search field, so typing searches without a click first.
+#[gpui_kit::test]
+fn focusing_settings_puts_the_caret_in_search(cx: &mut TestAppContext) {
+    initialize(cx);
+    let (probe, window) = cx.add_window_view(|_, cx| {
+        SettingsProbe::with_snapshot(dependent_snapshot("", active_children()), cx)
+    });
+    window.update(|window, cx| {
+        let settings = probe.read(cx).settings.clone();
+        settings.update(cx, |settings, cx| settings.focus(window, cx));
+    });
+    window.simulate_input("bastion");
+    assert!(
+        window
+            .debug_bounds("settings-dependent-child-remotes.transport-remotes.proxy")
+            .is_some(),
+        "typed text reaches the search field"
+    );
+}
+
 #[gpui_kit::test]
 fn dependent_search_indexes_parent_and_active_children_with_page_and_section_context(
     cx: &mut TestAppContext,

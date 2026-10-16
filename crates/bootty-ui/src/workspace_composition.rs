@@ -9,6 +9,7 @@
 use bootty_mux::{snapshot::MuxSession, workspace::ScopedWindowId};
 use gpui_kit::component::dock::{DockAreaState, DockPlacement, DockState, PanelInfo, PanelState};
 use gpui_kit::px;
+use std::collections::BTreeMap;
 
 pub use crate::gpui_dock::surfaces::TerminalSurfaceOrigin;
 
@@ -16,6 +17,42 @@ pub use crate::gpui_dock::surfaces::TerminalSurfaceOrigin;
 #[must_use]
 pub fn surface_center_key(binding: &str, task: &str, kind: &str, id: &str) -> String {
     serde_json::json!([binding, task, kind, id]).to_string()
+}
+
+/// Each session keeps its own right dock: its tools, documents and subagents, and whether they
+/// show.
+///
+/// Moving from the center `previous` to `next` in another session stores the right dock in
+/// `layout` under the session it leaves and puts back the one `next`'s session left, or `fresh`
+/// for a session that has none yet. Windows of one session share their right dock.
+pub fn swap_session_right_dock(
+    layout: &mut DockAreaState,
+    rights: &mut BTreeMap<String, DockState>,
+    (previous, next): (Option<&str>, &str),
+    fresh: DockState,
+) {
+    let previous = previous.and_then(session_key);
+    let next = session_key(next);
+    if previous == next {
+        return;
+    }
+    if let (Some(previous), Some(right)) = (previous, layout.right_dock.take()) {
+        rights.insert(previous, right);
+    }
+    layout.right_dock = Some(
+        next.and_then(|session| rights.remove(&session))
+            .unwrap_or(fresh),
+    );
+}
+
+/// The session a center key belongs to: its binding and task, whichever of the session's windows
+/// or surfaces the key names.
+fn session_key(center: &str) -> Option<String> {
+    let parts = serde_json::from_str::<Vec<String>>(center).ok()?;
+    let [binding, task, ..] = parts.as_slice() else {
+        return None;
+    };
+    Some(serde_json::json!([binding, task]).to_string())
 }
 
 /// A saved agent destination has stable record identity; current generation comes from the catalog.

@@ -651,6 +651,14 @@ impl AppState {
         )
     }
 
+    pub(crate) fn toggle_settled_shelf(&mut self, effects: &mut Vec<AppEffect>) -> bool {
+        let collapsed = !self.config().sidebar.settled_collapsed;
+        self.mutate_config_document(
+            |document| document.set_bool(&["sidebar", "settled-collapsed"], collapsed),
+            effects,
+        )
+    }
+
     pub(crate) fn set_session_sort_order(
         &mut self,
         order: bootty_config::config::SidebarSortOrder,
@@ -1751,6 +1759,7 @@ impl AppState {
         self.reconcile_orchestration();
         self.sync_agent_attention(window_focused, effects);
         self.sync_native_attention(window_focused, effects);
+        self.sync_terminal_attention(window_focused, effects);
 
         // A command-palette choice from the previous frame runs as soon as viewport/effects are
         // available, before mux refresh can retarget selected-window actions back to backend-active.

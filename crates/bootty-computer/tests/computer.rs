@@ -6,10 +6,10 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_computer::{
     Computer, ComputerAccess, ComputerAction, ComputerElement, ComputerError, ComputerResult,
-    ComputerStatus, ComputerTarget, DisplayBounds, ElementState, HostCaptureRegion, MouseButton,
-    PermissionStatus, PressMethod,
+    ComputerStatus, ComputerTarget, DisplayBounds, ElementState, HostCaptureRegion, Key,
+    MouseButton, PermissionStatus, PressMethod,
     control::{MAX_TEXT_UNITS, text_pieces},
-    desktop::{Desktop, Focus, Image, InputEvent, NativeWindow},
+    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow},
 };
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
@@ -214,7 +214,11 @@ fn captured_frame_resize_invalidates_region(
 #[derive(Default)]
 struct Fake {
     windows: Vec<NativeWindow>,
-    focus: Option<Focus>,
+    /// Window-addressed input, as on macOS, unless a test says otherwise.
+    route: Option<InputRoute>,
+    /// The process and the bounds of the window that receives its keys.
+    focus: Option<(i32, DisplayBounds)>,
+    frontmost: Option<i32>,
     accessibility: Option<PermissionStatus>,
     recording: Option<PermissionStatus>,
     secure: bool,
@@ -231,10 +235,8 @@ impl Fake {
     fn focused(target: &ComputerTarget) -> Arc<Self> {
         Arc::new(Self {
             windows: vec![window(target)],
-            focus: Some(Focus {
-                process_id: target.process_id,
-                window: Some(target.bounds.clone()),
-            }),
+            focus: Some((target.process_id, target.bounds.clone())),
+            frontmost: Some(target.process_id),
             elements: vec![button()],
             ..Self::default()
         })
@@ -305,8 +307,19 @@ impl Desktop for Fake {
         self.windows.clone()
     }
 
-    fn focus(&self) -> Option<Focus> {
-        self.focus.clone()
+    fn route(&self) -> InputRoute {
+        self.route.unwrap_or(InputRoute::Window)
+    }
+
+    fn frontmost(&self) -> Option<i32> {
+        self.frontmost
+    }
+
+    fn focus(&self, process_id: i32) -> Option<DisplayBounds> {
+        self.focus
+            .clone()
+            .filter(|(owner, _)| *owner == process_id)
+            .map(|(_, bounds)| bounds)
     }
 
     fn secure_input(&self) -> bool {
@@ -370,6 +383,23 @@ impl Desktop for Fake {
             .cloned())
     }
 
+    fn pressable_at(
+        &self,
+        _: &NativeWindow,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<Vec<u16>>, ComputerError> {
+        Ok(self
+            .elements
+            .iter()
+            .find(|element| {
+                self.pressable
+                    && (element.frame.x..element.frame.x + element.frame.width).contains(&x)
+                    && (element.frame.y..element.frame.y + element.frame.height).contains(&y)
+            })
+            .map(|element| element.path.clone()))
+    }
+
     fn press(&self, _: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
         if self.pressable {
             self.pressed
@@ -409,6 +439,17 @@ const fn click() -> ComputerAction {
     }
 }
 
+fn type_text() -> ComputerAction {
+    ComputerAction::TypeText { text: "hi".into() }
+}
+
+const fn key() -> ComputerAction {
+    ComputerAction::Key {
+        key: Key::Return,
+        modifiers: Vec::new(),
+    }
+}
+
 async fn run(
     fake: &Arc<Fake>,
     target: &ComputerTarget,
@@ -421,8 +462,13 @@ async fn run(
 
 #[rstest]
 #[tokio::test]
-async fn focused_uncovered_input_reaches_the_window(target: ComputerTarget) {
-    let fake = Fake::focused(&target);
+async fn focused_uncovered_input_reaches_the_window(
+    target: ComputerTarget,
+    #[values(InputRoute::Window, InputRoute::Shared)] route: InputRoute,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(route);
+    let fake = Arc::new(fake);
     assert!(matches!(
         run(&fake, &target, &click()).await,
         Ok(ComputerResult::Posted)
@@ -459,9 +505,21 @@ fn move_window(fake: &mut Fake, _: &ComputerTarget) {
     }
 }
 const fn focus_other_app(fake: &mut Fake, _: &ComputerTarget) {
-    if let Some(focus) = fake.focus.as_mut() {
-        focus.process_id = 999;
+    if let Some((process_id, _)) = fake.focus.as_mut() {
+        *process_id = 999;
     }
+}
+const fn focus_other_window(fake: &mut Fake, _: &ComputerTarget) {
+    if let Some((_, bounds)) = fake.focus.as_mut() {
+        bounds.x = 100.0;
+    }
+}
+const fn focus_nothing(fake: &mut Fake, _: &ComputerTarget) {
+    fake.focus = None;
+}
+const fn leave_in_front(_: &mut Fake, _: &ComputerTarget) {}
+const fn bring_other_app_to_front(fake: &mut Fake, _: &ComputerTarget) {
+    fake.frontmost = Some(999);
 }
 fn cover_point(fake: &mut Fake, _: &ComputerTarget) {
     fake.windows.insert(
@@ -494,28 +552,151 @@ const fn secure_input(fake: &mut Fake, _: &ComputerTarget) {
     fake.secure = true;
 }
 
-/// Each case changes one fact about the desktop; input must refuse and post nothing. A press of
-/// an element without its own action clicks, so it follows the same rules.
+/// Each case changes one fact about the desktop; input must refuse and post nothing on every
+/// route. A press of an element without its own action clicks, so it follows the same rules.
 #[rstest]
 #[case::window_closed(close)]
 #[case::window_moved(move_window)]
 #[case::process_relaunched(relaunch)]
-#[case::other_app_focused(focus_other_app)]
-#[case::point_covered(cover_point)]
-#[case::two_windows_at_the_same_frame(duplicate_frame)]
 #[case::accessibility_missing(revoke_accessibility)]
 #[case::secure_input(secure_input)]
 #[tokio::test]
-async fn input_refuses_anything_but_the_exact_focused_window(
+async fn input_refuses_anything_but_the_exact_window(
     target: ComputerTarget,
     #[case] change: fn(&mut Fake, &ComputerTarget),
-    #[values(click(), press())] action: ComputerAction,
+    #[values(click(), press(), type_text())] action: ComputerAction,
+    #[values(InputRoute::Window, InputRoute::Shared)] route: InputRoute,
 ) {
     let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(route);
     change(&mut fake, &target);
     let fake = Arc::new(fake);
     let result = run(&fake, &target, &action).await;
     assert!(result.is_err(), "input must be refused, got {result:?}");
+    assert_eq!(fake.posted(), []);
+}
+
+/// Keys go wherever the target's process sends them, so on every route they need the target to
+/// be that window, told apart from its process's other windows.
+#[rstest]
+#[case::other_app_focused(focus_other_app)]
+#[case::other_window_focused(focus_other_window)]
+#[case::nothing_focused(focus_nothing)]
+#[case::two_windows_at_the_same_frame(duplicate_frame)]
+#[tokio::test]
+async fn keys_reach_only_the_window_its_process_focuses(
+    target: ComputerTarget,
+    #[case] change: fn(&mut Fake, &ComputerTarget),
+    #[values(type_text(), key())] action: ComputerAction,
+    #[values(InputRoute::Window, InputRoute::Shared)] route: InputRoute,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(route);
+    change(&mut fake, &target);
+    let fake = Arc::new(fake);
+    let result = run(&fake, &target, &action).await;
+    assert!(
+        matches!(result, Err(ComputerError::TargetNotFocused)),
+        "{result:?}"
+    );
+    assert_eq!(fake.posted(), []);
+}
+
+/// A pointer event addressed to the window reaches it behind other apps and windows, so it needs
+/// no focus. Shared pointer input lands on whatever is in front, so it needs both.
+#[rstest]
+#[case::other_app_focused(focus_other_app)]
+#[case::point_covered(cover_point)]
+#[case::two_windows_at_the_same_frame(duplicate_frame)]
+#[tokio::test]
+async fn only_shared_pointer_input_needs_focus_and_an_uncovered_point(
+    target: ComputerTarget,
+    #[case] change: fn(&mut Fake, &ComputerTarget),
+    #[values(click(), press())] action: ComputerAction,
+    #[values(InputRoute::Window, InputRoute::Shared)] route: InputRoute,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(route);
+    change(&mut fake, &target);
+    let fake = Arc::new(fake);
+    let result = run(&fake, &target, &action).await;
+    let clicked = [InputEvent::Click {
+        x: 10.0,
+        y: 10.0,
+        button: MouseButton::Left,
+    }];
+    if route == InputRoute::Window {
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(fake.posted(), clicked);
+    } else {
+        assert!(result.is_err(), "input must be refused, got {result:?}");
+        assert_eq!(fake.posted(), []);
+    }
+}
+
+/// Views such as web content ignore a click in a background app's window, so a left click there
+/// presses the element under the point when it has its own press action. Clicks on the frontmost
+/// app, other buttons, and points without such an element are posted.
+#[rstest]
+#[case::app_in_background(bring_other_app_to_front, MouseButton::Left, true)]
+#[case::key_window(leave_in_front, MouseButton::Left, false)]
+#[case::other_window_of_the_frontmost_app(focus_other_window, MouseButton::Left, false)]
+#[case::right_click(bring_other_app_to_front, MouseButton::Right, false)]
+#[tokio::test]
+async fn background_left_clicks_press_the_element_under_the_point(
+    target: ComputerTarget,
+    #[case] change: fn(&mut Fake, &ComputerTarget),
+    #[case] button: MouseButton,
+    #[case] presses: bool,
+    #[values(true, false)] pressable: bool,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.pressable = pressable;
+    change(&mut fake, &target);
+    let fake = Arc::new(fake);
+    let action = ComputerAction::Click {
+        x: 10.0,
+        y: 10.0,
+        button,
+    };
+    assert_eq!(
+        run(&fake, &target, &action).await.unwrap(),
+        ComputerResult::Posted
+    );
+    let clicked = [InputEvent::Click {
+        x: 10.0,
+        y: 10.0,
+        button,
+    }];
+    let (pressed, posted): (&[Vec<u16>], &[InputEvent]) = if presses && pressable {
+        (&[vec![0, 2]], &[])
+    } else {
+        (&[], &clicked)
+    };
+    assert_eq!(fake.pressed(), pressed);
+    assert_eq!(fake.posted(), posted);
+}
+
+/// An element's own action goes to the element, so it needs neither focus nor an uncovered point.
+#[rstest]
+#[tokio::test]
+async fn element_actions_need_no_focus(
+    target: ComputerTarget,
+    #[values(InputRoute::Window, InputRoute::Shared)] route: InputRoute,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(route);
+    fake.pressable = true;
+    focus_nothing(&mut fake, &target);
+    cover_point(&mut fake, &target);
+    let fake = Arc::new(fake);
+    assert_eq!(
+        run(&fake, &target, &press()).await.unwrap(),
+        ComputerResult::Pressed {
+            method: PressMethod::Action
+        }
+    );
+    assert_eq!(fake.pressed(), [vec![0, 2]]);
     assert_eq!(fake.posted(), []);
 }
 
@@ -621,6 +802,7 @@ async fn elements_need_accessibility_but_not_focus(target: ComputerTarget) {
 #[tokio::test]
 async fn transparent_windows_do_not_cover_points(target: ComputerTarget) {
     let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(InputRoute::Shared);
     fake.windows.insert(
         0,
         NativeWindow {

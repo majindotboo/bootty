@@ -484,7 +484,8 @@ fn write_remote_transport(
             "  printf '%s\\n' '{{\"Bytes\":\"G1s1OzFIQk9PVFRZX1JNVVhfUkVNT1RFX0lOUFVUPWFjY2VwdGVk\"}}'\n",
             "  while [ ! -f {resize_ready} ]; do sleep 0.01; done\n",
             "  printf '%s\\n' '{{\"Bytes\":\"G1s2OzFIQk9PVFRZX1JNVVhfUkVNT1RFX1NJWkU9MzAgMTAw\"}}'\n",
-            "  while :; do sleep 1; done\n",
+            // The stream stays open until the test that started it ends.
+            "  while kill -0 \"$PPID\" 2>/dev/null; do sleep 0.1; done\n",
             "fi\n",
             "if [ \"$last\" = {input_line} ]; then\n",
             "  if IFS= read -r input; then\n",

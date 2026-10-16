@@ -160,6 +160,36 @@ fn cloned_remote_serializes_daemon_readiness() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
+/// Handles built separately for one host, as every backend operation builds its own, check the
+/// host's daemon once between them.
+#[test]
+fn fresh_remotes_for_one_host_share_daemon_readiness() {
+    struct PingRunner(Arc<AtomicUsize>);
+
+    impl CommandRunner for PingRunner {
+        fn run(&self, _program: &str, _args: &[String]) -> Result<CommandOutput> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(CommandOutput {
+                success: true,
+                stdout: format!(
+                    "{}:{}",
+                    bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
+                    env!("CARGO_PKG_VERSION")
+                ),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    for _ in 0..3 {
+        remote()
+            .ensure_daemon_with(&PingRunner(calls.clone()))
+            .unwrap();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
 type RecordedCalls = Rc<RefCell<Vec<(String, Vec<String>)>>>;
 
 #[derive(Clone, Default)]

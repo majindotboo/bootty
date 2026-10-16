@@ -71,6 +71,8 @@ pub enum TerminalFindAction {
 pub enum KeybindAction {
     OpenSetting(String),
     SettleSession,
+    /// Interrupt the conversation in the pane the command was issued for.
+    InterruptAgent,
     App(AppAction),
     Mux(MuxKeyAction),
     Scroll(TerminalScrollAction),
@@ -139,6 +141,7 @@ impl Default for AppKeyBindings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarAction {
     ToggleGrouping,
+    ToggleSettled,
     SortManual,
     SortRecentActivity,
     Ignore,
@@ -149,8 +152,9 @@ pub enum SidebarAction {
 }
 
 impl SidebarAction {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::ToggleGrouping,
+        Self::ToggleSettled,
         Self::SortManual,
         Self::SortRecentActivity,
         Self::Ignore,
@@ -166,6 +170,7 @@ impl SidebarAction {
             Self::SortManual => "ui.sidebar.sort_manual",
             Self::SortRecentActivity => "ui.sidebar.sort_recent_activity",
             Self::ToggleGrouping => "ui.sidebar.toggle_grouping",
+            Self::ToggleSettled => "ui.sidebar.toggle_settled",
             Self::Ignore => "ui.sidebar.ignore",
             Self::PreviousSession => "ui.sidebar.previous_session",
             Self::NextSession => "ui.sidebar.next_session",
@@ -488,6 +493,7 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         }
         Binding::SwitchTheme => Keybind::App(AppAction::SwitchTheme),
         Binding::SettleSession => Keybind::SettleSession,
+        Binding::InterruptAgent => Keybind::InterruptAgent,
         Binding::RenameSession => Keybind::App(AppAction::RenameSession),
         Binding::CleanWorktrees => Keybind::App(AppAction::CleanWorktrees),
         Binding::MoveSessionToSpace => Keybind::App(AppAction::MoveSessionToSpace),

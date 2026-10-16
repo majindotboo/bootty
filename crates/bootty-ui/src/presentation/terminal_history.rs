@@ -283,9 +283,9 @@ impl TerminalHistoryDialog {
             if !self.providers.is_empty() {
                 "History".to_owned()
             } else if self.context.session.kind == bootty_control::ResourceKind::Binding {
-                format!("Resume {} session", self.context.provider)
+                format!("Resume {} session", self.context.provider.display_name())
             } else {
-                format!("{} history", self.context.provider)
+                format!("{} history", self.context.provider.display_name())
             },
             self.list.filter(),
             rows,

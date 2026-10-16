@@ -179,6 +179,9 @@ pub struct WorkspaceDock {
     retained_panels: Vec<ContextPanels>,
     surfaces: surfaces::CenterSurfaces,
     centers: std::collections::BTreeMap<String, gpui_kit::component::dock::PanelState>,
+    /// The right dock of each session other than the current one, by session key. Each session
+    /// keeps its own tools, documents and subagents there, and whether they show.
+    rights: std::collections::BTreeMap<String, gpui_kit::component::dock::DockState>,
     subagents: Rc<
         RefCell<
             std::collections::BTreeMap<String, Entity<crate::gpui_subagent_panel::SubagentPanel>>,
@@ -315,6 +318,7 @@ impl WorkspaceDock {
             retained_panels: Vec::new(),
             surfaces,
             centers: std::collections::BTreeMap::new(),
+            rights: std::collections::BTreeMap::new(),
             subagents,
             center_task: None,
             restored_agent_destination: None,
@@ -1308,6 +1312,7 @@ impl WorkspaceDock {
     }
 
     fn load_layout(&mut self, saved: SavedLayout, window: &mut Window, cx: &mut Context<Self>) {
+        self.rights = saved.rights;
         if self.restoring.is_some() {
             self.restored_agent_destination = saved
                 .active_center
@@ -1402,6 +1407,12 @@ impl WorkspaceDock {
         if let Some(previous) = &self.center_task {
             self.centers.insert(previous.clone(), layout.center.clone());
         }
+        crate::workspace_composition::swap_session_right_dock(
+            &mut layout,
+            &mut self.rights,
+            (self.center_task.as_deref(), &key),
+            closed_right_dock(self.area.read(cx), window),
+        );
         // A task-wide legacy layout belongs to one outer tab, never a copy on every window.
         if !self.centers.contains_key(&key)
             && let Ok(parts) = serde_json::from_str::<Vec<String>>(&key)
@@ -1458,6 +1469,7 @@ impl WorkspaceDock {
             layout,
             centers,
             active_center: self.center_task.clone(),
+            rights: self.rights.clone(),
         }
     }
 
@@ -1799,6 +1811,21 @@ fn group_paths(area: &DockArea) -> Vec<(String, NodeId)> {
         }
     }
     groups
+}
+
+/// A session's right dock before it has one of its own: closed and empty, at the current width.
+fn closed_right_dock(area: &DockArea, window: &Window) -> gpui_kit::component::dock::DockState {
+    gpui_kit::component::dock::DockState::new(
+        gpui_kit::component::dock::PanelState {
+            panel_name: "TabPanel".to_owned(),
+            children: Vec::new(),
+            info: PanelInfo::tabs(0),
+        },
+        DockPlacement::Right,
+        area.dock_size(DockPlacement::Right)
+            .unwrap_or_else(|| gpui_kit::px(f32::from(window.rem_size()) * 20.0)),
+        false,
+    )
 }
 
 fn panel_placement_in_area(area: &DockArea, id: PanelId) -> Option<DockPlacement> {

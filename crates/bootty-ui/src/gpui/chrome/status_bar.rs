@@ -1367,6 +1367,7 @@ fn tab_is_active(item: &StatusItemSnapshot) -> bool {
 pub(super) fn tab_menu(tab: TabContextSnapshot) -> Vec<MenuRow> {
     use TabContextAction as A;
     let row = |label: &str, enabled: bool, destructive: bool, starts_group: bool, action| MenuRow {
+        confirm: None,
         label: label.to_owned(),
         enabled,
         destructive,
@@ -1411,6 +1412,7 @@ pub(super) fn tab_menu(tab: TabContextSnapshot) -> Vec<MenuRow> {
             .into_iter()
             .enumerate()
             .map(|(index, (label, invocation))| MenuRow {
+                confirm: None,
                 label,
                 enabled: true,
                 destructive: false,

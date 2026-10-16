@@ -155,7 +155,8 @@ pub enum Modifier {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComputerAction {
-    /// Raise only the explicitly selected window before subsequent input.
+    /// Make the selected window the one its app sends keys to. On macOS the app stays where it
+    /// is; elsewhere the window comes to the front.
     Focus,
     Snapshot,
     /// Capture only this absolute desktop rectangle inside the exact window.

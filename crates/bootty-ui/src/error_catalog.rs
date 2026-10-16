@@ -134,6 +134,13 @@ pub const fn command_send_message(error: bootty_control::AppCommandSendError) ->
     }
 }
 
+/// Whether a failure means the provider account needs signing in, which a Sign in action fixes.
+#[must_use]
+pub fn needs_sign_in(message: &str) -> bool {
+    let lower = bootty_agents::native_error_message(message).to_ascii_lowercase();
+    lower.contains("not logged in") || lower.contains("sign in") || lower.contains("unauthorized")
+}
+
 fn technical_summary(message: &str) -> String {
     let message = bootty_agents::native_error_message(message);
     let lower = message.to_ascii_lowercase();
@@ -148,10 +155,7 @@ fn technical_summary(message: &str) -> String {
     {
         return "This conversation is archived. Unarchive it to continue.".into();
     }
-    if lower.contains("not logged in")
-        || lower.contains("sign in")
-        || lower.contains("unauthorized")
-    {
+    if needs_sign_in(&message) {
         return "Sign in to the selected provider account, then retry.".into();
     }
     if lower.contains("api key") {

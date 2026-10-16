@@ -67,19 +67,28 @@ capture to appear. Agents never use the Bootty instance they run
 in, terminals, or System Settings; another Bootty instance, such as a
 development build, is an ordinary app.
 
-Computer commands use an exact window token returned by `computer.targets`;
-input requires that window to remain focused and pointer coordinates to remain
-uncovered. `computer.elements` lists the window's accessibility elements and
-`computer.press` presses one of them by the element it returned; it follows the
-capture switch and the input switch respectively. Window or process changes invalidate the token. Only the focus
-command activates an app, and input is never redirected to another window.
-Computer use works on macOS, Windows and Linux on X11, including XWayland apps
-in a Wayland session; native Wayland windows are not listed. On macOS, capture
-needs macOS 14 or later and input goes straight to the target app, so the
-pointer never moves; Bootty shows its own cursor briefly where each click, move
-or scroll landed. On Windows and Linux, input drives the real pointer, and
-Command shortcuts are sent as Control. `computer.snapshot` writes a bounded PNG
+Computer commands use an exact window token returned by `computer.targets`.
+Window or process changes invalidate the token, and input is never redirected
+to another window. `computer.elements` lists the window's accessibility elements
+and `computer.press` presses one of them by the element it returned; it follows
+the capture switch and the input switch respectively. Computer use works on
+macOS, Windows and Linux on X11, including XWayland apps in a Wayland session;
+native Wayland windows are not listed. `computer.snapshot` writes a bounded PNG
 to the supplied absolute local path and never replaces an existing file.
+
+On macOS, capture needs macOS 14 or later, and input goes straight to the target
+window without focusing it, so the window may sit behind other apps and the
+pointer never moves; Bootty shows its own cursor briefly where each click, move
+or scroll landed. Typed text and keys go to the window its app has focused,
+whether or not that app is in front: `computer.focus` makes the target that
+window and lifts it behind the frontmost app without activating its app. Views
+that need their window active, such as web content, ignore clicks while their
+app is in the background, so a left click in an app that is not frontmost
+presses the accessibility element under the point when it has its own press
+action. Other clicks, and every click on the frontmost app, are sent as clicks. On Windows and Linux, input drives the real pointer,
+so the target must be the focused window and each point uncovered;
+`computer.focus` brings it to the front, and Command shortcuts are sent as
+Control.
 
 ```toml
 [computer]
@@ -205,6 +214,7 @@ shell = "/bin/zsh"
 working-directory = "/Users/example/src"
 worktree-directory = "~/.local/share/bootty/worktrees"
 worktree-limit = 10 # Bootty worktrees kept per host; 0 removes only unused ones
+branch-prefix = "bootty/" # start of new worktree branch names; a project's prefix wins
 env = [{ name = "EDITOR", value = "vim" }]
 term = "xterm-bootty"
 colorterm = "truecolor"
@@ -672,6 +682,9 @@ Connection tests report results for both saved profiles and unsaved drafts.
 
 `sidebar.group-by-project` defaults to `true`. The sidebar view button and
 `ui.sidebar.toggle_grouping` switch between project groups and a flat list.
+The Settled heading and `ui.sidebar.toggle_settled` open and close the settled
+shelf, saved as `sidebar.settled-collapsed`. The shelf lists the most recently
+active sessions first, ten at a time.
 Each session owns its branch and agent marks; switching views preserves sessions,
 selection and terminal contents. Sessions are grouped into Pinned, Needs attention,
 Working, Sessions and Settled. Archive retains saved work; Delete permanently
@@ -691,7 +704,8 @@ New worktrees go in `<session.worktree-directory>/<repository>/<name>` on the
 repository's host. Unset, the directory is `~/.local/share/bootty/worktrees` on
 macOS and Linux and `%LOCALAPPDATA%\bootty\worktrees` on Windows; Development
 builds use their own namespace in place of `bootty`. A leading `~` is that host's
-home. Generated names use the task's short slug. The sidebar groups a linked
+home. Generated names use the task's short slug, and branches start with
+`session.branch-prefix` (default `bootty/`) unless the project sets its own. The sidebar groups a linked
 worktree's sessions under its main checkout's project.
 
 Bootty cleans up the worktrees in that directory on each host: hourly, soon after
@@ -778,7 +792,8 @@ side padding without reserving a separate column. Hiding a close button keeps th
 close command and context menu available.
 
 Side visibility and widths are saved in `native-panels.json`; drag a side edge
-to resize. The legacy `chrome.sidebar` and `chrome.sidebar-width` keys seed an
+to resize. Each session keeps its own right side: its tools, documents and
+subagent tabs, and whether it shows. The sessions sidebar on the left is shared. The legacy `chrome.sidebar` and `chrome.sidebar-width` keys seed an
 unsaved layout. `sidebar.position` no longer moves the sidebar.
 
 ## Git tool panels
@@ -944,6 +959,8 @@ been certified from the macOS development environment.
 Agent alerts use `session.agent-notifications = "unfocused"` by default. Set
 `"always"` to include the focused terminal or `"never"` to disable desktop alerts.
 Unread markers and sequence-safe acknowledgement remain available in all modes.
+Alerts cover native conversations, agents reporting through hooks, and agents
+Bootty starts in a terminal; each also lists in the Agents panel.
 
 See [terminal image clipboard writes](clipboard-writes.md) for host keys, supported
 formats, limits and permission scope.
@@ -1020,10 +1037,12 @@ than starting a new conversation.
 
 `agents.follow-up-behavior` defaults to `"queue"`. Messages sent during an active
 turn wait for it to finish; `"steer"` sends them into the active turn instead,
-waiting in the queue until the turn can take them.
+waiting in the queue until the turn can take them; `"interrupt"` stops the turn and
+sends them next.
 `agents.send-shortcut` decides which keys send one message with the opposite
 behavior. The queued messages appear above the composer and remain with the
-conversation when its tab closes. Failed or interrupted deliveries remain
+conversation when its tab closes. Stopping the agent pauses the queue so the next
+message doesn't go out at once; Resume, or sending a message, lets it go again. Failed or interrupted deliveries remain
 available for an explicit retry.
 
 `agents.default-provider` selects the provider for a fresh composer. Each provider's

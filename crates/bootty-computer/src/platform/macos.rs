@@ -1,6 +1,13 @@
 //! macOS: `CoreGraphics` window lists and events, Accessibility focus and elements, and
 //! `ScreenCaptureKit` capture.
-//! Events go straight to the target process, so the user's pointer never moves.
+//! Events go straight to the target process addressed to its window, so the user's pointer never
+//! moves and the window needs no focus.
+//!
+//! Deliberate limit: a click in a background app's window still meets `AppKit`'s first-click rule,
+//! so views that need their window active, such as web content, ignore it. The shared rules press
+//! the element under the point instead, which leaves only points without a pressable element, such
+//! as a web canvas. Click those directly if macOS offers a public way to make a window key without
+//! activating its app.
 #![allow(
     unsafe_code,
     reason = "Accessibility, Carbon and Objective-C calls are confined to this native adapter."
@@ -15,7 +22,7 @@ use std::{
 
 use block2::RcBlock;
 use objc2::{AnyThread as _, rc::Retained};
-use objc2_app_kit::{NSApplicationActivationOptions, NSImage, NSRunningApplication, NSWorkspace};
+use objc2_app_kit::{NSImage, NSRunningApplication, NSWorkspace};
 use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFGetTypeID, CFNumber, CFRetained, CFString, CFType, CGPoint,
     CGRect, CGSize,
@@ -35,7 +42,7 @@ use objc2_screen_capture_kit::{
 use crate::{
     ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, ElementState,
     Key, MAX_ELEMENT_DEPTH, Modifier, MouseButton, PermissionStatus,
-    desktop::{Desktop, Focus, Image, InputEvent, NativeWindow},
+    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow},
 };
 
 // ScreenCaptureKit answers on its own queue; a capture that has not answered by then failed.
@@ -46,6 +53,9 @@ const AX_VALUE_CG_POINT: u32 = 1;
 const AX_VALUE_CG_SIZE: u32 = 2;
 const AX_ERROR_CANNOT_COMPLETE: i32 = -25204;
 const AX_ERROR_ACTION_UNSUPPORTED: i32 = -25206;
+/// The undocumented event field `AppKit` reads as `NSEvent.windowNumber`. Events posted to a process
+/// without it reach no window while the app is inactive.
+const WINDOW_NUMBER: CGEventField = CGEventField(51);
 // A listing reads at most this many elements and stops at this budget, even in huge web pages.
 const MAX_ELEMENT_READS: usize = 4_000;
 const ELEMENT_BUDGET: Duration = Duration::from_secs(3);
@@ -98,6 +108,12 @@ unsafe extern "C" {
         value: *mut *mut c_void,
     ) -> i32;
     fn AXUIElementPerformAction(element: *const c_void, action: *const c_void) -> i32;
+    fn AXUIElementCopyElementAtPosition(
+        application: *const c_void,
+        x: f32,
+        y: f32,
+        element: *mut *mut c_void,
+    ) -> i32;
     fn AXUIElementCopyMultipleAttributeValues(
         element: *const c_void,
         attributes: *const c_void,
@@ -118,6 +134,13 @@ unsafe extern "C" {
 #[link(name = "Carbon", kind = "framework")]
 unsafe extern "C" {
     fn IsSecureEventInputEnabled() -> u8;
+}
+
+// Exported by the SDK's CoreGraphics stubs without a header. Sets an event's point relative to
+// the top-left of its window, which AppKit reads as `NSEvent.locationInWindow`.
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGEventSetWindowLocation(event: *const c_void, location: CGPoint);
 }
 
 pub fn native() -> Arc<dyn Desktop> {
@@ -150,32 +173,28 @@ impl Desktop for MacDesktop {
             .collect()
     }
 
-    fn focus(&self) -> Option<Focus> {
-        let process_id = NSWorkspace::sharedWorkspace()
-            .frontmostApplication()?
-            .processIdentifier();
-        let window = ax_application(process_id)
+    fn route(&self) -> InputRoute {
+        InputRoute::Window
+    }
+
+    fn frontmost(&self) -> Option<i32> {
+        NSWorkspace::sharedWorkspace()
+            .frontmostApplication()
+            .map(|app| app.processIdentifier())
+    }
+
+    /// Every app keeps its own focused window, in front or not.
+    fn focus(&self, process_id: i32) -> Option<DisplayBounds> {
+        ax_application(process_id)
             .and_then(|app| ax_element(&app, "AXFocusedWindow"))
-            .and_then(|window| element_bounds(&window));
-        Some(Focus { process_id, window })
+            .and_then(|window| element_bounds(&window))
     }
 
     fn secure_input(&self) -> bool {
-        if unsafe { IsSecureEventInputEnabled() } != 0 {
-            return true;
-        }
-        let Some(element) = NSWorkspace::sharedWorkspace()
-            .frontmostApplication()
-            .and_then(|app| ax_application(app.processIdentifier()))
-            .and_then(|app| ax_element(&app, "AXFocusedUIElement"))
-        else {
-            return false;
-        };
-        ["AXRole", "AXSubrole"].into_iter().any(|name| {
-            ax_attribute(&element, name)
-                .and_then(|value| value.downcast::<CFString>().ok())
-                .is_some_and(|role| role.to_string() == "AXSecureTextField")
-        })
+        (unsafe { IsSecureEventInputEnabled() }) != 0
+            || NSWorkspace::sharedWorkspace()
+                .frontmostApplication()
+                .is_some_and(|app| secure_focus(app.processIdentifier()))
     }
 
     fn capture(
@@ -255,6 +274,12 @@ impl Desktop for MacDesktop {
             .as_ref()
             .map(|app| app.process_id)
             .ok_or(ComputerError::TargetUnavailable)?;
+        // Keys reach a background app's focused element too, so its password fields stay off
+        // limits just as the frontmost app's do.
+        if matches!(event, InputEvent::Text(_) | InputEvent::Key { .. }) && secure_focus(process_id)
+        {
+            return Err(ComputerError::SecureInput);
+        }
         let events = match event {
             InputEvent::Move { x, y } => {
                 vec![mouse(CGEventType::MouseMoved, *x, *y, MouseButton::Left)?]
@@ -328,25 +353,18 @@ impl Desktop for MacDesktop {
         };
         // Every event is allocated before the first is posted, so a press always gets its release.
         for event in &events {
+            address(event, window);
             CGEvent::post_to_pid(process_id, Some(event));
         }
         Ok(())
     }
 
+    /// `AXRaise` makes the window its app's focused window without activating the app, which
+    /// macOS refuses a background caller anyway. The window moves up behind the frontmost app's.
     fn raise(&self, window: &NativeWindow) -> Result<(), ComputerError> {
-        let process_id = window
-            .app
-            .as_ref()
-            .map(|app| app.process_id)
-            .ok_or(ComputerError::TargetUnavailable)?;
         let element = ax_window(window).ok_or(ComputerError::TargetNotFocused)?;
         let raise = CFString::from_static_str("AXRaise");
-        let raised = unsafe { AXUIElementPerformAction(cf(&element), cf(&raise)) } == 0;
-        let activated = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)
-            .is_some_and(|app| {
-                app.activateWithOptions(NSApplicationActivationOptions::ActivateAllWindows)
-            });
-        if raised && activated {
+        if unsafe { AXUIElementPerformAction(cf(&element), cf(&raise)) } == 0 {
             Ok(())
         } else {
             Err(ComputerError::TargetNotFocused)
@@ -428,22 +446,76 @@ impl Desktop for MacDesktop {
             .and_then(|attributes| attributes.element(path.to_vec(), false)))
     }
 
+    fn pressable_at(
+        &self,
+        window: &NativeWindow,
+        x: f64,
+        y: f64,
+    ) -> Result<Option<Vec<u16>>, ComputerError> {
+        let root = ax_window(window).ok_or(ComputerError::TargetUnavailable)?;
+        let Some(app) = window
+            .app
+            .as_ref()
+            .and_then(|app| ax_application(app.process_id))
+        else {
+            return Ok(None);
+        };
+        // Hit-testing through the app element looks only at that app's windows, front to back.
+        let mut hit = std::ptr::null_mut();
+        if unsafe {
+            AXUIElementCopyElementAtPosition(
+                cf(&app),
+                ax_coordinate(x),
+                ax_coordinate(y),
+                &raw mut hit,
+            )
+        } != 0
+        {
+            return Ok(None);
+        }
+        let Some(hit) = NonNull::new(hit.cast::<CFType>()) else {
+            return Ok(None);
+        };
+        // Copy functions return a +1 reference. The chain runs from the hit element up to the
+        // window; a point showing another window of the app never reaches it.
+        let mut chain = vec![unsafe { CFRetained::from_raw(hit) }];
+        while chain.last().is_some_and(|element| **element != *root) {
+            let parent = chain
+                .last()
+                .and_then(|element| ax_element(element, "AXParent"));
+            match parent {
+                Some(parent) if chain.len() <= MAX_ELEMENT_DEPTH => chain.push(parent),
+                _ => return Ok(None),
+            }
+        }
+        // The window itself is never pressed. A click goes nowhere on a disabled element, so its
+        // ancestors are never pressed for it either.
+        let inside = chain.len().saturating_sub(1);
+        let Some(found) = chain
+            .iter()
+            .take(inside)
+            .position(|element| disabled(element) || has_action(element, "AXPress"))
+        else {
+            return Ok(None);
+        };
+        if chain.get(found).is_some_and(|element| disabled(element)) {
+            return Ok(None);
+        }
+        // Each step names a child by its position under its parent, from the window down.
+        Ok(chain
+            .windows(2)
+            .skip(found)
+            .rev()
+            .map(|pair| match pair {
+                [child, parent] => child_index(parent, child),
+                _ => None,
+            })
+            .collect())
+    }
+
     fn press(&self, window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
         let element = element_at(window, path).ok_or(ComputerError::StaleElement)?;
-        let mut names = std::ptr::null_mut();
-        if unsafe { AXUIElementCopyActionNames(cf(&element), &raw mut names) } != 0 {
-            return Ok(false);
-        }
-        let Some(names) = NonNull::new(names.cast::<CFArray>()) else {
-            return Ok(false);
-        };
-        // Copy functions return a +1 reference; action names are strings.
-        let names: CFRetained<CFArray<CFType>> =
-            unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(names)) };
-        if !names.iter().any(|name| {
-            name.downcast::<CFString>()
-                .is_ok_and(|name| name.to_string() == "AXPress")
-        }) {
+        if !has_action(&element, "AXPress") {
             return Ok(false);
         }
         let action = CFString::from_static_str("AXPress");
@@ -886,6 +958,76 @@ fn element_bounds(element: &CFType) -> Option<DisplayBounds> {
         width: size.width,
         height: size.height,
     })
+}
+
+/// Whether the element offers this accessibility action.
+fn has_action(element: &CFType, action: &str) -> bool {
+    let mut names = std::ptr::null_mut();
+    if unsafe { AXUIElementCopyActionNames(cf(element), &raw mut names) } != 0 {
+        return false;
+    }
+    let Some(names) = NonNull::new(names.cast::<CFArray>()) else {
+        return false;
+    };
+    // Copy functions return a +1 reference; action names are strings.
+    let names: CFRetained<CFArray<CFType>> =
+        unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(names)) };
+    names.iter().any(|name| {
+        name.downcast::<CFString>()
+            .is_ok_and(|name| name.to_string() == action)
+    })
+}
+
+fn disabled(element: &CFType) -> bool {
+    ax_attribute(element, "AXEnabled")
+        .and_then(|value| value.downcast::<CFBoolean>().ok())
+        .is_some_and(|enabled| !enabled.as_bool())
+}
+
+/// The child's position among the parent's children.
+fn child_index(parent: &CFType, child: &CFType) -> Option<u16> {
+    let children = ax_attribute(parent, "AXChildren")?
+        .downcast::<CFArray>()
+        .ok()?;
+    // Children of an accessibility element are elements.
+    let children: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(children) };
+    let index = children.iter().position(|candidate| *candidate == *child)?;
+    u16::try_from(index).ok()
+}
+
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "Accessibility hit-testing takes f32 desktop points."
+)]
+const fn ax_coordinate(value: f64) -> f32 {
+    value as f32
+}
+
+/// Whether the app's focused element hides what is typed, such as a password field.
+fn secure_focus(process_id: i32) -> bool {
+    let Some(element) =
+        ax_application(process_id).and_then(|app| ax_element(&app, "AXFocusedUIElement"))
+    else {
+        return false;
+    };
+    ["AXRole", "AXSubrole"].into_iter().any(|name| {
+        ax_attribute(&element, name)
+            .and_then(|value| value.downcast::<CFString>().ok())
+            .is_some_and(|role| role.to_string() == "AXSecureTextField")
+    })
+}
+
+/// Address an event to exactly this window, at its point inside the window. `AppKit` routes it there
+/// even behind other windows; keys still go to the window the app has focused.
+fn address(event: &CGEvent, window: &NativeWindow) {
+    CGEvent::set_integer_value_field(Some(event), WINDOW_NUMBER, i64::from(window.id));
+    let point = CGEvent::location(Some(event));
+    let local = CGPoint {
+        x: point.x - window.bounds.x,
+        y: point.y - window.bounds.y,
+    };
+    unsafe { CGEventSetWindowLocation(cf(event), local) };
 }
 
 fn input_error() -> ComputerError {

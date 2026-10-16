@@ -145,6 +145,8 @@ close-button = "always" # always, hover, hidden
 [sidebar]
 # Turn off for one flat list with project context on each session.
 group-by-project = true
+# Show only the Settled heading and count until you open it.
+settled-collapsed = false
 # Manual order is the default; recent-activity uses accepted session input.
 sort-order = "manual"
 # Rotate the Working ring unless reduced motion is enabled.
@@ -390,6 +392,8 @@ clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 # ~/.local/share/bootty/worktrees, or %LOCALAPPDATA%\bootty\worktrees on Windows;
 # Development builds use their own namespace in place of bootty.
 # worktree-directory = "~/src/worktrees"
+# What a new worktree's branch name starts with. A project's own prefix wins.
+# branch-prefix = "bootty/"
 # Keep at most this many of Bootty's worktrees on each host. Past it, the oldest
 # archived and settled sessions' worktrees go first; one with uncommitted or
 # unpushed work always stays. 0 removes only worktrees no session uses.
@@ -477,7 +481,7 @@ button = "none"
 default-provider = "codex"
 allow-spawn = false
 quick-model = "gpt-6-luna"
-follow-up-behavior = "queue" # queue | steer
+follow-up-behavior = "queue" # queue | steer | interrupt
 send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
 response-streaming = "live" # live | paragraph | complete
 collapse-composer-on-scroll = true

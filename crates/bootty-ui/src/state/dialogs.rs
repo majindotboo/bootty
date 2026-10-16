@@ -1079,6 +1079,7 @@ impl AppState {
         }
         let mut form = NewSessionForm::new(draft, destinations, self.config().agents.clone());
         form.set_worktree_directory(self.config().session.worktree_directory.clone());
+        form.set_branch_prefix(self.config().session.branch_prefix.clone());
         form.set_project_defaults(
             self.workspace
                 .spaces()

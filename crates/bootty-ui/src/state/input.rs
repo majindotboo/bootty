@@ -471,6 +471,7 @@ impl AppState {
     ) -> bool {
         match action {
             SidebarAction::ToggleGrouping => return self.toggle_session_grouping(effects),
+            SidebarAction::ToggleSettled => return self.toggle_settled_shelf(effects),
             SidebarAction::SortManual => {
                 return self.set_session_sort_order(
                     bootty_config::config::SidebarSortOrder::Manual,

@@ -10,6 +10,11 @@ pub struct ConversationContext {
     pub target: Option<SessionTarget>,
 }
 
+/// Whether the last measured conversation was wide. A new conversation starts from it, since it
+/// usually opens where the last one was, rather than painting narrow and then jumping.
+pub(super) struct LastWide(pub(super) bool);
+impl gpui_kit::Global for LastWide {}
+
 impl NativeAgentSessionView {
     pub(crate) fn set_conversation_context(
         &mut self,
@@ -27,6 +32,7 @@ impl NativeAgentSessionView {
         let project = context
             .and_then(|context| context.project.clone())
             .unwrap_or_else(|| "No project".into());
+        let sources = self.render_context_sources(cx);
         div()
             .id("native-context-card")
             .absolute()
@@ -89,7 +95,7 @@ impl NativeAgentSessionView {
                     )
                 },
             )
-            .when(!self.record.attachments.is_empty(), |card| {
+            .when(!sources.is_empty(), |card| {
                 card.child(
                     div()
                         .border_t_1()
@@ -100,11 +106,12 @@ impl NativeAgentSessionView {
                         .gap_2()
                         .child(
                             div()
+                                .debug_selector(|| "native-context-sources".into())
                                 .text_sm()
                                 .text_color(cx.theme().muted_foreground)
                                 .child("Sources"),
                         )
-                        .children(self.render_context_sources(cx)),
+                        .children(sources),
                 )
             })
     }
@@ -166,6 +173,23 @@ impl NativeAgentSessionView {
             }))
     }
 
+    /// Wide mode for a host that knows the conversation's width before it paints, so the first
+    /// frame already has the right layout.
+    pub(crate) fn fit_width(
+        &mut self,
+        width: gpui_kit::Pixels,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let wide = width >= gpui_kit::rems(76.).to_pixels(window.rem_size());
+        if self.wide != wide {
+            self.wide = wide;
+            cx.notify();
+        }
+    }
+
+    /// Wide mode follows the measured width, which arrives after the first paint, for hosts that
+    /// don't pass it in.
     pub(super) fn render_context_geometry(&self, cx: &Context<Self>) -> impl IntoElement {
         let geometry_owner = cx.weak_entity();
         let wide = self.wide;
@@ -175,6 +199,7 @@ impl NativeAgentSessionView {
                 if next != wide {
                     let owner = geometry_owner;
                     cx.defer(move |cx| {
+                        cx.set_global(LastWide(next));
                         _ = owner.update(cx, |this, cx| {
                             if this.wide != next {
                                 this.wide = next;
@@ -190,10 +215,13 @@ impl NativeAgentSessionView {
         .inset_0()
     }
 
+    /// Files the conversation's messages carry, each opening its message. Images already show
+    /// in their messages.
     fn render_context_sources(&self, cx: &Context<Self>) -> Vec<gpui_kit::AnyElement> {
         self.record
             .attachments
             .iter()
+            .filter(|attachment| attachment.kind != bootty_agents::NativeAttachmentKind::Image)
             .filter_map(|attachment| {
                 let message = self
                     .record
@@ -207,30 +235,31 @@ impl NativeAgentSessionView {
                     })?
                     .id
                     .clone();
+                let id = format!("context-source:{}", attachment.id);
                 Some(
-                    Button::new(gpui_kit::SharedString::from(format!(
-                        "context-source:{}",
-                        attachment.id
-                    )))
-                    .ghost()
-                    .small()
-                    .w_full()
-                    .accessibility_label(attachment.name.clone())
-                    .tooltip(attachment.name.clone())
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .child(attachment.name.clone()),
-                    )
-                    .child(crate::gpui::sized_icon(
-                        "paperclip",
-                        crate::gpui::IconSize::Small,
-                        cx.theme().muted_foreground,
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| this.reveal_response(&message, cx)))
-                    .into_any_element(),
+                    Button::new(gpui_kit::SharedString::from(id.clone()))
+                        .debug_selector(move || id)
+                        .ghost()
+                        .small()
+                        .w_full()
+                        .accessibility_label(attachment.name.clone())
+                        .tooltip(attachment.name.clone())
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(attachment.name.clone()),
+                        )
+                        .child(crate::gpui::sized_icon(
+                            "paperclip",
+                            crate::gpui::IconSize::Small,
+                            cx.theme().muted_foreground,
+                        ))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.reveal_response(&message, cx)),
+                        )
+                        .into_any_element(),
                 )
             })
             .collect()

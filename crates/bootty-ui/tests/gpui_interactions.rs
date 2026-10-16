@@ -199,6 +199,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
         footer: Vec::new(),
         title_visible: true,
         group_by_project: true,
+        settled_collapsed: false,
         sort_order: bootty_config::config::SidebarSortOrder::Manual,
         focused: true,
         hovered_session: None,
@@ -2602,6 +2603,7 @@ fn project_filter_retains_search_and_does_not_activate_a_hidden_session(cx: &mut
 
 fn saved_task(state: bootty_mux::session_membership::SessionState) -> SidebarTask {
     SidebarTask {
+        title: String::new(),
         native_conversation: None,
         identity: "saved-identity".to_owned(),
         state,
@@ -2754,6 +2756,74 @@ fn settled_session_that_needs_attention_leaves_the_shelf(cx: &mut TestAppContext
     assert_eq!(cx.debug_bounds("sidebar-settled-section"), None);
 }
 
+/// An idle session says how long it has been idle.
+#[gpui_kit::test]
+fn idle_sessions_show_their_age(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::SessionState;
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState {
+        last_activity_at: Some(1_000 - 2 * 60 * 60),
+        ..SessionState::default()
+    });
+    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+    row.trailing = None;
+    row.trailing_icon = None;
+    let (_, cx) = cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("sidebar-status-session").is_some());
+}
+
+/// A session titled with its branch doesn't repeat the branch under the title.
+#[gpui_kit::test]
+fn a_branch_title_is_not_repeated(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let shows_branch = |title: &str, cx: &mut TestAppContext| {
+        let mut snapshot = chrome_snapshot();
+        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
+        row.text = title.to_owned();
+        row.branch = Some("feature/login".to_owned());
+        let (_, cx) =
+            cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+        draw_chrome(cx);
+        cx.debug_bounds("sidebar-branch-session").is_some()
+    };
+    assert!(!shows_branch("feature/login", cx));
+    assert!(shows_branch("Session one", cx));
+}
+
+/// The settled shelf lists the most recently active session first, whatever the manual order.
+#[gpui_kit::test]
+fn settled_shelf_lists_recent_activity_first(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState::default());
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    let template = sidebar.rows[0].clone();
+    sidebar.rows = [100, 300, 200]
+        .into_iter()
+        .map(|at| {
+            let mut row = template.clone();
+            row.key = format!("settled-{at}");
+            row.text = format!("Settled at {at}");
+            row.task = Some(saved_task(SessionState {
+                lifecycle: SessionLifecycle::Settled,
+                last_activity_at: Some(at),
+                ..SessionState::default()
+            }));
+            row
+        })
+        .collect();
+    let (_probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    let tops = [
+        "sidebar-row-settled-300",
+        "sidebar-row-settled-200",
+        "sidebar-row-settled-100",
+    ]
+    .map(|selector| cx.debug_bounds(selector).expect(selector).top());
+    assert!(tops.is_sorted(), "{tops:?}");
+}
+
 #[gpui_kit::test]
 fn saved_task_without_a_terminal_has_no_connection_status(cx: &mut TestAppContext) {
     use bootty_mux::session_membership::{SessionLifecycle, SessionState};
@@ -2772,6 +2842,8 @@ fn saved_task_without_a_terminal_has_no_connection_status(cx: &mut TestAppContex
         lifecycle: SessionLifecycle::Settled,
         ..SessionState::default()
     }));
+    // The settled shelf has no project headers, so the row names its branch.
+    snapshot.sidebar.as_mut().unwrap().rows[0].branch = Some("feature/login".to_owned());
     cx.update(|window, cx| {
         probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
             chrome.update(&snapshot, window, cx);
@@ -2781,17 +2853,60 @@ fn saved_task_without_a_terminal_has_no_connection_status(cx: &mut TestAppContex
     assert!(cx.debug_bounds("sidebar-settled-section").is_some());
     let settled = cx.debug_bounds("sidebar-row-session").unwrap();
     assert!(settled.size.height < active.size.height);
+    assert!(cx.debug_bounds("sidebar-settled-context-session").is_some());
     assert_eq!(cx.debug_bounds("sidebar-status-session"), None);
     assert_eq!(cx.debug_bounds("sidebar-status-icon-session"), None);
+    // The heading asks to close the shelf; the saved setting closes it.
     let section = cx.debug_bounds("sidebar-settled-section").unwrap();
     cx.simulate_click(section.center(), Modifiers::none());
+    probe.update(cx, |probe, _| {
+        assert!(matches!(
+            probe.intents.borrow().as_slice(),
+            [ChromeIntent::Command(invocation)] if invocation.command == "ui.sidebar.toggle_settled"
+        ));
+    });
+    snapshot.sidebar.as_mut().unwrap().settled_collapsed = true;
+    cx.update(|window, cx| {
+        probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
+            chrome.update(&snapshot, window, cx);
+        });
+    });
     draw_chrome(cx);
     assert_eq!(cx.debug_bounds("sidebar-row-session"), None);
-    let section = cx.debug_bounds("sidebar-settled-section").unwrap();
-    cx.simulate_click(section.center(), Modifiers::none());
+    assert!(cx.debug_bounds("sidebar-settled-section").is_some());
+}
+
+/// The settled shelf shows ten sessions at a time.
+#[gpui_kit::test]
+fn settled_shelf_pages_ten_at_a_time(cx: &mut TestAppContext) {
+    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = saved_task_snapshot(SessionState::default());
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    let template = sidebar.rows[0].clone();
+    sidebar.rows = (0..13)
+        .map(|index| {
+            let mut row = template.clone();
+            row.key = format!("settled-{index}");
+            row.task = Some(saved_task(SessionState {
+                lifecycle: SessionLifecycle::Settled,
+                last_activity_at: Some(1_000_i64.saturating_sub(index)),
+                ..SessionState::default()
+            }));
+            row
+        })
+        .collect();
+    let (_probe, cx) =
+        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    assert!(cx.debug_bounds("sidebar-row-settled-9").is_some());
+    assert!(cx.debug_bounds("sidebar-row-settled-10").is_none());
+    let more = cx
+        .debug_bounds("sidebar-settled-more:3")
+        .expect("Show 3 more");
+    cx.simulate_click(more.center(), Modifiers::none());
     draw_chrome(cx);
-    assert!(cx.debug_bounds("sidebar-row-session").is_some());
-    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
+    assert!(cx.debug_bounds("sidebar-row-settled-12").is_some());
+    assert!(cx.debug_bounds("sidebar-settled-more:3").is_none());
 }
 
 #[gpui_kit::test]

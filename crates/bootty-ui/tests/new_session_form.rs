@@ -1090,6 +1090,36 @@ fn composer_defaults_resolve_advertised_values_and_preserve_explicit_choices(
     assert_eq!(selected.reasoning_effort.as_deref(), Some("medium"));
 }
 
+/// A new worktree's branch starts with the configured prefix, unless its project sets its own.
+#[rstest]
+#[case::configured("", "team/improve-composer")]
+#[case::project("work/", "work/improve-composer")]
+fn worktree_branches_start_with_the_configured_or_project_prefix(
+    mut form: NewSessionForm,
+    #[case] project_prefix: &str,
+    #[case] branch: &str,
+) {
+    use bootty_mux::repository::{ProjectSettings, RegisteredProject};
+    form.set_branch_prefix("team/".to_owned());
+    form.set_project_defaults(vec![RegisteredProject {
+        scope: form.draft.scope,
+        cwd: form.draft.cwd.clone(),
+        collapsed: false,
+        settings: ProjectSettings {
+            branch_prefix: project_prefix.to_owned(),
+            ..ProjectSettings::default()
+        },
+    }]);
+    form.set_worktree_available(true);
+    form.change_field("isolation", "New worktree");
+    form.set_generated_names(bootty_agents::GeneratedSessionNames {
+        title: "Improve composer".into(),
+        slug: "improve-composer".into(),
+    })
+    .expect("valid generated names");
+    assert_eq!(form.draft.branch, branch);
+}
+
 #[rstest]
 fn project_defaults_apply_to_creation_and_survive_a_created_worktree(mut form: NewSessionForm) {
     use bootty_mux::repository::{ProjectSettings, RegisteredProject};

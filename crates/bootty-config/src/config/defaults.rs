@@ -17,6 +17,8 @@ use std::{
 };
 const DEFAULT_MAX_SCROLLBACK: usize = 320_000_000;
 const DEFAULT_TERM: &str = "xterm-bootty";
+/// What new worktree branches start with until the configuration or a project says otherwise.
+pub const DEFAULT_BRANCH_PREFIX: &str = "bootty/";
 const DEFAULT_FONT_FAMILY: &str = ".ZedMono";
 const DEFAULT_UI_FONT_FAMILY: &str = ".ZedSans";
 const DEFAULT_FONT_SIZE: f32 = 15.0;
@@ -30,6 +32,7 @@ impl Default for SidebarConfig {
     fn default() -> Self {
         Self {
             group_by_project: true,
+            settled_collapsed: false,
             sort_order: SidebarSortOrder::Manual,
             animate_working: true,
             auto_settle_after_days: 3,
@@ -156,6 +159,7 @@ impl Default for SessionConfig {
             working_directory: None,
             worktree_directory: None,
             worktree_limit: 10,
+            branch_prefix: DEFAULT_BRANCH_PREFIX.to_owned(),
             env: Vec::new(),
             term: DEFAULT_TERM.to_owned(),
             colorterm: "truecolor".to_owned(),

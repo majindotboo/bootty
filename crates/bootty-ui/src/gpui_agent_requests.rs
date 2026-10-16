@@ -9,11 +9,35 @@ use gpui_kit::component::{
     scroll::ScrollableElement as _,
 };
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render, Styled as _,
-    Subscription, Window, div, prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, IntoElement, ParentElement as _, Render,
+    Styled as _, Subscription, Window, div, prelude::*,
 };
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
+
+#[path = "gpui_agent_elicitation.rs"]
+mod elicitation;
+
+gpui_kit::actions!(
+    bootty_request,
+    [
+        #[derive(Eq)]
+        AllowRequest,
+        #[derive(Eq)]
+        DenyRequest
+    ]
+);
+
+const REQUEST_KEYS: &str = "BoottyAgentRequest";
+
+/// A focused request panel answers its front approval: Enter takes the primary choice and Escape
+/// denies. Reusable scopes stay on their buttons, so no key grants more than once.
+pub fn init_request_keys(cx: &mut App) {
+    cx.bind_keys([
+        gpui_kit::KeyBinding::new("enter", AllowRequest, Some(REQUEST_KEYS)),
+        gpui_kit::KeyBinding::new("escape", DenyRequest, Some(REQUEST_KEYS)),
+    ]);
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum NativeRequestOperation {
@@ -47,10 +71,19 @@ pub(super) struct NativeRequestView {
     editor_subscriptions: BTreeMap<String, Subscription>,
     /// What each file-change approval would change: its `fileChange` input and diff rows.
     diffs: BTreeMap<String, (String, Vec<super::ToolDiff>)>,
+    /// Answers being given to MCP forms, by request.
+    forms: BTreeMap<String, elicitation::FormState>,
+    focus: FocusHandle,
+    /// Approvals and questions already shown, so only a new one takes focus.
+    seen_keyed: BTreeSet<String>,
+    /// The question each question request's digit keys answer, by request.
+    question_cursor: BTreeMap<String, usize>,
+    /// The panel has focus, so the front request shows its keys.
+    keys_shown: bool,
 }
 
 impl NativeRequestView {
-    pub(super) const fn new(target: CommandTarget) -> Self {
+    pub(super) fn new(target: CommandTarget, cx: &Context<Self>) -> Self {
         Self {
             target,
             requests: Vec::new(),
@@ -62,7 +95,54 @@ impl NativeRequestView {
             editors: BTreeMap::new(),
             editor_subscriptions: BTreeMap::new(),
             diffs: BTreeMap::new(),
+            forms: BTreeMap::new(),
+            focus: cx.focus_handle(),
+            seen_keyed: BTreeSet::new(),
+            question_cursor: BTreeMap::new(),
+            keys_shown: false,
         }
+    }
+
+    pub(super) fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    /// The request Enter, Escape and the digit keys answer: the first approval or question shown.
+    fn front_keyed(&self) -> Option<&NativeAgentRequest> {
+        self.requests
+            .iter()
+            .find(|request| is_decision(request) || is_question(request))
+            .filter(|request| {
+                self.provider_enabled && !self.pending.contains(&format!("request:{}", request.id))
+            })
+    }
+
+    pub(super) fn has_keyed(&self) -> bool {
+        self.requests
+            .iter()
+            .any(|request| is_decision(request) || is_question(request))
+    }
+
+    fn answer_front(
+        &self,
+        choose: fn(&NativeAgentRequest) -> Option<bootty_agents::NativeApprovalDecision>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(request) = self.front_keyed().filter(|request| is_decision(request)) else {
+            return;
+        };
+        let Some(decision) = choose(request) else {
+            return;
+        };
+        let (target, id) = (self.target.clone(), request.id.clone());
+        self.request_command(
+            &target,
+            NativeRequestOperation::Approve,
+            vec![id, decision.id().to_owned()],
+            window,
+            cx,
+        );
     }
     /// `changes` holds each file-change approval's changes, by request, in the transcript's
     /// `fileChange` shape; paths show relative to `cwd`.
@@ -74,13 +154,14 @@ impl NativeRequestView {
         (changes, cwd): (&BTreeMap<String, String>, &std::path::Path),
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.target != target {
             self.answers.clear();
             self.selected_answers.clear();
             self.answer_subscriptions.clear();
             self.editors.clear();
             self.editor_subscriptions.clear();
+            self.forms.clear();
         }
         self.target = target;
         self.requests = requests.to_vec();
@@ -93,6 +174,7 @@ impl NativeRequestView {
             cx,
         );
         self.sync_answers(window, cx);
+        self.sync_forms(window, cx);
         self.diffs.retain(|id, _| changes.contains_key(id));
         for (id, input) in changes {
             if self.diffs.get(id).is_some_and(|(seen, _)| seen == input) {
@@ -105,7 +187,17 @@ impl NativeRequestView {
                 .collect();
             self.diffs.insert(id.clone(), (input.clone(), files));
         }
+        let keyed = self
+            .requests
+            .iter()
+            .filter(|request| is_decision(request) || is_question(request))
+            .map(|request| request.id.clone())
+            .collect::<BTreeSet<_>>();
+        let arrived = keyed.iter().any(|id| !self.seen_keyed.contains(id));
+        self.question_cursor.retain(|id, _| keyed.contains(id));
+        self.seen_keyed = keyed;
         cx.notify();
+        arrived
     }
 
     /// The diff rows for an approval, when it changes files.
@@ -270,14 +362,16 @@ impl NativeRequestView {
         }
     }
 
+    /// The panel grows with its requests, up to 24rem or 40% of the window, then scrolls.
     fn render_requests(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        let limit = (f32::from(window.viewport_size().height) * 0.4)
+            .min(f32::from(window.rem_size()) * 24.0);
         let requests = div()
             .w_full()
             .max_w(gpui_kit::rems(48.0))
+            .max_h(gpui_kit::px(limit))
             .flex()
             .flex_col()
-            .h_full()
-            .min_h_0()
             .children(
                 self.requests
                     .iter()
@@ -285,11 +379,6 @@ impl NativeRequestView {
             )
             .overflow_y_scrollbar();
         div()
-            .h(gpui_kit::px(
-                f32::from(window.viewport_size().height)
-                    .mul_add(0.4, 0.0)
-                    .min(256.0),
-            ))
             .flex_shrink_0()
             .flex()
             .justify_center()
@@ -316,7 +405,7 @@ impl NativeRequestView {
             .flex_col()
             .flex_shrink_0()
             .gap_2()
-            .child(div().text_sm().child(request_title(request).to_owned()));
+            .child(request_heading(request, cx));
         if request.method == "claude.permission" {
             return row
                 .child(self.render_claude_request(request, pending, cx))
@@ -353,43 +442,22 @@ impl NativeRequestView {
         } else if request.is_mcp_approval() || is_approval(&request.method) {
             row = self.render_approval(row, request, pending, cx);
         } else if request.method == "mcpServer/elicitation/request" {
-            row = self.render_mcp_input(row, request, pending, cx);
+            row = self.render_elicitation(row, request, pending, cx);
         } else if request.method == "item/tool/requestUserInput" {
-            for question in questions(request) {
-                row = row.child(self.render_question(request, question, pending, cx));
+            for (index, question) in questions(request).enumerate() {
+                row = row.child(self.render_question(request, (index, question), pending, cx));
             }
-            let empty = questions(request).next().is_none()
-                || questions(request).any(|question| {
-                    field(question, "id").as_str().is_none_or(|question_id| {
-                        self.answers
-                            .get(&(id.clone(), question_id.to_owned()))
-                            .is_none_or(|answer| answer.read(cx).value().trim().is_empty())
-                    })
-                });
             row = row.child(
                 Button::new(gpui_kit::SharedString::from(format!("answer:{id}")))
+                    .debug_selector({
+                        let id = id.clone();
+                        move || format!("answer:{id}")
+                    })
                     .label("Send answer")
                     .small()
-                    .disabled(pending || empty)
+                    .disabled(pending || !self.all_answered(request, cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        let answers = this
-                            .answers
-                            .iter()
-                            .filter(|((request_id, _), _)| request_id == &id)
-                            .map(|((_, question_id), answer)| {
-                                (
-                                    question_id.clone(),
-                                    json!({"answers":[answer.read(cx).value().to_string()]}),
-                                )
-                            })
-                            .collect::<serde_json::Map<_, _>>();
-                        this.request_command(
-                            &target,
-                            NativeRequestOperation::Respond,
-                            vec![id.clone(), json!({"answers":answers}).to_string()],
-                            window,
-                            cx,
-                        );
+                        this.submit_codex_answers(&target, &id, window, cx);
                     })),
             );
         } else {
@@ -397,31 +465,6 @@ impl NativeRequestView {
                 .child("This provider request is not supported here. Interrupt the turn to continue."));
         }
         row.into_any_element()
-    }
-
-    fn render_mcp_input(
-        &self,
-        row: gpui_kit::Stateful<gpui_kit::Div>,
-        request: &NativeAgentRequest,
-        pending: bool,
-        cx: &Context<Self>,
-    ) -> gpui_kit::Stateful<gpui_kit::Div> {
-        let id = request.id.clone();
-        let target = self.target.clone();
-        row
-                .child(request_details(
-                    gpui_kit::SharedString::from(format!("elicitation-scope:{id}")),
-                    approval_description(&request.parameters, crate::strings::home_dir().as_deref(), request.is_from_attached_tools()),
-                ))
-                .child(div().text_sm().text_color(cx.theme().muted_foreground)
-                    .child("This MCP request needs structured input or authentication that Bootty does not yet support. Decline it to continue."))
-                .child(Button::new(gpui_kit::SharedString::from(format!("decline:{id}")))
-                    .label("Decline request")
-                    .small()
-                    .disabled(pending)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.request_command(&target, NativeRequestOperation::Respond, vec![id.clone(), json!({"action":"decline", "content":null}).to_string()], window, cx);
-                    })))
     }
 
     fn render_approval(
@@ -460,9 +503,11 @@ impl NativeRequestView {
         use bootty_agents::NativeApprovalDecision as Decision;
         let id = request.id.clone();
         let target = self.target.clone();
-        let primary = [Decision::AllowOnce, Decision::AllowSession]
-            .into_iter()
-            .find(|decision| request.approval_response(*decision).is_some());
+        let primary = primary_decision(request);
+        let keys = self.keys_shown
+            && self
+                .front_keyed()
+                .is_some_and(|front| front.id == request.id);
         div().flex().flex_wrap().gap_2().children(
             Decision::ALL
                 .into_iter()
@@ -483,6 +528,16 @@ impl NativeRequestView {
                     .when(
                         Some(decision) == primary,
                         gpui_kit::component::button::ButtonVariants::primary,
+                    )
+                    .when_some(
+                        keys.then(|| match decision {
+                            _ if Some(decision) == primary => Some("enter"),
+                            Decision::Deny => Some("escape"),
+                            _ => None,
+                        })
+                        .flatten()
+                        .and_then(|key| gpui_kit::Keystroke::parse(key).ok()),
+                        |button, key| button.child(gpui_kit::component::kbd::Kbd::new(key)),
                     )
                     .disabled(pending)
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -523,25 +578,13 @@ impl NativeRequestView {
                 .child(self.approval_buttons(request, pending, cx));
         }
         let body = div().flex().flex_col().gap_2().children(
-            questions(request).map(|question| self.render_question(request, question, pending, cx)),
+            questions(request)
+                .enumerate()
+                .map(|question| self.render_question(request, question, pending, cx)),
         );
         let denied = id.clone();
         let denied_target = target.clone();
-        let empty = questions(request).next().is_none()
-            || questions(request).any(|question| {
-                let Some(key) =
-                    question_key(request, question).map(|key| (id.clone(), key.to_owned()))
-                else {
-                    return true;
-                };
-                self.selected_answers
-                    .get(&key)
-                    .is_none_or(BTreeSet::is_empty)
-                    && self
-                        .answers
-                        .get(&key)
-                        .is_none_or(|answer| answer.read(cx).value().trim().is_empty())
-            });
+        let empty = !self.all_answered(request, cx);
         body.child(
             div()
                 .flex()
@@ -553,13 +596,7 @@ impl NativeRequestView {
                         .ghost()
                         .disabled(pending)
                         .on_click(cx.listener(move |this, _, window, cx| {
-                            this.request_command(
-                                &denied_target,
-                                NativeRequestOperation::Respond,
-                                vec![denied.clone(), json!({"decision":"decline"}).to_string()],
-                                window,
-                                cx,
-                            );
+                            this.decline_claude_question(&denied_target, &denied, window, cx);
                         })),
                 )
                 .child(
@@ -619,6 +656,131 @@ impl NativeRequestView {
             window,
             cx,
         );
+    }
+
+    fn submit_codex_answers(
+        &self,
+        target: &CommandTarget,
+        id: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let answers = self
+            .answers
+            .iter()
+            .filter(|((request_id, _), _)| request_id == id)
+            .map(|((_, question_id), answer)| {
+                (
+                    question_id.clone(),
+                    json!({"answers":[answer.read(cx).value().to_string()]}),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        self.request_command(
+            target,
+            NativeRequestOperation::Respond,
+            vec![id.to_owned(), json!({"answers":answers}).to_string()],
+            window,
+            cx,
+        );
+    }
+
+    fn decline_claude_question(
+        &self,
+        target: &CommandTarget,
+        id: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request_command(
+            target,
+            NativeRequestOperation::Respond,
+            vec![id.to_owned(), json!({"decision":"decline"}).to_string()],
+            window,
+            cx,
+        );
+    }
+
+    /// Whether `question` has an answer: a chosen option or typed text.
+    fn answered(&self, request: &NativeAgentRequest, question: &Value, cx: &App) -> bool {
+        let Some(key) =
+            question_key(request, question).map(|key| (request.id.clone(), key.to_owned()))
+        else {
+            return false;
+        };
+        self.selected_answers
+            .get(&key)
+            .is_some_and(|selected| !selected.is_empty())
+            || self
+                .answers
+                .get(&key)
+                .is_some_and(|answer| !answer.read(cx).value().trim().is_empty())
+    }
+
+    fn all_answered(&self, request: &NativeAgentRequest, cx: &App) -> bool {
+        questions(request).next().is_some()
+            && questions(request).all(|question| self.answered(request, question, cx))
+    }
+
+    /// The question the digit keys answer in `request`.
+    fn current_question(&self, request: &NativeAgentRequest) -> usize {
+        self.question_cursor.get(&request.id).copied().unwrap_or(0)
+    }
+
+    /// A digit picks that option on the front question, then moves to the next question unless
+    /// it takes several options.
+    fn choose_by_digit(
+        &mut self,
+        digit: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(request) = self.front_keyed().filter(|request| is_question(request)) else {
+            return false;
+        };
+        let index = self.current_question(request);
+        let Some(question) = questions(request).nth(index) else {
+            return false;
+        };
+        let (Some(key), Some(label)) = (
+            question_key(request, question),
+            field(question, "options")
+                .as_array()
+                .and_then(|options| options.get(digit.checked_sub(1)?))
+                .and_then(|option| field(option, "label").as_str()),
+        ) else {
+            return false;
+        };
+        let several = is_claude_question(request) && field(question, "multiSelect") == true;
+        let next = (!several && index.saturating_add(1) < questions(request).count())
+            .then(|| index.saturating_add(1));
+        let (id, key, label) = (request.id.clone(), key.to_owned(), label.to_owned());
+        let target = self.target.clone();
+        self.choose_question_option(&target, &(id.clone(), key), &label, window, cx);
+        if let Some(next) = next {
+            self.question_cursor.insert(id, next);
+        }
+        cx.notify();
+        true
+    }
+
+    /// Enter moves to the next question, and sends the answers from the last one.
+    fn advance_question(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let Some(request) = self.front_keyed().filter(|request| is_question(request)) else {
+            return;
+        };
+        let next = self.current_question(request).saturating_add(1);
+        if next < questions(request).count() {
+            self.question_cursor.insert(request.id.clone(), next);
+            cx.notify();
+        } else if self.all_answered(request, cx) {
+            let (target, id) = (self.target.clone(), request.id.clone());
+            if is_claude_question(request) {
+                self.submit_claude_answers(&target, &id, window, cx);
+            } else {
+                self.submit_codex_answers(&target, &id, window, cx);
+            }
+        }
     }
 
     fn render_pi_request(
@@ -839,13 +1001,83 @@ impl NativeRequestView {
         }
     }
 
+    /// One option of a question: its label, what choosing it does, and its digit key if shown.
+    fn render_option(
+        &self,
+        request: &NativeAgentRequest,
+        (question_id, answer): (&str, &Entity<InputState>),
+        option: &Value,
+        digit: Option<usize>,
+        pending: bool,
+        cx: &Context<Self>,
+    ) -> Option<Button> {
+        let label = field(option, "label").as_str()?.to_owned();
+        let id =
+            gpui_kit::SharedString::from(format!("option:{}:{question_id}:{label}", request.id));
+        let key = (request.id.clone(), question_id.to_owned());
+        let target = self.target.clone();
+        let selected = if is_claude_question(request) {
+            self.selected_answers
+                .get(&key)
+                .is_some_and(|selected| selected.contains(&label))
+        } else {
+            answer.read(cx).value().as_ref() == label.as_str()
+        };
+        let description = field(option, "description")
+            .as_str()
+            .map(str::trim)
+            .filter(|description| !description.is_empty() && *description != label)
+            .map(str::to_owned);
+        let digit = digit.and_then(|digit| gpui_kit::Keystroke::parse(&digit.to_string()).ok());
+        // An option's description says what choosing it does, so it shows with the label.
+        Some(
+            Button::new(id.clone())
+                .debug_selector(move || id.to_string())
+                .ghost()
+                .small()
+                .w_full()
+                .h_auto()
+                .py_1()
+                .justify_start()
+                .disabled(pending)
+                .selected(selected)
+                .when_some(digit, |button, digit| {
+                    button.child(gpui_kit::component::kbd::Kbd::new(digit))
+                })
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_start()
+                        .text_left()
+                        .child(label.clone())
+                        .children(description.map(|description| {
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .whitespace_normal()
+                                .child(description)
+                        })),
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.choose_question_option(&target, &key, &label, window, cx);
+                })),
+        )
+    }
+
     fn render_question(
         &self,
         request: &NativeAgentRequest,
-        question: &Value,
+        (index, question): (usize, &Value),
         pending: bool,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
+        // The question the digit keys answer shows them on its options.
+        let digits = self.keys_shown
+            && self.current_question(request) == index
+            && self
+                .front_keyed()
+                .is_some_and(|front| front.id == request.id);
         let Some(question_id) = question_key(request, question) else {
             return div().into_any_element();
         };
@@ -862,40 +1094,11 @@ impl NativeRequestView {
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|option| {
-                let label = field(option, "label").as_str()?.to_owned();
-                let id = gpui_kit::SharedString::from(format!(
-                    "option:{}:{question_id}:{label}",
-                    request.id
-                ));
-                let claude = is_claude_question(request);
-                let key = (request.id.clone(), question_id.to_owned());
-                let target = self.target.clone();
-                let selected = if claude {
-                    self.selected_answers
-                        .get(&key)
-                        .is_some_and(|selected| selected.contains(&label))
-                } else {
-                    answer.read(cx).value().as_ref() == label.as_str()
-                };
-                let description = field(option, "description")
-                    .as_str()
-                    .unwrap_or(&label)
-                    .to_owned();
-                // The request can resolve elsewhere while the pointer rests on an option.
-                Some(super::element_tooltip(
-                    gpui_kit::SharedString::from(format!("{id}:tooltip")),
-                    description,
-                    Button::new(id)
-                        .label(label.clone())
-                        .small()
-                        .ghost()
-                        .disabled(pending)
-                        .selected(selected)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.choose_question_option(&target, &key, &label, window, cx);
-                        })),
-                ))
+            .enumerate()
+            .filter_map(|(position, option)| {
+                // The digit keys reach the first nine options.
+                let digit = (digits && position < 9).then(|| position.saturating_add(1));
+                self.render_option(request, (question_id, answer), option, digit, pending, cx)
             });
         div()
             .flex()
@@ -913,7 +1116,7 @@ impl NativeRequestView {
                     )
                 },
             )
-            .child(div().flex().flex_wrap().gap_1().children(options))
+            .child(div().flex().flex_col().gap_0p5().children(options))
             .child(
                 Input::new(answer)
                     .aria_label(if is_claude_question(request) {
@@ -930,8 +1133,69 @@ impl NativeRequestView {
 impl EventEmitter<NativeRequestResponse> for NativeRequestView {}
 impl Render for NativeRequestView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_requests(window, cx)
+        self.keys_shown = self.focus.contains_focused(window, cx);
+        div()
+            .track_focus(&self.focus)
+            .key_context(REQUEST_KEYS)
+            .on_action(cx.listener(|this, _: &AllowRequest, window, cx| {
+                if this.front_keyed().is_some_and(is_question) {
+                    this.advance_question(window, cx);
+                } else {
+                    this.answer_front(primary_decision, window, cx);
+                }
+            }))
+            .on_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    // Typing into an answer field keeps its digits.
+                    if this.focus.is_focused(window)
+                        && !event.keystroke.modifiers.modified()
+                        && let Ok(digit @ 1..=9) = event.keystroke.key.parse::<usize>()
+                        && this.choose_by_digit(digit, window, cx)
+                    {
+                        cx.stop_propagation();
+                    }
+                }),
+            )
+            .on_action(cx.listener(|this, _: &DenyRequest, window, cx| {
+                if let Some(request) = this
+                    .front_keyed()
+                    .filter(|request| is_claude_question(request))
+                {
+                    let (target, id) = (this.target.clone(), request.id.clone());
+                    this.decline_claude_question(&target, &id, window, cx);
+                    return;
+                }
+                this.answer_front(
+                    |request| {
+                        let deny = bootty_agents::NativeApprovalDecision::Deny;
+                        request.approval_response(deny).map(|_| deny)
+                    },
+                    window,
+                    cx,
+                );
+            }))
+            .child(self.render_requests(window, cx))
     }
+}
+
+/// A blocking question the panel asks: Codex's user input request or Claude's `AskUserQuestion`.
+fn is_question(request: &NativeAgentRequest) -> bool {
+    request.method == "item/tool/requestUserInput" || is_claude_question(request)
+}
+
+/// A request answered with one of its approval buttons rather than typed input.
+fn is_decision(request: &NativeAgentRequest) -> bool {
+    (is_approval(&request.method) && !is_claude_question(request))
+        || request.is_mcp_approval()
+        || request.application_access().is_some()
+}
+
+/// The choice Enter takes: allow once, or for the session where once isn't offered.
+fn primary_decision(request: &NativeAgentRequest) -> Option<bootty_agents::NativeApprovalDecision> {
+    use bootty_agents::NativeApprovalDecision as Decision;
+    [Decision::AllowOnce, Decision::AllowSession]
+        .into_iter()
+        .find(|decision| request.approval_response(*decision).is_some())
 }
 
 fn field<'a>(value: &'a Value, key: &str) -> &'a Value {
@@ -972,6 +1236,39 @@ pub(super) fn is_approval(method: &str) -> bool {
             | "claude.permission"
     )
 }
+/// The request's title, and which subagent asked when the conversation didn't.
+fn request_heading(request: &NativeAgentRequest, cx: &App) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_sm()
+                .child(request_title(request).to_owned()),
+        )
+        .when_some(request.subagent.clone(), |heading, agent| {
+            heading.child(
+                div()
+                    .debug_selector({
+                        let selector = format!("request-subagent:{}:{agent}", request.id);
+                        move || selector
+                    })
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .min_w_0()
+                    .max_w(gpui_kit::rems(12.0))
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Bot).xsmall())
+                    .child(div().truncate().child(agent)),
+            )
+        })
+}
+
 fn request_title(request: &NativeAgentRequest) -> &str {
     field(&request.parameters, "title")
         .as_str()
@@ -989,7 +1286,9 @@ fn request_title(request: &NativeAgentRequest) -> &str {
             | "claude.permission" => "Your answer",
             "pi.confirm" => "Confirm",
             "mcpServer/elicitation/request" if request.is_mcp_approval() => "Allow this tool?",
-            "mcpServer/elicitation/request" => "MCP request",
+            "mcpServer/elicitation/request" => field(&request.parameters, "serverName")
+                .as_str()
+                .unwrap_or("MCP request"),
             method if method == bootty_agents::APPLICATION_ACCESS_METHOD => "Allow app access?",
             _ => "Provider request",
         })

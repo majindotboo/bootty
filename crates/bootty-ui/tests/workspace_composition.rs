@@ -862,3 +862,51 @@ fn closing_agent_refuses_to_overwrite_a_populated_surviving_tab(
         "failed close preserves both complete layouts"
     );
 }
+
+/// A right dock holding `panels`, open or closed.
+fn right_dock(panels: &[&str], open: bool) -> gpui_kit::component::dock::DockState {
+    gpui_kit::component::dock::DockState::new(
+        PanelState {
+            panel_name: "TabPanel".into(),
+            children: panels.iter().map(|panel| PanelState::new(*panel)).collect(),
+            info: PanelInfo::tabs(0),
+        },
+        DockPlacement::Right,
+        px(320.),
+        open,
+    )
+}
+
+/// Each session keeps its own right dock: another window of the same session shares it, another
+/// session starts from a fresh one, and coming back restores what the session left.
+#[rstest]
+fn sessions_keep_their_own_right_dock() {
+    use bootty_ui::workspace_composition::{surface_center_key, swap_session_right_dock};
+    use gpui_kit::component::dock::DockAreaState;
+    let first = surface_center_key("binding", "first", "window", "1");
+    let first_other = surface_center_key("binding", "first", "window", "2");
+    let second = surface_center_key("binding", "second", "window", "1");
+    let fresh = right_dock(&[], false);
+    let subagents = right_dock(&["bootty.subagent"], true);
+    let mut layout = DockAreaState {
+        right_dock: Some(subagents.clone()),
+        ..DockAreaState::default()
+    };
+    let mut rights = std::collections::BTreeMap::new();
+    let mut step = |layout: &mut DockAreaState, from: &str, to: &str| {
+        swap_session_right_dock(layout, &mut rights, (Some(from), to), fresh.clone());
+        layout.right_dock.clone()
+    };
+    assert_eq!(
+        step(&mut layout, &first, &first_other),
+        Some(subagents.clone())
+    );
+    assert_eq!(
+        step(&mut layout, &first_other, &second),
+        Some(fresh.clone())
+    );
+    let files = right_dock(&["bootty.files"], true);
+    layout.right_dock = Some(files.clone());
+    assert_eq!(step(&mut layout, &second, &first), Some(subagents));
+    assert_eq!(step(&mut layout, &first, &second), Some(files));
+}

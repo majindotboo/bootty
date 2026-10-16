@@ -437,7 +437,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                     .iter()
                     .any(|operation| command.ends_with(operation)))
         }
-        ResourceKind::Pane => matches!(command, "split_right" | "split_down"),
+        ResourceKind::Pane => matches!(command, "split_right" | "split_down" | "interrupt_agent"),
         _ => false,
     }
 }

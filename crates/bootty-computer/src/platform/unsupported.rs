@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use crate::{
-    ComputerError, ComputerStatus, PermissionStatus,
-    desktop::{Desktop, Focus, Image, InputEvent, NativeWindow},
+    ComputerError, ComputerStatus, DisplayBounds, PermissionStatus,
+    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow},
 };
 
 pub fn native() -> Arc<dyn Desktop> {
@@ -25,7 +25,15 @@ impl Desktop for UnsupportedDesktop {
         Vec::new()
     }
 
-    fn focus(&self) -> Option<Focus> {
+    fn route(&self) -> InputRoute {
+        InputRoute::Shared
+    }
+
+    fn frontmost(&self) -> Option<i32> {
+        None
+    }
+
+    fn focus(&self, _: i32) -> Option<DisplayBounds> {
         None
     }
 

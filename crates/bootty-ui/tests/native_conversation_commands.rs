@@ -1047,6 +1047,33 @@ fn native_conversations_notify_when_they_need_approval_and_finish() -> TestResul
     Ok(())
 }
 
+/// Interrupt Agent in the palette stops the conversation in the focused pane, the same way the
+/// conversation's own interrupt does.
+#[rstest]
+fn interrupt_agent_stops_the_conversation_in_the_focused_pane() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let record = record(&host.start(&binding, "conversation", "task-palette", "")?)?;
+    let target = record.target();
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .ok_or("deadline overflow")?;
+    success(host.submit(native_command(
+        "agents.native.prompt",
+        &target,
+        &["stuck"],
+        Caller::Socket,
+    ))?)?;
+    host.wait_working(&target, deadline)?;
+    success(host.submit(CommandInvocation::from_action(
+        "interrupt_agent",
+        Caller::CommandPalette,
+    ))?)?;
+    let service = host.state.native_agent_service().ok_or("owner missing")?;
+    assert!(service.resolve(&target)?.snapshot().stopping());
+    Ok(())
+}
+
 /// A provider can acknowledge a stop and never end its turn. The conversation shows it is
 /// stopping; stopping again restarts the provider, and the queued message goes out afterwards.
 #[rstest]

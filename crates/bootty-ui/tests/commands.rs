@@ -654,6 +654,94 @@ fn wait_for_native_agent_input(
     }
 }
 
+/// A terminal agent Bootty started appears in the Agents panel, and turning to wait for the
+/// person notifies them.
+#[cfg(unix)]
+#[rstest]
+fn terminal_agents_list_in_the_agents_panel_and_notify() {
+    let directory = assert_fs::TempDir::new().expect("temporary workspace");
+    let config = test_config::config(
+        directory.path().join("config.toml"),
+        MultiplexerBackendConfig::Native,
+    );
+    let (wake, wakes) = mpsc::channel();
+    let (agent_events, _agent_event_receiver) = bootty_control::event_queue();
+    let mut state = AppState::new_for_window_with_agents(
+        config,
+        "main".to_owned(),
+        support::backends(),
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+        None,
+        None,
+        Some(agent_events),
+    )
+    .expect("composed app state");
+    let started = Instant::now();
+    open_native_session(&mut state, directory.path(), started);
+    let program = claude_terminal_fixture(directory.path()).unwrap();
+    let session_id = "00000000-0000-4000-8000-000000000011";
+    let query = directory.path().join("query-session");
+    fs::write(
+        &query,
+        serde_json::json!({"session_id": session_id}).to_string(),
+    )
+    .unwrap();
+    let launched = submit_command_from_caller(
+        &mut state,
+        &wakes,
+        Caller::Socket,
+        CommandInvocation::new(
+            "agents.claude.start",
+            vec![
+                directory.path().to_string_lossy().into_owned(),
+                program.to_string_lossy().into_owned(),
+                serde_json::to_string(&["--session-id", session_id]).unwrap(),
+            ],
+            Caller::Socket,
+        ),
+        started,
+    );
+    let CommandOutcome::Success { value, .. } = launched else {
+        panic!("terminal agent launch failed: {launched:?}");
+    };
+    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
+    wait_for_native_agent_input(&mut state, &wakes, &target).unwrap();
+    let listed = state
+        .agent_overview()
+        .into_iter()
+        .find(|entry| entry.target == target)
+        .expect("the terminal agent is listed");
+    assert_eq!(
+        (listed.source.as_str(), listed.status.as_str()),
+        ("terminal", "working")
+    );
+
+    fs::write(
+        &query,
+        serde_json::json!({"session_id": session_id, "status": "waiting"}).to_string(),
+    )
+    .unwrap();
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .expect("deadline fits");
+    loop {
+        let mut frame = frames::idle_frame(Instant::now());
+        frame.input.window_focused = false;
+        let notified = state.update_frame(frame).into_iter().any(|effect| {
+            matches!(effect, bootty_ui::AppEffect::DesktopNotification { title, .. }
+                if title == "Claude: Needs input")
+        });
+        if notified {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(!remaining.is_zero(), "no Needs input notification");
+        let _ = wakes.recv_timeout(remaining);
+    }
+}
+
 #[cfg(unix)]
 #[rstest]
 fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
@@ -2101,8 +2189,11 @@ if sys.argv[1:3] == ['agents', '--json']:
         source = directory / 'agent-output'
     if source.exists():
         observed = json.loads(source.read_text())
-        print(json.dumps([{'sessionId': observed['session_id'], 'status': 'busy',
-                           'waitingFor': observed.get('detail')}]))
+        # Other fixtures rewrite the default status text; a test can name another status.
+        reported = {'sessionId': observed['session_id'], 'status': 'busy',
+                    'waitingFor': observed.get('detail')}
+        reported.update({key: observed[key] for key in ['status'] if key in observed})
+        print(json.dumps([reported]))
     else:
         print('[]')
     sys.exit(0)

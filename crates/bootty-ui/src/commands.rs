@@ -1166,6 +1166,10 @@ fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
             "Toggle Session Grouping",
             "Switch between project groups and a flat session list.",
         ),
+        SidebarAction::ToggleSettled => (
+            "Toggle Settled Sessions",
+            "Open or close the sidebar's settled shelf.",
+        ),
         SidebarAction::SortManual => ("Sort Sessions Manually", "Keep the saved session order."),
         SidebarAction::SortRecentActivity => (
             "Sort Sessions by Recent Activity",
@@ -1202,6 +1206,7 @@ fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
         palette: matches!(
             action,
             SidebarAction::ToggleGrouping
+                | SidebarAction::ToggleSettled
                 | SidebarAction::SortManual
                 | SidebarAction::SortRecentActivity
         ),

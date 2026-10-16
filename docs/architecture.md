@@ -51,13 +51,13 @@ This file describes the current production structure.
 | Native conversations and provider subprocesses | `bootty-agents::NativeAgentService` | Commit catalog snapshots before publication; resume only the captured task, account and provider conversation. |
 | Dictation and voice | `bootty-agents::voice` | Speech uses the Codex sign-in on this machine, from the captured or selected Codex account. Without one, dictation uses the macOS on-device recognizer, and where that is unavailable composers show no speech buttons. Voice mode is a Codex realtime call on a Codex conversation's thread, started by that conversation's session. The pinned Pi audio host owns cross-platform microphone capture and playback. `bootty-host::speech` owns bounded helper framing and process lifetime. The GUI receives text and status; credentials stay provider-owned. |
 | Persisted agent runs and dispatch attempts | `bootty-agents::OrchestrationService` | Commit before publication; recovery interrupts outstanding attempts without replaying prompts. |
-| Desktop capture, accessibility elements and input | `bootty-computer` | Disabled, denied, stale or occluded targets fail before input; the in-process platform adapter validates the exact observed process and window on macOS, Windows and X11. A press re-reads its element and refuses one that moved, changed or was disabled. Elements are listed on macOS only. |
+| Desktop capture, accessibility elements and input | `bootty-computer` | Disabled, denied or stale targets fail before input, as do keys for a window its app has not focused. macOS addresses input to the exact window, even behind other apps, and presses the element under a left click in an app that is not frontmost when it has a press action; Windows and X11 drive the shared pointer, so their targets must also be focused and uncovered. The in-process platform adapter validates the exact observed process and window on macOS, Windows and X11. A press re-reads its element and refuses one that moved, changed or was disabled. Elements are listed on macOS only. |
 | Native browser views and validated web content | `bootty-browser` | Native window systems report capability errors; navigation and bounded page events pass through the host adapter. |
 | Local browser annotations and credential origin checks | `bootty-browser` | Bounded annotations persist atomically. Retained credential library APIs validate the document and exact origin; platform-store records remain separate from browser-managed passwords. |
 | Browser page identity, selection and saved placement | `bootty-ui::BrowserPanel` and `gpui_dock` | A stale page ID fails rather than navigating another page; page content and placement persist in `native-panels.json`. |
 | Terminal pane topology, ratios, and focus | `bootty-mux::BindingRuntime` | Providers remain authoritative. Hosts consume `MuxPaneLayout` and submit typed pane operations; they never persist a competing terminal tree. |
 | Workspace composition | `bootty-ui::workspace_composition` | Projects real backend windows and pane layouts. A pane carrying a native conversation identity renders its agent view in that pane's rectangle. Numbered tabs, navigation, splits and close operations use the same backend targets for terminals and agents. Documents live in the right sidebar; the center has no inner tab strip. |
-| Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock composes Sessions on the left, the selected backend window in the center, and tools/documents on the right. `native-panels.json` stores sidebar sizes, visibility and documents. Center projections retain logical task/window keys and resolve through the current binding mapping. Agent placement belongs to real mux panes, never a separate Dock conversation tab or split tree. Transient creation choosers are not saved. |
+| Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock composes Sessions on the left, the selected backend window in the center, and tools/documents on the right. `native-panels.json` stores sidebar sizes, visibility and documents; each session keeps its own right dock. Center projections retain logical task/window keys and resolve through the current binding mapping. Agent placement belongs to real mux panes, never a separate Dock conversation tab or split tree. Transient creation choosers are not saved. |
 | Per-window coordination and GPUI projections | `bootty-ui::{AppState, GpuiWorkspace}` | Views consume snapshots and emit typed intents; they do not become domain owners. |
 | Preserved custom script diagnostics | `bootty-ui` | Existing Lua and Luau files remain on disk and are reported as unsupported. |
 
@@ -133,7 +133,8 @@ Its `terminal-runtime` facet owns pane policy, terminal attachment, and the
 desktop-only controller/workspace realization. The facet is optional so the
 installed daemon keeps core providers and catalog operations without Ghostty VT
 or local PTY support. `bootty-host` owns SSH and WSL commands, daemon installation,
-remote framing, and generic process execution. `bootty-git` owns project
+remote framing, and generic process execution. It checks each host's daemon once
+per process; every handle to that host shares the result. `bootty-git` owns project
 discovery, favorites, worktrees, status, and Git facts through its host-runner
 seam. Worktree creation resolves a branch, optional folder name, optional
 starting ref and the configured worktree directory on that same host. New
@@ -389,7 +390,8 @@ user turns, with cached virtual-list measurements retained while streaming;
 copy actions and returning to the live tail act on that same transcript. Transcript
 refresh runs on a worker and follows service revisions, without an idle polling loop.
 Active-turn follow-ups use Codex's exact `turn/steer` acknowledgement, Claude's
-urgent input on its existing stream, or Pi's `steer` disposition. A turn that
+`next`-priority input on its existing stream, which it takes at the next tool
+boundary without stopping the running tool, or Pi's `steer` disposition. A turn that
 can't take a steer yet, such as while the previous message is still on its way or
 while it stops, queues the message marked to steer; the follow-up owner steers it in
 once the turn can take it, or sends it as the next turn's message. Provider rejection
@@ -491,9 +493,15 @@ Provider-reported subagent lifecycle rows preserve identity, model, observed
 status and timestamps across transcript restoration. Child updates may outlive a
 parent turn, but only that parent session can introduce a child. Codex child
 transcripts use `thread/read` after verifying reported ownership; viewing never
-resumes a child or acquires its writer. Pi task IDs are output/lifecycle identities,
+resumes a child or acquires its writer. A child's tab draws its transcript with
+the conversation view in a transcript-only mode, reading it while the parent
+reports the child running. Pi task IDs are output/lifecycle identities,
 not invented conversation IDs. Claude Agent/Task notifications must name an
-observed parent tool. Unknown or foreign children remain inaccessible.
+observed parent tool. Unknown or foreign children remain inaccessible. A Codex
+child's approvals, questions and MCP requests arrive on its own thread and turn;
+the parent holds them, names the asking child, and keeps them past the end of its
+own turn. Requests from threads the parent never started are refused, and the
+provider's `serverRequest/resolved` withdraws a request it settled itself.
 
 A conversation's lease grants apps by bundle ID for the rest of that
 conversation. A prompt mention, an approval card the agent raises through

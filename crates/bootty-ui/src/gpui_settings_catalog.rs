@@ -453,6 +453,25 @@ pub fn settings_section<'a>(
     }
 }
 
+/// One page's settings in product order, grouped by the section each shows under. A section's
+/// settings stay together where the section first appears, so no section shows twice.
+#[must_use]
+pub fn group_settings(
+    category: SettingsCategory,
+    mut specs: Vec<&bootty_config::settings_schema::SettingSpec>,
+) -> Vec<(&str, Vec<&bootty_config::settings_schema::SettingSpec>)> {
+    specs.sort_by_key(|spec| settings_row_order(category, &spec.id()));
+    let mut groups: Vec<(&str, Vec<_>)> = Vec::new();
+    for spec in specs {
+        let section = settings_section(category, &spec.id(), spec.section.as_ref());
+        match groups.iter_mut().find(|(known, _)| *known == section) {
+            Some((_, group)) => group.push(spec),
+            None => groups.push((section, vec![spec])),
+        }
+    }
+    groups
+}
+
 /// Product order inside one native page. Schema declaration order resolves ties.
 #[must_use]
 pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
@@ -537,8 +556,9 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
             "session.shell" => 0,
             "session.working-directory" => 1,
             "session.worktree-directory" => 2,
-            "session.worktree-limit" => 3,
-            "session.env" => 4,
+            "session.branch-prefix" => 3,
+            "session.worktree-limit" => 4,
+            "session.env" => 5,
             "session.term" => 10,
             "session.colorterm" => 11,
             "session.glyph-protocol" => 12,

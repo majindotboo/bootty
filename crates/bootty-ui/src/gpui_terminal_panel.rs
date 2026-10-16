@@ -22,10 +22,20 @@ pub enum WorkspacePaneView {
     Terminal(CachedTerminalView),
     NativeAgent(Entity<crate::gpui_agent_session::NativeAgentSessionView>),
     NativePlaceholder {
-        loading: bool,
+        state: NativePlaceholder,
         background: gpui_kit::Hsla,
         foreground: gpui_kit::Hsla,
     },
+}
+
+/// Why a conversation pane shows no conversation.
+#[derive(Clone, PartialEq, Eq)]
+pub enum NativePlaceholder {
+    Loading,
+    /// This window has no conversation service.
+    Unavailable,
+    /// No conversation matches the pane's marker; closing the pane is the way out.
+    Missing(Option<bootty_control::CommandTarget>),
 }
 
 impl IntoElement for WorkspacePaneView {
@@ -36,7 +46,7 @@ impl IntoElement for WorkspacePaneView {
             Self::Terminal(view) => view.into_any_element(),
             Self::NativeAgent(view) => view.into_any_element(),
             Self::NativePlaceholder {
-                loading,
+                state,
                 background,
                 foreground,
             } => div()
@@ -47,14 +57,44 @@ impl IntoElement for WorkspacePaneView {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .when(loading, |view| {
+                .when(state == NativePlaceholder::Loading, |view| {
                     view.child(gpui_kit::component::spinner::Spinner::new())
                 })
-                .child(if loading {
-                    "Loading conversation…"
-                } else {
-                    "Conversation unavailable"
+                .child(match &state {
+                    NativePlaceholder::Loading => "Loading conversation…",
+                    NativePlaceholder::Unavailable => {
+                        "Conversations aren't available in this window."
+                    }
+                    NativePlaceholder::Missing(_) => "Bootty has no conversation for this pane.",
                 })
+                .when_some(
+                    match state {
+                        NativePlaceholder::Missing(target) => target,
+                        _ => None,
+                    },
+                    |view, target| {
+                        view.child(
+                            Button::new("close-missing-conversation-pane")
+                                .debug_selector(|| "close-missing-conversation-pane".into())
+                                .small()
+                                .label("Close pane")
+                                .on_click(move |_, window, cx| {
+                                    let mut invocation =
+                                        bootty_control::CommandInvocation::from_action(
+                                            "close_surface",
+                                            bootty_control::Caller::Internal,
+                                        );
+                                    invocation.target = Some(target.clone());
+                                    window.dispatch_action(
+                                        Box::new(crate::gpui_actions::InvokeCommand::new(
+                                            invocation,
+                                        )),
+                                        cx,
+                                    );
+                                }),
+                        )
+                    },
+                )
                 .into_any_element(),
         }
     }

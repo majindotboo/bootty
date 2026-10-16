@@ -42,15 +42,13 @@ fn working_record() -> NativeSessionRecord {
     }
 }
 
-/// A queued message offers steer, remove and more; one already marked to steer offers no Steer.
-/// Edit message moves it back to the composer and out of the queue.
-#[gpui_kit::test]
-fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    let record = working_record();
+type Commands = Arc<Mutex<Vec<CommandInvocation>>>;
+
+/// Opens a conversation view for `record` whose commands are answered and recorded.
+fn open(
+    record: NativeSessionRecord,
+    cx: &mut TestAppContext,
+) -> (&mut gpui_kit::VisualTestContext, Commands) {
     let commands = Arc::new(Mutex::new(Vec::<CommandInvocation>::new()));
     let observed = commands.clone();
     let inbox = Arc::new(Mutex::new(None::<AppCommandReceiver>));
@@ -86,6 +84,18 @@ fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContex
     });
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
+    (visual, commands)
+}
+
+/// A queued message offers steer, remove and more; one already marked to steer offers no Steer.
+/// Edit message moves it back to the composer and out of the queue.
+#[gpui_kit::test]
+fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let (visual, commands) = open(working_record(), cx);
     for control in [
         "native-queue-steer:next",
         "native-queue-cancel:next",
@@ -122,4 +132,38 @@ fn editing_a_queued_message_moves_it_back_to_the_composer(cx: &mut TestAppContex
             .is_some_and(|text| text == "Check the logs too")),
         "its text is back in the composer and sends: {sent:?}"
     );
+}
+
+/// After a stop, the queue waits; the first paused message offers Resume, which lets the
+/// conversation's paused messages go.
+#[gpui_kit::test]
+fn a_paused_queue_offers_to_resume(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = working_record();
+    record.queued_messages = serde_json::from_value(serde_json::json!([{
+        "id": "first", "text": "Then fix the docs", "preview_text": "Then fix the docs",
+        "attachments": [], "status": "paused"
+    }, {
+        "id": "second", "text": "And the tests", "preview_text": "And the tests",
+        "attachments": [], "status": "paused"
+    }]))
+    .unwrap();
+    let (visual, commands) = open(record, cx);
+    assert!(visual.debug_bounds("native-queue-resume:second").is_none());
+    let resume = visual
+        .debug_bounds("native-queue-resume:first")
+        .expect("the first paused message offers Resume");
+    visual.simulate_click(resume.center(), Modifiers::none());
+    visual.run_until_parked();
+    let resumed = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|invocation| invocation.command == "agents.native.queue-resume")
+        .map(|invocation| invocation.arguments.len());
+    // Only the conversation's id and generation: Resume names no single message.
+    assert_eq!(resumed, Some(2));
 }

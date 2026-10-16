@@ -95,6 +95,8 @@ pub struct NewSessionForm {
     pub worktree_available: bool,
     worktree_repository: Option<String>,
     worktree_directory: Option<String>,
+    /// The configured `session.branch-prefix`, for projects without their own.
+    branch_prefix: String,
     pub error: Option<String>,
     pub model_options: Vec<bootty_agents::NativeModelOption>,
     pub model_error: Option<String>,
@@ -119,6 +121,7 @@ impl NewSessionForm {
             worktree_available: false,
             worktree_repository: None,
             worktree_directory: None,
+            branch_prefix: bootty_config::config::DEFAULT_BRANCH_PREFIX.to_owned(),
             error: None,
             model_options: Vec::new(),
             model_error: None,
@@ -216,6 +219,11 @@ impl NewSessionForm {
     /// The configured `session.worktree-directory`, shown in the destination preview.
     pub fn set_worktree_directory(&mut self, directory: Option<String>) {
         self.worktree_directory = directory.filter(|directory| !directory.trim().is_empty());
+    }
+
+    /// The configured `session.branch-prefix`, which a project's own prefix overrides.
+    pub fn set_branch_prefix(&mut self, prefix: String) {
+        self.branch_prefix = prefix;
     }
 
     fn project_settings(&self) -> Option<&bootty_mux::repository::ProjectSettings> {
@@ -1104,7 +1112,7 @@ impl NewSessionForm {
         self.project_settings()
             .map(|settings| settings.branch_prefix.as_str())
             .filter(|prefix| !prefix.is_empty())
-            .unwrap_or("bootty/")
+            .unwrap_or(&self.branch_prefix)
     }
 
     /// The empty-Enter fallback opens a shell without consuming either retained text draft.

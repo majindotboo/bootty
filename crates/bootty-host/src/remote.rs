@@ -5,6 +5,28 @@ use crate::{
 };
 use anyhow::Result;
 use bootty_config::config::RemoteConfig;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+/// Each remote host's daemon readiness, by host, for every handle to it in this process.
+pub(crate) type Readiness<C> = OnceLock<Mutex<Vec<(C, Arc<Mutex<bool>>)>>>;
+
+/// The readiness flag every handle to `config`'s host shares, so the first operation on a host
+/// checks its daemon and later handles, fresh or not, skip the check.
+pub(crate) fn shared_readiness<C: PartialEq + Clone>(
+    registry: &Readiness<C>,
+    config: &C,
+) -> Arc<Mutex<bool>> {
+    let mut hosts = registry
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, ready)) = hosts.iter().find(|(host, _)| host == config) {
+        return Arc::clone(ready);
+    }
+    let ready = Arc::new(Mutex::new(false));
+    hosts.push((config.clone(), Arc::clone(&ready)));
+    ready
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RemoteHost {

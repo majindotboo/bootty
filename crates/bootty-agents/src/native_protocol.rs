@@ -225,6 +225,9 @@ pub struct NativeAgentRequest {
     pub parameters: Value,
     #[serde(default)]
     pub(crate) from_attached_tools: bool,
+    /// The subagent that asked, by title. A request from the conversation itself has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<String>,
     #[serde(skip)]
     pub(crate) wire_id: Value,
 }
@@ -247,6 +250,16 @@ impl NativeAgentRequest {
         if self.method == crate::APPLICATION_ACCESS_METHOD {
             // An app grant lasts the conversation, so a one-call allowance is not offered.
             return (decision != D::AllowOnce).then(|| Value::String(decision.id().into()));
+        }
+        if self.method == "mcpServer/elicitation/request" {
+            use crate::native_elicitation::{approval_response, is_approval};
+            return match decision {
+                D::Deny => is_approval(&self.parameters)
+                    .then(|| serde_json::json!({"action":"decline","content":null})),
+                D::AllowOnce => approval_response(&self.parameters, None),
+                D::AllowSession => approval_response(&self.parameters, Some("session")),
+                D::AlwaysAllow => approval_response(&self.parameters, Some("always")),
+            };
         }
         let value = match decision {
             D::Deny => Value::String("decline".into()),
@@ -304,6 +317,13 @@ impl NativeAgentRequest {
     pub fn is_mcp_approval(&self) -> bool {
         self.method == "mcpServer/elicitation/request"
             && crate::native_elicitation::is_approval(&self.parameters)
+    }
+
+    /// What an MCP server asks for, when this is an elicitation.
+    #[must_use]
+    pub fn elicitation(&self) -> Option<crate::Elicitation> {
+        (self.method == "mcpServer/elicitation/request")
+            .then(|| crate::native_elicitation::parse(&self.parameters))
     }
 }
 
@@ -447,6 +467,10 @@ pub struct NativeSessionSnapshot {
     pub(crate) computer_tool_server: Option<String>,
     #[serde(skip)]
     computer_tools: BTreeMap<String, ComputerToolStage>,
+    /// The last summary part each streaming Codex reasoning item reported. Once an item has a
+    /// summary, its raw reasoning no longer shows.
+    #[serde(skip)]
+    reasoning_summaries: BTreeMap<String, u64>,
     /// Monotonic origin of this accepted live turn; inactive generations never restore it.
     #[serde(skip)]
     pub(crate) working_since: Option<Instant>,
@@ -468,6 +492,35 @@ impl NativeSessionSnapshot {
     #[must_use]
     pub fn waiting_for_input(&self) -> bool {
         self.requests.iter().any(NativeAgentRequest::is_blocking)
+    }
+
+    /// Leave Waiting once nothing blocks: back to the turn if one runs, otherwise idle. A
+    /// subagent can ask after its parent's turn has ended.
+    pub(crate) fn settle_waiting(&mut self) {
+        if !self.waiting_for_input() && self.status == NativeSessionStatus::Waiting {
+            self.status = if self.turn_id.is_none() && self.pending_user_item.is_none() {
+                NativeSessionStatus::Idle
+            } else {
+                NativeSessionStatus::Working
+            };
+        }
+    }
+
+    /// The title of the subagent whose provider thread sent `value`, when this conversation
+    /// started it. Its requests belong here even though their thread and turn are the child's.
+    // Limit: only direct children are known, and only while their spawn item is retained in the
+    // live transcript. Track child threads separately if grandchildren need to ask too.
+    pub(crate) fn requesting_subagent(&self, value: &Value) -> Option<String> {
+        let thread = field(field(value, "params"), "threadId").as_str()?;
+        if self.session_id.as_deref() == Some(thread) {
+            return None;
+        }
+        self.transcript.iter().rev().find_map(|item| {
+            item.subagent
+                .as_ref()
+                .filter(|agent| agent.thread_id.as_deref() == Some(thread))
+                .map(|agent| agent.title.clone())
+        })
     }
 
     /// Record how a turn ended; a successful one counts toward the conversation's completed turns.
@@ -549,6 +602,18 @@ impl NativeSessionSnapshot {
                 ))
     }
 
+    /// A user message on its way to the live provider, which hasn't confirmed it yet.
+    #[must_use]
+    pub fn sending(&self, item: &NativeTranscriptItem) -> bool {
+        item.role == "user"
+            && !item.complete
+            && self.pending_user_item.as_deref() == Some(item.id.as_str())
+            && !matches!(
+                self.status,
+                NativeSessionStatus::Stopped | NativeSessionStatus::Error
+            )
+    }
+
     /// An interrupt was acknowledged, but the provider has not reported the turn's end yet.
     #[must_use]
     pub const fn stopping(&self) -> bool {
@@ -620,7 +685,9 @@ impl NativeSessionSnapshot {
             .map(|started| now.saturating_duration_since(started))
     }
 
-    pub(crate) const fn new(provider: AgentKind) -> Self {
+    /// An empty snapshot of a conversation with `provider`.
+    #[must_use]
+    pub const fn new(provider: AgentKind) -> Self {
         Self {
             provider,
             application_mentions_supported: false,
@@ -649,6 +716,7 @@ impl NativeSessionSnapshot {
             tool_server: None,
             computer_tool_server: None,
             computer_tools: BTreeMap::new(),
+            reasoning_summaries: BTreeMap::new(),
             working_since: None,
             realtime: RealtimeCall::None,
             realtime_epoch: 0,
@@ -945,9 +1013,45 @@ impl NativeSessionSnapshot {
         self.message(id, role, text, false);
     }
 
+    /// Streams Codex reasoning: raw text until a summary starts, then only the summary, with a
+    /// blank line between its parts. The completed item replaces both.
+    fn reasoning_delta(&mut self, params: &Value, raw: bool) {
+        let id = field(params, "itemId")
+            .as_str()
+            .unwrap_or("stream")
+            .to_owned();
+        let delta = field(params, "delta").as_str().unwrap_or_default();
+        if raw {
+            if !self.reasoning_summaries.contains_key(&id) {
+                self.delta(id, "thinking", delta);
+            }
+            return;
+        }
+        let part = field(params, "summaryIndex").as_u64().unwrap_or_default();
+        match self.reasoning_summaries.insert(id.clone(), part) {
+            None => self.message(id, "thinking", delta.to_owned(), false),
+            Some(previous) if part > previous => {
+                self.delta(id, "thinking", &format!("\n\n{delta}"));
+            }
+            Some(_) => self.delta(id, "thinking", delta),
+        }
+    }
+
     pub(crate) fn ingest(&mut self, value: &Value) {
-        let accepted = self.accepts(value);
         let params = field(value, "params");
+        // The provider settles a request itself when the asking turn ends or is interrupted.
+        if field(value, "method") == "serverRequest/resolved"
+            && self.session_id.is_some()
+            && (self.session_id.as_deref() == field(params, "threadId").as_str()
+                || self.requesting_subagent(value).is_some())
+        {
+            let id = field(params, "requestId");
+            self.requests.retain(|request| request.wire_id != *id);
+            self.settle_waiting();
+            self.changed();
+            return;
+        }
+        let accepted = self.accepts(value);
         if self.session_id.as_deref() == field(params, "threadId").as_str()
             && self.session_id.is_some()
             && matches!(
@@ -1196,6 +1300,7 @@ impl NativeSessionSnapshot {
     }
 
     fn complete_turn(&mut self, params: &Value) {
+        self.reasoning_summaries.clear();
         if let Some(id) = self.turn_id.clone() {
             let outcome = match field(field(params, "turn"), "status").as_str() {
                 Some("completed") => Some(NativeTurnOutcome::Succeeded),
@@ -1223,7 +1328,11 @@ impl NativeSessionSnapshot {
         };
         self.turn_id = None;
         self.pending_user_item = None;
-        self.requests.clear();
+        // A subagent can outlive the turn that started it and still waits for its answer.
+        self.requests.retain(|request| request.subagent.is_some());
+        if self.status == NativeSessionStatus::Idle && self.waiting_for_input() {
+            self.status = NativeSessionStatus::Waiting;
+        }
         for item in &mut self.transcript {
             item.complete = true;
         }
@@ -1387,19 +1496,17 @@ impl NativeSessionSnapshot {
             }
             "thread/realtime/closed" => self.realtime = RealtimeCall::None,
             "turn/completed" => self.complete_turn(params),
+            "item/reasoning/summaryTextDelta" | "item/reasoning/textDelta" => {
+                self.reasoning_delta(params, field(value, "method") == "item/reasoning/textDelta");
+            }
             "item/agentMessage/delta"
             | "item/plan/delta"
-            | "item/reasoning/textDelta"
-            | "item/reasoning/summaryTextDelta"
             | "item/commandExecution/outputDelta"
             | "item/fileChange/outputDelta" => {
                 let role = match field(value, "method").as_str() {
                     Some("item/agentMessage/delta") => "assistant",
                     Some("item/plan/delta") => "plan",
-                    Some("item/commandExecution/outputDelta" | "item/fileChange/outputDelta") => {
-                        "tool"
-                    }
-                    _ => "thinking",
+                    _ => "tool",
                 };
                 self.delta(
                     field(params, "itemId")

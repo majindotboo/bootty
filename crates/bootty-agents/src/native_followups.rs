@@ -13,6 +13,8 @@ pub enum NativeQueuedMessageStatus {
     Queued,
     Sending,
     Failed,
+    /// Held after the user stopped the agent, until they resume the queue or send a message.
+    Paused,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -147,7 +149,24 @@ impl NativeAgentService {
         target: &CommandTarget,
         prompt: &crate::NativePrompt,
     ) -> Result<NativeQueuedMessage, String> {
-        self.enqueue(target, prompt, false)
+        self.enqueue(target, prompt, false, false)
+    }
+
+    /// Stop the running turn and send `prompt` next, ahead of anything already waiting. Unlike a
+    /// plain stop, this leaves the queue running.
+    /// # Errors
+    /// Rejects stale targets or the bounded queue, or returns the provider's interrupt failure.
+    pub fn interrupt_and_send(
+        &self,
+        target: &CommandTarget,
+        prompt: &crate::NativePrompt,
+    ) -> Result<NativeQueuedMessage, String> {
+        let queued = self.enqueue(target, prompt, false, true)?;
+        let session = self.resolve(target)?;
+        if !session.snapshot().stopping() {
+            session.interrupt()?;
+        }
+        Ok(queued)
     }
 
     /// Queue a message for the active turn, which takes it as soon as it can.
@@ -156,7 +175,7 @@ impl NativeAgentService {
         target: &CommandTarget,
         prompt: &crate::NativePrompt,
     ) -> Result<NativeQueuedMessage, String> {
-        self.enqueue(target, prompt, true)
+        self.enqueue(target, prompt, true, false)
     }
 
     fn enqueue(
@@ -164,6 +183,7 @@ impl NativeAgentService {
         target: &CommandTarget,
         prompt: &crate::NativePrompt,
         steer: bool,
+        front: bool,
     ) -> Result<NativeQueuedMessage, String> {
         let session = self.resolve(target)?;
         let _mutation = lock(&self.mutation);
@@ -201,15 +221,73 @@ impl NativeAgentService {
             status: NativeQueuedMessageStatus::Queued,
             steer,
         };
-        candidate.followups.push(QueuedInput {
+        let input = QueuedInput {
             session: target.handle.clone(),
             id,
             status: info.status,
             prompt: saved_prompt,
             steer,
-        });
+        };
+        let position = if front {
+            candidate
+                .followups
+                .iter()
+                .position(|queued| queued.session == target.handle)
+        } else {
+            None
+        };
+        match position {
+            Some(position) => candidate.followups.insert(position, input),
+            None => candidate.followups.push(input),
+        }
         self.commit(candidate)?;
         Ok(info)
+    }
+
+    /// Hold a conversation's waiting messages after the user stops the agent, so stopping
+    /// doesn't send the next one at once.
+    /// # Errors
+    /// Returns catalog persistence failures.
+    pub(super) fn pause_followups(&self, target: &CommandTarget) -> Result<(), String> {
+        self.set_waiting_followups(
+            target,
+            NativeQueuedMessageStatus::Queued,
+            NativeQueuedMessageStatus::Paused,
+        )
+    }
+
+    /// Let a conversation's paused messages send again, in order.
+    /// # Errors
+    /// Returns catalog persistence failures.
+    pub fn resume_followups(&self, target: &CommandTarget) -> Result<(), String> {
+        self.set_waiting_followups(
+            target,
+            NativeQueuedMessageStatus::Paused,
+            NativeQueuedMessageStatus::Queued,
+        )
+    }
+
+    fn set_waiting_followups(
+        &self,
+        target: &CommandTarget,
+        from: NativeQueuedMessageStatus,
+        to: NativeQueuedMessageStatus,
+    ) -> Result<(), String> {
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        let mut changed = false;
+        for input in candidate
+            .followups
+            .iter_mut()
+            .filter(|input| input.session == target.handle && input.status == from)
+        {
+            input.status = to;
+            changed = true;
+        }
+        if changed {
+            self.commit(candidate)?;
+        }
+        Ok(())
     }
 
     /// Remove only an unsent queued message.

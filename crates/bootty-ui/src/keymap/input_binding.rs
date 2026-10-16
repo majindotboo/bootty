@@ -386,6 +386,7 @@ binding_actions! {
     CommandPalette => "command_palette" [unit],
     CloseWindow => "close_window" [unit],
     CloseSurface => "close_surface" [unit],
+    InterruptAgent => "interrupt_agent" [unit],
     Quit => "quit" [unit],
     ToggleFullscreen => "toggle_fullscreen" [unit],
     FocusTerminal => "focus_terminal" [unit],

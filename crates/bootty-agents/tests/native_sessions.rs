@@ -1602,6 +1602,101 @@ fn mcp_input_requests_remain_pending_without_fabricating_content(
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
 }
 
+/// Emit one MCP elicitation on the session's active turn and return the pending request.
+#[expect(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "Fixture writes one event and requires the request it raises"
+)]
+fn pending_elicitation(
+    root: &Path,
+    session: &NativeAgentSession,
+    mut parameters: Value,
+) -> bootty_agents::NativeAgentRequest {
+    parameters["threadId"] = session.snapshot().session_id.into();
+    parameters["turnId"] = session.snapshot().turn_id.into();
+    fs::write(
+        root.join("events.json"),
+        json!([{"id":"mcp-input","method":"mcpServer/elicitation/request","params":parameters}])
+            .to_string(),
+    )
+    .unwrap();
+    barrier(session).unwrap();
+    session.snapshot().requests.remove(0)
+}
+
+/// A form or sign-in page answers only with what its schema allows, and the provider receives
+/// exactly that answer.
+#[rstest]
+#[case::form(
+    json!({"mode":"form","message":"Contact","serverName":"crm","requestedSchema":{"type":"object",
+        "required":["email"],"properties":{"email":{"type":"string","format":"email"}}}}),
+    vec![
+        json!({"action":"accept","content":{}}),
+        json!({"action":"accept","content":{"email":"nope"}}),
+        json!({"action":"accept","content":{"email":"a@b.co","extra":1}}),
+        json!({"action":"accept","content":{"email":"a@b.co"},"_meta":{"persist":"always"}}),
+    ],
+    json!({"action":"accept","content":{"email":"a@b.co"}}),
+)]
+#[case::sign_in(
+    json!({"mode":"url","message":"Sign in","serverName":"crm","url":"https://auth.example.com/x",
+        "elicitationId":"e"}),
+    vec![json!({"action":"accept","content":{}})],
+    json!({"action":"accept","content":null}),
+)]
+fn mcp_forms_and_sign_in_pages_send_only_checked_answers(
+    #[case] parameters: Value,
+    #[case] rejected: Vec<Value>,
+    #[case] accepted: Value,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let request = pending_elicitation(root.path(), &session, parameters);
+    for response in rejected {
+        assert!(
+            session.respond(&request.id, response.clone()).is_err(),
+            "{response}"
+        );
+    }
+    session.respond(&request.id, accepted.clone()).unwrap();
+    assert_eq!(barrier(&session).unwrap()["approvals"], json!([accepted]));
+}
+
+/// A tool approval grants a reusable scope only when its server offered that scope.
+#[rstest]
+fn mcp_tool_approvals_grant_the_offered_scope() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let request = pending_elicitation(
+        root.path(),
+        &session,
+        json!({"mode":"form","message":"Allow the crm MCP server to run tool \"lookup\"?",
+            "serverName":"crm","_meta":{"codex_approval_kind":"mcp_tool_call","persist":"session"},
+            "requestedSchema":{"type":"object","properties":{}}}),
+    );
+    assert!(
+        session
+            .approve_decision(
+                &request.id,
+                bootty_agents::NativeApprovalDecision::AlwaysAllow
+            )
+            .is_err()
+    );
+    session
+        .approve_decision(
+            &request.id,
+            bootty_agents::NativeApprovalDecision::AllowSession,
+        )
+        .unwrap();
+    assert_eq!(
+        barrier(&session).unwrap()["approvals"],
+        json!([{"action":"accept","content":{},"_meta":{"persist":"session"}}])
+    );
+}
+
 /// Codex reasoning, web searches, viewed images and compaction reach the transcript instead of
 /// vanishing; a completed reasoning item's summary replaces its streamed text.
 #[rstest]
@@ -1662,6 +1757,42 @@ fn codex_reasoning_search_image_and_compaction_items_reach_the_transcript() {
             String::new(),
             Some(("webSearch".into(), "{}".into(), NativeToolStatus::Running))
         ))
+    );
+    // A summary replaces the raw notes it arrived after; later raw notes stay out of it, and each
+    // summary part starts its own paragraph. A model with no summary shows its raw notes.
+    assert_eq!(
+        row(&snapshot, "think"),
+        Some(("thinking".into(), "Summary".into(), None))
+    );
+    let snapshot = emit(&[
+        (
+            "item/reasoning/textDelta",
+            json!({"itemId":"think","delta":"more raw"}),
+        ),
+        (
+            "item/reasoning/summaryTextDelta",
+            json!({"itemId":"think","delta":" first","summaryIndex":0}),
+        ),
+        (
+            "item/reasoning/summaryTextDelta",
+            json!({"itemId":"think","delta":"Second","summaryIndex":1}),
+        ),
+        (
+            "item/reasoning/textDelta",
+            json!({"itemId":"raw-only","delta":"plain "}),
+        ),
+        (
+            "item/reasoning/textDelta",
+            json!({"itemId":"raw-only","delta":"notes"}),
+        ),
+    ]);
+    assert_eq!(
+        row(&snapshot, "think"),
+        Some(("thinking".into(), "Summary first\n\nSecond".into(), None))
+    );
+    assert_eq!(
+        row(&snapshot, "raw-only"),
+        Some(("thinking".into(), "plain notes".into(), None))
     );
 
     let snapshot = emit(&[
@@ -2649,6 +2780,59 @@ fn codex_child_lifecycle_outlives_parent_turn_and_history_reads_do_not_take_a_wr
         serde_json::from_slice(&fs::read(root.path().join("read.json")).unwrap()).unwrap();
     assert_eq!(request["method"], "thread/read");
     assert_eq!(request["params"]["threadId"], "child-thread");
+    session.stop();
+}
+
+/// A subagent this conversation started asks through it, even after the parent's turn ends. A
+/// thread it never started is still refused, and the provider can settle a request itself.
+#[rstest]
+fn spawned_codex_subagents_ask_through_their_parent() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let approval = |id: &str, thread: &str| {
+        json!({"id":id,"method":"item/commandExecution/requestApproval","params":{
+            "threadId":thread,"turnId":"child-turn","itemId":"command","command":"cargo test"}})
+    };
+    fs::write(root.path().join("events.json"), json!([
+        {"method":"item/started","params":{"threadId":"native-thread","turnId":"turn-1","item":{
+            "type":"collabAgentToolCall","tool":"spawnAgent","receiverThreadIds":["child-thread"],
+            "agentNickname":"Scout","prompt":"Run the tests"}}},
+        approval("stranger-approval", "stranger-thread"),
+        approval("child-approval", "child-thread"),
+    ]).to_string()).unwrap();
+    barrier(&session).unwrap();
+    session
+        .rpc("__finish", json!({"status":"completed"}))
+        .unwrap();
+    let declined = barrier(&session).unwrap()["declined"].clone();
+    assert_eq!(declined[0]["id"], "stranger-approval");
+    assert_eq!(declined[0]["error"]["code"], -32602);
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, NativeSessionStatus::Waiting);
+    let request = snapshot.requests.first().unwrap();
+    assert_eq!(request.subagent.as_deref(), Some("Scout"));
+    session.approve(&request.id, true).unwrap();
+    assert_eq!(
+        barrier(&session).unwrap()["approvals"],
+        json!([{"decision":"accept"}])
+    );
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
+
+    fs::write(
+        root.path().join("events.json"),
+        json!([approval("settled-approval", "child-thread"),]).to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(session.snapshot().requests.len(), 1);
+    fs::write(root.path().join("events.json"), json!([
+        {"method":"serverRequest/resolved","params":{"threadId":"child-thread","requestId":"settled-approval"}},
+    ]).to_string()).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.requests, Vec::new());
+    assert_eq!(snapshot.status, NativeSessionStatus::Idle);
     session.stop();
 }
 

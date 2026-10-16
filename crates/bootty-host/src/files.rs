@@ -110,6 +110,8 @@ pub enum FileResponse {
     Document(FileSnapshot),
     Media(crate::media::MediaDescriptor),
     Source(crate::file_reader::FileDescriptor),
+    /// The source to read doesn't exist yet, as an agent's log before its first record.
+    Missing,
     Saved {
         digest: String,
         durability_warning: Option<String>,
@@ -311,10 +313,17 @@ fn path_string(path: &Path) -> Result<String> {
 
 fn open_reader(path: &str, root: &str) -> Result<FileResponse> {
     let path = require_absolute(path)?;
-    let root = require_absolute(root)?.canonicalize()?;
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+    let root = require_absolute(root)?;
+    let metadata = match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FileResponse::Missing);
+        }
+        metadata => metadata?,
+    };
+    if metadata.file_type().is_symlink() {
         bail!("File reader requires a regular root-local source");
     }
+    let root = root.canonicalize()?;
     let path = path.canonicalize()?;
     if !path.starts_with(&root) {
         bail!("File reader source is outside the captured root");

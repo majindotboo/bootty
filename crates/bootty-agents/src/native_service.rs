@@ -664,7 +664,10 @@ impl NativeAgentService {
             self.queue_steer(target, prompt)?;
             return Ok(session.snapshot());
         }
-        self.prompt_input_mode(target, prompt, NativePromptDelivery::Automatic)
+        let sent = self.prompt_input_mode(target, prompt, NativePromptDelivery::Automatic)?;
+        // Sending a message picks the conversation back up, queue included.
+        self.resume_followups(target)?;
+        Ok(sent)
     }
 
     fn prompt_input_mode(
@@ -1140,7 +1143,8 @@ impl NativeAgentService {
     /// # Errors
     /// Returns a stale/stopped target, or first-hand provider interrupt errors.
     pub fn interrupt(&self, target: &CommandTarget) -> Result<(), String> {
-        self.resolve(target)?.interrupt()
+        self.resolve(target)?.interrupt()?;
+        self.pause_followups(target)
     }
 
     /// Start a Codex voice call on the conversation and return Codex's answer to `offer`.

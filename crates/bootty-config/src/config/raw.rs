@@ -134,6 +134,7 @@ pub(super) struct ChromePatch {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct SidebarPatch {
     pub(super) group_by_project: Option<bool>,
+    pub(super) settled_collapsed: Option<bool>,
     pub(super) sort_order: Option<SidebarSortOrder>,
     pub(super) animate_working: Option<bool>,
     pub(super) auto_settle_after_days: Option<u16>,
@@ -213,6 +214,7 @@ pub(super) struct SessionPatch {
     pub(super) working_directory: Option<PathBuf>,
     pub(super) worktree_directory: Option<String>,
     pub(super) worktree_limit: Option<u16>,
+    pub(super) branch_prefix: Option<String>,
     pub(super) env: Option<Vec<EnvConfigEntry>>,
     pub(super) term: Option<String>,
     pub(super) colorterm: Option<String>,

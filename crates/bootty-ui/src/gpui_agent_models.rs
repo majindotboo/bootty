@@ -69,6 +69,20 @@ impl NativeAgentSessionView {
         self.model_command("models-info", Vec::new(), window, cx);
     }
 
+    fn accept_catalog(&mut self, value: serde_json::Value, window: &Window, cx: &Context<Self>) {
+        let Ok(catalog) = serde_json::from_value::<bootty_agents::NativeProviderCatalog>(value)
+        else {
+            self.error = Some(UNREADABLE_CATALOG.into());
+            return;
+        };
+        self.models = Some(catalog.models);
+        self.provider_permissions = catalog.permissions;
+        self.error = None;
+        if let Some(plan) = self.pending_plan.take() {
+            self.set_plan_mode(plan, window, cx);
+        }
+    }
+
     pub(super) fn model_command(
         &mut self,
         operation: &str,
@@ -121,17 +135,7 @@ impl NativeAgentSessionView {
                 }
                 match result {
                     Ok(CommandOutcome::Success { value, .. }) if operation == "models-info" => {
-                        match serde_json::from_value::<bootty_agents::NativeProviderCatalog>(value)
-                        {
-                            Ok(catalog) => {
-                                this.models = Some(catalog.models);
-                                this.provider_permissions = catalog.permissions;
-                                this.error = None;
-                            }
-                            Err(_) => {
-                                this.error = Some(UNREADABLE_CATALOG.into());
-                            }
-                        }
+                        this.accept_catalog(value, window, cx);
                     }
                     Ok(CommandOutcome::Success { value, .. }) if operation == "favorite" => {
                         match serde_json::from_value::<Vec<bootty_agents::NativeModelOption>>(value)

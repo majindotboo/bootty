@@ -32,6 +32,80 @@ pub struct FileDescriptor {
     pub len: u64,
 }
 
+/// How a source may change while it is read.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceChanges {
+    /// Any change fails the read.
+    #[default]
+    Refused,
+    /// An append-only log, such as a conversation transcript, may grow while it is read. Reads
+    /// cover the length it had when it opened; a log that shrinks or whose end is rewritten
+    /// still fails.
+    Appended,
+}
+
+/// Bytes at the end of a log's opened length that must stay put while it is read.
+const LOG_TAIL_BYTES: u64 = 64;
+
+/// What an open source must still be, for every read from it.
+struct SourceGuard {
+    descriptor: FileDescriptor,
+    changes: SourceChanges,
+    /// The log's last bytes at its opened length; empty for a source that can't change.
+    tail: Vec<u8>,
+}
+impl SourceGuard {
+    /// Hold `file` to `descriptor`. A log takes its length as it opens, which can be longer
+    /// than the descriptor saw.
+    fn open(file: &File, descriptor: &FileDescriptor, changes: SourceChanges) -> Result<Self> {
+        let descriptor = match changes {
+            SourceChanges::Refused => {
+                check_revision(file, descriptor)?;
+                descriptor.clone()
+            }
+            SourceChanges::Appended => {
+                let opened = describe(&descriptor.path, file)?;
+                ensure!(opened.len >= descriptor.len, SOURCE_CHANGED);
+                opened
+            }
+        };
+        let tail = match changes {
+            SourceChanges::Refused => Vec::new(),
+            SourceChanges::Appended => log_tail(file, descriptor.len)?,
+        };
+        Ok(Self {
+            descriptor,
+            changes,
+            tail,
+        })
+    }
+    fn check(&self, file: &File) -> Result<()> {
+        match self.changes {
+            SourceChanges::Refused => check_revision(file, &self.descriptor),
+            SourceChanges::Appended => {
+                ensure!(
+                    file.metadata()?.len() >= self.descriptor.len
+                        && log_tail(file, self.descriptor.len)? == self.tail,
+                    SOURCE_CHANGED
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
+/// The last bytes before `len`; callers seek before every read, so moving the cursor is safe.
+fn log_tail(mut file: &File, len: u64) -> Result<Vec<u8>> {
+    let start = len.saturating_sub(LOG_TAIL_BYTES);
+    let mut tail = vec![0; usize::try_from(len.saturating_sub(start))?];
+    file.seek(SeekFrom::Start(start))?;
+    file.read_exact(&mut tail).context(SOURCE_CHANGED)?;
+    Ok(tail)
+}
+
+const SOURCE_CHANGED: &str = "File source changed; reopen the file";
+
 /// Cancels an open source, including a blocked remote pipe read.
 #[derive(Clone)]
 pub struct FileCancellation {
@@ -57,13 +131,14 @@ impl FileCancellation {
 }
 
 enum Source {
-    Local(File),
+    Local { file: File, guard: SourceGuard },
     Remote(Box<RemoteReader>),
 }
 
 /// Owns an open file or persistent SSH/WSL channel. Use on an IO/decode worker.
 pub struct FileReader {
     source: Source,
+    /// The source as opened; a log's length is the one it had then.
     descriptor: FileDescriptor,
     position: u64,
     cache_start: u64,
@@ -75,16 +150,35 @@ impl FileReader {
     /// # Errors
     /// Returns invalid metadata, changed files, or host/transport setup errors.
     pub fn open(descriptor: &FileDescriptor, remote: Option<&RemoteHost>) -> Result<Self> {
+        Self::open_with(descriptor, remote, SourceChanges::Refused)
+    }
+
+    /// Open an append-only log that may grow while it is read, such as a conversation
+    /// transcript its agent is still writing. Reads cover the length it has as it opens.
+    /// # Errors
+    /// Returns invalid metadata, a log that shrank or was rewritten, or host/transport setup
+    /// errors.
+    pub fn open_log(descriptor: &FileDescriptor, remote: Option<&RemoteHost>) -> Result<Self> {
+        Self::open_with(descriptor, remote, SourceChanges::Appended)
+    }
+
+    fn open_with(
+        descriptor: &FileDescriptor,
+        remote: Option<&RemoteHost>,
+        changes: SourceChanges,
+    ) -> Result<Self> {
         validate_descriptor(descriptor)?;
-        let (source, cancellation) = if let Some(remote) = remote {
-            let reader = RemoteReader::open(descriptor, remote)?;
+        let (source, opened, cancellation) = if let Some(remote) = remote {
+            let (reader, opened) = RemoteReader::open(descriptor, changes, remote)?;
             let cancellation = reader.cancellation().clone();
-            (Source::Remote(Box::new(reader)), cancellation)
+            (Source::Remote(Box::new(reader)), opened, cancellation)
         } else {
             let file = open_file(&descriptor.path)?;
-            check_revision(&file, descriptor)?;
+            let guard = SourceGuard::open(&file, descriptor, changes)?;
+            let opened = guard.descriptor.clone();
             (
-                Source::Local(file),
+                Source::Local { file, guard },
+                opened,
                 FileCancellation {
                     cancelled: Arc::default(),
                     process: None,
@@ -93,7 +187,7 @@ impl FileReader {
         };
         Ok(Self {
             source,
-            descriptor: descriptor.clone(),
+            descriptor: opened,
             position: 0,
             cache_start: 0,
             cache: Vec::with_capacity(MAX_FILE_CHUNK),
@@ -105,7 +199,7 @@ impl FileReader {
     /// Returns a changed source or a closed remote reader.
     pub fn verify_source(&mut self) -> Result<()> {
         match &mut self.source {
-            Source::Local(file) => check_revision(file, &self.descriptor),
+            Source::Local { file, guard } => guard.check(file),
             Source::Remote(remote) => remote.read_range(0, &mut []),
         }
     }
@@ -125,8 +219,8 @@ impl FileReader {
 impl Read for FileReader {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         self.cancellation.check()?;
-        if let Source::Local(file) = &self.source {
-            check_revision(file, &self.descriptor).map_err(io::Error::other)?;
+        if let Source::Local { file, guard } = &self.source {
+            guard.check(file).map_err(io::Error::other)?;
         }
         if output.is_empty() || self.position >= self.len() {
             return Ok(0);
@@ -147,8 +241,8 @@ impl Read for FileReader {
             .map_err(io::Error::other)?;
             self.cache.resize(length, 0);
             let result = match &mut self.source {
-                Source::Local(file) => {
-                    read_range(file, &self.descriptor, self.position, &mut self.cache)
+                Source::Local { file, guard } => {
+                    read_range(file, guard, self.position, &mut self.cache)
                 }
                 Source::Remote(remote) => remote.read_range(self.position, &mut self.cache),
             };
@@ -269,16 +363,12 @@ fn check_revision(file: &File, descriptor: &FileDescriptor) -> Result<()> {
     let metadata = file.metadata()?;
     ensure!(
         metadata.len() == descriptor.len && revision(&metadata)? == descriptor.revision,
-        "File source changed; reopen the file"
+        SOURCE_CHANGED
     );
     Ok(())
 }
-fn read_range(
-    file: &mut File,
-    descriptor: &FileDescriptor,
-    offset: u64,
-    bytes: &mut [u8],
-) -> Result<()> {
+fn read_range(file: &mut File, guard: &SourceGuard, offset: u64, bytes: &mut [u8]) -> Result<()> {
+    let descriptor = &guard.descriptor;
     ensure!(
         bytes.len() <= MAX_FILE_CHUNK,
         "File range exceeds its bound"
@@ -288,9 +378,9 @@ fn read_range(
             && u64::try_from(bytes.len())? <= descriptor.len.saturating_sub(offset),
         "File range is outside the file"
     );
-    check_revision(file, descriptor)?;
+    guard.check(file)?;
     file.seek(SeekFrom::Start(offset))?;
     file.read_exact(bytes)
         .context("File source ended before the requested range")?;
-    check_revision(file, descriptor)
+    guard.check(file)
 }

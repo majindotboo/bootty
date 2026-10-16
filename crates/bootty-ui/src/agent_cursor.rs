@@ -1,15 +1,14 @@
 //! The agent cursor: a small pointer shown where an agent clicks, presses, moves or scrolls, so
-//! computer use is visible. Only macOS needs it, because input goes straight to the app there and the real
-//! pointer stays put; on Windows and X11 the real pointer moves to each point. It never takes
-//! focus, and its window starts just past the target so it never covers the pixel the agent acts
-//! on.
+//! computer use is visible. Only macOS needs it, because input goes straight to the app's window
+//! there and the real pointer stays put; on Windows and X11 the real pointer moves to each point.
+//! Input addressed to a window never lands on the cursor. It never takes focus, and its window
+//! starts just past the target so it never hides the pixel the agent acts on.
 //!
 //! Deliberate limit: the cursor appears at each point instead of gliding, because GPUI cannot
 //! move a window; add a native move when the cursor should animate.
 use std::{
     sync::{Mutex, PoisonError},
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use bootty_computer::ComputerAction;
@@ -23,25 +22,12 @@ const SIDE: f32 = 24.0;
 /// The arrow's tip sits this far inside the lucide icon box.
 const TIP_INSET: f32 = 2.0;
 const VISIBLE_FOR: Duration = Duration::from_millis(1500);
-/// How long a shown cursor may stay on screen, including the frame that opens it and the
-/// deferred native close.
-const LINGER: Duration = Duration::from_millis(1800);
 
-struct Points {
-    /// The next point to show, in desktop points.
-    pending: Option<(f64, f64)>,
-    /// The latest point and when it was published.
-    last: Option<(f64, f64, Instant)>,
-}
+/// The next point to show, in desktop points.
+static PENDING: Mutex<Option<(f64, f64)>> = Mutex::new(None);
 
-static POINTS: Mutex<Points> = Mutex::new(Points {
-    pending: None,
-    last: None,
-});
-
-/// Run `act`, then show the cursor where a delivered pointer action landed. The window list counts
-/// the cursor as cover, so a previous cursor that would cover the point is waited out first. Call
-/// it from a worker thread, never the UI thread.
+/// Run `act`, then show the cursor where a delivered pointer action landed. Call it from a worker
+/// thread, never the UI thread.
 pub fn pointing<T, E>(
     action: &ComputerAction,
     repaint: &dyn Fn(),
@@ -57,39 +43,17 @@ pub fn pointing<T, E>(
     if !cfg!(target_os = "macos") {
         return act();
     }
-    let covering = POINTS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .last
-        .filter(|&(last_x, last_y, _)| covers(last_x, last_y, x, y))
-        .and_then(|(_, _, at)| at.checked_add(LINGER))
-        .and_then(|until| until.checked_duration_since(Instant::now()));
-    if let Some(wait) = covering {
-        thread::sleep(wait);
-    }
     let result = act()?;
-    let mut points = POINTS.lock().unwrap_or_else(PoisonError::into_inner);
-    points.pending = Some((x, y));
-    points.last = Some((x, y, Instant::now()));
-    drop(points);
+    *PENDING.lock().unwrap_or_else(PoisonError::into_inner) = Some((x, y));
     repaint();
     Ok(result)
 }
 
-/// Whether the cursor shown for `(cursor_x, cursor_y)` covers `(x, y)`.
-fn covers(cursor_x: f64, cursor_y: f64, x: f64, y: f64) -> bool {
-    let side = f64::from(SIDE);
-    let left = cursor_x + 1.0;
-    let top = cursor_y + 1.0;
-    (left..=left + side).contains(&x) && (top..=top + side).contains(&y)
-}
-
 /// Show the latest pending point. The workspace calls this every frame.
 pub fn sync_pending(cx: &mut App) {
-    let Some((x, y)) = POINTS
+    let Some((x, y)) = PENDING
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .pending
         .take()
     else {
         return;

@@ -238,6 +238,7 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
     apply_fields!(sidebar, partial;
         group_by_project,
+        settled_collapsed,
         sort_order,
         animate_working,
         auto_settle_after_days,
@@ -350,6 +351,7 @@ fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
         working_directory,
         worktree_directory,
         worktree_limit,
+        branch_prefix,
     );
     if let Some(value) = partial.env {
         session.env = value

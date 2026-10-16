@@ -302,6 +302,7 @@ pub struct SidebarSnapshot {
     pub footer: Vec<SidebarFooterItem>,
     pub title_visible: bool,
     pub group_by_project: bool,
+    pub settled_collapsed: bool,
     pub sort_order: bootty_config::config::SidebarSortOrder,
     pub animate_working: bool,
     pub focused: bool,
@@ -353,6 +354,8 @@ pub struct SidebarRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarTask {
     pub identity: String,
+    /// The row's title, for confirmations that name the session.
+    pub title: String,
     pub native_conversation: Option<bootty_control::CommandTarget>,
     pub state: bootty_mux::session_membership::SessionState,
     pub binding: Option<bootty_control::CommandTarget>,

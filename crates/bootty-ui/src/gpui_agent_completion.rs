@@ -276,34 +276,43 @@ impl NativeAgentSessionView {
     ) {
         match action {
             crate::gpui_composer_completion::ComposerAddAction::Plan(plan) => {
-                if let Some(model) = self.models.iter().flatten().find(|model| {
-                    self.record
-                        .config
-                        .model
-                        .as_ref()
-                        .map_or(model.is_default, |selected| selected == &model.id)
-                }) {
-                    self.select_model(
-                        &bootty_agents::NativeModelSelection {
-                            plan_mode: Some(*plan),
-                            fast_mode: None,
-                            model: model.id.clone(),
-                            reasoning_effort: self
-                                .record
-                                .config
-                                .reasoning_effort
-                                .clone()
-                                .or_else(|| model.default_reasoning_effort.clone()),
-                        },
-                        window,
-                        cx,
-                    );
-                }
+                self.set_plan_mode(*plan, window, cx);
             }
             crate::gpui_composer_completion::ComposerAddAction::Goal(objective) => {
                 self.model_command("goal", vec![objective.clone()], window, cx);
             }
         }
+    }
+
+    /// Plan mode rides on the model selection, so a toggle made before models load waits for
+    /// them instead of doing nothing.
+    pub(super) fn set_plan_mode(&mut self, plan: bool, window: &Window, cx: &Context<Self>) {
+        let Some(model) = self.models.iter().flatten().find(|model| {
+            self.record
+                .config
+                .model
+                .as_ref()
+                .map_or(model.is_default, |selected| selected == &model.id)
+        }) else {
+            self.pending_plan = Some(plan);
+            self.load_models(window, cx);
+            return;
+        };
+        self.select_model(
+            &bootty_agents::NativeModelSelection {
+                plan_mode: Some(plan),
+                fast_mode: None,
+                model: model.id.clone(),
+                reasoning_effort: self
+                    .record
+                    .config
+                    .reasoning_effort
+                    .clone()
+                    .or_else(|| model.default_reasoning_effort.clone()),
+            },
+            window,
+            cx,
+        );
     }
 
     pub(super) fn active_applications(
@@ -371,6 +380,11 @@ impl NativeAgentSessionView {
             }
             ComposerCommand::Stop => {
                 self.command("interrupt", Vec::new(), window, cx);
+                None
+            }
+            ComposerCommand::Plan => {
+                let plan = !self.record.config.plan_mode.unwrap_or(false);
+                self.set_plan_mode(plan, window, cx);
                 None
             }
             ComposerCommand::Model => {

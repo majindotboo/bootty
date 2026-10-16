@@ -720,7 +720,7 @@ impl DialogView {
                 InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
             },
         );
-        let prompt_textarea = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 8));
+        let prompt_textarea = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10));
         let prompt_textarea_subscription =
             Self::subscribe_prompt_content(&prompt_textarea, window, cx);
         let command_interceptor = Self::command_interceptor(cx);
@@ -1738,7 +1738,7 @@ impl DialogView {
                             .gap_2()
                             .p_3()
                             .pb_2()
-                            .rounded(cx.theme().radius)
+                            .rounded_xl()
                             .bg(cx.theme().muted.opacity(0.35))
                             .border_1()
                             .border_color(prompt_border)

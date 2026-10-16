@@ -473,10 +473,12 @@ impl NativeAgentSessionView {
                             Some(
                                 div()
                                     .relative()
-                                    .w_20()
+                                    .w(gpui_kit::rems(7.0))
                                     .h_20()
                                     .rounded_md()
                                     .overflow_hidden()
+                                    .border_1()
+                                    .border_color(cx.theme().border)
                                     .child(
                                         Button::new(gpui_kit::SharedString::from(format!(
                                             "open-preview:{id}"
@@ -491,7 +493,7 @@ impl NativeAgentSessionView {
                                         .child(
                                             gpui_kit::img(preview.clone())
                                                 .size_full()
-                                                .object_fit(gpui_kit::ObjectFit::Contain),
+                                                .object_fit(gpui_kit::ObjectFit::Cover),
                                         )
                                         .on_click(
                                             cx.listener({
@@ -639,31 +641,26 @@ impl NativeAgentSessionView {
                 continue;
             };
             cx.spawn_in(window, async move |owner, cx| {
+                // `None` means the preview couldn't be fetched, so a later update retries it; an
+                // image that can't be decoded stays tried.
                 let preview = cx
                     .background_executor()
                     .spawn(async move {
-                        use base64::Engine as _;
                         let CommandOutcome::Success { value, .. } = receiver.recv().ok()? else {
                             return None;
                         };
-                        let encoded = value.get("png")?.as_str()?;
-                        let limit = bootty_agents::MAX_NATIVE_ATTACHMENT_PREVIEW_BYTES;
-                        if base64::encoded_len(limit, true).is_none_or(|max| encoded.len() > max) {
-                            return None;
-                        }
-                        let bytes = base64::engine::general_purpose::STANDARD
-                            .decode(encoded)
-                            .ok()?;
-                        if bytes.len() > limit {
-                            return None;
-                        }
-                        decode_image_preview(&bytes, false)
+                        Some(preview_from_reply(&value))
                     })
                     .await;
                 _ = owner.update(cx, |this, cx| {
-                    if this.record.target() == target
-                        && let Some(preview) = preview
-                    {
+                    if this.record.target() != target {
+                        return;
+                    }
+                    let Some(preview) = preview else {
+                        this.attachment_preview_attempts.remove(&id);
+                        return;
+                    };
+                    if let Some(preview) = preview {
                         // Only the rows that show this image change height.
                         for (ix, row) in this.timeline.iter().enumerate() {
                             if let super::TranscriptRow::Message { index, .. } = row
@@ -729,46 +726,69 @@ impl NativeAgentSessionView {
                                     let id = reference.id.clone();
                                     move || format!("attachment-preview:{id}")
                                 })
-                                .w_20()
+                                .w(gpui_kit::rems(7.0))
                                 .h_20()
                                 .rounded_md()
                                 .overflow_hidden()
+                                .border_1()
+                                .border_color(cx.theme().border)
                                 .child(
                                     gpui_kit::img(preview.clone())
                                         .size_full()
-                                        .object_fit(gpui_kit::ObjectFit::Contain),
+                                        .object_fit(gpui_kit::ObjectFit::Cover),
                                 )
                             })
                         }),
                     ))
                 },
             )
-            .child(div().flex().flex_shrink_0().flex_wrap().gap_2().children(
-                item.attachments.iter().map(|reference| {
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .px_2()
-                        .py_1()
-                        .rounded_md()
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .text_xs()
-                        .child(crate::gpui::sized_icon(
-                            crate::gpui_prompt_attachments::icon(&reference.name),
-                            crate::gpui::IconSize::Small,
-                            cx.theme().muted_foreground,
-                        ))
-                        .child(reference.name.clone())
-                        .child(
+            // A preview already names its image; only attachments without one get a chip.
+            .child(
+                div().flex().flex_shrink_0().flex_wrap().gap_2().children(
+                    item.attachments
+                        .iter()
+                        .filter(|reference| !self.attachment_previews.contains_key(&reference.id))
+                        .map(|reference| {
                             div()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(crate::gpui_prompt_attachments::size(reference.size_bytes)),
-                        )
-                }),
-            ))
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .px_2()
+                                .py_1()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .text_xs()
+                                .child(crate::gpui::sized_icon(
+                                    crate::gpui_prompt_attachments::icon(&reference.name),
+                                    crate::gpui::IconSize::Small,
+                                    cx.theme().muted_foreground,
+                                ))
+                                .child(reference.name.clone())
+                                .child(div().text_color(cx.theme().muted_foreground).child(
+                                    crate::gpui_prompt_attachments::size(reference.size_bytes),
+                                ))
+                        }),
+                ),
+            )
     }
+}
+
+/// The preview image an attachment-preview reply carries, within its byte bound.
+fn preview_from_reply(value: &serde_json::Value) -> Option<Arc<gpui_kit::RenderImage>> {
+    use base64::Engine as _;
+    let encoded = value.get("png")?.as_str()?;
+    let limit = bootty_agents::MAX_NATIVE_ATTACHMENT_PREVIEW_BYTES;
+    if base64::encoded_len(limit, true).is_none_or(|max| encoded.len() > max) {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .ok()?;
+    if bytes.len() > limit {
+        return None;
+    }
+    decode_image_preview(&bytes, false)
 }
 
 pub fn attachment_preview(path: &std::path::Path) -> Option<Arc<gpui_kit::RenderImage>> {

@@ -151,6 +151,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(cursor_specs());
     specs.extend(font_styles_specs());
     specs.extend(custom_chrome_specs());
+    specs.extend(sidebar_session_specs());
     specs.extend(sidebar_specs());
     specs.extend(backend_specs());
     specs.extend(ssh_profiles_specs());
@@ -182,14 +183,18 @@ pub(super) fn specs() -> Vec<SettingSpec> {
         "general",
         "BEHAVIOR",
         SettingKind::Choice {
-            options: [("queue", "Queue"), ("steer", "Steer")]
-                .into_iter()
-                .map(|(token, label)| SettingOption {
-                    token: token.into(),
-                    label: label.into(),
-                    description: None,
-                })
-                .collect(),
+            options: [
+                ("queue", "Queue"),
+                ("steer", "Steer"),
+                ("interrupt", "Interrupt"),
+            ]
+            .into_iter()
+            .map(|(token, label)| SettingOption {
+                token: token.into(),
+                label: label.into(),
+                description: None,
+            })
+            .collect(),
         },
         SettingDefault::Field(|config| {
             SettingValue::Token(config.agents.follow_up_behavior.token().into())
@@ -1164,7 +1169,7 @@ fn notifications_specs() -> [SettingSpec; 4] {
     ]
 }
 
-fn terminal_environment_specs() -> [SettingSpec; 6] {
+fn terminal_environment_specs() -> [SettingSpec; 7] {
     [
         spec(
             &["session", "working-directory"],
@@ -1186,7 +1191,7 @@ fn terminal_environment_specs() -> [SettingSpec; 6] {
         spec(
             &["session", "worktree-directory"],
             "Worktree directory",
-            "New worktrees go in <directory>/<repository>/<name> on the repository's host. ~ is that host's home.",
+            "New worktrees go in `<directory>/<repository>/<name>` on the repository's host. `~` is that host's home.",
             "shell",
             "SHELL",
             text("~/.local/share/bootty/worktrees", true),
@@ -1198,6 +1203,17 @@ fn terminal_environment_specs() -> [SettingSpec; 6] {
                         .clone()
                         .unwrap_or_default(),
                 )
+            }),
+        ),
+        spec(
+            &["session", "branch-prefix"],
+            "Branch prefix",
+            "What a new worktree's branch name starts with. A project's own prefix wins.",
+            "shell",
+            "SHELL",
+            text("bootty/", true),
+            SettingDefault::Field(|config| {
+                SettingValue::Text(config.session.branch_prefix.clone())
             }),
         ),
         spec(
@@ -1495,7 +1511,8 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
     ]
 }
 
-fn sidebar_specs() -> [SettingSpec; 11] {
+/// How the sidebar lists sessions.
+fn sidebar_session_specs() -> [SettingSpec; 4] {
     [
         spec(
             &["sidebar", "auto-settle-after-days"],
@@ -1524,6 +1541,15 @@ fn sidebar_specs() -> [SettingSpec; 11] {
             SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.group_by_project)),
         ),
         spec(
+            &["sidebar", "settled-collapsed"],
+            "Collapse settled sessions",
+            "The Settled shelf shows its heading and count until you open it.",
+            "sidebar",
+            "SESSIONS",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.settled_collapsed)),
+        ),
+        spec(
             &["sidebar", "sort-order"],
             "Session order",
             "Keep manual order or put sessions with recent accepted input first.",
@@ -1543,6 +1569,11 @@ fn sidebar_specs() -> [SettingSpec; 11] {
                 SettingValue::Token(config.sidebar.sort_order.token().to_owned())
             }),
         ),
+    ]
+}
+
+fn sidebar_specs() -> [SettingSpec; 8] {
+    [
         spec(
             &["sidebar", "animate-working"],
             "Animate Working ring",

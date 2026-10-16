@@ -1,5 +1,9 @@
 //! Windows: top-level window enumeration, `PrintWindow` capture and `SendInput`. Windows has no
 //! per-process input delivery, so input drives the real pointer and needs the window in front.
+//!
+//! Deliberate limit: window messages such as `WM_LBUTTONDOWN` reach background windows, but apps
+//! that read raw input or the real key state ignore them. Address input to the window that way if
+//! the apps agents drive turn out to honor it.
 //! Coordinates are physical pixels; Bootty runs per-monitor DPI aware.
 #![allow(
     unsafe_code,
@@ -55,7 +59,7 @@ use windows::{
 use crate::{
     ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier, MouseButton,
     PermissionStatus,
-    desktop::{Desktop, Focus, Image, InputEvent, NativeWindow, pixel_count},
+    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count},
 };
 
 // PrintWindow renders DirectComposition content, such as browsers, only with this flag.
@@ -97,17 +101,18 @@ impl Desktop for WindowsDesktop {
         handles.into_iter().filter_map(native_window).collect()
     }
 
-    fn focus(&self) -> Option<Focus> {
-        let window = unsafe { GetForegroundWindow() };
-        if window.is_invalid() {
-            return None;
-        }
-        let mut process_id = 0;
-        unsafe { GetWindowThreadProcessId(window, Some(&raw mut process_id)) };
-        Some(Focus {
-            process_id: i32::try_from(process_id).ok()?,
-            window: bounds(window),
-        })
+    fn route(&self) -> InputRoute {
+        InputRoute::Shared
+    }
+
+    fn frontmost(&self) -> Option<i32> {
+        foreground().map(|(owner, _)| owner)
+    }
+
+    /// Keys go to the foreground window, so a process in the background receives none.
+    fn focus(&self, process_id: i32) -> Option<DisplayBounds> {
+        let (owner, window) = foreground()?;
+        (owner == process_id).then(|| bounds(window)).flatten()
     }
 
     fn secure_input(&self) -> bool {
@@ -368,6 +373,17 @@ fn native_window(window: HWND) -> Option<NativeWindow> {
         visible: true,
         app,
     })
+}
+
+/// The foreground window and its process.
+fn foreground() -> Option<(i32, HWND)> {
+    let window = unsafe { GetForegroundWindow() };
+    if window.is_invalid() {
+        return None;
+    }
+    let mut owner = 0;
+    unsafe { GetWindowThreadProcessId(window, Some(&raw mut owner)) };
+    Some((i32::try_from(owner).ok()?, window))
 }
 
 fn bounds(window: HWND) -> Option<DisplayBounds> {

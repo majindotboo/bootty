@@ -432,3 +432,17 @@ fn session_sort_order_loads_through_the_scalar_setting(
     );
     assert!(load_with(&["sidebar", "sort-order"], "\"focus-time\"").is_err());
 }
+
+/// Setting help renders as markdown, where a `<word>` outside a code span is an HTML tag and
+/// disappears, so placeholders go in backticks.
+#[test]
+fn help_text_keeps_placeholders_in_code_spans() {
+    for spec in SettingsSchema::builtin().specs() {
+        let prose = spec.help.split('`').step_by(2).collect::<String>();
+        assert!(
+            !prose.contains('<'),
+            "{}: put `<…>` placeholders in backticks so the help shows them",
+            spec.id()
+        );
+    }
+}

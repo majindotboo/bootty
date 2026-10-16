@@ -1314,6 +1314,13 @@ impl AppState {
             CoreCommandExecutor::Synchronous(executor) => {
                 self.dispatch_synchronous_command(executor, effects, execution)
             }
+            CoreCommandExecutor::Keybind(KeybindAction::InterruptAgent) => self
+                .interrupt_pane_conversation(
+                    exact_target.as_ref(),
+                    invocation.caller,
+                    effects,
+                    execution,
+                ),
             CoreCommandExecutor::Keybind(KeybindAction::App(
                 crate::app_actions::AppAction::AgentHistory,
             )) => {
@@ -1643,6 +1650,7 @@ impl AppState {
                     && matches!(
                         action,
                         crate::app_actions::SidebarAction::ToggleGrouping
+                            | crate::app_actions::SidebarAction::ToggleSettled
                             | crate::app_actions::SidebarAction::SortManual
                             | crate::app_actions::SidebarAction::SortRecentActivity
                     )

@@ -27,9 +27,10 @@ impl Eq for WslRemote {}
 impl WslRemote {
     #[must_use]
     pub fn new(config: WslRemoteConfig) -> Self {
+        static READY: crate::remote::Readiness<WslRemoteConfig> = std::sync::OnceLock::new();
         Self {
+            ready: crate::remote::shared_readiness(&READY, &config),
             config,
-            ready: Arc::new(Mutex::new(false)),
         }
     }
     #[must_use]

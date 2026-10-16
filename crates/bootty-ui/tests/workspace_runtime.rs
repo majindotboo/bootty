@@ -2103,10 +2103,30 @@ fn failed_active_space_delete_preserves_selection(
         SpaceMuxOverride::default(),
     );
     repository.set_selected_space("close-test", first).unwrap();
+    // rmux and tmux servers are per user; a stand-in keeps the developer's servers untouched.
+    let backends = match backend {
+        MultiplexerBackendConfig::Rmux => registry(
+            [Arc::new(restore_provider(
+                MuxBackendKind::Rmux,
+                Arc::default(),
+                Arc::default(),
+            ))],
+            [MuxBackendKind::Rmux],
+        ),
+        MultiplexerBackendConfig::Tmux => registry(
+            [Arc::new(restore_provider(
+                MuxBackendKind::Tmux,
+                Arc::default(),
+                Arc::default(),
+            ))],
+            [MuxBackendKind::Tmux],
+        ),
+        _ => support::backends(),
+    };
     let mut state = AppState::new_for_window(
         config,
         "close-test".to_owned(),
-        support::backends(),
+        backends,
         Arc::new(|| {}),
         None,
         None,

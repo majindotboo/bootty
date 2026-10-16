@@ -510,6 +510,7 @@ impl DocumentPanel {
             }
             Ok(
                 FileResponse::Source(_)
+                | FileResponse::Missing
                 | FileResponse::Directory(_)
                 | FileResponse::Completions(_)
                 | FileResponse::Location { .. }

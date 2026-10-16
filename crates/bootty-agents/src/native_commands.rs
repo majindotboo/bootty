@@ -93,6 +93,7 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             ResourceKind::Session,
         ),
         ("queue", prompt_arguments(), ResourceKind::Session),
+        ("interrupt-send", prompt_arguments(), ResourceKind::Session),
         (
             "queue-cancel",
             vec!["id", "generation", "message_id"],
@@ -127,6 +128,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         (
             "queue-steer",
             vec!["id", "generation", "message_id"],
+            ResourceKind::Session,
+        ),
+        (
+            "queue-resume",
+            vec!["id", "generation"],
             ResourceKind::Session,
         ),
         (

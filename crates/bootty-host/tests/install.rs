@@ -120,33 +120,8 @@ fn remote() -> SshRemote {
 #[test]
 fn candidate_is_verified_before_publication() -> Result<()> {
     let _artifact = PackagedDaemon::install()?;
-    let successful = Rc::new(RefCell::new(InstallerState::default()));
-    remote().ensure_daemon_with(&InstallerRunner {
-        state: Rc::clone(&successful),
-        candidate_ping: compatible_ping(),
-    })?;
-    let successful = successful.borrow();
-    let position = |needle| {
-        successful
-            .commands
-            .iter()
-            .position(|command| command.contains(needle))
-            .expect("observed install step")
-    };
-    let candidate_ping = position(".upload");
-    let publication = position("mv -f");
-    let final_ping = successful
-        .commands
-        .iter()
-        .rposition(|command| command.ends_with("remote-ping"))
-        .expect("final ping");
-    let observed = (
-        successful.installed,
-        candidate_ping < publication,
-        publication < final_ping,
-    );
-    assert_eq!(observed, (true, true, true));
-
+    // Readiness is shared by every handle to one host, and only a published daemon sets it, so
+    // the rejected candidates go first.
     let failed = Rc::new(RefCell::new(InstallerState::default()));
     let error = remote()
         .ensure_daemon_with(&InstallerRunner {
@@ -188,6 +163,33 @@ fn candidate_is_verified_before_publication() -> Result<()> {
             bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION
         )
     );
+    let successful = Rc::new(RefCell::new(InstallerState::default()));
+    remote().ensure_daemon_with(&InstallerRunner {
+        state: Rc::clone(&successful),
+        candidate_ping: compatible_ping(),
+    })?;
+    let successful = successful.borrow();
+    let position = |needle| {
+        successful
+            .commands
+            .iter()
+            .position(|command| command.contains(needle))
+            .expect("observed install step")
+    };
+    let candidate_ping = position(".upload");
+    let publication = position("mv -f");
+    let final_ping = successful
+        .commands
+        .iter()
+        .rposition(|command| command.ends_with("remote-ping"))
+        .expect("final ping");
+    let observed = (
+        successful.installed,
+        candidate_ping < publication,
+        publication < final_ping,
+    );
+    assert_eq!(observed, (true, true, true));
+
     Ok(())
 }
 

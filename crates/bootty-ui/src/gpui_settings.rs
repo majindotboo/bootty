@@ -12,9 +12,8 @@ use crate::{
         StatusSegmentEditorRow, StatusSegmentIntent, StatusSegmentsSnapshot,
     },
     gpui_settings_catalog::{
-        advanced_configuration_rows, setting_is_visible_in_native_settings, settings_catalog_pages,
-        settings_category_for, settings_page, settings_row_order as catalog_row_order,
-        settings_section as catalog_section,
+        advanced_configuration_rows, group_settings, setting_is_visible_in_native_settings,
+        settings_catalog_pages, settings_category_for, settings_page,
     },
     settings_session::{
         Catalogs, DefaultRemote, FontFeatureDraft, RemoteDraft, SettingsSession, StatusSegmentEdit,
@@ -979,7 +978,7 @@ fn settings_content(
                 None
             };
 
-            let mut specs = schema
+            let specs = schema
                 .specs()
                 .iter()
                 .filter(|spec| {
@@ -991,47 +990,19 @@ fn settings_content(
                             == category.category
                 })
                 .collect::<Vec<_>>();
-            specs.sort_by_key(|spec| catalog_row_order(category.category, &spec.id()));
-            for spec in specs {
-                let spec_rows = match &spec.kind {
-                    SettingKind::FontStyle => font_style_row(spec, state.config(), session)
-                        .into_iter()
-                        .collect(),
-                    SettingKind::Custom(editor) => custom_setting_rows(
-                        spec,
-                        *editor,
-                        state.config(),
-                        session,
-                        session.font_families(),
-                    ),
-                    kind => {
-                        let (label, help) = setting_copy(spec);
-                        let value = if spec.id() == "window.fullscreen-enabled" {
-                            Some(SettingValue::Bool(state.config().window.fullscreen_enabled))
-                        } else {
-                            session.value(&spec.id())
-                        };
-                        let Some(value) = value else { continue };
-                        vec![SettingsRow::Value {
-                            id: spec.id(),
-                            label,
-                            help,
-                            value,
-                            control: settings_control(kind),
-                            enabled: true,
-                        }]
-                    }
-                };
-                if spec_rows.is_empty() {
+            for (display_section, specs) in group_settings(category.category, specs) {
+                let section_rows = specs
+                    .into_iter()
+                    .flat_map(|spec| setting_rows(spec, state, session))
+                    .collect::<Vec<_>>();
+                if section_rows.is_empty() {
                     continue;
                 }
-                let display_section =
-                    catalog_section(category.category, &spec.id(), spec.section.as_ref());
                 if section.as_deref() != Some(display_section) {
                     section = Some(display_section.to_owned());
                     rows.push(SettingsRow::Section(display_section.to_owned()));
                 }
-                rows.extend(spec_rows);
+                rows.extend(section_rows);
             }
 
             if category.category == SettingsCategory::Keymap {
@@ -1055,6 +1026,45 @@ fn settings_content(
     SettingsContent {
         pages,
         write_error: session.write_error().map(str::to_owned),
+    }
+}
+
+/// The rows one schema setting shows as.
+fn setting_rows(
+    spec: &bootty_config::settings_schema::SettingSpec,
+    state: &AppState,
+    session: &SettingsSession,
+) -> Vec<SettingsRow> {
+    match &spec.kind {
+        SettingKind::FontStyle => font_style_row(spec, state.config(), session)
+            .into_iter()
+            .collect(),
+        SettingKind::Custom(editor) => custom_setting_rows(
+            spec,
+            *editor,
+            state.config(),
+            session,
+            session.font_families(),
+        ),
+        kind => {
+            let (label, help) = setting_copy(spec);
+            let value = if spec.id() == "window.fullscreen-enabled" {
+                Some(SettingValue::Bool(state.config().window.fullscreen_enabled))
+            } else {
+                session.value(&spec.id())
+            };
+            value
+                .map(|value| SettingsRow::Value {
+                    id: spec.id(),
+                    label,
+                    help,
+                    value,
+                    control: settings_control(kind),
+                    enabled: true,
+                })
+                .into_iter()
+                .collect()
+        }
     }
 }
 
@@ -2200,6 +2210,7 @@ fn provider_status_rows(
         help: scope_error
             .clone()
             .or_else(|| status.and_then(|status| status.message.clone()))
+            .or_else(|| claude_connectors_note(provider, status))
             .unwrap_or_default(),
         value: ScalarValue::Text(detail),
         control: SettingsControl::ReadOnly,
@@ -2269,6 +2280,24 @@ fn provider_inspection_scope_error(
                 || (argument.starts_with("-c") && argument.len() > 2)
         });
     changed.then(|| "Account status unavailable for this Codex launch profile: its provider, configuration, or remote overrides are not applied by the local account check.".to_owned())
+}
+
+/// Claude loads the connectors of a Claude account, the ones Claude Desktop has, only when it
+/// signs in with that account; an Anthropic Console key has none.
+fn claude_connectors_note(
+    provider: bootty_agents::AgentKind,
+    status: Option<&bootty_agents::TerminalProviderStatus>,
+) -> Option<String> {
+    (provider == bootty_agents::AgentKind::Claude
+        && status.is_some_and(|status| {
+            status.authenticated == Some(true)
+                && matches!(status.auth_method.as_deref(), Some("api_key" | "apiKey"))
+        }))
+    .then(|| {
+        "Signed in with an Anthropic Console key, so your Claude account's connectors, the ones \
+         Claude Desktop has, aren't available. Sign in with your Claude subscription to use them."
+            .to_owned()
+    })
 }
 
 fn provider_status_summary(status: Option<&bootty_agents::TerminalProviderStatus>) -> String {

@@ -1,6 +1,6 @@
 use super::{
-    FileCancellation, FileDescriptor, MAX_FILE_CHUNK, check_revision, open_file, read_range,
-    validate_descriptor,
+    FileCancellation, FileDescriptor, MAX_FILE_CHUNK, SOURCE_CHANGED, SourceChanges, SourceGuard,
+    open_file, read_range, validate_descriptor,
 };
 use crate::{CancellableCommandRunner, CommandCancellation, remote::RemoteHost};
 use anyhow::{Context as _, Result, ensure};
@@ -17,6 +17,14 @@ use std::{
 const HEADER_LIMIT: u64 = 16 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// What the local reader asks the remote daemon to serve.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Request {
+    descriptor: FileDescriptor,
+    #[serde(default)]
+    changes: SourceChanges,
+}
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Range {
@@ -53,10 +61,10 @@ fn write_line(value: &impl Serialize, output: &mut impl Write) -> Result<()> {
 /// Serve one open file source until request EOF. Bodies are raw, bounded binary ranges.
 /// # Errors
 /// Returns malformed requests, changed files, or stream errors.
-pub fn serve(payload: &str, mut input: impl BufRead, mut output: impl Write) -> Result<()> {
+pub fn serve(payload: &str, input: impl BufRead, output: impl Write) -> Result<()> {
     ensure!(payload.len() <= 32 * 1024, "File request exceeds its bound");
-    let descriptor: FileDescriptor = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
-    serve_descriptor(&descriptor, &mut input, &mut output)
+    let request: Request = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
+    serve_source(&request.descriptor, request.changes, input, output)
 }
 
 /// Serve bounded ranges from an already decoded source descriptor.
@@ -64,16 +72,26 @@ pub fn serve(payload: &str, mut input: impl BufRead, mut output: impl Write) -> 
 /// Returns malformed requests, changed files, or stream errors.
 pub fn serve_descriptor(
     descriptor: &FileDescriptor,
+    input: impl BufRead,
+    output: impl Write,
+) -> Result<()> {
+    serve_source(descriptor, SourceChanges::Refused, input, output)
+}
+
+fn serve_source(
+    descriptor: &FileDescriptor,
+    changes: SourceChanges,
     mut input: impl BufRead,
     mut output: impl Write,
 ) -> Result<()> {
     let opened = (|| {
         validate_descriptor(descriptor)?;
         let file = open_file(&descriptor.path)?;
-        check_revision(&file, descriptor)?;
-        Ok(file)
+        let guard = SourceGuard::open(&file, descriptor, changes)?;
+        Ok((file, guard))
     })();
-    let mut file = report_error(opened, &mut output)?;
+    let (mut file, guard) = report_error(opened, &mut output)?;
+    let descriptor = &guard.descriptor;
     write_line(
         &Response::Ready {
             len: descriptor.len,
@@ -90,7 +108,7 @@ pub fn serve_descriptor(
             let length = usize::try_from(request.length)?;
             ensure!(length <= MAX_FILE_CHUNK, "File range exceeds its bound");
             bytes.resize(length, 0);
-            read_range(&mut file, descriptor, request.offset, &mut bytes)?;
+            read_range(&mut file, &guard, request.offset, &mut bytes)?;
             Ok(Some(request.length))
         })();
         let Some(length) = report_error(requested, &mut output)? else {
@@ -120,14 +138,23 @@ pub(super) struct RemoteReader {
     errors: Option<JoinHandle<()>>,
 }
 impl RemoteReader {
-    pub(super) fn open(descriptor: &FileDescriptor, remote: &RemoteHost) -> Result<Self> {
+    /// Opens the source on its host and returns it as opened there: a log's length is the one
+    /// it had then.
+    pub(super) fn open(
+        descriptor: &FileDescriptor,
+        changes: SourceChanges,
+        remote: &RemoteHost,
+    ) -> Result<(Self, FileDescriptor)> {
         remote.ensure_daemon_with(&CancellableCommandRunner::with_deadline(
             CommandCancellation::default(),
             Instant::now()
                 .checked_add(IO_TIMEOUT)
                 .context("File deadline overflow")?,
         ))?;
-        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(descriptor)?);
+        let payload = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&Request {
+            descriptor: descriptor.clone(),
+            changes,
+        })?);
         let (program, args) = remote.proxy_command(
             crate::REMOTE_DAEMON_PROGRAM,
             &["file-reader".to_owned(), payload],
@@ -201,16 +228,9 @@ impl RemoteReader {
                 .context("File deadline overflow")?,
         ))?;
         let response = line::<Response>(&mut reader.output)?.context("Missing file handshake")?;
-        match response {
-            Response::Ready { len, revision } => ensure!(
-                len == descriptor.len && revision == descriptor.revision,
-                "File handshake revision mismatch"
-            ),
-            Response::Error { message } => anyhow::bail!("{message}"),
-            Response::Data { .. } => anyhow::bail!("Unexpected file handshake"),
-        }
+        let opened = handshake(response, descriptor, changes)?;
         reader.deadline.send(None)?;
-        Ok(reader)
+        Ok((reader, opened))
     }
     pub(super) const fn cancellation(&self) -> &FileCancellation {
         &self.cancellation
@@ -247,6 +267,33 @@ impl RemoteReader {
         result
     }
 }
+/// The source as the remote daemon opened it, when that is what was asked for: the same
+/// revision, or for a log the same file at its length or longer.
+fn handshake(
+    response: Response,
+    descriptor: &FileDescriptor,
+    changes: SourceChanges,
+) -> Result<FileDescriptor> {
+    match response {
+        Response::Ready { len, revision } => {
+            match changes {
+                SourceChanges::Refused => ensure!(
+                    len == descriptor.len && revision == descriptor.revision,
+                    "File handshake revision mismatch"
+                ),
+                SourceChanges::Appended => ensure!(len >= descriptor.len, SOURCE_CHANGED),
+            }
+            Ok(FileDescriptor {
+                revision,
+                len,
+                ..descriptor.clone()
+            })
+        }
+        Response::Error { message } => anyhow::bail!("{message}"),
+        Response::Data { .. } => anyhow::bail!("Unexpected file handshake"),
+    }
+}
+
 impl Drop for RemoteReader {
     fn drop(&mut self) {
         self.cancellation.cancel();

@@ -22,6 +22,7 @@ pub fn init_ui_theme(ui_theme: UiTheme, cx: &mut App) {
     gpui_kit::init(cx);
     super::config_editor::init(cx);
     crate::gpui_agent_session::init_reaction_keys(cx);
+    crate::gpui_agent_session::init_request_keys(cx);
     crate::gpui_model_picker::init(cx);
     cx.set_global(BoottyThemeSettings::default());
     cx.bind_keys([

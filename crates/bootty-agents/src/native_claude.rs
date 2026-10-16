@@ -50,8 +50,9 @@ impl ClaudeProtocol {
         })
     }
 
-    /// Claude consumes urgent user input on its existing stream, then reports the
-    /// interrupted result before the replacement result. Keep both admissions.
+    /// Claude takes a `next` message at the turn's next tool boundary without stopping the
+    /// running tool, and the turn ends with one result. A turn that ends first gets it as the
+    /// following turn instead.
     pub fn steer(
         &mut self,
         snapshot: &mut NativeSessionSnapshot,
@@ -70,7 +71,7 @@ impl ClaudeProtocol {
             return Err("Claude has too many pending follow-ups".into());
         }
         let value = json!({"type":"user","uuid":id,"session_id":self.session_id,
-            "parent_tool_use_id":null,"priority":"now",
+            "parent_tool_use_id":null,"priority":"next",
             "message":{"role":"user","content":prompt.claude_content()?}});
         snapshot.prompt_message(id, prompt)?;
         snapshot.pending_user_item = Some(id.to_owned());
@@ -346,6 +347,17 @@ impl ClaudeProtocol {
             if snapshot.pending_user_item.as_deref() == Some(dispatch.id.as_str()) {
                 snapshot.pending_user_item = None;
             }
+            // A steer Claude takes in mid-turn belongs to the running turn, which ends with one
+            // result, so it no longer waits for a turn of its own.
+            let id = dispatch.id.clone();
+            if self.accepted()
+                && self
+                    .dispatch
+                    .as_ref()
+                    .is_some_and(|current| current.id != id)
+            {
+                self.steering.retain(|steer| steer.id != id);
+            }
         } else if self.accepted() {
             tool_results(snapshot, value);
         }
@@ -540,6 +552,7 @@ impl ClaudeProtocol {
                 method: "claude.permission".to_owned(),
                 parameters: request.clone(),
                 from_attached_tools: false,
+                subagent: None,
                 wire_id: id.into(),
             });
             snapshot.status = NativeSessionStatus::Waiting;

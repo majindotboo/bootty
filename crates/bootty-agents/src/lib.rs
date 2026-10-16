@@ -12,6 +12,9 @@ mod native_claude;
 mod native_commands;
 mod native_completions;
 mod native_elicitation;
+pub use native_elicitation::{
+    Elicitation, ElicitationField, FieldKind, FieldOption, TextFormat, form_response,
+};
 mod native_history;
 mod native_history_claude;
 mod native_history_pi;

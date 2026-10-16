@@ -16,11 +16,16 @@ pub struct NativeWindow {
     pub app: Option<ComputerTarget>,
 }
 
-/// The frontmost application and the bounds of its focused window, when the OS reports one.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Focus {
-    pub process_id: i32,
-    pub window: Option<DisplayBounds>,
+/// How a platform delivers input, which decides what proves that input reaches only its window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputRoute {
+    /// Events go to the window's process addressed to the window, as on macOS. Pointer events
+    /// reach exactly that window, even behind other windows; keys reach the window its process
+    /// has focused, whether or not the process is in front.
+    Window,
+    /// Events go through the shared pointer and keyboard focus, as on Windows and X11, so the
+    /// window must be the focused window in front and each point uncovered.
+    Shared,
 }
 
 /// One input event in global desktop points.
@@ -135,7 +140,11 @@ pub trait Desktop: Send + Sync {
     fn status(&self) -> ComputerStatus;
     /// On-screen windows, front to back.
     fn windows(&self) -> Vec<NativeWindow>;
-    fn focus(&self) -> Option<Focus>;
+    fn route(&self) -> InputRoute;
+    /// The process whose windows receive the user's input, when the OS reports one.
+    fn frontmost(&self) -> Option<i32>;
+    /// The bounds of the window that receives keys sent to this process, when the OS reports one.
+    fn focus(&self, process_id: i32) -> Option<DisplayBounds>;
     /// True while the OS hides keystrokes from other processes, such as in a password field.
     fn secure_input(&self) -> bool;
     /// Capture one window scaled to `width` by `height` pixels.
@@ -154,7 +163,7 @@ pub trait Desktop: Send + Sync {
     /// # Errors
     /// Returns platform errors; delivery is never retried.
     fn post(&self, window: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError>;
-    /// Raise and focus the window. The caller confirms the resulting focus.
+    /// Make the window the one its process sends keys to. The caller confirms the result.
     ///
     /// # Errors
     /// Returns focus or platform errors.
@@ -162,7 +171,7 @@ pub trait Desktop: Send + Sync {
     /// A square icon for an application, `side` pixels wide, when the OS has one.
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image>;
 
-    // Deliberate limit: only macOS reads accessibility elements. Implement the three methods
+    // Deliberate limit: only macOS reads accessibility elements. Implement the four methods
     // below with UI Automation on Windows and AT-SPI on Linux when agents need elements there.
 
     /// The window's accessibility elements in screen order: at most `limit`, and whether any were
@@ -186,6 +195,20 @@ pub trait Desktop: Send + Sync {
         _window: &NativeWindow,
         _path: &[u16],
     ) -> Result<Option<ComputerElement>, ComputerError> {
+        Err(ComputerError::Unsupported)
+    }
+    /// The path of the innermost element under a desktop point that has its own press action, as
+    /// a click there would reach it. `None` when the point shows another window or no such element,
+    /// or the element is disabled.
+    ///
+    /// # Errors
+    /// Returns unsupported, availability or platform errors.
+    fn pressable_at(
+        &self,
+        _window: &NativeWindow,
+        _x: f64,
+        _y: f64,
+    ) -> Result<Option<Vec<u16>>, ComputerError> {
         Err(ComputerError::Unsupported)
     }
     /// Perform the element's press action. `false` means it has none, so the caller clicks it.

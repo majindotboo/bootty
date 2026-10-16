@@ -261,8 +261,17 @@ impl GpuiSettings {
             .cloned()
     }
 
+    /// Settings take focus in their search field, so typing searches at once. The theme page has
+    /// no search field and takes focus itself.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
-        self.focus.focus(window, cx);
+        match self
+            .search_input
+            .as_ref()
+            .filter(|_| self.category != SettingsCategory::Theme)
+        {
+            Some(input) => input.focus_handle(cx).focus(window, cx),
+            None => self.focus.focus(window, cx),
+        }
     }
 
     #[must_use]
