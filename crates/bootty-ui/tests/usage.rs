@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use bootty_ui::usage::{QuotaTone, UsageWindow, parse_usage};
+use bootty_ui::usage::{QuotaTone, UsageProvider, UsageService, UsageWindow, parse_usage};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -45,7 +45,7 @@ fn reports_first_line_of_provider_errors(#[case] json: &str, #[case] expected: &
 #[case(50.0, QuotaTone::Provider)]
 fn quota_warning_thresholds(#[case] used_percent: f64, #[case] expected: QuotaTone) {
     let meter = UsageWindow {
-        label: "5h",
+        label: "5h".into(),
         used_percent,
         duration_secs: 18_000.0,
         resets_at: None,
@@ -68,7 +68,7 @@ fn quota_pacing_names_the_estimated_direction(
     #[case] tone: QuotaTone,
 ) {
     let meter = UsageWindow {
-        label: "7d",
+        label: "7d".into(),
         used_percent,
         duration_secs: 604_800.0,
         resets_at: Some(302_400),
@@ -83,8 +83,41 @@ proptest! {
     #[test]
     fn provider_percentages_stay_within_meter_bounds(used in -1000_f64..1000.0) {
         let json = serde_json::json!({"primary": {"usedPercent": used}}).to_string();
-        let window = parse_usage(&json).windows[0];
+        let window = parse_usage(&json).windows[0].clone();
         prop_assert!((0.0..=100.0).contains(&window.used_percent));
         prop_assert!((0.0..=100.0).contains(&window.meter(0).remaining_percent));
     }
+}
+
+/// Limits a live conversation's provider reported stand in for `CodexBar`'s, which isn't asked
+/// while they are fresh.
+#[test]
+fn provider_reports_stand_in_for_codexbar() {
+    let mut usage = UsageService::default();
+    let now = std::time::Instant::now();
+    let window = |label: &str, used_percent| UsageWindow {
+        label: label.into(),
+        used_percent,
+        duration_secs: 18_000.0,
+        resets_at: Some(1_760_000_000),
+    };
+    usage.report(UsageProvider::Codex, vec![window("5h", 72.0)], now);
+    usage.report(
+        UsageProvider::Claude,
+        vec![window("5h", 10.0), window("7d Opus", 40.0)],
+        now,
+    );
+    assert!(!usage.refresh(now));
+    assert_eq!(
+        usage
+            .current()
+            .iter()
+            .map(|provider| provider
+                .windows
+                .iter()
+                .map(|window| (window.label.as_str(), window.used_percent))
+                .collect::<Vec<_>>())
+            .collect::<Vec<_>>(),
+        [vec![("5h", 72.0)], vec![("5h", 10.0), ("7d Opus", 40.0)]]
+    );
 }

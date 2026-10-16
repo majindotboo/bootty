@@ -3,7 +3,7 @@
 use super::NativeAgentSessionView;
 use bootty_agents::{NativeSessionStatus, NativeTodo, NativeTodoStatus};
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
 };
 use gpui_kit::{
@@ -33,6 +33,99 @@ impl NativeAgentSessionView {
                 .when(ready, |section| section.child(self.render_implement(cx)))
                 .into_any_element()
         })
+    }
+
+    /// The goal section of the composer drawer: what the conversation works toward, whether it
+    /// is, and what it has spent, with Pause or Resume and Remove.
+    pub(super) fn render_goal(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        use bootty_agents::NativeGoalStatus as Status;
+        let goal = self.record.snapshot.goal.as_ref()?;
+        let state = match goal.status {
+            Status::Active => "Working on it",
+            Status::Paused => "Paused",
+            Status::Blocked => "Blocked",
+            Status::UsageLimited => "Stopped by the usage limit",
+            Status::BudgetLimited => "Budget spent",
+            Status::Complete => "Done",
+        };
+        let spent = goal.token_budget.map_or_else(
+            || format!("{} tokens", super::compact_tokens(goal.tokens_used)),
+            |budget| {
+                format!(
+                    "{} of {} tokens",
+                    super::compact_tokens(goal.tokens_used),
+                    super::compact_tokens(budget)
+                )
+            },
+        );
+        let enabled = self.provider_enabled();
+        let toggle = match goal.status {
+            Status::Active => Some(("Pause", "paused")),
+            Status::Paused | Status::Blocked | Status::UsageLimited => Some(("Resume", "active")),
+            Status::BudgetLimited | Status::Complete => None,
+        };
+        Some(
+            div()
+                .id("native-goal")
+                .debug_selector(|| "native-goal".into())
+                .flex()
+                .items_center()
+                .gap_1()
+                .min_w_0()
+                .px_1()
+                .pb_1()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(div().w_6().flex().flex_shrink_0().justify_center().child(
+                    crate::gpui::sized_icon(
+                        "target",
+                        crate::gpui::IconSize::Small,
+                        cx.theme().muted_foreground,
+                    ),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(cx.theme().foreground)
+                        .child(goal.objective.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .debug_selector({
+                            let summary = format!("{state} · {spent}");
+                            move || format!("native-goal-state:{summary}")
+                        })
+                        .child(format!("{state} · {spent}")),
+                )
+                .children(toggle.map(|(label, status)| {
+                    Button::new("native-goal-toggle")
+                        .debug_selector(|| "native-goal-toggle".into())
+                        .ghost()
+                        .xsmall()
+                        .label(label)
+                        .disabled(!enabled)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.command("goal-status", vec![status.to_owned()], window, cx);
+                        }))
+                }))
+                .child(
+                    Button::new("native-goal-remove")
+                        .debug_selector(|| "native-goal-remove".into())
+                        .ghost()
+                        .xsmall()
+                        .icon(gpui_kit::component::IconName::Close)
+                        .accessibility_label("Remove goal")
+                        .tooltip("Remove goal")
+                        .disabled(!enabled)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.command("goal", vec![String::new()], window, cx);
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The latest proposed plan can be carried out while nothing has followed it.
@@ -152,6 +245,27 @@ impl NativeAgentSessionView {
                     )),
             )
             .child(div().flex_1().child("Plan ready"))
+            .child(
+                Button::new("native-implement-plan-new")
+                    .debug_selector(|| "native-implement-plan-new".into())
+                    .ghost()
+                    .xsmall()
+                    .label("In a new conversation")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(plan) = this
+                            .record
+                            .snapshot
+                            .transcript
+                            .iter()
+                            .rfind(|item| item.role == "plan")
+                        {
+                            cx.emit(super::OpenNativeSession::ImplementInNew {
+                                target: this.record.target(),
+                                plan: plan.text.clone(),
+                            });
+                        }
+                    })),
+            )
             .child(
                 Button::new("native-implement-plan")
                     .debug_selector(|| "native-implement-plan".into())

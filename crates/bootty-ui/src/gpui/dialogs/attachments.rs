@@ -25,7 +25,7 @@ fn read_prompt_attachment(
     if metadata.len() > bootty_agents::MAX_NATIVE_ATTACHMENT_FILE_BYTES {
         return Err("File exceeds 50 MB".to_owned());
     }
-    let preview = crate::gpui_agent_session::attachment_preview(&path);
+    let preview = crate::gpui_image_viewer::ImagePreview::from_file(&path);
     Ok(StagedPromptAttachment::File(NewSessionAttachment {
         path,
         size_bytes: metadata.len(),
@@ -375,28 +375,17 @@ impl DialogView {
                                         .to_string_lossy()
                                 ))
                                 .on_click({
-                                    let preview = preview.clone();
-                                    let name = attachment
-                                        .path
-                                        .file_name()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .into_owned();
-                                    move |_, window, cx| {
-                                        crate::gpui_prompt_attachments::open_image(
-                                            name.clone(),
-                                            preview.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    }
+                                    let id = attachment.path.to_string_lossy().into_owned();
+                                    cx.listener(move |this, _, window, cx| {
+                                        this.open_new_session_attachment(&id, window, cx);
+                                    })
                                 })
                                 .w_16()
                                 .h_16()
                                 .overflow_hidden()
                                 .rounded(cx.theme().radius)
                                 .child(
-                                    gpui_kit::img(preview)
+                                    gpui_kit::img(preview.thumbnail)
                                         .size_full()
                                         .object_fit(gpui_kit::ObjectFit::Contain),
                                 ),
@@ -423,19 +412,36 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(attachment) = self.spec.as_ref().and_then(|spec| {
-            spec.attachments
-                .iter()
-                .find(|attachment| attachment.path.to_string_lossy() == id)
-        }) && let Some(preview) = &attachment.preview
-        {
-            let name = attachment
-                .path
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy()
-                .into_owned();
-            crate::gpui_prompt_attachments::open_image(name, preview.clone(), window, cx);
+        let Some(spec) = &self.spec else { return };
+        let tokens = self.prompt_textarea.read(cx).tokens();
+        let mut index = None;
+        let images = spec
+            .attachments
+            .iter()
+            .filter(|attachment| {
+                tokens
+                    .iter()
+                    .any(|span| span.token().id().as_ref() == attachment.path.to_string_lossy())
+            })
+            .filter_map(|attachment| Some((attachment, attachment.preview.clone()?)))
+            .enumerate()
+            .map(|(position, (attachment, preview))| {
+                if attachment.path.to_string_lossy() == id {
+                    index = Some(position);
+                }
+                crate::gpui_image_viewer::ViewedImage {
+                    name: attachment
+                        .path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned(),
+                    preview,
+                }
+            })
+            .collect();
+        if let Some(index) = index {
+            crate::gpui_image_viewer::open(images, index, window, cx);
         }
     }
 

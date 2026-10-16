@@ -228,7 +228,8 @@ pub struct GpuiWorkspace {
     tools: Option<Entity<crate::gpui_dock::WorkspaceDock>>,
     document_close_prompt: bool,
     exit_pending: bool,
-    tools_focus_subscription: Option<Subscription>,
+    /// The dock's focus changes and the comments on its changes.
+    tools_subscriptions: Vec<Subscription>,
     browser_overlay_task: Option<gpui_kit::Task<()>>,
     integration_rows: Vec<ModuleIntegrationsSnapshot>,
     launch: WorkspaceLaunch,
@@ -398,7 +399,7 @@ impl GpuiWorkspace {
             tools: None,
             document_close_prompt: false,
             exit_pending: false,
-            tools_focus_subscription: None,
+            tools_subscriptions: Vec::new(),
             browser_overlay_task: None,
             state,
             integration_rows,
@@ -1205,14 +1206,23 @@ impl GpuiWorkspace {
         if reveal_changes {
             tools.update(cx, |tools, cx| tools.refresh(window, cx));
         }
-        self.tools_focus_subscription = Some(cx.subscribe_in(
-            &tools,
-            window,
-            |this, _, _: &crate::gpui_dock::DockFocusChanged, window, cx| {
-                this.sync_key_bindings(window, cx);
-                cx.notify();
-            },
-        ));
+        self.tools_subscriptions = vec![
+            cx.subscribe_in(
+                &tools,
+                window,
+                |this, _, _: &crate::gpui_dock::DockFocusChanged, window, cx| {
+                    this.sync_key_bindings(window, cx);
+                    cx.notify();
+                },
+            ),
+            cx.subscribe_in(
+                &tools,
+                window,
+                |this, _, comment: &crate::gpui_git_panel::DiffComment, window, cx| {
+                    this.add_diff_comment(comment, window, cx);
+                },
+            ),
+        ];
         self.tools = Some(tools);
         cx.notify();
     }
@@ -1700,6 +1710,17 @@ impl GpuiWorkspace {
                 } => self.open_git_changes(scope, target, directory, host, window, cx),
                 AppEffect::OpenFiles(request) => self.open_files(request, window, cx),
                 AppEffect::RevealPath(path) => cx.reveal_path(&path),
+                AppEffect::OpenWithSystem(path) => cx.open_with_system(&path),
+                AppEffect::ConversationFind(action) => {
+                    if let Some(view) = self.native_conversation_view(cx) {
+                        view.update(cx, |view, cx| view.find_action(&action, window, cx));
+                    }
+                }
+                AppEffect::ConversationCopyMode => {
+                    if let Some(view) = self.native_conversation_view(cx) {
+                        view.update(cx, |view, cx| view.enter_copy_mode(window, cx));
+                    }
+                }
                 AppEffect::OpenInEditor { editor, path } => Self::open_in_editor(editor, path, cx),
                 AppEffect::AddSelectionToConversation => {
                     self.add_selection_to_conversation(window, cx);

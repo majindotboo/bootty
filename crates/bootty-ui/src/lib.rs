@@ -35,6 +35,7 @@ mod gpui_dock_skin;
 mod gpui_document_panel;
 mod gpui_files_panel;
 mod gpui_git_panel;
+pub mod gpui_image_viewer;
 mod gpui_input;
 mod gpui_keymap_editor;
 mod gpui_model_picker;
@@ -103,5 +104,6 @@ mod gpui_sidebar_panel;
 
 pub use gpui_surface_chooser::{SurfaceCommand, SurfacePanel};
 
-pub use gpui_agent_session::NativeAgentSessionView;
+pub use gpui_agent_session::{NativeAgentSessionView, OpenNativeSession};
+pub use gpui_git_panel::DiffComment;
 pub use gpui_subagent_panel::SubagentPanel;

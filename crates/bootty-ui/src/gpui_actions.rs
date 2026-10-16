@@ -517,6 +517,13 @@ pub fn conversation_terminal_navigation(
                     | crate::app_actions::KeybindAction::App(
                         crate::app_actions::AppAction::FocusTerminal
                     )
+                    // Find and copy mode act on the conversation itself.
+                    | crate::app_actions::KeybindAction::CopyMode
+                    | crate::app_actions::KeybindAction::Find(
+                        crate::app_actions::TerminalFindAction::Prompt
+                            | crate::app_actions::TerminalFindAction::Next
+                            | crate::app_actions::TerminalFindAction::Previous
+                    )
             ) | crate::commands::CoreCommandExecutor::Pane(_, _)
                 | crate::commands::CoreCommandExecutor::Session(_, _)
         ))

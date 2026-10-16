@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fmt::Write as _,
     fs,
     io::{Cursor, Read as _},
@@ -188,44 +189,8 @@ impl NativeAttachmentStore {
         let extension = extension(&source_path);
         let id = format!("native-att-{}", crate::terminal_session_id()?);
         let (reference, stored_bytes, stored_extension) = if is_supported_image(&extension) {
-            let mut reader = ImageReader::new(Cursor::new(bytes))
-                .with_guessed_format()
-                .map_err(|_| "Unsupported image attachment")?;
-            let mut limits = image::Limits::default();
-            limits.max_image_width = Some(8192);
-            limits.max_image_height = Some(8192);
-            limits.max_alloc = Some(MAX_DECODE_BYTES_U64);
-            reader.limits(limits);
-            let image = reader
-                .decode()
-                .map_err(|_| "Unsupported or oversized image attachment")?;
-            if u64::from(image.width()).saturating_mul(u64::from(image.height())) > 16 * 1024 * 1024
-            {
-                return Err("Image attachment exceeds the pixel limit".to_owned());
-            }
-            let mut encoded = Cursor::new(Vec::new());
-            image
-                .write_to(&mut encoded, ImageFormat::Png)
-                .map_err(|_| "Image attachment could not be encoded")?;
-            let stored_bytes = encoded.into_inner();
-            if stored_bytes.is_empty() || stored_bytes.len() > MAX_NATIVE_ATTACHMENT_IMAGE_BYTES {
-                return Err("Image attachment exceeds 8 MiB".to_owned());
-            }
-            (
-                NativeAttachmentReference {
-                    id,
-                    kind: NativeAttachmentKind::Image,
-                    name: original_name,
-                    mime_type: "image/png".to_owned(),
-                    size_bytes: u64::try_from(stored_bytes.len())
-                        .map_err(|_| "Attachment size exceeds this host's limits")?,
-                    prompt_ranges: Vec::new(),
-                    pixel_width: Some(image.width()),
-                    pixel_height: Some(image.height()),
-                },
-                stored_bytes,
-                "png".to_owned(),
-            )
+            let (reference, bytes) = png_attachment(id, original_name, bytes)?;
+            (reference, bytes, "png".to_owned())
         } else {
             (
                 NativeAttachmentReference {
@@ -334,6 +299,49 @@ impl NativeAttachmentStore {
         Err("Native image preview exceeds 1 MiB".to_owned())
     }
 
+    /// Writes the tool images in `pending` that `shown` still lists beside this session's
+    /// attachments, once each, then removes the tool images no row shows anymore.
+    pub(super) fn save_tool_images(
+        &self,
+        session_id: &str,
+        pending: &[crate::native_tool_images::PendingToolImage],
+        shown: &BTreeSet<&str>,
+    ) -> Result<(), String> {
+        let directory = self.prepare_session(session_id)?;
+        let mut wrote = false;
+        for image in pending
+            .iter()
+            .filter(|image| shown.contains(image.id.as_str()))
+        {
+            let path = directory.join(format!("{}.png", image.id));
+            if fs::symlink_metadata(&path)
+                .is_ok_and(|metadata| usize::try_from(metadata.len()) == Ok(image.png.len()))
+            {
+                continue;
+            }
+            write_private(&path, &image.png)?;
+            wrote = true;
+        }
+        if !wrote {
+            return Ok(());
+        }
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| error.to_string())?
+            .flatten()
+        {
+            let name = entry.file_name();
+            if let Some(id) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".png"))
+                .filter(|id| id.starts_with(crate::native_tool_images::PREFIX))
+                && !shown.contains(id)
+            {
+                _ = fs::remove_file(entry.path());
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn remove_file(attachment: &StoredNativeAttachment) {
         let _ = fs::remove_file(&attachment.path);
     }
@@ -367,6 +375,96 @@ impl NativeAttachmentStore {
         }
         Ok(self.root.join(component))
     }
+}
+
+/// The image in `bytes`, in any supported format, re-encoded as a stored PNG named `name`, which
+/// drops any metadata it carried.
+pub fn png_attachment(
+    id: String,
+    name: String,
+    bytes: Vec<u8>,
+) -> Result<(NativeAttachmentReference, Vec<u8>), String> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|_| "Unsupported image attachment")?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(8192);
+    limits.max_image_height = Some(8192);
+    limits.max_alloc = Some(MAX_DECODE_BYTES_U64);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|_| "Unsupported or oversized image attachment")?;
+    if u64::from(image.width()).saturating_mul(u64::from(image.height())) > 16 * 1024 * 1024 {
+        return Err("Image attachment exceeds the pixel limit".to_owned());
+    }
+    let mut encoded = Cursor::new(Vec::new());
+    image
+        .write_to(&mut encoded, ImageFormat::Png)
+        .map_err(|_| "Image attachment could not be encoded")?;
+    png_reference(
+        id,
+        name,
+        image.width(),
+        image.height(),
+        encoded.into_inner(),
+    )
+}
+
+/// An image a tool returned as a stored PNG named `name`: a still PNG keeps its bytes, and others
+/// are re-encoded.
+pub fn tool_png_attachment(
+    id: String,
+    name: String,
+    bytes: Vec<u8>,
+) -> Result<(NativeAttachmentReference, Vec<u8>), String> {
+    match png_dimensions(&bytes) {
+        Some((width, height)) => png_reference(id, name, width, height, bytes),
+        None => png_attachment(id, name, bytes),
+    }
+}
+
+fn png_reference(
+    id: String,
+    name: String,
+    width: u32,
+    height: u32,
+    stored_bytes: Vec<u8>,
+) -> Result<(NativeAttachmentReference, Vec<u8>), String> {
+    if stored_bytes.is_empty() || stored_bytes.len() > MAX_NATIVE_ATTACHMENT_IMAGE_BYTES {
+        return Err("Image attachment exceeds 8 MiB".to_owned());
+    }
+    let reference = NativeAttachmentReference {
+        id,
+        kind: NativeAttachmentKind::Image,
+        name,
+        mime_type: "image/png".to_owned(),
+        size_bytes: u64::try_from(stored_bytes.len())
+            .map_err(|_| "Attachment size exceeds this host's limits")?,
+        prompt_ranges: Vec::new(),
+        pixel_width: Some(width),
+        pixel_height: Some(height),
+    };
+    reference.validate()?;
+    Ok((reference, stored_bytes))
+}
+
+/// The size of a still PNG within the pixel limits, read from its header.
+fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let reader = png::Decoder::new_with_limits(
+        Cursor::new(bytes),
+        png::Limits {
+            bytes: usize::try_from(MAX_DECODE_BYTES_U64).ok()?,
+        },
+    )
+    .read_info()
+    .ok()?;
+    let info = reader.info();
+    (info.animation_control.is_none()
+        && (1..=8192).contains(&info.width)
+        && (1..=8192).contains(&info.height)
+        && u64::from(info.width).saturating_mul(u64::from(info.height)) <= 16 * 1024 * 1024)
+        .then_some((info.width, info.height))
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), String> {

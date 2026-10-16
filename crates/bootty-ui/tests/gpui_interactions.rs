@@ -1096,7 +1096,7 @@ fn quota_rows_name_the_quota_above_its_meter_and_pace(cx: &mut TestAppContext) {
                 pace: palette().text,
                 track: palette().border,
                 meter: UsageWindow {
-                    label,
+                    label: label.to_owned(),
                     used_percent: 77.0,
                     duration_secs: 604_800.0,
                     resets_at: Some(352_000),

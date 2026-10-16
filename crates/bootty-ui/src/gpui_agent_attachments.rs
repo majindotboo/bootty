@@ -1,11 +1,13 @@
 //! Composer attachment ingress; the native service owns admitted bytes and identities.
 use super::*;
+use crate::gpui_image_viewer::{ImagePreview, ViewedImage};
+use gpui_kit::component::menu::ContextMenuExt as _;
 use std::path::PathBuf;
 
 #[derive(Clone)]
 pub(super) struct ComposerAttachment {
     pub reference: bootty_agents::NativeAttachmentReference,
-    pub preview: Option<Arc<gpui_kit::RenderImage>>,
+    pub preview: Option<ImagePreview>,
 }
 
 pub(super) struct PendingAttachmentImport {
@@ -267,24 +269,58 @@ impl NativeAgentSessionView {
         cx.notify();
     }
 
+    /// Opens the viewer on the composer's image `id`, stepping through the draft's images.
     pub(super) fn open_attachment(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(preview) = self.attachment_previews.get(id) else {
+        if !self.attachment_previews.contains_key(id) {
             return;
-        };
-        let name = self
+        }
+        let active = self.active_attachment_ids(cx);
+        let draft = self
             .attachments
             .iter()
             .map(|attachment| &attachment.reference)
-            .chain(
-                self.record
-                    .snapshot
-                    .transcript
-                    .iter()
-                    .flat_map(|item| &item.attachments),
-            )
-            .find(|reference| reference.id == id)
-            .map_or("Image", |reference| reference.name.as_str());
-        crate::gpui_prompt_attachments::open_image(name.to_owned(), preview.clone(), window, cx);
+            .filter(|reference| active.contains(&reference.id))
+            .collect::<Vec<_>>();
+        self.view_images(draft, id, window, cx);
+    }
+
+    /// Opens the viewer on the sent image `id`, stepping through every image the conversation
+    /// shows.
+    fn view_sent_image(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let shown = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .flat_map(|item| &item.attachments)
+            .collect::<Vec<_>>();
+        self.view_images(shown, id, window, cx);
+    }
+
+    /// Opens the viewer on `id` among the `references` that have a preview.
+    fn view_images(
+        &self,
+        references: Vec<&bootty_agents::NativeAttachmentReference>,
+        id: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let mut index = 0;
+        let images = references
+            .into_iter()
+            .filter_map(|reference| Some((reference, self.attachment_previews.get(&reference.id)?)))
+            .enumerate()
+            .map(|(position, (reference, preview))| {
+                if reference.id == id {
+                    index = position;
+                }
+                ViewedImage {
+                    name: reference.name.clone(),
+                    preview: preview.clone(),
+                }
+            })
+            .collect();
+        crate::gpui_image_viewer::open(images, index, window, cx);
     }
 
     /// Attaches `text` as a file named from `prefix`, such as a terminal selection.
@@ -366,6 +402,42 @@ impl NativeAgentSessionView {
         cx.notify();
     }
 
+    /// Writes a comment on changed lines into the draft: the file and lines it is about, those
+    /// lines, and the comment.
+    pub fn add_diff_comment(
+        &mut self,
+        comment: &crate::gpui_git_panel::DiffComment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let anchor = &comment.anchor;
+        let lines = if anchor.line > anchor.start_line {
+            format!("{}-{}", anchor.start_line, anchor.line)
+        } else {
+            anchor.start_line.to_string()
+        };
+        let path = if anchor.path.contains(char::is_whitespace) {
+            format!("@\"{}\"", anchor.path)
+        } else {
+            format!("@{}", anchor.path)
+        };
+        let side = if anchor.side == bootty_git::diff::DiffSide::Left {
+            " (as it was before the change)"
+        } else {
+            ""
+        };
+        let text = format!(
+            "{path}:{lines}{side}\n```\n{}\n```\n{}\n\n",
+            comment.quote,
+            comment.body.trim()
+        );
+        self.composer.update(cx, |input, cx| {
+            input.insert(text, window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
     pub(super) fn import_attachment(
         &mut self,
         path: PathBuf,
@@ -416,7 +488,7 @@ impl NativeAgentSessionView {
                 .background_executor()
                 .spawn(async move {
                     let result = receiver.recv();
-                    let preview = attachment_preview(&path);
+                    let preview = ImagePreview::from_file(&path);
                     drop(temporary);
                     (result, preview)
                 })
@@ -575,7 +647,7 @@ impl NativeAgentSessionView {
                                             attachment.reference.name
                                         ))
                                         .child(
-                                            gpui_kit::img(preview.clone())
+                                            gpui_kit::img(preview.thumbnail.clone())
                                                 .size_full()
                                                 .object_fit(gpui_kit::ObjectFit::Cover),
                                         )
@@ -746,17 +818,25 @@ impl NativeAgentSessionView {
                     };
                     if let Some(preview) = preview {
                         // Only the rows that show this image change height.
+                        let has_image = |index: &usize| {
+                            this.record
+                                .snapshot
+                                .transcript
+                                .get(*index)
+                                .is_some_and(|item| {
+                                    item.attachments.iter().any(|reference| reference.id == id)
+                                })
+                        };
                         for (ix, row) in this.timeline.iter().enumerate() {
-                            if let super::TranscriptRow::Message { index, .. } = row
-                                && this
-                                    .record
-                                    .snapshot
-                                    .transcript
-                                    .get(*index)
-                                    .is_some_and(|item| {
-                                        item.attachments.iter().any(|reference| reference.id == id)
-                                    })
-                            {
+                            let changed = match row {
+                                super::TranscriptRow::Message { index, .. } => has_image(index),
+                                super::TranscriptRow::Work { members, .. } => {
+                                    members.iter().any(has_image)
+                                }
+                                super::TranscriptRow::Failure { .. }
+                                | super::TranscriptRow::Runway => false,
+                            };
+                            if changed {
                                 this.list.remeasure_items(ix..ix.saturating_add(1));
                             }
                         }
@@ -772,6 +852,7 @@ impl NativeAgentSessionView {
     pub(super) fn render_sent_attachments(
         &self,
         item: &NativeTranscriptItem,
+        owner: &gpui_kit::WeakEntity<Self>,
         cx: &App,
     ) -> gpui_kit::Div {
         div()
@@ -787,40 +868,48 @@ impl NativeAgentSessionView {
                     row.child(div().flex().flex_shrink_0().flex_wrap().gap_2().children(
                         item.attachments.iter().filter_map(|reference| {
                             self.attachment_previews.get(&reference.id).map(|preview| {
-                                Button::new(gpui_kit::SharedString::from(format!(
-                                    "attachment-preview:{}",
-                                    reference.id
-                                )))
-                                .ghost()
-                                .p_0()
-                                .accessibility_label(format!("View {}", reference.name))
-                                .on_click({
-                                    let name = reference.name.clone();
-                                    let preview = preview.clone();
-                                    move |_, window, cx| {
-                                        crate::gpui_prompt_attachments::open_image(
-                                            name.clone(),
-                                            preview.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    }
-                                })
-                                .debug_selector({
-                                    let id = reference.id.clone();
-                                    move || format!("attachment-preview:{id}")
-                                })
-                                .w(gpui_kit::rems(7.0))
-                                .h_20()
-                                .rounded_md()
-                                .overflow_hidden()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .child(
-                                    gpui_kit::img(preview.clone())
-                                        .size_full()
-                                        .object_fit(gpui_kit::ObjectFit::Cover),
-                                )
+                                let (menu_owner, menu_id) = (owner.clone(), reference.id.clone());
+                                div()
+                                    .id(gpui_kit::SharedString::from(format!(
+                                        "attachment-menu:{}",
+                                        reference.id
+                                    )))
+                                    .context_menu(move |menu, _, _| {
+                                        Self::attachment_menu(&menu_owner, &menu_id, menu)
+                                    })
+                                    .child(
+                                        Button::new(gpui_kit::SharedString::from(format!(
+                                            "attachment-preview:{}",
+                                            reference.id
+                                        )))
+                                        .ghost()
+                                        .p_0()
+                                        .accessibility_label(format!("View {}", reference.name))
+                                        .on_click({
+                                            let owner = owner.clone();
+                                            let id = reference.id.clone();
+                                            move |_, window, cx| {
+                                                _ = owner.update(cx, |this, cx| {
+                                                    this.view_sent_image(&id, window, cx);
+                                                });
+                                            }
+                                        })
+                                        .debug_selector({
+                                            let id = reference.id.clone();
+                                            move || format!("attachment-preview:{id}")
+                                        })
+                                        .w(gpui_kit::rems(7.0))
+                                        .h_20()
+                                        .rounded_md()
+                                        .overflow_hidden()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .child(
+                                            gpui_kit::img(preview.thumbnail.clone())
+                                                .size_full()
+                                                .object_fit(gpui_kit::ObjectFit::Cover),
+                                        ),
+                                    )
                             })
                         }),
                     ))
@@ -832,34 +921,83 @@ impl NativeAgentSessionView {
                     item.attachments
                         .iter()
                         .filter(|reference| !self.attachment_previews.contains_key(&reference.id))
-                        .map(|reference| {
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_1()
-                                .px_2()
-                                .py_1()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .text_xs()
-                                .child(crate::gpui::sized_icon(
-                                    crate::gpui_prompt_attachments::icon(&reference.name),
-                                    crate::gpui::IconSize::Small,
-                                    cx.theme().muted_foreground,
-                                ))
-                                .child(reference.name.clone())
-                                .child(div().text_color(cx.theme().muted_foreground).child(
-                                    crate::gpui_prompt_attachments::size(reference.size_bytes),
-                                ))
-                        }),
+                        .map(|reference| Self::sent_file_chip(reference, owner, cx)),
                 ),
             )
     }
 }
 
+impl NativeAgentSessionView {
+    /// A sent file without a preview: its name and size. A click opens the stored copy in the app
+    /// this computer uses; its menu also shows it in the file manager.
+    fn sent_file_chip(
+        reference: &bootty_agents::NativeAttachmentReference,
+        owner: &gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> impl IntoElement {
+        let (menu_owner, menu_id) = (owner.clone(), reference.id.clone());
+        let (open_owner, open_id) = (owner.clone(), reference.id.clone());
+        div()
+            .id(gpui_kit::SharedString::from(format!(
+                "sent-attachment:{}",
+                reference.id
+            )))
+            .debug_selector({
+                let id = reference.id.clone();
+                move || format!("sent-attachment:{id}")
+            })
+            // A click opens the stored copy in the app this computer uses.
+            .on_click(move |_, window, cx| {
+                _ = open_owner.update(cx, |this, cx| {
+                    this.submit_command("attachment-open", vec![open_id.clone()], None, window, cx);
+                });
+            })
+            .cursor_pointer()
+            .hover(|chip| chip.bg(cx.theme().muted.opacity(0.4)))
+            .context_menu(move |menu, _, _| Self::attachment_menu(&menu_owner, &menu_id, menu))
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_2()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(cx.theme().border)
+            .text_xs()
+            .child(crate::gpui::sized_icon(
+                crate::gpui_prompt_attachments::icon(&reference.name),
+                crate::gpui::IconSize::Small,
+                cx.theme().muted_foreground,
+            ))
+            .child(reference.name.clone())
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(crate::gpui_prompt_attachments::size(reference.size_bytes)),
+            )
+    }
+
+    /// Open and show in the file manager, for a sent attachment's stored copy.
+    fn attachment_menu(
+        owner: &gpui_kit::WeakEntity<Self>,
+        id: &str,
+        menu: gpui_kit::component::menu::PopupMenu,
+    ) -> gpui_kit::component::menu::PopupMenu {
+        let item = |label: &'static str, operation: &'static str| {
+            let (owner, id) = (owner.clone(), id.to_owned());
+            gpui_kit::component::menu::PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    this.submit_command(operation, vec![id.clone()], None, window, cx);
+                });
+            })
+        };
+        menu.item(item("Open", "attachment-open"))
+            .item(item(crate::commands::reveal_label(), "attachment-reveal"))
+    }
+}
+
 /// The preview image an attachment-preview reply carries, within its byte bound.
-fn preview_from_reply(value: &serde_json::Value) -> Option<Arc<gpui_kit::RenderImage>> {
+fn preview_from_reply(value: &serde_json::Value) -> Option<ImagePreview> {
     use base64::Engine as _;
     let encoded = value.get("png")?.as_str()?;
     let limit = bootty_agents::MAX_NATIVE_ATTACHMENT_PREVIEW_BYTES;
@@ -872,26 +1010,7 @@ fn preview_from_reply(value: &serde_json::Value) -> Option<Arc<gpui_kit::RenderI
     if bytes.len() > limit {
         return None;
     }
-    decode_image_preview(&bytes, false)
-}
-
-pub fn attachment_preview(path: &std::path::Path) -> Option<Arc<gpui_kit::RenderImage>> {
-    if std::fs::metadata(path).ok()?.len() > 50 * 1024 * 1024 {
-        return None;
-    }
-    let mut reader = ImageReader::open(path).ok()?.with_guessed_format().ok()?;
-    let mut limits = image::Limits::default();
-    limits.max_image_width = Some(8192);
-    limits.max_image_height = Some(8192);
-    limits.max_alloc = Some(64 * 1024 * 1024);
-    reader.limits(limits);
-    let mut pixels = reader.decode().ok()?.thumbnail(1600, 1600).into_rgba8();
-    for pixel in pixels.pixels_mut() {
-        pixel.0.swap(0, 2);
-    }
-    Some(Arc::new(gpui_kit::RenderImage::new([image::Frame::new(
-        pixels,
-    )])))
+    ImagePreview::new(bytes.into())
 }
 
 fn too_many_images() -> String {

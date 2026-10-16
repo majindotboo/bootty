@@ -152,10 +152,16 @@ impl ContextPanels {
                     this.layout_changed(cx);
                 }
             });
+        // A comment on the session's changes goes on to its conversation.
+        let comment_subscription = cx.subscribe(
+            &panels.diff,
+            |_, _, comment: &crate::gpui_git_panel::DiffComment, cx| cx.emit(comment.clone()),
+        );
         panels.subscriptions = vec![
             diff_subscription,
             files_subscription,
             files_layout_subscription,
+            comment_subscription,
         ];
         panels
     }
@@ -213,6 +219,7 @@ pub struct WorkspaceDock {
 }
 
 impl EventEmitter<DockFocusChanged> for WorkspaceDock {}
+impl EventEmitter<crate::gpui_git_panel::DiffComment> for WorkspaceDock {}
 impl Focusable for WorkspaceDock {
     fn focus_handle(&self, _: &App) -> FocusHandle {
         self.focus.clone()

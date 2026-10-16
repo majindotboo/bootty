@@ -336,6 +336,24 @@ impl AppState {
         if operation == "regenerate-title" {
             return self.dispatch_regenerate_title(service, &invocation, execution);
         }
+        if matches!(operation, "attachment-open" | "attachment-reveal") {
+            // The stored copy is on this computer, even for a conversation on a remote host.
+            let id = invocation.arguments.get(2).map_or("", String::as_str);
+            return CommandDispatch::Complete(match service.attachment_file(target, id) {
+                Ok(path) => {
+                    effects.push(if operation == "attachment-open" {
+                        AppEffect::OpenWithSystem(path)
+                    } else {
+                        AppEffect::RevealPath(path)
+                    });
+                    CommandOutcome::success()
+                }
+                Err(message) => CommandOutcome::Failed {
+                    code: "attachment_failed".to_owned(),
+                    message,
+                },
+            });
+        }
         if operation == "profiles" {
             return CommandDispatch::Complete(self.native_profile_names(&service, target));
         }
@@ -1233,7 +1251,15 @@ impl AppState {
             .agents
             .provider(&provider.to_string())
             .is_none_or(|preferences| !preferences.enabled)
-            && !matches!(operation, "interrupt" | "stop")
+            // Stopping, and reading the stored copies of what was sent, need no provider.
+            && !matches!(
+                operation,
+                "interrupt"
+                    | "stop"
+                    | "attachment-preview"
+                    | "attachment-open"
+                    | "attachment-reveal"
+            )
         {
             return Err(CommandOutcome::Denied {
                 message: format!("{provider} is disabled in provider settings"),
@@ -2985,6 +3011,12 @@ fn invoke(
             },
         ),
         "goal" => service.set_goal(target, arg(2)).map(|()| Value::Null),
+        "goal-status" => match arg(2) {
+            "active" | "paused" => service
+                .set_goal_active(target, arg(2) == "active")
+                .map(|()| Value::Null),
+            _ => Err("A goal is active or paused".to_owned()),
+        },
         "completions" => service
             .completions(target)
             .and_then(|catalog| serde_json::to_value(catalog).map_err(|e| e.to_string())),

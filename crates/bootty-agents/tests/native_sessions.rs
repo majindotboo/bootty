@@ -68,6 +68,18 @@ for line in sys.stdin:
   continue
  if method == 'initialized': continue
  if method == 'initialize': reply(ident,{})
+ elif method == 'review/start':
+  # Observed from codex app-server: the reviewer's turn enters and exits review mode, then
+  # its review arrives as the turn's reply.
+  turn+=1
+  with open('review.json','w') as output: json.dump(params,output)
+  reply(ident,{'turn':{'id':'turn-'+str(turn),'status':'inProgress','items':[]},'reviewThreadId':thread})
+  started()
+  notice('item/started',item={'type':'enteredReviewMode','id':'turn-'+str(turn),'review':'current changes'})
+  for phase in ['item/started','item/completed']:
+   notice(phase,item={'type':'exitedReviewMode','id':'exit-'+str(turn),'review':'Looks solid.'})
+  notice('item/completed',item={'type':'agentMessage','id':'review-reply-'+str(turn),'text':'Looks solid.'})
+  completed()
  elif method == 'thread/unarchive':
   with open('unarchive-request.json','w') as output: json.dump(params,output)
   if os.path.exists('unarchive-fail'):
@@ -3651,4 +3663,174 @@ fn conversations_are_found_by_what_was_said() {
     let mut stale = scrolling.target();
     stale.generation = stale.generation.saturating_add(1);
     assert!(service.conversation_context(&[stale]).is_err());
+}
+
+/// Codex reports the thread's running totals; the turn's reply keeps only what that turn used.
+#[rstest]
+fn codex_turn_usage_is_the_turns_share_of_the_thread_totals() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    let (thread, turn) = (session.snapshot().session_id, session.snapshot().turn_id);
+    let breakdown = |input: u64, cached: u64, output: u64, reasoning: u64| {
+        json!({"totalTokens": input.saturating_add(output), "inputTokens": input, "cachedInputTokens": cached,
+            "outputTokens": output, "reasoningOutputTokens": reasoning})
+    };
+    let usage = |total: Value, last: Value| {
+        json!({"method": "thread/tokenUsage/updated", "params": {"threadId": thread,
+            "turnId": turn, "tokenUsage": {"total": total, "last": last}}})
+    };
+    fs::write(
+        root.path().join("events.json"),
+        json!([
+            {"method": "item/completed", "params": {"threadId": thread, "turnId": turn,
+                "item": {"id": "reply-1", "type": "agentMessage", "text": "Done."}}},
+            usage(breakdown(1500, 500, 150, 30), breakdown(500, 300, 50, 20)),
+            usage(breakdown(2300, 1100, 220, 35), breakdown(800, 600, 70, 5)),
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    session
+        .rpc("__finish", json!({"status": "completed"}))
+        .unwrap();
+    let reply = session
+        .snapshot()
+        .transcript
+        .into_iter()
+        .find(|item| item.id == "reply-1")
+        .unwrap();
+    assert_eq!(
+        reply.usage,
+        Some(bootty_agents::NativeTurnUsage {
+            input: 1300,
+            output: 120,
+            cache_read: 900,
+            cache_write: 0,
+            reasoning: 25,
+            cost_micros: None,
+        })
+    );
+    session.stop();
+}
+
+/// Codex changes a thread's goal on its own, outside any turn; the conversation follows it.
+#[rstest]
+fn codex_goal_notifications_follow_the_threads_goal() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let thread = session.snapshot().session_id;
+    let notify = |events: Value| {
+        fs::write(root.path().join("events.json"), events.to_string()).unwrap();
+        barrier(&session).unwrap();
+        session.snapshot().goal
+    };
+    let updated = json!([{"method": "thread/goal/updated", "params": {"threadId": thread,
+        "turnId": null, "goal": {"threadId": thread, "objective": "Ship the release",
+            "status": "budgetLimited", "tokenBudget": 1000, "tokensUsed": 1000,
+            "timeUsedSeconds": 30}}},
+        {"method": "thread/goal/cleared", "params": {"threadId": "another-thread"}}]);
+    assert_eq!(
+        notify(updated),
+        Some(bootty_agents::NativeGoal {
+            objective: "Ship the release".into(),
+            status: bootty_agents::NativeGoalStatus::BudgetLimited,
+            token_budget: Some(1000),
+            tokens_used: 1000,
+            seconds_used: 30,
+        })
+    );
+    assert_eq!(
+        notify(json!([{"method": "thread/goal/cleared", "params": {"threadId": thread}}])),
+        None
+    );
+    session.stop();
+}
+
+/// Codex's account limits arrive outside any thread; only the Codex limits count, and a reached
+/// one says when work can go on.
+#[rstest]
+fn codex_rate_limits_say_when_a_reached_limit_resets() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let report = |limits: Value| json!({"method": "account/rateLimits/updated", "params": {"rateLimits": limits}});
+    fs::write(
+        root.path().join("events.json"),
+        json!([
+            report(json!({"limitId": "codex", "rateLimitReachedType": "rate_limit_reached",
+                "primary": {"usedPercent": 72, "windowDurationMins": 300, "resetsAt": 1_760_000_000},
+                "secondary": {"usedPercent": 100, "windowDurationMins": 10_080,
+                    "resetsAt": 1_760_500_000}})),
+            report(json!({"limitId": "codex_other_model",
+                "primary": {"usedPercent": 1, "windowDurationMins": 300}})),
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    barrier(&session).unwrap();
+    let limits = session.snapshot().rate_limits.unwrap();
+    assert_eq!(
+        limits
+            .windows
+            .iter()
+            .map(|window| (window.label.as_str(), window.used_percent))
+            .collect::<Vec<_>>(),
+        [("5h", 72), ("7d", 100)]
+    );
+    assert_eq!(limits.reached_until(), Some(1_760_500_000));
+    session.stop();
+}
+
+/// `/review` runs Codex's reviewer: on the uncommitted changes, or as its words ask. It shows as
+/// one review row, and the review arrives as its reply.
+#[rstest]
+#[case::uncommitted("/review", json!({"type": "uncommittedChanges"}))]
+#[case::custom("/review the error handling", json!({"type": "custom", "instructions": "the error handling"}))]
+fn codex_review_runs_the_reviewer(#[case] prompt: &str, #[case] target: Value) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt(prompt).unwrap();
+    barrier(&session).unwrap();
+    let request: Value =
+        serde_json::from_slice(&fs::read(root.path().join("review.json")).unwrap()).unwrap();
+    assert_eq!(
+        (&request["delivery"], &request["target"]),
+        (&json!("inline"), &target)
+    );
+    let snapshot = session.snapshot();
+    assert_eq!(snapshot.status, NativeSessionStatus::Idle);
+    let reviews = snapshot
+        .transcript
+        .iter()
+        .filter_map(|item| item.tool.as_ref())
+        .filter(|tool| tool.name == "review")
+        .map(|tool| tool.status)
+        .collect::<Vec<_>>();
+    assert_eq!(reviews, [NativeToolStatus::Completed]);
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .filter(|item| item.role == "assistant")
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        ["Looks solid."]
+    );
+    session.stop();
+}
+
+/// A command only Codex's terminal app runs is refused rather than sent to the model as words.
+#[rstest]
+fn codex_terminal_commands_are_refused() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let error = session.send_prompt("/init the project").unwrap_err();
+    assert!(
+        error.contains("/init runs only in Codex's terminal app"),
+        "{error}"
+    );
+    assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
+    assert!(!root.path().join("prompt.json").exists());
+    session.stop();
 }

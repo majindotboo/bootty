@@ -38,7 +38,6 @@ mod completion;
 
 #[path = "gpui_agent_attachments.rs"]
 mod attachments;
-pub use attachments::attachment_preview;
 use attachments::{ComposerAttachment, PendingAttachmentImport};
 #[path = "gpui_agent_models.rs"]
 mod models;
@@ -52,6 +51,10 @@ mod citations;
 pub use citations::init_reaction_keys;
 use citations::{ResponseCitation, ResponseSelection};
 pub use requests::init_request_keys;
+#[path = "gpui_agent_copy_mode.rs"]
+mod copy_mode;
+#[path = "gpui_agent_find.rs"]
+mod find;
 #[path = "gpui_agent_timeline.rs"]
 mod timeline;
 use timeline::TranscriptRow;
@@ -107,7 +110,8 @@ fn annotation_preview_key(
     })
 }
 
-fn decode_image_preview(bytes: &[u8], annotation: bool) -> Option<Arc<gpui_kit::RenderImage>> {
+/// A browser note's screenshot, small enough for its chip.
+fn annotation_thumbnail(bytes: &[u8]) -> Option<Arc<gpui_kit::RenderImage>> {
     let mut reader = ImageReader::with_format(Cursor::new(bytes), ImageFormat::Png);
     let mut limits = image::Limits::default();
     limits.max_image_width = Some(1600);
@@ -115,12 +119,7 @@ fn decode_image_preview(bytes: &[u8], annotation: bool) -> Option<Arc<gpui_kit::
     limits.max_alloc = Some(32 * 1024 * 1024);
     reader.limits(limits);
     let image = reader.decode().ok()?;
-    let mut pixels = if annotation {
-        image.thumbnail(128, 80)
-    } else {
-        image
-    }
-    .into_rgba8();
+    let mut pixels = image.thumbnail(128, 80).into_rgba8();
     for pixel in pixels.pixels_mut() {
         pixel.0.swap(0, 2);
     }
@@ -133,6 +132,12 @@ fn decode_image_preview(bytes: &[u8], annotation: bool) -> Option<Arc<gpui_kit::
 pub enum OpenNativeSession {
     Speech {
         mode: crate::gpui_speech::SpeechMode,
+    },
+    /// Carry out `plan` in a new conversation beside this one, with the same provider and
+    /// settings.
+    ImplementInNew {
+        target: CommandTarget,
+        plan: String,
     },
     Changes {
         target: crate::gpui::chrome::SessionTarget,
@@ -249,7 +254,7 @@ pub struct NativeAgentSessionView {
     attachments: Vec<ComposerAttachment>,
     attachment_imports: BTreeMap<u64, PendingAttachmentImport>,
     next_attachment_import: u64,
-    attachment_previews: BTreeMap<String, Arc<gpui_kit::RenderImage>>,
+    attachment_previews: BTreeMap<String, crate::gpui_image_viewer::ImagePreview>,
     attachment_preview_attempts: BTreeSet<String>,
     models: Option<Vec<bootty_agents::NativeModelOption>>,
     provider_permissions: Option<bootty_agents::NativePermissionMode>,
@@ -269,6 +274,11 @@ pub struct NativeAgentSessionView {
     expanded_messages: BTreeSet<String>,
     copied_message: Option<String>,
     copy_feedback: Option<gpui_kit::Task<()>>,
+    find: Option<find::TranscriptFind>,
+    anchor: Option<timeline::PromptAnchor>,
+    copy_mode: Option<copy_mode::CopyMode>,
+    /// Holds the keys while copy mode is on.
+    copy_focus: FocusHandle,
     citations: Vec<ResponseCitation>,
     selected_response: Option<ResponseSelection>,
     /// The link right-clicked in a message, and where.
@@ -301,6 +311,8 @@ pub struct NativeAgentSessionView {
     error: Option<String>,
     command_error: Option<(String, String)>,
     dismissed_error: Option<String>,
+    /// A failed turn waiting to send again once the usage limit that stopped it resets.
+    scheduled_retry: Option<gpui_kit::Task<()>>,
     subscriptions: Vec<Subscription>,
 }
 
@@ -354,7 +366,8 @@ impl NativeAgentSessionView {
                 }
                 cx.notify();
             });
-        let requests = cx.new(|cx| requests::NativeRequestView::new(record.target(), cx));
+        let local = record.config.remote.is_none();
+        let requests = cx.new(|cx| requests::NativeRequestView::new(record.target(), local, cx));
         let request_subscription = cx.subscribe_in(
             &requests,
             window,
@@ -366,6 +379,12 @@ impl NativeAgentSessionView {
                     window,
                     cx,
                 );
+                if let Some(plan) = &response.implement_elsewhere {
+                    cx.emit(OpenNativeSession::ImplementInNew {
+                        target: response.target.clone(),
+                        plan: plan.clone(),
+                    });
+                }
                 this.sync_requests(window, cx);
             },
         );
@@ -447,6 +466,10 @@ impl NativeAgentSessionView {
             message_focus: BTreeMap::new(),
             expanded_messages: BTreeSet::new(),
             copied_message: None,
+            find: None,
+            anchor: None,
+            copy_mode: None,
+            copy_focus: cx.focus_handle(),
             copy_feedback: None,
             citations: Vec::new(),
             selected_response: None,
@@ -485,8 +508,15 @@ impl NativeAgentSessionView {
             error: None,
             command_error: None,
             dismissed_error: None,
+            scheduled_retry: None,
             subscriptions: vec![subscription, citation_subscription, request_subscription],
         };
+        // Copy mode ends where focus leaves the transcript, without taking it back.
+        let copy_focus = this.copy_focus.clone();
+        this.subscriptions
+            .push(cx.on_focus_out(&copy_focus, window, |this, _, _, cx| {
+                this.leave_copy_mode(cx);
+            }));
         this.restore_initial_message(window, cx);
         this.restore_saved_draft(window, cx);
         // A Codex conversation's speech runs on its own account, and it can hold a voice call;
@@ -543,6 +573,7 @@ impl NativeAgentSessionView {
             let owner = owner.clone();
             window.defer(cx, move |window, cx| {
                 _ = owner.update(cx, |this, cx| {
+                    this.release_prompt_anchor();
                     if near_start
                         && matches!(
                             this.record.snapshot.status,
@@ -664,7 +695,7 @@ impl NativeAgentSessionView {
                     let bytes = store
                         .load_image(&annotation, &conversation)
                         .map_err(|_| ())?;
-                    decode_image_preview(&bytes, true).ok_or(())
+                    annotation_thumbnail(&bytes).ok_or(())
                 })
                 .await;
             _ = owner.update(cx, |this, cx| {
@@ -775,7 +806,7 @@ impl NativeAgentSessionView {
         }
     }
 
-    pub(crate) fn update_record(
+    pub fn update_record(
         &mut self,
         mut record: NativeSessionRecord,
         window: &mut Window,
@@ -914,6 +945,7 @@ impl NativeAgentSessionView {
         }
         self.tool_disclosures
             .retain(|id, _| current.contains(id.as_str()));
+        let mut added = Vec::new();
         for item in &self.record.snapshot.transcript {
             if let Some(state) = self.transcript.get(&item.id) {
                 if previous.get(item.id.as_str()).is_none_or(|old| {
@@ -933,23 +965,7 @@ impl NativeAgentSessionView {
                     state.update(cx, |state, cx| state.set_text(&markdown, cx));
                 }
             } else {
-                let (markdown, marks) = streamed_markdown(item, self.presentation.streaming);
-                self.link_marks.insert(item.id.clone(), marks);
-                let state = cx.new(|cx| TextViewState::markdown(&markdown, cx));
-                let focus = cx.focus_handle();
-                let mut subscriptions = vec![
-                    cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
-                    cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
-                ];
-                if item.role == "assistant" {
-                    let subscription =
-                        Self::observe_response_selection(item.id.clone(), &state, window, cx);
-                    subscriptions.push(subscription);
-                }
-                self.message_focus.insert(item.id.clone(), focus);
-                self.transcript_subscriptions
-                    .insert(item.id.clone(), subscriptions);
-                self.transcript.insert(item.id.clone(), state);
+                added.push(item.clone());
             }
             if item.complete && is_tool_output(&item.role) {
                 self.tool_disclosures
@@ -959,6 +975,10 @@ impl NativeAgentSessionView {
         }
         self.work_disclosures
             .retain(|id, _| current.contains(id.as_str()));
+        for item in &added {
+            self.add_message_state(item, window, cx);
+        }
+        self.adopt_sent_prompt(&previous.keys().copied().collect());
         self.refresh_timeline();
         for (ix, row) in self.timeline.iter().enumerate() {
             if matches!(row, TranscriptRow::Message { id, .. } if changed.contains(id)) {
@@ -966,6 +986,37 @@ impl NativeAgentSessionView {
             }
         }
         self.sync_tool_diffs(&previous, window, cx);
+    }
+
+    /// The text view a new message renders in, with what watches it.
+    fn add_message_state(
+        &mut self,
+        item: &NativeTranscriptItem,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (markdown, marks) = streamed_markdown(item, self.presentation.streaming);
+        self.link_marks.insert(item.id.clone(), marks);
+        let state = cx.new(|cx| TextViewState::markdown(&markdown, cx));
+        let focus = cx.focus_handle();
+        let mut subscriptions = vec![
+            cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
+            cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
+            // An open find bar searches a message again once its new text renders.
+            cx.observe(&state, {
+                let id = item.id.clone();
+                move |this, _, cx| this.find_observed(&id, cx)
+            }),
+        ];
+        if item.role == "assistant" {
+            let subscription =
+                Self::observe_response_selection(item.id.clone(), &state, window, cx);
+            subscriptions.push(subscription);
+        }
+        self.message_focus.insert(item.id.clone(), focus);
+        self.transcript_subscriptions
+            .insert(item.id.clone(), subscriptions);
+        self.transcript.insert(item.id.clone(), state);
     }
 
     fn retain_subagent_details(&mut self) {
@@ -1136,6 +1187,14 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
+        // A prompt sent now goes to the top of the transcript once it shows; a queued one waits.
+        if matches!(operation, "prompt" | "interrupt-send") {
+            self.anchor = Some(timeline::PromptAnchor {
+                prompt: None,
+                held: true,
+                runway: gpui_kit::px(0.),
+            });
+        }
         let submitted_draft =
             matches!(operation, "prompt" | "queue" | "interrupt-send").then(|| SubmittedPrompt {
                 text: self.composer.read(cx).value().to_string(),
@@ -1155,7 +1214,13 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.provider_enabled() && operation != "interrupt" {
+        // Stopping and the stored copies of sent files don't need the provider.
+        if !self.provider_enabled()
+            && !matches!(
+                operation,
+                "interrupt" | "attachment-open" | "attachment-reveal"
+            )
+        {
             return;
         }
         let pending = if matches!(
@@ -1232,9 +1297,7 @@ impl NativeAgentSessionView {
                     Ok(_) | Err(_) if operation == "subagent-read" => {
                         this.subagent_read_error(&pending);
                     }
-                    Ok(outcome) => {
-                        this.command_error = Some(command_failure(&operation, &outcome));
-                    }
+                    Ok(outcome) => this.command_failed(&operation, &outcome),
                     Err(_) => {
                         this.error = Some(
                             "Could not send the request. Reopen this conversation and retry."
@@ -1248,6 +1311,24 @@ impl NativeAgentSessionView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Asks the provider to compact the conversation's context, as `/compact` does, leaving the
+    /// draft alone.
+    fn compact_context(&mut self, window: &Window, cx: &mut Context<Self>) {
+        self.submit_command("prompt", vec!["/compact".to_owned()], None, window, cx);
+    }
+
+    /// Reports a command the host refused; a prompt that wasn't sent holds no place.
+    fn command_failed(&mut self, operation: &str, outcome: &CommandOutcome) {
+        if self
+            .anchor
+            .as_ref()
+            .is_some_and(|anchor| anchor.prompt.is_none())
+        {
+            self.anchor = None;
+        }
+        self.command_error = Some(command_failure(operation, outcome));
     }
 
     fn accept_command_result(
@@ -1687,6 +1768,9 @@ impl NativeAgentSessionView {
             .get(&item.id)
             .copied()
             .unwrap_or(false);
+        // Images the tool returned, such as a screenshot, show whether or not it is open.
+        let images = (!item.attachments.is_empty())
+            .then(|| self.render_sent_attachments(item, &owner, cx).pt_1());
         let output = div()
             .w_full()
             .max_w(gpui_kit::rems(48.0))
@@ -1705,6 +1789,7 @@ impl NativeAgentSessionView {
                     .child(self.render_tool_disclosure(item, open, owner, cx))
                     .content(self.render_tool_details(item, cx)),
             )
+            .children(images)
             .when(!open, |output| {
                 let Some(ToolDiffs::Ready(files)) = self.tool_diffs.get(&item.id) else {
                     return output;
@@ -2016,7 +2101,22 @@ impl NativeAgentSessionView {
                         files
                             .into_iter()
                             .map(|(path, file)| {
-                                tool_diff(&path, file, &this.record.config.cwd, window, cx)
+                                let diff =
+                                    tool_diff(&path, file, &this.record.config.cwd, window, cx);
+                                // A comment on the change goes into this conversation's draft.
+                                cx.subscribe_in(
+                                    &diff.view,
+                                    window,
+                                    |this,
+                                     _,
+                                     comment: &crate::gpui_git_panel::DiffComment,
+                                     window,
+                                     cx| {
+                                        this.add_diff_comment(comment, window, cx);
+                                    },
+                                )
+                                .detach();
+                                diff
                             })
                             .collect(),
                     ),
@@ -2032,7 +2132,7 @@ impl NativeAgentSessionView {
                                 .get(*index)
                                 .is_some_and(|item| item.id == id)
                         }),
-                        TranscriptRow::Failure { .. } => false,
+                        TranscriptRow::Failure { .. } | TranscriptRow::Runway => false,
                     };
                     if contains {
                         this.list.remeasure_items(index..index.saturating_add(1));
@@ -2464,8 +2564,7 @@ impl NativeAgentSessionView {
         cx: &App,
     ) -> gpui_kit::Div {
         let user = item.role == "user";
-        let collapsible =
-            user && (item.text.encode_utf16().count() > 600 || item.text.lines().count() > 8);
+        let collapsible = collapsible_prompt(item);
         let expanded = self.expanded_messages.contains(&item.id);
         let bubble_background = cx.theme().accent.mix_oklab(cx.theme().background, 0.5);
         let title = match item.role.as_str() {
@@ -2509,7 +2608,7 @@ impl NativeAgentSessionView {
                     )))
             })
             .when(!item.citations.is_empty(), |row| row.child(Self::render_sent_citations(item, &owner, cx).mt_1()))
-            .when(!item.attachments.is_empty(), |row| row.child(self.render_sent_attachments(item, cx).mt_1()))
+            .when(!item.attachments.is_empty(), |row| row.child(self.render_sent_attachments(item, &owner, cx).mt_1()))
             .when(!item.applications.is_empty(), |row| row.child(Self::render_sent_applications(item, cx).mt_1()))
             .when(collapsible, |row| {
                 row.child(Button::new(gpui_kit::SharedString::from(format!("expand-message:{id}")))
@@ -2781,7 +2880,6 @@ impl NativeAgentSessionView {
         cx: &App,
     ) -> gpui_kit::Div {
         let id = item.id.clone();
-        let copied = self.copied_message.as_deref() == Some(id.as_str());
         let timestamp = if item.role == "user" {
             item.created_at
         } else {
@@ -2813,36 +2911,16 @@ impl NativeAgentSessionView {
                     .when_some(timestamp, |bar, timestamp| {
                         bar.child(div().text_xs().child(timestamp))
                     })
-                    .child(
-                        Button::new(gpui_kit::SharedString::from(format!("copy-message:{id}")))
-                            .debug_selector({
-                                let id = id.clone();
-                                move || format!("copy-message:{id}")
-                            })
-                            .icon(if copied {
-                                IconName::Check
-                            } else {
-                                IconName::Copy
-                            })
-                            .ghost()
-                            .xsmall()
-                            .accessibility_label(if copied {
-                                "Copied message"
-                            } else {
-                                "Copy message"
-                            })
-                            .tooltip(if copied {
-                                "Copied message"
-                            } else {
-                                "Copy message"
-                            })
-                            .on_click({
-                                let owner = owner.clone();
-                                move |_, window, cx| {
-                                    _ = owner
-                                        .update(cx, |this, cx| this.copy_message(&id, window, cx));
-                                }
-                            }),
+                    .children(
+                        item.usage
+                            .filter(|_| item.role == "assistant")
+                            .map(|usage| turn_usage(&item.id, usage)),
+                    )
+                    .child(self.copy_message_button(&id, owner.clone()))
+                    .when(
+                        item.role == "assistant"
+                            && crate::presentation::markdown_tables::has_table(&item.text),
+                        |bar| bar.child(self.copy_tables_button(item, owner.clone())),
                     )
                     .when(
                         item.role == "user" && self.subagent.is_none() && self.provider_enabled(),
@@ -2876,6 +2954,64 @@ impl NativeAgentSessionView {
                         },
                     ),
             )
+    }
+
+    fn copy_message_button(&self, id: &str, owner: gpui_kit::WeakEntity<Self>) -> Button {
+        let copied = self.copied_message.as_deref() == Some(id);
+        let label = if copied {
+            "Copied message"
+        } else {
+            "Copy message"
+        };
+        let id = id.to_owned();
+        Button::new(gpui_kit::SharedString::from(format!("copy-message:{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("copy-message:{id}")
+            })
+            .icon(if copied {
+                IconName::Check
+            } else {
+                IconName::Copy
+            })
+            .ghost()
+            .xsmall()
+            .accessibility_label(label)
+            .tooltip(label)
+            .on_click(move |_, window, cx| {
+                _ = owner.update(cx, |this, cx| this.copy_message(&id, window, cx));
+            })
+    }
+
+    fn copy_tables_button(
+        &self,
+        item: &NativeTranscriptItem,
+        owner: gpui_kit::WeakEntity<Self>,
+    ) -> Button {
+        let copied = self
+            .copied_message
+            .as_deref()
+            .and_then(|copied| copied.strip_prefix("table:"))
+            == Some(item.id.as_str());
+        let label = if copied { "Copied table" } else { "Copy table" };
+        let id = item.id.clone();
+        Button::new(gpui_kit::SharedString::from(format!("copy-table:{id}")))
+            .debug_selector({
+                let id = id.clone();
+                move || format!("copy-table:{id}")
+            })
+            .icon(if copied {
+                gpui_kit::assets::IconName::Check
+            } else {
+                gpui_kit::assets::IconName::Table
+            })
+            .ghost()
+            .xsmall()
+            .accessibility_label(label)
+            .tooltip(label)
+            .on_click(move |_, window, cx| {
+                _ = owner.update(cx, |this, cx| this.copy_tables(&id, window, cx));
+            })
     }
 
     pub(crate) fn set_short_name(&mut self, name: String, cx: &mut Context<Self>) {
@@ -3015,8 +3151,28 @@ impl NativeAgentSessionView {
         let Some(text) = copied_text(&self.record.snapshot.transcript, id) else {
             return;
         };
+        self.copy(id.to_owned(), text, window, cx);
+    }
+
+    /// Copies the tables in reply `id` as tab-separated text.
+    fn copy_tables(&mut self, id: &str, window: &Window, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .find(|item| item.id == id)
+            .and_then(|item| crate::presentation::markdown_tables::tables_tsv(&item.text))
+        else {
+            return;
+        };
+        self.copy(format!("table:{id}"), text, window, cx);
+    }
+
+    /// Copies `text`, and marks the button `copied` as done for two seconds.
+    fn copy(&mut self, copied: String, text: String, window: &Window, cx: &mut Context<Self>) {
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
-        self.copied_message = Some(id.to_owned());
+        self.copied_message = Some(copied);
         self.copy_feedback = Some(cx.spawn_in(window, async move |owner, cx| {
             cx.background_executor().timer(Duration::from_secs(2)).await;
             _ = owner.update(cx, |this, cx| {
@@ -3411,6 +3567,115 @@ impl NativeAgentSessionView {
         .filter(|error| self.dismissed_error.as_deref() != Some(error))
     }
 
+    /// Retry, which sends a failed turn's prompt again once the draft is out of the way.
+    fn retry_button(
+        &self,
+        error: &str,
+        draft_empty: bool,
+        owner: gpui_kit::WeakEntity<Self>,
+    ) -> Button {
+        let retried = error.to_owned();
+        Button::new("native-retry-turn")
+            .debug_selector(|| "native-retry-turn".into())
+            .ghost()
+            .small()
+            .label("Retry")
+            .disabled(!draft_empty || !self.can_prompt())
+            .tooltip(if draft_empty {
+                "Send this turn's message again"
+            } else {
+                "Send or clear your draft first"
+            })
+            .on_click(move |_, window, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    this.retry_turn(&retried, window, cx);
+                });
+            })
+    }
+
+    /// Sends a failed turn's prompt again, with its attachments, and puts its failure away.
+    fn retry_turn(&mut self, error: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((text, attachments)) = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .rfind(|item| item.role == "user")
+            .map(|item| (item.text.clone(), item.attachments.clone()))
+        else {
+            return;
+        };
+        self.scheduled_retry = None;
+        self.dismissed_error = Some(error.to_owned());
+        self.restore_draft(&text, &attachments, window, cx);
+        self.send_prompt(window, cx);
+        self.refresh_timeline();
+    }
+
+    /// When the usage limit that stopped a turn resets, and a way to send the turn again then.
+    fn retry_at_reset(
+        &self,
+        resets_at: i64,
+        error: &str,
+        owner: &gpui_kit::WeakEntity<Self>,
+    ) -> gpui_kit::Div {
+        let time = reset_time(resets_at);
+        let scheduled = self.scheduled_retry.is_some();
+        let (owner, error) = (owner.clone(), error.to_owned());
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .debug_selector(|| "native-limit-resets".into())
+                    .child(format!("The usage limit resets {time}.")),
+            )
+            .child(
+                Button::new("native-retry-at-reset")
+                    .debug_selector(move || format!("native-retry-at-reset:{scheduled}"))
+                    .ghost()
+                    .small()
+                    .label(if scheduled {
+                        "Don’t retry then"
+                    } else {
+                        "Retry when it resets"
+                    })
+                    .on_click(move |_, window, cx| {
+                        _ = owner.update(cx, |this, cx| {
+                            this.toggle_retry_at_reset(resets_at, &error, window, cx);
+                        });
+                    }),
+            )
+    }
+
+    /// Waits for the limit to reset, a little past it, then sends the turn again; asked again,
+    /// stops waiting.
+    fn toggle_retry_at_reset(
+        &mut self,
+        resets_at: i64,
+        error: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.scheduled_retry.take().is_none() {
+            let wait = u64::try_from(
+                resets_at
+                    .saturating_sub(chrono::Utc::now().timestamp())
+                    .saturating_add(5),
+            )
+            .unwrap_or(0);
+            let error = error.to_owned();
+            self.scheduled_retry = Some(cx.spawn_in(window, async move |owner, cx| {
+                cx.background_executor()
+                    .timer(Duration::from_secs(wait))
+                    .await;
+                _ = owner.update_in(cx, |this, window, cx| this.retry_turn(&error, window, cx));
+            }));
+        }
+        cx.notify();
+    }
+
     /// A failed turn, where it ended: what failed, and Retry, which sends the turn's prompt again.
     pub(super) fn render_turn_failure(
         &self,
@@ -3425,13 +3690,19 @@ impl NativeAgentSessionView {
             .transcript
             .iter()
             .rfind(|item| item.role == "user")
-            .map(|item| (item.text.clone(), item.attachments.clone()));
+            .map(|item| item.text.clone());
+        let resets_at = self
+            .record
+            .snapshot
+            .rate_limits
+            .as_ref()
+            .and_then(bootty_agents::NativeRateLimits::reached_until);
         let draft_empty = self.composer.read(cx).value().trim().is_empty()
             && self.attachments.is_empty()
             && self.annotations.is_empty();
         let sign_in = crate::error_catalog::needs_sign_in(error);
         let provider = self.record.config.provider;
-        let (details, dismissed, retried) = (error.to_owned(), error.to_owned(), error.to_owned());
+        let (details, dismissed) = (error.to_owned(), error.to_owned());
         let dismiss_owner = owner.clone();
         div()
             .w_full()
@@ -3462,28 +3733,11 @@ impl NativeAgentSessionView {
                             .child(message),
                     )
                     .when(sign_in, |row| row.child(sign_in_button(provider)))
-                    .when_some(prompt, |row, (text, attachments)| {
-                        row.child(
-                            Button::new("native-retry-turn")
-                                .debug_selector(|| "native-retry-turn".into())
-                                .ghost()
-                                .small()
-                                .label("Retry")
-                                .disabled(!draft_empty || !self.can_prompt())
-                                .tooltip(if draft_empty {
-                                    "Send this turn's message again"
-                                } else {
-                                    "Send or clear your draft first"
-                                })
-                                .on_click(move |_, window, cx| {
-                                    _ = owner.update(cx, |this, cx| {
-                                        this.dismissed_error = Some(retried.clone());
-                                        this.restore_draft(&text, &attachments, window, cx);
-                                        this.send_prompt(window, cx);
-                                        this.refresh_timeline();
-                                    });
-                                }),
-                        )
+                    .when_some(prompt.as_ref().and(resets_at), |row, resets_at| {
+                        row.child(self.retry_at_reset(resets_at, error, &owner))
+                    })
+                    .when(prompt.is_some(), move |row| {
+                        row.child(self.retry_button(error, draft_empty, owner))
                     })
                     .child(
                         Button::new("copy-turn-failure-details")
@@ -3987,8 +4241,77 @@ impl NativeAgentSessionView {
             )
     }
 
+    /// The context meter's ring, whose menu compacts the conversation.
+    fn context_trigger(
+        &self,
+        percent: Option<u16>,
+        color: gpui_kit::Hsla,
+        label: String,
+        accessible: String,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        use gpui_kit::component::progress::ProgressCircle;
+        Button::new("native-context-trigger")
+            .debug_selector(|| "native-context-trigger".into())
+            .ghost()
+            .small()
+            .accessibility_label(accessible)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        ProgressCircle::new("native-context-ring")
+                            .value(f32::from(percent.unwrap_or(0)))
+                            .color(color)
+                            .size(gpui_kit::px(16.)),
+                    )
+                    .when(percent.is_none(), |row| row.child(label)),
+            )
+            .dropdown_menu({
+                let owner = cx.weak_entity();
+                let idle = self.provider_enabled() && !is_busy(self.record.snapshot.status);
+                move |menu, _, _| {
+                    let owner = owner.clone();
+                    menu.item(
+                        gpui_kit::component::menu::PopupMenuItem::new("Compact context")
+                            .disabled(!idle)
+                            .on_click(move |_, window, cx| {
+                                _ = owner.update(cx, |this, cx| {
+                                    this.compact_context(window, cx);
+                                });
+                            }),
+                    )
+                }
+            })
+    }
+
+    /// The account's usage limits, as the provider last reported them, a line each.
+    fn rate_limit_lines(&self) -> Vec<String> {
+        self.record
+            .snapshot
+            .rate_limits
+            .iter()
+            .flat_map(|limits| &limits.windows)
+            .map(|window| {
+                window.resets_at.map_or_else(
+                    || format!("{} limit: {}% used", window.label, window.used_percent),
+                    |resets_at| {
+                        format!(
+                            "{} limit: {}% used, resets {}",
+                            window.label,
+                            window.used_percent,
+                            reset_time(resets_at)
+                        )
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn render_context_usage(&self, cx: &Context<Self>) -> gpui_kit::AnyElement {
-        use gpui_kit::component::{progress::ProgressCircle, tooltip::Tooltip};
+        use gpui_kit::component::tooltip::Tooltip;
         let Some(usage) = self.record.snapshot.usage.as_ref() else {
             return div().into_any_element();
         };
@@ -4032,10 +4355,12 @@ impl NativeAgentSessionView {
                 )
             },
         );
+        let limits = self.rate_limit_lines();
         div()
             .id("native-context-usage")
             .tooltip(move |window, cx| {
                 let details = details.clone();
+                let limits = limits.clone();
                 Tooltip::element(move |_, cx| {
                     div()
                         .flex()
@@ -4056,28 +4381,16 @@ impl NativeAgentSessionView {
                             ))
                         })
                         .child(details.clone())
+                        .children(limits.iter().map(|limit| {
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(limit.clone())
+                        }))
                 })
                 .build(window, cx)
             })
-            .child(
-                Button::new("native-context-trigger")
-                    .ghost()
-                    .small()
-                    .accessibility_label(accessible)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                ProgressCircle::new("native-context-ring")
-                                    .value(f32::from(percent.unwrap_or(0)))
-                                    .color(color)
-                                    .size(gpui_kit::px(16.)),
-                            )
-                            .when(percent.is_none(), |row| row.child(label)),
-                    ),
-            )
+            .child(self.context_trigger(percent, color, label, accessible, cx))
             .into_any_element()
     }
 }
@@ -4212,6 +4525,7 @@ impl NativeAgentSessionView {
 }
 impl Render for NativeAgentSessionView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.hold_prompt_anchor();
         let busy = self.record.snapshot.transport_lost
             || self.record.snapshot.status == NativeSessionStatus::Starting
             || is_busy(self.record.snapshot.status)
@@ -4425,6 +4739,8 @@ fn command_failure(operation: &str, outcome: &CommandOutcome) -> (String, String
         "subagent-stop" => "Could not stop the subagent",
         "fork" => "Could not start the side chat",
         "resume" => "Could not resume the conversation",
+        "attachment-open" => "Could not open the attachment",
+        "attachment-reveal" => "Could not show the attachment",
         _ => "Could not update the conversation",
     };
     (
@@ -4436,6 +4752,77 @@ fn command_failure(operation: &str, outcome: &CommandOutcome) -> (String, String
 /// A failed command's message as people should read it.
 fn outcome_error(action: &str, outcome: &CommandOutcome) -> Option<String> {
     crate::commands::command_outcome_message(outcome).map(|message| diagnostic(action, message))
+}
+
+/// What a turn used, on its last reply: tokens in and out and the price, with the cache and
+/// reasoning in the tooltip.
+fn turn_usage(
+    id: &str,
+    usage: bootty_agents::NativeTurnUsage,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let mut summary = format!(
+        "{} in · {} out",
+        compact_tokens(usage.input),
+        compact_tokens(usage.output)
+    );
+    let mut details = vec![format!("{} input tokens", usage.input)];
+    if usage.cache_read > 0 || usage.cache_write > 0 {
+        details.push(format!(
+            "{} read from cache, {} written to it",
+            usage.cache_read, usage.cache_write
+        ));
+    }
+    details.push(format!("{} output tokens", usage.output));
+    if usage.reasoning > 0 {
+        details.push(format!("{} of them reasoning", usage.reasoning));
+    }
+    if let Some(cost) = usage.cost_micros {
+        let price = dollars(cost);
+        summary.push_str(" · ");
+        summary.push_str(&price);
+        details.push(format!("{price} as the provider prices it"));
+    }
+    let details = details.join("\n");
+    div()
+        .id(gpui_kit::SharedString::from(format!("turn-usage:{id}")))
+        .debug_selector({
+            let summary = summary.clone();
+            move || format!("turn-usage:{summary}")
+        })
+        .text_xs()
+        .child(summary)
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(details.clone()).build(window, cx)
+        })
+}
+
+/// When a limit resets, as "at 3:40 PM" today or "on Oct 17 at 3:40 PM" later.
+fn reset_time(resets_at: i64) -> String {
+    let Some(time) = chrono::DateTime::from_timestamp(resets_at, 0) else {
+        return "soon".to_owned();
+    };
+    let local = time.with_timezone(&chrono::Local);
+    if local.date_naive() == chrono::Local::now().date_naive() {
+        local.format("at %-I:%M %p").to_string()
+    } else {
+        local.format("on %b %-d at %-I:%M %p").to_string()
+    }
+}
+
+/// Millionths of a dollar as a price to the cent; less than a cent says so.
+fn dollars(micros: u64) -> String {
+    if micros < 10_000 {
+        return "<$0.01".to_owned();
+    }
+    let cents = micros
+        .saturating_add(5_000)
+        .checked_div(10_000)
+        .unwrap_or(0);
+    format!(
+        "${}.{:02}",
+        cents.checked_div(100).unwrap_or(0),
+        cents.checked_rem(100).unwrap_or(0)
+    )
 }
 
 fn compact_tokens(tokens: u64) -> String {
@@ -4551,6 +4938,7 @@ fn tool_label(name: &str) -> std::borrow::Cow<'_, str> {
         "WebFetch" | "web_fetch" => "Fetch",
         "Task" | "Agent" => "Run agent",
         "TodoWrite" => "Update tasks",
+        "review" => "Review",
         "Skill" => "Use skill",
         "ExitPlanMode" => "Propose plan",
         "KillShell" | "KillBash" => "Stop command",
@@ -4656,8 +5044,8 @@ fn tool_input_summary(
         .and_then(Value::as_array)
         .map(|todos| todo_summary(todos));
     // A task's description and a plan's opening line name the work better than its fields.
-    let detail =
-        text(&["description", "skill", "plan"]).map(|detail| detail.trim_start_matches(['#', ' ']));
+    let detail = text(&["description", "skill", "plan", "review"])
+        .map(|detail| detail.trim_start_matches(['#', ' ']));
     let (_, name) = tool_parts(&tool.name);
     let icon = if command.is_some()
         || matches!(
@@ -5212,6 +5600,11 @@ fn link_file_path(link: &str, cwd: &std::path::Path) -> Option<String> {
 /// What copying message `id` puts on the clipboard. A prompt brings the passages it quoted and
 /// the files it attached; a turn's final reply brings every reply in its turn, since the
 /// commentary between tools is part of the answer.
+/// Whether a sent prompt is long enough to show folded until asked.
+fn collapsible_prompt(item: &NativeTranscriptItem) -> bool {
+    item.role == "user" && (item.text.encode_utf16().count() > 600 || item.text.lines().count() > 8)
+}
+
 fn copied_text(transcript: &[NativeTranscriptItem], id: &str) -> Option<String> {
     let index = transcript.iter().position(|item| item.id == id)?;
     let item = transcript.get(index)?;

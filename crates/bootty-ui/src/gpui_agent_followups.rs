@@ -63,24 +63,29 @@ impl NativeAgentSessionView {
 
     pub(super) fn render_queued_messages(&self, cx: &Context<Self>) -> impl IntoElement {
         let messages = &self.record.queued_messages;
+        let goal = self.render_goal(cx);
         let plan = self.render_plan(cx);
         div()
             .id("native-queue")
             .debug_selector(|| "native-queue".into())
             .min_w_0()
             .mx_3()
-            .when(!messages.is_empty() || plan.is_some(), |drawer| {
-                // The composer covers the drawer's lower edge.
-                drawer
-                    .mb_neg_3()
-                    .pb_3()
-                    .px_1()
-                    .pt_1()
-                    .rounded_t_lg()
-                    .border_1()
-                    .border_color(cx.theme().border.opacity(0.5))
-                    .bg(cx.theme().muted.opacity(0.2))
-            })
+            .when(
+                !messages.is_empty() || plan.is_some() || goal.is_some(),
+                |drawer| {
+                    // The composer covers the drawer's lower edge.
+                    drawer
+                        .mb_neg_3()
+                        .pb_3()
+                        .px_1()
+                        .pt_1()
+                        .rounded_t_lg()
+                        .border_1()
+                        .border_color(cx.theme().border.opacity(0.5))
+                        .bg(cx.theme().muted.opacity(0.2))
+                },
+            )
+            .children(goal)
             .children(plan)
             .when(!messages.is_empty(), |drawer| {
                 drawer
@@ -248,40 +253,44 @@ impl NativeAgentSessionView {
             .child(self.queued_menu(message, cx))
     }
 
-    /// Thumbnails of a queued message's attached images.
+    /// Thumbnails of a queued message's attached images; each opens the viewer on the message's
+    /// images.
     fn queued_previews(&self, message: &NativeQueuedMessage) -> gpui_kit::Div {
+        let images: std::rc::Rc<[crate::gpui_image_viewer::ViewedImage]> = message
+            .attachments
+            .iter()
+            .filter_map(|attachment| {
+                Some(crate::gpui_image_viewer::ViewedImage {
+                    name: attachment.name.clone(),
+                    preview: self.attachment_previews.get(&attachment.id)?.clone(),
+                })
+            })
+            .collect();
         div()
             .flex()
             .flex_shrink_0()
             .gap_1()
-            .children(message.attachments.iter().filter_map(|attachment| {
-                self.attachment_previews.get(&attachment.id).map(|preview| {
-                    let preview = preview.clone();
-                    let name = attachment.name.clone();
-                    Button::new(SharedString::from(format!(
-                        "queued-preview:{}:{}",
-                        message.id, attachment.id
-                    )))
-                    .ghost()
-                    .p_0()
-                    .w_4()
-                    .h_4()
-                    .rounded_sm()
-                    .overflow_hidden()
-                    .accessibility_label(format!("View {name}"))
-                    .child(
-                        gpui_kit::img(preview.clone())
-                            .size_full()
-                            .object_fit(gpui_kit::ObjectFit::Cover),
-                    )
-                    .on_click(move |_, window, cx| {
-                        crate::gpui_prompt_attachments::open_image(
-                            name.clone(),
-                            preview.clone(),
-                            window,
-                            cx,
-                        );
-                    })
+            .children(images.iter().enumerate().map(|(index, image)| {
+                let images = images.clone();
+                let name = image.name.clone();
+                Button::new(SharedString::from(format!(
+                    "queued-preview:{}:{index}",
+                    message.id
+                )))
+                .ghost()
+                .p_0()
+                .w_4()
+                .h_4()
+                .rounded_sm()
+                .overflow_hidden()
+                .accessibility_label(format!("View {name}"))
+                .child(
+                    gpui_kit::img(image.preview.thumbnail.clone())
+                        .size_full()
+                        .object_fit(gpui_kit::ObjectFit::Cover),
+                )
+                .on_click(move |_, window, cx| {
+                    crate::gpui_image_viewer::open(images.to_vec(), index, window, cx);
                 })
             }))
     }

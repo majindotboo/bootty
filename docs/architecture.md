@@ -418,7 +418,14 @@ refreshing or reopening history retains the observed command input and outcome.
 `NativeAgentService` also owns per-conversation attachment manifests and private
 file copies. Transcripts retain typed attachment IDs and presentation metadata;
 source paths never enter saved messages. Image previews are bounded reads from
-that store, and deleting a conversation removes its local copies. Inline response
+that store, and deleting a conversation removes its local copies. Images a tool
+returns, such as a screenshot, are kept on the tool's row the same way: the
+reader thread admits each as a PNG named for its content, the next catalog commit
+writes it beside the attachments, and only its reference enters the catalog. A
+conversation keeps its 64 newest tool images and removes the files no row shows.
+`agents.native.attachment-open` and `agents.native.attachment-reveal` hand a
+stored copy to this computer's default app or file manager without the path
+leaving the host. Inline response
 comments retain the exact assistant message ID, UTF-8 source range, and inline
 prompt token range. Sent quotes stay inline and navigate to the referenced
 response. Provider context includes those references while authored text stays intact.

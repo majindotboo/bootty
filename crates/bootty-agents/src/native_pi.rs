@@ -229,6 +229,7 @@ impl NativeAgentSession {
             }
             snapshot.status = NativeSessionStatus::Working;
             snapshot.working_since = Some((self.clock)());
+            snapshot.start_compaction();
             snapshot.changed();
         }
         publish_change(&self.change_handler);
@@ -242,6 +243,14 @@ impl NativeAgentSession {
         );
         {
             let mut snapshot = lock(&self.snapshot);
+            snapshot.finish_compaction(
+                if result.is_ok() {
+                    NativeToolStatus::Completed
+                } else {
+                    NativeToolStatus::Failed
+                },
+                None,
+            );
             if snapshot.status == NativeSessionStatus::Working {
                 snapshot.status = if result.is_ok() {
                     NativeSessionStatus::Idle
@@ -340,6 +349,7 @@ pub fn ingest(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(),
             snapshot.turn_id = Some(id);
         }
         "agent_settled" => {
+            snapshot.settle_turn_usage();
             if let Some(id) = snapshot.turn_id.clone() {
                 snapshot.finish_first_turn(
                     &id,
@@ -373,44 +383,22 @@ pub fn ingest(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(),
             }
         }
         "tool_execution_start" | "tool_execution_update" | "tool_execution_end" => {
-            if let Some(id) = valid_identity(field(value, "toolCallId")) {
-                let complete = field(value, "type") == "tool_execution_end";
-                let text = if field(value, "type") == "tool_execution_start" {
-                    String::new()
-                } else {
-                    content_text(field(
-                        field(value, if complete { "result" } else { "partialResult" }),
-                        "content",
-                    ))
-                };
-                let name = field(value, "toolName").as_str().unwrap_or_default();
-                snapshot.pi_subagents(
-                    &id,
-                    name,
-                    field(value, if complete { "result" } else { "partialResult" }),
-                    complete,
-                );
-                let change = (complete && field(value, "isError") != true)
-                    .then(|| file_change(name, field(field(value, "result"), "details")))
-                    .flatten();
-                snapshot.tool_message(
-                    format!("tool-{id}"),
-                    if change.is_some() {
-                        Some("fileChange")
+            tool_execution(snapshot, value);
+        }
+        "auto_compaction_start" => snapshot.start_compaction(),
+        "auto_compaction_end" => {
+            if field(value, "skipped") == true {
+                snapshot.skip_compaction();
+            } else {
+                snapshot.finish_compaction(
+                    if field(value, "aborted") == true {
+                        NativeToolStatus::Interrupted
+                    } else if value.get("errorMessage").is_some_and(Value::is_string) {
+                        NativeToolStatus::Failed
                     } else {
-                        field(value, "toolName").as_str()
+                        NativeToolStatus::Completed
                     },
-                    change.or_else(|| value.get("args").map(Value::to_string)),
-                    text,
-                    if complete {
-                        if field(value, "isError") == true {
-                            NativeToolStatus::Failed
-                        } else {
-                            NativeToolStatus::Completed
-                        }
-                    } else {
-                        NativeToolStatus::Running
-                    },
+                    None,
                 );
             }
         }
@@ -420,6 +408,56 @@ pub fn ingest(snapshot: &mut NativeSessionSnapshot, value: &Value) -> Result<(),
     }
     snapshot.changed();
     Ok(())
+}
+
+/// A tool's start, progress or end: its row, its subagents, and its images once it ends.
+fn tool_execution(snapshot: &mut NativeSessionSnapshot, value: &Value) {
+    if let Some(id) = valid_identity(field(value, "toolCallId")) {
+        let complete = field(value, "type") == "tool_execution_end";
+        let text = if field(value, "type") == "tool_execution_start" {
+            String::new()
+        } else {
+            content_text(field(
+                field(value, if complete { "result" } else { "partialResult" }),
+                "content",
+            ))
+        };
+        let name = field(value, "toolName").as_str().unwrap_or_default();
+        snapshot.pi_subagents(
+            &id,
+            name,
+            field(value, if complete { "result" } else { "partialResult" }),
+            complete,
+        );
+        let change = (complete && field(value, "isError") != true)
+            .then(|| file_change(name, field(field(value, "result"), "details")))
+            .flatten();
+        snapshot.tool_message(
+            format!("tool-{id}"),
+            if change.is_some() {
+                Some("fileChange")
+            } else {
+                field(value, "toolName").as_str()
+            },
+            change.or_else(|| value.get("args").map(Value::to_string)),
+            text,
+            if complete {
+                if field(value, "isError") == true {
+                    NativeToolStatus::Failed
+                } else {
+                    NativeToolStatus::Completed
+                }
+            } else {
+                NativeToolStatus::Running
+            },
+        );
+        if complete {
+            snapshot.tool_images(
+                &format!("tool-{id}"),
+                field(field(value, "result"), "content"),
+            );
+        }
+    }
 }
 
 fn assistant_failure(message: &Value) -> Option<String> {
@@ -437,6 +475,12 @@ fn ingest_message(snapshot: &mut NativeSessionSnapshot, value: &Value) {
     let complete = field(value, "type") == "message_end";
     let message = field(value, "message");
     message_item(snapshot, message, complete);
+    if complete
+        && field(message, "role") == "assistant"
+        && let Some(usage) = crate::NativeTurnUsage::pi(field(message, "usage"))
+    {
+        snapshot.add_turn_usage(usage);
+    }
     if matches!(
         field(message, "stopReason").as_str(),
         Some("error" | "aborted")
@@ -562,6 +606,7 @@ fn message_content(snapshot: &mut NativeSessionSnapshot, message: &Value, comple
                     NativeToolStatus::Completed
                 },
             );
+            snapshot.tool_images(&id, content);
             nested_tool_results(snapshot, &id, field(message, "details"));
             return;
         }

@@ -256,6 +256,12 @@ pub enum AppEffect {
     OpenFiles(OpenFilesRequest),
     /// Show a local file in this computer's file manager.
     RevealPath(std::path::PathBuf),
+    /// Open a local file in the app this computer opens it with.
+    OpenWithSystem(std::path::PathBuf),
+    /// A find action for the focused conversation rather than a terminal.
+    ConversationFind(crate::app_actions::TerminalFindAction),
+    /// Enter the focused conversation's keyboard copy mode.
+    ConversationCopyMode,
     /// Add the focused document's or terminal's selection to the session's conversation.
     AddSelectionToConversation,
     /// Open a local file or folder in the installed editor with this id.

@@ -94,9 +94,15 @@ impl AppState {
                 self.apply_font_size_action(action, effects);
                 self.apply_ui_font_size_action(action, effects);
             }
+            KeybindAction::Find(action) if self.selected_pane_is_native() => {
+                effects.push(AppEffect::ConversationFind(action));
+            }
             KeybindAction::Find(action) => self.apply_terminal_find_action(action, effects),
             KeybindAction::CopyToClipboard(format) => {
                 self.copy_terminal_selection_or_request_copy(format, effects);
+            }
+            KeybindAction::CopyMode if self.selected_pane_is_native() => {
+                effects.push(AppEffect::ConversationCopyMode);
             }
             KeybindAction::CopyMode => {
                 self.enter_terminal_copy_mode(effects);
@@ -275,6 +281,23 @@ impl AppState {
                 .or_else(|| self.session_navigation_targets().into_iter().next());
         }
         effects.push(AppEffect::RequestRepaint);
+    }
+
+    /// Whether the focused pane shows a native conversation rather than a terminal.
+    pub(crate) fn selected_pane_is_native(&self) -> bool {
+        let binding = &self.workspace.active.binding;
+        let (Some(session), Some(window)) = (
+            binding.mux().selected_session(),
+            binding.mux().selected_window(),
+        ) else {
+            return false;
+        };
+        let pane = binding.window_focused_pane(session, window);
+        binding
+            .mux()
+            .selected_window_panes()
+            .iter()
+            .any(|anchor| anchor.pane_id.as_deref() == pane && anchor.native_agent.is_some())
     }
 
     fn enter_terminal_copy_mode(&mut self, effects: &mut Vec<AppEffect>) {

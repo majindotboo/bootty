@@ -68,11 +68,11 @@ for line in sys.stdin:
  elif method=='experimentalFeature/list': reply(value,{'data':[{'name':'goals','enabled':True}]})
  elif method=='thread/goal/get': reply(value,{'goal':goal})
  elif method=='thread/goal/set':
-  assert params['origin']=='user' and params['threadId']=='thread'
-  goal={'objective':params['objective'],'status':'active'}
+  assert params['threadId']=='thread' and 'origin' not in params
+  goal={**(goal or {'tokensUsed':1200,'tokenBudget':50000,'timeUsedSeconds':90}),**{key:params[key] for key in ['objective','status'] if key in params}}
   reply(value,{'goal':goal})
  elif method=='thread/goal/clear':
-  assert params['origin']=='user' and params['threadId']=='thread'
+  assert params=={'threadId':'thread'}
   goal=None
   reply(value,{'cleared':True})
 
@@ -973,8 +973,26 @@ fn user_goal_controls_update_and_clear_the_provider_goal_without_sending_a_turn(
         session.completions().unwrap().goal.as_deref(),
         Some("Improve the composer")
     );
+    let goal = |status| bootty_agents::NativeGoal {
+        objective: "Improve the composer".into(),
+        status,
+        token_budget: Some(50_000),
+        tokens_used: 1200,
+        seconds_used: 90,
+    };
+    assert_eq!(
+        session.snapshot().goal,
+        Some(goal(bootty_agents::NativeGoalStatus::Active))
+    );
+    session.set_goal_active(false).unwrap();
+    assert_eq!(
+        session.snapshot().goal,
+        Some(goal(bootty_agents::NativeGoalStatus::Paused))
+    );
     session.set_goal("").unwrap();
     assert_eq!(session.completions().unwrap().goal, None);
+    assert_eq!(session.snapshot().goal, None);
+    assert!(session.set_goal_active(true).is_err());
     assert!(!root.path().join("prompt.json").exists());
     session.stop();
 }

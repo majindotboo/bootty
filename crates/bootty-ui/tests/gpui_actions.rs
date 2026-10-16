@@ -400,8 +400,9 @@ fn composer_shortcuts_reach_terminals_unless_a_composer_is_shown(cx: &mut TestAp
         MultiplexerBackendConfig::Native,
         &catalog,
     );
+    // Find works in both; in a conversation it searches the conversation.
     for (bindings, expected) in [
-        (terminal, Vec::<&str>::new()),
+        (terminal, vec!["start_search"]),
         (
             composer,
             vec![
@@ -411,6 +412,7 @@ fn composer_shortcuts_reach_terminals_unless_a_composer_is_shown(cx: &mut TestAp
                 "ui.composer.dictate",
                 "ui.composer.voice",
                 "ui.composer.focus-composer",
+                "start_search",
             ],
         ),
     ] {
@@ -418,7 +420,14 @@ fn composer_shortcuts_reach_terminals_unless_a_composer_is_shown(cx: &mut TestAp
         received.borrow_mut().clear();
         cx.simulate_keystrokes(
             *window,
-            "alt-. shift-tab ctrl-alt-f ctrl-alt-d ctrl-alt-v ctrl-alt-i",
+            &format!(
+                "alt-. shift-tab ctrl-alt-f ctrl-alt-d ctrl-alt-v ctrl-alt-i {}",
+                if cfg!(target_os = "macos") {
+                    "cmd-f"
+                } else {
+                    "ctrl-shift-f"
+                }
+            ),
         );
         assert_eq!(received.borrow().as_slice(), expected.as_slice());
     }

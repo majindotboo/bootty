@@ -1,7 +1,7 @@
 //! The retained new-session draft. Selecting a destination never starts work.
 
 use std::collections::{BTreeMap, HashMap};
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 use bootty_config::config::{AgentProviderConfig, AgentProvidersConfig, RemoteConfig};
 use bootty_control::{Caller, CommandInvocation, CommandTarget};
@@ -36,7 +36,7 @@ pub struct NewSessionAttachment {
     pub path: PathBuf,
     pub size_bytes: u64,
     pub prompt_ranges: Vec<std::ops::Range<usize>>,
-    pub preview: Option<Arc<gpui_kit::RenderImage>>,
+    pub preview: Option<crate::gpui_image_viewer::ImagePreview>,
     pub temporary: Option<crate::attachment_source::AttachmentTemporary>,
 }
 

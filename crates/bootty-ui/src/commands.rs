@@ -47,6 +47,8 @@ pub use composer::ComposerRequest;
 mod jobs;
 mod orchestration;
 mod panes;
+mod plans;
+pub use plans::implement_plan_invocation;
 pub(crate) mod runtime;
 mod sessions;
 mod surfaces;

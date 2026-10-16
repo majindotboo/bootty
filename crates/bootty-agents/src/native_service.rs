@@ -586,21 +586,56 @@ impl NativeAgentService {
     /// # Errors
     /// Rejects stale targets, cross-session IDs, files, or unavailable image bytes.
     pub fn preview_attachment(&self, target: &CommandTarget, id: &str) -> Result<Vec<u8>, String> {
+        let (session, reference) = self.attachment(target, id)?;
+        self.attachment_store.preview(&session, &reference)
+    }
+
+    /// The stored copy of this session's attachment `id`, for this computer's desktop to open or
+    /// show. The path stays in the host; no reply carries it.
+    /// # Errors
+    /// Rejects stale targets, cross-session IDs, or a stored copy that is missing or changed.
+    pub fn attachment_file(&self, target: &CommandTarget, id: &str) -> Result<PathBuf, String> {
+        let (session, reference) = self.attachment(target, id)?;
+        self.attachment_store.reference_path(&session, &reference)
+    }
+
+    /// The session owning `target` and its attachment `id`: an attached file, or an image a tool
+    /// returned, which belongs to its row instead.
+    fn attachment(
+        &self,
+        target: &CommandTarget,
+        id: &str,
+    ) -> Result<(String, NativeAttachmentReference), String> {
         if target.kind != ResourceKind::Session {
             return Err("Native attachments require a Session target".to_owned());
         }
-        let record = lock(&self.store)
+        let store = lock(&self.store);
+        let found = store
             .records
             .iter()
             .find(|record| record.target() == *target)
-            .cloned()
-            .ok_or("Native session target is unknown or stale")?;
-        let reference = record
-            .attachments
-            .iter()
-            .find(|reference| reference.id == id)
-            .ok_or("Native attachment does not belong to this session")?;
-        self.attachment_store.preview(&record.id, reference)
+            .map(|record| {
+                let reference = record
+                    .attachments
+                    .iter()
+                    .chain(
+                        record
+                            .snapshot
+                            .transcript
+                            .iter()
+                            .flat_map(|item| &item.attachments)
+                            .filter(|reference| {
+                                reference.id.starts_with(crate::native_tool_images::PREFIX)
+                            }),
+                    )
+                    .find(|reference| reference.id == id)
+                    .cloned();
+                (record.id.clone(), reference)
+            });
+        drop(store);
+        let (session, reference) = found.ok_or("Native session target is unknown or stale")?;
+        let reference = reference.ok_or("Native attachment does not belong to this session")?;
+        Ok((session, reference))
     }
 
     /// # Errors
@@ -809,6 +844,13 @@ impl NativeAgentService {
     /// Returns stale targets, unavailable goals, or provider rejection.
     pub fn set_goal(&self, target: &CommandTarget, objective: &str) -> Result<(), String> {
         self.resolve(target)?.set_goal(objective)
+    }
+
+    /// Pauses a conversation's goal, or has its provider work on it again.
+    /// # Errors
+    /// Returns stale targets, a conversation without a goal, or provider rejection.
+    pub fn set_goal_active(&self, target: &CommandTarget, active: bool) -> Result<(), String> {
+        self.resolve(target)?.set_goal_active(active)
     }
 
     /// Read history through the exact provider/account owner; pages do not overwrite live state.
@@ -2149,16 +2191,62 @@ impl NativeAgentService {
         Ok(())
     }
 
-    fn commit(&self, candidate: Store) -> Result<(), String> {
+    fn commit(&self, mut candidate: Store) -> Result<(), String> {
+        let saved = save_tool_images(&self.attachment_store, &mut candidate);
         let bytes = serde_json::to_vec(&candidate).map_err(|error| error.to_string())?;
         if bytes.len() > 16 * 1024 * 1024 {
             return Err("Native agent catalog exceeds 16 MiB".to_owned());
         }
         write_private(&self.path, &bytes)?;
+        forget_saved_tool_images(&self.live, &saved);
         *lock(&self.store) = candidate;
         publish(&self.revision, &self.change_handler);
         self.followup_wake.notify();
         Ok(())
+    }
+}
+
+/// Writes the images tools returned in `store`'s conversations beside their attachments, and
+/// returns which conversations' images it took. A lost write leaves those rows without their
+/// image.
+fn save_tool_images(
+    attachments: &NativeAttachmentStore,
+    store: &mut Store,
+) -> Vec<(String, Vec<String>)> {
+    let mut saved = Vec::new();
+    for record in &mut store.records {
+        if record.snapshot.tool_images.is_empty() {
+            continue;
+        }
+        let pending = std::mem::take(&mut record.snapshot.tool_images);
+        if let Err(error) =
+            attachments.save_tool_images(&record.id, &pending, &record.snapshot.shown_tool_images())
+        {
+            eprintln!("tool images could not be saved: {error}");
+        }
+        saved.push((
+            record.id.clone(),
+            pending.into_iter().map(|image| image.id).collect(),
+        ));
+    }
+    saved
+}
+
+/// Live conversations stop holding the tool images a commit wrote.
+fn forget_saved_tool_images(
+    live: &Mutex<BTreeMap<String, Arc<NativeAgentSession>>>,
+    saved: &[(String, Vec<String>)],
+) {
+    if saved.is_empty() {
+        return;
+    }
+    let live = lock(live);
+    for (id, images) in saved {
+        if let Some(session) = live.get(id) {
+            lock(&session.snapshot)
+                .tool_images
+                .retain(|pending| !images.contains(&pending.id));
+        }
     }
 }
 
@@ -2299,6 +2387,7 @@ impl PublicationState {
         {
             return Some(wait);
         }
+        let saved = save_tool_images(&NativeAttachmentStore::new(&self.path), &mut candidate);
         let result = serde_json::to_vec(&candidate)
             .map_err(|error| error.to_string())
             .and_then(|bytes| {
@@ -2311,6 +2400,7 @@ impl PublicationState {
             eprintln!("native agent history could not be saved: {error}");
             return None;
         }
+        forget_saved_tool_images(&self.live, &saved);
         *lock(&self.store) = candidate;
         *committed = Some(Instant::now());
         drop(mutation);

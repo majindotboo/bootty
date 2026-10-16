@@ -11,6 +11,8 @@ use crate::surface_creation::{PendingNewSurface, SurfaceParent};
 #[derive(Default)]
 pub(super) struct NativeConversations {
     records: Vec<NativeSessionRecord>,
+    /// The usage limits each conversation last handed to the sidebar's meter.
+    reported_limits: HashMap<String, bootty_agents::NativeRateLimits>,
     views: HashMap<String, Entity<NativeAgentSessionView>>,
     subscriptions: HashMap<String, Subscription>,
     requested: Option<CommandTarget>,
@@ -381,19 +383,7 @@ impl GpuiWorkspace {
     }
 
     pub(super) fn selected_mux_pane_is_native(&self) -> bool {
-        let binding = &self.state.workspace.active.binding;
-        let Some(session) = binding.mux().selected_session() else {
-            return false;
-        };
-        let Some(window) = binding.mux().selected_window() else {
-            return false;
-        };
-        let pane = binding.window_focused_pane(session, window);
-        binding
-            .mux()
-            .selected_window_panes()
-            .iter()
-            .any(|anchor| anchor.pane_id.as_deref() == pane && anchor.native_agent.is_some())
+        self.state.selected_pane_is_native()
     }
 
     pub(super) fn selected_mux_native_record(&self) -> Option<NativeSessionRecord> {
@@ -463,6 +453,31 @@ impl GpuiWorkspace {
                 view.attach_text(prefix, text, window, cx);
             }
         });
+        let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
+        focus.target = Some(target);
+        self.invoke_gpui_command(focus, window, cx);
+    }
+
+    /// Puts a comment on the session's changes into its conversation's composer, with the lines
+    /// it is about.
+    pub(super) fn add_diff_comment(
+        &mut self,
+        comment: &crate::gpui_git_panel::DiffComment,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(record) = self
+            .selected_mux_native_record()
+            .or_else(|| self.session_native_record())
+        else {
+            self.state
+                .record_message("Open a conversation in this session to send it comments");
+            cx.notify();
+            return;
+        };
+        let target = record.target();
+        let view = self.ensure_native_conversation_view(record, window, cx);
+        view.update(cx, |view, cx| view.add_diff_comment(comment, window, cx));
         let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
         focus.target = Some(target);
         self.invoke_gpui_command(focus, window, cx);
@@ -659,6 +674,44 @@ impl GpuiWorkspace {
         }
     }
 
+    /// Hands the limits a Codex or Claude conversation newly reported to the sidebar's meter.
+    fn report_rate_limits(&mut self) {
+        use crate::usage::{UsageProvider, UsageWindow};
+        use num_traits::ToPrimitive as _;
+        let now = std::time::Instant::now();
+        let mut chrome = self.launch.native_chrome.borrow_mut();
+        let conversations = &mut self.native_conversations;
+        for record in &conversations.records {
+            let provider = match record.config.provider {
+                bootty_agents::AgentKind::Codex => UsageProvider::Codex,
+                bootty_agents::AgentKind::Claude => UsageProvider::Claude,
+                bootty_agents::AgentKind::Pi => continue,
+            };
+            let Some(limits) = &record.snapshot.rate_limits else {
+                continue;
+            };
+            if conversations.reported_limits.get(&record.id) == Some(limits) {
+                continue;
+            }
+            conversations
+                .reported_limits
+                .insert(record.id.clone(), limits.clone());
+            let windows = limits
+                .windows
+                .iter()
+                .filter_map(|window| {
+                    Some(UsageWindow {
+                        label: window.label.clone(),
+                        used_percent: f64::from(window.used_percent),
+                        duration_secs: window.window_seconds?.to_f64()?,
+                        resets_at: window.resets_at,
+                    })
+                })
+                .collect();
+            chrome.usage.report(provider, windows, now);
+        }
+    }
+
     pub(super) fn refresh_native_conversations(
         &mut self,
         window: &mut Window,
@@ -696,6 +749,7 @@ impl GpuiWorkspace {
                 this.native_conversations.refreshing = false;
                 this.native_conversations.revision = revision;
                 this.native_conversations.records = records;
+                this.report_rate_limits();
                 for record in &this.native_conversations.records {
                     if let Some(view) = this.native_conversations.views.get(&record.id) {
                         view.update(cx, |view, cx| {
@@ -1152,7 +1206,29 @@ impl GpuiWorkspace {
                 text,
                 attachments,
             } => self.edit_and_resend(target, text, attachments, window, cx),
+            OpenNativeSession::ImplementInNew { target, plan } => {
+                self.implement_in_new_conversation(target, plan);
+            }
         }
+    }
+
+    /// Starts a conversation in the same session, with the same provider, account settings and
+    /// model, that carries out `plan`.
+    fn implement_in_new_conversation(&mut self, target: &CommandTarget, plan: &str) {
+        let Some(record) = self
+            .native_conversations
+            .records
+            .iter()
+            .find(|record| record.target() == *target)
+            .cloned()
+        else {
+            return;
+        };
+        let Some(binding) = self.native_conversation_binding(&record) else {
+            return;
+        };
+        let invocation = crate::commands::implement_plan_invocation(&record, binding, plan);
+        self.state.commands.queue(invocation);
     }
 
     /// Brings back a sent message with browser notes: the notes go back to the conversation as

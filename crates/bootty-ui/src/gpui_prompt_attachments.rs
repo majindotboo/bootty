@@ -1,13 +1,9 @@
 //! File references are atomic editor content; the session owns attachment bytes.
 use gpui_kit::component::{
-    ActiveTheme as _, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    ActiveTheme as _,
     input::{InlineToken, InlineTokenContext},
 };
-use gpui_kit::{
-    App, InteractiveElement as _, IntoElement, ParentElement as _, Styled as _, StyledImage as _,
-    div,
-};
+use gpui_kit::{App, IntoElement, ParentElement as _, Styled as _, div};
 
 pub fn token(id: String, name: &str, bytes: u64) -> InlineToken {
     let name = name
@@ -183,88 +179,4 @@ pub fn directory_token(path: &std::path::Path) -> InlineToken {
         ),
     )
     .with_label(format!("{}/", label.trim_end_matches('/')))
-}
-
-/// Uses Root's dialog lifetime, Escape dismissal and focus restoration.
-pub fn open_image(
-    name: String,
-    image: std::sync::Arc<gpui_kit::RenderImage>,
-    window: &mut gpui_kit::Window,
-    cx: &mut App,
-) {
-    use gpui_kit::component::WindowExt as _;
-    use num_traits::ToPrimitive as _;
-    use std::ops::{Div as _, Mul as _, Sub as _};
-    window.open_dialog(cx, move |dialog, window, cx| {
-        let viewport = window.viewport_size();
-        let pixels = image.size(0);
-        let ratio = pixels
-            .width
-            .0
-            .to_f32()
-            .unwrap_or(1.)
-            .div(pixels.height.0.to_f32().unwrap_or(1.).max(1.));
-        let max_width = viewport
-            .width
-            .sub(gpui_kit::rems(4.).to_pixels(window.rem_size()))
-            .max(gpui_kit::px(1.));
-        let max_height = viewport
-            .height
-            .sub(gpui_kit::rems(8.).to_pixels(window.rem_size()))
-            .max(gpui_kit::px(1.));
-        let width = max_width.min(gpui_kit::px(f32::from(max_height).mul(ratio)));
-        let height = gpui_kit::px(f32::from(width).div(ratio.max(0.001)));
-        dialog
-            .w(width)
-            .close_button(false)
-            .p_0()
-            .bg(gpui_kit::Hsla::transparent_black())
-            .border_0()
-            .shadow_none()
-            .title(
-                div().flex().justify_end().child(
-                    Button::new("close-image-preview")
-                        .small()
-                        .ghost()
-                        .icon(gpui_kit::component::IconName::Close)
-                        .accessibility_label("Close image preview")
-                        .debug_selector(|| "close-image-preview".into())
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                ),
-            )
-            .margin_top(
-                viewport
-                    .height
-                    .sub(height)
-                    .div(2.)
-                    .sub(gpui_kit::rems(2.).to_pixels(window.rem_size()))
-                    .max(gpui_kit::px(0.)),
-            )
-            .footer(
-                div()
-                    .w_full()
-                    .py_2()
-                    .text_xs()
-                    .text_center()
-                    .text_color(cx.theme().foreground.opacity(0.8))
-                    .child(name.clone()),
-            )
-            .content({
-                let image = image.clone();
-                move |content, _, _| {
-                    content.child(
-                        div()
-                            .id("attachment-image-viewer")
-                            .debug_selector(|| "attachment-image-viewer".into())
-                            .w_full()
-                            .child(
-                                gpui_kit::img(image.clone())
-                                    .w_full()
-                                    .h(height)
-                                    .object_fit(gpui_kit::ObjectFit::Contain),
-                            ),
-                    )
-                }
-            })
-    });
 }

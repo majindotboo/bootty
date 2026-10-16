@@ -146,6 +146,16 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             ResourceKind::Session,
         ),
         (
+            "attachment-open",
+            vec!["id", "generation", "attachment_id"],
+            ResourceKind::Session,
+        ),
+        (
+            "attachment-reveal",
+            vec!["id", "generation", "attachment_id"],
+            ResourceKind::Session,
+        ),
+        (
             "computer",
             vec!["id", "generation", "application", "action"],
             ResourceKind::Session,
@@ -178,6 +188,11 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         (
             "goal",
             vec!["id", "generation", "objective"],
+            ResourceKind::Session,
+        ),
+        (
+            "goal-status",
+            vec!["id", "generation", "status"],
             ResourceKind::Session,
         ),
         ("models", vec!["id", "generation"], ResourceKind::Session),
@@ -316,6 +331,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                     choices: match (name, operation) {
                         ("direction", "pane") => vec!["right".into(), "down".into()],
                         ("direction", "queue-move") => vec!["earlier".into(), "later".into()],
+                        ("status", "goal-status") => vec!["active".into(), "paused".into()],
                         _ => Vec::new(),
                     },
                     minimum: None,

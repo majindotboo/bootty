@@ -3,7 +3,7 @@
 mod diff;
 mod pull_request;
 
-pub use diff::GitDiffPanel;
+pub use diff::{DiffComment, GitDiffPanel};
 
 use std::time::{Duration, Instant};
 

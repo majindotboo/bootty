@@ -368,7 +368,7 @@ command_catalog! {
         "Scroll to Bottom", "Jump to the latest output",
         "scroll_to_bottom", "arrow-down-to-line", Terminal, shown, Write, Terminal, None;
     CopyMode:
-        "Copy Mode", "Enter tmux-style scrollback navigation and text selection",
+        "Copy Mode", "Select and copy with the keyboard in a terminal or conversation",
         "copy_mode", "copy", Terminal, shown, Write, Terminal, None;
     IncreaseFontSize:
         "Increase Terminal Font Size", "Make the terminal text larger",
@@ -406,7 +406,7 @@ command_catalog! {
         "reset_ui_font_size", "type", Appearance, shown, Write,
         ApplicationWindow, None;
     Find:
-        "Find in Terminal", "Search the terminal scrollback",
+        "Find", "Search the terminal scrollback or the focused conversation",
         "start_search", "search", Terminal, shown, Write, Terminal, None;
     KeyboardShortcuts:
         "Keyboard Shortcuts", "Browse the active keybindings",

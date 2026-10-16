@@ -6,7 +6,9 @@ use serde_json::{Value, json};
 
 use crate::{
     NativeAgentRequest, NativeSessionSnapshot, NativeSessionStatus,
-    native_protocol::{NativeToolStatus, NativeTurnOutcome, bounded_text, field, string},
+    native_protocol::{
+        NativeTodoStatus, NativeToolStatus, NativeTurnOutcome, bounded_text, field, string,
+    },
 };
 
 struct Dispatch {
@@ -143,6 +145,20 @@ impl ClaudeProtocol {
                     && field(value, "session_id").as_str() == Some(self.session_id.as_str()) =>
             {
                 snapshot.claude_subagents(value);
+            }
+            Some("system")
+                if matches!(
+                    field(value, "subtype").as_str(),
+                    Some("status" | "compact_boundary")
+                ) && snapshot.session_id.as_deref() == Some(self.session_id.as_str())
+                    && field(value, "session_id").as_str() == Some(self.session_id.as_str()) =>
+            {
+                compaction(snapshot, value);
+            }
+            Some("rate_limit_event")
+                if field(value, "session_id").as_str() == Some(self.session_id.as_str()) =>
+            {
+                snapshot.claude_rate_limit(value);
             }
             Some("control_cancel_request") => cancel_request(snapshot, value),
             Some("control_request") => return self.capture_request(snapshot, value),
@@ -469,6 +485,19 @@ impl ClaudeProtocol {
 
     fn finish(&mut self, snapshot: &mut NativeSessionSnapshot, value: &Value) {
         record_context_window(snapshot, field(value, "modelUsage"));
+        // A compaction still running when its turn ends went the way the turn did.
+        if snapshot.compacting() {
+            let status = match field(value, "terminal_reason").as_str() {
+                Some("aborted_streaming" | "aborted_tools") => NativeToolStatus::Interrupted,
+                _ if field(value, "is_error") == true => NativeToolStatus::Failed,
+                _ => NativeToolStatus::Completed,
+            };
+            snapshot.finish_compaction(status, None);
+        }
+        if let Some(usage) = crate::NativeTurnUsage::claude(value) {
+            snapshot.add_turn_usage(usage);
+        }
+        snapshot.settle_turn_usage();
         let outcome = match field(value, "terminal_reason").as_str() {
             Some("aborted_streaming" | "aborted_tools") => NativeTurnOutcome::Interrupted,
             _ if field(value, "subtype") == "success" && field(value, "is_error") == false => {
@@ -947,6 +976,11 @@ pub fn content_block(
             complete,
         ),
         Some("tool_use") => {
+            claude_todos(
+                snapshot,
+                field(block, "name").as_str().unwrap_or_default(),
+                field(block, "input"),
+            );
             if let Some(tool) = field(block, "id").as_str().filter(|id| valid_wire_id(id)) {
                 snapshot.tool_message(
                     format!("claude-tool-{tool}"),
@@ -958,6 +992,34 @@ pub fn content_block(
             }
         }
         _ => {}
+    }
+}
+
+/// Claude reports `compacting` while it compacts, then a boundary with the context's size before
+/// and after; the meter reads the smaller size.
+fn compaction(snapshot: &mut NativeSessionSnapshot, value: &Value) {
+    if field(value, "subtype") == "status" {
+        if field(value, "status") == "compacting" {
+            snapshot.start_compaction();
+        }
+        return;
+    }
+    let metadata = field(value, "compact_metadata");
+    let tokens = field(metadata, "pre_tokens")
+        .as_u64()
+        .zip(field(metadata, "post_tokens").as_u64());
+    snapshot.finish_compaction(NativeToolStatus::Completed, tokens);
+    if let Some((_, after)) = tokens {
+        let window = snapshot
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.get("modelContextWindow"))
+            .cloned();
+        let mut usage = json!({"input": after, "output": 0, "cacheRead": 0, "cacheWrite": 0});
+        if let (Some(window), Some(usage)) = (window, usage.as_object_mut()) {
+            usage.insert("modelContextWindow".to_owned(), window);
+        }
+        snapshot.usage = Some(usage);
     }
 }
 
@@ -1037,6 +1099,23 @@ pub fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
                     .filter(|id| valid_wire_id(id))
             {
                 let change = change.clone().filter(|_| field(block, "is_error") != true);
+                if results == 1
+                    && snapshot.transcript.iter().any(|item| {
+                        item.id == format!("claude-tool-{id}")
+                            && item
+                                .tool
+                                .as_ref()
+                                .is_some_and(|tool| tool.name == "TaskCreate")
+                    })
+                {
+                    claude_task_created(
+                        snapshot,
+                        value
+                            .get("tool_use_result")
+                            .or_else(|| value.get("toolUseResult"))
+                            .unwrap_or(&Value::Null),
+                    );
+                }
                 snapshot.tool_message(
                     format!("claude-tool-{id}"),
                     change.as_ref().map(|_| "fileChange"),
@@ -1050,8 +1129,89 @@ pub fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
                         NativeToolStatus::Completed
                     },
                 );
+                snapshot.tool_images(&format!("claude-tool-{id}"), field(block, "content"));
             }
         }
+    }
+}
+
+/// Claude's to-do list in the plan drawer: `TodoWrite` replaces it whole, and `TaskUpdate` changes
+/// or removes one task the task tools made.
+fn claude_todos(snapshot: &mut NativeSessionSnapshot, name: &str, input: &Value) {
+    match name {
+        "TodoWrite" => {
+            let Some(todos) = field(input, "todos").as_array() else {
+                return;
+            };
+            snapshot.todos = todos
+                .iter()
+                .filter_map(|todo| {
+                    Some(crate::native_protocol::todo(
+                        field(todo, "content").as_str()?,
+                        todo_status(field(todo, "status")),
+                    ))
+                })
+                .take(crate::native_protocol::MAX_TODOS)
+                .collect();
+            snapshot.claude_tasks.clear();
+        }
+        "TaskUpdate" => {
+            let Some(at) = field(input, "taskId")
+                .as_str()
+                .and_then(|id| snapshot.claude_tasks.iter().position(|task| task == id))
+            else {
+                return;
+            };
+            if field(input, "status") == "deleted" {
+                snapshot.claude_tasks.remove(at);
+                if at < snapshot.todos.len() {
+                    snapshot.todos.remove(at);
+                }
+            } else if let Some(todo) = snapshot.todos.get_mut(at) {
+                let text = field(input, "subject")
+                    .as_str()
+                    .unwrap_or(&todo.text)
+                    .to_owned();
+                let status = if input.get("status").is_some() {
+                    todo_status(field(input, "status"))
+                } else {
+                    todo.status
+                };
+                *todo = crate::native_protocol::todo(&text, status);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A task `TaskCreate` made, added to the plan drawer.
+fn claude_task_created(snapshot: &mut NativeSessionSnapshot, result: &Value) {
+    let task = field(result, "task");
+    let (Some(id), Some(subject)) = (field(task, "id").as_str(), field(task, "subject").as_str())
+    else {
+        return;
+    };
+    // Tasks only join a list the task tools made, not one TodoWrite wrote.
+    if snapshot.claude_tasks.len() != snapshot.todos.len() {
+        snapshot.todos.clear();
+        snapshot.claude_tasks.clear();
+    }
+    if !snapshot.claude_tasks.iter().any(|task| task == id)
+        && snapshot.todos.len() < crate::native_protocol::MAX_TODOS
+    {
+        snapshot.claude_tasks.push(id.to_owned());
+        snapshot.todos.push(crate::native_protocol::todo(
+            subject,
+            NativeTodoStatus::Pending,
+        ));
+    }
+}
+
+fn todo_status(status: &Value) -> NativeTodoStatus {
+    match status.as_str() {
+        Some("in_progress") => NativeTodoStatus::InProgress,
+        Some("completed") => NativeTodoStatus::Completed,
+        _ => NativeTodoStatus::Pending,
     }
 }
 

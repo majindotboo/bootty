@@ -60,6 +60,8 @@ pub(super) struct NativeRequestResponse {
     pub target: CommandTarget,
     pub operation: NativeRequestOperation,
     pub arguments: Vec<String>,
+    /// A plan to carry out in a new conversation instead of this one.
+    pub implement_elsewhere: Option<String>,
 }
 
 /// A typed answer. A secret stays on one line, the only field that can mask it; other answers
@@ -101,12 +103,16 @@ impl AnswerField {
 
 pub(super) struct NativeRequestView {
     target: CommandTarget,
+    /// The provider runs on this computer, so it can read files given with answers.
+    local: bool,
     requests: Vec<NativeAgentRequest>,
     provider_enabled: bool,
     pending: BTreeSet<String>,
     answers: BTreeMap<(String, String), AnswerField>,
     selected_answers: BTreeMap<(String, String), BTreeSet<String>>,
     answer_subscriptions: BTreeMap<(String, String), Subscription>,
+    /// Files given with an answer; the provider reads them by their paths.
+    answer_files: BTreeMap<(String, String), Vec<std::path::PathBuf>>,
     editors: BTreeMap<String, Entity<TextareaState>>,
     editor_subscriptions: BTreeMap<String, Subscription>,
     /// What each file-change approval would change: its `fileChange` input and diff rows.
@@ -125,15 +131,17 @@ pub(super) struct NativeRequestView {
 }
 
 impl NativeRequestView {
-    pub(super) fn new(target: CommandTarget, cx: &Context<Self>) -> Self {
+    pub(super) fn new(target: CommandTarget, local: bool, cx: &Context<Self>) -> Self {
         Self {
             target,
+            local,
             requests: Vec::new(),
             provider_enabled: true,
             pending: BTreeSet::new(),
             answers: BTreeMap::new(),
             selected_answers: BTreeMap::new(),
             answer_subscriptions: BTreeMap::new(),
+            answer_files: BTreeMap::new(),
             editors: BTreeMap::new(),
             editor_subscriptions: BTreeMap::new(),
             diffs: BTreeMap::new(),
@@ -279,6 +287,96 @@ impl NativeRequestView {
                 target: target.clone(),
                 operation,
                 arguments,
+                implement_elsewhere: None,
+            });
+        }
+    }
+
+    /// The button for one decision, showing its key when the request is in front.
+    fn decision_button(
+        &self,
+        request: &NativeAgentRequest,
+        decision: bootty_agents::NativeApprovalDecision,
+        (primary, keys): (Option<bootty_agents::NativeApprovalDecision>, bool),
+        pending: bool,
+        cx: &Context<Self>,
+    ) -> Button {
+        use bootty_agents::NativeApprovalDecision as Decision;
+        let id = request.id.clone();
+        let target = self.target.clone();
+        Button::new(gpui_kit::SharedString::from(format!(
+            "{}:{id}",
+            decision.id()
+        )))
+        .debug_selector({
+            let id = id.clone();
+            move || format!("{}:{id}", decision.id())
+        })
+        .label(decision.label())
+        .small()
+        .when(
+            Some(decision) == primary,
+            gpui_kit::component::button::ButtonVariants::primary,
+        )
+        .when_some(
+            keys.then(|| match decision {
+                _ if Some(decision) == primary => Some("enter"),
+                Decision::Deny => Some("escape"),
+                _ => None,
+            })
+            .flatten()
+            .and_then(|key| gpui_kit::Keystroke::parse(key).ok()),
+            |button, key| button.child(gpui_kit::component::kbd::Kbd::new(key)),
+        )
+        .disabled(pending)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.request_command(
+                &target,
+                NativeRequestOperation::Approve,
+                vec![id.clone(), decision.id().to_owned()],
+                window,
+                cx,
+            );
+        }))
+    }
+
+    /// For Claude's plan, carrying it out in a new conversation instead.
+    fn implement_elsewhere_button(
+        request: &NativeAgentRequest,
+        pending: bool,
+        cx: &Context<Self>,
+    ) -> Option<Button> {
+        (request.method == "claude.permission"
+            && field(&request.parameters, "tool_name") == "ExitPlanMode")
+            .then(|| {
+                let id = request.id.clone();
+                let request = request.clone();
+                Button::new(gpui_kit::SharedString::from(format!("implement-new:{id}")))
+                    .debug_selector(move || format!("implement-new:{id}"))
+                    .label("In a new conversation")
+                    .small()
+                    .ghost()
+                    .disabled(pending)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.implement_elsewhere(&request, cx);
+                    }))
+            })
+    }
+
+    /// Declines Claude's plan here, saying why, and carries it out in a new conversation.
+    fn implement_elsewhere(&self, request: &NativeAgentRequest, cx: &mut Context<Self>) {
+        let Some(plan) = field(field(&request.parameters, "input"), "plan").as_str() else {
+            return;
+        };
+        if self.provider_enabled {
+            cx.emit(NativeRequestResponse {
+                target: self.target.clone(),
+                operation: NativeRequestOperation::Deny,
+                arguments: vec![
+                    request.id.clone(),
+                    "The plan is being carried out in a new conversation.".to_owned(),
+                ],
+                implement_elsewhere: Some(plan.to_owned()),
             });
         }
     }
@@ -295,6 +393,8 @@ impl NativeRequestView {
         self.answer_subscriptions
             .retain(|key, _| self.answers.contains_key(key));
         self.selected_answers
+            .retain(|key, _| self.answers.contains_key(key));
+        self.answer_files
             .retain(|key, _| self.answers.contains_key(key));
         self.sync_pi_answers(window, cx);
         for request in &self.requests {
@@ -567,7 +667,6 @@ impl NativeRequestView {
     ) -> gpui_kit::Div {
         use bootty_agents::NativeApprovalDecision as Decision;
         let id = request.id.clone();
-        let target = self.target.clone();
         let primary = primary_decision(request);
         let keys = self.keys_shown
             && self
@@ -576,49 +675,19 @@ impl NativeRequestView {
         let note = self.notes.get(&request.id).map(|(note, _)| note.clone());
         let noted = request.approval_response(Decision::Deny).is_some()
             && request.method != bootty_agents::APPLICATION_ACCESS_METHOD;
-        let buttons = div().flex().flex_wrap().gap_2().children(
-            Decision::ALL
-                .into_iter()
-                .filter(|decision| request.approval_response(*decision).is_some())
-                .map(|decision| {
-                    let id = id.clone();
-                    let target = target.clone();
-                    Button::new(gpui_kit::SharedString::from(format!(
-                        "{}:{id}",
-                        decision.id()
-                    )))
-                    .debug_selector({
-                        let id = id.clone();
-                        move || format!("{}:{id}", decision.id())
-                    })
-                    .label(decision.label())
-                    .small()
-                    .when(
-                        Some(decision) == primary,
-                        gpui_kit::component::button::ButtonVariants::primary,
-                    )
-                    .when_some(
-                        keys.then(|| match decision {
-                            _ if Some(decision) == primary => Some("enter"),
-                            Decision::Deny => Some("escape"),
-                            _ => None,
-                        })
-                        .flatten()
-                        .and_then(|key| gpui_kit::Keystroke::parse(key).ok()),
-                        |button, key| button.child(gpui_kit::component::kbd::Kbd::new(key)),
-                    )
-                    .disabled(pending)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.request_command(
-                            &target,
-                            NativeRequestOperation::Approve,
-                            vec![id.clone(), decision.id().to_owned()],
-                            window,
-                            cx,
-                        );
-                    }))
-                }),
-        );
+        let buttons = div()
+            .flex()
+            .flex_wrap()
+            .gap_2()
+            .children(
+                Decision::ALL
+                    .into_iter()
+                    .filter(|decision| request.approval_response(*decision).is_some())
+                    .map(|decision| {
+                        self.decision_button(request, decision, (primary, keys), pending, cx)
+                    }),
+            )
+            .children(Self::implement_elsewhere_button(request, pending, cx));
         let opener = id.clone();
         div()
             .flex()
@@ -790,7 +859,7 @@ impl NativeRequestView {
                     .cloned()
                     .collect::<Vec<_>>();
                 if let Some(answer) = self.answers.get(&state_key) {
-                    let value = answer.value(cx);
+                    let value = self.answer_with_files(&state_key, answer.value(cx));
                     if !value.trim().is_empty() {
                         selected.push(value);
                     }
@@ -818,8 +887,9 @@ impl NativeRequestView {
             .answers
             .iter()
             .filter(|((request_id, _), _)| request_id == id)
-            .map(|((_, question_id), answer)| {
-                (question_id.clone(), json!({"answers":[answer.value(cx)]}))
+            .map(|(key, answer)| {
+                let value = self.answer_with_files(key, answer.value(cx));
+                (key.1.clone(), json!({"answers":[value]}))
             })
             .collect::<serde_json::Map<_, _>>();
         self.request_command(
@@ -858,9 +928,67 @@ impl NativeRequestView {
             .get(&key)
             .is_some_and(|selected| !selected.is_empty())
             || self
+                .answer_files
+                .get(&key)
+                .is_some_and(|files| !files.is_empty())
+            || self
                 .answers
                 .get(&key)
                 .is_some_and(|answer| !answer.value(cx).trim().is_empty())
+    }
+
+    /// The typed answer to a question with the files given with it, one line each by path, the
+    /// way providers' question answers take files.
+    fn answer_with_files(&self, key: &(String, String), typed: String) -> String {
+        let files = self
+            .answer_files
+            .get(key)
+            .into_iter()
+            .flatten()
+            .map(|path| {
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                format!("Attached file \"{name}\": {:?}", path.display().to_string())
+            });
+        std::iter::once(typed)
+            .filter(|typed| !typed.trim().is_empty())
+            .chain(files)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Gives files with an answer, at most eight, each once.
+    fn attach_answer_files(
+        &mut self,
+        key: &(String, String),
+        paths: impl IntoIterator<Item = std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.answers.contains_key(key) {
+            return;
+        }
+        let files = self.answer_files.entry(key.clone()).or_default();
+        for path in paths {
+            if path.is_absolute() && !files.contains(&path) && files.len() < 8 {
+                files.push(path);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Lets the person choose files to give with an answer.
+    fn choose_answer_files(key: (String, String), window: &Window, cx: &Context<Self>) {
+        let chosen = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = chosen.await {
+                _ = this.update(cx, |this, cx| this.attach_answer_files(&key, paths, cx));
+            }
+        })
+        .detach();
     }
 
     fn all_answered(&self, request: &NativeAgentRequest, cx: &App) -> bool {
@@ -1345,7 +1473,88 @@ impl NativeRequestView {
                         pending,
                     )),
             )
+            .when(self.local, |row| {
+                row.child(self.render_answer_files(
+                    &(request.id.clone(), question_id.to_owned()),
+                    pending,
+                    cx,
+                ))
+            })
             .into_any_element()
+    }
+
+    /// The files given with an answer, each removable, and a way to give more. Files dropped
+    /// on the question join them.
+    fn render_answer_files(
+        &self,
+        key: &(String, String),
+        pending: bool,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let files = self.answer_files.get(key).cloned().unwrap_or_default();
+        let selector = format!("question-files:{}:{}", key.0, key.1);
+        let (drop_key, choose_key) = (key.clone(), key.clone());
+        div()
+            .id(gpui_kit::SharedString::from(selector.clone()))
+            .debug_selector(move || selector)
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_1()
+            .on_drop(
+                cx.listener(move |this, paths: &gpui_kit::ExternalPaths, _, cx| {
+                    this.attach_answer_files(&drop_key, paths.paths().iter().cloned(), cx);
+                }),
+            )
+            .children(files.into_iter().map(|path| {
+                let name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let remove_key = key.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_xs()
+                    .child(name.clone())
+                    .child(
+                        Button::new(gpui_kit::SharedString::from(format!(
+                            "remove-answer-file:{}",
+                            path.display()
+                        )))
+                        .icon(gpui_kit::component::IconName::Close)
+                        .xsmall()
+                        .ghost()
+                        .accessibility_label(format!("Remove {name}"))
+                        .disabled(pending)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if let Some(files) = this.answer_files.get_mut(&remove_key) {
+                                files.retain(|file| *file != path);
+                            }
+                            cx.notify();
+                        })),
+                    )
+            }))
+            .child(
+                Button::new(gpui_kit::SharedString::from(format!(
+                    "attach-answer-files:{}:{}",
+                    key.0, key.1
+                )))
+                .label("Attach files…")
+                .xsmall()
+                .ghost()
+                .disabled(pending)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    _ = this;
+                    Self::choose_answer_files(choose_key.clone(), window, cx);
+                })),
+            )
     }
 }
 

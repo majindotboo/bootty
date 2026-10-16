@@ -8,9 +8,9 @@ use assert_fs::TempDir;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_agents::{
     AgentKind, MAX_NATIVE_PROMPT_IMAGE_BYTES, MAX_NATIVE_PROMPT_TEXT_BYTES, NativeAgentService,
-    NativeImageReference, NativePrompt, NativePromptImage, NativeSessionConfig,
-    NativeSessionStatus, NativeTurnOutcome, ToolBridge, ToolBridgeContext, ToolCapture,
-    ToolCapturedCommand, ToolPolicy, ToolScope,
+    NativeAttachmentKind, NativeAttachmentReference, NativeImageReference, NativePrompt,
+    NativePromptImage, NativeSessionConfig, NativeSessionStatus, NativeTurnOutcome, ToolBridge,
+    ToolBridgeContext, ToolCapture, ToolCapturedCommand, ToolPolicy, ToolScope,
 };
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
@@ -599,6 +599,12 @@ fn exact_attached_computer_results_cross_the_control_budget_without_persisting_p
     service.checkpoint().unwrap();
     let journal = fs::read_to_string(root.path().join("native.json")).unwrap();
     assert!(!journal.contains(&STANDARD.encode(bytes)));
+    // The tool's row shows the capture from a file beside the conversation's attachments.
+    let capture = tool_image(&service, &record.target()).expect("the tool row shows its image");
+    assert_eq!(
+        (capture.pixel_width, capture.pixel_height),
+        (Some(1), Some(1))
+    );
     assert_eq!(
         session.refresh_history().unwrap().status,
         NativeSessionStatus::Idle
@@ -620,6 +626,7 @@ fn exact_attached_computer_results_cross_the_control_budget_without_persisting_p
     assert_eq!(resumed.task_identity.as_deref(), Some("task"));
     assert_eq!(resumed.snapshot.status, NativeSessionStatus::Idle);
     assert_eq!(resumed.snapshot.first_turn, None);
+    assert_eq!(tool_image(&restored, &resumed.target()), Some(capture));
     if provider == AgentKind::Pi {
         assert_eq!(
             resumed
@@ -637,6 +644,24 @@ fn exact_attached_computer_results_cross_the_control_budget_without_persisting_p
         );
     }
     restored.shutdown().unwrap();
+}
+
+/// The image on the conversation's tool row, when it opens as a preview.
+fn tool_image(
+    service: &NativeAgentService,
+    target: &CommandTarget,
+) -> Option<NativeAttachmentReference> {
+    service
+        .sessions()
+        .into_iter()
+        .find(|record| record.target() == *target)?
+        .snapshot
+        .transcript
+        .into_iter()
+        .filter(|item| item.tool.is_some())
+        .flat_map(|item| item.attachments)
+        .find(|reference| reference.kind == NativeAttachmentKind::Image)
+        .filter(|image| service.preview_attachment(target, &image.id).is_ok())
 }
 
 #[rstest]

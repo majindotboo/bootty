@@ -87,3 +87,45 @@ fn missing_deleted_and_cross_hunk_selections_are_rejected() {
             .patch_unavailable
     );
 }
+
+/// A Git diff of several files splits into each file's patch: a quoted path, a deleted file,
+/// and a removed line that starts like a header all keep their own file.
+#[test]
+fn git_diffs_split_into_each_files_patch() {
+    let contents = "\
+diff --git a/src/main.rs b/src/main.rs
+index 1..2 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,2 +1,2 @@
+ fn main() {
+--- old comment
++    run();
+diff --git \"a/my notes.md\" \"b/my notes.md\"
+--- \"a/my notes.md\"
++++ \"b/my notes.md\"
+@@ -0,0 +1 @@
++Hello
+diff --git a/gone.rs b/gone.rs
+deleted file mode 100644
+--- a/gone.rs
++++ /dev/null
+@@ -1 +0,0 @@
+-fn gone() {}
+";
+    let files = FileDiff::parse_all(contents);
+    assert_eq!(
+        files
+            .iter()
+            .map(|file| (file.path.as_str(), file.hunks.len()))
+            .collect::<Vec<_>>(),
+        [("src/main.rs", 1), ("my notes.md", 1), ("gone.rs", 1)]
+    );
+    let removed = DiffAnchor {
+        path: "src/main.rs".into(),
+        side: DiffSide::Left,
+        start_line: 2,
+        line: 2,
+    };
+    assert_eq!(files[0].quote(&removed).as_deref(), Ok("-- old comment"));
+}

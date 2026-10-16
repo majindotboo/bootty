@@ -13,6 +13,7 @@ getrandom.workspace = true
 png.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 markdown.workspace = true
+num-traits.workspace = true
 bootty-computer = { path = "../bootty-computer" }
 bootty-control = { path = "../bootty-control" }
 bootty-host = { path = "../bootty-host" }

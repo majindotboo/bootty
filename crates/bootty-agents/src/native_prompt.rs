@@ -548,8 +548,43 @@ impl NativePrompt {
     }
 
     pub(crate) fn compact_instructions(&self) -> Result<Option<String>, String> {
+        self.command_arguments("/compact")
+    }
+
+    /// A command of Codex's terminal app the message starts with, which its app server can't run
+    /// and its model would only read as words.
+    pub(crate) fn codex_terminal_command(&self) -> Option<&str> {
+        const TERMINAL: [&str; 19] = [
+            "approvals",
+            "archive",
+            "clean",
+            "clear",
+            "delete",
+            "exit",
+            "fast",
+            "feedback",
+            "fork",
+            "init",
+            "logout",
+            "mcp",
+            "mention",
+            "permissions",
+            "ps",
+            "quit",
+            "resume",
+            "skills",
+            "status",
+        ];
+        let command = self.authored_text().trim().strip_prefix('/')?;
+        let name = command.split_whitespace().next()?;
+        TERMINAL.contains(&name).then_some(name)
+    }
+
+    /// The words after a provider command such as `/review`, when the message is that command
+    /// alone. A command can't carry references.
+    pub(crate) fn command_arguments(&self, command: &str) -> Result<Option<String>, String> {
         let text = self.authored_text().trim();
-        let Some(rest) = text.strip_prefix("/compact") else {
+        let Some(rest) = text.strip_prefix(command) else {
             return Ok(None);
         };
         if !rest.is_empty() && !rest.starts_with(char::is_whitespace) {
@@ -562,7 +597,9 @@ impl NativePrompt {
             || !self.applications.is_empty()
             || !self.provider_mentions.is_empty()
         {
-            return Err("Send references in a message before compacting the conversation".into());
+            return Err(format!(
+                "Send references in a message of their own, not with {command}"
+            ));
         }
         Ok(Some(rest.trim().into()))
     }

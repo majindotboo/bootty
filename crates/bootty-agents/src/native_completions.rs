@@ -139,10 +139,12 @@ impl NativeAgentSession {
                 if catalog.goals
                     && let Some(thread) = &thread
                 {
-                    catalog.goal = self
+                    let goal = self
                         .rpc("thread/goal/get", json!({"threadId":thread}))
                         .ok()
-                        .and_then(|response| text(field(field(&response, "goal"), "objective")));
+                        .and_then(|response| crate::NativeGoal::codex(field(&response, "goal")));
+                    catalog.goal = goal.as_ref().map(|goal| goal.objective.clone());
+                    self.set_goal_snapshot(goal);
                 }
                 bounded(&catalog.options)?;
                 catalog
@@ -169,14 +171,11 @@ impl NativeAgentSession {
             .ok_or("This conversation has no provider thread")?;
         let objective = objective.trim();
         let result = if objective.is_empty() {
-            self.rpc(
-                "thread/goal/clear",
-                json!({"threadId":thread,"origin":"user"}),
-            )
+            self.rpc("thread/goal/clear", json!({"threadId":thread}))
         } else {
             self.rpc(
                 "thread/goal/set",
-                json!({"threadId":thread,"origin":"user","objective":objective}),
+                json!({"threadId":thread,"objective":objective,"status":"active"}),
             )
         }
         .map_err(|_| "Couldn’t update this conversation’s goal. Try again.".to_owned())?;
@@ -184,11 +183,45 @@ impl NativeAgentSession {
             if !field(&result, "cleared").is_boolean() {
                 return Err("The provider did not clear the goal".into());
             }
+            self.set_goal_snapshot(None);
         } else if field(field(&result, "goal"), "objective") != objective {
             return Err("The provider did not confirm the requested goal".into());
+        } else {
+            self.set_goal_snapshot(crate::NativeGoal::codex(field(&result, "goal")));
         }
         *lock(&self.completion_catalog) = None;
         Ok(())
+    }
+
+    /// Pauses the goal, or has Codex work on it again.
+    /// # Errors
+    /// Returns a conversation without a goal, a stopped session, or provider rejection.
+    pub fn set_goal_active(&self, active: bool) -> Result<(), String> {
+        let snapshot = self.snapshot();
+        let (Some(thread), Some(_)) = (snapshot.session_id, snapshot.goal) else {
+            return Err("This conversation has no goal".into());
+        };
+        let status = if active { "active" } else { "paused" };
+        let result = self
+            .rpc(
+                "thread/goal/set",
+                json!({"threadId":thread,"status":status}),
+            )
+            .map_err(|_| "Couldn’t change this conversation’s goal. Try again.".to_owned())?;
+        let goal = crate::NativeGoal::codex(field(&result, "goal"))
+            .ok_or("The provider did not confirm the goal")?;
+        self.set_goal_snapshot(Some(goal));
+        Ok(())
+    }
+
+    fn set_goal_snapshot(&self, goal: Option<crate::NativeGoal>) {
+        let mut snapshot = lock(&self.snapshot);
+        if snapshot.goal != goal {
+            snapshot.goal = goal;
+            snapshot.changed();
+        }
+        drop(snapshot);
+        crate::native_session::publish_change(&self.change_handler);
     }
 
     fn append_installed_apps(&self, catalog: &mut NativeCompletionCatalog, thread: Option<&str>) {
@@ -473,16 +506,28 @@ fn decode_codex(value: &Value, cwd: &str) -> Result<NativeCompletionCatalog, Str
         .as_array()
         .ok_or("Codex returned no skill catalog")?;
     bounded(entries)?;
-    let mut options = vec![NativeCompletionOption {
-        icon_url: None,
-        kind: NativeCompletionKind::Command,
-        name: "compact".into(),
-        display_name: "compact".into(),
-        description: Some("Compact this conversation".into()),
-        argument_hint: None,
-        path: None,
-        scope: None,
-    }];
+    let mut options = vec![
+        NativeCompletionOption {
+            icon_url: None,
+            kind: NativeCompletionKind::Command,
+            name: "compact".into(),
+            display_name: "compact".into(),
+            description: Some("Compact this conversation".into()),
+            argument_hint: None,
+            path: None,
+            scope: None,
+        },
+        NativeCompletionOption {
+            icon_url: None,
+            kind: NativeCompletionKind::Command,
+            name: "review".into(),
+            display_name: "review".into(),
+            description: Some("Review the uncommitted changes".into()),
+            argument_hint: Some("Optional instructions".into()),
+            path: None,
+            scope: None,
+        },
+    ];
     for entry in entries.iter().filter(|entry| field(entry, "cwd") == cwd) {
         let skills = field(entry, "skills")
             .as_array()

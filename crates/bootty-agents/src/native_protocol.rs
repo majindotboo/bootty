@@ -124,6 +124,9 @@ pub struct NativeTranscriptItem {
     /// starting the next one.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub steered: bool,
+    /// The tokens its turn used, on a turn's last reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::NativeTurnUsage>,
 }
 
 /// One step of the plan the agent is following.
@@ -143,7 +146,7 @@ pub enum NativeTodoStatus {
 
 /// Deliberate limit: a plan keeps this many steps of at most `MAX_TODO_BYTES` each, so a runaway
 /// plan can't grow the catalog. Raise it if real plans hit it.
-const MAX_TODOS: usize = 64;
+pub const MAX_TODOS: usize = 64;
 const MAX_TODO_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -456,6 +459,13 @@ pub struct NativeSessionSnapshot {
     /// The plan the current turn reported, step by step. A new turn starts without one.
     #[serde(default)]
     pub todos: Vec<NativeTodo>,
+    /// The Codex thread's goal, as it last reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::NativeGoal>,
+    /// The account's usage limits, as the provider reported them while Bootty watched; a
+    /// restart forgets them rather than show old limits as current.
+    #[serde(skip)]
+    pub rate_limits: Option<crate::NativeRateLimits>,
     pub requests: Vec<NativeAgentRequest>,
     pub usage: Option<Value>,
     pub error: Option<String>,
@@ -491,6 +501,24 @@ pub struct NativeSessionSnapshot {
     pub(crate) realtime_epoch: u64,
     #[serde(skip)]
     message_times: (Option<i64>, Option<i64>),
+    /// Images tools returned that the next commit writes beside the conversation's attachments.
+    #[serde(skip)]
+    pub(crate) tool_images: Vec<crate::native_tool_images::PendingToolImage>,
+    /// The running turn's tokens so far.
+    #[serde(skip)]
+    pub(crate) turn_usage: Option<crate::NativeTurnUsage>,
+    /// Claude's task identities, one for each of `todos` its task tools made.
+    #[serde(skip)]
+    pub(crate) claude_tasks: Vec<String>,
+    /// The row of a compaction Claude or Pi is running.
+    #[serde(skip)]
+    compaction: Option<String>,
+    /// The row of a review Codex is running.
+    #[serde(skip)]
+    review: Option<String>,
+    /// Codex's thread totals before the running turn, and that turn.
+    #[serde(skip)]
+    pub(crate) codex_usage_before: Option<(String, crate::NativeTurnUsage)>,
 }
 
 /// A pending request stays whole, because an approval answers with its exact input. The budget
@@ -716,6 +744,8 @@ impl NativeSessionSnapshot {
             evicted: 0,
             transcript: Vec::new(),
             todos: Vec::new(),
+            goal: None,
+            rate_limits: None,
             requests: Vec::new(),
             usage: None,
             error: None,
@@ -733,6 +763,12 @@ impl NativeSessionSnapshot {
             realtime: RealtimeCall::None,
             realtime_epoch: 0,
             message_times: (None, None),
+            tool_images: Vec::new(),
+            turn_usage: None,
+            claude_tasks: Vec::new(),
+            compaction: None,
+            review: None,
+            codex_usage_before: None,
         }
     }
 
@@ -862,6 +898,7 @@ impl NativeSessionSnapshot {
                 applications: Vec::new(),
                 questions,
                 steered: false,
+                usage: None,
             });
         }
         self.trim_transcript();
@@ -970,6 +1007,56 @@ impl NativeSessionSnapshot {
         self.trim_transcript();
     }
 
+    /// Shows a compaction Claude or Pi started, once, while it runs.
+    pub(crate) fn start_compaction(&mut self) {
+        if self.compaction.is_some() {
+            return;
+        }
+        let id = format!("compaction-{}", self.revision);
+        self.tool_message(
+            id.clone(),
+            Some("contextCompaction"),
+            None,
+            String::new(),
+            NativeToolStatus::Running,
+        );
+        self.compaction = Some(id);
+    }
+
+    /// Ends the running compaction, or shows one that ended without a start. `tokens` are the
+    /// context's size before and after, when the provider says.
+    pub(crate) fn finish_compaction(
+        &mut self,
+        status: NativeToolStatus,
+        tokens: Option<(u64, u64)>,
+    ) {
+        let id = self
+            .compaction
+            .take()
+            .unwrap_or_else(|| format!("compaction-{}", self.revision));
+        self.tool_message(
+            id,
+            Some("contextCompaction"),
+            tokens.map(|(before, after)| {
+                serde_json::json!({"preTokens": before, "postTokens": after}).to_string()
+            }),
+            String::new(),
+            status,
+        );
+    }
+
+    /// Drops a compaction that turned out to have nothing to do.
+    pub(crate) fn skip_compaction(&mut self) {
+        if let Some(id) = self.compaction.take() {
+            self.transcript.retain(|item| item.id != id);
+        }
+    }
+
+    /// Whether a compaction Claude or Pi started is still running.
+    pub(crate) const fn compacting(&self) -> bool {
+        self.compaction.is_some()
+    }
+
     pub(crate) fn restore_image_references(&mut self, history: &[NativeTranscriptItem]) {
         for item in &mut self.transcript {
             if let Some(saved) = history
@@ -986,8 +1073,12 @@ impl NativeSessionSnapshot {
                     item.text.clone_from(&saved.text);
                 }
                 item.images.clone_from(&saved.images);
-                item.attachments.clone_from(&saved.attachments);
+                // A replayed tool result already found its images; older catalogs lack them.
+                if !saved.attachments.is_empty() {
+                    item.attachments.clone_from(&saved.attachments);
+                }
                 item.citations.clone_from(&saved.citations);
+                item.usage = item.usage.or(saved.usage);
                 item.applications.clone_from(&saved.applications);
                 item.created_at = item.created_at.or(saved.created_at);
                 item.updated_at = saved.updated_at.or(item.updated_at);
@@ -1076,6 +1167,9 @@ impl NativeSessionSnapshot {
             self.requests.retain(|request| request.wire_id != *id);
             self.settle_waiting();
             self.changed();
+            return;
+        }
+        if self.codex_goal(value) || self.codex_rate_limits(value) {
             return;
         }
         let accepted = self.accepts(value);
@@ -1336,6 +1430,8 @@ impl NativeSessionSnapshot {
 
     fn complete_turn(&mut self, params: &Value) {
         self.reasoning_summaries.clear();
+        self.review = None;
+        self.settle_turn_usage();
         if let Some(id) = self.turn_id.clone() {
             let outcome = match field(field(params, "turn"), "status").as_str() {
                 Some("completed") => Some(NativeTurnOutcome::Succeeded),
@@ -1396,6 +1492,55 @@ impl NativeSessionSnapshot {
         }
     }
 
+    /// Codex's reviewer shows as one row while it works; its review arrives as a reply.
+    fn codex_review(&mut self, entered: bool, id: &str, item: &Value) {
+        if entered {
+            let row = format!("review-{id}");
+            self.tool_message(
+                row.clone(),
+                Some("review"),
+                Some(serde_json::json!({"review": field(item, "review")}).to_string()),
+                String::new(),
+                NativeToolStatus::Running,
+            );
+            self.review = Some(row);
+        } else {
+            let row = self
+                .review
+                .clone()
+                .unwrap_or_else(|| format!("review-{id}"));
+            self.tool_message(
+                row,
+                Some("review"),
+                None,
+                String::new(),
+                NativeToolStatus::Completed,
+            );
+        }
+    }
+
+    /// An MCP or dynamic tool call: its output, or the error that stopped it, and any images it
+    /// returned.
+    fn codex_tool_call(&mut self, id: &str, item: &Value, complete: bool) {
+        let content = if field(item, "type") == "mcpToolCall" {
+            field(field(item, "result"), "content")
+        } else {
+            field(item, "contentItems")
+        };
+        let output = field(field(item, "error"), "message")
+            .as_str()
+            .filter(|_| field(item, "type") == "mcpToolCall")
+            .map_or_else(|| content_text(content), str::to_owned);
+        self.tool_message(
+            id.to_owned(),
+            field(item, "tool").as_str(),
+            item.get("arguments").map(Value::to_string),
+            output,
+            codex_tool_status(item, complete),
+        );
+        self.tool_images(id, content);
+    }
+
     fn codex_item(&mut self, item: &Value, complete: bool) {
         let id = field(item, "id").as_str().unwrap_or("item").to_owned();
         match field(item, "type").as_str().unwrap_or_default() {
@@ -1435,6 +1580,9 @@ impl NativeSessionSnapshot {
                 String::new(),
                 codex_tool_status(item, complete),
             ),
+            kind @ ("enteredReviewMode" | "exitedReviewMode") => {
+                self.codex_review(kind == "enteredReviewMode", &id, item);
+            }
             "contextCompaction" => self.tool_message(
                 id,
                 Some("contextCompaction"),
@@ -1475,24 +1623,7 @@ impl NativeSessionSnapshot {
                     codex_tool_status(item, complete),
                 );
             }
-            "mcpToolCall" | "dynamicToolCall" => {
-                let output = if field(item, "type") == "mcpToolCall" {
-                    let error = field(field(item, "error"), "message").as_str();
-                    error.map_or_else(
-                        || content_text(field(field(item, "result"), "content")),
-                        str::to_owned,
-                    )
-                } else {
-                    content_text(field(item, "contentItems"))
-                };
-                self.tool_message(
-                    id,
-                    field(item, "tool").as_str(),
-                    item.get("arguments").map(Value::to_string),
-                    output,
-                    codex_tool_status(item, complete),
-                );
-            }
+            "mcpToolCall" | "dynamicToolCall" => self.codex_tool_call(&id, item, complete),
             _ => {}
         }
     }
@@ -1559,6 +1690,7 @@ impl NativeSessionSnapshot {
             "thread/tokenUsage/updated" => {
                 let usage = field(params, "tokenUsage");
                 if usage.to_string().len() <= 16 * 1024 {
+                    self.codex_turn_usage(field(params, "turnId").as_str(), usage);
                     self.usage = Some(usage.clone());
                 }
             }
@@ -1582,22 +1714,26 @@ fn codex_todos(plan: &Value) -> Vec<NativeTodo> {
         .into_iter()
         .flatten()
         .filter_map(|step| {
-            let text = field(step, "step").as_str()?;
             let status = match field(step, "status").as_str() {
                 Some("inProgress") => NativeTodoStatus::InProgress,
                 Some("completed") => NativeTodoStatus::Completed,
                 _ => NativeTodoStatus::Pending,
             };
-            Some(NativeTodo {
-                text: text
-                    .get(..text.floor_char_boundary(MAX_TODO_BYTES))
-                    .unwrap_or_default()
-                    .to_owned(),
-                status,
-            })
+            Some(todo(field(step, "step").as_str()?, status))
         })
         .take(MAX_TODOS)
         .collect()
+}
+
+/// A plan step, its text cut to `MAX_TODO_BYTES`.
+pub fn todo(text: &str, status: NativeTodoStatus) -> NativeTodo {
+    NativeTodo {
+        text: text
+            .get(..text.floor_char_boundary(MAX_TODO_BYTES))
+            .unwrap_or_default()
+            .to_owned(),
+        status,
+    }
 }
 
 fn joined_strings(parts: &Value) -> String {

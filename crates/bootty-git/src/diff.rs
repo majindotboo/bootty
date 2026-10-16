@@ -136,6 +136,51 @@ impl FileDiff {
         Ok(result)
     }
 
+    /// Each file's patch in a Git diff of several. Files start at their `diff --git` line, which
+    /// no hunk line can look like; a file whose patch doesn't parse is left out.
+    #[must_use]
+    pub fn parse_all(contents: &str) -> Vec<Self> {
+        let mut starts = contents
+            .match_indices("diff --git ")
+            .map(|(at, _)| at)
+            .filter(|at| {
+                *at == 0
+                    || contents
+                        .get(..*at)
+                        .is_some_and(|before| before.ends_with('\n'))
+            })
+            .collect::<Vec<_>>();
+        if starts.is_empty() {
+            starts.push(0);
+        }
+        starts
+            .iter()
+            .enumerate()
+            .filter_map(|(index, start)| {
+                let end = starts
+                    .get(index.saturating_add(1))
+                    .copied()
+                    .unwrap_or(contents.len());
+                let section = contents.get(*start..end)?;
+                let header = section.split("\n@@ ").next().unwrap_or(section);
+                let named = |prefix: &str| {
+                    header
+                        .lines()
+                        .find_map(|line| line.strip_prefix(prefix))
+                        .filter(|path| *path != "/dev/null")
+                };
+                let path = named("+++ ").or_else(|| named("--- "))?;
+                let path = serde_json::from_str::<String>(path).unwrap_or_else(|_| path.to_owned());
+                let path = path
+                    .strip_prefix("b/")
+                    .or_else(|| path.strip_prefix("a/"))
+                    .unwrap_or(&path)
+                    .to_owned();
+                Self::parse(path, None, Some(section)).ok()
+            })
+            .collect()
+    }
+
     /// Return exact selected source text, refusing a stale, missing or cross-hunk anchor.
     /// # Errors
     /// The selection must name consecutive lines on one side of one current hunk.

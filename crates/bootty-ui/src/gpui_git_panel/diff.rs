@@ -71,6 +71,14 @@ fn component_files(file: &FileDiff) -> Result<Vec<DiffFile>, String> {
     DiffFile::parse(&patch).map_err(|error| error.to_string())
 }
 
+/// A comment on lines of a local diff, for the session's conversation.
+#[derive(Clone, Debug)]
+pub struct DiffComment {
+    pub anchor: DiffAnchor,
+    pub quote: String,
+    pub body: String,
+}
+
 pub(super) struct DraftCodeComment {
     pub target: CommandTarget,
     pub number: u32,
@@ -86,6 +94,8 @@ pub struct GitDiffPanel {
     source: Option<String>,
     notice: Option<String>,
     review: Option<ReviewDiff>,
+    /// The shown files' patches outside a review, to quote comments for the conversation.
+    local: Vec<FileDiff>,
     selection: Option<(DiffAnchor, String)>,
     editing: bool,
     submitting: bool,
@@ -132,6 +142,7 @@ impl GitDiffPanel {
             source: None,
             notice: None,
             review: None,
+            local: Vec::new(),
             selection: None,
             editing: false,
             submitting: false,
@@ -157,6 +168,7 @@ impl GitDiffPanel {
         self.title = Some(title);
         self.source = None;
         self.review = None;
+        self.local.clear();
         self.selection = None;
         self.notice = files.as_ref().err().cloned();
         self.diff
@@ -191,6 +203,7 @@ impl GitDiffPanel {
                 }
             });
         if self.replace_files(title, files, cx) {
+            self.local = FileDiff::parse_all(&source);
             self.source = Some(source);
         }
     }
@@ -221,14 +234,22 @@ impl GitDiffPanel {
         cx: &mut Context<Self>,
     ) {
         let prepared = PreparedReviewDiff::from_diff(file);
-        self.replace_files(prepared.file.path, prepared.files, cx);
+        if self.replace_files(prepared.file.path.clone(), prepared.files, cx) {
+            self.local = vec![prepared.file];
+        }
     }
 
     fn selection_for(&self, range: &DiffLineRange) -> Option<(DiffAnchor, String)> {
         if range.side() != range.end_side() {
             return None;
         }
-        let review = self.review.as_ref()?;
+        let file = match &self.review {
+            Some(review) => &review.file,
+            None => self
+                .local
+                .iter()
+                .find(|file| file.path == range.path().as_ref())?,
+        };
         let side = match range.side() {
             ViewSide::Original => DiffSide::Left,
             ViewSide::Modified => DiffSide::Right,
@@ -239,7 +260,7 @@ impl GitDiffPanel {
             start_line: u32::try_from(range.start().min(range.end())).ok()?,
             line: u32::try_from(range.start().max(range.end())).ok()?,
         };
-        let quote = review.file.quote(&anchor).ok()?;
+        let quote = file.quote(&anchor).ok()?;
         Some((anchor, quote))
     }
 
@@ -266,7 +287,20 @@ impl GitDiffPanel {
         if body.trim().is_empty() || body.len() > 65536 {
             return;
         }
-        let Some(review) = &self.review else { return };
+        // Outside a review, the comment goes to the session's conversation.
+        let Some(review) = &self.review else {
+            cx.emit(DiffComment {
+                anchor,
+                quote,
+                body,
+            });
+            self.editing = false;
+            self.selection = None;
+            self.diff
+                .update(cx, |diff, cx| diff.set_selected_lines(None, cx));
+            cx.notify();
+            return;
+        };
         cx.emit(DraftCodeComment {
             target: review.target.clone(),
             number: review.number,
@@ -375,7 +409,11 @@ impl GitDiffPanel {
                                 )
                                 .child(
                                     Button::new("save-code-comment")
-                                        .label("Add to review")
+                                        .label(if self.review.is_some() {
+                                            "Add to review"
+                                        } else {
+                                            "Add to conversation"
+                                        })
                                         .small()
                                         .disabled(
                                             self.submitting
@@ -393,6 +431,7 @@ impl GitDiffPanel {
 
 impl EventEmitter<PanelEvent> for GitDiffPanel {}
 impl EventEmitter<DraftCodeComment> for GitDiffPanel {}
+impl EventEmitter<DiffComment> for GitDiffPanel {}
 impl Focusable for GitDiffPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         self.diff.focus_handle(cx)

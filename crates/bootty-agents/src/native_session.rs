@@ -982,6 +982,45 @@ impl NativeAgentSession {
         prompt: &crate::NativePrompt,
         selection: Option<&crate::NativeModelSelection>,
     ) -> Result<(), String> {
+        let thread = self
+            .snapshot()
+            .session_id
+            .ok_or("Agent has no native thread")?;
+        if let Some(command) = prompt.codex_terminal_command() {
+            return Err(format!(
+                "/{command} runs only in Codex's terminal app, so Bootty doesn't send it"
+            ));
+        }
+        // `/review` runs Codex's reviewer: on the uncommitted changes, or as its words ask.
+        if let Some(instructions) = prompt.command_arguments("/review")? {
+            let target = if instructions.is_empty() {
+                json!({"type":"uncommittedChanges"})
+            } else {
+                json!({"type":"custom","instructions":instructions})
+            };
+            return self.start_codex_turn(
+                prompt,
+                "review/start",
+                json!({"threadId":thread,"delivery":"inline","target":target}),
+            );
+        }
+        let parameters = codex_turn_parameters(
+            &thread,
+            &prompt.codex_input()?,
+            selection,
+            self.config.fast_mode,
+            self.config.permissions,
+        );
+        self.start_codex_turn(prompt, "turn/start", parameters)
+    }
+
+    /// Shows `prompt` and starts the Codex turn `method` begins with `parameters`.
+    fn start_codex_turn(
+        &self,
+        prompt: &crate::NativePrompt,
+        method: &str,
+        parameters: Value,
+    ) -> Result<(), String> {
         let first_prompt = {
             let mut snapshot = lock(&self.snapshot);
             if snapshot.status != NativeSessionStatus::Idle {
@@ -1003,18 +1042,7 @@ impl NativeAgentSession {
             first_prompt
         };
         publish_change(&self.change_handler);
-        let id = self
-            .snapshot()
-            .session_id
-            .ok_or("Agent has no native thread")?;
-        let parameters = codex_turn_parameters(
-            &id,
-            &prompt.codex_input()?,
-            selection,
-            self.config.fast_mode,
-            self.config.permissions,
-        );
-        let result = self.rpc_prompt("turn/start", parameters, prompt.requires_large_envelope());
+        let result = self.rpc_prompt(method, parameters, prompt.requires_large_envelope());
         let result = result.and_then(|reply| {
             let turn = string(field(field(&reply, "turn"), "id"))
                 .filter(|id| !id.is_empty() && id.len() <= 8192)

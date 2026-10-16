@@ -136,7 +136,26 @@ reads each mentioned conversation's latest prompts and replies, oldest first, up
 written. Plan mode and conversation goals appear
 when advertised by that server. Claude always offers Plan mode, its own permission
 mode; approving Claude's plan leaves it. Goals use Codex's thread goal API; they
-are not added as prompt text. Sketch and skill recording are not supported here yet.
+are not added as prompt text. The composer drawer shows a conversation's goal with
+its state and the tokens it spent against any budget, follows Codex's changes to it,
+and pauses, resumes or removes it (`agents.native.goal-status`, `agents.native.goal`).
+The plan drawer also shows Claude's to-do list, from TodoWrite or its task tools.
+Compaction shows as a row for every provider: Claude's says how far it shrank the
+context, which the meter then reads, and Pi's own compactions show as they run. The
+context meter's menu compacts the conversation as `/compact` does. Codex's and
+Claude's usage limit reports show in the meter's tooltip; a turn a limit stopped says
+when it resets and can wait to send the turn again then. The sidebar's usage meter
+uses those reports while they are fresh, and asks `codexbar` otherwise.
+In Codex, `/review` runs its reviewer on the uncommitted changes, or with the words
+after it as instructions, and shows as a review row; commands only Codex's terminal
+app runs, such as `/init` or `/status`, are refused rather than sent to the model as
+words. A ready plan, Codex's or one Claude asks to carry out, can instead go to a new
+conversation in the same session with the same provider and settings; Claude's is
+then declined here with a note saying so. A question's answer can carry files, by
+drop or Attach files…, which go to a local provider as their paths. In the Changes
+diff, and in a conversation's file changes, selected lines take a comment that goes
+into the conversation's draft with the file, the lines and their text.
+Sketch and skill recording are not supported here yet.
 
 Session naming also updates the exact newly created conversation's tab title.
 Delayed names apply only while each captured title remains unchanged; sibling
@@ -154,6 +173,28 @@ conversation's sent messages, newest first, and Down goes forward again. A sent
 message's pencil brings it back to change and send again, with its attachments; its
 browser notes return as notes, screenshots included, while they're still saved, and
 otherwise their text returns with the message.
+Images a tool returns show under its row, open or folded. Any image opens in a
+viewer that fits it to the window; Ctrl or Command with the wheel, a pinch, `+`
+and `-` zoom, dragging or the wheel pans, a double click zooms in or back to fit,
+`0` fits, and the arrow keys step through the conversation's other images. A sent
+file opens with a click, and its menu shows it in the file manager. A reply with a
+markdown table offers Copy table, which copies every table as tab-separated cells.
+A turn's last reply shows the tokens the turn used, and its price when Claude or Pi
+reports one; the tooltip splits out cached input and reasoning.
+
+A prompt sent from the composer moves to the top of the transcript, with room kept
+below it for the reply; once the reply outgrows that room, or the transcript is
+scrolled, the transcript follows its end again.
+
+The terminal's find and copy mode keys act on a focused conversation. Find
+(Cmd+F, Ctrl+Shift+F elsewhere) highlights a query's matches across the shown
+messages, ignoring the case of ASCII letters; Enter and Shift+Enter step through them
+and Escape closes it. Copy mode (Cmd+Y, or the prefix and `[`) puts a cursor on the
+latest message, or adopts a pointer selection: `h` `j` `k` `l`, `w` `b` `e`, `0` `^` `$`,
+`gg` `G`, Ctrl+D and Ctrl+U move it, with counts and `f` `F` `t` `T` `;` `,`; `v`, `V`
+and Ctrl+V select by character, line or column, and `o` swaps the ends. `y` or Enter
+copies the selection, or the cursor's line, and leaves; `c` comments on a selection in
+one reply and `r` reacts to it; Escape clears the selection, then leaves.
 Choosing Agent in the split chooser creates its backend pane beside the captured
 parent, in the requested direction. The parent task and window stay unchanged.
 Interrupt cancels its current turn, as does Escape in the composer while a turn

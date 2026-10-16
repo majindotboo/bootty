@@ -74,6 +74,21 @@ pub(super) struct ResponseSelection {
     position: Point<Pixels>,
 }
 
+impl ResponseSelection {
+    /// A quote chosen without the pointer, such as in copy mode; its menus open at `position`.
+    pub(super) const fn new(
+        citation: ResponseCitation,
+        copy_text: String,
+        position: Point<Pixels>,
+    ) -> Self {
+        Self {
+            citation,
+            copy_text,
+            position,
+        }
+    }
+}
+
 impl NativeAgentSessionView {
     pub(super) fn open_response_annotation(
         &self,
@@ -310,7 +325,7 @@ impl NativeAgentSessionView {
         true
     }
 
-    fn open_reaction_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn open_reaction_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(selection) = &self.selected_response else {
             return;
         };
@@ -373,7 +388,7 @@ impl NativeAgentSessionView {
         cx.notify();
     }
 
-    fn comment_response(
+    pub(super) fn comment_response(
         &mut self,
         reaction: Option<&str>,
         window: &mut Window,

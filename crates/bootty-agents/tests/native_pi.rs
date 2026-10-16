@@ -1328,6 +1328,7 @@ fn saved_native_transcript_presents_plain_text_without_rewriting_its_source(
         applications: Vec::new(),
         questions: Vec::new(),
         steered: false,
+        usage: None,
     };
     assert_eq!(item.display_text(), plain);
     assert_eq!(item.text, saved);
@@ -1715,4 +1716,80 @@ fn oversized_pi_dialogs_are_cancelled_without_ending_the_conversation() {
     assert_eq!(snapshot.status, NativeSessionStatus::Idle);
     assert!(snapshot.transcript.iter().any(|item| item.role == "notice"
         && item.text == "Bootty declined a provider request that is too large to show."));
+}
+
+/// A Pi turn's reply keeps the tokens and price of all the turn's model calls together.
+#[rstest]
+fn pi_turn_usage_sums_the_turns_model_calls() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let call = |timestamp: u64, text: &str, usage: Value| {
+        json!({"type":"message_end","message":{"role":"assistant","timestamp":timestamp,
+            "content":[{"type":"text","text":text}],"usage":usage,"stopReason":"stop"}})
+    };
+    fs::write(
+        root.path().join("events.json"),
+        json!([
+            call(910, "Looking.", json!({"input":40,"output":5,"cacheRead":300,"cacheWrite":20,
+                "totalTokens":365,"cost":{"total":0.0105}})),
+            call(911, "Done.", json!({"input":12,"output":30,"cacheRead":360,"cacheWrite":0,
+                "totalTokens":402,"cost":{"total":0.002}})),
+            {"type":"agent_settled"}
+        ])
+        .to_string(),
+    )
+    .unwrap();
+    session.rpc("get_state", json!({})).unwrap();
+    assert_eq!(
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .filter_map(|item| item.usage.map(|usage| (item.text.as_str(), usage)))
+            .collect::<Vec<_>>(),
+        [(
+            "Done.",
+            bootty_agents::NativeTurnUsage {
+                input: 732,
+                output: 35,
+                cache_read: 660,
+                cache_write: 20,
+                reasoning: 0,
+                cost_micros: Some(12_500),
+            }
+        )]
+    );
+    session.stop();
+}
+
+/// Pi's own compactions show as they run and end the way Pi says; one with nothing to do leaves
+/// no row.
+#[rstest]
+#[case::completed(json!({"result": {"summary": "Shorter"}}), Some(NativeToolStatus::Completed))]
+#[case::aborted(json!({"aborted": true}), Some(NativeToolStatus::Interrupted))]
+#[case::failed(json!({"errorMessage": "Too large"}), Some(NativeToolStatus::Failed))]
+#[case::skipped(json!({"skipped": true}), None)]
+fn pi_auto_compaction_shows_how_it_ended(
+    #[case] end: Value,
+    #[case] expected: Option<NativeToolStatus>,
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let mut end = end;
+    end["type"] = "auto_compaction_end".into();
+    fs::write(
+        root.path().join("events.json"),
+        json!([{"type": "auto_compaction_start", "reason": "threshold"}, end]).to_string(),
+    )
+    .unwrap();
+    session.rpc("get_state", json!({})).unwrap();
+    assert_eq!(
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .find_map(NativeTranscriptItem::compaction_status),
+        expected
+    );
+    session.stop();
 }

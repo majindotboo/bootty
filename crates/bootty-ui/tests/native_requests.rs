@@ -555,3 +555,132 @@ fn claude_question_escape_cancels(cx: &mut TestAppContext) {
         [serde_json::json!({"decision": "decline"})]
     );
 }
+
+/// Claude's plan can be carried out in a new conversation: this one declines it, saying why,
+/// and the plan goes to the new one.
+#[gpui_kit::test]
+fn claude_plans_can_go_to_a_new_conversation(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = NativeSessionRecord {
+        id: "plan".to_owned(),
+        binding_id: "binding".to_owned(),
+        task_identity: Some("task".to_owned()),
+        title: "Conversation".to_owned(),
+        pending_initial_message: None,
+        permissions_pending: false,
+        generation: 1,
+        config: NativeSessionConfig::new(AgentKind::Claude, "/tmp/project"),
+        snapshot: serde_json::from_value(serde_json::json!({
+            "provider": "claude", "session_id": "session", "turn_id": null, "status": "waiting",
+            "usage": null, "error": null, "revision": 1, "transcript": [],
+            "requests": [{"id": "claude-plan-1", "method": "claude.permission", "parameters": {
+                "subtype": "can_use_tool", "tool_name": "ExitPlanMode", "tool_use_id": "tool-1",
+                "input": {"plan": "1. Fix the bug"}
+            }}]
+        }))
+        .unwrap(),
+        side_chat: None,
+        spawn_parent: None,
+        queued_messages: Vec::new(),
+        attachments: Vec::new(),
+        draft: None,
+        seen_turns: 0,
+    };
+    let commands = Commands::default();
+    let observed = commands.clone();
+    let inbox = Arc::new(Mutex::new(None::<AppCommandReceiver>));
+    let queued = inbox.clone();
+    let (sender, receiver) = bootty_control::app_command_channel(
+        16,
+        Arc::new(move || {
+            let inbox = queued.lock().unwrap();
+            while let Ok(request) = inbox.as_ref().unwrap().try_recv() {
+                observed.lock().unwrap().push(request.invocation.clone());
+                request
+                    .response
+                    .send(CommandOutcome::Success {
+                        value: serde_json::Value::Null,
+                        warnings: Vec::new(),
+                    })
+                    .unwrap();
+            }
+        }),
+    );
+    *inbox.lock().unwrap() = Some(receiver);
+    let plans = Arc::new(Mutex::new(Vec::new()));
+    let carried = plans.clone();
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &view,
+            move |_, _, event: &bootty_ui::OpenNativeSession, _| {
+                if let bootty_ui::OpenNativeSession::ImplementInNew { plan, .. } = event {
+                    carried.lock().unwrap().push(plan.clone());
+                }
+            },
+        )
+        .detach();
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let elsewhere = visual.debug_bounds("implement-new:claude-plan-1").unwrap();
+    visual.simulate_click(elsewhere.center(), Modifiers::none());
+    visual.run_until_parked();
+    let denied = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|invocation| invocation.command == "agents.native.deny")
+        .map(|invocation| invocation.arguments[2..].to_vec());
+    assert_eq!(
+        denied,
+        Some(vec![
+            "claude-plan-1".to_owned(),
+            "The plan is being carried out in a new conversation.".to_owned()
+        ])
+    );
+    assert_eq!(*plans.lock().unwrap(), ["1. Fix the bug"]);
+}
+
+/// Files dropped on a question go with its answer, by path, the way the provider reads them.
+#[gpui_kit::test]
+fn dropped_files_go_with_a_questions_answer(cx: &mut TestAppContext) {
+    let (visual, commands) = open(codex_questions(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let files = visual.debug_bounds("question-files:ask:color").unwrap();
+    let position = files.center();
+    visual.update(|window, cx| {
+        for event in [
+            gpui_kit::FileDropEvent::Entered {
+                position,
+                paths: gpui_kit::ExternalPaths(vec!["/tmp/shot.png".into()].into()),
+            },
+            gpui_kit::FileDropEvent::Submit { position },
+            gpui_kit::FileDropEvent::Ended,
+        ] {
+            window.dispatch_event(gpui_kit::InputEvent::to_platform_input(event), cx);
+        }
+    });
+    visual.run_until_parked();
+    visual.simulate_keystrokes("2 1 enter");
+    visual.run_until_parked();
+    assert_eq!(
+        responses(&commands),
+        [serde_json::json!({"answers": {
+            "color": {"answers": ["Blue\nAttached file \"shot.png\": \"/tmp/shot.png\""]},
+            "size": {"answers": ["Small"]}
+        }})]
+    );
+}

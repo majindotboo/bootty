@@ -5,7 +5,8 @@ use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
 use assert_fs::TempDir;
 use bootty_agents::{
     AgentKind, AgentLaunch, NativeAgentService, NativeAgentSession, NativeApprovalDecision,
-    NativeSessionConfig, NativeSessionStatus, NativeToolStatus, NativeTurnOutcome,
+    NativeSessionConfig, NativeSessionStatus, NativeTodoStatus, NativeToolStatus,
+    NativeTurnOutcome,
 };
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
@@ -36,6 +37,7 @@ def result(reason='completed',subtype='success',identity=None,errors=None,**extr
  emit({'type':'result','subtype':subtype,'session_id':identity or session,'uuid':'result-uuid-not-user-uuid','is_error':subtype!='success','terminal_reason':reason,'result':'Hello world','errors':errors or [],**extra})
 def event(value): emit({'type':'stream_event','session_id':session,'parent_tool_use_id':None,'event':value})
 def tool_use(ident,command): emit({'type':'assistant','uuid':'block-'+ident,'session_id':session,'parent_tool_use_id':None,'message':{'id':'message-'+ident,'content':[{'type':'tool_use','id':ident,'name':'Bash','input':{'command':command}}]}})
+def tool_call(ident,name,arguments): emit({'type':'assistant','uuid':'block-'+ident,'session_id':session,'parent_tool_use_id':None,'message':{'id':'message-'+ident,'content':[{'type':'tool_use','id':ident,'name':name,'input':arguments}]}})
 def user_event(content,**extra): emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':content},**extra})
 running=None
 for line in sys.stdin:
@@ -129,13 +131,16 @@ for line in sys.stdin:
   if prompt=='usage':
    # Observed from Claude 2.1.299: each model call reports its usage; the result reports the window.
    emit({'type':'assistant','uuid':'usage-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'usage-message','content':[{'type':'text','text':'Counted'}],'usage':{'input_tokens':2,'cache_creation_input_tokens':900,'cache_read_input_tokens':24000,'output_tokens':40}}})
-   result(modelUsage={'claude-haiku-5-5':{'contextWindow':200000},'claude-opus-5-5':{'contextWindow':1000000}})
+   result(modelUsage={'claude-haiku-5-5':{'contextWindow':200000},'claude-opus-5-5':{'contextWindow':1000000}},usage={'input_tokens':5,'cache_creation_input_tokens':900,'cache_read_input_tokens':48000,'output_tokens':95},total_cost_usd=0.0421)
    continue
   if prompt=='read-image':
    # Observed from Claude 2.1.299: a Read of an image repeats its base64 in tool_use_result.
-   data='A'*700000
+   import base64,struct,zlib
+   def chunk(kind,body): return struct.pack('>I',len(body))+kind+body+struct.pack('>I',zlib.crc32(kind+body))
+   png=b'\x89PNG\r\n\x1a\n'+chunk(b'IHDR',struct.pack('>IIBBBBB',1,1,8,6,0,0,0))+chunk(b'tEXt',b'pad\0'+b'x'*500000)+chunk(b'IDAT',zlib.compress(b'\0\1\2\3\377'))+chunk(b'IEND',b'')
+   data=base64.b64encode(png).decode()
    emit({'type':'assistant','uuid':'read-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'read-message','content':[{'type':'tool_use','id':'read-call','name':'Read','input':{'file_path':'shot.png'}}]}})
-   emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'read-call','content':[{'type':'image','source':{'type':'base64','data':data,'media_type':'image/jpeg'}}]}]},'tool_use_result':{'type':'image','file':{'base64':data,'type':'image/jpeg'}}})
+   emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'read-call','content':[{'type':'image','source':{'type':'base64','data':data,'media_type':'image/png'}}]}]},'tool_use_result':{'type':'image','file':{'base64':data,'type':'image/png'}}})
   if prompt=='big-output':
    emit({'type':'assistant','uuid':'big-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'big-message','content':[{'type':'tool_use','id':'read-call','name':'Bash','input':{'command':'cat big.log'}}]}})
    emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'read-call','content':[{'type':'text','text':'z'*(2*1024*1024)}]}]}})
@@ -144,6 +149,24 @@ for line in sys.stdin:
   if prompt in ['tool-success','tool-failure']:
    emit({'type':'assistant','uuid':'tool-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'tool-message','content':[{'type':'tool_use','id':'bash-call','name':'Bash','input':{'command':'echo hello'}}]}})
    emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':[{'type':'tool_result','tool_use_id':'bash-call','content':[{'type':'text','text':'observed output'}],'is_error':prompt=='tool-failure'}]}})
+  if prompt=='limits':
+   emit({'type':'rate_limit_event','rate_limit_info':{'status':'allowed_warning','rateLimitType':'five_hour','resetsAt':1760000000,'utilization':0.91},'uuid':'limit-1','session_id':session})
+   emit({'type':'rate_limit_event','rate_limit_info':{'status':'rejected','rateLimitType':'seven_day_opus','resetsAt':1760500000},'uuid':'limit-2','session_id':session})
+  if prompt=='compact':
+   # Observed from Claude: `compacting` repeats while it works, then a boundary reports the sizes.
+   emit({'type':'system','subtype':'status','status':'compacting','session_id':session})
+   emit({'type':'system','subtype':'status','status':'compacting','session_id':session})
+   emit({'type':'system','subtype':'compact_boundary','compact_metadata':{'trigger':'manual','pre_tokens':180000,'post_tokens':12000},'uuid':'boundary','session_id':session})
+  if prompt=='todo':
+   tool_call('todo-call','TodoWrite',{'todos':[{'content':'Read the code','status':'completed','activeForm':'Reading'},{'content':'Fix the bug','status':'in_progress','activeForm':'Fixing'},{'content':'Ship it','status':'pending','activeForm':'Shipping'}]})
+   user_event([{'type':'tool_result','tool_use_id':'todo-call','content':'ok'}])
+  if prompt=='tasks':
+   for number,subject in [('1','Read the code'),('2','Fix the bug'),('3','Drop this')]:
+    tool_call('task-'+number,'TaskCreate',{'subject':subject})
+    user_event([{'type':'tool_result','tool_use_id':'task-'+number,'content':'created'}],tool_use_result={'task':{'id':number,'subject':subject}})
+   for number,change in [('1',{'status':'completed'}),('2',{'status':'in_progress','subject':'Fix the real bug'}),('3',{'status':'deleted'})]:
+    tool_call('update-'+number,'TaskUpdate',{'taskId':number,**change})
+    user_event([{'type':'tool_result','tool_use_id':'update-'+number,'content':'updated'}])
   if prompt.startswith('subagent-'):
    status=prompt.removeprefix('subagent-')
    emit({'type':'assistant','uuid':'agent-block','session_id':session,'parent_tool_use_id':None,'message':{'id':'agent-message','content':[{'type':'tool_use','id':'agent-call','name':'Agent','input':{'description':'Review source','prompt':'Review the changes','model':'sonnet'}}]}})
@@ -475,19 +498,39 @@ fn claude_tool_arguments_stream_into_the_running_row() {
     session.stop();
 }
 
-/// The context meter reads the latest model call's tokens against the turn's largest window.
+/// The context meter reads the latest model call's tokens against the turn's largest window,
+/// and the turn's reply keeps what the whole turn used and cost.
 #[rstest]
 fn claude_usage_fills_the_context_meter() {
     let root = TempDir::new().unwrap();
     let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
     session.send_prompt("usage").unwrap();
     barrier(&session).unwrap();
+    let snapshot = session.snapshot();
     assert_eq!(
-        session.snapshot().usage,
+        snapshot.usage,
         Some(json!({
             "input": 2, "output": 40, "cacheRead": 24000, "cacheWrite": 900,
             "modelContextWindow": 1_000_000
         }))
+    );
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .filter_map(|item| item.usage.map(|usage| (item.role.as_str(), usage)))
+            .collect::<Vec<_>>(),
+        [(
+            "assistant",
+            bootty_agents::NativeTurnUsage {
+                input: 48_905,
+                output: 95,
+                cache_read: 48_000,
+                cache_write: 900,
+                reasoning: 0,
+                cost_micros: Some(42_100),
+            }
+        )]
     );
     session.stop();
 }
@@ -517,13 +560,27 @@ fn large_messages_never_end_the_conversation(#[case] prompt: &str, #[case] notic
         notice
     );
     if prompt != "huge-line" {
-        let tool = snapshot
+        let item = snapshot
             .transcript
             .iter()
             .find(|item| item.id == "claude-tool-read-call")
-            .and_then(|item| item.tool.as_ref())
             .unwrap();
-        assert_eq!(tool.status, NativeToolStatus::Completed);
+        assert_eq!(
+            item.tool.as_ref().unwrap().status,
+            NativeToolStatus::Completed
+        );
+        // The image the tool read shows on its row.
+        assert_eq!(
+            item.attachments
+                .iter()
+                .map(|image| (image.name.as_str(), image.pixel_width))
+                .collect::<Vec<_>>(),
+            if prompt == "read-image" {
+                vec![("Read image 1.png", Some(1))]
+            } else {
+                Vec::new()
+            }
+        );
     }
     session.stop();
 }
@@ -2071,4 +2128,86 @@ fn an_unconfirmed_message_is_undelivered_once_its_provider_ends() {
     assert_eq!(undelivered(), Vec::<String>::new());
     session.stop();
     assert_eq!(undelivered(), vec!["no-ack".to_owned()]);
+}
+
+/// Claude's to-do list fills the plan: `TodoWrite` writes it whole, and the task tools add, change
+/// and remove tasks one at a time.
+#[rstest]
+#[case::todo_write("todo", &[
+    ("Read the code", NativeTodoStatus::Completed),
+    ("Fix the bug", NativeTodoStatus::InProgress),
+    ("Ship it", NativeTodoStatus::Pending),
+])]
+#[case::task_tools("tasks", &[
+    ("Read the code", NativeTodoStatus::Completed),
+    ("Fix the real bug", NativeTodoStatus::InProgress),
+])]
+fn claude_to_do_lists_fill_the_plan(
+    #[case] prompt: &str,
+    #[case] expected: &[(&str, NativeTodoStatus)],
+) {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt(prompt).unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(
+        session
+            .snapshot()
+            .todos
+            .iter()
+            .map(|todo| (todo.text.as_str(), todo.status))
+            .collect::<Vec<_>>(),
+        expected
+    );
+    session.stop();
+}
+
+/// A compaction shows as one row while Claude works on it, then says how far it shrank the
+/// context, which the meter reads.
+#[rstest]
+fn claude_compaction_shows_and_resets_the_context_meter() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("compact").unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    let rows = snapshot
+        .transcript
+        .iter()
+        .filter_map(|item| item.tool.as_ref())
+        .filter(|tool| tool.name == "contextCompaction")
+        .map(|tool| (tool.status, tool.input.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        rows,
+        [(
+            NativeToolStatus::Completed,
+            json!({"preTokens": 180_000, "postTokens": 12_000}).to_string()
+        )]
+    );
+    assert_eq!(snapshot.usage.unwrap()["input"], 12_000);
+    session.stop();
+}
+
+/// Claude reports each limit window on its own; a rejected one stopped work until it resets.
+#[rstest]
+fn claude_rate_limits_keep_each_window() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("limits").unwrap();
+    barrier(&session).unwrap();
+    let limits = session.snapshot().rate_limits.unwrap();
+    assert_eq!(
+        limits
+            .windows
+            .iter()
+            .map(|window| (window.label.as_str(), window.used_percent, window.resets_at))
+            .collect::<Vec<_>>(),
+        [
+            ("5h", 91, Some(1_760_000_000)),
+            ("7d Opus", 100, Some(1_760_500_000))
+        ]
+    );
+    assert_eq!(limits.reached_until(), Some(1_760_500_000));
+    session.stop();
 }

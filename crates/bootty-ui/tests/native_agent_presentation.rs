@@ -314,6 +314,44 @@ impl gpui_kit::Render for RestoredNativePanes {
     }
 }
 
+/// A stopped conversation that sent an image and a file, with a tool row that returned a
+/// screenshot, and the image's reference as an import reply.
+fn restored_attachments(png_bytes: usize) -> (NativeSessionRecord, serde_json::Value) {
+    let mut record = saved_record("stopped");
+    let reference: bootty_agents::NativeAttachmentReference =
+        serde_json::from_value(serde_json::json!({
+            "id":"restored-image", "kind":"image", "name":"image.png", "mime_type":"image/png",
+            "size_bytes":png_bytes,"pixel_width":500,"pixel_height":500
+        }))
+        .unwrap();
+    record.attachments.push(reference.clone());
+    let imported = serde_json::to_value(&reference).unwrap();
+    // A screenshot the tool returned belongs to its row.
+    let capture = bootty_agents::NativeAttachmentReference {
+        id: "tool-image-capture".into(),
+        name: "exec_command image 1.png".into(),
+        ..reference.clone()
+    };
+    let notes: bootty_agents::NativeAttachmentReference =
+        serde_json::from_value(serde_json::json!({
+            "id":"restored-notes", "kind":"file", "name":"notes.md", "mime_type":"text/markdown",
+            "size_bytes":9
+        }))
+        .unwrap();
+    record.attachments.push(notes.clone());
+    for (item, image) in [("user", reference), ("user", notes), ("tool", capture)] {
+        record
+            .snapshot
+            .transcript
+            .iter_mut()
+            .find(|row| row.id == item)
+            .unwrap()
+            .attachments
+            .push(image);
+    }
+    (record, imported)
+}
+
 #[gpui_kit::test]
 fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppContext) {
     use base64::Engine as _;
@@ -340,23 +378,7 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
         encoded.len() > 1024 * 1024,
         "a valid PNG grows during transport encoding"
     );
-    let mut record = saved_record("stopped");
-    let reference: bootty_agents::NativeAttachmentReference =
-        serde_json::from_value(serde_json::json!({
-            "id":"restored-image", "kind":"image", "name":"image.png", "mime_type":"image/png",
-            "size_bytes":png.get_ref().len(),"pixel_width":500,"pixel_height":500
-        }))
-        .unwrap();
-    record.attachments.push(reference.clone());
-    let imported = serde_json::to_value(&reference).unwrap();
-    record
-        .snapshot
-        .transcript
-        .iter_mut()
-        .find(|item| item.id == "user")
-        .unwrap()
-        .attachments
-        .push(reference);
+    let (record, imported) = restored_attachments(png.get_ref().len());
     let target = record.target();
     let mailbox = std::sync::Arc::new(std::sync::Mutex::new(
         None::<bootty_control::AppCommandReceiver>,
@@ -364,6 +386,8 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
     let confirmed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let inbox = mailbox.clone();
     let accepted = confirmed.clone();
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let opens = opened.clone();
     let (sender, receiver) = bootty_control::app_command_channel(
         8,
         std::sync::Arc::new(move || {
@@ -372,14 +396,17 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
             while let Ok(request) = receiver.try_recv() {
                 let value = if request.invocation.command == "agents.native.attachment-preview" {
                     assert_eq!(request.invocation.target, Some(target.clone()));
-                    assert_eq!(
-                        request.invocation.arguments,
-                        ["saved-pi", "1", "restored-image"]
-                    );
+                    assert_eq!(request.invocation.arguments[..2], ["saved-pi", "1"]);
                     accepted.store(true, std::sync::atomic::Ordering::Relaxed);
                     serde_json::json!({"png":encoded})
                 } else if request.invocation.command == "agents.native.import" {
                     imported.clone()
+                } else if request.invocation.command == "agents.native.attachment-open" {
+                    opens
+                        .lock()
+                        .unwrap()
+                        .push(request.invocation.arguments.clone());
+                    serde_json::Value::Null
                 } else {
                     serde_json::json!([])
                 };
@@ -415,6 +442,16 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
         .debug_bounds("attachment-preview:restored-image")
         .expect("restored preview renders");
     verify_image_viewer(visual, preview);
+    // A sent file opens from its chip.
+    let chip = visual
+        .debug_bounds("sent-attachment:restored-notes")
+        .unwrap();
+    visual.simulate_click(chip.center(), Modifiers::none());
+    visual.run_until_parked();
+    assert_eq!(
+        *opened.lock().unwrap(),
+        [["saved-pi", "1", "restored-notes"]]
+    );
     verify_draft_image_removal(visual, png.get_ref());
 }
 
@@ -458,6 +495,27 @@ fn verify_image_viewer(
     assert!(viewer.size.height > preview.size.height);
     let close = visual.debug_bounds("close-image-preview").unwrap();
     assert!(close.bottom() <= viewer.top());
+    let image = |visual: &mut gpui_kit::VisualTestContext| {
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.debug_bounds("image-viewer-image").unwrap()
+    };
+    pretty_assertions::assert_eq!(image(visual), viewer);
+    // Zoom grows the image inside the same frame, and 0 fits it again.
+    visual.simulate_keystrokes("=");
+    let zoomed = image(visual);
+    assert!(zoomed.size.width > viewer.size.width);
+    pretty_assertions::assert_eq!(visual.debug_bounds("attachment-image-viewer"), Some(viewer));
+    visual.simulate_keystrokes("0");
+    pretty_assertions::assert_eq!(image(visual), viewer);
+    // The arrows step through every image the conversation shows, the tool's included.
+    assert!(visual.debug_bounds("image-viewer-showing:0").is_some());
+    visual.simulate_keystrokes("right");
+    image(visual);
+    assert!(visual.debug_bounds("image-viewer-showing:1").is_some());
+    visual.simulate_keystrokes("right");
+    image(visual);
+    assert!(visual.debug_bounds("image-viewer-showing:0").is_some());
     visual.simulate_keystrokes("escape");
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -1952,7 +2010,8 @@ fn copies_keep_the_whole_reply_and_the_prompts_context(cx: &mut TestAppContext) 
         {"id": "found", "role": "assistant", "text": "Found it.", "complete": true},
         {"id": "tool", "role": "tool", "text": "", "complete": true,
             "tool": {"name": "Bash", "input": "{\"command\":\"ls\"}", "status": "completed"}},
-        {"id": "fixed", "role": "assistant", "text": "Fixed.", "complete": true}
+        {"id": "fixed", "role": "assistant",
+            "text": "Fixed.\n\n| Name | **Size** |\n| --- | ---: |\n| a\\|b | `1` |", "complete": true}
     ]))
     .unwrap();
     let (sender, _) = native_command_sender(&record);
@@ -1978,8 +2037,14 @@ fn copies_keep_the_whole_reply_and_the_prompts_context(cx: &mut TestAppContext) 
     };
     assert_eq!(
         copied(visual, "copy-message:fixed").as_deref(),
-        Some("Found it.\n\nFixed.")
+        Some("Found it.\n\nFixed.\n\n| Name | **Size** |\n| --- | ---: |\n| a\\|b | `1` |")
     );
+    // A reply's tables copy as cells a spreadsheet pastes, without their formatting.
+    assert_eq!(
+        copied(visual, "copy-table:fixed").as_deref(),
+        Some("Name\tSize\na|b\t1")
+    );
+    assert!(visual.debug_bounds("copy-table:ask").is_none());
     let prompt = copied(visual, "copy-message:ask").unwrap_or_default();
     assert!(prompt.contains("> it fails\nthis part"), "{prompt}");
     assert!(prompt.ends_with("Attached: build.log"), "{prompt}");
@@ -4733,4 +4798,520 @@ fn settled_replies_without_work_folds_show_elapsed_time(cx: &mut TestAppContext)
             "{status}, {tool:?}"
         );
     }
+}
+
+/// A conversation with a few messages to read through, open in its view.
+fn reading_view(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<NativeAgentSessionView>,
+    &mut gpui_kit::VisualTestContext,
+) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "ask", "role": "user", "text": "Where is the needle?", "complete": true},
+        {"id": "answer", "role": "assistant",
+            "text": "One needle here.\n\nAnother **NEEDLE** there.", "complete": true},
+        {"id": "thanks", "role": "user", "text": "Thanks", "complete": true},
+        {"id": "done", "role": "assistant", "text": "You are welcome.", "complete": true,
+            "usage": {"input": 48905, "output": 95, "cache_read": 48000, "cache_write": 900,
+                "cost_micros": 42100}}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let mut conversation = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        conversation = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(700.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    (conversation.unwrap(), visual)
+}
+
+fn redraw(visual: &mut gpui_kit::VisualTestContext) {
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+}
+
+/// Find counts a query's matches across the conversation, ignoring case, steps through them
+/// with Enter and Shift-Enter, and closes with Escape.
+#[gpui_kit::test]
+fn find_steps_through_matches_across_messages(cx: &mut TestAppContext) {
+    let (view, visual) = reading_view(cx);
+    view.update_in(visual, |view, window, cx| {
+        view.find_action(
+            &bootty_ui::app_actions::TerminalFindAction::Prompt,
+            window,
+            cx,
+        );
+    });
+    visual.simulate_input("needle");
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("conversation-find-count:1 of 3")
+            .is_some()
+    );
+    visual.simulate_keystrokes("enter");
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("conversation-find-count:2 of 3")
+            .is_some()
+    );
+    visual.simulate_keystrokes("enter enter");
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("conversation-find-count:1 of 3")
+            .is_some()
+    );
+    visual.simulate_keystrokes("shift-enter");
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("conversation-find-count:3 of 3")
+            .is_some()
+    );
+    visual.simulate_input("x");
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("conversation-find-count:No results")
+            .is_some()
+    );
+    visual.simulate_keystrokes("escape");
+    redraw(visual);
+    assert!(visual.debug_bounds("conversation-find").is_none());
+}
+
+/// Copy mode moves through every message with vim's keys, copies a selection, and quotes one
+/// from a reply into a comment.
+#[gpui_kit::test]
+fn copy_mode_selects_copies_and_quotes_with_the_keyboard(cx: &mut TestAppContext) {
+    let (view, visual) = reading_view(cx);
+    let enter = |visual: &mut gpui_kit::VisualTestContext| {
+        view.update_in(visual, NativeAgentSessionView::enter_copy_mode);
+        redraw(visual);
+    };
+    enter(visual);
+    assert!(
+        visual
+            .debug_bounds("conversation-copy-mode:Copy mode")
+            .is_some()
+    );
+    visual.simulate_keystrokes("g g 2 w v");
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("conversation-copy-mode:Visual")
+            .is_some()
+    );
+    visual.simulate_keystrokes("e y");
+    redraw(visual);
+    let copied = visual.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(copied.as_deref(), Some("the"));
+    assert!(
+        visual
+            .debug_bounds("conversation-copy-mode:Copied")
+            .is_some()
+    );
+    // A reply's words quote into a comment; the provider reads their markdown.
+    enter(visual);
+    visual.simulate_keystrokes("g g j j w v e c");
+    redraw(visual);
+    assert!(visual.debug_bounds("response-quote-editor").is_some());
+    assert!(
+        visual
+            .debug_bounds("conversation-copy-mode:Copy mode")
+            .is_none()
+    );
+}
+
+/// A prompt sent from here moves to the top of the transcript with room below for its reply,
+/// and the transcript follows the reply's end again once the reply outgrows that room.
+#[gpui_kit::test]
+fn sent_prompts_hold_the_top_while_their_reply_comes(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let long = "A long earlier reply that takes several lines to read. ".repeat(12);
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = (0..6)
+        .flat_map(|turn| {
+            [
+                serde_json::json!({"id": format!("ask-{turn}"), "role": "user",
+                    "text": format!("Question {turn}"), "complete": true}),
+                serde_json::json!({"id": format!("answer-{turn}"), "role": "assistant",
+                    "text": long, "complete": true}),
+            ]
+        })
+        .map(|item| serde_json::from_value(item).unwrap())
+        .collect();
+    let (sender, commands) = native_command_sender(&record);
+    let mut conversation = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record.clone(),
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        conversation = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let view = conversation.unwrap();
+    visual.simulate_resize(size(px(900.), px(700.)));
+    redraw(visual);
+    let composer = visual.debug_bounds("native-composer").unwrap();
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("What next?");
+    visual.simulate_keystrokes("enter");
+    redraw(visual);
+    assert!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call.command == "agents.native.prompt")
+    );
+    // The provider shows the prompt and the start of its reply, then replaces the streaming
+    // reply with its longer text.
+    let mut show = |items: &[serde_json::Value], visual: &mut gpui_kit::VisualTestContext| {
+        record.snapshot.revision = record.snapshot.revision.saturating_add(1);
+        record.snapshot.transcript.retain(|item| item.id != "reply");
+        record.snapshot.status = bootty_agents::NativeSessionStatus::Working;
+        for item in items {
+            record
+                .snapshot
+                .transcript
+                .push(serde_json::from_value(item.clone()).unwrap());
+        }
+        view.update_in(visual, |view, window, cx| {
+            view.update_record(record.clone(), window, cx);
+        });
+        for _ in 0..3 {
+            redraw(visual);
+        }
+    };
+    show(
+        &[
+            serde_json::json!({"id": "sent", "role": "user", "text": "What next?", "complete": true}),
+            serde_json::json!({"id": "reply", "role": "assistant", "text": "Start.", "complete": false}),
+        ],
+        visual,
+    );
+    let prompt = visual.debug_bounds("native-message-sent").unwrap();
+    assert!(prompt.top() < px(120.), "{prompt:?}");
+    // A reply longer than the room lets the transcript follow its end.
+    show(
+        &[serde_json::json!({"id": "reply", "role": "assistant",
+            "text": "A long reply line.\n\n".repeat(40), "complete": false})],
+        visual,
+    );
+    let composer = visual.debug_bounds("native-composer").unwrap();
+    let reply = visual.debug_bounds("native-message-reply").unwrap();
+    assert!(
+        f32::from(reply.bottom()) <= f32::from(composer.top()) + 64.,
+        "{reply:?} {composer:?}"
+    );
+    assert!(
+        visual
+            .debug_bounds("native-message-sent")
+            .is_none_or(|sent| sent.top() < px(0.))
+    );
+}
+
+/// A turn's reply says what the turn used and cost.
+#[gpui_kit::test]
+fn turn_usage_shows_on_the_turns_reply(cx: &mut TestAppContext) {
+    let (_, visual) = reading_view(cx);
+    assert!(
+        visual
+            .debug_bounds("turn-usage:49k in · 95 out · $0.04")
+            .is_some()
+    );
+}
+
+/// The context meter's menu compacts the conversation the way `/compact` does, and keeps the
+/// draft.
+#[gpui_kit::test]
+fn context_meter_compacts_the_conversation(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.usage =
+        Some(serde_json::json!({"input": 150_000, "modelContextWindow": 200_000}));
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(700.)));
+    redraw(visual);
+    let composer = visual.debug_bounds("native-composer").unwrap();
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("A draft");
+    let meter = visual.debug_bounds("native-context-trigger").unwrap();
+    visual.simulate_click(meter.center(), Modifiers::none());
+    redraw(visual);
+    visual.simulate_keystrokes("down enter");
+    redraw(visual);
+    // The draft stays to send afterwards.
+    let composer = visual.debug_bounds("native-composer").unwrap();
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_keystrokes("enter");
+    redraw(visual);
+    let prompts = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.command == "agents.native.prompt")
+        .map(|call| call.arguments[2].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(prompts, ["/compact", "A draft"]);
+}
+
+/// The composer drawer shows the conversation's goal with what it has spent, and pauses or
+/// removes it.
+#[gpui_kit::test]
+fn goals_show_what_they_spent_and_pause_or_go(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.goal = Some(bootty_agents::NativeGoal {
+        objective: "Ship the release".into(),
+        status: bootty_agents::NativeGoalStatus::Active,
+        token_budget: Some(50_000),
+        tokens_used: 1200,
+        seconds_used: 90,
+    });
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(700.)));
+    redraw(visual);
+    assert!(
+        visual
+            .debug_bounds("native-goal-state:Working on it · 1k of 50k tokens")
+            .is_some()
+    );
+    for control in ["native-goal-toggle", "native-goal-remove"] {
+        let button = visual.debug_bounds(control).unwrap();
+        visual.simulate_click(button.center(), Modifiers::none());
+        redraw(visual);
+    }
+    let sent = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.command.starts_with("agents.native.goal"))
+        .map(|call| (call.command.clone(), call.arguments[2].clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sent,
+        [
+            ("agents.native.goal-status".to_owned(), "paused".to_owned()),
+            ("agents.native.goal".to_owned(), String::new()),
+        ]
+    );
+}
+
+/// A turn a usage limit stopped says when the limit resets, and can wait to send the turn
+/// again then.
+#[gpui_kit::test]
+fn limit_stopped_turns_can_retry_when_the_limit_resets(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.error = Some("You've hit your usage limit".into());
+    record.snapshot.rate_limits = Some(bootty_agents::NativeRateLimits {
+        windows: vec![bootty_agents::NativeRateLimit {
+            label: "5h".into(),
+            used_percent: 100,
+            resets_at: Some(4_102_444_800),
+            window_seconds: Some(18_000),
+        }],
+        reached: true,
+    });
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    redraw(visual);
+    assert!(visual.debug_bounds("native-limit-resets").is_some());
+    for scheduled in [false, true] {
+        let toggle = visual
+            .debug_bounds(if scheduled {
+                "native-retry-at-reset:true"
+            } else {
+                "native-retry-at-reset:false"
+            })
+            .unwrap();
+        visual.simulate_click(toggle.center(), Modifiers::none());
+        redraw(visual);
+    }
+    assert!(visual.debug_bounds("native-retry-at-reset:false").is_some());
+    assert!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|call| call.command != "agents.native.prompt")
+    );
+}
+
+/// A finished plan can be carried out in a new conversation instead of this one.
+#[gpui_kit::test]
+fn ready_plans_can_go_to_a_new_conversation(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript.push(
+        serde_json::from_value(serde_json::json!({
+            "id": "plan", "role": "plan", "text": "1. Fix the bug", "complete": true
+        }))
+        .unwrap(),
+    );
+    let (sender, _) = native_command_sender(&record);
+    let plans = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let carried = plans.clone();
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &view,
+            move |_, _, event: &bootty_ui::OpenNativeSession, _| {
+                if let bootty_ui::OpenNativeSession::ImplementInNew { plan, .. } = event {
+                    carried.lock().unwrap().push(plan.clone());
+                }
+            },
+        )
+        .detach();
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    redraw(visual);
+    let elsewhere = visual.debug_bounds("native-implement-plan-new").unwrap();
+    visual.simulate_click(elsewhere.center(), Modifiers::none());
+    redraw(visual);
+    assert_eq!(*plans.lock().unwrap(), ["1. Fix the bug"]);
+}
+
+/// A comment on changed lines goes into the draft with the file, the lines and their text, and
+/// is sent like anything else written there.
+#[gpui_kit::test]
+fn diff_comments_join_the_draft_with_their_lines(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, commands) = native_command_sender(&record);
+    let mut conversation = None;
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        conversation = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    redraw(visual);
+    conversation.unwrap().update_in(visual, |view, window, cx| {
+        view.add_diff_comment(
+            &bootty_ui::DiffComment {
+                anchor: bootty_git::diff::DiffAnchor {
+                    path: "src/main.rs".into(),
+                    side: bootty_git::diff::DiffSide::Left,
+                    start_line: 2,
+                    line: 3,
+                },
+                quote: "-- old comment\nlet x = 1;".into(),
+                body: "Why remove these?".into(),
+            },
+            window,
+            cx,
+        );
+    });
+    visual.simulate_keystrokes("enter");
+    redraw(visual);
+    let sent = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.command == "agents.native.prompt")
+        .map(|call| call.arguments[2].trim_end().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        sent,
+        [
+            "@src/main.rs:2-3 (as it was before the change)\n```\n-- old comment\nlet x = 1;\n```\nWhy remove these?"
+        ]
+    );
 }

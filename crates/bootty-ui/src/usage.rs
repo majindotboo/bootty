@@ -1,4 +1,5 @@
-//! `CodexBar` quota presentation. `CodexBar` owns the provider protocols; Bootty reads its JSON.
+//! Quota presentation: what a live conversation's provider last reported, or `CodexBar`'s JSON
+//! when no conversation has reported lately.
 
 use bootty_host::{CancellableCommandRunner, CommandCancellation, CommandRunner};
 use chrono::DateTime;
@@ -10,6 +11,8 @@ use std::{
 };
 
 const USAGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a provider's own report stands in for `CodexBar`'s.
+const REPORT_FRESH: Duration = Duration::from_mins(10);
 
 /// One bounded background request per supported `CodexBar` provider.
 /// Pending processes are cancelled when this owner is retired; painting only reads snapshots.
@@ -17,6 +20,8 @@ const USAGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct UsageService {
     current: [ProviderUsage; 2],
     pending: [Option<mpsc::Receiver<ProviderUsage>>; 2],
+    /// When each provider last reported its limits through a live conversation.
+    reported: [Option<Instant>; 2],
     cancellation: CommandCancellation,
     last_poll: Option<Instant>,
 }
@@ -27,11 +32,34 @@ impl UsageService {
         &self.current
     }
 
+    /// The limits `provider` reported through a live conversation, which stand in for
+    /// `CodexBar`'s for a while.
+    pub fn report(&mut self, provider: UsageProvider, windows: Vec<UsageWindow>, now: Instant) {
+        let index = UsageProvider::ALL
+            .iter()
+            .position(|known| *known == provider)
+            .unwrap_or(0);
+        if let (Some(current), Some(reported)) =
+            (self.current.get_mut(index), self.reported.get_mut(index))
+        {
+            *current = ProviderUsage {
+                windows,
+                error: None,
+            };
+            *reported = Some(now);
+        }
+    }
+
     pub fn refresh(&mut self, now: Instant) -> bool {
         let mut changed = false;
-        for (pending, current) in self.pending.iter_mut().zip(&mut self.current) {
+        let fresh = self.reported.map(|reported| {
+            reported.is_some_and(|at| now.saturating_duration_since(at) < REPORT_FRESH)
+        });
+        for ((pending, current), fresh) in self.pending.iter_mut().zip(&mut self.current).zip(fresh)
+        {
             let result = pending.as_ref().map(std::sync::mpsc::Receiver::try_recv);
             match result {
+                Some(Ok(_)) if fresh => *pending = None,
                 Some(Ok(updated)) => {
                     changed |= *current != updated;
                     *current = updated;
@@ -47,8 +75,10 @@ impl UsageService {
             .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_mins(1));
         if due {
             let mut started = false;
-            for (pending, provider) in self.pending.iter_mut().zip(UsageProvider::ALL) {
-                if pending.is_some() {
+            for ((pending, provider), fresh) in
+                self.pending.iter_mut().zip(UsageProvider::ALL).zip(fresh)
+            {
+                if pending.is_some() || fresh {
                     continue;
                 }
                 *pending = Self::spawn_provider(provider, self.cancellation.clone());
@@ -125,9 +155,9 @@ fn query_provider(runner: &CancellableCommandRunner, provider: UsageProvider) ->
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UsageWindow {
-    pub label: &'static str,
+    pub label: String,
     pub used_percent: f64,
     pub duration_secs: f64,
     pub resets_at: Option<i64>,
@@ -169,7 +199,7 @@ pub fn parse_usage(raw: &str) -> ProviderUsage {
         .filter_map(|(key, label, fallback)| {
             let value = usage.get(key)?;
             Some(UsageWindow {
-                label,
+                label: label.to_owned(),
                 used_percent: value.get("usedPercent")?.as_f64()?.clamp(0.0, 100.0),
                 duration_secs: value
                     .get("windowMinutes")
@@ -212,7 +242,7 @@ pub struct QuotaMeter {
 
 impl UsageWindow {
     #[must_use]
-    pub fn meter(self, now: i64) -> QuotaMeter {
+    pub fn meter(&self, now: i64) -> QuotaMeter {
         let remaining = (100.0 - self.used_percent).clamp(0.0, 100.0);
         let reset = self.resets_at.map(|reset| reset.saturating_sub(now));
         let expected = reset

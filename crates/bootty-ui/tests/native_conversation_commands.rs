@@ -1064,6 +1064,59 @@ fn reply_paths_open_relative_to_the_conversation() -> TestResult<()> {
     Ok(())
 }
 
+/// A sent file opens, or shows in the file manager, from the stored copy its conversation keeps.
+/// Another conversation can't reach it.
+#[rstest]
+fn sent_attachments_open_and_reveal_their_stored_copy() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let conversation = record(&host.start(&binding, "conversation", "task-sent-file", "")?)?;
+    let other = record(&host.start(&binding, "other", "task-other-file", "")?)?;
+    let source = host.directory.path().join("notes.md");
+    fs::write(&source, "one\ntwo\n")?;
+    let reference = success(host.submit(native_command(
+        "agents.native.import",
+        &conversation.target(),
+        &[&source.to_string_lossy()],
+        Caller::Internal,
+    ))?)?;
+    let id = reference["id"].as_str().ok_or("an attachment id")?;
+    host.effects.clear();
+    for command in [
+        "agents.native.attachment-open",
+        "agents.native.attachment-reveal",
+    ] {
+        success(host.submit(native_command(
+            command,
+            &conversation.target(),
+            &[id],
+            Caller::Internal,
+        ))?)?;
+    }
+    let shown = host
+        .effects
+        .iter()
+        .filter_map(|effect| match effect {
+            AppEffect::OpenWithSystem(path) => Some(("open", fs::read_to_string(path).ok())),
+            AppEffect::RevealPath(path) => Some(("reveal", fs::read_to_string(path).ok())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let copy = Some("one\ntwo\n".to_owned());
+    assert_eq!(shown, [("open", copy.clone()), ("reveal", copy)]);
+    let outcome = host.submit(native_command(
+        "agents.native.attachment-open",
+        &other.target(),
+        &[id],
+        Caller::Internal,
+    ))?;
+    assert!(
+        matches!(&outcome, CommandOutcome::Failed { message, .. } if message.contains("does not belong")),
+        "{outcome:?}"
+    );
+    Ok(())
+}
+
 /// A reply's path and a document's path both show in the file manager: the reply's resolved
 /// against the conversation's directory, the way it would open.
 #[rstest]
@@ -4363,6 +4416,34 @@ fn app_access_is_answered_only_in_bootty_and_always_allow_is_saved() -> TestResu
     assert_eq!(
         host.state.config().computer.always_allowed_apps,
         ["dev.zed.Zed"]
+    );
+    Ok(())
+}
+
+/// A plan carried out in a new conversation starts beside its own, in the same session, with
+/// the plan as its first message.
+#[rstest]
+fn plans_carry_out_in_a_new_conversation_of_the_same_session() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let planned = record(&host.start(&binding, "conversation", "task-plan", "")?)?;
+    let invocation =
+        bootty_ui::commands::implement_plan_invocation(&planned, binding, "1. Fix the bug");
+    let created = record(&success(host.submit(invocation)?)?)?;
+    assert_ne!(created.id, planned.id);
+    assert_eq!(created.task_identity, planned.task_identity);
+    assert_eq!(created.config.provider, planned.config.provider);
+    let first = created.pending_initial_message.clone().or_else(|| {
+        created
+            .snapshot
+            .transcript
+            .iter()
+            .find(|item| item.role == "user")
+            .map(|item| item.text.clone())
+    });
+    assert_eq!(
+        first.as_deref(),
+        Some("Implement this plan:\n\n1. Fix the bug")
     );
     Ok(())
 }
