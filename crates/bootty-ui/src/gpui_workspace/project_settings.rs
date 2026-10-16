@@ -1,4 +1,5 @@
 //! The project page owns its controls; persistence stays on the shared command path.
+use crate::gpui::ElementTooltip as _;
 use crate::presentation::project_editor::ProjectSettingsEditor;
 use bootty_control::{BoundAppCommandSender, CommandCancellation, CommandOutcome};
 use bootty_mux::repository::{MAX_PROJECT_SCRIPTS, ProjectScript, ProjectSettings};
@@ -491,6 +492,7 @@ impl ProjectSettingsView {
                     .child(
                         div().w(rems(10.0)).flex_shrink_0().child(
                             Input::new(&script.name)
+                                .context_menu(crate::gpui::text_menu(&script.name))
                                 .disabled(self.saving)
                                 .aria_label("Script name"),
                         ),
@@ -498,6 +500,7 @@ impl ProjectSettingsView {
                     .child(
                         div().flex_1().min_w_0().child(
                             Input::new(&script.command)
+                                .context_menu(crate::gpui::text_menu(&script.command))
                                 .disabled(self.saving)
                                 .aria_label("Script command"),
                         ),
@@ -509,7 +512,7 @@ impl ProjectSettingsView {
                         .label("Setup")
                         .checked(script.setup)
                         .disabled(self.saving)
-                        .tooltip("Run it in each new worktree's session as it starts")
+                        .element_tooltip("Run it in each new worktree's session as it starts")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(script) = this.scripts.get_mut(index) {
                                 script.setup = !script.setup;
@@ -526,7 +529,7 @@ impl ProjectSettingsView {
                         .small()
                         .disabled(self.saving)
                         .accessibility_label("Remove script")
-                        .tooltip("Remove script")
+                        .element_tooltip("Remove script")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if index < this.scripts.len() {
                                 this.scripts.remove(index);
@@ -631,6 +634,7 @@ impl Render for ProjectSettingsView {
                         "Name",
                         "Empty uses the folder name.",
                         Input::new(&self.name)
+                            .context_menu(crate::gpui::text_menu(&self.name))
                             .disabled(self.saving)
                             .aria_label("Project name"),
                         cx,
@@ -655,6 +659,7 @@ impl Render for ProjectSettingsView {
                         "Branch prefix",
                         "Empty uses bootty/.",
                         Input::new(&self.branch_prefix)
+                            .context_menu(crate::gpui::text_menu(&self.branch_prefix))
                             .disabled(self.saving)
                             .aria_label("Branch prefix"),
                         cx,
@@ -663,6 +668,7 @@ impl Render for ProjectSettingsView {
                         "Starting ref",
                         "Branch, tag or commit. Empty uses HEAD.",
                         Input::new(&self.start_ref)
+                            .context_menu(crate::gpui::text_menu(&self.start_ref))
                             .disabled(self.saving)
                             .aria_label("Starting ref"),
                         cx,
@@ -672,13 +678,14 @@ impl Render for ProjectSettingsView {
                         div()
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Run from a session's menu in a new tab. Setup scripts also run in each new worktree's session as it starts."),
+                            .child("Run from a session's menu in a new tab."),
                     )
                     .child(self.render_scripts(cx))
                     .child(Self::row(
                         "Before removing a worktree",
-                        "Runs in the worktree before Bootty removes it. If it fails, the worktree stays.",
+                        "If it fails, the worktree stays.",
                         Input::new(&self.teardown)
+                            .context_menu(crate::gpui::text_menu(&self.teardown))
                             .disabled(self.saving)
                             .aria_label("Before removing a worktree"),
                         cx,

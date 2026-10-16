@@ -42,8 +42,8 @@ struct CreatedTerminalFocus {
     panel: gpui_kit::FocusHandle,
 }
 
+/// A resume on its way; a task waits for its answer and then lets the next refresh look again.
 struct PendingNativeReconnect {
-    response: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
     cancellation: bootty_control::CommandCancellation,
 }
 
@@ -578,18 +578,12 @@ impl GpuiWorkspace {
                     .remove(&record.id);
                 continue;
             }
-            if let Some(pending) = self.native_conversations.reconnect_pending.get(&record.id) {
-                if matches!(
-                    pending.response.try_recv(),
-                    Err(std::sync::mpsc::TryRecvError::Empty)
-                ) {
-                    let after = std::time::Duration::from_millis(100);
-                    wait = Some(wait.map_or(after, |current| current.min(after)));
-                    continue;
-                }
-                self.native_conversations
-                    .reconnect_pending
-                    .remove(&record.id);
+            if self
+                .native_conversations
+                .reconnect_pending
+                .contains_key(&record.id)
+            {
+                continue;
             }
             match self
                 .native_conversations
@@ -616,16 +610,22 @@ impl GpuiWorkspace {
                             .unwrap_or(now),
                         cancellation.clone(),
                     ) {
-                        self.native_conversations.reconnect_pending.insert(
-                            record.id.clone(),
-                            PendingNativeReconnect {
-                                response,
-                                cancellation,
-                            },
-                        );
+                        let id = record.id.clone();
+                        cx.spawn(async move |this, cx| {
+                            _ = cx
+                                .background_executor()
+                                .spawn(async move { response.recv() })
+                                .await;
+                            _ = this.update(cx, |this, cx| {
+                                this.native_conversations.reconnect_pending.remove(&id);
+                                cx.notify();
+                            });
+                        })
+                        .detach();
+                        self.native_conversations
+                            .reconnect_pending
+                            .insert(record.id.clone(), PendingNativeReconnect { cancellation });
                     }
-                    let after = std::time::Duration::from_millis(100);
-                    wait = Some(wait.map_or(after, |current| current.min(after)));
                 }
             }
         }
@@ -751,7 +751,9 @@ impl GpuiWorkspace {
                 this.native_conversations.records = records;
                 this.report_rate_limits();
                 for record in &this.native_conversations.records {
-                    if let Some(view) = this.native_conversations.views.get(&record.id) {
+                    if let Some(view) = this.native_conversations.views.get(&record.id)
+                        && view.read(cx).record_changed(record)
+                    {
                         view.update(cx, |view, cx| {
                             view.update_record(record.clone(), window, cx);
                         });
@@ -1365,6 +1367,25 @@ impl GpuiWorkspace {
                 },
             )
             .collect();
+        // Each conversation's side chats and spawned children, found in one pass.
+        let mut children = HashMap::<&str, Vec<&NativeSessionRecord>>::new();
+        for child in &self.native_conversations.records {
+            let parents = child
+                .side_chat
+                .as_ref()
+                .map(|fork| fork.source_id.as_str())
+                .into_iter()
+                .chain(
+                    child
+                        .spawn_parent
+                        .as_ref()
+                        .map(|parent| parent.handle.as_str()),
+                )
+                .collect::<std::collections::BTreeSet<_>>();
+            for parent in parents {
+                children.entry(parent).or_default().push(child);
+            }
+        }
         for (record, name) in self.native_conversations.records.iter().zip(&mentionable) {
             if let Some(view) = self.native_conversations.views.get(&record.id) {
                 // A conversation mentions the others, never itself.
@@ -1377,31 +1398,27 @@ impl GpuiWorkspace {
                     view.set_short_name(name.name.clone(), cx);
                     view.set_mentionable_conversations(others, cx);
                 });
-                let related = self
-                    .native_conversations
-                    .records
-                    .iter()
-                    .filter(|child| {
-                        child
-                            .side_chat
-                            .as_ref()
-                            .is_some_and(|fork| fork.source_id == record.id)
-                            || child
-                                .spawn_parent
-                                .as_ref()
-                                .is_some_and(|parent| parent.handle == record.id)
-                    })
+                let seen = view.read(cx);
+                let related = children
+                    .get(record.id.as_str())
+                    .into_iter()
+                    .flatten()
                     .map(|child| crate::gpui_agent_session::RelatedConversation {
                         target: child.target(),
                         title: child.title.clone(),
                         model: child.config.model.clone(),
                         status: child.snapshot.status,
                         revision: child.snapshot.revision,
+                        // The child's transcript goes only with a revision the view hasn't seen.
                         subagent: child
                             .spawn_parent
                             .as_ref()
                             .filter(|parent| parent.handle == record.id)
-                            .map(|_| host_subagent(child, &record.snapshot)),
+                            .map(|_| {
+                                let fresh = seen.related_revision(&child.target())
+                                    != Some(child.snapshot.revision);
+                                host_subagent(child, &record.snapshot, fresh)
+                            }),
                     })
                     .collect();
                 view.update(cx, |view, cx| view.set_related_conversations(related, cx));
@@ -1632,9 +1649,11 @@ impl GpuiWorkspace {
     }
 }
 
+/// A spawned child as its parent shows it, with its transcript when `transcript` asks for it.
 fn host_subagent(
     child: &NativeSessionRecord,
     parent: &bootty_agents::NativeSessionSnapshot,
+    with_transcript: bool,
 ) -> bootty_agents::NativeSubagentDetail {
     use bootty_agents::{NativeSessionStatus, NativeToolStatus, NativeTurnOutcome};
     let outcome = child.snapshot.first_turn.as_ref().map(|turn| turn.outcome);
@@ -1666,6 +1685,7 @@ fn host_subagent(
             model: child.config.model.clone(),
             thread_id: None,
             own_file: false,
+            output_file: None,
             owner_session: parent.session_id.clone(),
             status,
             started_at: transcript.iter().find_map(|item| item.created_at),
@@ -1673,6 +1693,10 @@ fn host_subagent(
                 .then(|| transcript.iter().rev().find_map(|item| item.updated_at))
                 .flatten(),
         },
-        transcript: transcript.clone(),
+        transcript: if with_transcript {
+            transcript.clone()
+        } else {
+            Vec::new()
+        },
     }
 }

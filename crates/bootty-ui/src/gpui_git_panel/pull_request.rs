@@ -2,6 +2,7 @@
 mod creation;
 mod merge;
 mod metadata;
+use crate::gpui::ElementTooltip as _;
 use creation::{CreationEditor, CreationSubmission};
 use metadata::{MetadataEditor, MetadataMode};
 
@@ -947,7 +948,7 @@ impl PullRequestView {
                     .selected(layer_number == number)
                     .disabled(self.pending)
                     .accessibility_label(label.clone())
-                    .tooltip(label.clone())
+                    .element_tooltip(label.clone())
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.open(layer_number, window, cx)),
@@ -1024,6 +1025,7 @@ impl PullRequestView {
                     .gap_1()
                     .child(
                         Input::new(&self.search)
+                            .context_menu(crate::gpui::text_menu(&self.search))
                             .disabled(self.pending)
                             .aria_label("Search pull requests")
                             .flex_1()
@@ -1036,7 +1038,7 @@ impl PullRequestView {
                             .small()
                             .disabled(self.pending)
                             .accessibility_label("Search pull requests")
-                            .tooltip("Search pull requests")
+                            .element_tooltip("Search pull requests")
                             .on_click(cx.listener(|this, _, window, cx| this.find(window, cx))),
                     ),
             )
@@ -1078,7 +1080,7 @@ impl PullRequestView {
                     .min_w_0()
                     .disabled(self.pending || self.creation_editor.is_some())
                     .accessibility_label(label.clone())
-                    .tooltip(label.clone())
+                    .element_tooltip(label.clone())
                     .child(div().flex_1().min_w_0().truncate().child(label))
                     .on_click(cx.listener(move |this, _, window, cx| this.open(number, window, cx)))
             }))
@@ -1186,7 +1188,7 @@ impl PullRequestView {
                             .small()
                             .disabled(self.pending)
                             .accessibility_label("Refresh pull request")
-                            .tooltip("Refresh pull request")
+                            .element_tooltip("Refresh pull request")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 if let Some(number) = this
                                     .snapshot
@@ -1229,7 +1231,7 @@ impl PullRequestView {
                                     .small()
                                     .ghost()
                                     .accessibility_label("Cancel edit")
-                                    .tooltip("Cancel edit")
+                                    .element_tooltip("Cancel edit")
                                     .disabled(self.pending)
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.metadata_editor = None;
@@ -1427,7 +1429,7 @@ impl PullRequestView {
                     } else {
                         "Mark file viewed"
                     })
-                    .tooltip(if viewed.is_none() {
+                    .element_tooltip(if viewed.is_none() {
                         "Viewed status has not loaded"
                     } else if viewed == Some(true) {
                         "Mark file unread"
@@ -1518,7 +1520,7 @@ impl PullRequestView {
                                         .ghost()
                                         .small()
                                         .accessibility_label("Edit comment")
-                                        .tooltip("Edit comment")
+                                        .element_tooltip("Edit comment")
                                         .disabled(self.pending)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.open_metadata(mode.clone(), window, cx);
@@ -1699,7 +1701,7 @@ impl PullRequestView {
                                     .small()
                                     .disabled(self.pending)
                                     .accessibility_label("Remove draft comment")
-                                    .tooltip("Remove draft comment")
+                                    .element_tooltip("Remove draft comment")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.comments.retain(|draft| draft.id != id);
                                         cx.notify();
@@ -1730,6 +1732,7 @@ impl PullRequestView {
             .gap_2()
             .child(
                 Textarea::new(&self.body)
+                    .context_menu(crate::gpui::text_menu(&self.body))
                     .aria_label("Pull request review")
                     .w_full(),
             )
@@ -2056,6 +2059,7 @@ impl PullRequestView {
                 )
                 .child(
                     Textarea::new(reply)
+                        .context_menu(crate::gpui::text_menu(reply))
                         .aria_label("Reply to review thread")
                         .w_full(),
                 )
@@ -2105,7 +2109,7 @@ impl PullRequestView {
             .ghost()
             .w_full()
             .accessibility_label(label.clone())
-            .tooltip(label.clone())
+            .element_tooltip(label.clone())
             .child(div().flex_1().min_w_0().truncate().child(label))
             .on_click(cx.listener(move |this, _, _, cx| {
                 let open = this
@@ -2179,7 +2183,7 @@ impl PullRequestView {
                                         .xsmall()
                                         .ghost()
                                         .accessibility_label("Edit comment")
-                                        .tooltip("Edit comment")
+                                        .element_tooltip("Edit comment")
                                         .disabled(self.pending)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.open_metadata(mode.clone(), window, cx);

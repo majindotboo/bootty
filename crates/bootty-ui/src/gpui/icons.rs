@@ -50,14 +50,14 @@ pub fn sized_icon(slug: &str, size: IconSize, tint: Hsla) -> AnyElement {
 pub fn icon(slug: &str, size: f32, tint: Hsla) -> AnyElement {
     if slug == "bootty" {
         return img("icons/bootty.png")
-            .size(px(normalize_size(size)))
+            .size(icon_size(size))
             .flex_shrink_0()
             .into_any_element();
     }
     if slug == "pi" {
         return gpui_kit::svg()
             .path("icons/pi.svg")
-            .size(px(normalize_size(size)))
+            .size(icon_size(size))
             .flex_shrink_0()
             .text_color(tint)
             .into_any_element();
@@ -65,7 +65,7 @@ pub fn icon(slug: &str, size: f32, tint: Hsla) -> AnyElement {
     if let Some(path) = lucide_path(slug) {
         return gpui_kit::component::Icon::default()
             .path(path)
-            .size(px(normalize_size(size)))
+            .size(icon_size(size))
             .flex_shrink_0()
             .text_color(tint)
             .into_any_element();
@@ -75,11 +75,19 @@ pub fn icon(slug: &str, size: f32, tint: Hsla) -> AnyElement {
     };
     IconElement {
         resolved,
-        size: px(normalize_size(size)),
+        size: normalize_size(size),
         tint,
     }
     .into_any_element()
 }
+
+/// An icon box of `size` pixels at the default UI size, in rems so UI zoom scales it.
+fn icon_size(size: f32) -> gpui_kit::Rems {
+    gpui_kit::rems(normalize_size(size) / DEFAULT_REM)
+}
+
+/// The UI font size icon pixel sizes are given at.
+const DEFAULT_REM: f32 = 16.0;
 
 /// A single icon glyph rasterized from its embedded font.
 ///
@@ -88,7 +96,8 @@ pub fn icon(slug: &str, size: f32, tint: Hsla) -> AnyElement {
 /// fallback produces tofu. Rasterizing the requested outline keeps icons out of the UI text stack.
 struct IconElement {
     resolved: ResolvedIcon,
-    size: Pixels,
+    /// Its side in pixels at the default UI size; UI zoom scales it.
+    size: f32,
     tint: Hsla,
 }
 
@@ -120,8 +129,9 @@ impl Element for IconElement {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = GpuiStyle::default();
-        style.size.width = self.size.into();
-        style.size.height = self.size.into();
+        let size = px(self.size / DEFAULT_REM * f32::from(window.rem_size()));
+        style.size.width = size.into();
+        style.size.height = size.into();
         style.flex_shrink = 0.0;
         (window.request_layout(style, [], cx), ())
     }
@@ -130,14 +140,14 @@ impl Element for IconElement {
         &mut self,
         _id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: Bounds<Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
         rasterized_icon(
             self.resolved,
-            f32::from(self.size) * window.scale_factor(),
+            f32::from(bounds.size.width) * window.scale_factor(),
             self.tint,
         )
     }

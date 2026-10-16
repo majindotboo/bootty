@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod support;
 use std::{
     fs,
     os::unix::fs::PermissionsExt as _,
@@ -633,10 +634,7 @@ fn native_mcp_attachment_preserves_exact_authority_and_resume_configuration(
     assert_eq!(service.provider_info(&record.target()).unwrap(), info);
     assert_eq!(catalog(&lease, &commands), Some(json!([])));
     service.checkpoint().expect("Durable checkpoint");
-    let saved: Value = serde_json::from_slice(
-        &fs::read(root.path().join("native.json")).expect("Saved native catalog"),
-    )
-    .expect("Catalog JSON");
+    let saved = support::stored_catalog(&root.path().join("native.json")).unwrap();
     assert_eq!(saved["records"][0]["config"], expected);
     let (tools, fresh_lease) =
         bridge(&commands, caller, Some(&terminal)).expect("Fresh resume attachment");

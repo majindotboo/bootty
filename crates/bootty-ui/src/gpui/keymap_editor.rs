@@ -4,6 +4,7 @@
 //! snapshot. This view owns only transient search, filter, selection, and modal state. Durable
 //! edits leave through [`KeymapEditorIntent`]; this crate never reads or writes `keymap.json`.
 
+use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 
 use gpui_kit::component::{
@@ -1624,7 +1625,7 @@ impl GpuiKeymapEditor {
         Button::new("KeymapEditorFilterMenuButton")
             .icon(Icon::new(IconName::Settings2))
             .accessibility_label("Filter keybindings")
-            .tooltip("Filters")
+            .element_tooltip("Filters")
             .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, cx| {
                 let state = editor.read(cx);
                 let filters = [
@@ -1665,7 +1666,7 @@ impl GpuiKeymapEditor {
             .label("Use built-in defaults")
             .outline()
             .xsmall()
-            .tooltip("Contexts")
+            .element_tooltip("Contexts")
             .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
                 let mut menu = menu.label("Use built-in defaults");
                 for context in &contexts {
@@ -1707,7 +1708,7 @@ impl GpuiKeymapEditor {
                     } else {
                         "Record search keystrokes"
                     })
-                    .tooltip(if recording {
+                    .element_tooltip(if recording {
                         "Stop recording"
                     } else {
                         "Record keystrokes"
@@ -1728,7 +1729,7 @@ impl GpuiKeymapEditor {
                 Button::new("kit-keymap-search-exact")
                     .icon(Icon::new(IconName::CaseSensitive))
                     .accessibility_label("Exact keystrokes")
-                    .tooltip("Exact keystrokes")
+                    .element_tooltip("Exact keystrokes")
                     .selected(self.exact_keystroke_search)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_exact_keystroke_search(!this.exact_keystroke_search, cx);
@@ -1740,7 +1741,7 @@ impl GpuiKeymapEditor {
                     Button::new("kit-keymap-keystroke-clear")
                         .icon(Icon::new(IconName::Delete))
                         .accessibility_label("Clear search keystrokes")
-                        .tooltip("Clear search keystrokes")
+                        .element_tooltip("Clear search keystrokes")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.keystroke_query.clear();
                             this.reselect_first_visible();
@@ -1791,7 +1792,9 @@ impl GpuiKeymapEditor {
                             .rounded_md()
                             .child(crate::gpui::focus_input(
                                 search_editor,
-                                Input::new(search_editor).appearance(false),
+                                Input::new(search_editor)
+                                    .context_menu(crate::gpui::text_menu(search_editor))
+                                    .appearance(false),
                             )),
                     )
                     .child(
@@ -1807,7 +1810,7 @@ impl GpuiKeymapEditor {
                                     .icon(Icon::default().path("icons/keyboard.svg"))
                                     .accessibility_label("Search by keystrokes")
                                     .selected(keystroke_selected)
-                                    .tooltip("Search by Keystrokes")
+                                    .element_tooltip("Search by Keystrokes")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.set_search_mode(
                                             if this.search_mode == KeymapSearchMode::Keystroke {
@@ -1890,17 +1893,21 @@ impl GpuiKeymapEditor {
                         cx.stop_propagation();
                     }))
                     .accessibility_label(action_label.clone())
-                    .tooltip(action_label)
-                    .xsmall()
-                    .when(conflict_count > 0, |button| {
-                        button.text_color(cx.theme().warning).tooltip(format!(
+                    .element_tooltip(if conflict_count > 0 {
+                        format!(
                             "This keybinding conflicts with {conflict_count} other {}",
                             if conflict_count == 1 {
                                 "binding"
                             } else {
                                 "bindings"
                             }
-                        ))
+                        )
+                    } else {
+                        action_label
+                    })
+                    .xsmall()
+                    .when(conflict_count > 0, |button| {
+                        button.text_color(cx.theme().warning)
                     }),
             )
             .into_any_element()
@@ -2056,7 +2063,7 @@ impl GpuiKeymapEditor {
                     } else {
                         "Record a keybinding"
                     })
-                    .tooltip(if recording {
+                    .element_tooltip(if recording {
                         "Stop recording"
                     } else {
                         "Record keystrokes"
@@ -2082,7 +2089,7 @@ impl GpuiKeymapEditor {
                     Button::new("kit-keymap-modal-clear")
                         .icon(Icon::new(IconName::Delete))
                         .accessibility_label("Clear keybinding")
-                        .tooltip("Clear keybinding")
+                        .element_tooltip("Clear keybinding")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.clear_modal_keystrokes(cx);
                         })),
@@ -2249,6 +2256,7 @@ impl GpuiKeymapEditor {
                     .child(crate::gpui::focus_input(
                         arguments_editor,
                         ComponentEditor::new(arguments_editor)
+                            .context_menu(crate::gpui::text_menu(arguments_editor))
                             .h(px(96.0))
                             .aria_label("JSON arguments"),
                     )),
@@ -2355,7 +2363,10 @@ impl GpuiKeymapEditor {
                         .aria_label("Keybinding context")
                         .child(crate::gpui::focus_input(
                             context_editor,
-                            Input::new(context_editor).with_size(Size::Small).w_full(),
+                            Input::new(context_editor)
+                                .context_menu(crate::gpui::text_menu(context_editor))
+                                .with_size(Size::Small)
+                                .w_full(),
                         )),
                 ),
         );

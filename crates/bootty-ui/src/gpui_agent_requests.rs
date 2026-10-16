@@ -90,10 +90,12 @@ impl AnswerField {
     fn render(&self, label: String, disabled: bool) -> gpui_kit::AnyElement {
         match self {
             Self::Line(input) => Input::new(input)
+                .context_menu(crate::gpui::text_menu(input))
                 .aria_label(label)
                 .disabled(disabled)
                 .into_any_element(),
             Self::Text(input) => Textarea::new(input)
+                .context_menu(crate::gpui::text_menu(input))
                 .aria_label(label)
                 .disabled(disabled)
                 .into_any_element(),
@@ -731,6 +733,7 @@ impl NativeRequestView {
                         ))
                         .child(
                             Input::new(&note)
+                                .context_menu(crate::gpui::text_menu(&note))
                                 .aria_label("Why the agent shouldn't do this")
                                 .disabled(pending),
                         ),
@@ -1175,7 +1178,12 @@ impl NativeRequestView {
         let mut body = div().flex().flex_col().gap_2();
         if request.method == "pi.editor" {
             if let Some(editor) = self.editors.get(&id) {
-                body = body.child(Textarea::new(editor).aria_label(label).disabled(pending));
+                body = body.child(
+                    Textarea::new(editor)
+                        .context_menu(crate::gpui::text_menu(editor))
+                        .aria_label(label)
+                        .disabled(pending),
+                );
             }
         } else if let Some(answer) = self.answers.get(&(id.clone(), "value".to_owned())) {
             body = body.child(answer.render(label, pending));

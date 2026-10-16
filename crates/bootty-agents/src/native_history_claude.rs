@@ -62,11 +62,7 @@ impl NativeAgentSession {
         }
         // A resumed conversation knows its identity before Claude's first turn reports it. One
         // without any identity hasn't run a turn, so it has no history yet.
-        let Some(session) = current
-            .session_id
-            .as_deref()
-            .or(self.config.session_id.as_deref())
-        else {
+        let Some(session) = self.history_identity(current) else {
             return Ok(empty_history());
         };
         if !crate::terminal_history::valid_id(session) {
@@ -213,26 +209,35 @@ fn open_history(
             .ok_or("Claude has no captured account")?,
     )
     .join("projects");
-    let remote = config
-        .remote
-        .as_ref()
-        .map(|remote| RemoteHost::new(remote.host.clone()));
     // Claude runs in the resolved directory, so a local link like /tmp names /private/tmp.
-    let cwd = if remote.is_none() {
+    let cwd = if config.remote.is_none() {
         std::fs::canonicalize(&config.cwd).unwrap_or_else(|_| config.cwd.clone())
     } else {
         config.cwd.clone()
     };
     let path = projects.join(project_folder(&cwd)).join(file);
+    open_log(
+        config,
+        projects.to_str().ok_or("Claude account is not UTF-8")?,
+        path.to_str().ok_or("Claude history path is not UTF-8")?,
+    )
+    .map(|reader| reader.map(BufReader::new))
+}
+
+/// Opens a log Claude writes at `path`, inside `root`, on the conversation's host. A log Claude
+/// hasn't written yet is none.
+fn open_log(
+    config: &crate::NativeSessionConfig,
+    root: &str,
+    path: &str,
+) -> Result<Option<FileReader>, String> {
+    let remote = config
+        .remote
+        .as_ref()
+        .map(|remote| RemoteHost::new(remote.host.clone()));
     let request = FileRequest::OpenReader {
-        root: projects
-            .to_str()
-            .ok_or("Claude account is not UTF-8")?
-            .to_owned(),
-        path: path
-            .to_str()
-            .ok_or("Claude history path is not UTF-8")?
-            .to_owned(),
+        root: root.to_owned(),
+        path: path.to_owned(),
     };
     let response = remote
         .as_ref()
@@ -247,8 +252,74 @@ fn open_history(
         _ => return Err("Claude history requires its captured file descriptor".into()),
     };
     FileReader::open_log(&descriptor, remote.as_ref())
-        .map(|reader| Some(BufReader::new(reader)))
+        .map(Some)
         .map_err(|error| error.to_string())
+}
+
+/// The most of a background command's output its tab shows: the end, where it's still writing.
+const MAX_COMMAND_OUTPUT: u64 = 64 * 1024;
+
+/// A Claude background command as a conversation: the command, the end of its output so far,
+/// and Claude's summary once it has ended.
+/// # Errors
+/// Returns an output file that can't be read.
+pub fn command_transcript(
+    config: &crate::NativeSessionConfig,
+    agent: &crate::NativeSubagent,
+    path: &str,
+    summary: &str,
+) -> Result<Vec<crate::NativeTranscriptItem>, String> {
+    let root = Path::new(path)
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or("The command's output has no folder")?;
+    let output = match open_log(config, root, path)? {
+        Some(mut reader) => {
+            let start = reader.len().saturating_sub(MAX_COMMAND_OUTPUT);
+            reader
+                .seek(SeekFrom::Start(start))
+                .map_err(|error| error.to_string())?;
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(
+                &mut std::io::Read::take(&mut reader, MAX_COMMAND_OUTPUT),
+                &mut bytes,
+            )
+            .map_err(|error| error.to_string())?;
+            let text = String::from_utf8_lossy(&bytes);
+            // A cut start falls mid-line; show from the next whole line.
+            if start > 0 {
+                text.split_once('\n')
+                    .map_or("", |(_, rest)| rest)
+                    .to_owned()
+            } else {
+                text.into_owned()
+            }
+        }
+        None => String::new(),
+    };
+    let mut snapshot = NativeSessionSnapshot::new(AgentKind::Claude);
+    let id = &agent.id;
+    for (key, role, text) in [
+        ("prompt", "user", agent.prompt.clone()),
+        ("output", "assistant", fenced(&output)),
+        ("result", "assistant", summary.to_owned()),
+    ] {
+        if !text.trim().is_empty() {
+            snapshot.message(format!("subagent-{key}:{id}"), role, text, true);
+        }
+    }
+    Ok(snapshot.transcript)
+}
+
+/// `text` in a code block whose fence no run of backticks in it can close.
+fn fenced(text: &str) -> String {
+    let text = text.trim_end();
+    if text.is_empty() {
+        return String::new();
+    }
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2).saturating_add(1));
+    format!("{fence}text\n{text}\n{fence}")
 }
 
 fn read_index(reader: &mut BufReader<FileReader>, size: u64) -> Result<Vec<IndexedEntry>, String> {

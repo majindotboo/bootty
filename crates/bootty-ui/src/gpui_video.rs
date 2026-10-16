@@ -1,5 +1,6 @@
 //! Native playback clock/audio and a bounded host reader; GPUI retains only the current frame.
 
+use crate::gpui::ElementTooltip as _;
 use anyhow::{Context as _, Result, ensure};
 use avplayer::{
     AssetResourceLoaderEvent, AssetResourceLoaderObserver, AssetResourceLoadingRequest, Player,
@@ -311,7 +312,7 @@ impl Render for VideoPreview {
                             } else {
                                 IconName::Play
                             })
-                            .tooltip(playback_label)
+                            .element_tooltip(playback_label)
                             .accessibility_label(playback_label)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.playing {
@@ -342,7 +343,7 @@ impl Render for VideoPreview {
                             } else {
                                 IconName::Volume2
                             })
-                            .tooltip(volume_label)
+                            .element_tooltip(volume_label)
                             .accessibility_label(volume_label)
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.playback

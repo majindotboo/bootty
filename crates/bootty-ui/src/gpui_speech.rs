@@ -1,4 +1,5 @@
 //! One local recording owner shared by both composers; providers receive text through normal prompts.
+use crate::gpui::ElementTooltip as _;
 use bootty_host::speech::{SpeechCommand, SpeechEvent, SpeechSession};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, WindowExt as _,
@@ -24,7 +25,9 @@ pub fn notify_error(action: &str, error: &str, window: &mut Window, cx: &mut gpu
                         })
                 })
             })
-            .id::<SpeechInput>(),
+            .id::<SpeechInput>()
+            // After the action, which turns hiding off; hovering holds it open.
+            .autohide(true),
         cx,
     );
 }
@@ -331,7 +334,7 @@ impl SpeechInput {
             .loading(status == SpeechStatus::Stopping)
             .disabled(self.voice_active() || !self.enabled && !status.is_active())
             .accessibility_label(label)
-            .tooltip(label)
+            .element_tooltip(label)
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.emit(SpeechInputEvent::Toggle(SpeechMode::Dictation));
             }))
@@ -377,7 +380,7 @@ impl Render for SpeechInput {
                         } else {
                             "Start voice mode"
                         })
-                        .tooltip(if voice {
+                        .element_tooltip(if voice {
                             "End voice mode"
                         } else {
                             "Start voice mode"

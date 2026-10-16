@@ -32,9 +32,14 @@ impl NativeHistoryPage {
             item
         };
         let mut merged = Vec::with_capacity(self.transcript.len().max(live.len()));
+        // Each live item's first position, found once rather than per page item.
+        let mut positions = std::collections::HashMap::new();
+        for (position, item) in live.iter().enumerate() {
+            positions.entry(item.id.as_str()).or_insert(position);
+        }
         let mut next = 0;
         for item in &self.transcript {
-            match live.iter().position(|candidate| candidate.id == item.id) {
+            match positions.get(item.id.as_str()).copied() {
                 Some(position) if position >= next => {
                     merged.extend(
                         live.get(next..=position)
@@ -288,6 +293,18 @@ impl NativeAgentSession {
         Ok((position, page))
     }
 
+    /// The provider conversation history reads from. A resumed conversation has its saved
+    /// identity before the provider reports it again, and it's the same conversation after.
+    pub(crate) fn history_identity<'a>(
+        &'a self,
+        snapshot: &'a NativeSessionSnapshot,
+    ) -> Option<&'a str> {
+        snapshot
+            .session_id
+            .as_deref()
+            .or(self.config.session_id.as_deref())
+    }
+
     pub(crate) fn accept_history_page(
         &self,
         current: &NativeSessionSnapshot,
@@ -299,7 +316,7 @@ impl NativeAgentSession {
         if !matches!(
             current_after_read.status,
             NativeSessionStatus::Idle | NativeSessionStatus::Working | NativeSessionStatus::Waiting
-        ) || current_after_read.session_id != current.session_id
+        ) || self.history_identity(&current_after_read) != self.history_identity(current)
         {
             return Err("The conversation changed while reading history".into());
         }
@@ -400,7 +417,7 @@ impl NativeAgentSession {
             }
             if !page.has_older {
                 let latest = self.snapshot();
-                if latest.session_id != current.session_id
+                if self.history_identity(&latest) != self.history_identity(&current)
                     || latest.revision != current.revision
                     || latest.status != NativeSessionStatus::Idle
                 {

@@ -2,6 +2,7 @@
 
 use std::time::Duration;
 
+use bootty_ui::clock::Moment;
 use bootty_ui::gpui::chrome::{
     ChromeLayout, SidebarPosition, StatusIntent, TabDragGesture, TabInsertionTarget,
     WindowDragGesture, tab_insertion_target,
@@ -56,6 +57,38 @@ proptest! {
         prop_assert_eq!(
             bootty_ui::clock::format_working_duration(Duration::new(seconds, nanos)),
             format!("{seconds}s"),
+        );
+    }
+}
+
+/// Each moment writes the parts it names, whatever the system's language and clock.
+#[rstest]
+#[case(Moment::Time, &["40"], &["2026", "05"])]
+#[case(Moment::TimeWithSeconds, &["40", "05"], &["2026"])]
+#[case(Moment::Day, &["17"], &["2026", "40"])]
+#[case(Moment::DayAndYear, &["17", "2026"], &["40"])]
+#[case(Moment::DayAndTime, &["17", "40"], &["2026"])]
+fn local_moments_write_the_parts_they_name(
+    #[case] moment: Moment,
+    #[case] shown: &[&str],
+    #[case] hidden: &[&str],
+) {
+    use chrono::TimeZone as _;
+    let at = chrono::Local
+        .with_ymd_and_hms(2026, 10, 17, 15, 40, 5)
+        .single()
+        .expect("an unambiguous local time");
+    let text = bootty_ui::clock::local_moment(at, moment);
+    for part in shown {
+        assert!(
+            text.contains(part),
+            "{moment:?} wrote {text:?}, without {part}"
+        );
+    }
+    for part in hidden {
+        assert!(
+            !text.contains(part),
+            "{moment:?} wrote {text:?}, with {part}"
         );
     }
 }

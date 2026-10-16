@@ -1,6 +1,7 @@
 //! The current plan sits in the composer drawer: its steps while the agent works through them,
 //! and Implement once a proposed plan is ready.
 use super::NativeAgentSessionView;
+use crate::gpui::ElementTooltip as _;
 use bootty_agents::{NativeSessionStatus, NativeTodo, NativeTodoStatus};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
@@ -118,7 +119,7 @@ impl NativeAgentSessionView {
                         .xsmall()
                         .icon(gpui_kit::component::IconName::Close)
                         .accessibility_label("Remove goal")
-                        .tooltip("Remove goal")
+                        .element_tooltip("Remove goal")
                         .disabled(!enabled)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.command("goal", vec![String::new()], window, cx);
@@ -273,7 +274,6 @@ impl NativeAgentSessionView {
                     .xsmall()
                     .label("Implement")
                     .loading(self.pending.contains("implement"))
-                    .tooltip("Implement plan")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.command("implement", Vec::new(), window, cx);
                     })),

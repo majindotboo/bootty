@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod support;
 use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
 
 use assert_fs::TempDir;
@@ -185,6 +186,10 @@ for line in sys.stdin:
    tool_use('bg-call','cargo build');tool_use('fg-call','ls')
    emit({'type':'system','subtype':'task_started','session_id':session,'task_id':'fg-task','tool_use_id':'fg-call','description':'List files','task_type':'local_bash'})
    emit({'type':'system','subtype':'task_started','session_id':session,'task_id':'bg-task','tool_use_id':'bg-call','description':'Watch the build','is_backgrounded':True,'task_type':'local_bash'})
+   # The tool's result says where the command writes its output.
+   os.makedirs('tasks',exist_ok=True)
+   with open('tasks/bg-task.output','w') as output: output.write('Compiling bootty\n')
+   user_event([{'type':'tool_result','tool_use_id':'bg-call','content':'Command running in background with ID: bg-task. Output is being written to: '+os.path.abspath('tasks/bg-task.output')}],tool_use_result={'stdout':'','stderr':'','interrupted':False,'backgroundTaskId':'bg-task'})
   if prompt=='background-done':
    emit({'type':'system','subtype':'task_updated','session_id':session,'task_id':'bg-task','patch':{'status':'completed'}})
   if prompt=='self-turn':
@@ -927,7 +932,7 @@ fn fresh_intent_is_durable_and_resume_preserves_exact_task_account_identity() {
         .unwrap();
     let intent = record.config.fresh_session_id.clone().unwrap();
     assert_eq!(record.snapshot.session_id, None);
-    let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let persisted: Value = support::stored_catalog(&path).unwrap();
     assert_eq!(
         persisted["records"][0]["config"]["fresh_session_id"],
         intent
@@ -938,7 +943,7 @@ fn fresh_intent_is_durable_and_resume_preserves_exact_task_account_identity() {
     service.stop(&record.target()).unwrap();
     let stopped = service.sessions().remove(0);
     assert_eq!(stopped.config.session_id.as_deref(), Some(intent.as_str()));
-    let persisted: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let persisted: Value = support::stored_catalog(&path).unwrap();
     assert_eq!(persisted["records"][0]["config"]["session_id"], intent);
     service.shutdown().unwrap();
     drop(service);
@@ -2070,8 +2075,9 @@ fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
     service.shutdown().unwrap();
 }
 
-/// Claude reports background shells as tasks. One stays visible and keeps its conversation active
-/// until Claude reports it finished; foreground commands stay plain tools.
+/// Claude reports background shells as tasks. One stays visible, shows its command and output,
+/// and keeps its conversation active until Claude reports it finished; foreground commands stay
+/// plain tools.
 #[test]
 fn background_shells_stay_visible_until_they_finish() {
     let root = TempDir::new().unwrap();
@@ -2099,6 +2105,15 @@ fn background_shells_stay_visible_until_they_finish() {
     };
     service.prompt(&target, "background-shell").unwrap();
     barrier(&session).unwrap();
+    let detail = session.read_subagent("bg-task").unwrap();
+    assert_eq!(
+        detail
+            .transcript
+            .iter()
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        ["cargo build", "```text\nCompiling bootty\n```"]
+    );
     assert_eq!(
         tasks(),
         vec![(

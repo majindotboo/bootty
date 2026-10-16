@@ -1,3 +1,4 @@
+use crate::gpui::ElementTooltip as _;
 use gpui_kit::base::Tab;
 use std::{cmp::Ordering, rc::Rc};
 
@@ -599,7 +600,7 @@ fn new_tab_button(
         .xsmall()
         .size_6()
         .accessibility_label("New tab")
-        .tooltip("New tab")
+        .element_tooltip("New tab")
         .on_click(cx.listener(|_, _, _, cx| {
             cx.emit(ChromeIntent::Command(
                 bootty_control::CommandInvocation::from_action(
@@ -864,7 +865,7 @@ fn native_tab_close_button(
     .xsmall()
     .size_4()
     .accessibility_label(format!("Close {label}"))
-    .tooltip(format!("Close {label}"))
+    .element_tooltip(format!("Close {label}"))
     .on_click(cx.listener(move |_, _, _, cx| {
         cx.stop_propagation();
         cx.emit(ChromeIntent::Status(StatusIntent::Action(
@@ -881,7 +882,7 @@ fn surface_tab_close_button(id: u64, cx: &Context<GpuiChrome>) -> gpui_kit::AnyE
         .xsmall()
         .size_4()
         .accessibility_label("Close New tab")
-        .tooltip("Close New tab")
+        .element_tooltip("Close New tab")
         .on_click(cx.listener(move |_, _, _, cx| {
             cx.stop_propagation();
             cx.emit(ChromeIntent::Status(StatusIntent::Action(
@@ -914,7 +915,7 @@ fn tab_close_button(
                 .size_4()
                 .debug_selector(move || id)
                 .accessibility_label(format!("Close pane in {label}"))
-                .tooltip(format!("Close pane in {label}"))
+                .element_tooltip(format!("Close pane in {label}"))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.stop_propagation();
                     cx.emit(ChromeIntent::Status(StatusIntent::Context {
@@ -1218,7 +1219,7 @@ fn panel_button(
         IconSize::Small,
         color(colors.text),
     ))
-    .tooltip_with_action(
+    .element_tooltip_with_action(
         command.title(),
         &crate::gpui_actions::dock_binding_action(action),
         Some(bar.keymap_context),

@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod support;
 use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
 
 use assert_fs::TempDir;
@@ -230,7 +231,7 @@ fn committed_selection_drives_the_next_provider_prompt(
         reasoning_effort: Some("high".to_owned()),
     };
     service.configure(&record.target(), &selection).unwrap();
-    let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let stored: Value = support::stored_catalog(&path).unwrap();
     assert_eq!(stored["records"][0]["config"]["model"], model);
     assert_eq!(stored["records"][0]["config"]["fast_mode"], fast);
     assert_eq!(stored["records"][0]["config"]["reasoning_effort"], "high");
@@ -276,7 +277,7 @@ fn committed_selection_drives_the_next_provider_prompt(
     }
     service.shutdown().unwrap();
     let reopened = NativeAgentService::open(&path).unwrap();
-    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let saved: Value = support::stored_catalog(&path).unwrap();
     assert_eq!(saved["records"][0]["config"]["model"], model);
     drop(reopened);
 }
@@ -289,7 +290,7 @@ proptest! {
         let path = root.path().join("native.json");
         let service = NativeAgentService::open(&path).unwrap();
         let record = service.create("binding", "Session", config(root.path(), AgentKind::Codex).unwrap()).unwrap();
-        let before: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let before: Value = support::stored_catalog(&path).unwrap();
         let selection = NativeModelSelection {
                 plan_mode: None,
 fast_mode: None,
@@ -297,7 +298,7 @@ fast_mode: None,
             reasoning_effort: if invalid_model { None } else { Some(selector) },
         };
         prop_assert!(service.configure(&record.target(), &selection).is_err());
-        let after: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let after: Value = support::stored_catalog(&path).unwrap();
         assert_eq!(before["records"][0]["config"], after["records"][0]["config"]);
         prop_assert!(!root.path().join("prompt.json").exists());
     }
@@ -315,8 +316,7 @@ fn failed_configuration_write_keeps_the_prior_prompt_settings() {
             config(root.path(), AgentKind::Codex).unwrap(),
         )
         .unwrap();
-    fs::remove_file(&path).unwrap();
-    fs::create_dir(&path).unwrap();
+    support::break_catalog(&path).unwrap();
     assert!(
         service
             .configure(
@@ -330,7 +330,7 @@ fn failed_configuration_write_keeps_the_prior_prompt_settings() {
             )
             .is_err()
     );
-    fs::remove_dir(&path).unwrap();
+    support::repair_catalog(&path).unwrap();
     service.prompt(&record.target(), "hello").unwrap();
     let wire: Value =
         serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
@@ -922,7 +922,7 @@ fn plan_mode_is_persisted_and_sent_as_a_provider_collaboration_mode(#[case] plan
         wire["params"]["collaborationMode"],
         json!({"mode":if plan {"plan"} else {"default"},"settings":{"model":"available","reasoning_effort":"high","developer_instructions":null}})
     );
-    let persisted: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let persisted: Value = support::stored_catalog(&path).unwrap();
     assert_eq!(persisted["records"][0]["config"]["plan_mode"], plan);
     service.stop(&target).unwrap();
 }
@@ -957,7 +957,7 @@ fn implementing_a_plan_runs_its_turn_outside_plan_mode() {
         ),
         (&json!("default"), &json!("Implement the plan."))
     );
-    let persisted: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    let persisted: Value = support::stored_catalog(&path).unwrap();
     assert_eq!(persisted["records"][0]["config"]["plan_mode"], false);
     service.stop(&target).unwrap();
 }

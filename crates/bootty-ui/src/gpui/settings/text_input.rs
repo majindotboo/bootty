@@ -175,6 +175,7 @@ impl GpuiSettings {
             .child(crate::gpui::focus_input(
                 &input,
                 ComponentInput::new(&input)
+                    .context_menu(crate::gpui::text_menu(&input))
                     // gpui-component exposes the editor's accessible name but not a separate
                     // description for this control. Keep the setting help in the real input's
                     // announced name until the component forwards aria_description.
@@ -227,6 +228,7 @@ impl GpuiSettings {
             .child(crate::gpui::focus_input(
                 &input,
                 ComponentInput::new(&input)
+                    .context_menu(crate::gpui::text_menu(&input))
                     .aria_label(aria_label)
                     .role(Role::TextInput)
                     .disabled(!enabled)

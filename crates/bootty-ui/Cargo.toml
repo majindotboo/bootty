@@ -37,6 +37,7 @@ url.workspace = true
 bootty-terminal = { path = "../bootty-terminal" }
 iconflow.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
+mermaid-rs-renderer.workspace = true
 libghostty-vt.workspace = true
 markdown.workspace = true
 keepawake.workspace = true

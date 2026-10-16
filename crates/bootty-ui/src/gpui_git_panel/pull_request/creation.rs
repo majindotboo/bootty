@@ -130,75 +130,86 @@ impl Render for CreationEditor {
             )
             .child(
                 Input::new(&self.base)
+                    .context_menu(crate::gpui::text_menu(&self.base))
                     .disabled(self.saving)
                     .aria_label("Base branch"),
             )
             .child(
                 Input::new(&self.title)
+                    .context_menu(crate::gpui::text_menu(&self.title))
                     .disabled(self.saving)
                     .aria_label("Pull request title"),
             )
-            .child(Textarea::new(&self.body).disabled(self.saving))
             .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .child(
-                        Button::new("draft-pr")
-                            .label("Draft")
-                            .small()
-                            .ghost()
-                            .selected(self.draft)
-                            .disabled(self.saving)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.draft = !this.draft;
-                                cx.notify();
-                            })),
+                Textarea::new(&self.body)
+                    .context_menu(crate::gpui::text_menu(&self.body))
+                    .disabled(self.saving),
+            )
+            .child(self.render_actions(cx))
+    }
+}
+
+impl CreationEditor {
+    /// Draft, Write with Codex, Publish branch and Create pull request.
+    fn render_actions(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .child(
+                Button::new("draft-pr")
+                    .label("Draft")
+                    .small()
+                    .ghost()
+                    .selected(self.draft)
+                    .disabled(self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.draft = !this.draft;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("write-pr")
+                    .icon(gpui_kit::assets::IconName::Sparkles)
+                    .label("Write with Codex")
+                    .small()
+                    .ghost()
+                    .disabled(
+                        self.saving
+                            || self.base.read(cx).value().trim().is_empty()
+                            || !self.title.read(cx).value().trim().is_empty()
+                                && !self.body.read(cx).value().trim().is_empty(),
                     )
-                    .child(
-                        Button::new("write-pr")
-                            .icon(gpui_kit::assets::IconName::Sparkles)
-                            .label("Write with Codex")
-                            .small()
-                            .ghost()
-                            .disabled(
-                                self.saving
-                                    || self.base.read(cx).value().trim().is_empty()
-                                    || !self.title.read(cx).value().trim().is_empty()
-                                        && !self.body.read(cx).value().trim().is_empty(),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.emit(CreationSubmission::Write {
-                                    base: this.base.read(cx).value().trim().to_owned(),
-                                });
-                            })),
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.emit(CreationSubmission::Write {
+                            base: this.base.read(cx).value().trim().to_owned(),
+                        });
+                    })),
+            )
+            .child(
+                Button::new("publish-pr-branch")
+                    .label(if self.published {
+                        "Published"
+                    } else {
+                        "Publish branch"
+                    })
+                    .small()
+                    .disabled(self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        cx.emit(CreationSubmission::Publish(this.context.clone()));
+                    })),
+            )
+            .child(
+                Button::new("create-pr")
+                    .label("Create pull request")
+                    .small()
+                    .primary()
+                    .disabled(
+                        self.saving
+                            || self.title.read(cx).value().trim().is_empty()
+                            || self.base.read(cx).value().trim().is_empty(),
                     )
-                    .child(
-                        Button::new("publish-pr-branch")
-                            .label(if self.published {
-                                "Published"
-                            } else {
-                                "Publish branch"
-                            })
-                            .small()
-                            .disabled(self.saving)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                cx.emit(CreationSubmission::Publish(this.context.clone()));
-                            })),
-                    )
-                    .child(
-                        Button::new("create-pr")
-                            .label("Create pull request")
-                            .small()
-                            .primary()
-                            .disabled(
-                                self.saving
-                                    || self.title.read(cx).value().trim().is_empty()
-                                    || self.base.read(cx).value().trim().is_empty(),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
-                    ),
+                    .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
             )
     }
 }

@@ -4,6 +4,7 @@
 //! values and translate emitted [`DialogIntent`] values back into domain events.
 
 use super::{OverlayPlacement, OverlayView};
+use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonGroup, ButtonVariants as _},
@@ -2106,7 +2107,7 @@ impl DialogView {
                                 .child(format!("Start from {start_ref}")),
                         )
                         .accessibility_label("Worktree options")
-                        .tooltip("Starting branch, tag or commit"),
+                        .element_tooltip("Starting branch, tag or commit"),
                 )
                 .child(v_flex().w(rems(22.)).gap_3().children(fields)),
         )
@@ -2136,7 +2137,7 @@ impl DialogView {
             .loading(spec.busy)
             .disabled(!row.enabled || spec.busy)
             .accessibility_label(row.label.clone())
-            .tooltip(row.label.clone())
+            .element_tooltip(row.label.clone())
             .on_click(move |_, _, cx| {
                 _ = owner.update(cx, |this, cx| this.confirm(&submit, false, cx));
             })
@@ -2376,6 +2377,7 @@ impl DialogView {
         if spec.multiline {
             let completion = self.completion.clone();
             Textarea::new(&self.prompt_textarea)
+                .context_menu(crate::gpui::text_menu(&self.prompt_textarea))
                 .token(move |context, _, cx| {
                     let kind = completion.as_ref().and_then(|completion| {
                         completion.read(cx).provider_kind(context.token().id())
@@ -2389,6 +2391,7 @@ impl DialogView {
             crate::gpui::focus_input(
                 &self.prompt_input,
                 Input::new(&self.prompt_input)
+                    .context_menu(crate::gpui::text_menu(&self.prompt_input))
                     .disabled(spec.busy)
                     .w_full()
                     .when(invalid, |input| input.border_color(destructive)),
@@ -2429,6 +2432,7 @@ impl DialogView {
                     crate::gpui::focus_input(
                         input,
                         Input::new(input)
+                            .context_menu(crate::gpui::text_menu(input))
                             .aria_label(field.label.clone())
                             .disabled(spec.busy)
                             .w_full(),
@@ -2862,6 +2866,7 @@ impl DialogView {
                     crate::gpui::focus_input(
                         &self.find_input,
                         Input::new(&self.find_input)
+                            .context_menu(crate::gpui::text_menu(&self.find_input))
                             .appearance(false)
                             .bordered(false)
                             .focus_bordered(false)

@@ -305,9 +305,11 @@ impl NativeAgentSessionView {
     /// Holds a prompt sent from here at the top of the transcript, keeping room below it for its
     /// reply. Once the reply fills that room, or the transcript is scrolled, the transcript
     /// follows its end again. Runs before each layout, from the last one's sizes.
-    pub(super) fn hold_prompt_anchor(&mut self) {
+    /// Returns whether the list needs drawing again: its rows aren't drawn yet, the runway
+    /// changed, or the prompt let go.
+    pub(super) fn hold_prompt_anchor(&mut self) -> bool {
         let Some(anchor) = &mut self.anchor else {
-            return;
+            return false;
         };
         let rows = self.timeline.len();
         let (Some(prompt), Some(runway)) = (
@@ -317,7 +319,7 @@ impl NativeAgentSessionView {
             rows.checked_sub(1)
                 .filter(|last| matches!(self.timeline.get(*last), Some(TranscriptRow::Runway))),
         ) else {
-            return;
+            return false;
         };
         let (Some(top), Some(bottom)) = (
             self.list.bounds_for_item(prompt).map(|bounds| bounds.top()),
@@ -326,29 +328,32 @@ impl NativeAgentSessionView {
                 .and_then(|last| self.list.bounds_for_item(last))
                 .map(|bounds| bounds.bottom()),
         ) else {
-            return;
+            // The list hasn't drawn the prompt's rows yet; it can once it has.
+            return true;
         };
         let room = gpui_kit::px(
             (f32::from(self.list.viewport_bounds().size.height)
                 - (f32::from(bottom) - f32::from(top)))
             .max(0.),
         );
-        if room != anchor.runway {
+        let changed = room != anchor.runway;
+        if changed {
             anchor.runway = room;
             self.list.remeasure_items(runway..rows);
         }
         if !anchor.held {
-            return;
+            return changed;
         }
         if room == gpui_kit::px(0.) {
             anchor.held = false;
             self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
-        } else {
-            self.list.scroll_to(gpui_kit::ListOffset {
-                item_ix: prompt,
-                offset_in_item: gpui_kit::px(0.),
-            });
+            return true;
         }
+        self.list.scroll_to(gpui_kit::ListOffset {
+            item_ix: prompt,
+            offset_in_item: gpui_kit::px(0.),
+        });
+        changed
     }
 
     /// Gives a prompt just sent from here the anchor once its message shows, and drops an anchor
@@ -454,9 +459,10 @@ impl NativeAgentSessionView {
                 (message.role == "user" && !message.steered).then(|| {
                     let preview = previews.get(id.as_str()).map_or_else(
                         || {
-                            SharedString::from(
-                                message.display_text().chars().take(180).collect::<String>(),
-                            )
+                            SharedString::from(crate::strings::clipped(
+                                &message.display_text(),
+                                180,
+                            ))
                         },
                         |preview| (*preview).clone(),
                     );
@@ -912,7 +918,7 @@ impl NativeAgentSessionView {
                     .items_center()
                     .gap_2()
                     .text_sm()
-                    .text_color(cx.theme().foreground.opacity(0.72))
+                    .text_color(cx.theme().muted_foreground)
                     .child(
                         gpui_kit::component::Icon::new(if open {
                             gpui_kit::component::IconName::ChevronDown

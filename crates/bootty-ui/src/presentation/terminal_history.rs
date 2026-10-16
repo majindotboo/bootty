@@ -8,6 +8,7 @@ use std::{
 use bootty_agents::{AgentKind, TerminalHistoryEntry};
 use bootty_control::{Caller, CommandInvocation, CommandOutcome, CommandTarget};
 
+use crate::clock::Moment;
 use crate::gpui::{DialogAction, DialogIntent, DialogRow, DialogSpec, RowId};
 use crate::product_dialogs::searchable::{SearchableEntry, SearchableIntent, SearchableList};
 
@@ -582,13 +583,13 @@ fn history_time(
     let Some(updated) = updated.map(|updated| updated.with_timezone(&chrono::Local)) else {
         return String::new();
     };
-    let format = match history_section(Some(updated.to_utc()), now) {
-        "Today" | "Yesterday" => "%H:%M",
-        "Previous 7 days" => "%a %H:%M",
-        _ if updated.format("%Y").to_string() == now.format("%Y").to_string() => "%b %-d",
-        _ => "%b %-d, %Y",
+    let moment = match history_section(Some(updated.to_utc()), now) {
+        "Today" | "Yesterday" => Moment::Time,
+        "Previous 7 days" => Moment::WeekdayAndTime,
+        _ if chrono::Datelike::year(&updated) == chrono::Datelike::year(&now) => Moment::Day,
+        _ => Moment::DayAndYear,
     };
-    updated.format(format).to_string()
+    crate::clock::local_moment(updated, moment)
 }
 
 fn project_label(path: &Path) -> String {

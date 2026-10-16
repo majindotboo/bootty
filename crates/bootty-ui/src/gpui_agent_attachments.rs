@@ -676,7 +676,7 @@ impl NativeAgentSessionView {
                                                 "Remove {}",
                                                 attachment.reference.name
                                             ))
-                                            .tooltip(format!(
+                                            .element_tooltip(format!(
                                                 "Remove {}",
                                                 attachment.reference.name
                                             ))

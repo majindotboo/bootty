@@ -28,3 +28,42 @@ fn streaming_publishes_complete_markdown_blocks(#[case] text: &str, #[case] show
     );
     assert_eq!(ResponseStreaming::Complete.visible_text(text, false), "");
 }
+
+/// Live streaming holds back an inline span until its closing marker arrives, so markers never
+/// show raw and then change; code blocks and finished spans show as they come. A lone marker at
+/// the end waits for the next character, which may pair it, and a bracket waits until it can't
+/// become a link.
+#[rstest]
+#[case("Use **bold", "Use ")]
+#[case("Use **bold** now", "Use **bold** now")]
+#[case("Run `cargo t", "Run ")]
+#[case("Run `cargo test` then ~~old", "Run `cargo test` then ")]
+#[case("See [the docs](https://exa", "See ")]
+#[case(
+    "See [the docs](https://example.com) and",
+    "See [the docs](https://example.com) and"
+)]
+#[case("A list:\n* one **two", "A list:\n* one ")]
+#[case("```rust\nlet a = **b", "```rust\nlet a = **b")]
+#[case("snake_case and 2 * 3", "snake_case and 2 * 3")]
+#[case("Not that ~", "Not that ")]
+#[case("See [the docs]", "See ")]
+#[case("See [1] and [2", "See [1] and ")]
+fn live_streaming_holds_unclosed_spans(#[case] text: &str, #[case] shown: &str) {
+    assert_eq!(ResponseStreaming::Live.visible_text(text, false), shown);
+}
+
+proptest! {
+    /// As a reply grows, live streaming only ever adds to what it showed.
+    #[test]
+    fn live_streaming_never_takes_back_what_it_showed(
+        text in "[a *_~`\\[\\]()\\\\\n]{0,40}",
+        split in 0usize..40,
+    ) {
+        let split = split.min(text.len());
+        // The alphabet is ASCII, so every split is a character boundary.
+        let earlier = ResponseStreaming::Live.visible_text(text.get(..split).unwrap_or_default(), false);
+        let later = ResponseStreaming::Live.visible_text(&text, false);
+        prop_assert!(later.starts_with(earlier), "{earlier:?} then {later:?}");
+    }
+}

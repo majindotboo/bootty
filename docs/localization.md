@@ -4,11 +4,12 @@
 its accepted locale to GPUI Kit with `set_locale`; the component library owns its
 own translations. The config owner persists the top-level `locale` value.
 
-`crates/bootty-ui/locales/en.ftl` contains extracted English settings, commands and
-common UI messages. Settings metadata supplies English fallback for newly added
-schema rows. `localize_settings` translates only presentation fields, after stable
-section IDs and dependent rows have been resolved. User values, choice tokens,
-paths, diagnostics and theme names are not translated.
+`crates/bootty-ui/locales/en.ftl` contains common UI messages. Settings, settings
+pages and commands keep their English with their owners: the settings schema, the
+settings rows and the action catalog. The English catalog never repeats them, since a
+catalog message overrides its owner's English. `localize_settings` translates only
+presentation fields, after stable section IDs and dependent rows have been resolved.
+User values, choice tokens, paths, diagnostics and theme names are not translated.
 
 Use complete Fluent messages with named variables for inserted values. Plural
 variants use the language's CLDR rules, including when a missing translation falls

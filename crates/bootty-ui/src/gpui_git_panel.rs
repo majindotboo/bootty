@@ -5,6 +5,7 @@ mod pull_request;
 
 pub use diff::{DiffComment, GitDiffPanel};
 
+use crate::gpui::ElementTooltip as _;
 use std::time::{Duration, Instant};
 
 use bootty_control::{
@@ -882,7 +883,7 @@ impl GitChangesPanel {
                     .xsmall()
                     .disabled(pending)
                     .accessibility_label(if staged { "Unstage file" } else { "Stage file" })
-                    .tooltip(if staged {
+                    .element_tooltip(if staged {
                         "Unstage file (Space)"
                     } else {
                         "Stage file (Space)"
@@ -961,7 +962,7 @@ impl GitChangesPanel {
                         .xsmall()
                         .disabled(pending)
                         .accessibility_label("Discard all changes")
-                        .tooltip("Discard all changes")
+                        .element_tooltip("Discard all changes")
                         .on_click(move |_, window, cx| {
                             cx.stop_propagation();
                             _ = discard
@@ -984,7 +985,7 @@ impl GitChangesPanel {
                     .xsmall()
                     .disabled(pending)
                     .accessibility_label(label)
-                    .tooltip(label)
+                    .element_tooltip(label)
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         _ = stage_owner.update(cx, |this, cx| {
@@ -1181,7 +1182,9 @@ impl GitChangesPanel {
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         content = content.child("Branches").child(crate::gpui::focus_input(
             &self.branch_filter,
-            Input::new(&self.branch_filter).aria_label("Find a branch"),
+            Input::new(&self.branch_filter)
+                .context_menu(crate::gpui::text_menu(&self.branch_filter))
+                .aria_label("Find a branch"),
         ));
         let filter = self.branch_filter.read(cx).value().to_lowercase();
         let matching = branches
@@ -1216,11 +1219,13 @@ impl GitChangesPanel {
                 .gap_1()
                 .child(crate::gpui::focus_input(
                     &self.branch_name,
-                    Input::new(&self.branch_name),
+                    Input::new(&self.branch_name)
+                        .context_menu(crate::gpui::text_menu(&self.branch_name)),
                 ))
                 .child(crate::gpui::focus_input(
                     &self.branch_start,
-                    Input::new(&self.branch_start),
+                    Input::new(&self.branch_start)
+                        .context_menu(crate::gpui::text_menu(&self.branch_start)),
                 ))
                 .child(
                     Button::new("create-branch")
@@ -1297,7 +1302,7 @@ impl GitChangesPanel {
                 Button::new(format!("checkout-branch:{}", branch.name))
                     .label(label)
                     .small()
-                    .tooltip(tooltip)
+                    .element_tooltip(tooltip)
                     .disabled(self.mutating || branch.current)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.request(command, vec![name.clone()], window, cx);
@@ -1392,7 +1397,8 @@ impl GitChangesPanel {
                 .gap_1()
                 .child(crate::gpui::focus_input(
                     &self.stash_message,
-                    Input::new(&self.stash_message),
+                    Input::new(&self.stash_message)
+                        .context_menu(crate::gpui::text_menu(&self.stash_message)),
                 ))
                 .child(
                     Button::new("stash-tracked")
@@ -1452,13 +1458,13 @@ impl GitChangesPanel {
             sync("git-fetch", "git.fetch")
                 .icon(Icon::default().path("icons/cloud-download.svg"))
                 .accessibility_label("Fetch")
-                .tooltip(format!("Fetch the remote of {}", upstream.name)),
+                .element_tooltip(format!("Fetch the remote of {}", upstream.name)),
         ];
         if upstream.behind > 0 {
             buttons.push(
                 sync("git-pull", "git.pull")
                     .label(format!("↓{}", upstream.behind))
-                    .tooltip(format!(
+                    .element_tooltip(format!(
                         "Pull {} {} from {}",
                         upstream.behind,
                         commits(upstream.behind),
@@ -1470,7 +1476,7 @@ impl GitChangesPanel {
             buttons.push(
                 sync("git-push", "git.push")
                     .label(format!("↑{}", upstream.ahead))
-                    .tooltip(format!(
+                    .element_tooltip(format!(
                         "Push {} {} to {}",
                         upstream.ahead,
                         commits(upstream.ahead),
@@ -1524,7 +1530,7 @@ impl GitChangesPanel {
                         .ghost()
                         .small()
                         .accessibility_label("Refresh changes")
-                        .tooltip("Refresh changes")
+                        .element_tooltip("Refresh changes")
                         .disabled(self.mutating)
                         .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
                 )
@@ -1714,7 +1720,7 @@ impl GitChangesPanel {
                 .label(format!("#{number}"))
                 .ghost()
                 .small()
-                .tooltip(format!("Pull request #{number}: {state}{checks}"))
+                .element_tooltip(format!("Pull request #{number}: {state}{checks}"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.show_pull_requests(Some(number), window, cx);
                 })),
@@ -1737,10 +1743,10 @@ impl GitChangesPanel {
                     .small()
                     .disabled(self.mutating || empty || !staged)
                     .when(!staged, |button| {
-                        button.tooltip("Stage changes to commit first")
+                        button.element_tooltip("Stage changes to commit first")
                     })
                     .when(staged && empty, |button| {
-                        button.tooltip("Write a message first")
+                        button.element_tooltip("Write a message first")
                     })
                     .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))),
             )
@@ -1749,7 +1755,9 @@ impl GitChangesPanel {
                     .label(crate::i18n::t(cx, "git-amend"))
                     .small()
                     .disabled(self.mutating || empty)
-                    .when(empty, |button| button.tooltip("Write a message first"))
+                    .when(empty, |button| {
+                        button.element_tooltip("Write a message first")
+                    })
                     .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
             )
             .child(
@@ -1760,7 +1768,7 @@ impl GitChangesPanel {
                     .loading(self.writing)
                     .disabled(self.mutating || !staged)
                     .accessibility_label("Write the message with Codex")
-                    .tooltip(if staged {
+                    .element_tooltip(if staged {
                         "Write the message with Codex"
                     } else {
                         "Stage changes for Codex to describe first"
@@ -1849,7 +1857,9 @@ impl Render for GitChangesPanel {
         }
         body.child(crate::gpui::focus_input(
             &self.message,
-            Input::new(&self.message).disabled(self.mutating),
+            Input::new(&self.message)
+                .context_menu(crate::gpui::text_menu(&self.message))
+                .disabled(self.mutating),
         ))
         .child(self.render_commit_controls(cx))
         .into_any_element()

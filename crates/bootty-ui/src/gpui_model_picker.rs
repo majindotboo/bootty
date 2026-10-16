@@ -1,4 +1,5 @@
 //! Shared catalog picker; provider identity and accepted favorites remain agent-owned.
+use crate::gpui::ElementTooltip as _;
 use bootty_agents::{AgentKind, NativeModelOption};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, IndexPath, Selectable as _, Sizable as _,
@@ -597,7 +598,7 @@ impl ModelPickerView {
                     .icon(IconName::Star)
                     .selected(group == Group::Favorites)
                     .accessibility_label("Favorite models")
-                    .tooltip("Favorite models")
+                    .element_tooltip("Favorite models")
                     .on_click(move |_, window, cx| {
                         _ = owner.update(cx, |this, cx| {
                             this.select_group(Group::Favorites, window, cx);
@@ -624,7 +625,7 @@ impl ModelPickerView {
                 .flex_shrink_0()
                 .selected(selected)
                 .accessibility_label(format!("{label} provider"))
-                .tooltip(format!("{label} provider"))
+                .element_tooltip(format!("{label} provider"))
                 .child(crate::gpui::sized_icon(
                     provider_icon(&provider),
                     crate::gpui::IconSize::Medium,
@@ -654,7 +655,7 @@ impl ModelPickerView {
                             .flex_shrink_0()
                             .selected(group == Group::Provider(id.clone()))
                             .accessibility_label(format!("{label} models"))
-                            .tooltip(format!("{label} models"))
+                            .element_tooltip(format!("{label} models"))
                             .child(crate::gpui::sized_icon(
                                 group_icon(&id, provider),
                                 crate::gpui::IconSize::Medium,
@@ -1144,7 +1145,7 @@ fn favorite_button(model: &NativeModelOption, cx: &Context<ListState<ModelList>>
             cx.theme().muted_foreground
         })
         .accessibility_label(label.clone())
-        .tooltip(label)
+        .element_tooltip(label)
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
             _ = owner.update(cx, |list, cx| {

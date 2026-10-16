@@ -20,6 +20,7 @@ pub fn init_ui_theme(ui_theme: UiTheme, cx: &mut App) {
         cx.set_global(crate::font_mapping::FontMappings::default());
     }
     gpui_kit::init(cx);
+    super::init_text_menu(cx);
     super::config_editor::init(cx);
     crate::gpui_agent_session::init_reaction_keys(cx);
     crate::gpui_agent_session::init_request_keys(cx);

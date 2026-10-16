@@ -1,3 +1,4 @@
+use crate::gpui::ElementTooltip as _;
 use num_traits::ToPrimitive as _;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -527,6 +528,7 @@ impl SidebarRows {
                     crate::gpui::focus_input(
                         &self.search,
                         Input::new(&self.search)
+                            .context_menu(crate::gpui::text_menu(&self.search))
                             .aria_label("Search sessions")
                             .role(gpui_kit::Role::SearchInput)
                             .appearance(false)
@@ -550,7 +552,7 @@ impl SidebarRows {
                     .icon(gpui_kit::assets::IconName::ListFilter)
                     .text_color(color(self.colors.subtext))
                     .accessibility_label("Filter and sort sessions")
-                    .tooltip("Filter and sort sessions")
+                    .element_tooltip("Filter and sort sessions")
                     .dropdown_menu(move |menu, window, cx| rows.options_menu(menu, window, cx)),
             )
             .child(
@@ -562,7 +564,7 @@ impl SidebarRows {
                     .icon(gpui_kit::assets::IconName::FolderPlus)
                     .text_color(color(self.colors.subtext))
                     .accessibility_label("Add project")
-                    .tooltip("Add project")
+                    .element_tooltip("Add project")
                     .on_click(move |_, _, cx| emit_sidebar_command(&add_owner, "add_project", cx)),
             )
             .child(
@@ -574,7 +576,7 @@ impl SidebarRows {
                     .icon(gpui_kit::assets::IconName::SquarePen)
                     .text_color(color(self.colors.subtext))
                     .accessibility_label("New session")
-                    .tooltip("New session")
+                    .element_tooltip("New session")
                     .on_click(move |_, _, cx| {
                         emit_sidebar_command(&create_owner, "new_mux_session", cx);
                     }),
@@ -591,7 +593,7 @@ impl SidebarRows {
                     ))
                     .text_color(color(self.colors.subtext))
                     .accessibility_label("History")
-                    .tooltip("Browse conversation history")
+                    .element_tooltip("Browse conversation history")
                     .on_click(move |_, _, cx| {
                         emit_sidebar_command(&resume_owner, "agent_history", cx);
                     }),
@@ -1579,6 +1581,7 @@ impl SidebarRows {
             })
             .child(
                 gpui_kit::component::input::Input::new(input)
+                    .context_menu(crate::gpui::text_menu(input))
                     .xsmall()
                     .aria_label("Session title"),
             )
@@ -1983,7 +1986,7 @@ impl SidebarRows {
                     .child(label),
             )
             .accessibility_label(format!("{label} {}", row.text))
-            .tooltip(format!("{label} this session"))
+            .element_tooltip(format!("{label} this session"))
             .disabled(task.pending);
         Some(super::button::activated_button(
             div()
@@ -2320,7 +2323,7 @@ impl SidebarRows {
             .ghost()
             .xsmall()
             .icon(gpui_kit::component::IconName::Ellipsis)
-            .tooltip("Project actions")
+            .element_tooltip("Project actions")
             .accessibility_label(format!("Project actions for {}", row.text))
             .dropdown_menu(move |menu, _, _| {
                 rows.iter().cloned().fold(menu, |menu, row| {
@@ -3377,7 +3380,10 @@ pub(super) fn snooze_menu(tasks: &[SidebarTask], now: i64) -> Vec<MenuRow> {
             .collect::<Option<Vec<_>>>()?;
         Some(MenuRow {
             confirm: None,
-            label: format!("{label} ({})", date.format("%b %-d, %-I:%M %p")),
+            label: format!(
+                "{label} ({})",
+                crate::clock::local_moment(date, crate::clock::Moment::DayAndTime)
+            ),
             enabled,
             destructive: false,
             starts_group: false,

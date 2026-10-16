@@ -203,10 +203,16 @@ pub struct NativeProviderInfo {
     pub permission_modes: Vec<crate::NativePermissionMode>,
 }
 
-#[derive(Clone, Default, Deserialize, Serialize)]
+/// The catalog in memory. On disk the index holds everything but the conversations, which each
+/// have their own file; an index from before then holds them inline.
+#[derive(Clone, Default, Deserialize)]
 struct Store {
     next_generation: u64,
+    #[serde(default)]
     records: Vec<NativeSessionRecord>,
+    /// The conversations' order, as the index names them.
+    #[serde(default)]
+    record_ids: Vec<String>,
     #[serde(default)]
     model_favorites: Vec<ModelFavorite>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -241,7 +247,7 @@ enum CreationOrigin {
 /// App-owned native sessions and bounded provider model catalogs. Credentials remain with providers.
 /// Opening a restored session resumes its existing provider identity.
 pub struct NativeAgentService {
-    path: PathBuf,
+    catalog: Arc<crate::native_catalog::CatalogFiles>,
     attachment_store: NativeAttachmentStore,
     mutation: Arc<Mutex<()>>,
     store: Arc<Mutex<Store>>,
@@ -279,6 +285,10 @@ impl NativeAgentService {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Store::default(),
             Err(error) => return Err(error.to_string()),
         };
+        let catalog = Arc::new(crate::native_catalog::CatalogFiles::new(&path));
+        if store.records.is_empty() {
+            store.records = catalog.read_records(&store.record_ids)?;
+        }
         if store.records.len() > 128 {
             return Err("Native agent catalog exceeds 128 sessions".to_owned());
         }
@@ -287,49 +297,7 @@ impl NativeAgentService {
         }
         validate_model_catalog_cache(&store)?;
         followups::restore(&mut store)?;
-        let mut identities = std::collections::BTreeSet::new();
-        for record in &mut store.records {
-            // Older catalogs assigned Pi a policy it never supported. Migrate before validation.
-            if record.config.provider == crate::AgentKind::Pi {
-                record.config.permissions = crate::NativePermissionMode::ProviderDefault;
-            }
-            record.config.validate_stored()?;
-            validate_pending_message(
-                record.pending_initial_message.as_deref(),
-                !record.attachments.is_empty(),
-            )?;
-            if record.id.is_empty()
-                || !identities.insert(record.id.clone())
-                || record.generation > store.next_generation
-                || record.attachments.len() > MAX_NATIVE_SESSION_ATTACHMENTS
-                || record.spawn_parent.as_ref().is_some_and(|parent| {
-                    parent.kind != ResourceKind::Session
-                        || parent.handle.is_empty()
-                        || parent.handle.len() > 8192
-                        || parent.handle.chars().any(char::is_control)
-                        || parent.generation == 0
-                        || parent.generation > store.next_generation
-                })
-            {
-                return Err("Invalid native agent catalog identity".to_owned());
-            }
-            let mut attachment_ids = std::collections::BTreeSet::new();
-            let _attachment_bytes =
-                record
-                    .attachments
-                    .iter()
-                    .try_fold(0_u64, |total, attachment| {
-                        attachment.validate()?;
-                        if !attachment_ids.insert(attachment.id.as_str()) {
-                            return Err("Duplicate native attachment identity".to_owned());
-                        }
-                        total
-                            .checked_add(attachment.size_bytes)
-                            .filter(|size| *size <= MAX_NATIVE_SESSION_ATTACHMENT_BYTES)
-                            .ok_or_else(|| "Native session attachments exceed 512 MiB".to_owned())
-                    })?;
-            record.restore_stopped();
-        }
+        validate_records(&mut store)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
@@ -344,6 +312,7 @@ impl NativeAgentService {
         start_publication_worker(
             PublicationState {
                 path: path.clone(),
+                catalog: Arc::clone(&catalog),
                 mutation: Arc::clone(&mutation),
                 store: Arc::clone(&store),
                 live: Arc::clone(&live),
@@ -356,7 +325,7 @@ impl NativeAgentService {
         )?;
         Ok(Self {
             attachment_store: NativeAttachmentStore::new(&path),
-            path,
+            catalog,
             mutation,
             store,
             live,
@@ -2310,11 +2279,8 @@ impl NativeAgentService {
 
     fn commit(&self, mut candidate: Store) -> Result<(), String> {
         let saved = save_tool_images(&self.attachment_store, &mut candidate);
-        let bytes = serde_json::to_vec(&candidate).map_err(|error| error.to_string())?;
-        if bytes.len() > 16 * 1024 * 1024 {
-            return Err("Native agent catalog exceeds 16 MiB".to_owned());
-        }
-        write_private(&self.path, &bytes)?;
+        self.catalog
+            .write(&candidate.records, None, &index_bytes(&candidate)?)?;
         forget_saved_tool_images(&self.live, &saved);
         *lock(&self.store) = candidate;
         publish(&self.revision, &self.change_handler);
@@ -2431,7 +2397,85 @@ fn next_generation(store: &mut Store) -> Result<u64, String> {
     Ok(store.next_generation)
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
+/// Checks each saved conversation, migrates what older catalogs stored, and marks live ones
+/// stopped: nothing runs until it's opened again.
+fn validate_records(store: &mut Store) -> Result<(), String> {
+    let mut identities = std::collections::BTreeSet::new();
+    for record in &mut store.records {
+        // Older catalogs assigned Pi a policy it never supported. Migrate before validation.
+        if record.config.provider == crate::AgentKind::Pi {
+            record.config.permissions = crate::NativePermissionMode::ProviderDefault;
+        }
+        record.config.validate_stored()?;
+        validate_pending_message(
+            record.pending_initial_message.as_deref(),
+            !record.attachments.is_empty(),
+        )?;
+        if record.id.is_empty()
+            || !identities.insert(record.id.clone())
+            || record.generation > store.next_generation
+            || record.attachments.len() > MAX_NATIVE_SESSION_ATTACHMENTS
+            || record.spawn_parent.as_ref().is_some_and(|parent| {
+                parent.kind != ResourceKind::Session
+                    || parent.handle.is_empty()
+                    || parent.handle.len() > 8192
+                    || parent.handle.chars().any(char::is_control)
+                    || parent.generation == 0
+                    || parent.generation > store.next_generation
+            })
+        {
+            return Err("Invalid native agent catalog identity".to_owned());
+        }
+        let mut attachment_ids = std::collections::BTreeSet::new();
+        let _attachment_bytes =
+            record
+                .attachments
+                .iter()
+                .try_fold(0_u64, |total, attachment| {
+                    attachment.validate()?;
+                    if !attachment_ids.insert(attachment.id.as_str()) {
+                        return Err("Duplicate native attachment identity".to_owned());
+                    }
+                    total
+                        .checked_add(attachment.size_bytes)
+                        .filter(|size| *size <= MAX_NATIVE_SESSION_ATTACHMENT_BYTES)
+                        .ok_or_else(|| "Native session attachments exceed 512 MiB".to_owned())
+                })?;
+        record.restore_stopped();
+    }
+    Ok(())
+}
+
+/// The catalog index: its own state and its conversations' order.
+fn index_bytes(store: &Store) -> Result<Vec<u8>, String> {
+    #[derive(Serialize)]
+    struct Index<'a> {
+        next_generation: u64,
+        record_ids: Vec<&'a str>,
+        model_favorites: &'a [ModelFavorite],
+        model_catalogs: &'a BTreeMap<String, crate::NativeProviderCatalog>,
+        model_catalog_aliases: &'a BTreeMap<String, String>,
+        followups: &'a [followups::QueuedInput],
+    }
+    serde_json::to_vec(&Index {
+        next_generation: store.next_generation,
+        record_ids: store
+            .records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect(),
+        model_favorites: &store.model_favorites,
+        model_catalogs: &store.model_catalogs,
+        model_catalog_aliases: &store.model_catalog_aliases,
+        followups: &store.followups,
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// Replaces `path` with `bytes`, durably and readable only by this user.
+/// # Errors
+/// Returns a failed lock, write or sync.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {
     WriteTarget::resolve(path)
         .map_err(|error| error.into_io().to_string())?
         .lock()
@@ -2451,6 +2495,7 @@ impl Drop for NativeAgentService {
 
 struct PublicationState {
     path: PathBuf,
+    catalog: Arc<crate::native_catalog::CatalogFiles>,
     mutation: Arc<Mutex<()>>,
     store: Arc<Mutex<Store>>,
     live: Arc<Mutex<BTreeMap<String, Arc<NativeAgentSession>>>>,
@@ -2461,7 +2506,7 @@ struct PublicationState {
 }
 
 /// Deliberate limit: while a reply streams, the catalog commits at most ten times a second,
-/// because each commit rewrites every conversation and syncs it to disk. Status, request and
+/// because each commit rewrites and syncs the streaming conversation's file. Status, request and
 /// identity changes commit at once. Publish live snapshots apart from persistence before raising
 /// the rate.
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
@@ -2498,7 +2543,7 @@ impl PublicationState {
     fn commit_live(&self, committed: &mut Option<Instant>) -> Option<Duration> {
         let mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();
-        let mut changed = false;
+        let mut changed = std::collections::BTreeSet::new();
         let mut settled = false;
         {
             let live = lock(&self.live);
@@ -2509,12 +2554,12 @@ impl PublicationState {
                         settled |= !streamed_only(&record.snapshot, &snapshot);
                         record.config.capture_session(&snapshot);
                         record.snapshot = snapshot;
-                        changed = true;
+                        changed.insert(record.id.clone());
                     }
                 }
             }
         }
-        if !changed {
+        if changed.is_empty() {
             return None;
         }
         if !settled
@@ -2524,14 +2569,10 @@ impl PublicationState {
             return Some(wait);
         }
         let saved = save_tool_images(&NativeAttachmentStore::new(&self.path), &mut candidate);
-        let result = serde_json::to_vec(&candidate)
-            .map_err(|error| error.to_string())
-            .and_then(|bytes| {
-                if bytes.len() > 16 * 1024 * 1024 {
-                    return Err("Native agent catalog exceeds 16 MiB".to_owned());
-                }
-                write_private(&self.path, &bytes)
-            });
+        let result = index_bytes(&candidate).and_then(|index| {
+            self.catalog
+                .write(&candidate.records, Some(&changed), &index)
+        });
         if let Err(error) = result {
             eprintln!("native agent history could not be saved: {error}");
             return None;

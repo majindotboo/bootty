@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod support;
 use std::{
     fs,
     os::unix::fs::PermissionsExt as _,
@@ -333,7 +334,7 @@ fn archived_conversation_can_unarchive_the_same_provider_identity(
     service.shutdown().unwrap();
     drop(service);
     if legacy {
-        let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        let mut catalog: Value = support::stored_catalog(&path).unwrap();
         catalog["records"][0]["snapshot"]
             .as_object_mut()
             .unwrap()
@@ -922,7 +923,7 @@ fn legacy_accountless_history_remains_readable_without_resuming_under_another_ac
     let transcript = service.sessions()[0].snapshot.transcript.clone();
     service.shutdown().unwrap();
     drop(service);
-    let mut legacy: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+    let mut legacy: Value = support::stored_catalog(&catalog).unwrap();
     legacy["records"][0]["config"]
         .as_object_mut()
         .unwrap()
@@ -972,7 +973,7 @@ fn completion_survives_attachment_resume_without_inference_from_history(#[case] 
     drop(service);
     if !completed {
         // Existing catalogs predate the completion fact; loading them defaults to unknown.
-        let mut legacy: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+        let mut legacy: Value = support::stored_catalog(&catalog).unwrap();
         legacy["records"][0]["snapshot"]
             .as_object_mut()
             .unwrap()
@@ -1504,7 +1505,7 @@ fn working_duration_keeps_one_turn_origin_through_approval_and_clears_when_inact
         service.activities()[0].working_elapsed,
         Some(Duration::from_secs(300))
     );
-    let saved: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+    let saved: Value = support::stored_catalog(&catalog).unwrap();
     assert_eq!(saved["records"][0]["snapshot"].get("working_since"), None);
     if ending != "stop" {
         session.rpc("__finish", json!({"status":ending})).unwrap();
@@ -2144,9 +2145,7 @@ fn failed_catalog_commit_keeps_prior_publication() {
     let record = service
         .create("binding", "Original", config(root.path()).unwrap())
         .unwrap();
-    // A directory is a deterministic atomic-replace failure, without changing permissions.
-    fs::remove_file(&catalog).unwrap();
-    fs::create_dir(&catalog).unwrap();
+    support::break_catalog(&catalog).unwrap();
     let revision = service.revision();
     assert!(service.rename(&record.target(), "Changed").is_err());
     assert_eq!(service.sessions()[0].title, "Original");
@@ -2411,7 +2410,7 @@ fn prompt_failure_persists_observed_state_without_inventing_an_accepted_turn(
     } else {
         assert_eq!(published.snapshot.error, None);
     }
-    let durable: Value = serde_json::from_slice(&fs::read(&catalog).unwrap()).unwrap();
+    let durable: Value = support::stored_catalog(&catalog).unwrap();
     assert_eq!(
         durable["records"][0]["snapshot"],
         serde_json::to_value(&published.snapshot).unwrap()
@@ -3571,7 +3570,7 @@ fn conversations_are_found_by_what_was_said() {
         "word ".repeat(30),
         "tail ".repeat(30)
     );
-    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut catalog: Value = support::stored_catalog(&path).unwrap();
     let item = |id: &str, role: &str, text: &str| json!({"id": id, "role": role, "text": text, "complete": true});
     catalog["records"][0]["task_identity"] = json!("scrolling-task");
     catalog["records"][0]["snapshot"]["transcript"] = json!([
@@ -3833,4 +3832,52 @@ fn codex_terminal_commands_are_refused() {
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
     assert!(!root.path().join("prompt.json").exists());
     session.stop();
+}
+
+/// Each conversation keeps its own file, so a commit rewrites only what changed; a catalog from
+/// before, with conversations inline, opens and moves to that layout on its next commit.
+#[rstest]
+fn conversations_keep_their_own_files_and_old_catalogs_still_open() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("unique-threads"), "").unwrap();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let first = service
+        .create("binding", "First", config(root.path()).unwrap())
+        .unwrap();
+    let second = service
+        .create("binding", "Second", config(root.path()).unwrap())
+        .unwrap();
+    let files = path.with_extension("d");
+    // The catalog doesn't write the newline; a rewrite would drop it.
+    let untouched = support::conversation_file(&path, &second.id);
+    let mut marked = fs::read(&untouched).unwrap();
+    marked.push(b'\n');
+    fs::write(&untouched, &marked).unwrap();
+    service.rename(&first.target(), "Renamed").unwrap();
+    assert_eq!(
+        fs::read(&untouched).unwrap(),
+        marked,
+        "an unchanged conversation isn't rewritten"
+    );
+    drop(service);
+    // An older catalog kept every conversation inline.
+    let legacy = support::stored_catalog(&path).unwrap();
+    fs::remove_dir_all(&files).unwrap();
+    fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let service = NativeAgentService::open(&path).unwrap();
+    let titles = service
+        .sessions()
+        .into_iter()
+        .map(|record| record.title)
+        .collect::<Vec<_>>();
+    assert_eq!(titles, ["Renamed", "Second"]);
+    service.rename(&second.target(), "Moved").unwrap();
+    assert!(support::conversation_file(&path, &first.id).exists());
+    assert!(
+        support::stored_catalog(&path)
+            .unwrap()
+            .get("record_ids")
+            .is_some()
+    );
 }

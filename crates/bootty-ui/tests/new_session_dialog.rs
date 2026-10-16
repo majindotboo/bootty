@@ -260,6 +260,57 @@ fn session_picker_preserves_display_identity_and_captured_targets_after_refresh(
     ));
 }
 
+/// Each session's color in the session picker, in saved order.
+fn picker_colors(count: usize) -> Vec<gpui_kit::Hsla> {
+    let sessions = (0..count)
+        .map(|index| MuxSession {
+            id: format!("session-{index}"),
+            name: format!("task-{index}"),
+            active: false,
+            anchor: MuxPaneAnchor::default(),
+            active_window_id: None,
+            windows: Vec::new(),
+            tag: MuxSessionTag::default(),
+        })
+        .collect::<Vec<_>>();
+    let groups = vec![BindingSessionGroup {
+        scope: SpaceId::from_persistence(1),
+        label: "Local".to_owned(),
+        sessions,
+        selected_session: None,
+        active: false,
+        can_return_to_last_session: false,
+        display_names: HashMap::new(),
+    }];
+    let mut dialog = SessionPickerDialog::open();
+    dialog.update_groups(&groups, &HashMap::new());
+    let rows = dialog.spec(&groups).rows;
+    (0..count)
+        .map(|index| {
+            let label = format!("task-{index}");
+            rows.iter()
+                .find(|row| row.label == label)
+                .and_then(|row| row.color)
+                .expect("a colored session row")
+        })
+        .collect()
+}
+
+proptest::proptest! {
+    /// Sessions next to each other in saved order read apart, and saving another session keeps
+    /// every earlier session's color.
+    #[test]
+    fn neighboring_sessions_have_distinct_stable_colors(count in 2usize..32) {
+        let colors = picker_colors(count);
+        for pair in colors.windows(2) {
+            let distance = (pair[0].h - pair[1].h).abs() * 360.0;
+            proptest::prop_assert!(distance.min(360.0 - distance) > 90.0, "{pair:?}");
+        }
+        let earlier = count.saturating_sub(1);
+        proptest::prop_assert_eq!(&colors[..earlier], &picker_colors(earlier)[..]);
+    }
+}
+
 #[test]
 fn remote_space_editor_starts_catalog_after_profiles_are_loaded() {
     let dialog = SpaceEditorDialog::edit_space(

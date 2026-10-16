@@ -5110,6 +5110,130 @@ fn context_meter_compacts_the_conversation(cx: &mut TestAppContext) {
     assert_eq!(prompts, ["/compact", "A draft"]);
 }
 
+/// A reply's image that names a file shows that file, read from the conversation's directory;
+/// one whose file is missing says so where the image would be.
+#[gpui_kit::test]
+fn reply_images_show_files_from_the_conversation_directory(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let directory = assert_fs::TempDir::new().unwrap();
+    image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255]))
+        .save(directory.path().join("chart.png"))
+        .unwrap();
+    let mut record = saved_record("idle");
+    record.config.cwd = directory.path().to_path_buf();
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "reply", "role": "assistant", "complete": true,
+            "text": "Here it is:\n\n![Chart](chart.png)\n\n![Gone](gone.png)"}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    redraw(visual);
+    redraw(visual);
+    let root = directory.path().to_string_lossy().into_owned();
+    // Selectors are static; these name this test's directory.
+    let (chart, gone) = (
+        format!("markdown-image:{root}/chart.png").leak(),
+        format!("markdown-image:{root}/gone.png").leak(),
+    );
+    let chart = visual.debug_bounds(chart).expect("the chart shows");
+    assert_eq!(
+        (f32::from(chart.size.width), f32::from(chart.size.height)),
+        (40., 20.)
+    );
+    assert!(
+        visual.debug_bounds(gone).is_some(),
+        "the missing image says so"
+    );
+}
+
+/// A reply's HTML block offers to open the page in the browser; other code doesn't.
+#[gpui_kit::test]
+fn html_blocks_open_in_the_browser(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let offers = |text: &str, cx: &mut TestAppContext| {
+        let mut record = saved_record("idle");
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+            {"id": "reply", "role": "assistant", "complete": true, "text": text}
+        ]))
+        .unwrap();
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        redraw(visual);
+        visual.debug_bounds("preview-html").is_some()
+    };
+    assert!(offers("```html\n<h1>Hi</h1>\n```\n", cx));
+    assert!(!offers("```rust\nfn main() {}\n```\n", cx));
+}
+
+/// A reply's finished Mermaid fence shows the drawn diagram; one still streaming shows as code.
+#[gpui_kit::test]
+fn mermaid_fences_draw_once_finished(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let shows = |text: &str, cx: &mut TestAppContext| {
+        let mut record = saved_record("idle");
+        record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+            {"id": "reply", "role": "assistant", "complete": true, "text": text}
+        ]))
+        .unwrap();
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        redraw(visual);
+        redraw(visual);
+        visual.debug_bounds("markdown-diagram").is_some()
+    };
+    assert!(shows(
+        "The flow:\n\n```mermaid\nflowchart LR\n  Plan --> Build\n```\n",
+        cx
+    ));
+    assert!(!shows(
+        "The flow:\n\n```mermaid\nflowchart LR\n  Plan --> Bu",
+        cx
+    ));
+}
+
 /// The composer shows the conversation's branch and switches its checkout to another local
 /// branch through the conversation's binding.
 #[gpui_kit::test]
@@ -5501,5 +5625,105 @@ fn turns_show_their_changes_and_rewind(cx: &mut TestAppContext) {
             "agents.native.rewind user files",
             "agents.native.prompt Review this change."
         ]
+    );
+}
+
+/// A wide conversation shows its context card beside the messages. A narrow one opens it from
+/// the composer, over the messages, and a click outside closes it.
+#[gpui_kit::test]
+fn narrow_conversations_open_the_context_card_on_request(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, _) = native_command_sender(&record);
+    let context = bootty_ui::ConversationContext {
+        project: Some("bootty".to_owned()),
+        branch: Some("feature".to_owned()),
+        pull_request: None,
+        binding: None,
+        diff: None,
+        target: None,
+    };
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.set_conversation_context(Some(context), cx);
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let shown = |visual: &mut gpui_kit::VisualTestContext| {
+        redraw(visual);
+        redraw(visual);
+        (
+            visual.debug_bounds("native-context-card").is_some(),
+            visual.debug_bounds("native-context-card-button").is_some(),
+        )
+    };
+    visual.simulate_resize(size(px(1600.), px(900.)));
+    assert_eq!(shown(visual), (true, false), "wide");
+    visual.simulate_resize(size(px(900.), px(900.)));
+    assert_eq!(shown(visual), (false, true), "narrow");
+    let button = visual.debug_bounds("native-context-card-button").unwrap();
+    visual.simulate_click(button.center(), Modifiers::none());
+    assert_eq!(shown(visual), (true, true), "opened");
+    visual.simulate_click(point(px(40.), px(40.)), Modifiers::none());
+    assert_eq!(shown(visual), (false, true), "closed by a click outside");
+}
+
+/// Right-clicking a text field opens Bootty's own menu, whose items act on the field: Copy puts
+/// the selection on the clipboard.
+#[gpui_kit::test]
+fn text_fields_open_bootty_menus(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    redraw(visual);
+    let composer = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("Wrap up");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a"
+    } else {
+        "ctrl-a"
+    });
+    // On the text, so the click keeps the selection.
+    let text = point(composer.left().add(px(24.)), composer.top().add(px(22.)));
+    visual.simulate_mouse_down(text, MouseButton::Right, Modifiers::none());
+    visual.simulate_mouse_up(text, MouseButton::Right, Modifiers::none());
+    redraw(visual);
+    // Cut, then Copy.
+    visual.simulate_keystrokes("down down enter");
+    redraw(visual);
+    assert_eq!(
+        visual
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .as_deref(),
+        Some("Wrap up")
     );
 }

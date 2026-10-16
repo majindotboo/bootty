@@ -4067,13 +4067,19 @@ fn project_scripts_open_in_new_tabs() {
             started,
         );
         if !file.is_empty() {
-            // The tab opens from the queue once the command has answered.
-            let opened = (0..200).any(|_| {
+            // The tab opens from the queue once the command has answered; its shell starts in
+            // its own time.
+            let deadline = Instant::now()
+                .checked_add(Duration::from_secs(10))
+                .expect("test deadline fits");
+            let opened = std::iter::repeat_with(|| {
                 state.update_frame(frames::idle_frame(started));
                 _ = wakes.recv_timeout(Duration::from_millis(10));
                 state.mux().sessions()[0].windows.len() > windows
                     && directory.path().join(file).exists()
-            });
+            })
+            .take_while(|_| Instant::now() < deadline)
+            .any(|opened| opened);
             assert!(opened, "{command} opened no tab that ran its script");
         }
         outcome

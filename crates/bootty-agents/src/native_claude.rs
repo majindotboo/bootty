@@ -1138,6 +1138,18 @@ pub fn tool_results(snapshot: &mut NativeSessionSnapshot, value: &Value) {
                     },
                 );
                 snapshot.tool_images(&format!("claude-tool-{id}"), field(block, "content"));
+                // A backgrounded command says where it writes its output.
+                if let Some(task) = value
+                    .get("tool_use_result")
+                    .or_else(|| value.get("toolUseResult"))
+                    .and_then(|result| field(result, "backgroundTaskId").as_str())
+                    .filter(|_| results == 1)
+                {
+                    snapshot.claude_command_started(
+                        task,
+                        &crate::native_protocol::content_text(field(block, "content")),
+                    );
+                }
             }
         }
     }

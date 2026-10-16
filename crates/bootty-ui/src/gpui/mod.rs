@@ -16,8 +16,10 @@ mod space_editor;
 pub(crate) mod tabs;
 mod terminal;
 mod terminal_zoom;
+mod text_menu;
 mod theme;
 mod theme_integration;
+mod tooltip;
 
 pub use crate::gpui_model_picker::{ModelPickerEvent, ModelPickerView};
 pub use chrome::*;
@@ -33,5 +35,7 @@ pub use settings::*;
 pub use space_editor::*;
 pub use terminal::*;
 pub use terminal_zoom::*;
+pub use text_menu::*;
 pub use theme::*;
 pub use theme_integration::*;
+pub use tooltip::*;

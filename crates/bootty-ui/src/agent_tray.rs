@@ -182,16 +182,22 @@ impl AgentTray {
     }
 }
 
+/// The tray's prompt mark, 16 pixels square, with an orange dot while agents wait. On macOS it's
+/// a template image: black shapes the menu bar tints to its theme, and the waiting count shows as
+/// the item's title rather than a dot.
 fn icon(unread: bool) -> Vec<u8> {
+    let template = cfg!(target_os = "macos");
     let mut bytes = vec![0; 16 * 16 * 4];
     for (y, row) in bytes.as_chunks_mut::<{ 16 * 4 }>().0.iter_mut().enumerate() {
         for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             let chevron = (3..=11).contains(&y) && x == 7_usize.saturating_sub(y.abs_diff(7));
             let underline = y == 11 && (9..=13).contains(&x);
-            let dot = unread && x >= 11 && y <= 4;
+            let dot = unread && !template && x >= 11 && y <= 4;
             if chevron || underline || dot {
                 pixel.copy_from_slice(if dot {
                     &[255, 140, 0, 255]
+                } else if template {
+                    &[0, 0, 0, 255]
                 } else {
                     &[128, 128, 128, 255]
                 });

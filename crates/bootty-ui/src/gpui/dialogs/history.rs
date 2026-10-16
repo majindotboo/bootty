@@ -75,20 +75,10 @@ impl DialogView {
                     .justify_between()
                     .items_center()
                     .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                    .child("History"),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child("Continue an existing conversation."),
-                            ),
+                        div()
+                            .text_xl()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child("History"),
                     )
                     .child(
                         Button::new("history-close")

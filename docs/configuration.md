@@ -1183,8 +1183,19 @@ adding Shift uses the opposite follow-up behavior for that message.
 
 
 `agents.response-streaming` selects `"live"` (default), `"paragraph"`, or `"complete"`.
-Paragraph mode waits for completed Markdown blocks and keeps unfinished fenced
+Live mode shows words as they arrive and fades them in, and holds back an inline span
+until its closing marker arrives, so `**`, backticks and links never show raw and then
+change. Paragraph mode waits for completed Markdown blocks and keeps unfinished fenced
 code blocks together. Final replies always display in full.
+
+A reply's image on its own line that names a file shows that file: absolute paths as
+written, relative paths from the conversation's directory, read on the conversation's
+host, remote ones included, up to 32 MiB. One that can't load says why in its place. Web
+and data URL images load as usual. A finished ```` ```mermaid ```` fence shows the drawn
+diagram in the theme's colors; one still streaming, or one Mermaid can't draw, shows its
+source, with the reason. An ```` ```html ```` block offers to open the page in your
+browser from a private file. Code blocks highlight the languages agents write most,
+SQL included.
 `agents.transcript-width` sets how wide messages run: `"normal"` (default, 48rem),
 `"wide"` (72rem), or `"full"`. In a wide window the conversation details card
 sits in the margin beside centered messages, and moves them aside only when it

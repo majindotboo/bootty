@@ -1,5 +1,6 @@
 //! Settings uses the same account catalog and command path as the agent composers.
 
+use crate::gpui::ElementTooltip as _;
 use std::{
     rc::Rc,
     time::{Duration, Instant},
@@ -263,7 +264,7 @@ impl GpuiSettings {
                 .outline()
                 .small()
                 .label("Retry loading models")
-                .tooltip(error.clone())
+                .element_tooltip(error.clone())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.request_provider_catalog(provider, cx);
                     cx.notify();

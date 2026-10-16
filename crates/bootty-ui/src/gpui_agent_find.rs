@@ -26,6 +26,9 @@ impl NativeAgentSessionView {
             find.input.focus_handle(cx).focus(window, cx);
             return;
         }
+        // Find reads every row's text, so folded rows take theirs first.
+        let folded = self.folded_text.iter().cloned().collect::<Vec<_>>();
+        self.unfold_text(folded.iter().map(String::as_str), cx);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in conversation"));
         let subscription = cx.subscribe(&input, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -292,7 +295,7 @@ impl NativeAgentSessionView {
                 .xsmall()
                 .disabled(order.is_empty())
                 .accessibility_label(label)
-                .tooltip(label)
+                .element_tooltip(label)
                 .debug_selector(move || id.into())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.step_find(forward, window, cx);
@@ -326,6 +329,7 @@ impl NativeAgentSessionView {
                 .child(
                     div().w(gpui_kit::rems(14.)).child(
                         Input::new(&find.input)
+                            .context_menu(crate::gpui::text_menu(&find.input))
                             .xsmall()
                             .aria_label("Find in conversation"),
                     ),
@@ -359,7 +363,7 @@ impl NativeAgentSessionView {
                         .ghost()
                         .xsmall()
                         .accessibility_label("Close find")
-                        .tooltip("Close find")
+                        .element_tooltip("Close find")
                         .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
                 ),
         )

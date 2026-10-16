@@ -1,4 +1,5 @@
 //! Composer quotes are view-owned drafts; their context is persisted with the sent native prompt.
+use crate::gpui::ElementTooltip as _;
 pub(super) use bootty_agents::NativeResponseCitation as ResponseCitation;
 use bootty_agents::{NATIVE_CITATION_TEXT_LIMIT as CITATION_TEXT_LIMIT, NativeTranscriptItem};
 use gpui_kit::component::{
@@ -60,11 +61,7 @@ fn citation_label(citation: &ResponseCitation) -> String {
         &citation.comment
     };
     let preview = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    let mut label = preview.chars().take(64).collect::<String>();
-    if preview.chars().count() > 64 {
-        label.push('…');
-    }
-    label
+    crate::strings::clipped(&preview, 64)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -453,7 +450,7 @@ impl NativeAgentSessionView {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
-            let label = label.chars().take(40).collect::<String>();
+            let label = crate::strings::clipped(&label, 40);
             self.composer.update(cx, |composer, cx| {
                 _ = composer.replace_with_token(
                     InlineToken::new(token_id, "[quote]").with_label(label),
@@ -667,7 +664,7 @@ impl NativeAgentSessionView {
                         .label(format!("❝ {}", citation_label(citation)))
                         .small()
                         .outline()
-                        .tooltip(format!("{}\nView quoted response", citation.quote))
+                        .element_tooltip(format!("{}\nView quoted response", citation.quote))
                         .on_click(move |_, _, cx| {
                             _ = owner.update(cx, |this, cx| {
                                 this.reveal_response(&message_id, cx);
@@ -835,6 +832,7 @@ impl NativeAgentSessionView {
             }))
             .child(
                 Textarea::new(&self.citation_editor)
+                    .context_menu(crate::gpui::text_menu(&self.citation_editor))
                     .appearance(false)
                     .bordered(false)
                     .aria_label("Comment on selected text"),

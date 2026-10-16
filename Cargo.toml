@@ -48,6 +48,7 @@ gpui-kit = { version = "0.7.3", features = [
     "tree-sitter-python",
     "tree-sitter-ruby",
     "tree-sitter-rust",
+    "tree-sitter-sql",
     "tree-sitter-swift",
     "tree-sitter-toml",
     "tree-sitter-tsx",
@@ -77,6 +78,7 @@ fontdb = "0.24"
 font-kit = { package = "zed-font-kit", version = "=0.14.1-zed" }
 image = { version = "0.25", default-features = false }
 markdown = "1.0"
+mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 iconflow = { version = "1", features = [
   "pack-bootstrap",
   "pack-lucide",
@@ -116,7 +118,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
   "std",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
+  "NSDate",
+  "NSDateFormatter",
   "NSDictionary",
+  "NSFormatter",
   "NSString",
   "NSValue",
   "NSURL",

@@ -162,7 +162,7 @@ impl NativeAgentSessionView {
                 .ghost()
                 .small()
                 .disabled(is_busy(self.record.snapshot.status))
-                .tooltip(if dirty {
+                .element_tooltip(if dirty {
                     "Switch branches; your changes are stashed first"
                 } else {
                     "Switch branches"

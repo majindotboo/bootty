@@ -201,6 +201,7 @@ impl GpuiSettings {
             header = header.child(crate::gpui::focus_input(
                 input,
                 Input::new(input)
+                    .context_menu(crate::gpui::text_menu(input))
                     .aria_label("Search theme colors")
                     .cleanable(true)
                     .small()

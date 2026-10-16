@@ -205,6 +205,7 @@ impl GpuiSettings {
             .child(crate::gpui::focus_input(
                 &input,
                 Input::new(&input)
+                    .context_menu(crate::gpui::text_menu(&input))
                     .aria_label(aria_label)
                     .with_size(size)
                     .disabled(!enabled)

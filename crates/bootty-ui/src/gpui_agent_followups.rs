@@ -1,6 +1,7 @@
 //! Queued prompts and the current plan sit in an inset drawer attached to the shared composer
 //! surface.
 use super::NativeAgentSessionView;
+use crate::gpui::ElementTooltip as _;
 use bootty_agents::{NativeQueuedMessage, NativeQueuedMessageStatus, NativeSessionStatus};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -462,11 +463,11 @@ impl NativeAgentSessionView {
             || operation.to_owned(),
             |direction| format!("{operation}-{direction}"),
         );
-        let button = Button::new(SharedString::from(format!("{key}:{id}")))
+        Button::new(SharedString::from(format!("{key}:{id}")))
             .ghost()
             .xsmall()
             .debug_selector({
-                let (id, key) = (message.id.clone(), key.clone());
+                let id = message.id.clone();
                 move || format!("native-{key}:{id}")
             })
             .text_color(cx.theme().muted_foreground)
@@ -483,6 +484,7 @@ impl NativeAgentSessionView {
             .disabled(message.status == NativeQueuedMessageStatus::Sending)
             .loading(loading)
             .accessibility_label(label)
+            .element_tooltip(label)
             .on_click(cx.listener(move |this, _, window, cx| {
                 // Resume names the conversation, not one message.
                 let arguments = if operation == "queue-resume" {
@@ -493,11 +495,6 @@ impl NativeAgentSessionView {
                         .collect()
                 };
                 this.command(operation, arguments, window, cx);
-            }));
-        super::element_tooltip(
-            SharedString::from(format!("{key}-tooltip:{}", message.id)),
-            label,
-            button,
-        )
+            }))
     }
 }

@@ -7,6 +7,7 @@ mod launch;
 mod native_annotations;
 pub use native_annotations::{NativeResponseAnnotation, response_annotations};
 mod native_attachments;
+mod native_catalog;
 mod native_checkpoints;
 mod native_citations;
 mod native_claude;

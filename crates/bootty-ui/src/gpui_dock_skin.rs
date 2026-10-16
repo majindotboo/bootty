@@ -1,5 +1,6 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
+use crate::gpui::ElementTooltip as _;
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui_kit::base::Tab;
@@ -520,7 +521,7 @@ fn panel_toggle(
         .small()
         .rounded(cx.theme().radius)
         .selected(open)
-        .tooltip_with_action(
+        .element_tooltip_with_action(
             label,
             &crate::gpui_actions::dock_binding_action(action),
             Some(chrome.read(cx).keymap_context()),
@@ -642,7 +643,7 @@ impl WorkspaceTabGroup {
                             .ghost()
                             .small()
                             .accessibility_label(if full { "Restore view" } else { "Full view" })
-                            .tooltip(if full { "Restore view" } else { "Full view" })
+                            .element_tooltip(if full { "Restore view" } else { "Full view" })
                             .on_click(move |_, window, cx| {
                                 _ = owner.update(cx, |owner, cx| {
                                     owner.invoke_action(
@@ -831,7 +832,7 @@ fn close_panel_tab(
         )
         .xsmall()
         .size_4()
-        .tooltip("Close tab")
+        .element_tooltip("Close tab")
         .accessibility_label(format!("Close {label}"))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -1030,7 +1031,7 @@ fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>, cx: &App) -> impl IntoEl
         .size_6()
         .accessibility_label("Open a tool")
         .disabled(all_open)
-        .tooltip(if all_open {
+        .element_tooltip(if all_open {
             "All tools are open"
         } else {
             "Open a tool"

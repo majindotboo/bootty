@@ -64,7 +64,7 @@ impl BrowserPanel {
                         .is_none_or(|tab| tab.view.is_none() || tab.loading),
             )
             .accessibility_label("Capture screenshot")
-            .tooltip("Capture screenshot")
+            .element_tooltip("Capture screenshot")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.submit("browser.capture", Vec::new(), window, cx);
             }))

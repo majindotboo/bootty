@@ -326,6 +326,7 @@ impl NativeRequestView {
                             .debug_selector(move || format!("elicitation-input:{id}:{key}"))
                             .child(
                                 Input::new(input)
+                                    .context_menu(crate::gpui::text_menu(input))
                                     .aria_label(form_field.title.clone())
                                     .disabled(pending),
                             ),

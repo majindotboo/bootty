@@ -23,6 +23,9 @@ pub struct NativeSubagent {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub own_file: bool,
+    /// Where a Claude background command writes its output, as Claude reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_file: Option<String>,
     pub owner_session: Option<String>,
     pub status: NativeToolStatus,
     pub started_at: Option<i64>,
@@ -30,10 +33,11 @@ pub struct NativeSubagent {
 }
 
 impl NativeSubagent {
-    /// Whether the subagent's own conversation can be read: a Codex thread or its own file.
+    /// Whether the subagent's own conversation can be read: a Codex thread, its own file, or a
+    /// background command's output.
     #[must_use]
     pub const fn readable(&self) -> bool {
-        self.thread_id.is_some() || self.own_file
+        self.thread_id.is_some() || self.own_file || self.output_file.is_some()
     }
 
     /// Whether its parent can ask the provider to stop it: a running Codex thread or Claude task.
@@ -48,6 +52,24 @@ impl NativeSubagent {
 pub struct NativeSubagentDetail {
     pub agent: NativeSubagent,
     pub transcript: Vec<crate::NativeTranscriptItem>,
+}
+
+/// Where a Claude tool result says background command `task` writes its output: "Output is
+/// being written to: PATH".
+fn claude_output_file(result: &str, task: &str) -> Option<String> {
+    let (_, rest) = result.split_once("Output is being written to: ")?;
+    output_file(rest.lines().next()?.trim(), task)
+}
+
+/// `path` when it can be `task`'s output: an absolute path to a file named for the task, so a
+/// reported path can't point a tab at some other file.
+fn output_file(path: &str, task: &str) -> Option<String> {
+    let file = std::path::Path::new(path);
+    (path.len() <= 4096
+        && !path.chars().any(char::is_control)
+        && file.is_absolute()
+        && file.file_name()? == std::ffi::OsStr::new(&format!("{task}.output")))
+    .then(|| path.to_owned())
 }
 
 fn model(value: &Value) -> Option<String> {
@@ -215,6 +237,7 @@ impl NativeSessionSnapshot {
                     model: model(field(item, "model")),
                     thread_id: Some(id.into()),
                     own_file: false,
+                    output_file: None,
                     owner_session: self.session_id.clone(),
                     status,
                     started_at: None,
@@ -329,6 +352,7 @@ impl NativeSessionSnapshot {
                     model: model(field(row, "model")),
                     thread_id: None,
                     own_file: false,
+                    output_file: None,
                     owner_session: self.session_id.clone(),
                     status,
                     started_at: None,
@@ -363,6 +387,7 @@ impl NativeSessionSnapshot {
                 thread_id: None,
                 // The extension gives each child its own session, named in the parent's.
                 own_file: true,
+                output_file: None,
                 owner_session: self.session_id.clone(),
                 status,
                 started_at: field(row, "startedAt").as_i64(),
@@ -375,6 +400,21 @@ impl NativeSessionSnapshot {
                 10000,
             ),
         );
+    }
+
+    /// Records where Claude's background command `task` writes its output, from `result`, what
+    /// the tool that started it returned.
+    pub(crate) fn claude_command_started(&mut self, task: &str, result: &str) {
+        let Some(path) = claude_output_file(result, task) else {
+            return;
+        };
+        if let Some(agent) = self
+            .transcript
+            .iter_mut()
+            .find_map(|item| item.subagent.as_mut().filter(|agent| agent.id == task))
+        {
+            agent.output_file = Some(path);
+        }
     }
 
     pub(crate) fn claude_subagents(&mut self, value: &Value) {
@@ -390,12 +430,12 @@ impl NativeSessionSnapshot {
             .iter()
             .find_map(|item| item.subagent.as_ref().filter(|agent| agent.id == id))
             .cloned();
-        let tool = field(value, "tool_use_id").as_str().and_then(|tool| {
+        let tool_item = field(value, "tool_use_id").as_str().and_then(|tool| {
             self.transcript
                 .iter()
                 .find(|item| item.id == format!("claude-tool-{tool}"))
-                .and_then(|item| item.tool.as_ref())
         });
+        let tool = tool_item.and_then(|item| item.tool.as_ref());
         // Agent tools start subagents, and a backgrounded task (such as a shell) keeps running
         // after its turn. Foreground commands are already visible as tools.
         if known.is_none()
@@ -430,6 +470,11 @@ impl NativeSessionSnapshot {
         let title = value
             .get("description")
             .unwrap_or_else(|| field(&args, "description"));
+        let output_file = field(value, "output_file")
+            .as_str()
+            .and_then(|path| output_file(path, id))
+            .or_else(|| tool_item.and_then(|item| claude_output_file(&item.text, id)))
+            .or_else(|| known.as_ref().and_then(|known| known.output_file.clone()));
         self.subagent(
             NativeSubagent {
                 id: id.into(),
@@ -446,6 +491,7 @@ impl NativeSessionSnapshot {
                 own_file: known.as_ref().is_some_and(|known| known.own_file)
                     || field(value, "task_type") == "local_agent"
                     || tool.is_some_and(|tool| matches!(tool.name.as_str(), "Agent" | "Task")),
+                output_file,
                 owner_session: self.session_id.clone(),
                 status,
                 started_at: None,
@@ -457,12 +503,27 @@ impl NativeSessionSnapshot {
 }
 
 impl crate::NativeAgentSession {
-    /// Claude keeps each subagent's transcript in its own session file.
+    /// Claude keeps each subagent's transcript in its own session file, and a background
+    /// command's output in a file of its own.
     fn read_claude_subagent(
         &self,
         snapshot: &NativeSessionSnapshot,
         agent: NativeSubagent,
     ) -> Result<NativeSubagentDetail, String> {
+        if let Some(path) = agent.output_file.as_deref().filter(|_| !agent.own_file) {
+            let summary = snapshot
+                .transcript
+                .iter()
+                .find(|item| item.id == format!("subagent:{}", agent.id))
+                .map_or("", |item| item.text.as_str());
+            let transcript = crate::native_history_claude::command_transcript(
+                &self.config,
+                &agent,
+                path,
+                summary,
+            )?;
+            return Ok(NativeSubagentDetail { agent, transcript });
+        }
         let session = snapshot
             .session_id
             .as_deref()

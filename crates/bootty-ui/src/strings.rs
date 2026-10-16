@@ -37,3 +37,15 @@ pub fn csv_field(value: &str) -> String {
         value.to_owned()
     }
 }
+
+/// `text` cut to at most `limit` characters, with an ellipsis when anything was cut.
+#[must_use]
+pub fn clipped(text: &str, limit: usize) -> String {
+    let mut chars = text.chars();
+    let mut kept = chars.by_ref().take(limit).collect::<String>();
+    if chars.next().is_some() {
+        kept.pop();
+        kept.push('…');
+    }
+    kept
+}

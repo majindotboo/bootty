@@ -1,4 +1,5 @@
 //! Browser tabs own native child webviews; GPUI owns their chrome and visibility.
+use crate::gpui::ElementTooltip as _;
 use bootty_browser::{
     BrowserBounds, BrowserEvent, BrowserProfile, BrowserShortcut, BrowserView, NativeBrowserError,
     normalize_address, resolve_address,
@@ -1051,7 +1052,7 @@ impl BrowserPanel {
                     .size_6()
                     .disabled(!can_open_external)
                     .accessibility_label("Open in default browser")
-                    .tooltip("Open in default browser")
+                    .element_tooltip("Open in default browser")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.submit("browser.open_external", Vec::new(), window, cx);
                     })),
@@ -1081,7 +1082,7 @@ impl BrowserPanel {
                 .small()
                 .size_6()
                 .accessibility_label("Browser options")
-                .tooltip("Browser options")
+                .element_tooltip("Browser options")
                 .dropdown_menu(move |menu, _, _| {
                     let settings = owner.clone();
                     let reset = owner.clone();
@@ -1170,7 +1171,7 @@ impl BrowserPanel {
                     .size_6()
                     .disabled(!can_back)
                     .accessibility_label("Back")
-                    .tooltip("Back")
+                    .element_tooltip("Back")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.submit("browser.back", Vec::new(), window, cx);
                     })),
@@ -1183,7 +1184,7 @@ impl BrowserPanel {
                     .size_6()
                     .disabled(!can_forward)
                     .accessibility_label("Forward")
-                    .tooltip("Forward")
+                    .element_tooltip("Forward")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.submit("browser.forward", Vec::new(), window, cx);
                     })),
@@ -1192,6 +1193,7 @@ impl BrowserPanel {
                 div().flex_1().min_w_0().child(crate::gpui::focus_input(
                     &self.address,
                     Input::new(&self.address)
+                        .context_menu(crate::gpui::text_menu(&self.address))
                         .accessibility_id("browser.address")
                         .aria_label("Web address")
                         .small()
@@ -1210,7 +1212,7 @@ impl BrowserPanel {
                                 } else {
                                     "Reload page"
                                 })
-                                .tooltip(if loading {
+                                .element_tooltip(if loading {
                                     "Stop loading"
                                 } else {
                                     "Reload page"

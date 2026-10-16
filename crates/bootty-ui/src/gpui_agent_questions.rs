@@ -109,6 +109,7 @@ impl AsyncQuestionsView {
                     })
                     .child(
                         Textarea::new(answer)
+                            .context_menu(crate::gpui::text_menu(answer))
                             .aria_label(question.title.clone())
                             .disabled(!self.enabled),
                     ),

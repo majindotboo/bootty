@@ -439,7 +439,7 @@ fn tabs_specs() -> [SettingSpec; 4] {
         spec(
             &["chrome", "tabs-use-session-color"],
             "Use session color for tabs",
-            "Tint active tabs with the selected session's color. Turn off to use the theme accent.",
+            "Turn off to use the theme accent.",
             "panels",
             "TABS",
             SettingKind::Bool,
@@ -980,7 +980,7 @@ fn pane_appearance_specs() -> [SettingSpec; 6] {
         spec(
             &["chrome", "pane-focus-border-width"],
             "Focus border width",
-            "Border drawn around the focused split pane (0 hides it).",
+            "0 hides it.",
             "window",
             "SPLIT PANES",
             number(0.0..=8.0, NumberControl::Slider, " px"),
@@ -1014,7 +1014,7 @@ fn font_metrics_specs() -> [SettingSpec; 7] {
         spec(
             &["font", "ui-size"],
             "UI font size",
-            "Font size for the app interface.",
+            "",
             "text",
             "FONT",
             number(6.0..=48.0, NumberControl::Slider, "px"),
@@ -1489,7 +1489,7 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
         spec(
             &["chrome", "top-bar"],
             "Top bar",
-            "Show the top status bar.",
+            "",
             "status",
             "BARS",
             SettingKind::Bool,
@@ -1605,7 +1605,7 @@ fn sidebar_specs() -> [SettingSpec; 8] {
         spec(
             &["sidebar", "animate-working"],
             "Animate Working ring",
-            "Rotate the ring while an agent is working. Reduced motion keeps it still.",
+            "Reduced motion keeps it still.",
             "sidebar",
             "SESSIONS",
             SettingKind::Bool,
@@ -1838,7 +1838,7 @@ fn input_specs() -> impl Iterator<Item = SettingSpec> {
         spec(
             &["input", "copy-on-select"],
             "Copy on select",
-            "Copy terminal text when a selection completes.",
+            "",
             "keys",
             "INPUT",
             SettingKind::Bool,

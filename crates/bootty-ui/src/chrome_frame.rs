@@ -413,8 +413,7 @@ fn session_label_colors<'a>(labels: impl Iterator<Item = &'a str>) -> Vec<(Strin
                 counts.get(group).copied().unwrap_or_default()
             };
             let group_position = positions.entry(group).or_default();
-            let colors =
-                computed_session_color(group_index, order.len(), *group_position, group_count);
+            let colors = computed_session_color(group_index, *group_position, group_count);
             if !group.is_empty() {
                 *group_position = group_position.saturating_add(1);
             }
@@ -423,17 +422,20 @@ fn session_label_colors<'a>(labels: impl Iterator<Item = &'a str>) -> Vec<(Strin
         .collect()
 }
 
+/// A session's color and dim color from its group's place in saved order. Each group turns the
+/// golden angle from the last, so neighbors stay far apart and a new session changes no other
+/// session's color.
 fn computed_session_color(
     position: usize,
-    total: usize,
     group_position: usize,
     group_total: usize,
 ) -> (String, String) {
-    let base = if total > 0 {
-        60.0 + (position.to_f64().unwrap_or_default() * 300.0) / total.to_f64().unwrap_or_default()
-    } else {
-        210.0
-    };
+    const GOLDEN_ANGLE: f64 = 137.507_764;
+    let base = position
+        .to_f64()
+        .unwrap_or_default()
+        .mul_add(GOLDEN_ANGLE, 60.0)
+        % 360.0;
     let (hue, lightness) = if group_total > 1 {
         let offset = group_position.to_f64().unwrap_or_default()
             / group_total.saturating_sub(1).to_f64().unwrap_or(1.0);
@@ -1594,9 +1596,10 @@ fn sidebar_footer(
                 .resets_at
                 .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
                 .map(|date| {
-                    date.with_timezone(&chrono::Local)
-                        .format("%b %-d %H:%M")
-                        .to_string()
+                    crate::clock::local_moment(
+                        date.with_timezone(&chrono::Local),
+                        crate::clock::Moment::DayAndTime,
+                    )
                 });
             rows.push(crate::gpui::chrome::SidebarFooterItem {
                 key: format!("{}:{}", provider.id(), window.label),

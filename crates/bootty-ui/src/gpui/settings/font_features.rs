@@ -495,6 +495,7 @@ impl GpuiFontFeatureEditor {
                 crate::gpui::focus_input(
                     tag_input,
                     Input::new(tag_input)
+                        .context_menu(crate::gpui::text_menu(tag_input))
                         .aria_label("OpenType feature tag")
                         .with_size(Size::Small)
                         .disabled(!enabled)

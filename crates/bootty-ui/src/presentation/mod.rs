@@ -1,6 +1,8 @@
 pub mod capture;
 pub mod dialogs;
+pub mod markdown_images;
 pub mod markdown_tables;
+pub mod mermaid;
 pub mod native_reconnect;
 pub mod new_session_form;
 pub mod project_editor;

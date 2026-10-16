@@ -528,6 +528,7 @@ impl GitDiffPanel {
                     .when(self.editing, |view| {
                         view.child(
                             Textarea::new(&self.comment)
+                                .context_menu(crate::gpui::text_menu(&self.comment))
                                 .disabled(self.submitting)
                                 .aria_label("Code comment")
                                 .w_full(),

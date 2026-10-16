@@ -1,4 +1,5 @@
 //! Native conversation presentation; provider processes and transcripts belong to bootty-agents.
+use crate::gpui::ElementTooltip as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
@@ -57,6 +58,10 @@ mod branch;
 mod copy_mode;
 #[path = "gpui_agent_find.rs"]
 mod find;
+#[path = "gpui_agent_markdown_blocks.rs"]
+mod markdown_blocks;
+#[path = "gpui_agent_panes.rs"]
+mod panes;
 #[path = "gpui_agent_timeline.rs"]
 mod timeline;
 use timeline::TranscriptRow;
@@ -228,10 +233,10 @@ pub struct NativeAgentSessionView {
     /// What to call this conversation in writing, like `bootty-7c`.
     short_name: String,
     context_card: Option<ConversationContext>,
+    /// The pictures of the markdown blocks replies show, as far as each has loaded or drawn.
+    markdown_blocks: std::collections::HashMap<String, markdown_blocks::BlockMedia>,
     branch_choices: branch::BranchChoices,
-    wide: bool,
-    /// The context card fits in the margin beside the centered message column.
-    card_beside: bool,
+    card: context_card::CardPlace,
     speech: Entity<crate::gpui_speech::SpeechInput>,
     _speech_subscription: Subscription,
     focus: FocusHandle,
@@ -312,7 +317,11 @@ pub struct NativeAgentSessionView {
     history_rail_focus: FocusHandle,
     work_disclosures: BTreeMap<String, bool>,
     working_indicator: WorkingIndicator,
+    transcript_pane: Entity<panes::TranscriptPane>,
+    activity_pane: Entity<panes::ActivityPane>,
     tool_disclosures: BTreeMap<String, bool>,
+    /// Folded rows whose text changed while folded; they take it when they open.
+    folded_text: BTreeSet<String>,
     list: ListState,
     availability: ProviderAvailability,
     requests: Entity<requests::NativeRequestView>,
@@ -425,11 +434,16 @@ impl NativeAgentSessionView {
             related: Vec::new(),
             short_name: String::new(),
             context_card: None,
+            markdown_blocks: std::collections::HashMap::new(),
             branch_choices: branch::BranchChoices::default(),
-            wide: cx
+            card: if cx
                 .try_global::<context_card::LastWide>()
-                .is_some_and(|last| last.0),
-            card_beside: false,
+                .is_some_and(|last| last.0)
+            {
+                context_card::CardPlace::Aside
+            } else {
+                context_card::CardPlace::Closed
+            },
             speech,
             _speech_subscription: speech_subscription,
             focus: cx.focus_handle(),
@@ -504,7 +518,16 @@ impl NativeAgentSessionView {
                 tick: None,
                 animate: true,
             },
+            transcript_pane: {
+                let session = cx.entity();
+                cx.new(|cx| panes::TranscriptPane::new(&session, cx))
+            },
+            activity_pane: {
+                let session = cx.entity();
+                cx.new(|_| panes::ActivityPane::new(&session))
+            },
             tool_disclosures: BTreeMap::new(),
+            folded_text: BTreeSet::new(),
             // Tail following handles long histories; short histories keep a nonnegative
             // top anchor so their first paint does not depend on a scroll event.
             // Overdraw is the virtualized viewport boundary, not product spacing.
@@ -817,6 +840,26 @@ impl NativeAgentSessionView {
         }
     }
 
+    /// Whether `record` shows anything this view doesn't: another generation, a snapshot past its
+    /// revision, or other settings. A snapshot's revision moves with every change to it, so its
+    /// transcript needs no comparing.
+    pub(crate) fn record_changed(&self, record: &NativeSessionRecord) -> bool {
+        let current = self
+            .history_live_snapshot
+            .as_ref()
+            .unwrap_or(&self.record.snapshot);
+        record.id == self.record.id
+            && (record.generation != self.record.generation
+                || record.snapshot.revision != current.revision
+                || record.title != self.record.title
+                || record.config.permissions != self.record.config.permissions
+                || record.config.model != self.record.config.model
+                || record.config.reasoning_effort != self.record.config.reasoning_effort
+                || record.config.fast_mode != self.record.config.fast_mode
+                || record.permissions_pending != self.record.permissions_pending
+                || record.queued_messages != self.record.queued_messages)
+    }
+
     pub fn update_record(
         &mut self,
         mut record: NativeSessionRecord,
@@ -827,21 +870,8 @@ impl NativeAgentSessionView {
             return;
         }
         if record.generation == self.record.generation {
-            if record.snapshot.revision < self.record.snapshot.revision {
-                return;
-            }
-            let current = self
-                .history_live_snapshot
-                .as_ref()
-                .unwrap_or(&self.record.snapshot);
-            if record.snapshot == *current
-                && record.title == self.record.title
-                && record.config.permissions == self.record.config.permissions
-                && record.config.model == self.record.config.model
-                && record.config.reasoning_effort == self.record.config.reasoning_effort
-                && record.config.fast_mode == self.record.config.fast_mode
-                && record.permissions_pending == self.record.permissions_pending
-                && record.queued_messages == self.record.queued_messages
+            if record.snapshot.revision < self.record.snapshot.revision
+                || !self.record_changed(&record)
             {
                 return;
             }
@@ -971,9 +1001,16 @@ impl NativeAgentSessionView {
                     {
                         self.selected_response = None;
                     }
-                    let (markdown, marks) = streamed_markdown(item, self.presentation.streaming);
-                    self.link_marks.insert(item.id.clone(), marks);
-                    state.update(cx, |state, cx| state.set_text(&markdown, cx));
+                    // A folded row shows no text; parsing it waits until the row opens.
+                    if self.folded(item) {
+                        self.folded_text.insert(item.id.clone());
+                    } else {
+                        let (markdown, marks) =
+                            streamed_markdown(item, self.presentation.streaming);
+                        self.link_marks.insert(item.id.clone(), marks);
+                        state.update(cx, |state, cx| state.set_text(&markdown, cx));
+                        self.folded_text.remove(&item.id);
+                    }
                 }
             } else {
                 added.push(item.clone());
@@ -1677,10 +1714,12 @@ impl NativeAgentSessionView {
                                 this.working_indicator.tick = None;
                                 return false;
                             }
-                            // Working motion already redraws every frame; the tick only
-                            // advances the clocks without it.
+                            // Working motion already redraws the working row every frame; the
+                            // tick only advances the clocks without it, the working one and the
+                            // running turn's and subagents' in the transcript.
                             if !(is_busy(this.record.snapshot.status) && this.moving(cx)) {
-                                cx.notify();
+                                this.activity_pane.update(cx, |_, cx| cx.notify());
+                                this.transcript_pane.update(cx, |_, cx| cx.notify());
                             }
                             true
                         })
@@ -1730,7 +1769,7 @@ impl NativeAgentSessionView {
                     .items_center()
                     .gap_3()
                     .text_sm()
-                    .text_color(cx.theme().foreground.opacity(0.72))
+                    .text_color(cx.theme().muted_foreground)
                     .when(
                         busy && !self.record.snapshot.transcript.iter().any(|item| {
                             item.compaction_status()
@@ -1747,7 +1786,7 @@ impl NativeAgentSessionView {
                                     .items_center()
                                     .gap_2()
                                     .child(if animate {
-                                        crate::motion::spinner(cx.theme().foreground.opacity(0.72))
+                                        crate::motion::spinner(cx.theme().muted_foreground)
                                             .into_any_element()
                                     } else {
                                         // A paused spinner reads as frozen; waiting on the user is a clock.
@@ -1910,8 +1949,49 @@ impl NativeAgentSessionView {
     }
 
     /// Opens or closes one tool or thought row and remeasures it.
+    /// Whether `item` is a tool's output or a thought folded shut, so its text isn't on screen.
+    /// While the find bar is open every row keeps its text, so find reads what's there.
+    fn folded(&self, item: &NativeTranscriptItem) -> bool {
+        (is_tool_output(&item.role) || item.role == "thinking")
+            && self.find.is_none()
+            && !self
+                .tool_disclosures
+                .get(&item.id)
+                .copied()
+                .unwrap_or(false)
+    }
+
+    /// Gives the rows whose text waited while they were folded, `ids`, their text now.
+    pub(super) fn unfold_text<'a>(
+        &mut self,
+        ids: impl IntoIterator<Item = &'a str>,
+        cx: &mut Context<Self>,
+    ) {
+        for id in ids {
+            if !self.folded_text.remove(id) {
+                continue;
+            }
+            let (Some(item), Some(state)) = (
+                self.record
+                    .snapshot
+                    .transcript
+                    .iter()
+                    .find(|item| item.id == id),
+                self.transcript.get(id),
+            ) else {
+                continue;
+            };
+            let (markdown, marks) = streamed_markdown(item, self.presentation.streaming);
+            self.link_marks.insert(id.to_owned(), marks);
+            state.update(cx, |state, cx| state.set_text(&markdown, cx));
+        }
+    }
+
     fn toggle_disclosure(&mut self, id: &str, open: bool, cx: &mut Context<Self>) {
         self.tool_disclosures.insert(id.to_owned(), !open);
+        if !open {
+            self.unfold_text([id], cx);
+        }
         if let Some(ix) = self.timeline.iter().position(
             |row| matches!(row, TranscriptRow::Message { id: message, .. } if message == id),
         ) {
@@ -1948,7 +2028,7 @@ impl NativeAgentSessionView {
             .flex()
             .items_center()
             .gap_2()
-            .text_color(cx.theme().foreground.opacity(0.72))
+            .text_color(cx.theme().muted_foreground)
             .child(gpui_kit::component::Icon::new(gpui_kit::assets::IconName::Lightbulb).small())
             .child(div().flex_shrink_0().child(label))
             .child(div().flex_1().min_w_0().truncate().child(summary))
@@ -1989,7 +2069,7 @@ impl NativeAgentSessionView {
                 body.child(capped_scroll(
                     format!("thinking-scroll:{id}"),
                     20.,
-                    Self::message_text(state, &id, owner),
+                    self.message_text(state, &id, owner),
                 ))
             });
         div()
@@ -2067,7 +2147,7 @@ impl NativeAgentSessionView {
             .flex()
             .items_center()
             .gap_2()
-            .text_color(cx.theme().foreground.opacity(0.72))
+            .text_color(cx.theme().muted_foreground)
             .child(gpui_kit::component::Icon::new(icon).small())
             .child(
                 div()
@@ -2633,7 +2713,7 @@ impl NativeAgentSessionView {
             .when_some(self.transcript.get(&item.id), |body, state| {
                 body.child(div().min_w_0().relative()
                     .when(collapsible && !expanded, |text| text.max_h(gpui_kit::rems(11.)).overflow_hidden())
-                    .child(Self::message_text(state, &item.id, owner.clone()))
+                    .child(self.message_text(state, &item.id, owner.clone()))
                     .when(collapsible && !expanded, |text| text.child(
                         div().absolute().left_0().right_0().bottom_0().h_7()
                             .bg(gpui_kit::linear_gradient(180.,
@@ -2667,6 +2747,7 @@ impl NativeAgentSessionView {
             })
     }
     fn message_text(
+        &self,
         state: &Entity<TextViewState>,
         id: &str,
         owner: gpui_kit::WeakEntity<Self>,
@@ -2674,7 +2755,13 @@ impl NativeAgentSessionView {
         let id = id.to_owned();
         TextView::new(state)
             .selectable(true)
-            .code_block_actions(code_block_actions)
+            // Words a streaming reply adds light up as they arrive; earlier text stays put.
+            .stream_fade(true)
+            .markdown_extensions(self.markdown_blocks(owner.clone()))
+            .code_block_actions({
+                let owner = owner.clone();
+                move |block, window, cx| code_block_actions(block, &owner, window, cx)
+            })
             .on_link_click(move |url, event, window, cx| {
                 // A right-click offers what can be done with the link instead of opening it.
                 if event.is_right_click() {
@@ -2874,7 +2961,7 @@ impl NativeAgentSessionView {
             .xsmall()
             .disabled(!empty)
             .accessibility_label("Edit and resend")
-            .tooltip(if empty {
+            .element_tooltip(if empty {
                 "Edit and resend"
             } else {
                 "Send or clear your draft first"
@@ -2921,9 +3008,10 @@ impl NativeAgentSessionView {
         }
         .and_then(chrono::DateTime::from_timestamp_millis)
         .map(|time| {
-            time.with_timezone(&chrono::Local)
-                .format("%b %-d, %-I:%M %p")
-                .to_string()
+            crate::clock::local_moment(
+                time.with_timezone(&chrono::Local),
+                crate::clock::Moment::DayAndTime,
+            )
         });
         // Reserve the metadata lane so hover/focus never moves the transcript.
         div()
@@ -2974,7 +3062,7 @@ impl NativeAgentSessionView {
                                     .ghost()
                                     .xsmall()
                                     .accessibility_label("Start side chat")
-                                    .tooltip("Start side chat")
+                                    .element_tooltip("Start side chat")
                                     .on_click(move |_, window, cx| {
                                         _ = owner.update(cx, |this, cx| {
                                             this.command(
@@ -3015,7 +3103,7 @@ impl NativeAgentSessionView {
                     .xsmall()
                     .disabled(is_busy(self.record.snapshot.status))
                     .accessibility_label("Rewind to before this message")
-                    .tooltip("Rewind to before this message")
+                    .element_tooltip("Rewind to before this message")
                     .on_click(move |_, window, cx| {
                         _ = owner.update(cx, |this, cx| this.confirm_rewind(&id, window, cx));
                     })
@@ -3042,7 +3130,7 @@ impl NativeAgentSessionView {
                 .xsmall()
                 .loading(self.pending.contains("turn-diff"))
                 .accessibility_label("Show the files this turn changed")
-                .tooltip("Show the files this turn changed")
+                .element_tooltip("Show the files this turn changed")
                 .on_click(move |_, window, cx| {
                     _ = owner.update(cx, |this, cx| {
                         this.submit_command("turn-diff", vec![id.clone()], None, window, cx);
@@ -3157,7 +3245,7 @@ impl NativeAgentSessionView {
             .ghost()
             .xsmall()
             .accessibility_label(label)
-            .tooltip(label)
+            .element_tooltip(label)
             .on_click(move |_, window, cx| {
                 _ = owner.update(cx, |this, cx| this.copy_message(&id, window, cx));
             })
@@ -3188,7 +3276,7 @@ impl NativeAgentSessionView {
             .ghost()
             .xsmall()
             .accessibility_label(label)
-            .tooltip(label)
+            .element_tooltip(label)
             .on_click(move |_, window, cx| {
                 _ = owner.update(cx, |this, cx| this.copy_tables(&id, window, cx));
             })
@@ -3208,6 +3296,14 @@ impl NativeAgentSessionView {
         } else {
             format!("{} · {}", self.record.title, self.short_name).into()
         }
+    }
+
+    /// The revision of the related conversation `target` this view last took, if any.
+    pub(crate) fn related_revision(&self, target: &CommandTarget) -> Option<u64> {
+        self.related
+            .iter()
+            .find(|related| related.target == *target)
+            .map(|related| related.revision)
     }
 
     pub(crate) fn set_related_conversations(
@@ -3259,7 +3355,7 @@ impl NativeAgentSessionView {
                         div().flex().child(
                             Button::new("side-chats-toggle")
                                 .ghost()
-                                .xsmall()
+                                .small()
                                 .icon(if open {
                                     gpui_kit::component::IconName::ChevronDown
                                 } else {
@@ -3396,7 +3492,7 @@ impl NativeAgentSessionView {
         cx: &Context<Self>,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let id = annotation.id;
-        let label = annotation.note.trim().chars().take(48).collect::<String>();
+        let label = crate::strings::clipped(annotation.note.trim(), 48);
         let description = format!(
             "{}\n{}\n{}",
             annotation.address,
@@ -3446,7 +3542,7 @@ impl NativeAgentSessionView {
                     },
                     annotation.note
                 ))
-                .tooltip(description)
+                .element_tooltip(description)
                 .when_some(preview, |button, image| {
                     button
                         .h_auto()
@@ -3477,7 +3573,7 @@ impl NativeAgentSessionView {
         .xsmall()
         .ghost()
         .accessibility_label("Remove annotation attachment")
-        .tooltip("Remove attachment; keep saved annotation")
+        .element_tooltip("Remove attachment; keep saved annotation")
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.emit(OpenNativeSession::DetachAnnotation {
                 target: this.record.target(),
@@ -3761,7 +3857,7 @@ impl NativeAgentSessionView {
             .small()
             .label("Retry")
             .disabled(!draft_empty || !self.can_prompt())
-            .tooltip(if draft_empty {
+            .element_tooltip(if draft_empty {
                 "Send this turn's message again"
             } else {
                 "Send or clear your draft first"
@@ -4190,6 +4286,7 @@ impl NativeAgentSessionView {
         let token_owner = owner.clone();
         let token_click_owner = owner.clone();
         Textarea::new(&self.composer)
+            .context_menu(crate::gpui::text_menu(&self.composer))
             .token(move |context, _, cx| {
                 token_owner.upgrade().map_or_else(
                     || div().into_any_element(),
@@ -4337,6 +4434,9 @@ impl NativeAgentSessionView {
                     .gap_2()
                     .child(self.render_context_usage(cx))
                     .children(self.render_branch_picker(cx))
+                    .when(!self.card.wide() && self.context_card.is_some(), |row| {
+                        row.child(self.render_context_card_button(cx))
+                    })
                     .child(
                         div()
                             .id("native-model-control")
@@ -4348,16 +4448,7 @@ impl NativeAgentSessionView {
                     .child(self.speech.clone())
                     .when(interruptible, |row| {
                         // The turn can end under a resting pointer.
-                        row.child(element_tooltip(
-                            "native-interrupt-tooltip",
-                            if self.record.snapshot.stopping() {
-                                format!(
-                                    "Restart {} to stop now",
-                                    self.record.config.provider.display_name()
-                                )
-                            } else {
-                                "Interrupt".to_owned()
-                            },
+                        row.child(
                             Button::new("native-interrupt")
                                 .debug_selector(|| "native-interrupt".into())
                                 .accessibility_label("Interrupt")
@@ -4368,8 +4459,16 @@ impl NativeAgentSessionView {
                                 .disabled(interrupt_pending)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.command("interrupt", vec![], window, cx);
-                                })),
-                        ))
+                                }))
+                                .element_tooltip(if self.record.snapshot.stopping() {
+                                    format!(
+                                        "Restart {} to stop now",
+                                        self.record.config.provider.display_name()
+                                    )
+                                } else {
+                                    "Interrupt".to_owned()
+                                }),
+                        )
                     })
                     .when(resumable, |row| {
                         row.child(
@@ -4401,7 +4500,7 @@ impl NativeAgentSessionView {
                                 .primary()
                                 .rounded_full()
                                 .accessibility_label(send_blocker.unwrap_or(send_label))
-                                .tooltip(send_blocker.unwrap_or(send_label))
+                                .element_tooltip(send_blocker.unwrap_or(send_label))
                                 .loading(send_pending)
                                 .disabled(
                                     !self.provider_enabled()
@@ -4446,7 +4545,7 @@ impl NativeAgentSessionView {
                         ProgressCircle::new("native-context-ring")
                             .value(f32::from(percent.unwrap_or(0)))
                             .color(color)
-                            .size(gpui_kit::px(16.)),
+                            .size(gpui_kit::rems(1.)),
                     )
                     .when(percent.is_none(), |row| row.child(label)),
             )
@@ -4628,9 +4727,7 @@ impl NativeAgentSessionView {
 
     fn render_jump_to_latest(cx: &Context<Self>) -> impl IntoElement {
         // Following new output hides this pill under a resting pointer.
-        div().flex().justify_center().child(element_tooltip(
-            "native-jump-latest-tooltip",
-            "Jump to latest",
+        div().flex().justify_center().child(
             Button::new("native-jump-latest")
                 .debug_selector(|| "native-jump-latest".into())
                 .icon(IconName::ChevronDown)
@@ -4651,8 +4748,9 @@ impl NativeAgentSessionView {
                         this.list.set_follow_mode(gpui_kit::FollowMode::Tail);
                     }
                     cx.notify();
-                })),
-        ))
+                }))
+                .element_tooltip("Jump to latest"),
+        )
     }
 
     pub(crate) fn contains_focused(&self, window: &Window, cx: &App) -> bool {
@@ -4704,13 +4802,34 @@ impl NativeAgentSessionView {
         }
     }
 }
-impl Render for NativeAgentSessionView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.hold_prompt_anchor();
-        let busy = self.record.snapshot.transport_lost
+impl NativeAgentSessionView {
+    /// Redraws the working row on the next motion tick, and the transcript only while a row in it
+    /// moves.
+    fn request_motion_frames(&self, cx: &mut App) {
+        crate::motion::request_frame(self.activity_pane.entity_id(), cx);
+        if self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .any(|item| item.compaction_status() == Some(bootty_agents::NativeToolStatus::Running))
+        {
+            crate::motion::request_frame(self.transcript_pane.entity_id(), cx);
+        }
+    }
+
+    /// Whether the conversation is connecting, working or sending, so the working row shows.
+    fn busy(&self) -> bool {
+        self.record.snapshot.transport_lost
             || self.record.snapshot.status == NativeSessionStatus::Starting
             || is_busy(self.record.snapshot.status)
-            || self.pending.contains("prompt");
+            || self.pending.contains("prompt")
+    }
+}
+
+impl Render for NativeAgentSessionView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let busy = self.busy();
         // A subagent's view shows its transcript; the conversation's controls stay with the parent.
         let conversation = self.subagent.is_none();
         if conversation {
@@ -4720,7 +4839,7 @@ impl Render for NativeAgentSessionView {
         }
         self.sync_activity_tick(window, cx);
         if busy && window.is_visible() && self.moving(cx) {
-            crate::motion::request_frame(cx.entity_id(), cx);
+            self.request_motion_frames(cx);
         }
         let enabled = self.provider_enabled()
             && !matches!(
@@ -4731,7 +4850,7 @@ impl Render for NativeAgentSessionView {
             );
         self.speech
             .update(cx, |speech, cx| speech.set_enabled(enabled, cx));
-        let wide = self.wide && conversation;
+        let wide = self.card.wide() && conversation;
         div()
             .id(gpui_kit::SharedString::from(self.record.id.clone()))
             .relative()
@@ -4755,9 +4874,10 @@ impl Render for NativeAgentSessionView {
                 )
                 .child(self.render_context_geometry(cx))
             })
-            .when(wide && !self.card_beside, |view| {
-                view.pr(gpui_kit::rems(20.))
-            })
+            .when(
+                conversation && self.card == context_card::CardPlace::Aside,
+                |view| view.pr(gpui_kit::rems(20.)),
+            )
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
@@ -4770,7 +4890,8 @@ impl Render for NativeAgentSessionView {
                 cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if this.handle_selection_key(event, window, cx)
                         || (event.keystroke.key == "escape"
-                            && this.dismiss_citation_controls(window, cx))
+                            && (this.dismiss_citation_controls(window, cx)
+                                || this.close_context_card(cx)))
                     {
                         cx.stop_propagation();
                     }
@@ -4786,36 +4907,38 @@ impl Render for NativeAgentSessionView {
                         .child("This conversation is archived in Codex. Unarchive it to continue."),
                 )
             })
-            .child(self.render_transcript(window, cx))
+            .child(
+                self.transcript_pane
+                    .clone()
+                    .cached(panes::TranscriptPane::style()),
+            )
             .when(!self.record.snapshot.requests.is_empty(), |body| {
                 body.child(self.requests.clone())
             })
             .when(busy || !self.subagents().is_empty(), |body| {
-                body.child(self.render_activity(busy, window, cx))
+                body.child(self.activity_pane.clone())
             })
-            .when(conversation, |body| {
-                body.when(!wide, |body| {
-                    body.child(self.render_related_conversations(cx).px_4())
-                })
+            .when(conversation && !wide, |body| {
+                body.child(self.render_related_conversations(cx).px_4())
             })
             .child(self.render_error_recovery(cx))
             .child(self.render_link_menu(cx))
             .when(conversation, |body| {
                 body.child(self.render_composer(window, cx))
                     .child(self.render_selection_toolbar(window, cx))
-                    .when(wide, |body| body.child(self.render_context_card(cx)))
+                    .when(self.card != context_card::CardPlace::Closed, |body| {
+                        body.child(self.render_context_card(cx))
+                    })
             })
     }
 }
 
-/// Token counts read at a glance: 950, 12k, 1.2M.
-/// Give `control` a tooltip that ends with it. `Button::tooltip` shows through a window overlay
-/// that hides only on hover-out, so a button that disappears under a still pointer leaves it up.
 /// A fenced block's language and a copy button, in its corner.
 fn code_block_actions(
     block: &gpui_kit::base::text::CodeBlock,
+    owner: &gpui_kit::WeakEntity<NativeAgentSessionView>,
     _: &mut Window,
-    cx: &mut App,
+    cx: &App,
 ) -> gpui_kit::Div {
     let code = block.code();
     let id = block.span.map_or(0, |span| span.start);
@@ -4832,9 +4955,29 @@ fn code_block_actions(
                     .child(lang),
             )
         })
-        .child(element_tooltip(
-            gpui_kit::SharedString::from(format!("copy-code-tooltip:{id}")),
-            "Copy code",
+        .when(lang.eq_ignore_ascii_case("html"), |row| {
+            let (page, owner) = (code.clone(), owner.clone());
+            row.child(
+                Button::new(gpui_kit::SharedString::from(format!("preview-html:{id}")))
+                    .debug_selector(|| "preview-html".into())
+                    .icon(IconName::ExternalLink)
+                    .ghost()
+                    .xsmall()
+                    .accessibility_label("Open in your browser")
+                    .on_click(move |_, _, cx| match html_artifact(&page) {
+                        Ok(path) => cx.open_with_system(&path),
+                        Err(error) => {
+                            _ = owner.update(cx, |this, cx| {
+                                this.error =
+                                    Some(diagnostic("Could not open the page", error.to_string()));
+                                cx.notify();
+                            });
+                        }
+                    })
+                    .element_tooltip("Open in your browser"),
+            )
+        })
+        .child(
             Button::new(gpui_kit::SharedString::from(format!("copy-code:{id}")))
                 .debug_selector(move || format!("copy-code:{lang}"))
                 .icon(IconName::Copy)
@@ -4843,8 +4986,21 @@ fn code_block_actions(
                 .accessibility_label("Copy code")
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(code.to_string()));
-                }),
-        ))
+                })
+                .element_tooltip("Copy code"),
+        )
+}
+
+/// Writes a reply's HTML to a private file for the system browser to open, and returns it.
+fn html_artifact(page: &str) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write as _;
+    let mut file = tempfile::Builder::new()
+        .prefix("bootty-page-")
+        .suffix(".html")
+        .tempfile()?;
+    file.write_all(page.as_bytes())?;
+    let (_, path) = file.keep().map_err(|error| error.error)?;
+    Ok(path)
 }
 
 /// Long tool text scrolls inside its row instead of stretching the transcript.
@@ -4861,28 +5017,6 @@ fn capped_scroll(
         .child(content)
 }
 
-fn element_tooltip(
-    id: impl Into<gpui_kit::ElementId>,
-    label: impl Into<gpui_kit::SharedString>,
-    control: impl IntoElement,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
-    let label = label.into();
-    div()
-        .id(id)
-        .flex_shrink_0()
-        .child(control)
-        .tooltip(move |window, cx| {
-            let label = label.clone();
-            gpui_kit::component::tooltip::Tooltip::element(move |_, _| {
-                let selector = format!("tooltip:{label}");
-                div().debug_selector(move || selector).child(label.clone())
-            })
-            .build(window, cx)
-        })
-}
-
-/// Text from providers, commands, and lower layers, as people should read it. The view's own
-/// messages are already written for people and skip this.
 /// Runs the provider's own sign-in flow, the same one Settings offers.
 fn sign_in_button(provider: AgentKind) -> Button {
     Button::new("conversation-sign-in")
@@ -4980,16 +5114,19 @@ fn turn_usage(
         })
 }
 
-/// When a limit resets, as "at 3:40 PM" today or "on Oct 17 at 3:40 PM" later.
+/// When a limit resets, as "at 3:40 PM" today or "on Oct 17 at 3:40 PM" later, in the system's
+/// own clock and date order.
 fn reset_time(resets_at: i64) -> String {
+    use crate::clock::{Moment, local_moment};
     let Some(time) = chrono::DateTime::from_timestamp(resets_at, 0) else {
         return "soon".to_owned();
     };
     let local = time.with_timezone(&chrono::Local);
+    let at = local_moment(local, Moment::Time);
     if local.date_naive() == chrono::Local::now().date_naive() {
-        local.format("at %-I:%M %p").to_string()
+        format!("at {at}")
     } else {
-        local.format("on %b %-d at %-I:%M %p").to_string()
+        format!("on {} at {at}", local_moment(local, Moment::Day))
     }
 }
 
@@ -5009,6 +5146,7 @@ fn dollars(micros: u64) -> String {
     )
 }
 
+/// Token counts read at a glance: 950, 12k, 1.2M.
 fn compact_tokens(tokens: u64) -> String {
     if tokens < 1_000 {
         tokens.to_string()
@@ -5599,7 +5737,7 @@ pub fn subagent_label(agent: &bootty_agents::NativeSubagent) -> String {
     if label.is_empty() {
         return "Subagent".into();
     }
-    label.chars().take(80).collect()
+    crate::strings::clipped(label, 80)
 }
 
 /// A subagent's initials: the first letters of its first two words.

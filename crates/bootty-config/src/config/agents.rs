@@ -22,44 +22,140 @@ impl ResponseStreaming {
             Self::Complete => "complete",
         }
     }
+    /// What of a reply's `text` shows while it streams. Live holds back an inline span whose
+    /// closing marker hasn't arrived, so `**`, backticks and links don't show raw and then
+    /// change; the shown text only ever grows. Paragraph shows finished blocks only.
     #[must_use]
     pub fn visible_text(self, text: &str, complete: bool) -> &str {
-        if complete || self == Self::Live {
+        if complete {
             return text;
         }
         if self == Self::Complete {
             return "";
         }
-        // Publish only completed Markdown blocks; never cut an unfinished fenced code block.
-        let mut fence = None;
-        let mut boundary = 0;
-        let mut offset: usize = 0;
-        for line in text.split_inclusive('\n') {
-            let trimmed = line.trim_start();
-            if line.len().saturating_sub(trimmed.len()) <= 3 {
-                let marker = trimmed.as_bytes().first().copied();
-                if let Some(marker @ (b'`' | b'~')) = marker {
-                    let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
-                    if length >= 3 {
-                        let rest = trimmed.get(length..).unwrap_or_default();
-                        if fence
-                            .is_some_and(|(opening, count)| opening == marker && length >= count)
-                            && rest.trim().is_empty()
-                        {
-                            fence = None;
-                        } else if fence.is_none() && (marker != b'`' || !rest.contains('`')) {
-                            fence = Some((marker, length));
-                        }
+        let (boundary, fence) = block_boundary(text);
+        if self == Self::Paragraph {
+            return text.get(..boundary).unwrap_or_default();
+        }
+        let line = text.rfind('\n').map_or(0, |at| at.saturating_add(1));
+        if let Some((opened, marker)) = fence {
+            let last = text.get(line..).unwrap_or_default();
+            let start = last.trim_start();
+            let indent = last.len().saturating_sub(start.len());
+            // An opening line is a fence only once it ends, since a backtick may yet make it
+            // code, and a line that starts, or may yet start, with the marker may close it.
+            let closing =
+                indent <= 3 && (start.is_empty() || start.starts_with(char::from(marker)));
+            return if opened == line || closing {
+                text.get(..line.saturating_add(indent)).unwrap_or_default()
+            } else {
+                text
+            };
+        }
+        let held = text
+            .get(line..)
+            .and_then(unclosed_markup)
+            .map_or(text.len(), |at| line.saturating_add(at));
+        text.get(..held).unwrap_or(text)
+    }
+}
+
+/// Where `text`'s last finished Markdown block ends, never inside a fenced code block, and
+/// where and with which marker the fenced code block its end is inside opens, if it is.
+fn block_boundary(text: &str) -> (usize, Option<(usize, u8)>) {
+    let mut fence: Option<(u8, usize, usize)> = None;
+    let mut boundary = 0;
+    let mut offset: usize = 0;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if line.len().saturating_sub(trimmed.len()) <= 3 {
+            let marker = trimmed.as_bytes().first().copied();
+            if let Some(marker @ (b'`' | b'~')) = marker {
+                let length = trimmed.bytes().take_while(|byte| *byte == marker).count();
+                if length >= 3 {
+                    let rest = trimmed.get(length..).unwrap_or_default();
+                    if fence.is_some_and(|(opening, count, _)| opening == marker && length >= count)
+                        && rest.trim().is_empty()
+                    {
+                        fence = None;
+                    } else if fence.is_none() && (marker != b'`' || !rest.contains('`')) {
+                        fence = Some((marker, length, offset));
                     }
                 }
             }
-            offset = offset.saturating_add(line.len());
-            if fence.is_none() && line.trim().is_empty() {
-                boundary = offset;
-            }
         }
-        text.get(..boundary).unwrap_or_default()
+        offset = offset.saturating_add(line.len());
+        if fence.is_none() && line.trim().is_empty() {
+            boundary = offset;
+        }
     }
+    (boundary, fence.map(|(marker, _, opened)| (opened, marker)))
+}
+
+/// Where the earliest inline span in `line` opens that hasn't closed: a code span, `**`, `__`
+/// or `~~`, or a bracket that may still become a link. Single `*`, `_` and `~` stay, since lists
+/// and names use them, except at the very end, where the next character may pair them.
+fn unclosed_markup(line: &str) -> Option<usize> {
+    let bytes = line.as_bytes();
+    let mut open: Vec<(u8, usize)> = Vec::new();
+    let mut stopped = None;
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        match byte {
+            b'\\' => at = at.saturating_add(2),
+            b'`' => {
+                let run = bytes
+                    .get(at..)
+                    .map_or(0, |rest| rest.iter().take_while(|b| **b == b'`').count());
+                let after = at.saturating_add(run);
+                let ticks = line.get(at..after).unwrap_or_default();
+                if let Some(end) = line.get(after..).and_then(|rest| rest.find(ticks)) {
+                    at = after.saturating_add(end).saturating_add(run);
+                } else {
+                    stopped = Some(at);
+                    break;
+                }
+            }
+            b'*' | b'_' | b'~' if bytes.get(at.saturating_add(1)) == Some(&byte) => {
+                match open.iter().position(|(marker, _)| *marker == byte) {
+                    Some(opened) => open.truncate(opened),
+                    None => open.push((byte, at)),
+                }
+                at = at.saturating_add(2);
+            }
+            b'*' | b'_' | b'~' if at.saturating_add(1) == bytes.len() => {
+                stopped = Some(at);
+                break;
+            }
+            _ => at = at.saturating_add(1),
+        }
+    }
+    open.first()
+        .map(|(_, first)| *first)
+        .into_iter()
+        .chain(stopped)
+        .chain(unsettled_bracket(bytes))
+        .min()
+}
+
+/// Where the first `[` in `line` opens that may still become a link: no `]` after it is
+/// followed by anything but `(`, and no `](` after it has closed its target. A bracket that
+/// settles stays settled however the line goes on.
+fn unsettled_bracket(line: &[u8]) -> Option<usize> {
+    let settled = |rest: &[u8]| {
+        rest.windows(2).enumerate().any(|(at, pair)| match pair {
+            [b']', b'('] => rest
+                .get(at.saturating_add(2)..)
+                .is_some_and(|target| target.contains(&b')')),
+            [b']', _] => true,
+            _ => false,
+        })
+    };
+    line.iter()
+        .enumerate()
+        .filter(|(_, byte)| **byte == b'[')
+        .map(|(at, _)| at)
+        .find(|at| !line.get(*at..).is_some_and(settled))
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

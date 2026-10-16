@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+mod support;
 use std::{fs, io::Cursor, os::unix::fs::PermissionsExt as _, path::Path};
 
 use assert_fs::TempDir;
@@ -238,7 +239,7 @@ fn legacy_pi_permissions_do_not_block_saved_conversations(#[case] permissions: &
         .unwrap();
     service.shutdown().unwrap();
     drop(service);
-    let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let mut catalog: Value = support::stored_catalog(&path).unwrap();
     catalog["records"][0]["config"]["permissions"] = json!(permissions);
     fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
     let restored = NativeAgentService::open(&path).unwrap();

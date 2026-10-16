@@ -1,4 +1,5 @@
 //! Shared tab appearance and close-affordance layout for dock and mux tabs.
+use crate::gpui::ElementTooltip as _;
 use bootty_config::config::{TabAppearance, TabCloseButton, TabClosePosition, TabConfig};
 use gpui_kit::base::{Tab, Tabs};
 use gpui_kit::component::{
@@ -657,7 +658,7 @@ fn scroll_button(
                     .xsmall()
                     .w_5()
                     .accessibility_label(format!("Scroll tabs {direction}"))
-                    .tooltip(format!("Scroll tabs {direction}"))
+                    .element_tooltip(format!("Scroll tabs {direction}"))
                     .on_click(move |_, window, cx| {
                         let distance = f32::from(scroll.bounds().size.width) * 0.8;
                         move_scroll(

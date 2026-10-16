@@ -1,5 +1,6 @@
 //! PR metadata and comment controls use captured PR identity.
 use super::*;
+use crate::gpui::ElementTooltip as _;
 use bootty_git::github::{
     CandidateKind, CandidatePage, GitHubCandidate, MetadataRequest, Reaction, ReactionGroup,
 };
@@ -352,12 +353,14 @@ impl Render for MetadataEditor {
             .when(matches!(self.mode, MetadataMode::PullRequest), |view| {
                 view.child(
                     Input::new(&self.title)
+                        .context_menu(crate::gpui::text_menu(&self.title))
                         .aria_label("Pull request title")
                         .w_full(),
                 )
             })
             .child(
                 Textarea::new(&self.body)
+                    .context_menu(crate::gpui::text_menu(&self.body))
                     .aria_label(if matches!(self.mode, MetadataMode::PullRequest) {
                         "Pull request description"
                     } else {
@@ -576,7 +579,7 @@ impl PullRequestView {
                     .xsmall()
                     .ghost()
                     .accessibility_label("React")
-                    .tooltip("Add reaction")
+                    .element_tooltip("Add reaction")
                     .disabled(self.pending)
                     .dropdown_menu(move |mut menu, _, _| {
                         for content in [

@@ -42,6 +42,7 @@ pub fn readonly_editor(editor: &Entity<EditorState>, label: &'static str) -> imp
     focus_input(
         editor,
         ComponentEditor::new(editor)
+            .context_menu(crate::gpui::text_menu(editor))
             .readonly(true)
             .bordered(false)
             .size_full()
@@ -304,6 +305,7 @@ impl Render for FileEditor {
                     focus_input(
                         &self.editor,
                         ComponentEditor::new(&self.editor)
+                            .context_menu(crate::gpui::text_menu(&self.editor))
                             .bordered(false)
                             .size_full(),
                     )

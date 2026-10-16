@@ -19,6 +19,7 @@ impl Backend {
                 Icon::from_rgba(super::icon(snapshot.unread > 0), 16, 16)
                     .map_err(|error| error.to_string())?,
             )
+            .with_icon_as_template(cfg!(target_os = "macos"))
             .with_tooltip(snapshot.title())
             .with_menu(Box::new(menu(&snapshot)?))
             .with_menu_on_left_click(true)
@@ -49,6 +50,8 @@ impl Backend {
             && let Ok(icon) = Icon::from_rgba(super::icon(snapshot.unread > 0), 16, 16)
         {
             let _ = self.tray.set_icon(Some(icon));
+            #[cfg(target_os = "macos")]
+            self.tray.set_icon_as_template(true);
         }
         #[cfg(target_os = "macos")]
         if snapshot.unread != self.shown.unread {

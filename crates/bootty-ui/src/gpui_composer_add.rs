@@ -1,5 +1,6 @@
 //! The Add menu uses the same captured catalog and input owner as keyboard completions.
 use super::*;
+use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
     Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
@@ -48,7 +49,7 @@ impl ComposerCompletion {
             .small()
             .ghost()
             .accessibility_label("Add to message")
-            .tooltip("Add to message")
+            .element_tooltip("Add to message")
             .when(plan, |button| button.label("Plan"))
             .disabled(disabled);
         let Some(owner) = owner else {
@@ -429,7 +430,7 @@ fn task_menu(
                     let confirm = submit.clone();
                     dialog
                         .title("Conversation goal")
-                        .child(Input::new(&input))
+                        .child(Input::new(&input).context_menu(crate::gpui::text_menu(&input)))
                         .footer(
                             DialogFooter::new()
                                 .child(

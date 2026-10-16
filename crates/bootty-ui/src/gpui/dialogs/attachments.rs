@@ -53,6 +53,7 @@ impl DialogView {
         let token_owner = owner.clone();
         let completion = self.completion.clone();
         Textarea::new(&self.prompt_textarea)
+            .context_menu(crate::gpui::text_menu(&self.prompt_textarea))
             .token(move |context, _, cx| {
                 let kind = completion
                     .as_ref()
