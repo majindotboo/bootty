@@ -115,15 +115,14 @@ fn voice_media_reports_connection_loss_close_and_provider_errors(
     #[case] expected: SpeechEvent,
 ) {
     use assert_fs::prelude::*;
-    use std::{
-        io::{BufRead as _, BufReader},
-        os::unix::fs::PermissionsExt as _,
-    };
+    use std::io::{BufRead as _, BufReader};
     let root = assert_fs::TempDir::new().unwrap();
     let helper = root.child("bootty-voice");
-    std::fs::copy(env!("CARGO_BIN_EXE_bootty-voice"), helper.path()).unwrap();
+    bootty_test_support::place_executable(env!("CARGO_BIN_EXE_bootty-voice"), helper.path())
+        .unwrap();
     let host = root.child("voice-host");
-    host.write_str(
+    bootty_test_support::write_executable(
+        host.path(),
         r#"#!/bin/sh
 printf '%s\n' '{"type":"ready","version":6}'
 IFS= read -r command
@@ -132,7 +131,6 @@ cat >/dev/null
 "#,
     )
     .unwrap();
-    std::fs::set_permissions(host.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut child = Command::new(helper.path())
         .env(
             "BOOTTY_TEST_VOICE_EVENT",

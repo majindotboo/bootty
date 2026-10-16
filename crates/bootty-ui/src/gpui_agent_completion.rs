@@ -312,9 +312,12 @@ impl NativeAgentSessionView {
         match cx
             .update_global(|stash: &mut crate::prompt_stash::PromptStash, _| stash.stash(text, now))
         {
-            Ok(()) => self.composer.update(cx, |composer, cx| {
-                composer.set_value("", window, cx);
-            }),
+            Ok(()) => {
+                self.composer.update(cx, |composer, cx| {
+                    composer.set_value("", window, cx);
+                });
+                self.draft_replaced(cx);
+            }
             Err(error) => self.error = Some(super::diagnostic("Could not stash the prompt", error)),
         }
         cx.notify();
@@ -558,6 +561,7 @@ impl NativeAgentSessionView {
         };
         self.composer
             .update(cx, |composer, cx| composer.set_value("", window, cx));
+        self.draft_replaced(cx);
         if let Some(name) = app_command {
             window.dispatch_action(
                 Box::new(crate::gpui_actions::InvokeCommand::new(

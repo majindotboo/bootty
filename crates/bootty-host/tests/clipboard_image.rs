@@ -25,6 +25,8 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 proptest! {
+    // Each case saves durably to disk; a few dozen cover the byte shapes.
+    #![proptest_config(ProptestConfig::with_cases(32))]
     #[test]
     fn complete_uploads_preserve_bytes_in_private_unique_files(tail in prop::collection::vec(any::<u8>(), 0..2048)) {
         let directory = assert_fs::TempDir::new().unwrap();

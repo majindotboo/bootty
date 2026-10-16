@@ -35,6 +35,7 @@ objc2-foundation = { workspace = true, features = ["NSError", "NSOperation"] }
 objc2-speech = { version = "0.3", default-features = false, features = ["SFSpeechRecognitionRequest", "SFSpeechRecognitionResult", "SFSpeechRecognitionTask", "SFSpeechRecognizer", "SFTranscription", "block2", "objc2-avf-audio", "std"] }
 
 [dev-dependencies]
+bootty-test-support = { path = "../bootty-test-support" }
 proptest.workspace = true
 assert_fs.workspace = true
 pretty_assertions.workspace = true

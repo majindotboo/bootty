@@ -158,6 +158,52 @@ fn tmux_reopen_retains_history_for_the_backend_owner(
     Ok(())
 }
 
+/// An attached tmux client shows tmux's own active window, so a saved tab never outranks it.
+#[rstest]
+fn tmux_restore_leaves_the_tab_to_the_attached_client(
+    checkpoint: SavedTerminalSession,
+) -> anyhow::Result<()> {
+    use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
+    let directory = TempDir::new()?;
+    let mut config = BoottyConfig {
+        config_path: directory.path().join("config.toml"),
+        ..BoottyConfig::default()
+    };
+    config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
+    let (mut repository, saved) = WorkspaceRepository::open(&config.config_path)?;
+    let scope = saved.spaces().first().unwrap().id();
+    repository.commit_binding_state(
+        scope,
+        &SessionMembership::from_sessions(vec![WorkspaceSession {
+            identity: checkpoint.session_id.clone(),
+            backend_name: checkpoint.backend_id.clone(),
+            display_name: "Purpose".into(),
+            explicit: true,
+            cwd: "/tmp".into(),
+            state: SessionState::default(),
+            terminal_snapshot: Some(Arc::new(checkpoint)),
+        }]),
+    )?;
+    repository.set_binding_saved_selection(scope, Some("logical"), "original", Some("@2"))?;
+    let registry = bootty_mux::provider::MuxBackendRegistry::from_app_providers(
+        [Arc::new(MissingTmux)],
+        [bootty_mux::MuxBackendKind::Tmux],
+    )?;
+    let workspace = bootty_mux::workspace::WorkspaceRuntime::open(
+        &config,
+        "main",
+        Arc::new(registry),
+        AppearanceVariant::Light,
+        Arc::new(|| {}),
+    )?;
+    let mux = workspace.active.binding.mux();
+    assert_eq!(
+        (mux.selected_session(), mux.selected_window()),
+        (Some("original"), None)
+    );
+    Ok(())
+}
+
 #[rstest]
 #[case::unix_absolute("/work", true)]
 #[case::local_platform_absolute(if cfg!(windows) { r"C:\work" } else { "/work" }, true)]

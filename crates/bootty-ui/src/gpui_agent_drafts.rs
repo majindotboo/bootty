@@ -18,6 +18,13 @@ impl NativeAgentSessionView {
         }
     }
 
+    /// The composer reports only typing as a change; text set in code, such as clearing a sent
+    /// message, saves the draft here.
+    pub(super) fn draft_replaced(&mut self, cx: &Context<Self>) {
+        self.draft_revision = self.draft_revision.wrapping_add(1);
+        self.schedule_draft_save(cx);
+    }
+
     pub(super) fn schedule_draft_save(&mut self, cx: &Context<Self>) {
         self.draft_save = Some(cx.spawn(async move |owner, cx| {
             cx.background_executor().timer(DRAFT_SAVE_DELAY).await;

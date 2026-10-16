@@ -76,15 +76,15 @@ fn installer_publishes_only_verified_complete_candidates(
     #[case] compatible: bool,
     #[case] corrupt: bool,
 ) {
-    use std::os::unix::fs::PermissionsExt;
     let home = assert_fs::TempDir::new().unwrap();
     // macOS supplies shasum; Linux normally supplies sha256sum directly.
     if cfg!(target_os = "macos") {
         let checksum = home.child("bin/sha256sum");
-        checksum
-            .write_str("#!/bin/sh\nexec /usr/bin/shasum -a 256 \"$@\"\n")
-            .unwrap();
-        std::fs::set_permissions(checksum.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        bootty_test_support::write_executable(
+            checksum.path(),
+            "#!/bin/sh\nexec /usr/bin/shasum -a 256 \"$@\"\n",
+        )
+        .unwrap();
     }
     let installed = home.child(format!(
         ".bootty/bin/bootty-daemon-{}-{}.exe",

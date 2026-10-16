@@ -22,6 +22,7 @@ mslnk.workspace = true
 winreg.workspace = true
 
 [dev-dependencies]
+bootty-test-support = { path = "../bootty-test-support" }
 assert_fs.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true

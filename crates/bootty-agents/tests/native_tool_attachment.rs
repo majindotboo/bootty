@@ -3,7 +3,6 @@
 mod support;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     sync::{Arc, Mutex, PoisonError},
     time::Instant,
@@ -91,7 +90,7 @@ fn bridge(
 // It returns each MCP result through a normal provider RPC, without printing private tokens.
 fn provider(root: &Path) -> std::io::Result<NativeSessionConfig> {
     let path = root.join("provider.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &path,
         r"#!/usr/bin/env python3
 import json,socket,sys
@@ -134,7 +133,6 @@ for line in sys.stdin:
  emit({'id':value['id'],'result':result})
 ",
     )?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     let mut config = NativeSessionConfig::new(AgentKind::Codex, root);
     config.program = path.to_string_lossy().into_owned();
     config.account_directory = Some(root.join("captured-account").to_string_lossy().into_owned());

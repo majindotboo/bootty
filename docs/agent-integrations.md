@@ -142,7 +142,9 @@ and pauses, resumes or removes it (`agents.native.goal-status`, `agents.native.g
 The plan drawer also shows Claude's to-do list, from TodoWrite or its task tools.
 Compaction shows as a row for every provider: Claude's says how far it shrank the
 context, which the meter then reads, and Pi's own compactions show as they run. The
-context meter's menu compacts the conversation as `/compact` does. Codex's and
+context meter's menu compacts the conversation as `/compact` does. Commands Claude
+runs itself, such as `/cost` or a `/compact` with nothing to compact, show Claude's
+output as it laid it out. Codex's and
 Claude's usage limit reports show in the meter's tooltip; a turn a limit stopped says
 when it resets and can wait to send the turn again then. The sidebar's usage meter
 uses those reports while they are fresh, and asks `codexbar` otherwise.
@@ -194,9 +196,8 @@ markdown table offers Copy table, which copies every table as tab-separated cell
 A turn's last reply shows the tokens the turn used, and its price when Claude or Pi
 reports one; the tooltip splits out cached input and reasoning.
 
-A prompt sent from the composer moves to the top of the transcript, with room kept
-below it for the reply; once the reply outgrows that room, or the transcript is
-scrolled, the transcript follows its end again.
+A prompt sent from the composer shows at the end of the transcript, which follows
+its reply.
 
 The terminal's find and copy mode keys act on a focused conversation. Find
 (Cmd+F, Ctrl+Shift+F elsewhere) highlights a query's matches across the shown

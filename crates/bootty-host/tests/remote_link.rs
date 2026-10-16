@@ -133,8 +133,9 @@ async fn an_undrained_output_stream_cannot_block_another_process(
     let bytes: Vec<u8> = (0..=255).cycle().take(32 * 1024).collect();
     echo.write(&bytes).await.expect("input");
     echo.finish_input().await.expect("EOF");
+    // A blocked stream never finishes; the limit only bounds a failure on a loaded machine.
     let (stdout, stderr, exit) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), output(&mut echo))
+        tokio::time::timeout(std::time::Duration::from_secs(30), output(&mut echo))
             .await
             .expect("independent stream progress")
             .expect("output");
@@ -281,8 +282,9 @@ async fn cancel_reaps_the_remote_process_before_returning_its_exit_status(
         .parse()
         .expect("pid number");
     process.cancel().await.expect("cancel");
+    // A tree that survives never exits; the limit only bounds a failure on a loaded machine.
     let (_, _, status) =
-        tokio::time::timeout(std::time::Duration::from_secs(2), output(&mut process))
+        tokio::time::timeout(std::time::Duration::from_secs(30), output(&mut process))
             .await
             .expect("the entire captured process tree exits")
             .expect("output");

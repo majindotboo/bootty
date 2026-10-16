@@ -195,8 +195,8 @@ impl ComposerSendShortcut {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TranscriptWidth {
-    #[default]
     Normal,
+    #[default]
     Wide,
     Full,
 }

@@ -44,10 +44,10 @@ fn power_stops_continuous_nvidia_sampler_at_the_deadline() {
     let bin = temp.child("bin");
     bin.create_dir_all().unwrap();
     let nvidia_smi = bin.child("nvidia-smi");
-    fs::write(nvidia_smi.path(), "#!/bin/sh\nwhile :; do :; done\n").unwrap();
+    bootty_test_support::write_executable(nvidia_smi.path(), "#!/bin/sh\nwhile :; do :; done\n")
+        .unwrap();
     let mut permissions = fs::metadata(nvidia_smi.path()).unwrap().permissions();
     permissions.set_mode(0o755);
-    fs::set_permissions(nvidia_smi.path(), permissions).unwrap();
     let output = temp.child("power");
 
     let started = Instant::now();

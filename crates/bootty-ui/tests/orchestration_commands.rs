@@ -523,10 +523,9 @@ struct ProviderFixture {
 
 #[cfg(unix)]
 fn providers(first_state: &str) -> Result<ProviderFixture, Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt as _;
     let directory = Arc::new(assert_fs::TempDir::new()?);
     let program = directory.path().join("provider.py");
-    std::fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -549,7 +548,6 @@ for line in sys.stdin:
     pass
 ",
     )?;
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
     let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
@@ -711,10 +709,9 @@ fn two_provider_workers_observe_dependency_order_without_idle_success(
 
 #[cfg(unix)]
 fn native_provider_host(mode: &str) -> Result<HostFixture, Box<dyn std::error::Error>> {
-    use std::os::unix::fs::PermissionsExt as _;
     let directory = Arc::new(assert_fs::TempDir::new()?);
     let program = directory.path().join("native-provider.py");
-    std::fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json,os,pathlib,sys
@@ -742,7 +739,6 @@ for line in sys.stdin:
  else: reply(ident,{})
 ",
     )?;
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))?;
     let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,

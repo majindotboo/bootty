@@ -1,8 +1,5 @@
 #![cfg(test)]
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt as _;
-
 use bootty_ui::gpui as bootty_gpui;
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
@@ -1452,9 +1449,7 @@ fn commit_messages_are_written_by_codex_from_the_staged_changes() {
     };
     git(&["init", "--quiet"]);
     let codex = directory.path().join("codex.py");
-    fs::write(
-        &codex,
-        r"#!/usr/bin/env python3
+    bootty_test_support::write_executable(&codex, r"#!/usr/bin/env python3
 import json,pathlib,sys
 args=sys.argv[1:]
 assert args[args.index('--model')+1]=='quick-model' and '+contents' in args[-1]
@@ -1462,7 +1457,6 @@ pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(
 ",
     )
     .unwrap();
-    fs::set_permissions(&codex, fs::Permissions::from_mode(0o700)).unwrap();
     let (wake, wakes) = mpsc::channel();
     let mut config = test_config::config(
         directory.path().join("settings/config.toml"),
@@ -1971,11 +1965,10 @@ fn link_commands_open_the_resolved_document_and_honor_cancellation(
 #[rstest]
 fn capture_and_export_use_the_attached_pane_and_never_replace_a_file() {
     use bootty_terminal::frame_source::TerminalFrameSource as _;
-    use std::os::unix::fs::PermissionsExt as _;
+
     let directory = assert_fs::TempDir::new().unwrap();
     let shell = directory.path().join("capture-shell");
-    fs::write(&shell, "#!/bin/sh\nprintf 'first-capture-line\\r\\n'\ni=0; while [ $i -lt 100 ]; do printf 'line-%s\\r\\n' \"$i\"; i=$((i + 1)); done\nprintf 'capture-ready'\nread line\n").unwrap();
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    bootty_test_support::write_executable(&shell, "#!/bin/sh\nprintf 'first-capture-line\\r\\n'\ni=0; while [ $i -lt 100 ]; do printf 'line-%s\\r\\n' \"$i\"; i=$((i + 1)); done\nprintf 'capture-ready'\nread line\n").unwrap();
     let (wake, wakes) = mpsc::channel();
     let mut config = test_config::config(
         directory.path().join("config.toml"),
@@ -2264,10 +2257,8 @@ fn named_theme_restore_preserves_accepted_theme_and_unrelated_settings(
 
 #[cfg(unix)]
 fn claude_terminal_fixture(directory: &Path) -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let program = directory.join("claude-fixture.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -2309,7 +2300,6 @@ with open(directory / 'agent-input', 'a') as received:
         print('received prompt', flush=True)
 ",
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     Ok(program)
 }
 
@@ -4760,10 +4750,10 @@ fn named_agent_start_creates_exactly_one_task_directly_on_its_issued_binding(
 #[cfg(unix)]
 #[rstest]
 fn native_agent_retry_reuses_saved_identity_and_user_title_after_launch_failure() {
-    use std::os::unix::fs::PermissionsExt as _;
     let directory = assert_fs::TempDir::new().unwrap();
     let program = claude_terminal_fixture(directory.path()).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o600)).unwrap();
+    // The first launch fails: the provider isn't there yet.
+    fs::remove_file(&program).unwrap();
     let config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
@@ -4833,7 +4823,7 @@ fn native_agent_retry_reuses_saved_identity_and_user_title_after_launch_failure(
             assert_eq!(saved[0]["title"], "User title survives retry");
         }
     }
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    claude_terminal_fixture(directory.path()).unwrap();
     let outcome = submit_command_from_caller(
         &mut state,
         &wakes,
@@ -4875,7 +4865,7 @@ fn finished_claude_terminal_fixture(
             "os.replace(temporary, path)\n",
             "os.replace(temporary, path)\nwith open(directory / 'query-gate', 'wb', buffering=0) as gate:\n    gate.write(b'x')\n",
         );
-    fs::write(&program, script)?;
+    bootty_test_support::write_executable(&program, script)?;
     Ok((program, gate))
 }
 
@@ -4937,11 +4927,10 @@ fn configure_pi_child(
     directory: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let child = directory.join("pi-terminal.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &child,
         "#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.path.join(os.environ['PI_CODING_AGENT_DIR'],'launch.json'),'w') as out: json.dump({'argv':sys.argv,'account':os.environ['PI_CODING_AGENT_DIR']},out)\nprint('PI_CHILD_READY',flush=True)\nfor line in sys.stdin: pass\n",
     )?;
-    fs::set_permissions(&child, fs::Permissions::from_mode(0o700))?;
     preferences.program = child.to_string_lossy().into_owned();
     preferences.selected = "review".into();
     let account = directory.join("pi-account");

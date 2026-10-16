@@ -499,19 +499,16 @@ fn installed_hooks_execute_from_paths_with_spaces_and_shell_metacharacters(
     #[case] provider: AgentKind,
     #[case] server: (Option<&str>, Option<&str>, &str),
 ) {
-    use std::os::unix::fs::PermissionsExt as _;
-
     let root = assert_fs::TempDir::new().unwrap();
     let integration_dir = root.path().join("Luan's $(invalid command) integrations");
     let declaration = AgentIntegration::for_provider(provider, &integration_dir).declaration;
     install_integration(&integration_dir, Some(root.path()), &declaration).unwrap();
     let fake = root.path().join("bootty");
-    fs::write(
+    bootty_test_support::write_executable(
         &fake,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$BOOTTY_HOOK_ARGUMENTS\"\n",
     )
     .unwrap();
-    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
     let recorded = root.path().join("arguments");
     let command = declaration.merge[0].value["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         .as_str()

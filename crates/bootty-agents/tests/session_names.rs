@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use std::{fs, os::unix::fs::PermissionsExt as _};
+use std::fs;
 
 use assert_fs::TempDir;
 use bootty_agents::{
@@ -30,7 +30,7 @@ fn naming_uses_a_private_ephemeral_query_and_rejects_invalid_output(
 ) {
     let root = TempDir::new().expect("temporary account");
     let script = root.path().join("provider.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &script,
         r"#!/usr/bin/env python3
 import json,os,pathlib,sys
@@ -51,7 +51,6 @@ output.write_text(json.dumps({'title':'Fix composer','slug':(account/'slug').rea
 ",
     )
     .expect("provider script");
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).expect("executable provider");
     fs::write(root.path().join("slug"), slug).expect("response slug");
     let mut config = NativeSessionConfig::new(AgentKind::Codex, root.path());
     config.program = script.to_string_lossy().into_owned();

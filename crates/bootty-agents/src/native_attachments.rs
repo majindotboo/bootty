@@ -2,7 +2,7 @@ use std::{
     collections::BTreeSet,
     fmt::Write as _,
     fs,
-    io::{Cursor, Read as _},
+    io::{Cursor, Read},
     path::{Path, PathBuf},
 };
 
@@ -10,7 +10,11 @@ use bootty_write::{NewFileMode, WriteTarget};
 use image::{ImageFormat, ImageReader};
 use serde::{Deserialize, Serialize};
 
-pub const MAX_NATIVE_ATTACHMENT_FILE_BYTES: u64 = 50 * 1024 * 1024;
+/// The largest file a conversation takes, as much as all of its attachments together.
+pub const MAX_NATIVE_ATTACHMENT_FILE_BYTES: u64 = MAX_NATIVE_SESSION_ATTACHMENT_BYTES;
+/// The largest image read to make its PNG; the PNG itself is at most
+/// [`MAX_NATIVE_ATTACHMENT_IMAGE_BYTES`].
+const MAX_NATIVE_ATTACHMENT_IMAGE_SOURCE_BYTES: u64 = 50 * 1024 * 1024;
 pub const MAX_NATIVE_ATTACHMENT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_NATIVE_ATTACHMENT_PREVIEW_BYTES: usize = 1024 * 1024;
 const MAX_NATIVE_ATTACHMENT_IMAGE_BYTES_U64: u64 = 8 * 1024 * 1024;
@@ -131,23 +135,16 @@ impl NativeAttachmentStore {
         let copied = (|| {
             for reference in references {
                 let resolved = self.resolve(source, reference)?;
-                let mut source = fs::File::open(&resolved.path).map_err(|e| e.to_string())?;
+                let source = fs::File::open(&resolved.path).map_err(|e| e.to_string())?;
                 if !source.metadata().map_err(|e| e.to_string())?.is_file() {
                     return Err("A source attachment is no longer a regular file".into());
                 }
-                let mut bytes = Vec::new();
-                source
-                    .by_ref()
-                    .take(reference.size_bytes.saturating_add(1))
-                    .read_to_end(&mut bytes)
-                    .map_err(|e| e.to_string())?;
-                if u64::try_from(bytes.len()).ok() != Some(reference.size_bytes) {
-                    return Err("A source attachment changed while creating the side chat".into());
-                }
-                write_private(
+                copy_private(
+                    source,
                     &directory.join(format!("{}.{}", reference.id, stored_extension(reference))),
-                    &bytes,
-                )?;
+                    reference.size_bytes,
+                )
+                .map_err(|_| "A source attachment changed while creating the side chat")?;
             }
             Ok(())
         })();
@@ -167,55 +164,61 @@ impl NativeAttachmentStore {
         }
         let source_path = fs::canonicalize(source_path).map_err(|error| error.to_string())?;
         let metadata = fs::metadata(&source_path).map_err(|error| error.to_string())?;
-        if !metadata.is_file() || metadata.len() > MAX_NATIVE_ATTACHMENT_FILE_BYTES {
-            return Err("Attach a regular file of at most 50 MiB".to_owned());
+        if !metadata.is_file() {
+            return Err("Attach a regular file".to_owned());
         }
-        let mut source = fs::File::open(&source_path).map_err(|error| error.to_string())?;
-        let capacity = usize::try_from(metadata.len().min(MAX_NATIVE_ATTACHMENT_FILE_BYTES))
-            .map_err(|_| "Attachment size exceeds this host's limits")?;
-        let mut bytes = Vec::with_capacity(capacity);
-        source
-            .by_ref()
-            .take(MAX_NATIVE_ATTACHMENT_FILE_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        let byte_length =
-            u64::try_from(bytes.len()).map_err(|_| "Attachment size exceeds this host's limits")?;
-        if byte_length > MAX_NATIVE_ATTACHMENT_FILE_BYTES {
-            return Err("Attach a regular file of at most 50 MiB".to_owned());
-        }
-
         let original_name = sanitized_name(&source_path);
         let extension = extension(&source_path);
         let id = format!("native-att-{}", crate::terminal_session_id()?);
-        let (reference, stored_bytes, stored_extension) = if is_supported_image(&extension) {
+        let source = fs::File::open(&source_path).map_err(|error| error.to_string())?;
+        if is_supported_image(&extension) {
+            if metadata.len() > MAX_NATIVE_ATTACHMENT_IMAGE_SOURCE_BYTES {
+                return Err("Images can be at most 50 MiB".to_owned());
+            }
+            let mut bytes = Vec::new();
+            source
+                .take(MAX_NATIVE_ATTACHMENT_IMAGE_SOURCE_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|error| error.to_string())?;
             let (reference, bytes) = png_attachment(id, original_name, bytes)?;
-            (reference, bytes, "png".to_owned())
-        } else {
-            (
-                NativeAttachmentReference {
-                    id,
-                    kind: NativeAttachmentKind::File,
-                    name: original_name,
-                    mime_type: mime_type(&extension).to_owned(),
-                    size_bytes: byte_length,
-                    prompt_ranges: Vec::new(),
-                    pixel_width: None,
-                    pixel_height: None,
-                },
-                bytes,
-                safe_extension(&extension),
-            )
+            reference.validate()?;
+            let path = self.new_attachment_path(session_id, &reference, "png")?;
+            write_private(&path, &bytes)?;
+            return Ok(StoredNativeAttachment { reference, path });
+        }
+        if metadata.len() > MAX_NATIVE_ATTACHMENT_FILE_BYTES {
+            return Err("Attachments can be at most 512 MiB".to_owned());
+        }
+        let reference = NativeAttachmentReference {
+            id,
+            kind: NativeAttachmentKind::File,
+            name: original_name,
+            mime_type: mime_type(&extension).to_owned(),
+            size_bytes: metadata.len(),
+            prompt_ranges: Vec::new(),
+            pixel_width: None,
+            pixel_height: None,
         };
         reference.validate()?;
+        let path = self.new_attachment_path(session_id, &reference, &safe_extension(&extension))?;
+        copy_private(source, &path, reference.size_bytes)?;
+        Ok(StoredNativeAttachment { reference, path })
+    }
 
-        let directory = self.prepare_session(session_id)?;
-        let path = directory.join(format!("{}.{}", reference.id, stored_extension));
+    /// Where a new attachment goes in its conversation's folder, which must not hold it yet.
+    fn new_attachment_path(
+        &self,
+        session_id: &str,
+        reference: &NativeAttachmentReference,
+        extension: &str,
+    ) -> Result<PathBuf, String> {
+        let path = self
+            .prepare_session(session_id)?
+            .join(format!("{}.{extension}", reference.id));
         if path.exists() {
             return Err("Native attachment identity already exists".to_owned());
         }
-        write_private(&path, &stored_bytes)?;
-        Ok(StoredNativeAttachment { reference, path })
+        Ok(path)
     }
 
     pub(super) fn resolve(
@@ -495,6 +498,32 @@ fn ensure_existing_private_directory(path: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Copies exactly `length` bytes of `source` into a new private file at `path`, durably. A
+/// source of any other length leaves no file.
+fn copy_private(source: impl Read, path: &Path, length: u64) -> Result<(), String> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path).map_err(|error| error.to_string())?;
+    let copied = std::io::copy(&mut source.take(length.saturating_add(1)), &mut file)
+        .and_then(|copied| file.sync_all().map(|()| copied));
+    match copied {
+        Ok(copied) if copied == length => Ok(()),
+        Ok(_) => {
+            _ = fs::remove_file(path);
+            Err("The file changed while it was attached".to_owned())
+        }
+        Err(error) => {
+            _ = fs::remove_file(path);
+            Err(error.to_string())
+        }
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<(), String> {

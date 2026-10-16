@@ -7,7 +7,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -59,7 +58,7 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 )]
 fn provider(root: &Path) -> TestResult<String> {
     let program = root.join("codex-provider.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json,os,socket,sys
@@ -174,7 +173,6 @@ for line in source:
  else: reply(ident,{})
 ",
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     Ok(program.to_string_lossy().into_owned())
 }
 
@@ -418,12 +416,14 @@ impl Host {
         let deadline = Instant::now()
             .checked_add(FIXTURE_DEADLINE)
             .ok_or("deadline overflow")?;
+        let command = invocation.command.clone();
         let response = self
             .state
             .app_command_sender(invocation.caller)
             .submit(invocation, deadline, CommandCancellation::new())
             .map_err(|error| format!("mailbox submission failed: {error:?}"))?;
         self.receive(&response, deadline)
+            .map_err(|error| format!("{command}: {error}").into())
     }
 
     fn receive(
@@ -439,7 +439,8 @@ impl Host {
                 Err(mpsc::TryRecvError::Empty) => {}
             }
             self.wakes
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .map_err(|_| "no reply before the deadline")?;
         }
     }
 
@@ -3726,14 +3727,13 @@ fn run_isolated_split(
         .env("ENV", "");
     if matches!(backend, MultiplexerBackendConfig::Rmux) {
         let helper = directory.path().join("bootty-daemon");
-        fs::write(
+        bootty_test_support::write_executable(
             &helper,
             format!(
                 "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact {SPLIT_CHILD} --nocapture\n",
                 bootty_host::shell_quote(&executable.to_string_lossy()),
             ),
         )?;
-        fs::set_permissions(&helper, fs::Permissions::from_mode(0o700))?;
         child
             .env("BOOTTY_DAEMON_BINARY", &helper)
             .env("BOOTTY_SPLIT_BACKEND", "rmux");
@@ -4189,7 +4189,7 @@ fn model_catalog_and_favorites_reuse_the_captured_provider_discovery(
         host.submit(info)?,
         CommandOutcome::StaleTarget { .. }
     ));
-    fs::write(
+    bootty_test_support::write_executable(
         &host.program,
         "#!/usr/bin/env python3\nraise SystemExit(1)\n",
     )?;
@@ -4282,7 +4282,7 @@ fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestRe
 
 fn pi_child_provider(directory: &Path) -> TestResult<String> {
     let program = directory.join("pi-child.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json,os,sys
@@ -4312,7 +4312,6 @@ for line in sys.stdin:
  emit({'type':'response','id':value['id'],'command':kind,'success':True,'data':data})
 ",
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     Ok(program.to_string_lossy().into_owned())
 }
 
@@ -4589,14 +4588,18 @@ fn checkpointed_turns<const N: usize>(
                 .map(|item| item.id.clone())
                 .collect::<Vec<_>>()
         };
-        let turns = recorded("user")
-            .into_iter()
-            .zip(recorded("assistant"))
-            .collect::<Vec<_>>();
+        let (prompts, replies) = (recorded("user"), recorded("assistant"));
+        let kept = format!(
+            "{} prompts and {} replies kept their files",
+            prompts.len(),
+            replies.len()
+        );
+        let turns = prompts.into_iter().zip(replies).collect::<Vec<_>>();
         if let Ok(turns) = <[(String, String); N]>::try_from(turns) {
             return Ok(turns);
         }
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| format!("only {kept} before the deadline"))?;
     }
 }

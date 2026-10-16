@@ -1,7 +1,5 @@
 #![cfg(unix)]
 
-use std::os::unix::fs::PermissionsExt;
-
 use assert_fs::prelude::*;
 use bootty_host::CommandRunner;
 use bootty_mux::tmux::TmuxControlRunner;
@@ -11,8 +9,9 @@ fn tmux_control_runner_reuses_queries_and_forks_mutations() {
     let directory = assert_fs::TempDir::new().expect("temporary command directory");
     let program = directory.child("tmux-fixture");
     let input_log = directory.child("literal-input.log");
-    program
-        .write_str(&format!(
+    bootty_test_support::write_executable(
+        program.path(),
+        format!(
             r#"#!/bin/sh
 if [ "$1" = "-C" ]; then
   printf '%%begin 1 1 1\n%%end 1 1 1\n'
@@ -44,11 +43,9 @@ printf ' <%s>' "$@"
 printf '\n'
 "#,
             input_log.path().display()
-        ))
-        .expect("write command fixture");
-    let mut permissions = std::fs::metadata(program.path()).unwrap().permissions();
-    permissions.set_mode(0o700);
-    std::fs::set_permissions(program.path(), permissions).unwrap();
+        ),
+    )
+    .expect("write command fixture");
     let program = program.path().to_string_lossy().into_owned();
     let runner = TmuxControlRunner::default();
 

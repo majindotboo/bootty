@@ -1026,10 +1026,11 @@ impl GpuiWorkspace {
                         .w(relative(rect.width() / area.width().max(1.0)))
                         .h(relative(rect.height() / area.height().max(1.0)))
                         .overflow_hidden()
+                        // The attached terminal beneath focuses itself on any press it sees.
+                        .occlude()
                         .on_mouse_down(
                             gpui_kit::MouseButton::Left,
-                            cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
+                            cx.listener(move |this, _: &gpui_kit::MouseDownEvent, window, cx| {
                                 if let Some(target) = &target
                                     && this.selected_native_conversation_target(cx).as_ref()
                                         != Some(target)

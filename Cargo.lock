@@ -896,6 +896,7 @@ dependencies = [
  "bootty-host",
  "bootty-mux",
  "bootty-terminal",
+ "bootty-test-support",
  "bootty-ui",
  "clap",
  "embed-resource",
@@ -921,6 +922,7 @@ dependencies = [
  "bootty-control",
  "bootty-git",
  "bootty-host",
+ "bootty-test-support",
  "bootty-write",
  "chrono",
  "getrandom 0.4.3",
@@ -1046,6 +1048,7 @@ dependencies = [
  "bootty-git",
  "bootty-host",
  "bootty-mux",
+ "bootty-test-support",
  "pretty_assertions",
  "rmux-sdk",
  "rstest",
@@ -1082,6 +1085,7 @@ dependencies = [
  "assert_fs",
  "base64 0.23.1",
  "bootty-config",
+ "bootty-test-support",
  "bootty-write",
  "bytes",
  "crossterm",
@@ -1124,6 +1128,7 @@ dependencies = [
  "bootty-git",
  "bootty-host",
  "bootty-terminal",
+ "bootty-test-support",
  "derive_more",
  "getrandom 0.4.3",
  "inventory",
@@ -1175,6 +1180,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bootty-test-support"
+version = "0.0.0"
+
+[[package]]
 name = "bootty-tests"
 version = "0.7.1"
 dependencies = [
@@ -1206,6 +1215,7 @@ dependencies = [
  "bootty-host",
  "bootty-mux",
  "bootty-terminal",
+ "bootty-test-support",
  "bootty-write",
  "chrono",
  "core-foundation 0.10.1",
@@ -11886,6 +11896,7 @@ dependencies = [
  "anyhow",
  "assert_fs",
  "bootty-config",
+ "bootty-test-support",
  "clap",
  "mslnk",
  "pretty_assertions",

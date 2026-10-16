@@ -47,21 +47,10 @@ impl ActivityPane {
 impl Render for TranscriptPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let drawn = self.session.update(cx, |session, cx| {
-            // The held prompt reads where the list drew rows last frame.
-            let again = session.hold_prompt_anchor();
-            (
-                again,
-                session.render_transcript(window, cx).into_any_element(),
-            )
+            session.render_transcript(window, cx).into_any_element()
         });
-        if drawn.as_ref().is_ok_and(|(again, _)| *again) {
-            cx.notify();
-        }
         // A cached view lays out as a root, so it fills the place the conversation gave it.
-        div()
-            .size_full()
-            .flex()
-            .children(drawn.ok().map(|(_, transcript)| transcript))
+        div().size_full().flex().children(drawn.ok())
     }
 }
 

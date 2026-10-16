@@ -1,0 +1,7 @@
+[package]
+name = "bootty-test-support"
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true

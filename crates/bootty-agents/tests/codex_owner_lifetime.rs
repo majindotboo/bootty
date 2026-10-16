@@ -6,10 +6,7 @@ use rstest::rstest;
 use std::{
     fs,
     io::{Read as _, Write as _},
-    os::unix::{
-        fs::PermissionsExt as _,
-        net::{UnixListener, UnixStream},
-    },
+    os::unix::net::{UnixListener, UnixStream},
     path::Path,
     process::{Child, Command, Stdio},
     sync::{Arc, mpsc},
@@ -55,7 +52,7 @@ fn accepted(listener: &UnixListener) -> TestResult<UnixStream> {
 
 fn provider(directory: &Path) -> TestResult<AgentLaunch> {
     let program = directory.join("provider 'literal'.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import fcntl, json, os, pathlib, socket, subprocess, sys
@@ -71,7 +68,6 @@ peer.sendall((json.dumps({'argv': sys.argv[1:], 'account': os.environ.get('CODEX
 while peer.recv(1): pass
 ",
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     Ok(AgentLaunch {
         program: program.to_str().ok_or("program path")?.to_owned(),
         cwd: Some(directory.to_str().ok_or("cwd path")?.to_owned()),
@@ -185,7 +181,7 @@ fn owner_loss_reaps_private_provider_descendants_and_releases_same_session_write
 fn failed_provider_exit_is_observed_after_supervisor_reaps_its_watcher() -> TestResult<()> {
     let directory = assert_fs::TempDir::new()?;
     let mut launch = provider(directory.path())?;
-    fs::write(&launch.program, "#!/bin/sh\nexit 37\n")?;
+    bootty_test_support::write_executable(&launch.program, "#!/bin/sh\nexit 37\n")?;
     launch.arguments.clear();
     let (sender, observed) = mpsc::channel();
     let mut observer = CodexTerminalObserver::prepare(

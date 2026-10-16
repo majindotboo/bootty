@@ -90,6 +90,7 @@ objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 
 [dev-dependencies]
+bootty-test-support = { path = "../bootty-test-support" }
 gpui-kit = { workspace = true, features = ["test-support"] }
 # The facade exposes renderer benchmarks; enable their underlying implementation.
 gpui-pre = { version = "=0.3.9", features = ["bench-support"] }

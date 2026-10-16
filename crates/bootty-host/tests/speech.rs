@@ -3,13 +3,12 @@ use assert_fs::TempDir;
 use bootty_host::speech::{SpeechCommand, SpeechEvent, SpeechSession};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-use std::{fs, os::unix::fs::PermissionsExt as _};
 
 #[rstest]
 fn dictation_and_voice_deliver_events_without_recording_audio() {
     let root = TempDir::new().unwrap();
     let program = root.path().join("speech.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json,sys
@@ -23,7 +22,6 @@ for line in sys.stdin:
 ",
     )
     .unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
     let (session, mut events) = SpeechSession::start(program);
     assert_eq!(events.blocking_recv(), Some(SpeechEvent::Ready));
     session
@@ -65,8 +63,11 @@ for line in sys.stdin:
 fn invalid_speech_frames_are_reported_and_the_stream_closes(#[case] response: &str) {
     let root = TempDir::new().unwrap();
     let program = root.path().join("speech.py");
-    fs::write(&program, format!("#!/usr/bin/env python3\n{response}\n")).unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    bootty_test_support::write_executable(
+        &program,
+        format!("#!/usr/bin/env python3\n{response}\n"),
+    )
+    .unwrap();
     let (session, mut events) = SpeechSession::start(program);
     assert!(matches!(
         events.blocking_recv(),

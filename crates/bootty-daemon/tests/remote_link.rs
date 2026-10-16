@@ -7,7 +7,6 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 use std::{
     io::Write as _,
-    os::unix::fs::PermissionsExt as _,
     process::{Command, Stdio},
 };
 
@@ -16,12 +15,10 @@ fn unavailable_direct_transport_falls_back_without_repeated_bootstrap() {
     let root = assert_fs::TempDir::new_in("/tmp").expect("private fixture");
     let ssh = root.path().join("ssh");
     let log = root.path().join("calls");
-    std::fs::write(&ssh, format!(
+    bootty_test_support::write_executable(&ssh, format!(
         "#!/bin/sh\nfor line; do :; done\ncase \"$line\" in\n*remote-link-bootstrap*) printf 'bootstrap\\n' >> {}; exit 1;;\n*remote-exec*) printf 'exec\\n' >> {}; cat; exit 9;;\n*) exit 1;;\nesac\n",
         bootty_host::shell_quote(&log.to_string_lossy()), bootty_host::shell_quote(&log.to_string_lossy()),
     )).expect("SSH fixture");
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))
-        .expect("executable fixture");
     let mut config = SshRemoteConfig::for_host("fixture");
     config.program = ssh.to_string_lossy().into_owned();
     let request = RemoteProcessRequest {
@@ -83,12 +80,10 @@ fn shared_transport_inherits_development_identity_and_preserves_explicit_callers
     let daemon = env!("CARGO_BIN_EXE_bootty-daemon");
     let ssh = root.path().join("ssh");
     let broker_pid = root.path().join("broker.pid");
-    std::fs::write(&ssh, format!(
+    bootty_test_support::write_executable(&ssh, format!(
         "#!/bin/sh\nprintf '%s' \"$PPID\" > {}\nexec {} --application-identity bootty-dev remote-link-bootstrap\n",
         bootty_host::shell_quote(&broker_pid.to_string_lossy()), bootty_host::shell_quote(daemon),
     )).expect("SSH bootstrap fixture");
-    std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))
-        .expect("executable fixture");
     let mut config = SshRemoteConfig::for_host("fixture");
     config.program = ssh.to_string_lossy().into_owned();
     let mut args = Vec::new();

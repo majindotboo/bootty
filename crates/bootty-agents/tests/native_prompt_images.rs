@@ -1,8 +1,6 @@
 #![cfg(unix)]
 
-use std::{
-    error::Error, fs, os::unix::fs::PermissionsExt as _, path::Path, sync::Arc, time::Instant,
-};
+use std::{error::Error, fs, path::Path, sync::Arc, time::Instant};
 
 use assert_fs::TempDir;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -48,7 +46,7 @@ fn reference(id: &str) -> NativeImageReference {
 
 fn fixture(root: &Path) -> std::io::Result<String> {
     let path = root.join("image-provider.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &path,
         r"#!/usr/bin/env python3
 import base64,fcntl,json,os,sys
@@ -132,7 +130,6 @@ for line in sys.stdin:
    notice('turn/completed',turn={'id':'turn-image','status':'completed',**({'items':[user,assistant]} if history_mode else {})})
 ",
     )?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -366,7 +363,7 @@ proptest! {
 
 fn capture_provider(root: &Path) -> std::io::Result<String> {
     let path = root.join("capture-provider.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &path,
         r"#!/usr/bin/env python3
 import base64,hashlib,json,os,sys
@@ -448,7 +445,6 @@ for line in sys.stdin:
  elif kind=='__barrier': reply(value,{})
 ",
     )?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     Ok(path.to_string_lossy().into_owned())
 }
 

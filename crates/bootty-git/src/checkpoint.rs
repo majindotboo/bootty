@@ -67,7 +67,11 @@ pub fn capture(
             Some(head) => scratch(&["read-tree", head])?,
             None => scratch(&["read-tree", "--empty"])?,
         };
-        scratch(&["add", "-A"])?;
+        // A file removed while Git walks the tree, such as a database's journal, fails the whole
+        // add; the next walk no longer sees it.
+        scratch(&["add", "-A"])
+            .or_else(|_| scratch(&["add", "-A"]))
+            .or_else(|_| scratch(&["add", "-A"]))?;
         let tree = scratch(&["write-tree"])?;
         let mut commit = vec![
             "-c",

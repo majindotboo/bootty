@@ -129,19 +129,15 @@ fn disowned_command_output_is_bounded(#[case] stderr: bool) {
 #[cfg(target_os = "macos")]
 #[test]
 fn disowned_commands_resolve_programs_and_preserve_the_bootty_environment() {
-    use std::os::unix::fs::PermissionsExt;
-
     let directory = TempDir::new().expect("temporary process directory");
     let program = directory.child("bootty-env-probe");
     let captured_path = directory.child("captured-path");
     let captured_custom = directory.child("captured-custom");
-    program
-        .write_str(
-            "#!/bin/sh\nprintf '%s' \"$PATH\" > \"$1\"\nprintf '%s' \"$BOOTTY_ENV_PROBE\" > \"$2\"",
-        )
-        .expect("write environment probe");
-    std::fs::set_permissions(program.path(), std::fs::Permissions::from_mode(0o755))
-        .expect("make environment probe executable");
+    bootty_test_support::write_executable(
+        program.path(),
+        "#!/bin/sh\nprintf '%s' \"$PATH\" > \"$1\"\nprintf '%s' \"$BOOTTY_ENV_PROBE\" > \"$2\"",
+    )
+    .expect("write environment probe");
     let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf()).chain(
         std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
     ))
@@ -219,7 +215,6 @@ fn canceled_runner_does_not_start_a_command() {
 #[case(false)]
 #[case(true)]
 fn stopped_runner_does_not_start_a_marker_command(#[case] expired: bool) {
-    use std::os::unix::fs::PermissionsExt;
     let cancellation = CommandCancellation::default();
     let runner = if expired {
         CancellableCommandRunner::with_deadline(cancellation, std::time::Instant::now())
@@ -230,11 +225,8 @@ fn stopped_runner_does_not_start_a_marker_command(#[case] expired: bool) {
     let directory = UnixTempDir::new().expect("temporary process directory");
     let program = directory.child("marker-command");
     let marker = directory.child("started");
-    program
-        .write_str("#!/bin/sh\nprintf started > \"$1\"\n")
+    bootty_test_support::write_executable(program.path(), "#!/bin/sh\nprintf started > \"$1\"\n")
         .expect("marker command");
-    std::fs::set_permissions(program.path(), std::fs::Permissions::from_mode(0o755))
-        .expect("executable marker command");
     let error = runner
         .run(
             program.path().to_str().expect("marker command path"),

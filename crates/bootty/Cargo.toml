@@ -30,6 +30,7 @@ tokio = { workspace = true, features = ["rt", "signal"] }
 embed-resource.workspace = true
 
 [dev-dependencies]
+bootty-test-support = { path = "../bootty-test-support" }
 proptest.workspace = true
 assert_fs.workspace = true
 pretty_assertions.workspace = true

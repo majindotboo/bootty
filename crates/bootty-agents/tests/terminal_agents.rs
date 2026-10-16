@@ -198,7 +198,6 @@ fn exact_retirement_preserves_observed_identity_and_commits_before_publication(
     #[case] initially_failed_commit: bool,
 ) {
     use std::{
-        os::unix::fs::PermissionsExt as _,
         sync::{Arc, mpsc},
         time::Duration,
     };
@@ -208,12 +207,11 @@ fn exact_retirement_preserves_observed_identity_and_commits_before_publication(
     let service = Arc::new(TerminalAgentService::open(&path).unwrap());
     let program = directory.path().join("claude-query");
     let session = "8ea5a4d1-9c09-4e2a-93e2-c4d2d9658b60";
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         format!("#!/bin/sh\nprintf '%s' '[{{\"sessionId\":\"{session}\",\"status\":\"busy\"}}]'\n"),
     )
     .unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
     let (changed, changes) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = changed.send(());
@@ -310,10 +308,9 @@ fn account_queries_publish_only_native_readiness(
     #[case] output: &str,
     #[case] authenticated: bool,
 ) {
-    use std::os::unix::fs::PermissionsExt as _;
     let directory = assert_fs::TempDir::new().unwrap();
     let program = directory.path().join("provider");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         format!(
             "#!/bin/sh\nprintf '%s' '{}'\nexit {}\n",
@@ -322,7 +319,6 @@ fn account_queries_publish_only_native_readiness(
         ),
     )
     .unwrap();
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
     let result = bootty_agents::terminal_account_status(
         provider,
         program.to_str().unwrap(),

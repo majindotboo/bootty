@@ -1156,6 +1156,12 @@ the picker and the Alt+, / Alt+. shortcuts to those levels, in the model's adver
 order. The shortcuts decrease or increase effort without wrapping at either end.
 Their commands are `ui.composer.effort-down` and `ui.composer.effort-up`.
 
+On macOS, text fields take the Control keys Cocoa text fields do: Control-B and
+Control-F move by character, Control-D and Control-H delete forward and back, and
+Control-A and Control-E go to the line's ends. In the composer, Control-P and
+Control-N move by line and Control-K deletes to the line's end; an open completion
+menu takes Control-P, Control-N and Control-K for itself.
+
 Composer controls have bindable commands: `ui.composer.focus-space`,
 `ui.composer.focus-provider`, `ui.composer.focus-model`, `ui.composer.focus-effort`,
 `ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.
@@ -1196,8 +1202,8 @@ diagram in the theme's colors; one still streaming, or one Mermaid can't draw, s
 source, with the reason. An ```` ```html ```` block offers to open the page in your
 browser from a private file. Code blocks highlight the languages agents write most,
 SQL included.
-`agents.transcript-width` sets how wide messages run: `"normal"` (default, 48rem),
-`"wide"` (72rem), or `"full"`. In a wide window the conversation details card
+`agents.transcript-width` sets how wide messages run: `"wide"` (default, 72rem),
+`"normal"` (48rem), or `"full"`. In a wide window the conversation details card
 sits in the margin beside centered messages, and moves them aside only when it
 would cover them.
 `agents.collapse-composer-on-scroll` defaults to true; an empty, unfocused composer

@@ -2,7 +2,6 @@
 
 use std::{
     io::{BufRead, BufReader},
-    os::unix::fs::PermissionsExt as _,
     process::{Child, Command, Stdio},
     sync::{OnceLock, mpsc},
     thread,
@@ -1829,14 +1828,13 @@ fn run_embedded_scenario(scenario: &str) -> Result<()> {
     // The socket path includes the development namespace and must fit Unix socket limits.
     let directory = assert_fs::TempDir::new_in("/tmp")?;
     let helper = directory.path().join("bootty-daemon");
-    std::fs::write(
+    bootty_test_support::write_executable(
         &helper,
         format!(
             "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact embedded_rmux_scenario_child --nocapture\n",
             bootty_host::shell_quote(&std::env::current_exe()?.to_string_lossy()),
         ),
     )?;
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700))?;
     let status = std::process::Command::new(std::env::current_exe()?)
         .args(["--exact", SCENARIO_CHILD_TEST])
         .env(SCENARIO_ENV, scenario)

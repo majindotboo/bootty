@@ -484,7 +484,7 @@ quick-model = "gpt-6-luna" # names sessions, writes commit messages and PR text
 follow-up-behavior = "queue" # queue | steer | interrupt
 send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
 response-streaming = "live" # live | paragraph | complete
-transcript-width = "normal" # normal | wide | full
+transcript-width = "wide" # normal | wide | full
 collapse-composer-on-scroll = true
 
 [agents.codex]

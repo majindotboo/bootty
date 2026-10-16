@@ -104,14 +104,13 @@ fn rmux_policy_publishes_real_frames_through_gpui() -> Result<()> {
 
     let directory = assert_fs::TempDir::new_in("/tmp").context("create isolated rmux root")?;
     let helper = directory.path().join("bootty-daemon");
-    fs::write(
+    bootty_test_support::write_executable(
         &helper,
         format!(
             "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact rmux_policy_publishes_real_frames_through_gpui --nocapture\n",
             shell_quote(&env::current_exe()?.to_string_lossy()),
         ),
     )?;
-    fs::set_permissions(&helper, fs::Permissions::from_mode(0o700))?;
     let output = Command::new(env::current_exe().context("resolve acceptance test executable")?)
         .args([
             "--exact",

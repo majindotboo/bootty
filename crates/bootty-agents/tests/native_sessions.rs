@@ -3,7 +3,6 @@
 mod support;
 use std::{
     fs,
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     sync::{
         Arc,
@@ -31,7 +30,7 @@ use serde_json::{Value, json};
 )]
 fn fixture(root: &Path) -> std::io::Result<String> {
     let path = root.join("provider.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &path,
         r"#!/usr/bin/env python3
 import fcntl,json,os,subprocess,sys
@@ -297,7 +296,6 @@ for line in sys.stdin:
  else: reply(ident,{})
 ",
     )?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     Ok(path.to_string_lossy().into_owned())
 }
 

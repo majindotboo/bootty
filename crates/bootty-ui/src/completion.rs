@@ -8,6 +8,16 @@ pub enum CompletionKind {
     Mention,
 }
 
+/// How a suggestion matches what was typed. Every name match ranks above every description
+/// match.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CompletionMatch {
+    /// Only the description has the words. It shows, but Enter doesn't pick it unless chosen.
+    Description,
+    /// The name matches; a higher score ranks first.
+    Name(i32),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CompletionTrigger {
     pub kind: CompletionKind,
@@ -16,27 +26,30 @@ pub struct CompletionTrigger {
 }
 
 impl CompletionTrigger {
-    /// Names support fuzzy matching; descriptions only support contiguous search.
-    /// Higher scores win. An empty query preserves the provider's catalog order.
+    /// Names support fuzzy matching; descriptions only support contiguous search. An empty
+    /// query matches every name, which keeps the provider's catalog order.
     #[must_use]
-    pub fn score(&self, name: &str, description: &str) -> Option<i32> {
+    pub fn score(&self, name: &str, description: &str) -> Option<CompletionMatch> {
         if self.query.is_empty() {
-            return Some(0);
+            return Some(CompletionMatch::Name(0));
         }
         let name = name.trim_start_matches(['/', '$', '@']);
         let query = self.query.to_lowercase();
         let name = name.to_lowercase();
-        let primary =
-            crate::product_dialogs::searchable::fuzzy_match(&name, &query).map(|matched| {
-                matched
-                    .score
-                    .saturating_add(if name.contains(&query) { 20_000 } else { 0 })
-            });
-        let secondary = description
-            .to_lowercase()
-            .contains(&query)
-            .then_some(20_000);
-        primary.into_iter().chain(secondary).max()
+        crate::product_dialogs::searchable::fuzzy_match(&name, &query)
+            .map(|matched| {
+                CompletionMatch::Name(matched.score.saturating_add(if name.contains(&query) {
+                    20_000
+                } else {
+                    0
+                }))
+            })
+            .or_else(|| {
+                description
+                    .to_lowercase()
+                    .contains(&query)
+                    .then_some(CompletionMatch::Description)
+            })
     }
 
     /// Read a trigger at a UTF-8 source cursor; selections, emails and completed tokens do not open it.

@@ -21,6 +21,8 @@ fn read(path: &str) -> anyhow::Result<FileSnapshot> {
 }
 
 proptest! {
+    // Each case saves durably to disk; a few dozen cover the byte shapes.
+    #![proptest_config(ProptestConfig::with_cases(32))]
     #[test]
     fn revisions_preserve_utf8_bytes_and_reject_external_edits(contents in "[^\\x00]{0,400}", replacement in "[^\\x00]{0,400}") {
         let directory = assert_fs::TempDir::new().unwrap();

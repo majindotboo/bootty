@@ -127,7 +127,6 @@ fn submit(
     }
 }
 fn provider(directory: &Path) -> TestResult<(std::path::PathBuf, fs::File)> {
-    use std::os::unix::fs::PermissionsExt as _;
     let gate = directory.join("query-gate");
     if !std::process::Command::new("mkfifo")
         .arg(&gate)
@@ -138,7 +137,7 @@ fn provider(directory: &Path) -> TestResult<(std::path::PathBuf, fs::File)> {
     }
     let gate = fs::OpenOptions::new().read(true).write(true).open(gate)?;
     let program = directory.join("claude-fixture.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json, os, pathlib, sys
@@ -174,7 +173,6 @@ for line in sys.stdin:
     print('received', flush=True)
 ",
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     Ok((program, gate))
 }
 #[fixture]
@@ -557,7 +555,6 @@ fn missing_original_destination_cannot_launch_into_another_session(host: TestRes
 }
 
 fn interrupt_provider(directory: &Path) -> TestResult<(std::path::PathBuf, fs::File)> {
-    use std::os::unix::fs::PermissionsExt as _;
     let gate = directory.join("raw-query-gate");
     if !std::process::Command::new("mkfifo")
         .arg(&gate)
@@ -568,7 +565,7 @@ fn interrupt_provider(directory: &Path) -> TestResult<(std::path::PathBuf, fs::F
     }
     let gate = fs::OpenOptions::new().read(true).write(true).open(gate)?;
     let program = directory.join("interrupt-provider.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
 import json, os, pathlib, socket, struct, sys, tty
@@ -652,7 +649,6 @@ while True:
     print('control received', flush=True)
 ",
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     Ok((program, gate))
 }
 

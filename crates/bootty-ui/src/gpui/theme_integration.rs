@@ -15,6 +15,26 @@ pub fn init_theme(palette: UiPalette, cx: &mut App) {
     init_ui_theme(UiTheme { palette }, cx);
 }
 
+/// The Control keys macOS text fields take from Emacs, which GPUI Kit leaves to the platform
+/// apart from Control-A and Control-E. Moving by line and deleting to the line's end stay in the
+/// composer, where lists and menus don't claim those keys.
+#[cfg(target_os = "macos")]
+fn bind_cocoa_text_keys(cx: &mut App) {
+    use gpui_kit::component::input::{
+        Backspace, Delete, DeleteToEndOfLine, MoveDown, MoveLeft, MoveRight, MoveUp,
+    };
+    let composer = Some("BoottyComposer > Input");
+    cx.bind_keys([
+        KeyBinding::new("ctrl-b", MoveLeft, Some("Input")),
+        KeyBinding::new("ctrl-f", MoveRight, Some("Input")),
+        KeyBinding::new("ctrl-d", Delete, Some("Input")),
+        KeyBinding::new("ctrl-h", Backspace, Some("Input")),
+        KeyBinding::new("ctrl-p", MoveUp, composer),
+        KeyBinding::new("ctrl-n", MoveDown, composer),
+        KeyBinding::new("ctrl-k", DeleteToEndOfLine, composer),
+    ]);
+}
+
 pub fn init_ui_theme(ui_theme: UiTheme, cx: &mut App) {
     if !cx.has_global::<crate::font_mapping::FontMappings>() {
         cx.set_global(crate::font_mapping::FontMappings::default());
@@ -25,6 +45,8 @@ pub fn init_ui_theme(ui_theme: UiTheme, cx: &mut App) {
     crate::gpui_agent_session::init_reaction_keys(cx);
     crate::gpui_agent_session::init_request_keys(cx);
     crate::gpui_model_picker::init(cx);
+    #[cfg(target_os = "macos")]
+    bind_cocoa_text_keys(cx);
     cx.set_global(BoottyThemeSettings::default());
     cx.bind_keys([
         KeyBinding::new(

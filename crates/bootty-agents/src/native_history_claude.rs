@@ -20,10 +20,11 @@ use std::{
     path::Path,
 };
 
-// A bounded metadata index avoids loading every message body. Revisit these bounds when Claude
-// exposes a cursor-based history API.
-const MAX_ENTRIES: usize = 65_536;
-const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
+// A bounded metadata index avoids loading every message body. A long session writes tens of
+// thousands of hook records a day, so these leave room for weeks of one conversation. Revisit
+// them when Claude exposes a cursor-based history API.
+const MAX_ENTRIES: usize = 262_144;
+const MAX_FILE_BYTES: u64 = 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,7 +75,7 @@ impl NativeAgentSession {
         };
         let size = reader.get_ref().len();
         if size > MAX_FILE_BYTES {
-            return Err("Claude history exceeds the bounded regular-file reader".into());
+            return Err("Claude history is larger than 1 GiB".into());
         }
         let entries = read_index(&mut reader, size)?;
         let branch = history_branch(&entries, false)?;
@@ -174,7 +175,7 @@ pub fn subagent_transcript(
     };
     let size = reader.get_ref().len();
     if size > MAX_FILE_BYTES {
-        return Err("This subagent's transcript exceeds the bounded regular-file reader".into());
+        return Err("This subagent's transcript is larger than 1 GiB".into());
     }
     let entries = read_index(&mut reader, size)?;
     let branch = history_branch(&entries, true)?;
@@ -344,18 +345,21 @@ fn read_index(reader: &mut BufReader<FileReader>, size: u64) -> Result<Vec<Index
         let Some(id) = entry.uuid.as_deref() else {
             continue;
         };
-        if entries.len() >= MAX_ENTRIES
-            || entry.kind.len() > 128
+        if entry.kind.len() > 128
             || !crate::terminal_history::valid_id(id)
             || [&entry.parent_uuid, &entry.logical_parent_uuid]
                 .into_iter()
                 .flatten()
                 .any(|parent| !crate::terminal_history::valid_id(parent))
-            || !ids.insert(id.to_owned())
         {
-            return Err(
-                "Claude history has invalid, repeated or excessive entry identities".into(),
-            );
+            return Err("Claude history has an entry with an invalid identity".into());
+        }
+        // A resumed session can write an entry again; the first copy stands.
+        if !ids.insert(id.to_owned()) {
+            continue;
+        }
+        if entries.len() >= MAX_ENTRIES {
+            return Err("Claude history has more than 262,144 entries".into());
         }
         entries.push(IndexedEntry {
             entry,
@@ -485,7 +489,9 @@ fn project_entry(
             }
             return;
         }
-        if field(entry, "isMeta") == true {
+        // Claude's notes around a command it runs itself, the output it saves, and the summary a
+        // compaction leaves aren't messages.
+        if field(entry, "isMeta") == true || field(entry, "isCompactSummary") == true {
             return;
         }
         let content = field(message, "content");
@@ -504,9 +510,24 @@ fn project_entry(
         );
         if let Some(id) = field(entry, "uuid").as_str()
             && !text.trim().is_empty()
+            && !text.starts_with("<local-command-stdout>")
         {
+            let text = typed_command(&text).unwrap_or(text);
             history.message(id.to_owned(), "user", text, true);
         }
         crate::native_claude::tool_results(history, entry);
     });
+}
+
+/// A command Claude runs itself, such as `/compact`, as the user typed it; Claude saves it as
+/// `<command-name>` markup.
+fn typed_command(text: &str) -> Option<String> {
+    let (name, rest) = text
+        .strip_prefix("<command-name>")?
+        .split_once("</command-name>")?;
+    let arguments = rest
+        .split_once("<command-args>")
+        .and_then(|(_, rest)| rest.split_once("</command-args>"))
+        .map_or("", |(arguments, _)| arguments);
+    Some(format!("{name} {arguments}").trim_end().to_owned())
 }

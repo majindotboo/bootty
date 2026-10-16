@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 mod support;
-use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
+use std::{fs, path::Path};
 
 use assert_fs::TempDir;
 use bootty_agents::{AgentKind, NativeAgentService, NativeModelSelection, NativeSessionConfig};
@@ -123,8 +123,7 @@ for line in sys.stdin:
 
 fn config(root: &Path, provider: AgentKind) -> std::io::Result<NativeSessionConfig> {
     let script = root.join("provider.py");
-    fs::write(&script, PROVIDER)?;
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
+    bootty_test_support::write_executable(&script, PROVIDER)?;
     let mut config = NativeSessionConfig::new(provider, root);
     config.program = script.to_string_lossy().into_owned();
     config.account_directory = Some(root.join("account").to_string_lossy().into_owned());

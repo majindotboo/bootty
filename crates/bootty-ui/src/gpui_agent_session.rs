@@ -289,7 +289,6 @@ pub struct NativeAgentSessionView {
     rewound: Option<(String, Vec<bootty_agents::NativeAttachmentReference>)>,
     copy_feedback: Option<gpui_kit::Task<()>>,
     find: Option<find::TranscriptFind>,
-    anchor: Option<timeline::PromptAnchor>,
     copy_mode: Option<copy_mode::CopyMode>,
     /// Holds the keys while copy mode is on.
     copy_focus: FocusHandle,
@@ -492,7 +491,6 @@ impl NativeAgentSessionView {
             copied_message: None,
             rewound: None,
             find: None,
-            anchor: None,
             copy_mode: None,
             copy_focus: cx.focus_handle(),
             copy_feedback: None,
@@ -607,7 +605,6 @@ impl NativeAgentSessionView {
             let owner = owner.clone();
             window.defer(cx, move |window, cx| {
                 _ = owner.update(cx, |this, cx| {
-                    this.release_prompt_anchor();
                     if near_start
                         && matches!(
                             this.record.snapshot.status,
@@ -838,6 +835,7 @@ impl NativeAgentSessionView {
                 }
             }
         }
+        self.draft_replaced(cx);
     }
 
     /// Whether `record` shows anything this view doesn't: another generation, a snapshot past its
@@ -1026,7 +1024,6 @@ impl NativeAgentSessionView {
         for item in &added {
             self.add_message_state(item, window, cx);
         }
-        self.adopt_sent_prompt(&previous.keys().copied().collect());
         self.refresh_timeline();
         for (ix, row) in self.timeline.iter().enumerate() {
             if matches!(row, TranscriptRow::Message { id, .. } if changed.contains(id)) {
@@ -1235,13 +1232,9 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        // A prompt sent now goes to the top of the transcript once it shows; a queued one waits.
+        // A prompt sent now shows at the end of the transcript, which follows its reply.
         if matches!(operation, "prompt" | "interrupt-send") {
-            self.anchor = Some(timeline::PromptAnchor {
-                prompt: None,
-                held: true,
-                runway: gpui_kit::px(0.),
-            });
+            self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
         }
         let submitted_draft =
             matches!(operation, "prompt" | "queue" | "interrupt-send").then(|| SubmittedPrompt {
@@ -1367,15 +1360,8 @@ impl NativeAgentSessionView {
         self.submit_command("prompt", vec!["/compact".to_owned()], None, window, cx);
     }
 
-    /// Reports a command the host refused; a prompt that wasn't sent holds no place.
+    /// Reports a command the host refused.
     fn command_failed(&mut self, operation: &str, outcome: &CommandOutcome) {
-        if self
-            .anchor
-            .as_ref()
-            .is_some_and(|anchor| anchor.prompt.is_none())
-        {
-            self.anchor = None;
-        }
         self.command_error = Some(command_failure(operation, outcome));
     }
 
@@ -1505,6 +1491,7 @@ impl NativeAgentSessionView {
             self.composer.update(cx, |composer, cx| {
                 composer.set_value("", window, cx);
             });
+            self.draft_replaced(cx);
         }
         if !annotations.is_empty() {
             // The durable owner removes only unchanged submitted versions.
@@ -1645,7 +1632,8 @@ impl NativeAgentSessionView {
         self.send_shortcut = shortcut;
     }
 
-    pub(crate) fn set_presentation_preferences(
+    /// How replies stream, whether the composer folds while reading, and how wide messages run.
+    pub fn set_presentation_preferences(
         &mut self,
         (streaming, collapse, width): (
             bootty_config::config::ResponseStreaming,
@@ -1846,7 +1834,7 @@ impl NativeAgentSessionView {
             .then(|| self.render_sent_attachments(item, &owner, cx).pt_1());
         let output = div()
             .w_full()
-            .max_w(gpui_kit::rems(48.0))
+            .max_w(self.column_width())
             .min_w_0()
             .id(gpui_kit::SharedString::from(format!(
                 "message:{}:{}",
@@ -2082,7 +2070,7 @@ impl NativeAgentSessionView {
             .child(
                 div()
                     .w_full()
-                    .max_w(gpui_kit::rems(48.0))
+                    .max_w(self.column_width())
                     .min_w_0()
                     .debug_selector(move || format!("native-message-{id}"))
                     .child(Collapsible::new().open(open).child(toggle).content(body)),
@@ -2246,7 +2234,7 @@ impl NativeAgentSessionView {
                                 .get(*index)
                                 .is_some_and(|item| item.id == id)
                         }),
-                        TranscriptRow::Failure { .. } | TranscriptRow::Runway => false,
+                        TranscriptRow::Failure { .. } => false,
                     };
                     if contains {
                         this.list.remeasure_items(index..index.saturating_add(1));
@@ -2662,7 +2650,7 @@ impl NativeAgentSessionView {
             .child(
                 div()
                     .w_full()
-                    .max_w(gpui_kit::rems(48.0))
+                    .max_w(self.column_width())
                     .min_w_0()
                     .flex()
                     .when(user, gpui_kit::Styled::justify_end)
@@ -3679,7 +3667,7 @@ impl NativeAgentSessionView {
             .id("native-writer-callout")
             .debug_selector(|| "native-writer-callout".into())
             .w_full()
-            .max_w(gpui_kit::rems(48.0))
+            .max_w(self.column_width())
             .p_4()
             .rounded_xl()
             .border_1()
@@ -3765,68 +3753,73 @@ impl NativeAgentSessionView {
                 .flatten()
             });
         let provider = self.record.config.provider;
-        div().when_some(message, |body, (message, details)| {
-            let sign_in = details
-                .as_deref()
-                .is_some_and(crate::error_catalog::needs_sign_in);
-            body.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .px_4()
-                    .py_2()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(
-                        div()
-                            .debug_selector({
-                                let message = message.clone();
-                                move || format!("native-conversation-error:{message}")
-                            })
-                            .flex_1()
-                            .text_color(cx.theme().danger)
-                            .child(message),
-                    )
-                    .when(sign_in, |row| row.child(sign_in_button(provider)))
-                    .when_some(details, |row, details| {
-                        row.child(
-                            Button::new("copy-conversation-error-details")
-                                .debug_selector(|| "copy-conversation-error-details".into())
+        // The error sits in the message column, above the composer it belongs to.
+        div().w_full().flex().justify_center().px_4().when_some(
+            message,
+            |body, (message, details)| {
+                let sign_in = details
+                    .as_deref()
+                    .is_some_and(crate::error_catalog::needs_sign_in);
+                body.child(
+                    div()
+                        .w_full()
+                        .max_w(self.column_width())
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .py_2()
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(
+                            div()
+                                .debug_selector({
+                                    let message = message.clone();
+                                    move || format!("native-conversation-error:{message}")
+                                })
+                                .flex_1()
+                                .text_color(cx.theme().danger)
+                                .child(message),
+                        )
+                        .when(sign_in, |row| row.child(sign_in_button(provider)))
+                        .when_some(details, |row, details| {
+                            row.child(
+                                Button::new("copy-conversation-error-details")
+                                    .debug_selector(|| "copy-conversation-error-details".into())
+                                    .ghost()
+                                    .small()
+                                    .label("Copy details")
+                                    .on_click(move |_, _, cx| {
+                                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
+                                            details.clone(),
+                                        ));
+                                    }),
+                            )
+                        })
+                        .child(
+                            Button::new("conversation-recover-error")
+                                .debug_selector(|| "conversation-recover-error".into())
                                 .ghost()
                                 .small()
-                                .label("Copy details")
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(
-                                        details.clone(),
-                                    ));
-                                }),
-                        )
-                    })
-                    .child(
-                        Button::new("conversation-recover-error")
-                            .debug_selector(|| "conversation-recover-error".into())
-                            .ghost()
-                            .small()
-                            .label(
-                                if self.record.snapshot.status == NativeSessionStatus::Error {
-                                    format!("Restart {}", provider.display_name())
-                                } else {
-                                    "Dismiss".to_owned()
-                                },
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.error = None;
-                                this.command_error = None;
-                                this.dismissed_error.clone_from(&this.record.snapshot.error);
-                                if this.record.snapshot.status == NativeSessionStatus::Error {
-                                    this.command("resume", Vec::new(), window, cx);
-                                }
-                                cx.notify();
-                            })),
-                    ),
-            )
-        })
+                                .label(
+                                    if self.record.snapshot.status == NativeSessionStatus::Error {
+                                        format!("Restart {}", provider.display_name())
+                                    } else {
+                                        "Dismiss".to_owned()
+                                    },
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.error = None;
+                                    this.command_error = None;
+                                    this.dismissed_error.clone_from(&this.record.snapshot.error);
+                                    if this.record.snapshot.status == NativeSessionStatus::Error {
+                                        this.command("resume", Vec::new(), window, cx);
+                                    }
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            },
+        )
     }
 
     /// The provider's report that the last turn failed, while the provider still runs. A provider
@@ -4174,8 +4167,11 @@ impl NativeAgentSessionView {
         let composer = div()
             .id("native-composer")
             .debug_selector(|| "native-composer".into())
-            .when(self.completion_active(window, cx), |view| {
-                view.key_context("ComposerCompletion")
+            // An open completion menu takes the keys the composer otherwise edits with.
+            .key_context(if self.completion_active(window, cx) {
+                "ComposerCompletion"
+            } else {
+                "BoottyComposer"
             })
             // Escape the text area had nothing to dismiss interrupts a running turn.
             .on_action(
@@ -4205,9 +4201,21 @@ impl NativeAgentSessionView {
                     }
                 },
             ))
+            // A press anywhere in the box writes in it, not only on the text's own line. A press
+            // the text area already took is prevented; this one is, so the conversation's own
+            // focus doesn't take it next.
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, window, cx| {
+                    if !window.default_prevented() {
+                        this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                        window.prevent_default();
+                    }
+                }),
+            )
             .relative()
             .w_full()
-            .max_w(gpui_kit::rems(48.0))
+            .max_w(self.column_width())
             .min_w_0()
             .flex()
             .flex_col()
@@ -4277,6 +4285,7 @@ impl NativeAgentSessionView {
         self.recalled_prompt = next;
         self.composer
             .update(cx, |composer, cx| composer.set_value(text, window, cx));
+        self.draft_replaced(cx);
         cx.notify();
         true
     }

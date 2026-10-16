@@ -6,7 +6,6 @@
 //! this machine, against a private tmux server.
 
 use std::{
-    os::unix::fs::PermissionsExt as _,
     path::{Path, PathBuf},
     process::{Command, Output},
     time::{Duration, Instant},
@@ -48,14 +47,13 @@ impl FakeRemote {
             )),
         )?;
         let ssh = remote.root.path().join("ssh");
-        std::fs::write(
+        bootty_test_support::write_executable(
             &ssh,
             format!(
                 "#!/bin/sh\nfor line; do :; done\n{}\ncd \"$HOME\" && exec /bin/sh -c \"$line\"\n",
                 remote.environment()
             ),
         )?;
-        std::fs::set_permissions(&ssh, std::fs::Permissions::from_mode(0o700))?;
         Ok(remote)
     }
 

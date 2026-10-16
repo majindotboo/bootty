@@ -344,7 +344,6 @@ impl GpuiWorkspace {
         })
     }
 
-    // Keep construction together until another child lifetime can move behind one owner.
     fn new(
         mut state: AppState,
         window_state_key: &str,
@@ -638,10 +637,15 @@ impl GpuiWorkspace {
     /// composer, or another Space's panel). GPUI keeps that stale focus, so keys reach no
     /// key context: typing and Bootty's own bindings stop until a click. The workspace root
     /// always tracks `focus`, so reclaiming it restores bindings and, when visible, the terminal.
+    /// A conversation in front takes it instead of the terminal pane hidden behind it.
     fn observe_workspace_focus_loss(window: &mut Window, cx: &mut Context<Self>) {
         cx.on_focus_lost(window, |this, window, cx| {
-            if this.can_reclaim_focus(window, cx) {
-                this.focus.focus(window, cx);
+            if !this.can_reclaim_focus(window, cx) {
+                return;
+            }
+            match this.native_conversation_view(cx) {
+                Some(view) => view.focus_handle(cx).focus(window, cx),
+                None => this.focus.focus(window, cx),
             }
         })
         .detach();
@@ -2140,6 +2144,9 @@ impl GpuiWorkspace {
             .iter()
             .any(|effect| !matches!(effect, AppEffect::RepaintAfter(_)));
         self.apply_effects(effects, window, cx);
+        // A frame can select another tab or pane. A conversation it brings forward takes focus
+        // now; waiting for the next wake leaves keys on the pane that just left.
+        self.sync_selected_native_pane(window, cx);
         changed
     }
 
@@ -3216,7 +3223,11 @@ impl GpuiWorkspace {
             if self.focus != focus || self.focused_surface != transition_key {
                 self.focus = focus.clone();
                 self.focused_surface = transition_key;
-                schedule_focus(focus, window, cx);
+                // An attached backend draws one terminal for every pane; a conversation over its
+                // selected pane keeps the keys.
+                if self.native_conversation_view(cx).is_none() {
+                    schedule_focus(focus, window, cx);
+                }
             }
             self.state.record_surface(surface);
         }

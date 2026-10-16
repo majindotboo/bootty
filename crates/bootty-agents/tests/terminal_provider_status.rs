@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::{fs, os::unix::fs::PermissionsExt as _};
+use std::fs;
 
 use bootty_agents::{
     AgentKind, TerminalAgentService, terminal_account_status_in, terminal_provider_status,
@@ -14,8 +14,7 @@ const ACCOUNT_DIRECTORY: &str = "/selected account/with spaces";
 
 fn executable(directory: &assert_fs::TempDir, script: &str) -> std::io::Result<String> {
     let path = directory.path().join("provider");
-    fs::write(&path, format!("#!/bin/sh\n{script}\n"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    bootty_test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n"))?;
     path.to_str().map(str::to_owned).ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,

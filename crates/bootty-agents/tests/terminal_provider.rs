@@ -79,7 +79,7 @@ fn updates_use_the_proven_global_installation(#[case] provider: AgentKind, #[cas
 fn update_retains_the_real_exit_status_until_acknowledged() {
     use bootty_agents::terminal_provider_update;
     use std::io::{BufRead as _, Write as _};
-    use std::os::unix::fs::PermissionsExt as _;
+
     use std::process::{Command, Stdio};
 
     let temporary = assert_fs::TempDir::new().unwrap();
@@ -94,8 +94,7 @@ fn update_retains_the_real_exit_status_until_acknowledged() {
         .write_str(&format!(r#"{{"name":"{package}"}}"#))
         .unwrap();
     let installer = directory.child("bin/bun");
-    installer.write_str("#!/bin/sh\nprintf '%s\\n' \"$BUN_INSTALL_GLOBAL_DIR\" \"$BUN_INSTALL_BIN\" \"$@\"\nexit 7\n").unwrap();
-    std::fs::set_permissions(installer.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    bootty_test_support::write_executable(installer.path(), "#!/bin/sh\nprintf '%s\\n' \"$BUN_INSTALL_GLOBAL_DIR\" \"$BUN_INSTALL_BIN\" \"$@\"\nexit 7\n").unwrap();
     let launch =
         terminal_provider_update(AgentKind::Codex, executable.path().to_str().unwrap()).unwrap();
     let mut child = Command::new(launch.program)

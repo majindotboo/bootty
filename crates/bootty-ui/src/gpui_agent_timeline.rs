@@ -11,16 +11,6 @@ use gpui_kit::{
 };
 use std::collections::BTreeMap;
 
-/// A prompt sent from here, held at the top of the transcript while its reply comes.
-pub(super) struct PromptAnchor {
-    /// The prompt's message, once the provider shows it.
-    pub(super) prompt: Option<String>,
-    /// Whether the transcript still keeps the prompt at its top.
-    pub(super) held: bool,
-    /// The room below the prompt's turn, filled as the reply grows.
-    pub(super) runway: gpui_kit::Pixels,
-}
-
 #[derive(Clone)]
 pub(super) enum TranscriptRow {
     Message {
@@ -38,8 +28,6 @@ pub(super) enum TranscriptRow {
     },
     /// The provider's report that the last turn failed, shown where the turn ended.
     Failure { error: String },
-    /// Room kept below a prompt sent from here, so it can sit at the top while its reply comes.
-    Runway,
 }
 impl TranscriptRow {
     pub(super) fn key(&self) -> String {
@@ -48,7 +36,6 @@ impl TranscriptRow {
             Self::Message { id, meta, .. } => format!("message:{id}:{meta}"),
             Self::Work { id, .. } => format!("work:{id}"),
             Self::Failure { error } => format!("failure:{error}"),
-            Self::Runway => "runway".to_owned(),
         }
     }
 }
@@ -302,94 +289,6 @@ impl NativeAgentSessionView {
             .into_any_element()
     }
 
-    /// Holds a prompt sent from here at the top of the transcript, keeping room below it for its
-    /// reply. Once the reply fills that room, or the transcript is scrolled, the transcript
-    /// follows its end again. Runs before each layout, from the last one's sizes.
-    /// Returns whether the list needs drawing again: its rows aren't drawn yet, the runway
-    /// changed, or the prompt let go.
-    pub(super) fn hold_prompt_anchor(&mut self) -> bool {
-        let Some(anchor) = &mut self.anchor else {
-            return false;
-        };
-        let rows = self.timeline.len();
-        let (Some(prompt), Some(runway)) = (
-            self.timeline.iter().position(|row| {
-                matches!(row, TranscriptRow::Message { id, .. } if anchor.prompt.as_ref() == Some(id))
-            }),
-            rows.checked_sub(1)
-                .filter(|last| matches!(self.timeline.get(*last), Some(TranscriptRow::Runway))),
-        ) else {
-            return false;
-        };
-        let (Some(top), Some(bottom)) = (
-            self.list.bounds_for_item(prompt).map(|bounds| bounds.top()),
-            runway
-                .checked_sub(1)
-                .and_then(|last| self.list.bounds_for_item(last))
-                .map(|bounds| bounds.bottom()),
-        ) else {
-            // The list hasn't drawn the prompt's rows yet; it can once it has.
-            return true;
-        };
-        let room = gpui_kit::px(
-            (f32::from(self.list.viewport_bounds().size.height)
-                - (f32::from(bottom) - f32::from(top)))
-            .max(0.),
-        );
-        let changed = room != anchor.runway;
-        if changed {
-            anchor.runway = room;
-            self.list.remeasure_items(runway..rows);
-        }
-        if !anchor.held {
-            return changed;
-        }
-        if room == gpui_kit::px(0.) {
-            anchor.held = false;
-            self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
-            return true;
-        }
-        self.list.scroll_to(gpui_kit::ListOffset {
-            item_ix: prompt,
-            offset_in_item: gpui_kit::px(0.),
-        });
-        changed
-    }
-
-    /// Gives a prompt just sent from here the anchor once its message shows, and drops an anchor
-    /// whose message is gone.
-    pub(super) fn adopt_sent_prompt(&mut self, previous: &std::collections::HashSet<&str>) {
-        let Some(anchor) = &mut self.anchor else {
-            return;
-        };
-        let transcript = &self.record.snapshot.transcript;
-        match &anchor.prompt {
-            None => {
-                if let Some(sent) = transcript
-                    .iter()
-                    .rev()
-                    .find(|item| item.role == "user" && !previous.contains(item.id.as_str()))
-                {
-                    anchor.prompt = Some(sent.id.clone());
-                    self.list.set_follow_mode(gpui_kit::FollowMode::Normal);
-                }
-            }
-            Some(prompt) if !transcript.iter().any(|item| item.id == *prompt) => {
-                self.anchor = None;
-                self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
-            }
-            Some(_) => {}
-        }
-    }
-
-    /// Lets go of a held prompt, as scrolling the transcript does; its room stays.
-    pub(super) fn release_prompt_anchor(&mut self) {
-        if let Some(anchor) = self.anchor.as_mut().filter(|anchor| anchor.held) {
-            anchor.held = false;
-            self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
-        }
-    }
-
     pub(super) fn refresh_timeline(&mut self) {
         let mut new = rows(
             &self.record.snapshot.transcript,
@@ -400,16 +299,6 @@ impl NativeAgentSessionView {
             self.turn_failure()
                 .map(|error| TranscriptRow::Failure { error }),
         );
-        if let Some(prompt) = self
-            .anchor
-            .as_ref()
-            .and_then(|anchor| anchor.prompt.as_ref())
-            && new
-                .iter()
-                .any(|row| matches!(row, TranscriptRow::Message { id, .. } if id == prompt))
-        {
-            new.push(TranscriptRow::Runway);
-        }
         let old_keys = self
             .timeline
             .iter()
@@ -506,9 +395,9 @@ impl NativeAgentSessionView {
             }))
             .flex_shrink_0()
             .min_h_0()
-            .pt_6()
             .flex()
             .flex_col()
+            .justify_center()
             .when(self.history_turns.len() > 1, |gutter| {
                 gutter.child(
                     div()
@@ -518,8 +407,7 @@ impl NativeAgentSessionView {
                         .relative()
                         .flex()
                         .flex_col()
-                        // At least 1rem a turn, so each is easy to point at.
-                        .h(gpui_kit::rems(count.min(24.)))
+                        .h(gpui_kit::rems((count * 0.5).min(20.)))
                         .max_h_full()
                         .min_h_0()
                         .on_key_down(cx.listener(
@@ -691,12 +579,6 @@ impl NativeAgentSessionView {
                 live,
             }) => self.render_work_group(id, members, *open, *live, owner, cx),
             Some(TranscriptRow::Failure { error }) => self.render_turn_failure(error, owner, cx),
-            Some(TranscriptRow::Runway) => div()
-                .h(self
-                    .anchor
-                    .as_ref()
-                    .map_or(gpui_kit::px(0.), |anchor| anchor.runway))
-                .into_any_element(),
             None => div().into_any_element(),
         }
     }

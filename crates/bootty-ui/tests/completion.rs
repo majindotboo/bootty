@@ -1,4 +1,4 @@
-use bootty_ui::completion::{CompletionKind, CompletionTrigger};
+use bootty_ui::completion::{CompletionKind, CompletionMatch, CompletionTrigger};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -52,11 +52,14 @@ fn command_ranking_prefers_names_and_does_not_fuzzy_match_descriptions() {
         trigger.score("/help", "Choose options, manage profiles and tasks"),
         None
     );
-    assert!(
-        CompletionTrigger::at("/cmpct", 6..6)
+    // A loose name match still ranks above words found only in a description.
+    let loose = CompletionTrigger::at("/cmpct", 6..6).unwrap();
+    assert!(loose.score("/compact", "") > loose.score("/other", "cmpct"));
+    assert_eq!(
+        CompletionTrigger::at("/cost", 5..5)
             .unwrap()
-            .score("/compact", "")
-            .is_some()
+            .score("/usage", "Show session cost"),
+        Some(CompletionMatch::Description)
     );
 }
 
@@ -64,6 +67,6 @@ proptest! {
     #[test]
     fn empty_completion_queries_preserve_catalog_order(name in ".{0,60}", description in ".{0,80}") {
         let trigger = CompletionTrigger::at("/", 1..1).unwrap();
-        prop_assert_eq!(trigger.score(&name, &description), Some(0));
+        prop_assert_eq!(trigger.score(&name, &description), Some(CompletionMatch::Name(0)));
     }
 }

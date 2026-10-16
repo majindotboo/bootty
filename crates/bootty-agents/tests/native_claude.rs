@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 mod support;
-use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
+use std::{fs, path::Path};
 
 use assert_fs::TempDir;
 use bootty_agents::{
@@ -22,7 +22,7 @@ const SESSION: &str = "01234567-89ab-4cde-8123-456789abcdef";
 )]
 fn fixture(root: &Path) -> std::io::Result<String> {
     let path = root.join("claude-stream.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &path,
         r#"#!/usr/bin/env python3
 import json,os,sys,time
@@ -41,9 +41,18 @@ def tool_use(ident,command): emit({'type':'assistant','uuid':'block-'+ident,'ses
 def tool_call(ident,name,arguments): emit({'type':'assistant','uuid':'block-'+ident,'session_id':session,'parent_tool_use_id':None,'message':{'id':'message-'+ident,'content':[{'type':'tool_use','id':ident,'name':name,'input':arguments}]}})
 def user_event(content,**extra): emit({'type':'user','session_id':session,'parent_tool_use_id':None,'message':{'role':'user','content':content},**extra})
 running=None
+compacting=None
 for line in sys.stdin:
  value=json.loads(line)
  if value['type']=='control_request':
+  if compacting and os.path.exists('compact-done'):
+   # Observed from Claude 2.1.302: a compaction with nothing to do answers before it confirms
+   # the message, and the result repeats the answer.
+   emit({'type':'system','subtype':'status','status':None,'session_id':session})
+   emit({'type':'system','subtype':'init','session_id':session,'cwd':os.getcwd()})
+   emit({'type':'assistant','uuid':'local-answer','session_id':session,'parent_tool_use_id':None,'message':{'content':[{'type':'text','text':'Not enough messages to compact.'}]}})
+   echo=dict(compacting);echo['isReplay']=True;echo['message']={'role':'user','content':'<command-name>/compact</command-name>'};emit(echo)
+   result(result='Not enough messages to compact.');compacting=None
   if value['request']['subtype']=='rewind_conversation':
    # Observed from Claude 2.1.301: a rewind it refuses still succeeds as a control request.
    with open('rewind.json','w') as output: json.dump(value['request'],output)
@@ -82,6 +91,10 @@ for line in sys.stdin:
   with open('prompt.json','w') as output: json.dump(value,output)
   if prompt=='oversize': sys.stdout.write('x'*(1024*1024+1)+'\n');sys.stdout.flush();continue
   if prompt=='partial': sys.stdout.write('{"type":"result"}');sys.stdout.flush();break
+  if prompt=='/compact':
+   # Observed from Claude 2.1.302: `/compact` as a resumed process's first input reports
+   # `compacting` at once, and `init` only once compaction is done.
+   emit({'type':'system','subtype':'status','status':'compacting','session_id':session});compacting=value;continue
   emit({'type':'system','subtype':'init','session_id':'foreign' if prompt=='wrong-session' else session,'cwd':'/foreign' if prompt=='wrong-cwd' else os.getcwd()})
   result(identity='foreign')
   result() # No user ACK yet: never a completed turn.
@@ -207,7 +220,6 @@ for line in sys.stdin:
   result()
 "#,
     )?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -246,7 +258,8 @@ fn claude_history_reads_the_session_file() {
     let directory = root.path().join("account/projects").join(folder);
     fs::create_dir_all(&directory).unwrap();
     // Observed from Claude 2.1.299: one entry per content block, bookkeeping without a uuid,
-    // attachments beside the chain, and sidechain entries for subagents.
+    // attachments beside the chain, sidechain entries for subagents, and an attachment a resumed
+    // session wrote again.
     let entries = [
         json!({"type":"queue-operation","operation":"enqueue"}),
         json!({"type":"user","uuid":"u1","parentUuid":null,"isSidechain":false,
@@ -263,6 +276,18 @@ fn claude_history_reads_the_session_file() {
         json!({"type":"assistant","uuid":"a2","parentUuid":"r1","isSidechain":false,
             "message":{"id":"msg-2","role":"assistant","content":[
                 {"type":"text","text":"The test fails on overflow."}]}}),
+        json!({"type":"attachment","uuid":"x1","parentUuid":"a1","isSidechain":false}),
+        // Observed from Claude 2.1.302: `/compact` saves its summary, a note, the command as
+        // markup, and its output.
+        json!({"type":"user","uuid":"c1","parentUuid":"a2","isSidechain":false,
+            "isCompactSummary":true,"isVisibleInTranscriptOnly":true,
+            "message":{"role":"user","content":"This session is being continued"}}),
+        json!({"type":"user","uuid":"c2","parentUuid":"c1","isSidechain":false,"isMeta":true,
+            "message":{"role":"user","content":"<local-command-caveat>Ran directly</local-command-caveat>"}}),
+        json!({"type":"user","uuid":"c3","parentUuid":"c2","isSidechain":false,
+            "message":{"role":"user","content":"<command-name>/compact</command-name>\n            <command-message>compact</command-message>\n            <command-args>keep the plan</command-args>"}}),
+        json!({"type":"user","uuid":"c4","parentUuid":"c3","isSidechain":false,
+            "message":{"role":"user","content":"<local-command-stdout>Compacted</local-command-stdout>"}}),
         json!({"type":"last-prompt","lastPrompt":"Find the bug"}),
     ];
     // Claude is still writing its next record, so the file ends partway through it.
@@ -292,6 +317,7 @@ fn claude_history_reads_the_session_file() {
             ("u1", "user", "Find the bug"),
             ("claude-tool-toolu-1", "tool", "1 failed"),
             ("claude-msg-2-0", "assistant", "The test fails on overflow."),
+            ("c3", "user", "/compact keep the plan"),
         ]
     );
     assert_eq!((page.has_older, page.at_latest), (false, true));
@@ -1435,6 +1461,31 @@ fn queued_followups_wait_for_idle_and_survive_a_conversation_owner_restart() {
     service.shutdown().unwrap();
 }
 
+/// A screen recording past the old 50 MiB limit attaches whole; a file past 512 MiB says why
+/// it can't.
+#[rstest]
+#[case::recording(60 * 1024 * 1024, None)]
+#[case::too_large(512 * 1024 * 1024 + 1, Some("Attachments can be at most 512 MiB"))]
+fn large_files_attach_up_to_the_conversation_limit(
+    #[case] size: u64,
+    #[case] refused: Option<&str>,
+) {
+    let root = TempDir::new().unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .unwrap();
+    let file = root.path().join("recording.mp4");
+    // Sparse, so the test writes nothing it doesn't need to.
+    fs::File::create(&file).unwrap().set_len(size).unwrap();
+    let imported = service.import_attachment(&record.target(), &file);
+    match refused {
+        None => assert_eq!(imported.unwrap().size_bytes, size),
+        Some(reason) => assert_eq!(imported.unwrap_err(), reason),
+    }
+    service.shutdown().unwrap();
+}
+
 /// Each image format people attach becomes a PNG image the provider can read.
 #[rstest]
 #[case("photo.png")]
@@ -2260,6 +2311,42 @@ fn claude_compaction_shows_and_resets_the_context_meter() {
         )]
     );
     assert_eq!(snapshot.usage.unwrap()["input"], 12_000);
+    session.stop();
+}
+
+/// `/compact` sent first to a resumed Claude shows it compacting before Claude introduces itself,
+/// and one with nothing to do ends with Claude's answer instead of a compaction.
+#[rstest]
+fn claude_compact_shows_its_progress_and_answer() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let compactions = |session: &NativeAgentSession| {
+        session
+            .snapshot()
+            .transcript
+            .iter()
+            .filter_map(|item| item.tool.as_ref())
+            .filter(|tool| tool.name == "contextCompaction")
+            .map(|tool| tool.status)
+            .collect::<Vec<_>>()
+    };
+    session.send_prompt("/compact").unwrap();
+    barrier(&session).unwrap();
+    assert_eq!(compactions(&session), [NativeToolStatus::Running]);
+    fs::write(root.path().join("compact-done"), "").unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    assert_eq!(compactions(&session), []);
+    assert_eq!(
+        snapshot
+            .transcript
+            .iter()
+            .filter(|item| item.role == "assistant")
+            .map(|item| item.text.as_str())
+            .collect::<Vec<_>>(),
+        ["```\nNot enough messages to compact.\n```"]
+    );
+    assert_eq!(snapshot.status, NativeSessionStatus::Idle);
     session.stop();
 }
 

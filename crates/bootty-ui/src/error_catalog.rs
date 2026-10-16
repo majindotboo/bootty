@@ -198,5 +198,11 @@ fn known_cause(message: &str) -> Option<&'static str> {
     if lower.contains("target is stale") {
         return Some("That pane or session no longer exists.");
     }
+    if lower.contains("attachments can be at most 512 mib") {
+        return Some("Attachments can be at most 512 MiB.");
+    }
+    if lower.contains("images can be at most 50 mib") {
+        return Some("Images can be at most 50 MiB.");
+    }
     None
 }

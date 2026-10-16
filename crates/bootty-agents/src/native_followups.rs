@@ -245,15 +245,33 @@ impl NativeAgentService {
     }
 
     /// Hold a conversation's waiting messages after the user stops the agent, so stopping
-    /// doesn't send the next one at once.
+    /// doesn't send the next one at once. Returns the messages it held.
     /// # Errors
     /// Returns catalog persistence failures.
-    pub(super) fn pause_followups(&self, target: &CommandTarget) -> Result<(), String> {
+    pub(super) fn pause_followups(&self, target: &CommandTarget) -> Result<Vec<String>, String> {
         self.set_waiting_followups(
             target,
+            |_| true,
             NativeQueuedMessageStatus::Queued,
             NativeQueuedMessageStatus::Paused,
         )
+    }
+
+    /// Queues `ids` again, of the messages a pause held.
+    /// # Errors
+    /// Returns catalog persistence failures.
+    pub(super) fn requeue_followups(
+        &self,
+        target: &CommandTarget,
+        ids: &[String],
+    ) -> Result<(), String> {
+        self.set_waiting_followups(
+            target,
+            |input| ids.contains(&input.id),
+            NativeQueuedMessageStatus::Paused,
+            NativeQueuedMessageStatus::Queued,
+        )
+        .map(drop)
     }
 
     /// Let a conversation's paused messages send again, in order, including after a failed turn.
@@ -264,11 +282,18 @@ impl NativeAgentService {
         if let Ok(session) = self.resolve(target) {
             session.acknowledge_failure();
         }
+        self.unpause_followups(target)
+    }
+
+    /// Queues the conversation's paused messages again.
+    pub(crate) fn unpause_followups(&self, target: &CommandTarget) -> Result<(), String> {
         self.set_waiting_followups(
             target,
+            |_| true,
             NativeQueuedMessageStatus::Paused,
             NativeQueuedMessageStatus::Queued,
         )
+        .map(drop)
     }
 
     /// Moves a waiting message one place earlier or later among its conversation's messages.
@@ -327,27 +352,30 @@ impl NativeAgentService {
         self.commit(candidate)
     }
 
+    /// Moves the conversation's messages `chosen` among those in `from` to `to`, and returns
+    /// the ones it moved.
     fn set_waiting_followups(
         &self,
         target: &CommandTarget,
+        chosen: impl Fn(&QueuedInput) -> bool,
         from: NativeQueuedMessageStatus,
         to: NativeQueuedMessageStatus,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<String>, String> {
         let _mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();
-        let mut changed = false;
+        let mut changed = Vec::new();
         for input in candidate
             .followups
             .iter_mut()
-            .filter(|input| input.session == target.handle && input.status == from)
+            .filter(|input| input.session == target.handle && input.status == from && chosen(input))
         {
             input.status = to;
-            changed = true;
+            changed.push(input.id.clone());
         }
-        if changed {
+        if !changed.is_empty() {
             self.commit(candidate)?;
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Remove only an unsent queued message.

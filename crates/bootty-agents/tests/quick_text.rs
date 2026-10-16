@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use std::{fs, os::unix::fs::PermissionsExt as _, path::Path};
+use std::{fs, path::Path};
 
 use assert_fs::TempDir;
 use bootty_agents::{
@@ -14,7 +14,7 @@ use serde_json::json;
 /// answers with `answer.json`.
 fn codex(root: &Path, answer: &serde_json::Value) -> std::io::Result<NativeSessionConfig> {
     let script = root.join("codex.py");
-    fs::write(
+    bootty_test_support::write_executable(
         &script,
         r"#!/usr/bin/env python3
 import os,pathlib,sys
@@ -28,7 +28,6 @@ account=pathlib.Path(os.environ['CODEX_HOME'])
 pathlib.Path(args[args.index('--output-last-message')+1]).write_text((account/'answer.json').read_text())
 ",
     )?;
-    fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
     fs::write(root.join("answer.json"), answer.to_string())?;
     let mut config = NativeSessionConfig::new(AgentKind::Codex, root);
     config.program = script.to_string_lossy().into_owned();

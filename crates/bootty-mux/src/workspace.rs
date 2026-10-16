@@ -417,10 +417,13 @@ impl BindingRuntime {
             .selected_session_identity()
             .map(str::to_owned);
         if let Some(selection) = workspace_binding.selection() {
-            binding.mux.restore_selection(
-                selection.session_id().to_owned(),
-                selection.window_id().map(str::to_owned),
-            );
+            // An attached client shows the backend's own active window; the tab follows it.
+            let window = selection
+                .window_id()
+                .filter(|_| binding.uses_native_terminal_layout());
+            binding
+                .mux
+                .restore_selection(selection.session_id().to_owned(), window.map(str::to_owned));
         }
         Ok(binding)
     }

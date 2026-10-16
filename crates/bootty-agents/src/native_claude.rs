@@ -146,12 +146,13 @@ impl ClaudeProtocol {
             {
                 snapshot.claude_subagents(value);
             }
+            // `/compact` as a resumed process's first input reports compacting before `init`, so
+            // the event's own session is the identity check.
             Some("system")
                 if matches!(
                     field(value, "subtype").as_str(),
                     Some("status" | "compact_boundary")
-                ) && snapshot.session_id.as_deref() == Some(self.session_id.as_str())
-                    && field(value, "session_id").as_str() == Some(self.session_id.as_str()) =>
+                ) && field(value, "session_id").as_str() == Some(self.session_id.as_str()) =>
             {
                 compaction(snapshot, value);
             }
@@ -485,14 +486,18 @@ impl ClaudeProtocol {
 
     fn finish(&mut self, snapshot: &mut NativeSessionSnapshot, value: &Value) {
         record_context_window(snapshot, field(value, "modelUsage"));
-        // A compaction still running when its turn ends went the way the turn did.
+        // A compaction still running when its turn ends never reached its boundary: it stopped,
+        // failed, or had nothing to compact.
         if snapshot.compacting() {
-            let status = match field(value, "terminal_reason").as_str() {
-                Some("aborted_streaming" | "aborted_tools") => NativeToolStatus::Interrupted,
-                _ if field(value, "is_error") == true => NativeToolStatus::Failed,
-                _ => NativeToolStatus::Completed,
-            };
-            snapshot.finish_compaction(status, None);
+            match field(value, "terminal_reason").as_str() {
+                Some("aborted_streaming" | "aborted_tools") => {
+                    snapshot.finish_compaction(NativeToolStatus::Interrupted, None);
+                }
+                _ if field(value, "is_error") == true => {
+                    snapshot.finish_compaction(NativeToolStatus::Failed, None);
+                }
+                _ => snapshot.skip_compaction(),
+            }
         }
         if let Some(usage) = crate::NativeTurnUsage::claude(value) {
             snapshot.add_turn_usage(usage);
@@ -506,6 +511,41 @@ impl ClaudeProtocol {
             _ => NativeTurnOutcome::Failed,
         };
         if let Some(dispatch) = self.dispatch.take() {
+            // A command Claude runs itself, such as `/cost`, answers before it confirms the
+            // message, so the answer shows only in the result. It is plain text laid out in
+            // columns.
+            let answered = snapshot
+                .transcript
+                .iter()
+                .position(|item| item.id == dispatch.id)
+                .is_none_or(|start| {
+                    snapshot
+                        .transcript
+                        .iter()
+                        .skip(start)
+                        .any(|item| item.role == "assistant")
+                });
+            if outcome == NativeTurnOutcome::Succeeded
+                && !answered
+                && let Some(text) = field(value, "result")
+                    .as_str()
+                    .filter(|text| !text.is_empty())
+            {
+                let fence = "`".repeat(
+                    text.split(|character| character != '`')
+                        .map(str::len)
+                        .max()
+                        .unwrap_or(0)
+                        .max(2)
+                        .saturating_add(1),
+                );
+                snapshot.message(
+                    format!("claude-result-{}", dispatch.id),
+                    "assistant",
+                    format!("{fence}\n{text}\n{fence}"),
+                    true,
+                );
+            }
             snapshot.finish_first_turn(&dispatch.id, outcome);
             // A steer can also abort tools; only a requested stop marks the turn.
             if outcome == NativeTurnOutcome::Interrupted && snapshot.stopping() {

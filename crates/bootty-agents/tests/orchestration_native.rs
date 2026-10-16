@@ -85,6 +85,8 @@ fn fixture() -> TestResult<Fixture> {
 }
 
 proptest! {
+    // Each case builds a run on disk; a few cover both mismatches.
+    #![proptest_config(ProptestConfig::with_cases(16))]
     #[test]
     fn another_turn_or_process_generation_cannot_release_dependencies(
         changed_turn in any::<bool>(),

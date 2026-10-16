@@ -1,7 +1,7 @@
 #![cfg(unix)]
 
 mod support;
-use std::{fs, io::Cursor, os::unix::fs::PermissionsExt as _, path::Path};
+use std::{fs, io::Cursor, path::Path};
 
 use assert_fs::TempDir;
 use bootty_agents::{
@@ -140,8 +140,7 @@ closing()
 
 fn fixture(root: &Path) -> std::io::Result<String> {
     let path = root.join("pi-rpc.py");
-    fs::write(&path, PI_FIXTURE)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    bootty_test_support::write_executable(&path, PI_FIXTURE)?;
     Ok(path.to_string_lossy().into_owned())
 }
 

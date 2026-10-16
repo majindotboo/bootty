@@ -40,6 +40,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync
 bootty-terminal = { path = "../bootty-terminal", optional = true }
 
 [dev-dependencies]
+bootty-test-support = { path = "../bootty-test-support" }
 assert_fs.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true

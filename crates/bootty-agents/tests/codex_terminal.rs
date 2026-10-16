@@ -483,7 +483,7 @@ fn explicit_external_endpoints_are_not_adopted() {
 fn real_transport_forwards_bytes_and_reaps_its_provider(#[case] disconnect: bool) {
     use assert_fs::prelude::*;
     use std::io::{Read as _, Write as _};
-    use std::os::unix::fs::PermissionsExt as _;
+
     use std::os::unix::net::UnixStream;
     use std::sync::mpsc;
 
@@ -491,9 +491,7 @@ fn real_transport_forwards_bytes_and_reaps_its_provider(#[case] disconnect: bool
     let executable = directory.child("provider.py");
     // A provider fixture speaks the supported transport, without credentials,
     // a real agent turn, or any global provider configuration.
-    executable
-        .write_str(
-            r#"#!/usr/bin/env python3
+    bootty_test_support::write_executable(executable.path(), r#"#!/usr/bin/env python3
 import json, os, socket, struct, sys
 # Model an installed JS launcher that owns a separate native provider child.
 if os.fork():
@@ -563,7 +561,6 @@ finally:
 "#,
         )
         .unwrap();
-    std::fs::set_permissions(executable.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     let (sender, receiver) = mpsc::channel();
     let observer = CodexTerminalObserver::prepare(
         &AgentLaunch {
@@ -687,11 +684,9 @@ finally:
 #[cfg(unix)]
 #[rstest]
 fn exited_provider_cannot_leave_an_input_ready_observation() {
-    use std::os::unix::fs::PermissionsExt as _;
     let directory = assert_fs::TempDir::new().unwrap();
     let program = directory.path().join("exited-provider");
-    std::fs::write(&program, "#!/bin/sh\nexit 7\n").unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 7\n").unwrap();
     let (sender, receiver) = std::sync::mpsc::channel();
     let mut observer = CodexTerminalObserver::prepare(
         &AgentLaunch {

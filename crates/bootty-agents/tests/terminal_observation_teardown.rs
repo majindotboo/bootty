@@ -3,7 +3,6 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead as _, BufReader, Read as _},
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     process::{Child, Command, Stdio},
     sync::Arc,
@@ -51,7 +50,7 @@ fn query_fixture() -> FixtureResult<QueryFixture> {
     }
     let ready_pipe = OpenOptions::new().read(true).write(true).open(&ready)?;
     let program = directory.path().join("provider");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         format!(
             "#!/bin/sh\n\
@@ -64,7 +63,6 @@ fn query_fixture() -> FixtureResult<QueryFixture> {
             quoted(&blocked)?,
         ),
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     let program = program
         .to_str()
         .ok_or("Fixture program path is not UTF-8")?

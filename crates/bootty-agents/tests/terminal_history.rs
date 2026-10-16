@@ -425,10 +425,8 @@ fn quoted(value: &str) -> String {
 
 #[cfg(unix)]
 fn program(directory: &assert_fs::TempDir, script: &str) -> FixtureResult<String> {
-    use std::os::unix::fs::PermissionsExt as _;
     let path = directory.path().join("codex");
-    fs::write(&path, format!("#!/bin/sh\n{script}\n"))?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    bootty_test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n"))?;
     Ok(path
         .to_str()
         .ok_or("Fixture program path is not UTF-8")?

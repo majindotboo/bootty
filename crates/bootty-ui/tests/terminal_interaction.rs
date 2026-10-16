@@ -6,7 +6,6 @@ use bootty_ui::gpui as bootty_gpui;
 use pretty_assertions::assert_eq;
 
 use std::{
-    os::unix::fs::PermissionsExt,
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant},
@@ -131,9 +130,7 @@ fn state_with_script_on_backend(
 ) -> (assert_fs::TempDir, AppState) {
     let directory = assert_fs::TempDir::new().expect("temporary app directory");
     let script = directory.child("terminal-interaction-shell");
-    script.write_str(source).expect("write terminal program");
-    std::fs::set_permissions(script.path(), std::fs::Permissions::from_mode(0o755))
-        .expect("make terminal program executable");
+    bootty_test_support::write_executable(script.path(), source).expect("write terminal program");
     let mut config = BoottyConfig {
         config_path: directory.path().join("config.toml"),
         multiplexer: bootty_config::config::MultiplexerConfig {
@@ -1139,11 +1136,11 @@ fn configured_platform_shortcut_opens_the_command_palette() {
 fn native_terminal_progress_updates_active_binding_presentation() {
     let directory = assert_fs::TempDir::new().expect("temporary app directory");
     let script = directory.child("terminal-side-effects");
-    script
-        .write_str("#!/bin/sh\nprintf '\\033]9;4;42\\033\\\\'\nsleep 1\n")
-        .expect("write terminal program");
-    std::fs::set_permissions(script.path(), std::fs::Permissions::from_mode(0o755))
-        .expect("make terminal program executable");
+    bootty_test_support::write_executable(
+        script.path(),
+        "#!/bin/sh\nprintf '\\033]9;4;42\\033\\\\'\nsleep 1\n",
+    )
+    .expect("write terminal program");
 
     let config_file = directory.child("config.toml");
     config_file

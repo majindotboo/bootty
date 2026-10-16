@@ -1,5 +1,6 @@
 #![cfg(test)]
-//! A conversation's unsent draft comes back when its view opens, and typing saves it again.
+//! A conversation's unsent draft comes back when its view opens, typing saves it again, and
+//! sending it leaves no draft behind.
 
 use bootty_agents::{AgentKind, NativeSessionConfig, NativeSessionRecord};
 use bootty_control::{AppCommandReceiver, Caller, CommandInvocation, CommandOutcome};
@@ -15,7 +16,7 @@ use std::{
 };
 
 #[gpui_kit::test]
-fn a_saved_draft_returns_and_typing_saves_it_again(cx: &mut TestAppContext) {
+fn a_saved_draft_returns_typing_saves_it_and_sending_clears_it(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
@@ -85,19 +86,30 @@ fn a_saved_draft_returns_and_typing_saves_it_again(cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.executor().advance_clock(Duration::from_secs(1));
     visual.run_until_parked();
-    let saved = commands
-        .lock()
-        .unwrap()
-        .iter()
-        .rev()
-        .find(|invocation| invocation.command == "agents.native.draft")
-        .and_then(|invocation| invocation.arguments.get(2).cloned())
-        .map(|draft| serde_json::from_str::<bootty_agents::NativeDraft>(&draft).unwrap());
-    assert_eq!(
-        saved,
-        Some(bootty_agents::NativeDraft {
-            text: "Unsent idea again".to_owned(),
-            attachments: Vec::new(),
-        })
+    let saved = || {
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|invocation| invocation.command == "agents.native.draft")
+            .and_then(|invocation| invocation.arguments.get(2).cloned())
+            .map(|draft| serde_json::from_str::<bootty_agents::NativeDraft>(&draft).unwrap())
+            .map(|draft| draft.text)
+    };
+    assert_eq!(saved().as_deref(), Some("Unsent idea again"));
+    // A sent message is no longer a draft, so a restart doesn't offer it again.
+    visual.simulate_keystrokes("enter");
+    visual.run_until_parked();
+    visual.executor().advance_clock(Duration::from_secs(1));
+    visual.run_until_parked();
+    assert!(
+        commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|invocation| invocation.command == "agents.native.prompt"),
+        "the message was sent"
     );
+    assert_eq!(saved().as_deref(), Some(""));
 }

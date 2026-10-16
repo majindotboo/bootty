@@ -3,7 +3,6 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read as _, Write as _},
-    os::unix::fs::PermissionsExt as _,
     process::Command,
     sync::{
         Arc,
@@ -48,7 +47,7 @@ fn coordinated_provider() -> FixtureResult<CoordinatedProvider> {
     let started_pipe = OpenOptions::new().read(true).write(true).open(&started)?;
     let release_pipe = OpenOptions::new().read(true).write(true).open(&release)?;
     let program = directory.path().join("provider");
-    fs::write(
+    bootty_test_support::write_executable(
         &program,
         format!(
             "#!/bin/sh\n\
@@ -66,7 +65,6 @@ fn coordinated_provider() -> FixtureResult<CoordinatedProvider> {
             quoted(&release)?,
         ),
     )?;
-    fs::set_permissions(&program, fs::Permissions::from_mode(0o700))?;
     let program = program
         .to_str()
         .ok_or("Fixture program path is not UTF-8")?

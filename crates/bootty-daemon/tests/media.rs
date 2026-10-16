@@ -8,10 +8,7 @@ use bootty_host::{
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-use std::{
-    io::{Read as _, Seek as _, SeekFrom},
-    os::unix::fs::PermissionsExt as _,
-};
+use std::io::{Read as _, Seek as _, SeekFrom};
 
 fn descriptor(path: &std::path::Path) -> anyhow::Result<MediaDescriptor> {
     let FileResponse::Media(descriptor) = (FileRequest::Read {
@@ -28,8 +25,10 @@ fn remote(directory: &assert_fs::TempDir, body: &str) -> anyhow::Result<RemoteHo
     let script = directory.child("ssh-fixture");
     let home = bootty_host::shell_quote(&directory.path().to_string_lossy());
     let program = bootty_host::shell_quote(env!("CARGO_BIN_EXE_bootty-daemon"));
-    script.write_str(&format!(
-        r#"#!/bin/sh
+    bootty_test_support::write_executable(
+        script.path(),
+        format!(
+            r#"#!/bin/sh
 export HOME={home}
 export XDG_CONFIG_HOME={home}
 export XDG_STATE_HOME={home}
@@ -45,11 +44,11 @@ case "$last" in
     ;;
 esac
 "#,
-        bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
-        env!("CARGO_PKG_VERSION"),
-        body = body.replace("DAEMON", &program)
-    ))?;
-    std::fs::set_permissions(script.path(), std::fs::Permissions::from_mode(0o700))?;
+            bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            body = body.replace("DAEMON", &program)
+        ),
+    )?;
     let mut config = bootty_config::config::SshRemoteConfig::for_host("fixture");
     config.program = script.path().to_string_lossy().into_owned();
     Ok(RemoteHost::new(config))

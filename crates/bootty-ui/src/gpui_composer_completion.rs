@@ -1,6 +1,6 @@
 //! Both composers share a retained, provider-scoped completion menu.
 use crate::{
-    completion::{CompletionKind, CompletionTrigger},
+    completion::{CompletionKind, CompletionMatch, CompletionTrigger},
     error_catalog::ErrorNotice,
     gpui::CommandAction,
 };
@@ -72,6 +72,17 @@ pub struct CompletionSelection {
     pub range: std::ops::Range<usize>,
 }
 
+/// Which suggestion Enter takes. Matches by description alone show with nothing picked, so
+/// Enter sends the text as typed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pick {
+    Nothing,
+    /// The best name match, which the selection follows while the suggestions change.
+    Best,
+    /// One the selection moved to.
+    Moved,
+}
+
 pub struct ComposerCompletion {
     scope: CompletionScope,
     sender: BoundAppCommandSender,
@@ -97,6 +108,7 @@ pub struct ComposerCompletion {
     file_query: Option<Task<()>>,
     file_cancellation: Option<CommandCancellation>,
     reset_selection: bool,
+    pick: Pick,
     confirming: bool,
     omitted: usize,
     error: Option<String>,
@@ -140,6 +152,7 @@ impl ComposerCompletion {
             file_query: None,
             file_cancellation: None,
             reset_selection: false,
+            pick: Pick::Nothing,
             confirming: false,
             omitted: 0,
             error: None,
@@ -199,10 +212,16 @@ impl ComposerCompletion {
         self.trigger.is_some() && self.editor.focus_handle(cx).is_focused(window)
     }
 
-    /// Enter accepts a suggestion only when one exists. Text whose last token merely starts with
-    /// a trigger character, such as `/new` or `costs $5`, still submits.
+    /// Enter accepts a suggestion only when one is picked. Text whose last token merely starts
+    /// with a trigger character, such as `/new` or `costs $5`, still submits, and so does a
+    /// command no name matches, such as `/cost`.
     pub(super) fn blocks_submission(&self, window: &Window, cx: &App) -> bool {
-        self.confirming || (self.active(window, cx) && !self.items.is_empty())
+        self.confirming || (self.active(window, cx) && self.picked())
+    }
+
+    /// Whether a suggestion is picked: the best name match, or one the selection moved to.
+    fn picked(&self) -> bool {
+        !self.items.is_empty() && self.pick != Pick::Nothing
     }
 
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -234,6 +253,7 @@ impl ComposerCompletion {
         }
         self.pending.remove("files");
         self.reset_selection = true;
+        self.pick = Pick::Nothing;
         self.trigger = trigger;
         self.files.clear();
         self.omitted = 0;
@@ -612,8 +632,12 @@ impl ComposerCompletion {
                 let score = match &item.source {
                     CompletionSource::File(_) | CompletionSource::Directory(_) => {
                         crate::product_dialogs::searchable::fuzzy_match(&item.label, &trigger.query)
-                            .map(|matched| matched.score)
+                            .map(|matched| CompletionMatch::Name(matched.score))
                     }
+                    // A conversation goes by its title as much as by its short name.
+                    CompletionSource::Conversation(conversation) => trigger
+                        .score(&item.label, "")
+                        .max(trigger.score(&conversation.title, "")),
                     _ => trigger.score(&item.label, &item.detail),
                 };
                 score.map(|score| (score, item))
@@ -621,7 +645,18 @@ impl ComposerCompletion {
             .collect::<Vec<_>>();
         // Stable sorting keeps the provider's intentional order when no query is present.
         ranked.sort_by_key(|item| std::cmp::Reverse(item.0));
-        self.reset_selection |= self.items.is_empty();
+        // Until the selection moves, it follows the best name match, or picks nothing.
+        if self.pick != Pick::Moved || self.items.is_empty() {
+            self.reset_selection = true;
+            self.pick = if ranked
+                .first()
+                .is_some_and(|(score, _)| matches!(score, CompletionMatch::Name(_)))
+            {
+                Pick::Best
+            } else {
+                Pick::Nothing
+            };
+        }
         self.items = ranked.into_iter().take(50).map(|(_, item)| item).collect();
         cx.notify();
     }
@@ -708,7 +743,8 @@ impl ComposerCompletion {
             .menu
             .read(cx)
             .selected_index()
-            .map_or(0, |index| index.row);
+            .filter(|_| self.picked())
+            .map(|index| index.row);
         match action {
             CommandAction::Cancel => {
                 self.dismissed = self
@@ -720,6 +756,10 @@ impl ComposerCompletion {
                 cx.notify();
             }
             CommandAction::Confirm => {
+                // Nothing picked: Enter sends the text as typed.
+                let Some(index) = index else {
+                    return false;
+                };
                 self.confirming = true;
                 self.select(index, window, cx);
                 // Textarea emits PressEnter before the same key's propagated action finishes.
@@ -730,18 +770,18 @@ impl ComposerCompletion {
                 if self.items.is_empty() {
                     return true;
                 }
-                let next = if action == CommandAction::Next {
-                    index
-                        .saturating_add(1)
-                        .checked_rem(self.items.len())
-                        .unwrap_or_default()
-                } else {
-                    index
-                        .saturating_add(self.items.len())
-                        .saturating_sub(1)
-                        .checked_rem(self.items.len())
-                        .unwrap_or_default()
-                };
+                // With nothing picked, down starts at the first suggestion and up at the last.
+                let next = match (action == CommandAction::Next, index) {
+                    (true, Some(index)) => index.saturating_add(1),
+                    (true, None) => 0,
+                    (false, Some(index)) => {
+                        index.saturating_add(self.items.len()).saturating_sub(1)
+                    }
+                    (false, None) => self.items.len().saturating_sub(1),
+                }
+                .checked_rem(self.items.len())
+                .unwrap_or_default();
+                self.pick = Pick::Moved;
                 self.menu.update(cx, |menu, cx| {
                     menu.set_selected_index(Some(IndexPath::new(next)), window, cx);
                 });
@@ -881,9 +921,10 @@ impl Render for ComposerCompletion {
             self.reset_selection = false;
             let menu = self.menu.clone();
             // Command installs its new items during this render, before resetting selection.
+            let first = (self.pick == Pick::Best).then(IndexPath::default);
             window.defer(cx, move |window, cx| {
                 menu.update(cx, |menu, cx| {
-                    menu.set_selected_index(Some(IndexPath::default()), window, cx);
+                    menu.set_selected_index(first, window, cx);
                 });
             });
         }

@@ -23,7 +23,7 @@ fn read_prompt_attachment(
         return Err("Choose a local file or folder".to_owned());
     }
     if metadata.len() > bootty_agents::MAX_NATIVE_ATTACHMENT_FILE_BYTES {
-        return Err("File exceeds 50 MB".to_owned());
+        return Err("Attachments can be at most 512 MiB".to_owned());
     }
     let preview = crate::gpui_image_viewer::ImagePreview::from_file(&path);
     Ok(StagedPromptAttachment::File(NewSessionAttachment {

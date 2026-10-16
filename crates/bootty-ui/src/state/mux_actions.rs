@@ -49,7 +49,17 @@ impl AppState {
         let window_id = window_id.map(str::to_owned);
         let pane_id = pane_id.map(str::to_owned);
         Some(match action {
-            MuxKeyAction::SelectTab(index) => MuxCommand::ActivateWindowIndex { session_id, index },
+            // A number past the last tab selects nothing, the same on every backend.
+            MuxKeyAction::SelectTab(index) => self
+                .workspace
+                .active
+                .binding
+                .mux()
+                .session_by_id_or_name(&session_id)?
+                .windows
+                .iter()
+                .any(|window| window.index == index)
+                .then_some(MuxCommand::ActivateWindowIndex { session_id, index })?,
             MuxKeyAction::SplitPane(direction) => MuxCommand::SplitPane {
                 session_id,
                 pane_id,

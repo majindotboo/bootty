@@ -30,6 +30,8 @@ metrics, and tmux session chrome through GPUI.
   owner-local tasks and subscriptions.
 - `bootty-agents` - native Pi, Codex, and Claude integrations and protocol state.
 - `bootty-write` - shared locked atomic replacement and durability outcomes.
+- `bootty-test-support` - test-only helpers, such as fake provider scripts that start
+  without macOS checking each new copy.
 
 ## Native app bundles
 
