@@ -135,7 +135,9 @@ reads each mentioned conversation's latest prompts and replies, oldest first, up
 8 KiB each and four conversations a message. The transcript shows the message as
 written. Plan mode and conversation goals appear
 when advertised by that server. Claude always offers Plan mode, its own permission
-mode; approving Claude's plan leaves it. Goals use Codex's thread goal API; they
+mode; approving Claude's plan leaves it. Pi's Plan mode comes from Bootty's Pi
+extension, so a Pi launched without Bootty's tools has none: while it is on, only
+Pi's read, grep, find and ls tools run, and each prompt asks for a plan. Goals use Codex's thread goal API; they
 are not added as prompt text. The composer drawer shows a conversation's goal with
 its state and the tokens it spent against any budget, follows Codex's changes to it,
 and pauses, resumes or removes it (`agents.native.goal-status`, `agents.native.goal`).

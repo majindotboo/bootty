@@ -1498,7 +1498,15 @@ fn codex_goal_survives_provider_changes_without_blocking_other_providers(mut for
 }
 
 #[rstest]
-fn changing_model_effort_and_catalog_preserves_plan_mode(mut form: NewSessionForm) {
+#[case("Codex")]
+#[case("Claude")]
+#[case("Pi")]
+fn changing_model_effort_and_catalog_preserves_plan_mode(
+    mut form: NewSessionForm,
+    #[case] provider: &str,
+) {
+    form.change_field("provider", provider);
+    assert_eq!(form.draft.provider, provider.to_lowercase());
     let models = vec![bootty_agents::NativeModelOption {
         id: "available".into(),
         display_name: "Available".into(),

@@ -77,7 +77,7 @@ for line in sys.stdin:
   goal=None
   reply(value,{'cleared':True})
 
- elif method=='get_commands': reply(value,{'commands':[{'name':'review','description':'Review work','source':'extension'},{'name':'skill:project-skill','source':'skill','description':'Project work','sourceInfo':{'path':os.path.join(os.getcwd(),'SKILL.md'),'scope':'project'}}]})
+ elif method=='get_commands': reply(value,{'commands':[{'name':'review','description':'Review work','source':'extension'},{'name':'skill:project-skill','source':'skill','description':'Project work','sourceInfo':{'path':os.path.join(os.getcwd(),'SKILL.md'),'scope':'project'}}]+([] if os.path.exists('no-plan') else [{'name':'__bootty_plan','source':'extension'}])})
  elif method=='model/list':
   advertised={'id':'catalog-id','model':'available','displayName':'Available','supportedReasoningEfforts':[{'reasoningEffort':'medium'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'medium','isDefault':True,'serviceTiers':[{'id':'fast'}]}
   if os.path.exists('speed-capabilities.json'):
@@ -111,6 +111,9 @@ for line in sys.stdin:
   if os.path.exists('claude-settings.json'):
    with open('claude-settings.json') as source: settings=json.load(source)
   reply(value,settings)
+ elif pi and method=='prompt' and params['message'].startswith('/__bootty_plan '):
+  with open('modes','a') as output: output.write(params['message']+'\n')
+  reply(value,{'disposition':'handled'})
  elif method in ['turn/start','turn/steer','prompt']:
   if method=='turn/start':
    emit({'method':'turn/started','params':{'threadId':'thread','turn':{'id':'turn','status':'inProgress','items':[]}}})
@@ -645,6 +648,53 @@ fn claude_plan_mode_follows_the_choice_and_ends_when_the_plan_is_approved() {
         service.prompt(&target, "finish").unwrap();
     }
     assert_eq!(modes(), "plan\ndefault\n");
+    service.shutdown().unwrap();
+}
+
+/// Pi's Plan mode lives in Bootty's extension. Pi is told before the next turn when the choice
+/// changes, and a Pi launched without the extension offers no Plan mode.
+#[rstest]
+#[case(true)]
+#[case(false)]
+fn pi_plan_mode_switches_bootty_extension_before_the_turn(#[case] extension: bool) {
+    let root = TempDir::new().unwrap();
+    if !extension {
+        fs::write(root.path().join("no-plan"), "").unwrap();
+    }
+    let mut config = config(root.path(), AgentKind::Pi).unwrap();
+    config.model = Some("configured/available".to_owned());
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let target = service
+        .create("binding", "Session", config)
+        .unwrap()
+        .target();
+    assert_eq!(service.completions(&target).unwrap().plan_mode, extension);
+    let choose = |plan| {
+        service.configure(
+            &target,
+            &NativeModelSelection {
+                plan_mode: Some(plan),
+                fast_mode: None,
+                model: "configured/available".to_owned(),
+                reasoning_effort: None,
+            },
+        )
+    };
+    if !extension {
+        assert_eq!(
+            choose(true).unwrap_err(),
+            "Plan mode is not available for this conversation"
+        );
+        return;
+    }
+    for plan in [true, true, false] {
+        choose(plan).unwrap();
+        service.prompt(&target, "next").unwrap();
+    }
+    assert_eq!(
+        fs::read_to_string(root.path().join("modes")).unwrap(),
+        "/__bootty_plan on\n/__bootty_plan off\n"
+    );
     service.shutdown().unwrap();
 }
 

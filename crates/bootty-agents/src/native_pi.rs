@@ -80,15 +80,7 @@ impl NativeAgentSession {
             return Err("Pi resumed a different file; captured identity was preserved".to_owned());
         }
         if self.config.session_id.is_none() && lock(&self.snapshot).tool_server.is_some() {
-            let commands = self.rpc("get_commands", json!({}))?;
-            if !field(&commands, "commands")
-                .as_array()
-                .is_some_and(|commands| {
-                    commands.iter().any(|command| {
-                        field(command, "name") == crate::tool_bridge::PI_CHECKPOINT_COMMAND
-                    })
-                })
-            {
+            if !self.has_pi_command(crate::tool_bridge::PI_CHECKPOINT_COMMAND)? {
                 return Err("Pi did not register its session checkpoint".into());
             }
             let checkpoint = self.rpc(
@@ -266,6 +258,19 @@ impl NativeAgentSession {
         result?;
         self.refresh_history_pi()?;
         Ok(())
+    }
+
+    /// Whether Pi registered `name`, one of Bootty's extension commands. Pi sends an unknown
+    /// command to the model as a message, so check before invoking one.
+    pub(crate) fn has_pi_command(&self, name: &str) -> Result<bool, String> {
+        let commands = self.rpc("get_commands", json!({}))?;
+        Ok(field(&commands, "commands")
+            .as_array()
+            .is_some_and(|commands| {
+                commands
+                    .iter()
+                    .any(|command| field(command, "name") == name)
+            }))
     }
 
     pub(crate) fn verify_pi_identity(&self) -> Result<(), String> {

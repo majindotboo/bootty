@@ -384,7 +384,34 @@ impl NativeAgentSession {
                 return Err("Pi did not accept the selected thinking level".to_owned());
             }
         }
+        if let Some(plan) = selection.plan_mode {
+            self.apply_pi_plan(plan)?;
+        }
         self.verify_pi_identity()
+    }
+
+    /// Plan mode lives in Bootty's Pi extension, which starts with it off. Pi is only told when
+    /// the mode changes.
+    fn apply_pi_plan(&self, plan: bool) -> Result<(), String> {
+        if *super::native_session::lock(&self.pi_plan) == plan {
+            return Ok(());
+        }
+        if !self.has_pi_command(crate::tool_bridge::PI_PLAN_COMMAND)? {
+            return Err("This Pi conversation can't plan without Bootty's tools".to_owned());
+        }
+        let switch = if plan { "on" } else { "off" };
+        let response = self.rpc(
+            "prompt",
+            json!({"message":format!("/{} {switch}", crate::tool_bridge::PI_PLAN_COMMAND)}),
+        )?;
+        // Older Pi RPC acknowledges a command without a disposition.
+        if field(&response, "disposition") != "handled"
+            && !response.as_object().is_some_and(serde_json::Map::is_empty)
+        {
+            return Err("Pi did not switch plan mode".to_owned());
+        }
+        *super::native_session::lock(&self.pi_plan) = plan;
+        Ok(())
     }
 }
 

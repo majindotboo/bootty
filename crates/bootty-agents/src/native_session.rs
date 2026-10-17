@@ -280,9 +280,6 @@ impl NativeSessionConfig {
     }
 
     pub(crate) fn validate_stored(&self) -> Result<(), String> {
-        if self.plan_mode == Some(true) && self.provider == AgentKind::Pi {
-            return Err("Pi has no Plan mode".into());
-        }
         if self.profile.as_ref().is_some_and(|profile| {
             profile.is_empty()
                 || profile.len() > 64
@@ -413,6 +410,8 @@ pub struct NativeAgentSession {
     pub(crate) claude_models: Mutex<Option<Vec<crate::NativeModelOption>>>,
     /// Whether Claude is in its plan permission mode, as Bootty last set or launched it.
     pub(crate) claude_plan: Mutex<bool>,
+    /// Whether Bootty's Pi extension is in plan mode, as Bootty last set it.
+    pub(crate) pi_plan: Mutex<bool>,
     pub(crate) history_window: Mutex<Option<crate::native_history::HistoryPosition>>,
     pub(crate) history_quotes: Mutex<NativeSessionSnapshot>,
     /// Where the conversation's files are, for the snapshots around its turns.
@@ -556,6 +555,7 @@ impl NativeAgentSession {
             completion_catalog: Mutex::new(None),
             claude_models: Mutex::new(None),
             claude_plan: Mutex::new(config.plan_mode == Some(true)),
+            pi_plan: Mutex::new(false),
             history_window: Mutex::new(None),
             history_quotes: Mutex::new(NativeSessionSnapshot::new(config.provider)),
             checkpoints,

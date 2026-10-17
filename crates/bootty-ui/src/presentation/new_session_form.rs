@@ -384,9 +384,7 @@ impl NewSessionForm {
     }
 
     fn change_plan_mode(&mut self, value: &str, fast: Option<bool>) {
-        if self.draft.provider == "codex"
-            && let Ok(plan) = value.parse::<bool>()
-        {
+        if let Ok(plan) = value.parse::<bool>() {
             if let Some(selection) = &mut self.draft.model_selection {
                 selection.plan_mode = Some(plan);
             } else if let Some(model) = self.model_options.iter().find(|model| model.is_default) {
@@ -1383,9 +1381,7 @@ impl NewSessionForm {
                 kind: DialogFieldKind::Text,
             });
         }
-        if self.draft.mode == NewSessionMode::Agent
-            && matches!(self.draft.provider.as_str(), "codex" | "claude")
-        {
+        if self.draft.mode == NewSessionMode::Agent {
             fields.push(choice(
                 "plan-mode",
                 "Plan mode",

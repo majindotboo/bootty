@@ -19,6 +19,7 @@ pub use transport::tool_stdio;
 
 pub const PI_CHECKPOINT_COMMAND: &str = "__bootty_checkpoint";
 pub const PI_REWIND_COMMAND: &str = "__bootty_rewind";
+pub const PI_PLAN_COMMAND: &str = "__bootty_plan";
 
 // Bootty's Pi session commands. Pi defers an empty session's file until its first message, so the
 // checkpoint uses its public session entries and reattaches the same file before publishing the
@@ -55,6 +56,14 @@ const PI_SESSION_EXTENSION: &str = r"
     if (result.cancelled) throw new Error('Pi kept the conversation as it was');
     pi.appendEntry('bootty-rewind', { at });
   }});
+  // Plan mode, switched by Bootty before a turn with `on` or `off`. Only Pi's read-only tools run,
+  // each prompt says so, and the notes leave the context once plan mode is off.
+  let plan = false;
+  if (process.argv.includes('rpc')) pi.registerCommand('__bootty_plan', { handler: async args => { plan = args.trim() === 'on'; } });
+  const readOnly = new Set(['read', 'grep', 'find', 'ls']);
+  pi.on('tool_call', async event => plan && !readOnly.has(event.toolName) ? { block: true, reason: 'Plan mode is on: only read, grep, find and ls run. Lay out the plan instead; the user turns plan mode off to carry it out.' } : undefined);
+  pi.on('before_agent_start', async event => plan && event.messageType === 'user' ? { message: { customType: 'bootty-plan', display: false, content: 'Plan mode is on. Explore with read, grep, find and ls only; other tools are blocked. Change nothing. End with a numbered plan under a \'Plan:\' heading. The user turns plan mode off to carry it out.' } } : undefined);
+  pi.on('context', async event => plan ? undefined : { messages: event.messages.filter(message => message.customType !== 'bootty-plan') });
 ";
 
 /// Pi sanitizes MCP names and hashes identifiers over 64 characters. Resolve only our

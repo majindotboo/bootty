@@ -1065,16 +1065,11 @@ impl NativeAgentService {
         {
             return Err("Selected reasoning effort is not supported by this model".to_owned());
         }
-        if let Some(plan) = selection.plan_mode {
-            if session.config.provider == crate::AgentKind::Pi {
-                return Err("Pi has no Plan mode".into());
-            }
-            if plan
-                && session.config.provider == crate::AgentKind::Codex
-                && !session.completions()?.plan_mode
-            {
-                return Err("Plan mode is not available for this account".into());
-            }
+        if selection.plan_mode == Some(true)
+            && session.config.provider != crate::AgentKind::Claude
+            && !session.completions()?.plan_mode
+        {
+            return Err("Plan mode is not available for this conversation".into());
         }
         let _mutation = lock(&self.mutation);
         let mut candidate = lock(&self.store).clone();

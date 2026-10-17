@@ -459,6 +459,7 @@ fn decode_pi(value: &Value) -> Result<NativeCompletionCatalog, String> {
             "compact"
                 | crate::tool_bridge::PI_CHECKPOINT_COMMAND
                 | crate::tool_bridge::PI_REWIND_COMMAND
+                | crate::tool_bridge::PI_PLAN_COMMAND
         ) {
             continue;
         }
@@ -499,6 +500,10 @@ fn decode_pi(value: &Value) -> Result<NativeCompletionCatalog, String> {
     }
     Ok(NativeCompletionCatalog {
         options,
+        // Bootty's Pi extension owns plan mode; Pi launched without it has none.
+        plan_mode: commands
+            .iter()
+            .any(|command| field(command, "name") == crate::tool_bridge::PI_PLAN_COMMAND),
         ..NativeCompletionCatalog::default()
     })
 }

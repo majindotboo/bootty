@@ -463,9 +463,10 @@ from the selected provider/account's live protocol. The shared Add menu also rea
 Codex's installed callable apps and enabled plugins, enriches them with provider
 metadata, and inserts typed mentions. Submission revalidates these references
 against the captured account, including queued messages. Plan mode is an explicit
-provider selection: a Codex collaboration mode on each turn, or Claude's plan
+provider selection: a Codex collaboration mode on each turn, Claude's plan
 permission mode, set when the choice changes and left when Claude's plan is
-approved. Conversation goals stay owned by Codex through its thread goal API.
+approved, or a switch in Bootty's Pi extension, set before a turn when the choice
+changes. Conversation goals stay owned by Codex through its thread goal API.
 Unsupported actions are omitted. Probing a creation draft does
 not start a conversation. File search runs through `bootty-host::files` on the captured host, with bounded
 ranked Git indexes and ignore rules. Outside Git it completes the typed directory

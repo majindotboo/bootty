@@ -140,15 +140,7 @@ impl NativeAgentSession {
             .strip_prefix("pi-user-")
             .filter(|at| !at.is_empty() && at.bytes().all(|byte| byte.is_ascii_digit()))
             .ok_or("Pi can't find that message")?;
-        let commands = self.rpc("get_commands", json!({}))?;
-        if !field(&commands, "commands")
-            .as_array()
-            .is_some_and(|commands| {
-                commands
-                    .iter()
-                    .any(|command| field(command, "name") == crate::tool_bridge::PI_REWIND_COMMAND)
-            })
-        {
+        if !self.has_pi_command(crate::tool_bridge::PI_REWIND_COMMAND)? {
             return Err("This Pi conversation can't rewind without Bootty's tools".to_owned());
         }
         let count = |state: &Value| field(state, "messageCount").as_u64();
