@@ -1453,15 +1453,11 @@ impl AppState {
                 message: "The source conversation is stale".into(),
             });
         };
-        let launch_invocation = CommandInvocation::new(
-            format!("{}.start", record.config.provider.module()),
-            Vec::new(),
-            invocation.caller,
-        );
-        let captured = match self.capture_native_destination(&record, &launch_invocation) {
-            Ok(captured) => captured,
+        let (launch_invocation, captured, switched) = match self.fork_launch(&record, invocation) {
+            Ok(launch) => launch,
             Err(outcome) => return CommandDispatch::Complete(outcome),
         };
+        let config = switched.clone().unwrap_or_else(|| record.config.clone());
         let commands: Arc<dyn AgentCommandExecutor> = Arc::new(AppCommandAgentExecutor {
             creation_receipt: None,
             sender: self.commands.sender.clone(),
@@ -1475,20 +1471,15 @@ impl AppState {
         let (deadline, cancellation) = executor::command_execution(execution);
         self.dispatch_committed_command(Some((deadline, cancellation.clone())), move || {
             let launch = AgentLaunch {
-                program: record.config.program.clone(),
-                cwd: Some(record.config.cwd.to_string_lossy().into_owned()),
-                arguments: record.config.arguments.clone(),
+                program: config.program.clone(),
+                cwd: Some(config.cwd.to_string_lossy().into_owned()),
+                arguments: config.arguments.clone(),
                 ephemeral: false,
-                account_directory: record.config.account_directory.clone(),
+                account_directory: config.account_directory.clone(),
             };
             let result = (|| {
-                let (tools, mut warnings) = native_tools(
-                    &commands,
-                    &launch_invocation,
-                    &captured,
-                    &record.config,
-                    &launch,
-                )?;
+                let (tools, mut warnings) =
+                    native_tools(&commands, &launch_invocation, &captured, &config, &launch)?;
                 let parent = captured
                     .terminal
                     .as_ref()
@@ -1516,6 +1507,7 @@ impl AppState {
                 let child = service.fork_side_chat_placed(
                     &record.target(),
                     response.as_deref(),
+                    switched,
                     tools,
                     |child| {
                         let registered = register_native_panel(
@@ -1542,6 +1534,62 @@ impl AppState {
             })();
             result.unwrap_or_else(failure)
         })
+    }
+
+    /// Where a fork of `record` launches: on its own provider, or on the one `invocation` names,
+    /// which continues the conversation there with the history so far.
+    fn fork_launch(
+        &self,
+        record: &NativeSessionRecord,
+        invocation: &CommandInvocation,
+    ) -> Result<(CommandInvocation, NativeLaunch, Option<NativeSessionConfig>), CommandOutcome>
+    {
+        let provider = match invocation.arguments.get(3).filter(|id| !id.is_empty()) {
+            None => record.config.provider,
+            Some(id) => native_provider(id)
+                .ok_or_else(|| failure("Unsupported native provider".to_owned()))?,
+        };
+        let launch_invocation = CommandInvocation::new(
+            format!("{}.start", provider.module()),
+            Vec::new(),
+            invocation.caller,
+        );
+        let mut captured = self.capture_native_destination(record, &launch_invocation)?;
+        let switched = (provider != record.config.provider)
+            .then(|| {
+                self.switched_provider_config(record, provider, &launch_invocation, &mut captured)
+            })
+            .transpose()
+            .map_err(failure)?;
+        Ok((launch_invocation, captured, switched))
+    }
+
+    /// The launch a side chat on `provider` takes: that provider's own program and selected
+    /// account, in the conversation's directory and on its host.
+    fn switched_provider_config(
+        &self,
+        record: &NativeSessionRecord,
+        provider: AgentKind,
+        launch_invocation: &CommandInvocation,
+        captured: &mut NativeLaunch,
+    ) -> Result<NativeSessionConfig, String> {
+        let preferences = self
+            .config()
+            .agents
+            .provider(&provider.to_string())
+            .filter(|preferences| preferences.enabled)
+            .cloned()
+            .ok_or_else(|| format!("{} is disabled in Settings", provider.display_name()))?;
+        captured.context.preferences = preferences;
+        let cwd = record.config.cwd.to_string_lossy();
+        let launch = super::terminal_agents::prepare_launch(
+            launch_invocation,
+            provider,
+            "start",
+            Some(&cwd),
+            &captured.context.preferences,
+        )?;
+        captured_launch_config(captured, launch_invocation, provider, launch)
     }
 
     fn capture_native_resume(

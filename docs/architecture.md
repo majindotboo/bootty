@@ -498,7 +498,10 @@ carriers and process/directory fields, and does not start detached tasks.
 These reads follow the lease rather than the selected Space.
 
 Side chats copy history through a completed assistant response, retain the exact
-project/account/model, and create a fresh provider session. `bootty-agents` owns
+project/account/model, and create a fresh provider session. Choosing another
+provider in a conversation's model picker starts a side chat on that provider
+instead: its own program and selected account, in the same project and host
+(`agents.native.fork`'s optional `provider`). `bootty-agents` owns
 the durable source/boundary, immutable copied transcript and context-delivery receipt. The copied prefix and
 attachment files are saved before publication; historical approvals, app grants
 and provider writer identities are never copied. The first ordinary prompt seeds

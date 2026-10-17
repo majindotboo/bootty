@@ -259,6 +259,8 @@ pub struct NativeAgentSessionView {
     focus: FocusHandle,
     permissions_focus: FocusHandle,
     available_efforts: Vec<String>,
+    /// The enabled providers this conversation can continue on, by name, when there is a choice.
+    providers: Vec<String>,
     sender: BoundAppCommandSender,
     composer: Entity<TextareaState>,
     /// Which sent message Up last put in the composer, newest first.
@@ -503,6 +505,7 @@ impl NativeAgentSessionView {
             provider_permissions: None,
             model_picker: None,
             available_efforts: Vec::new(),
+            providers: Vec::new(),
             model_picker_subscription: None,
             annotations: Vec::new(),
             expanded_annotation: None,

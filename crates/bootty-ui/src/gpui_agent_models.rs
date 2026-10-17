@@ -32,6 +32,17 @@ impl NativeAgentSessionView {
             }
         }
     }
+    pub(crate) fn set_providers(
+        &mut self,
+        providers: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.providers != providers {
+            self.providers = providers;
+            self.sync_model_picker(window, cx);
+        }
+    }
     pub(crate) fn set_cached_catalog(
         &mut self,
         catalog: bootty_agents::NativeProviderCatalog,
@@ -262,7 +273,17 @@ impl NativeAgentSessionView {
             );
         if let Some(picker) = &self.model_picker {
             picker.update(cx, |picker, cx| {
-                picker.set_models(models, selected.as_deref(), enabled, window, cx);
+                picker.set_provider_models(
+                    crate::gpui_model_picker::ProviderModelCatalog {
+                        provider: self.record.config.provider,
+                        models,
+                        current: selected.as_deref(),
+                        providers: &self.providers,
+                        enabled,
+                    },
+                    window,
+                    cx,
+                );
                 picker.set_reasoning_effort(self.record.config.reasoning_effort.as_deref(), cx);
                 picker.set_fast_mode(self.record.config.fast_mode, cx);
                 picker.set_available_efforts(&self.available_efforts, cx);
@@ -270,10 +291,11 @@ impl NativeAgentSessionView {
             return;
         }
         let picker = cx.new(|cx| {
-            ModelPickerView::new(
+            ModelPickerView::new_with_providers(
                 self.record.config.provider,
                 models.clone(),
                 selected.as_deref(),
+                self.providers.clone(),
                 window,
                 cx,
             )
@@ -345,9 +367,13 @@ impl NativeAgentSessionView {
                     );
                 }
             }
-            // Existing conversations keep their provider fixed; only the new-session
-            // composer supplies provider choices to the shared picker.
-            ModelPickerEvent::SelectProvider(_) => {}
+            // A conversation keeps its provider; another one continues it in a side chat.
+            ModelPickerEvent::SelectProvider(provider) => {
+                let provider = provider.to_ascii_lowercase();
+                if provider != self.record.config.provider.to_string() {
+                    self.command("fork", vec![String::new(), provider], window, cx);
+                }
+            }
         }
         if matches!(event, ModelPickerEvent::Select(_)) {
             cx.defer_in(window, |this, window, cx| {

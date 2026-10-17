@@ -162,7 +162,7 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
         ),
         (
             "fork",
-            vec!["id", "generation", "response"],
+            vec!["id", "generation", "response", "provider"],
             ResourceKind::Session,
         ),
         (
@@ -346,7 +346,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                             | "goal"
                             | "files"
                     ) || name == "permissions" && operation != "permissions"
-                        || name == "response" && operation == "fork"),
+                        || matches!(name, "response" | "provider") && operation == "fork"),
                     choices: match (name, operation) {
                         ("direction", "pane") => vec!["right".into(), "down".into()],
                         ("direction", "queue-move") => vec!["earlier".into(), "later".into()],

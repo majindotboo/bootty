@@ -56,16 +56,19 @@ impl NativeAgentService {
         response: Option<&str>,
         tools: Option<Arc<crate::ToolBridge>>,
     ) -> Result<NativeSessionRecord, String> {
-        self.fork_side_chat_placed(source, response, tools, |_| Ok(()))
+        self.fork_side_chat_placed(source, response, None, tools, |_| Ok(()))
     }
 
     /// Publish the copied native pane after reservation, before its provider initializes.
+    /// `config` starts the side chat on another provider's launch; without it the side chat
+    /// continues on the source's.
     /// # Errors
     /// Rejects stale sources, invalid history, failed placement or provider initialization.
     pub fn fork_side_chat_placed(
         &self,
         source: &CommandTarget,
         response: Option<&str>,
+        config: Option<crate::NativeSessionConfig>,
         tools: Option<Arc<crate::ToolBridge>>,
         place: impl Fn(&NativeSessionRecord) -> Result<(), String>,
     ) -> Result<NativeSessionRecord, String> {
@@ -113,7 +116,7 @@ impl NativeAgentService {
             return Err("The conversation exceeds the side-chat context limit".into());
         }
         // Provider identity, pending approvals and application grants never cross the fork.
-        let mut config = parent.config.clone();
+        let mut config = config.unwrap_or_else(|| parent.config.clone());
         config.session_id = None;
         config.session_file = None;
         config.fresh_session_id = None;

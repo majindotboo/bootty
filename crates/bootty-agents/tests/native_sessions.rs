@@ -2485,7 +2485,7 @@ fn side_chat_placement_precedes_provider_start_and_retains_failed_identity(
         .prompt(&parent.target(), "Completed response")
         .unwrap();
     let published = std::cell::RefCell::new(None);
-    let result = service.fork_side_chat_placed(&parent.target(), None, None, |child| {
+    let result = service.fork_side_chat_placed(&parent.target(), None, None, None, |child| {
         *published.borrow_mut() = Some(child.target());
         assert_eq!(child.snapshot.status, NativeSessionStatus::Starting);
         if reject_placement {
@@ -2549,7 +2549,7 @@ fn side_chat_copies_a_completed_response_without_reusing_the_parent_provider_ses
         .find(|record| record.id == parent.id)
         .unwrap();
     let child = service
-        .fork_side_chat_placed(&parent.target(), Some(&response), None, |reserved| {
+        .fork_side_chat_placed(&parent.target(), Some(&response), None, None, |reserved| {
             assert_eq!(reserved.snapshot.status, NativeSessionStatus::Starting);
             assert!(reserved.snapshot.session_id.is_none());
             assert!(service.resolve(&reserved.target()).is_err());
@@ -2649,6 +2649,46 @@ fn side_chat_copies_a_completed_response_without_reusing_the_parent_provider_ses
             .unwrap();
     assert_eq!(wire["input"][0]["text"], "After relaunch");
     restored.shutdown().unwrap();
+}
+
+/// A side chat started on another launch, as switching provider does, runs there and still
+/// begins with the conversation so far.
+#[rstest]
+fn a_side_chat_on_another_launch_carries_the_conversation() {
+    let root = TempDir::new().unwrap();
+    fs::write(root.path().join("unique-threads"), "").unwrap();
+    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let parent = service
+        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .unwrap();
+    service
+        .prompt(&parent.target(), "Original context")
+        .unwrap();
+    let mut other = config(root.path()).unwrap();
+    other.account_directory = Some(
+        root.path()
+            .join("other-account")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    let child = service
+        .fork_side_chat_placed(
+            &parent.target(),
+            None,
+            Some(other.clone()),
+            None,
+            |_| Ok(()),
+        )
+        .unwrap();
+    assert_eq!(child.config.account_directory, other.account_directory);
+    service.prompt(&child.target(), "Next question").unwrap();
+    let identity = child.snapshot.session_id.as_ref().unwrap();
+    let first: Value =
+        serde_json::from_slice(&fs::read(root.path().join(format!("{identity}-1.json"))).unwrap())
+            .unwrap();
+    let text = first["input"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Original context"), "{text}");
+    service.shutdown().unwrap();
 }
 
 #[rstest]

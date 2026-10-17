@@ -635,6 +635,22 @@ impl GpuiWorkspace {
     }
 
     fn sync_native_preferences(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let mut providers: Vec<String> = bootty_agents::AgentKind::ALL
+            .into_iter()
+            .filter(|kind| {
+                bootty_agents::NativeSessionConfig::supports_provider(*kind)
+                    && self
+                        .state
+                        .config()
+                        .agents
+                        .provider(&kind.to_string())
+                        .is_some_and(|provider| provider.enabled)
+            })
+            .map(|kind| kind.display_name().to_owned())
+            .collect();
+        if providers.len() < 2 {
+            providers.clear();
+        }
         for record in &self.native_conversations.records {
             if let Some(view) = self.native_conversations.views.get(&record.id) {
                 let enabled = self
@@ -657,6 +673,7 @@ impl GpuiWorkspace {
                     {
                         view.set_available_efforts(&provider.available_efforts, cx);
                     }
+                    view.set_providers(providers.clone(), window, cx);
                     view.set_animate_working(self.state.config().sidebar.animate_working, cx);
                     view.set_follow_up_behavior(self.state.config().agents.follow_up_behavior, cx);
                     view.set_send_shortcut(self.state.config().agents.send_shortcut);
