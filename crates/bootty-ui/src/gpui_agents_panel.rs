@@ -396,7 +396,6 @@ impl AgentsPanel {
                             .small()
                             .flex_1()
                             .min_w_0()
-                            .justify_start()
                             .selected(self.selected.as_ref() == Some(&entry.target))
                             .accessibility_label(entry.title.clone())
                             .child(div().flex_1().min_w_0().truncate().child(format!(

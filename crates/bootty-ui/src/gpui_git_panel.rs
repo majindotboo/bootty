@@ -1478,7 +1478,6 @@ impl GitChangesPanel {
                 Button::new(format!("commit-diff:{}", commit.id))
                     .ghost()
                     .w_full()
-                    .justify_start()
                     .child(div().flex_1().min_w_0().truncate().child(format!(
                         "{} · {} · {}",
                         short_commit(&commit.id),

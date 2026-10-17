@@ -276,7 +276,6 @@ impl SurfacePanel {
                     .when(edit_focus.contains_focused(window, cx), |button| {
                         button.bg(cx.theme().accent)
                     })
-                    .justify_start()
                     .accessibility_label("Edit profiles")
                     .child(
                         div()
@@ -330,7 +329,6 @@ impl SurfacePanel {
                 })
                 .w_full()
                 .h_10()
-                .justify_start()
                 .gap_3()
                 .accessibility_label(label)
                 .child(

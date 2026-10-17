@@ -97,7 +97,6 @@ impl NativeAgentSessionView {
                             .xsmall()
                             .px_1()
                             .w_full()
-                            .justify_start()
                             .child(
                                 div()
                                     .w_full()

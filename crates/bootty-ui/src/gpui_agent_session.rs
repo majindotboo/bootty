@@ -2434,7 +2434,6 @@ impl NativeAgentSessionView {
                     Button::new(format!("subagent-toggle:{id}"))
                         .ghost()
                         .w_full()
-                        .justify_start()
                         .child(header)
                         .on_click(move |_, _, cx| {
                             _ = owner.update(cx, |this, cx| {
@@ -3528,7 +3527,6 @@ impl NativeAgentSessionView {
                                 Button::new(format!("related:{}", target.handle))
                                     .ghost()
                                     .small()
-                                    .justify_start()
                                     .child(crate::gpui::sized_icon(
                                         "git-fork",
                                         crate::gpui::IconSize::Small,

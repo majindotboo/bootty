@@ -7,7 +7,7 @@ use bootty_ui::{
     NativeAgentSessionView,
     gpui::{UiPalette, init_theme},
 };
-use gpui_kit::{AppContext as _, Modifiers, TestAppContext};
+use gpui_kit::{AppContext as _, Modifiers, TestAppContext, px, size};
 use pretty_assertions::assert_eq;
 use std::sync::{Arc, Mutex};
 
@@ -554,6 +554,73 @@ fn claude_question_escape_cancels(cx: &mut TestAppContext) {
         responses(&commands),
         [serde_json::json!({"decision": "decline"})]
     );
+}
+
+/// A question's options read from the start of their rows, and however long it runs, its answer
+/// buttons stay in view.
+#[gpui_kit::test]
+fn claude_questions_fit_with_their_options_at_the_start(cx: &mut TestAppContext) {
+    let long = "Keep Settle, Snooze, Archive and Delete; hidden sessions become archived and stay \
+        reachable from history.";
+    let (visual, _) = open(
+        record(
+            AgentKind::Claude,
+            serde_json::json!({
+                "provider": "claude", "session_id": "session", "turn_id": "turn",
+                "status": "waiting", "usage": null, "error": null, "revision": 1,
+                "transcript": [],
+                "requests": [{"id": "claude-ask", "method": "claude.permission", "parameters": {
+                    "subtype": "can_use_tool", "tool_name": "AskUserQuestion",
+                    "tool_use_id": "tool-1", "input": {"questions": [{
+                        "question": "Five ways to put a session away overlap. Remove one?",
+                        "header": "Hide", "multiSelect": true,
+                        "options": [
+                            {"label": "Remove Hide (Recommended)", "description": long},
+                            {"label": "Keep all five", "description": "Leave them."},
+                            {"label": "Status bar layout", "description": long},
+                            {"label": "Sidebar side", "description": long}]}]}
+                }}]
+            }),
+        ),
+        cx,
+    );
+    visual.simulate_resize(size(px(900.), px(520.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let starts = [
+        "Remove Hide (Recommended)",
+        "Keep all five",
+        "Status bar layout",
+        "Sidebar side",
+    ]
+    .map(|label| {
+        let option = format!(
+            "option:claude-ask:Five ways to put a session away overlap. Remove one?:{label}"
+        );
+        let row = visual
+            .debug_bounds(option.clone().leak())
+            .expect("option row");
+        let text = visual
+            .debug_bounds(format!("{option}:label").leak())
+            .expect("option text");
+        assert!(
+            f32::from(row.right()) - f32::from(text.right()) < 16.,
+            "{label} runs to the end of its row: {row:?} {text:?}"
+        );
+        text.left()
+    });
+    assert!(
+        starts.iter().all(|start| *start == starts[0]),
+        "every option starts at the same edge: {starts:?}"
+    );
+    let requests = visual.debug_bounds("native-requests").expect("requests");
+    for action in ["claude-decline:claude-ask", "claude-accept:claude-ask"] {
+        let button = visual.debug_bounds(action).expect("answer button");
+        assert!(
+            button.bottom() <= requests.bottom(),
+            "{action} stays in view: {button:?} in {requests:?}"
+        );
+    }
 }
 
 /// Claude's plan can be carried out in a new conversation: this one declines it, saying why,

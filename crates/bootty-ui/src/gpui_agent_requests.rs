@@ -544,18 +544,20 @@ impl NativeRequestView {
 
     /// The panel grows with its requests, up to 24rem or 40% of the window, then scrolls.
     fn render_requests(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::AnyElement {
-        let limit = (f32::from(window.viewport_size().height) * 0.4)
-            .min(f32::from(window.rem_size()) * 24.0);
+        let height = f32::from(window.viewport_size().height);
+        // A question scrolls within this room, so its heading and buttons stay in view.
+        let room = gpui_kit::px((height * 0.4).min(f32::from(window.rem_size()) * 24.0));
         let requests = div()
+            .debug_selector(|| "native-requests".into())
             .w_full()
             .max_w(gpui_kit::rems(48.0))
-            .max_h(gpui_kit::px(limit))
+            .max_h(gpui_kit::px(height * 0.6))
             .flex()
             .flex_col()
             .children(
                 self.requests
                     .iter()
-                    .map(|request| self.render_request(request, cx)),
+                    .map(|request| self.render_request(request, room, cx)),
             )
             .overflow_y_scrollbar();
         div()
@@ -570,6 +572,7 @@ impl NativeRequestView {
     fn render_request(
         &self,
         request: &NativeAgentRequest,
+        room: gpui_kit::Pixels,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let id = request.id.clone();
@@ -588,7 +591,7 @@ impl NativeRequestView {
             .child(request_heading(request, cx));
         if request.method == "claude.permission" {
             return row
-                .child(self.render_claude_request(request, pending, cx))
+                .child(self.render_claude_request(request, pending, room, cx))
                 .into_any_element();
         }
         if matches!(
@@ -624,7 +627,7 @@ impl NativeRequestView {
         } else if request.method == "mcpServer/elicitation/request" {
             row = self.render_elicitation(row, request, pending, cx);
         } else if request.method == "item/tool/requestUserInput" {
-            row = row.child(self.render_questions(request, pending, cx));
+            row = row.child(self.render_questions(request, pending, room, cx));
             row = row.child(
                 Button::new(gpui_kit::SharedString::from(format!("answer:{id}")))
                     .debug_selector({
@@ -789,6 +792,7 @@ impl NativeRequestView {
         &self,
         request: &NativeAgentRequest,
         pending: bool,
+        room: gpui_kit::Pixels,
         cx: &Context<Self>,
     ) -> gpui_kit::Div {
         let id = request.id.clone();
@@ -813,7 +817,7 @@ impl NativeRequestView {
             .flex()
             .flex_col()
             .gap_2()
-            .child(self.render_questions(request, pending, cx));
+            .child(self.render_questions(request, pending, room, cx));
         let denied = id.clone();
         let denied_target = target.clone();
         let empty = !self.all_answered(request, cx);
@@ -823,6 +827,10 @@ impl NativeRequestView {
                 .gap_2()
                 .child(
                     Button::new(gpui_kit::SharedString::from(format!("claude-decline:{id}")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("claude-decline:{id}")
+                        })
                         .label("Cancel")
                         .small()
                         .ghost()
@@ -833,6 +841,10 @@ impl NativeRequestView {
                 )
                 .child(
                     Button::new(gpui_kit::SharedString::from(format!("claude-accept:{id}")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("claude-accept:{id}")
+                        })
                         .label("Send answers")
                         .small()
                         .primary()
@@ -1320,23 +1332,32 @@ impl NativeRequestView {
             .filter(|description| !description.is_empty() && *description != label)
             .map(str::to_owned);
         let digit = digit.and_then(|digit| gpui_kit::Keystroke::parse(&digit.to_string()).ok());
+        let text_selector = format!("{id}:label");
+        let spoken = description.as_ref().map_or_else(
+            || label.clone(),
+            |description| format!("{label}. {description}"),
+        );
         // An option's description says what choosing it does, so it shows with the label.
         Some(
             Button::new(id.clone())
                 .debug_selector(move || id.to_string())
+                .accessibility_label(spoken)
                 .ghost()
                 .small()
                 .w_full()
                 .h_auto()
                 .py_1()
-                .justify_start()
                 .disabled(pending)
                 .selected(selected)
                 .when_some(digit, |button, digit| {
                     button.child(gpui_kit::component::kbd::Kbd::new(digit))
                 })
+                // A button centers its content; filling the row keeps the text at its start.
                 .child(
                     div()
+                        .debug_selector(move || text_selector)
+                        .flex_grow(1.)
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .items_start()
@@ -1362,6 +1383,7 @@ impl NativeRequestView {
         &self,
         request: &NativeAgentRequest,
         pending: bool,
+        room: gpui_kit::Pixels,
         cx: &Context<Self>,
     ) -> gpui_kit::Div {
         let count = questions(request).count();
@@ -1422,7 +1444,13 @@ impl NativeRequestView {
                         )),
                 )
             })
-            .children(question)
+            .child(
+                div()
+                    .id(gpui_kit::SharedString::from(format!("question-body:{id}")))
+                    .max_h(room)
+                    .overflow_y_scrollbar()
+                    .children(question),
+            )
     }
 
     fn render_question(

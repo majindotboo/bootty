@@ -163,7 +163,6 @@ impl NativeAgentSessionView {
             .small()
             .flex_1()
             .min_w_0()
-            .justify_start()
             .accessibility_label(format!("Open subagent {}", subagent_label(agent)))
             .child(subagent_avatar(agent, cx))
             .when_some(agent.provider, |row, provider| {

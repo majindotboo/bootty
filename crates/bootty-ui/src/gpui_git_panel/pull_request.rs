@@ -1381,7 +1381,6 @@ impl PullRequestView {
                     .ghost()
                     .flex_1()
                     .min_w_0()
-                    .justify_start()
                     .child(crate::gpui::sized_icon(
                         crate::gpui_prompt_attachments::icon(&path),
                         crate::gpui::IconSize::Small,

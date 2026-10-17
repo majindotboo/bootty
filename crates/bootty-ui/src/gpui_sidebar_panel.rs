@@ -118,7 +118,6 @@ impl SubagentsPanel {
                                     .ghost()
                                     .small()
                                     .w_full()
-                                    .justify_start()
                                     .child(subagent_avatar(agent, cx))
                                     .accessibility_label(format!(
                                         "Open subagent {}",
