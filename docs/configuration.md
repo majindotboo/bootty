@@ -143,10 +143,6 @@ fit-cell-height = true
 
 [chrome]
 tabs-use-session-color = true
-top-bar = true
-bottom-bar = false
-status-height = 30
-status-background = "#1e1e2e"
 notched-fullscreen-black-chrome = true
 gap = 0
 unfocused-sidebar-dim = 0.16
@@ -644,7 +640,7 @@ Before replacement, Bootty compares the file with the draft's original bytes,
 including comments. A stale draft cannot overwrite an observed external edit,
 deletion, or newly created file. Settings retains rejected edits and offers
 **Discard unsaved changes** to return to the accepted config before editing again.
-Catalog refreshes preserve unsaved status segments and environment rows. A successful
+Catalog refreshes preserve unsaved environment rows. A successful
 save replaces the editor's accepted config and document together; untouched values
 follow subsequent config reloads. Scalar controls and reset indicators read the
 resolved accepted values, including values inherited from includes and legacy
@@ -661,8 +657,11 @@ Connection tests report results for both saved profiles and unsaved drafts.
 
 ## Compatibility notes
 
-- Status and sidebar modules are native implementations. Status segments support
-  `session`, `windows`, `clock`, and `sysinfo`; the sidebar includes native session
+- The status bar has one layout: the session's tabs at the left, and keep-awake, CPU,
+  memory, power, date and time at the right, a tab bar tall. `top-bar`, `bottom-bar`,
+  `status-bar`, `status-height`, `status-background`, `top-segment`, `status-segment`
+  and `bottom-segment` still load and have no effect.
+- Sidebar modules are native implementations; the sidebar includes native session
   facts and agent integrations. Existing Lua/Luau files under the config tree
   and raw `[extensions]` values are preserved, but are not executed. Native Pi,
   Codex, and Claude integration setup is documented in [agent integrations](agent-integrations.md).

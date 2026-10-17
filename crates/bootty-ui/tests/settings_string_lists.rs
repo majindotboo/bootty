@@ -26,7 +26,6 @@ fn session() -> SettingsSession {
         },
         Catalogs {
             font_families: vec!["Berkeley Mono".to_owned(), "Symbols Nerd Font".to_owned()].into(),
-            ..Catalogs::default()
         },
     )
 }

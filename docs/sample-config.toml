@@ -97,44 +97,15 @@ black = "auto"
 tabs-use-session-color = true
 left-dock-toggle = true
 right-dock-toggle = true
-# Live-reloaded app chrome. The default modules are in the top bar; enable the bottom bar
-# independently when its configured modules should be visible.
-top-bar = true
-bottom-bar = false
-status-height = 30
-# status-background = "#11131a"
+# Live-reloaded app chrome. The status bar has one layout: tabs at the left, the machine's
+# state and the time at the right.
 # In dark mode on notched fullscreen displays, use solid black for sidebar,
-# top/bottom bars, and split dividers so the notch band blends into the screen.
+# status bar, and split dividers so the notch band blends into the screen.
 notched-fullscreen-black-chrome = true
 gap = 0
 # Dim inactive panes by overlay opacity in the 0.0-1.0 range.
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.0
-
-# Top- and bottom-bar segments are composed left/center/right. Each segment names
-# a native module: session, windows, clock, or sysinfo. Session and window tabs
-# use the session's sidebar color. Custom Lua/Luau modules are unsupported;
-# existing files and configuration remain intact and Settings reports them.
-[[chrome.top-segment]]
-align = "left"
-module = "session"
-
-[[chrome.top-segment]]
-align = "left"
-module = "windows"
-
-[[chrome.top-segment]]
-align = "right"
-module = "sysinfo"
-
-[[chrome.top-segment]]
-align = "right"
-module = "clock"
-
-# To place a module below the terminal, set bottom-bar = true and add entries here.
-# [[chrome.bottom-segment]]
-# align = "right"
-# module = "clock"
 
 [chrome.tabs]
 # Terminal and sidebar tabs share one appearance and close-button setting.

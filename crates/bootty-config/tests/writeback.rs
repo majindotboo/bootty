@@ -6,11 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bootty_config::color::Color;
 use bootty_config::config::{
-    ExtensionSettingValue, SegmentAlign, SshAuthenticationConfig, SshHostKeyPolicyConfig,
-    SshProfileConfig, StatusSegment, commit_config_document, load_config_document,
-    load_config_from_path, load_or_create_config_document, update_config_document,
+    ExtensionSettingValue, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
+    commit_config_document, load_config_document, load_config_from_path,
+    load_or_create_config_document, update_config_document,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -373,91 +372,6 @@ fn accepted_documents_can_be_edited_again_without_reloading() {
         assert_eq!(accepted.config.window.title, title);
         document = accepted.document;
     }
-}
-
-#[test]
-fn status_bar_writeback_preserves_segments_legacy_cleanup_comments_and_order() {
-    let directory = assert_fs::TempDir::new().expect("temporary config directory");
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        "# keep this comment\ninclude = [\"?local.toml\"]\n\n[window]\n# keep window comment\ntitle = \"Keep\"\n\n[chrome]\nstatus-bar = false\nstatus-segment = [{ module = \"legacy\" }]\ntop-segment = [{ module = \"old-top\" }]\nbottom-segment = [{ module = \"old-bottom\" }]\nsidebar = true\n",
-    )
-    .expect("write initial config");
-
-    let top_segments = vec![
-        StatusSegment {
-            align: SegmentAlign::Left,
-            module: "left".to_owned(),
-            fg: Some(Color {
-                r: 0xab,
-                g: 0xcd,
-                b: 0xef,
-                a: 0xff,
-            }),
-            bg: None,
-            icon: Some(String::new()),
-        },
-        StatusSegment {
-            align: SegmentAlign::Center,
-            module: "center".to_owned(),
-            fg: None,
-            bg: Some(Color {
-                r: 0x01,
-                g: 0x02,
-                b: 0x03,
-                a: 0x80,
-            }),
-            icon: Some("◆".to_owned()),
-        },
-        StatusSegment {
-            align: SegmentAlign::Right,
-            module: "right".to_owned(),
-            ..StatusSegment::default()
-        },
-    ];
-    let bottom_segments = vec![StatusSegment {
-        align: SegmentAlign::Right,
-        module: "bottom".to_owned(),
-        ..StatusSegment::default()
-    }];
-
-    update_config_document(&path, |document| {
-        document.set_bottom_status_segments(&bottom_segments)
-    })
-    .expect("write bottom status segments");
-    let after_bottom = fs::read_to_string(&path).expect("read bottom status segments");
-    assert!(after_bottom.contains("status-bar = false"));
-    assert!(after_bottom.contains("status-segment = [{ module = \"legacy\" }]"));
-
-    update_config_document(&path, |document| {
-        document.set_top_bar_enabled(true)?;
-        document.set_top_status_segments(&top_segments)
-    })
-    .expect("write top status segments");
-
-    let written = fs::read_to_string(&path).expect("read status segments");
-    assert!(written.contains("# keep this comment"));
-    assert!(written.contains("# keep window comment"));
-    assert!(written.contains("sidebar = true"));
-    assert!(!written.contains("status-bar ="));
-    assert!(!written.contains("status-segment ="));
-    assert!(written.contains("top-bar = true"));
-    assert!(written.contains("align = \"left\""));
-    assert!(written.contains("align = \"center\""));
-    assert!(written.contains("align = \"right\""));
-    assert!(written.contains("fg = \"#abcdef\""));
-    assert!(written.contains("bg = \"#01020380\""));
-    assert!(!written.contains("icon = \"\""));
-    assert!(written.find("top-segment").unwrap() < written.find("bottom-segment").unwrap());
-    assert!(written.find("include").unwrap() < written.find("[window]").unwrap());
-    assert!(written.find("[window]").unwrap() < written.find("[chrome]").unwrap());
-
-    let config = load_config_from_path(&path).expect("load status segments");
-    let mut expected_top_segments = top_segments;
-    expected_top_segments[0].icon = None;
-    assert_eq!(config.chrome.top_segments, expected_top_segments);
-    assert_eq!(config.chrome.bottom_segments, bottom_segments);
 }
 
 #[cfg(unix)]

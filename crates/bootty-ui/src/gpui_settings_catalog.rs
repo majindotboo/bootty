@@ -342,8 +342,7 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
             || id.starts_with("colors.")
             || matches!(
                 id,
-                "chrome.status-background"
-                    | "chrome.pane-divider-color"
+                "chrome.pane-divider-color"
                     | "chrome.pane-focus-border-color"
                     | "sidebar.background"
                     | "sidebar.foreground"
@@ -369,13 +368,7 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
         "chrome.left-dock-toggle"
         | "chrome.right-dock-toggle"
         | "chrome.panel-tab-style"
-        | "chrome.panel-tabs"
-        | "chrome.top-bar"
-        | "chrome.bottom-bar"
-        | "chrome.status-height"
-        | "chrome.top-segment"
-        | "chrome.bottom-segment"
-        | "multiplexer.hide-tmux-status" => SettingsCategory::Panels,
+        | "chrome.panel-tabs" => SettingsCategory::Panels,
         "chrome.notched-fullscreen-black-chrome" => SettingsCategory::WindowAndLayout,
 
         _ => match legacy_page {
@@ -385,7 +378,7 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
             "permissions" => SettingsCategory::Permissions,
             "keys" => SettingsCategory::Keymap,
             "window" => SettingsCategory::WindowAndLayout,
-            "panels" | "sidebar" | "status" => SettingsCategory::Panels,
+            "panels" | "sidebar" => SettingsCategory::Panels,
             "remotes" => SettingsCategory::Remotes,
             "providers" => SettingsCategory::Ai,
             "general" => SettingsCategory::General,
@@ -427,9 +420,7 @@ pub fn settings_section<'a>(
             "colors.*" | "appearance.light.colors.*" | "appearance.dark.colors.*" => {
                 "TERMINAL COLORS"
             }
-            "chrome.status-background"
-            | "chrome.pane-divider-color"
-            | "chrome.pane-focus-border-color" => "WINDOW COLORS",
+            "chrome.pane-divider-color" | "chrome.pane-focus-border-color" => "WINDOW COLORS",
             id if id.starts_with("sidebar.") => "SIDEBAR COLORS",
             "font.ui-family" | "font.ui-size" | "font.ui-use-terminal-family" => "INTERFACE FONT",
             id if id.starts_with("font.ui-weights.") => "INTERFACE WEIGHTS",
@@ -443,11 +434,6 @@ pub fn settings_section<'a>(
             | "chrome.right-dock-toggle"
             | "chrome.panel-tab-style"
             | "chrome.panel-tabs" => "SIDEBARS",
-            "chrome.top-bar"
-            | "chrome.bottom-bar"
-            | "chrome.status-height"
-            | "multiplexer.hide-tmux-status" => "STATUS BARS",
-            "chrome.top-segment" | "chrome.bottom-segment" => "STATUS LAYOUT",
             _ => source_section,
         },
         _ => source_section,
@@ -546,12 +532,6 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
             "chrome.right-dock-toggle" => 2,
             "chrome.tabs-use-session-color" => 9,
             id if id.starts_with("chrome.tabs.") => 10,
-            "chrome.top-bar" => 20,
-            "chrome.bottom-bar" => 21,
-            "chrome.status-height" => 22,
-            "multiplexer.hide-tmux-status" => 23,
-            "chrome.top-segment" => 40,
-            "chrome.bottom-segment" => 41,
             _ => 100,
         },
         SettingsCategory::Terminal => match id {
@@ -674,7 +654,6 @@ fn settings_row_id(row: &SettingsRow) -> Option<&str> {
         | SettingsRow::Environment { id, .. }
         | SettingsRow::FontFeatures { id, .. }
         | SettingsRow::AnsiPalette { id, .. } => Some(id),
-        SettingsRow::StatusSegments(snapshot) => Some(&snapshot.id),
         SettingsRow::Section(_)
         | SettingsRow::Notice { .. }
         | SettingsRow::ModuleIntegrations(_)

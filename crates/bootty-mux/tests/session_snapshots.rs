@@ -321,7 +321,7 @@ fn checkpoint_reload_and_lifecycle_write_preserve_committed_history(
     );
     let mut earlier_ui = saved.clone();
     earlier_ui.terminal_snapshot = None;
-    earlier_ui.state.hidden = true;
+    earlier_ui.state.archived = true;
     repository
         .commit_binding_state(scope, &SessionMembership::from_sessions(vec![earlier_ui]))
         .expect("commit lifecycle change without replacing history");
@@ -334,7 +334,7 @@ fn checkpoint_reload_and_lifecycle_write_preserve_committed_history(
         .sessions()
         .get("logical")
         .unwrap();
-    assert!(current.state.hidden);
+    assert!(current.state.archived);
     assert_eq!(current.terminal_snapshot.as_deref(), Some(&checkpoint));
     assert_eq!(current.display_name, saved.display_name);
 }
@@ -433,7 +433,7 @@ fn supported_lifecycle_schema_evolves_without_losing_saved_work() {
         explicit: true,
         cwd: "/tmp".into(),
         state: SessionState {
-            hidden: true,
+            archived: true,
             ..SessionState::default()
         },
         terminal_snapshot: None,

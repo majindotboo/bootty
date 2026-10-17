@@ -293,7 +293,7 @@ fn task_view_counts(
     snapshot: &SidebarSnapshot,
     search: &Search<'_>,
     project_filter: Option<&str>,
-) -> [(TaskView, usize); 5] {
+) -> [(TaskView, usize); 4] {
     let view_rows = filtered_rows(
         &snapshot.rows,
         search,
@@ -434,7 +434,7 @@ struct SidebarRows {
     shown_anchors: Rc<std::cell::RefCell<Vec<String>>>,
     width: f32,
     task_view: TaskView,
-    views: [(TaskView, usize); 5],
+    views: [(TaskView, usize); 4],
     pointer_hovered_session: Option<SessionTarget>,
     colors: ChromePalette,
     radius: Pixels,
@@ -1871,7 +1871,6 @@ impl SidebarRows {
                         TaskView::Settled => Some(("Settled", "check", self.colors.muted)),
                         TaskView::Archived => Some(("Archived", "archive", self.colors.muted)),
                         TaskView::Snoozed => Some(("Snoozed", "clock", self.colors.muted)),
-                        TaskView::Hidden => Some(("Hidden", "eye-off", self.colors.muted)),
                         TaskView::Deleted => Some(("Deleted", "trash", self.colors.muted)),
                     }
                 }
@@ -3061,12 +3060,11 @@ fn row_accessible_label(row: &SidebarRow, now: i64) -> String {
     label
 }
 
-const TASK_VIEWS: [TaskView; 5] = [
+const TASK_VIEWS: [TaskView; 4] = [
     TaskView::Active,
     TaskView::Settled,
     TaskView::Archived,
     TaskView::Snoozed,
-    TaskView::Hidden,
 ];
 
 const fn task_view_label(view: TaskView) -> &'static str {
@@ -3075,7 +3073,6 @@ const fn task_view_label(view: TaskView) -> &'static str {
         TaskView::Settled => "Settled",
         TaskView::Archived => "Archived",
         TaskView::Snoozed => "Snoozed",
-        TaskView::Hidden => "Hidden",
         TaskView::Deleted => "Deleted",
     }
 }
@@ -3149,19 +3146,6 @@ pub(super) fn saved_session_menu(
         if task.state.snoozed_until.is_some_and(|until| until > now) {
             rows.extend(row("Wake", "session.unsnooze", false));
         }
-        rows.extend(row(
-            if task.state.hidden {
-                "Show session"
-            } else {
-                "Hide session"
-            },
-            if task.state.hidden {
-                "session.show"
-            } else {
-                "session.hide"
-            },
-            false,
-        ));
     }
     rows.extend(
         row(
@@ -3460,7 +3444,6 @@ const fn task_view_icon(view: TaskView) -> gpui_kit::assets::IconName {
         TaskView::Settled => I::CircleCheck,
         TaskView::Archived => I::Archive,
         TaskView::Snoozed => I::Clock,
-        TaskView::Hidden => I::EyeOff,
         TaskView::Deleted => I::Trash,
     }
 }

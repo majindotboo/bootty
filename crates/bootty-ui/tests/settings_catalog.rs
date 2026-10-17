@@ -166,13 +166,9 @@ fn custom_setting_surface(spec: &SettingSpec, editor: SettingEditor) -> NativeSe
         | "font.features"
         | "font.cell-width"
         | "font.cell-height"
-        | "chrome.top-bar"
-        | "chrome.status-background"
         | "chrome.pane-divider-color"
         | "chrome.notched-fullscreen-black-chrome"
         | "chrome.pane-focus-border-color"
-        | "chrome.top-segment"
-        | "chrome.bottom-segment"
         | "sidebar.background"
         | "sidebar.foreground"
         | "sidebar.selected"
@@ -535,7 +531,6 @@ fn ui_terminal_font_selection_does_not_hide_unrelated_font_metrics(#[case] id: &
 #[case("session.max-scrollback", "shell", SettingsCategory::Terminal)]
 #[case("input.copy-on-select", "keys", SettingsCategory::Terminal)]
 #[case("input.macos-option-as-alt", "keys", SettingsCategory::Terminal)]
-#[case("chrome.top-segment", "status", SettingsCategory::Panels)]
 #[case("sidebar.session-modules", "sidebar", SettingsCategory::Panels)]
 #[case("multiplexer.remote.host", "remotes", SettingsCategory::Remotes)]
 #[case(

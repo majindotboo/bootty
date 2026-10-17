@@ -1085,8 +1085,8 @@ pub(super) fn popup_session_menu(
                 menu
             });
         }
-        // Snooze goes before Hide, or before Archive when several sessions share the menu.
-        if (matches!(&row.intent, ChromeIntent::Command(invocation) if matches!(invocation.command.as_str(), "session.hide" | "session.show"))
+        // Snooze goes before Archive.
+        if (matches!(&row.intent, ChromeIntent::Command(invocation) if matches!(invocation.command.as_str(), "session.archive" | "session.unarchive"))
             || matches!(&row.intent, ChromeIntent::Commands(invocations) if invocations.first().is_some_and(|invocation| invocation.command == "session.archive")))
             && !snooze.is_empty()
         {
@@ -1249,8 +1249,6 @@ fn command_icon(command: &str) -> Option<gpui_kit::assets::IconName> {
         "session.unarchive" => Some(I::ArchiveRestore),
         "session.delete" => Some(I::Trash),
         "session.restore" => Some(I::Undo2),
-        "session.show" => Some(I::Eye),
-        "session.hide" => Some(I::EyeOff),
         _ => None,
     }
 }

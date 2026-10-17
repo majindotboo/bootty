@@ -4456,7 +4456,6 @@ fn saved_lifecycle_is_durable_and_independent_of_backend_attachments(
         &[
             ("session.settle", None),
             ("session.snooze", Some("100")),
-            ("session.hide", None),
             ("session.archive", None),
         ],
     );
@@ -4465,7 +4464,7 @@ fn saved_lifecycle_is_durable_and_independent_of_backend_attachments(
     assert_eq!(deleted[1], sibling_before);
     assert_eq!(
         deleted[0]["state"],
-        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":true, "deleted":false, "hidden":true, "snoozed_until":100, "last_activity_at":initial[0]["state"]["last_activity_at"], "auto_settle_disabled":false, "projectless":false})
+        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":true, "deleted":false, "snoozed_until":100, "last_activity_at":initial[0]["state"]["last_activity_at"], "auto_settle_disabled":false, "projectless":false})
     );
     assert_eq!(deleted[0]["attachment"].is_string(), attached);
     // A Binding for another Space cannot mutate the identity despite sharing a backend.
@@ -4491,7 +4490,7 @@ fn saved_lifecycle_is_durable_and_independent_of_backend_attachments(
     let restored = saved_metadata_listing(&mut state, binding);
     assert_eq!(
         restored[0]["state"],
-        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":false, "deleted":false, "hidden":true, "snoozed_until":100, "last_activity_at":null, "auto_settle_disabled":false, "projectless":false})
+        serde_json::json!({"lifecycle":"settled", "pinned":false, "archived":false, "deleted":false, "snoozed_until":100, "last_activity_at":null, "auto_settle_disabled":false, "projectless":false})
     );
     assert_eq!(restored[1], sibling_before);
     assert_eq!(creates.load(Ordering::SeqCst), 0);
@@ -4508,8 +4507,6 @@ fn saved_lifecycle_is_durable_and_independent_of_backend_attachments(
 #[case("session.activate")]
 #[case("session.snooze")]
 #[case("session.unsnooze")]
-#[case("session.hide")]
-#[case("session.show")]
 #[case("session.delete")]
 fn failed_lifecycle_write_keeps_live_and_reloaded_state(
     directory: assert_fs::TempDir,
@@ -4530,8 +4527,6 @@ fn failed_lifecycle_write_keeps_live_and_reloaded_state(
         change_saved_state(&mut state, &binding, &[("session.settle", None)]);
     } else if command == "session.unsnooze" {
         change_saved_state(&mut state, &binding, &[("session.snooze", Some("100"))]);
-    } else if command == "session.show" {
-        change_saved_state(&mut state, &binding, &[("session.hide", None)]);
     }
     let before = saved_metadata_listing(&mut state, binding.clone());
     let database =
@@ -4554,46 +4549,6 @@ fn failed_lifecycle_write_keeps_live_and_reloaded_state(
     let mut restarted = app_state(config, backends);
     let binding = listed_spaces(&mut restarted)[0].2.clone();
     assert_eq!(saved_metadata_listing(&mut restarted, binding), before);
-    assert_eq!(creates.load(Ordering::SeqCst), 0);
-}
-
-#[rstest]
-#[case::attached(true)]
-#[case::detached(false)]
-fn hide_and_show_preserve_saved_work_and_snooze_across_restart(
-    directory: assert_fs::TempDir,
-    #[case] attached: bool,
-) {
-    let SavedLifecycleWorkspace {
-        config,
-        backends,
-        sessions,
-        creates,
-        mut state,
-    } = saved_lifecycle_workspace(directory.path(), attached);
-    let binding = listed_spaces(&mut state)[0].2.clone();
-    change_saved_state(
-        &mut state,
-        &binding,
-        &[("session.settle", None), ("session.snooze", Some("100"))],
-    );
-    let before = saved_metadata_listing(&mut state, binding.clone());
-    let backend_before = sessions.lock().expect("backend").clone();
-    change_saved_state(&mut state, &binding, &[("session.hide", None)]);
-    let mut hidden = before.clone();
-    hidden[0]["state"]["hidden"] = true.into();
-    assert_eq!(saved_metadata_listing(&mut state, binding), hidden);
-    drop(state);
-    let mut state = app_state(config.clone(), Arc::clone(&backends));
-    let binding = listed_spaces(&mut state)[0].2.clone();
-    assert_eq!(saved_metadata_listing(&mut state, binding.clone()), hidden);
-    change_saved_state(&mut state, &binding, &[("session.show", None)]);
-    assert_eq!(saved_metadata_listing(&mut state, binding), before);
-    drop(state);
-    let mut state = app_state(config, backends);
-    let binding = listed_spaces(&mut state)[0].2.clone();
-    assert_eq!(saved_metadata_listing(&mut state, binding), before);
-    assert_eq!(*sessions.lock().expect("backend"), backend_before);
     assert_eq!(creates.load(Ordering::SeqCst), 0);
 }
 
@@ -4824,11 +4779,7 @@ fn failed_native_launch_retries_one_saved_identity_and_preserves_its_content(
         assert_eq!(saved["cwd"], cwd);
         assert!(saved["attachment"].is_null());
     }
-    for (command, extra) in [
-        ("session.settle", None),
-        ("session.hide", None),
-        ("session.snooze", Some("9000")),
-    ] {
+    for (command, extra) in [("session.settle", None), ("session.snooze", Some("9000"))] {
         let outcome = saved_metadata_command(
             &mut state,
             command,

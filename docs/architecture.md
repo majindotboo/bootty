@@ -1096,10 +1096,10 @@ descendants. This prevents an orphaned observer from retaining the conversation'
 writer lock after an application crash. Ordinary stop also reaps that group.
 
 Saved session lifecycle is independent of process activity. Active and Settled
-are durable task states; archive, hide, soft deletion and an optional UTC snooze
+are durable task states; archive, soft deletion and an optional UTC snooze
 deadline control discovery. `session.settle`, `activate`, `archive`, `unarchive`,
-`snooze`, `unsnooze`, `hide`, `show`, `delete` and `restore` use the exact Binding
-and saved identity. These commands preserve all terminal attachments and content.
+`snooze`, `unsnooze`, `delete` and `restore` use the exact Binding and saved
+identity. A session saved hidden by an earlier version loads archived. These commands preserve all terminal attachments and content.
 Soft-deleted sessions must be restored before reopening. The repository updates
 the supported identity schema transactionally; malformed or unsupported formats
 fail without replacing existing records.

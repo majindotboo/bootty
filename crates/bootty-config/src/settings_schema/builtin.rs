@@ -117,6 +117,12 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
         &["font-feature"],
         &["chrome", "status-bar"],
         &["chrome", "status-segment"],
+        &["chrome", "top-bar"],
+        &["chrome", "bottom-bar"],
+        &["chrome", "status-height"],
+        &["chrome", "status-background"],
+        &["chrome", "top-segment"],
+        &["chrome", "bottom-segment"],
         &["chrome", "window-tabs"],
         &["chrome", "sidebar"],
         &["chrome", "sidebar-width"],
@@ -1291,36 +1297,16 @@ fn terminal_environment_specs() -> [SettingSpec; 7] {
     ]
 }
 
-fn status_bar_specs() -> [SettingSpec; 3] {
-    [
-        spec(
-            &["chrome", "bottom-bar"],
-            "Bottom bar",
-            "",
-            "status",
-            "BARS",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.chrome.bottom_bar)),
-        ),
-        spec(
-            &["chrome", "status-height"],
-            "Height",
-            "",
-            "status",
-            "STATUS BARS",
-            number(20.0..=80.0, NumberControl::Slider, " px"),
-            SettingDefault::Field(|config| SettingValue::Number(config.chrome.status_height)),
-        ),
-        spec(
-            &["multiplexer", "hide-tmux-status"],
-            "Hide tmux's own bar",
-            "Avoid duplicate status bars when the tmux backend is active.",
-            "status",
-            "STATUS BARS",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.multiplexer.hide_tmux_status)),
-        ),
-    ]
+fn status_bar_specs() -> [SettingSpec; 1] {
+    [spec(
+        &["multiplexer", "hide-tmux-status"],
+        "Hide tmux's own bar",
+        "Avoid duplicate status bars when the tmux backend is active.",
+        "general",
+        "MULTIPLEXER",
+        SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.multiplexer.hide_tmux_status)),
+    )]
 }
 
 fn diagnostics_specs() -> [SettingSpec; 1] {
@@ -1484,23 +1470,8 @@ fn font_styles_specs() -> [SettingSpec; 9] {
     ]
 }
 
-fn custom_chrome_specs() -> [SettingSpec; 7] {
+fn custom_chrome_specs() -> [SettingSpec; 3] {
     [
-        spec(
-            &["chrome", "top-bar"],
-            "Top bar",
-            "",
-            "status",
-            "BARS",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.chrome.top_bar)),
-        ),
-        custom(
-            &["chrome", "status-background"],
-            "colors",
-            "CHROME COLORS",
-            SettingEditor::Colors,
-        ),
         custom(
             &["chrome", "pane-divider-color"],
             "colors",
@@ -1523,18 +1494,6 @@ fn custom_chrome_specs() -> [SettingSpec; 7] {
             "colors",
             "CHROME COLORS",
             SettingEditor::Colors,
-        ),
-        custom(
-            &["chrome", "top-segment"],
-            "status",
-            "SEGMENTS",
-            SettingEditor::Status,
-        ),
-        custom(
-            &["chrome", "bottom-segment"],
-            "status",
-            "SEGMENTS",
-            SettingEditor::Status,
         ),
     ]
 }

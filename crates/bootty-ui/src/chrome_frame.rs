@@ -519,9 +519,7 @@ pub fn snapshot(
     let status_background = if black_notch_chrome {
         Rgba::rgb(0, 0, 0)
     } else {
-        chrome
-            .status_background
-            .map_or(sidebar_tint, crate::theme::config_rgba)
+        sidebar_tint
     };
     let layout_gap = if chrome.sidebar && !facts.fullscreen {
         chrome.gap
@@ -529,16 +527,8 @@ pub fn snapshot(
         0.0
     };
     let (top_status, bottom_status) = status_bars(state, native, projection, status_background);
-    let status_height = if top_status.iter().chain(bottom_status.iter()).any(|status| {
-        status
-            .segments
-            .iter()
-            .any(|segment| segment.surface == "windows")
-    }) {
-        chrome.status_height.max(crate::gpui::UI_TAB_BAR_HEIGHT)
-    } else {
-        chrome.status_height
-    };
+    // The status bar holds the tab strip, so it is a tab bar tall.
+    let status_height = crate::gpui::UI_TAB_BAR_HEIGHT;
     ChromeSnapshot {
         palette,
         layout: ChromeLayout {
@@ -655,30 +645,17 @@ fn status_bars(
     projection: &ChromeProjection,
     status_background: Rgba,
 ) -> (Option<StatusBarSnapshot>, Option<StatusBarSnapshot>) {
-    let chrome = &state.config().chrome;
     let theme = state.ui_theme().palette;
-    let mut top_status = chrome.top_bar.then(|| {
-        status_snapshot(
-            state,
-            "top",
-            &chrome.top_segments,
-            native,
-            theme,
-            projection,
-            status_background,
-        )
-    });
-    let mut bottom_status = chrome.bottom_bar.then(|| {
-        status_snapshot(
-            state,
-            "bottom",
-            &chrome.bottom_segments,
-            native,
-            theme,
-            projection,
-            status_background,
-        )
-    });
+    let mut top_status = Some(status_snapshot(
+        state,
+        "top",
+        &TOP_BAR,
+        native,
+        theme,
+        projection,
+        status_background,
+    ));
+    let mut bottom_status = None;
     for kind in bootty_config::config::PanelKind::ALL
         .into_iter()
         .filter(|kind| *kind != bootty_config::config::PanelKind::Agents)
@@ -1681,38 +1658,36 @@ fn sidebar_footer(
     rows
 }
 
+/// The status bar's one layout: the session, when the sidebar doesn't show it, and the session's
+/// tabs at the left; the machine's state and the time at the right.
+const TOP_BAR: [(StatusAlignment, &str); 4] = [
+    (StatusAlignment::Left, "session"),
+    (StatusAlignment::Left, "windows"),
+    (StatusAlignment::Right, "sysinfo"),
+    (StatusAlignment::Right, "clock"),
+];
+
 fn status_snapshot(
     state: &AppState,
     key: &str,
-    configured: &[bootty_config::config::StatusSegment],
+    modules: &[(StatusAlignment, &str)],
     native: &NativeChrome,
     theme: crate::gpui::UiPalette,
     projection: &ChromeProjection,
     background: Rgba,
 ) -> StatusBarSnapshot {
-    let segments = configured
+    let segments = modules
         .iter()
         .enumerate()
-        .filter_map(|(source_slot, configured)| {
-            let mut items = status_items(state, &configured.module, native, projection, theme);
+        .filter_map(|(source_slot, &(align, module))| {
+            let mut items = status_items(state, module, native, projection, theme);
             for (index, item) in items.iter_mut().enumerate() {
                 item.key = format!("{source_slot}:{index}:{}", item.key);
-                item.icon = item.icon.take().or_else(|| configured.icon.clone());
-                item.foreground = item
-                    .foreground
-                    .or_else(|| configured.fg.map(crate::theme::config_rgba));
-                item.background = item
-                    .background
-                    .or_else(|| configured.bg.map(crate::theme::config_rgba));
             }
             (!items.is_empty()).then(|| StatusSegmentSnapshot {
-                align: match configured.align {
-                    bootty_config::config::SegmentAlign::Left => StatusAlignment::Left,
-                    bootty_config::config::SegmentAlign::Center => StatusAlignment::Center,
-                    bootty_config::config::SegmentAlign::Right => StatusAlignment::Right,
-                },
+                align,
                 source_slot,
-                surface: configured.module.clone(),
+                surface: module.to_owned(),
                 items,
             })
         })

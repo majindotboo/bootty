@@ -182,7 +182,6 @@ pub enum SettingsRow {
         help: String,
         editor: FontFeatureEditorSnapshot,
     },
-    StatusSegments(StatusSegmentsSnapshot),
     /// Native integration controls and any unsupported-source diagnostic for one provider.
     ModuleIntegrations(ModuleIntegrationsSnapshot),
     Remote(RemoteEditorSnapshot),
@@ -250,72 +249,6 @@ pub struct SettingsListItem {
     pub label: String,
     pub detail: Option<String>,
     pub selected: bool,
-}
-
-/// One complete structured status-bar editor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StatusSegmentsSnapshot {
-    pub id: String,
-    pub label: String,
-    pub help: String,
-    pub modules: Vec<SettingsChoice>,
-    pub segments: Vec<StatusSegmentEditorRow>,
-    pub add_label: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StatusSegmentEditorRow {
-    pub module: String,
-    pub alignment: StatusSegmentAlignment,
-    pub foreground: Option<String>,
-    pub background: Option<String>,
-    pub icon: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum StatusSegmentAlignment {
-    #[default]
-    Left,
-    Center,
-    Right,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StatusSegmentColor {
-    Foreground,
-    Background,
-}
-
-/// One interaction emitted by the structured status-segment editor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StatusSegmentIntent {
-    Add {
-        module: String,
-    },
-    Remove {
-        index: usize,
-    },
-    Move {
-        index: usize,
-        offset: isize,
-    },
-    SetModule {
-        index: usize,
-        module: String,
-    },
-    SetAlignment {
-        index: usize,
-        alignment: StatusSegmentAlignment,
-    },
-    SetColor {
-        index: usize,
-        field: StatusSegmentColor,
-        value: Option<String>,
-    },
-    SetIcon {
-        index: usize,
-        icon: Option<String>,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -426,10 +359,6 @@ pub enum SettingsIntent {
         id: String,
         colors: Vec<String>,
     },
-    EditStatusSegments {
-        id: String,
-        edit: StatusSegmentIntent,
-    },
     SetRemoteField {
         profile_id: String,
         field_id: String,
@@ -538,9 +467,7 @@ impl ThemeColorGroup {
         }
         if matches!(
             id,
-            "chrome.status-background"
-                | "chrome.pane-divider-color"
-                | "chrome.pane-focus-border-color"
+            "chrome.pane-divider-color" | "chrome.pane-focus-border-color"
         ) {
             return Some(Self::Window);
         }

@@ -3413,10 +3413,6 @@ fn saved_task_views_filter_without_backend_actions_and_keep_row_heights(cx: &mut
             ..SessionState::default()
         },
         SessionState {
-            hidden: true,
-            ..SessionState::default()
-        },
-        SessionState {
             deleted: true,
             ..SessionState::default()
         },
@@ -3445,9 +3441,8 @@ fn saved_task_views_filter_without_backend_actions_and_keep_row_heights(cx: &mut
         "sidebar-row-saved-2",
         "sidebar-row-saved-3",
         "sidebar-row-saved-4",
-        "sidebar-row-saved-5",
     ];
-    for selected in [0, 2, 3, 4] {
+    for selected in [0, 2, 3] {
         choose_task_view(selected, cx);
         for (index, selector) in row_selectors.into_iter().enumerate() {
             let bounds = cx.debug_bounds(selector);
@@ -3479,10 +3474,9 @@ fn saved_task_keyboard_menu_captures_binding_identity_and_absolute_snooze(cx: &m
     for (position, preset, command, deadline) in [
         (3, None, "session.pin", None),
         (4, None, "session.settle", None),
-        (6, None, "session.hide", None),
-        (8, None, "session.archive", None),
-        (5, Some(0), "session.snooze", Some("4600")),
-        (5, Some(1), "session.snooze", Some("11800")),
+        (7, None, "session.archive", None),
+        (6, Some(0), "session.snooze", Some("4600")),
+        (6, Some(1), "session.snooze", Some("11800")),
     ] {
         cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
         draw_chrome(cx);
@@ -3617,15 +3611,6 @@ fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
             3,
             5,
             "session.unsnooze",
-        ),
-        (
-            SessionState {
-                hidden: true,
-                ..SessionState::default()
-            },
-            4,
-            6,
-            "session.show",
         ),
     ] {
         let snapshot = saved_task_snapshot(state);
@@ -3884,7 +3869,7 @@ fn attention_filter_uses_observed_attention_and_keeps_other_states_out(cx: &mut 
     }
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    choose_task_view(5, cx);
+    choose_task_view(4, cx);
     for (index, selector) in [
         "sidebar-row-session-0",
         "sidebar-row-session-1",
@@ -4038,7 +4023,7 @@ fn attention_filter_without_observed_attention_renders_the_empty_state(cx: &mut 
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     assert!(cx.debug_bounds("sidebar-row-session").is_some());
-    choose_task_view(5, cx);
+    choose_task_view(4, cx);
     assert!(cx.debug_bounds("sidebar-row-session").is_none());
     assert!(cx.debug_bounds("sidebar-empty-state").is_some());
     probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
@@ -4456,7 +4441,7 @@ fn permanent_session_deletion_requires_the_visible_confirmation(cx: &mut TestApp
     let row = visual.debug_bounds("sidebar-row-session").unwrap();
     visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
     draw_chrome(visual);
-    for _ in 0..9 {
+    for _ in 0..8 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("enter");
@@ -4497,7 +4482,7 @@ fn archiving_a_working_session_asks_first(cx: &mut TestAppContext) {
         let row = visual.debug_bounds("sidebar-row-session").unwrap();
         visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
         draw_chrome(visual);
-        for _ in 0..8 {
+        for _ in 0..7 {
             visual.simulate_keystrokes("down");
         }
         visual.simulate_keystrokes("enter");

@@ -2,21 +2,20 @@ use num_traits::ToPrimitive as _;
 use std::{collections::BTreeMap, sync::Arc};
 
 use bootty_config::{
-    config::{BoottyConfig, ConfigDocument, StatusSegment},
+    config::{BoottyConfig, ConfigDocument},
     settings_schema::{SettingValue, SettingsSchema},
 };
 
 use crate::settings_session::{
     DraftWriteback, FontFeatureDraft, ModuleOutcome, RemoteDraft, RemoteEditorSnapshot,
-    SettingsEffect, SettingsOutcome, SettingsWriteSource, StatusSegmentEdit, dedupe_font_features,
-    remotes::RemoteState, status_segments::apply_status_segment_edit,
+    SettingsEffect, SettingsOutcome, SettingsWriteSource, dedupe_font_features,
+    remotes::RemoteState,
 };
 
 #[derive(Clone, Debug, Default)]
 pub struct Catalogs {
     /// Installed font families reported by the native host text system.
     pub font_families: Arc<[String]>,
-    pub status_modules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -40,9 +39,6 @@ pub struct SettingsSession {
     config: Arc<BoottyConfig>,
     font_families: Arc<[String]>,
     writeback: DraftWriteback,
-    status_modules: Vec<String>,
-    top_status_segments: Option<Vec<StatusSegment>>,
-    bottom_status_segments: Option<Vec<StatusSegment>>,
     remotes: RemoteState,
     integration_errors: BTreeMap<String, String>,
     unscoped_integration_error: Option<String>,
@@ -64,9 +60,6 @@ impl SettingsSession {
             config: accepted.config,
             font_families: catalogs.font_families,
             writeback,
-            status_modules: catalogs.status_modules,
-            top_status_segments: None,
-            bottom_status_segments: None,
             remotes,
             integration_errors: BTreeMap::new(),
             unscoped_integration_error: None,
@@ -109,8 +102,6 @@ impl SettingsSession {
         self.remotes.reconcile(&self.config);
         self.writeback.set_schema(accepted.schema);
         self.writeback.accept(accepted.document, warning);
-        self.top_status_segments = None;
-        self.bottom_status_segments = None;
         if self.environment_unsubmitted {
             if let Err(error) = environment_is_complete(&self.environment) {
                 self.writeback.reject(error);
@@ -127,7 +118,6 @@ impl SettingsSession {
 
     pub fn set_catalogs(&mut self, catalogs: Catalogs) {
         self.font_families = catalogs.font_families;
-        self.status_modules = catalogs.status_modules;
     }
 
     /// Surface validation from a structured editor without mutating the draft.
@@ -265,67 +255,6 @@ impl SettingsSession {
         true
     }
 
-    /// Persist status modules as their real structured config value, rather than a lossy summary.
-    pub fn set_status_segments(&mut self, top: bool, segments: Vec<StatusSegment>) -> bool {
-        let path = if top {
-            ["chrome", "top-segment"]
-        } else {
-            ["chrome", "bottom-segment"]
-        };
-        if !self.writeback.schema().allows_write_path(&path) {
-            self.writeback
-                .reject(format!("unknown setting {}", path.join(".")));
-            return false;
-        }
-        if segments.is_empty() {
-            self.writeback.remove(&path);
-        } else if top {
-            self.writeback.set_top_status_segments(&segments);
-        } else {
-            self.writeback.set_bottom_status_segments(&segments);
-        }
-        if top {
-            self.top_status_segments = Some(segments);
-        } else {
-            self.bottom_status_segments = Some(segments);
-        }
-        self.queue_document_submission();
-        true
-    }
-
-    pub fn edit_status_segments(&mut self, top: bool, edit: StatusSegmentEdit) -> bool {
-        let mut segments = self.status_segments(top).to_vec();
-        if let Err(error) = apply_status_segment_edit(&mut segments, edit) {
-            self.writeback.reject(error);
-            return false;
-        }
-        self.set_status_segments(top, segments)
-    }
-
-    #[must_use]
-    pub fn status_segments(&self, top: bool) -> &[StatusSegment] {
-        let (path, draft, accepted, defaults) = if top {
-            (
-                "chrome.top-segment",
-                &self.top_status_segments,
-                &self.config.chrome.top_segments,
-                &self.defaults.chrome.top_segments,
-            )
-        } else {
-            (
-                "chrome.bottom-segment",
-                &self.bottom_status_segments,
-                &self.config.chrome.bottom_segments,
-                &self.defaults.chrome.bottom_segments,
-            )
-        };
-        if self.writeback.was_removed(path) {
-            defaults
-        } else {
-            draft.as_deref().unwrap_or(accepted)
-        }
-    }
-
     /// Whether a row names a schema-owned value or structured editor.
     #[must_use]
     pub fn can_reset(&self, id: &str) -> bool {
@@ -373,10 +302,6 @@ impl SettingsSession {
         }
         match id {
             "font.features" => self.font_features_are_default(current, defaults),
-            "chrome.top-segment" => self.status_segments(true) == defaults.chrome.top_segments,
-            "chrome.bottom-segment" => {
-                self.status_segments(false) == defaults.chrome.bottom_segments
-            }
             "session.env" => {
                 if self.environment_unsubmitted || self.writeback.has_edit(id) {
                     self.environment
@@ -735,11 +660,6 @@ impl SettingsSession {
     }
 
     #[must_use]
-    pub fn status_modules(&self) -> &[String] {
-        &self.status_modules
-    }
-
-    #[must_use]
     pub fn remotes(&self) -> RemoteEditorSnapshot {
         self.remotes.snapshot()
     }
@@ -912,7 +832,6 @@ fn color_is_default(
         ),
         ["chrome" | "sidebar", _] => {
             let select = |config: &BoottyConfig| match id {
-                "chrome.status-background" => config.chrome.status_background,
                 "chrome.pane-divider-color" => config.chrome.pane_divider_color,
                 "chrome.pane-focus-border-color" => config.chrome.pane_focus_border_color,
                 "sidebar.background" => config.sidebar.background,

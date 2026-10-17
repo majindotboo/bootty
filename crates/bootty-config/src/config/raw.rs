@@ -2,7 +2,7 @@ use super::model::{
     AppearanceMode, BrowserSearchEngine, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
     MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig, OnLastWindowClosed,
     OpenBehavior, PanelTabStyle, PanelTabs, RestoreOnStartup, SidebarPosition, SidebarSortOrder,
-    SshProfileConfig, StatusSegment, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
+    SshProfileConfig, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 use crate::color::Color;
 use serde::{Deserialize, Deserializer};
@@ -108,14 +108,18 @@ pub(super) struct ChromePatch {
     pub(super) dock_tabs: Option<TabPatch>,
     pub(super) terminal_tabs: Option<TabPatch>,
     pub(super) sidebar: Option<bool>,
-    #[serde(alias = "status-bar")]
-    pub(super) top_bar: Option<bool>,
-    pub(super) bottom_bar: Option<bool>,
+    // The status bar has one layout now; its old layout keys still load and do nothing.
+    #[serde(rename = "top-bar", alias = "status-bar")]
+    pub(super) _top_bar: Option<bool>,
+    #[serde(rename = "bottom-bar")]
+    pub(super) _bottom_bar: Option<bool>,
     #[serde(rename = "window-tabs")]
     pub(super) _window_tabs: Option<bool>,
     pub(super) sidebar_width: Option<f32>,
-    pub(super) status_height: Option<f32>,
-    pub(super) status_background: Option<Color>,
+    #[serde(rename = "status-height")]
+    pub(super) _status_height: Option<f32>,
+    #[serde(rename = "status-background")]
+    pub(super) _status_background: Option<Color>,
     pub(super) gap: Option<f32>,
     pub(super) pane_divider_width: Option<f32>,
     pub(super) pane_divider_color: Option<Color>,
@@ -125,9 +129,10 @@ pub(super) struct ChromePatch {
     pub(super) pane_corner_radius: Option<f32>,
     pub(super) unfocused_sidebar_dim: Option<f32>,
     pub(super) unfocused_terminal_dim: Option<f32>,
-    #[serde(alias = "status-segment")]
-    pub(super) top_segment: Option<Vec<StatusSegment>>,
-    pub(super) bottom_segment: Option<Vec<StatusSegment>>,
+    #[serde(rename = "top-segment", alias = "status-segment")]
+    pub(super) _top_segment: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "bottom-segment")]
+    pub(super) _bottom_segment: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

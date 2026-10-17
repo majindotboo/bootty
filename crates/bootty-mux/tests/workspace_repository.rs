@@ -885,7 +885,6 @@ fn saved_lifecycle_round_trips_through_membership_recovery(
         pinned: true,
         archived: true,
         deleted: true,
-        hidden: true,
         snoozed_until: Some(100),
         last_activity_at: Some(90),
         projectless: true,
@@ -917,6 +916,7 @@ fn saved_lifecycle_round_trips_through_membership_recovery(
     Ok(())
 }
 
+/// Older saved state loads with pin off, and a session saved hidden comes back archived.
 #[rstest]
 fn existing_saved_state_defaults_pin_without_losing_its_other_values(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
@@ -927,7 +927,6 @@ fn existing_saved_state_defaults_pin_without_losing_its_other_values(
     let mut saved = session("saved", "backend");
     saved.state.lifecycle = SessionLifecycle::Settled;
     saved.state.archived = true;
-    saved.state.hidden = true;
     saved.state.snoozed_until = Some(100);
     let expected = SessionMembership::from_sessions(vec![saved]);
     repository.commit_binding_state(scope, &expected)?;
@@ -935,7 +934,7 @@ fn existing_saved_state_defaults_pin_without_losing_its_other_values(
     let database = Connection::open(directory.path().join("session-order.sqlite3"))?;
     database.execute(
         "UPDATE workspace_sessions SET session_state = ?1",
-        [r#"{"lifecycle":"settled","archived":true,"deleted":false,"hidden":true,"snoozed_until":100}"#],
+        [r#"{"lifecycle":"settled","archived":false,"deleted":false,"hidden":true,"snoozed_until":100}"#],
     )?;
     let (_, reopened) = WorkspaceRepository::open(&directory.path().join("config.toml"))?;
     assert_eq!(reopened.spaces()[0].binding().sessions(), &expected);

@@ -212,11 +212,7 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
 
     apply_fields!(chrome, partial;
         sidebar,
-        top_bar,
-        bottom_bar,
         sidebar_width,
-        status_height,
-        status_background,
         gap,
         pane_divider_width,
         pane_divider_color,
@@ -227,12 +223,6 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
         unfocused_sidebar_dim,
         unfocused_terminal_dim,
     );
-    if let Some(segments) = partial.top_segment {
-        chrome.top_segments = segments;
-    }
-    if let Some(segments) = partial.bottom_segment {
-        chrome.bottom_segments = segments;
-    }
 }
 
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {

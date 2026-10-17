@@ -9,15 +9,11 @@ use gpui_kit::{
     prelude::*, rems,
 };
 
-use super::{
-    model::{SettingsIntent, StatusSegmentIntent},
-    window::GpuiSettings,
-};
+use super::{model::SettingsIntent, window::GpuiSettings};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum InlineInputTarget {
     StringListItem { list: String, index: usize },
-    StatusSegmentIcon { setting: String, index: usize },
     EnvironmentName { id: String, index: usize },
     EnvironmentValue { id: String, index: usize },
 }
@@ -26,7 +22,6 @@ impl InlineInputTarget {
     fn editor_id(&self) -> String {
         match self {
             Self::StringListItem { list, index } => format!("{list}:{index}"),
-            Self::StatusSegmentIcon { setting, index } => format!("{setting}:{index}:icon"),
             Self::EnvironmentName { id, index } => format!("{id}:{index}:name"),
             Self::EnvironmentValue { id, index } => format!("{id}:{index}:value"),
         }
@@ -38,13 +33,6 @@ impl InlineInputTarget {
                 id: list.clone(),
                 index: *index,
                 value,
-            },
-            Self::StatusSegmentIcon { setting, index } => SettingsIntent::EditStatusSegments {
-                id: setting.clone(),
-                edit: StatusSegmentIntent::SetIcon {
-                    index: *index,
-                    icon: (!value.is_empty()).then_some(value),
-                },
             },
             Self::EnvironmentName { index, .. } => SettingsIntent::SetEnvironmentName {
                 index: *index,

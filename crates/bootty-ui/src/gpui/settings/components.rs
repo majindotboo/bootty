@@ -41,8 +41,7 @@ use super::{
         AnsiPalettePreset, ModifierRemap, ModifierRemapField, ModuleIntegrationStatus,
         ModuleIntegrationsSnapshot, ModuleSourceIntent, RemoteEditorSnapshot, RemoteTestState,
         ScalarValue, SettingsCategory, SettingsChoice, SettingsControl, SettingsIntent,
-        SettingsPageItem, SettingsRow, StatusSegmentsSnapshot, provider_kind_for_settings_row,
-        provider_navigation_id,
+        SettingsPageItem, SettingsRow, provider_kind_for_settings_row, provider_navigation_id,
     },
     picker::{
         render_compact_dropdown, render_dropdown, render_searchable_picker, uses_searchable_picker,
@@ -831,7 +830,6 @@ impl GpuiSettings {
             | SettingsRow::FontFeatures {
                 id, label, help, ..
             } => (id, label, help, true),
-            SettingsRow::StatusSegments(editor) => (&editor.id, &editor.label, &editor.help, true),
         };
         if structured {
             render_structured_settings_item_layout(id, label, help, control, Some(&self.draft), cx)
@@ -944,7 +942,6 @@ impl GpuiSettings {
                 || gpui_kit::Empty.into_any_element(),
                 |host| host.editor.clone().into_any_element(),
             ),
-            SettingsRow::StatusSegments(editor) => Self::render_status_segments(editor, window, cx),
             SettingsRow::ModuleIntegrations(editor) => Self::render_module_integrations(editor, cx),
             SettingsRow::Remote(remote) => Self::render_remote_editor(remote, window, cx),
         }
@@ -2581,7 +2578,6 @@ pub(super) fn settings_row_identity(row: &SettingsRow) -> Option<&str> {
         | SettingsRow::ModifierRemaps { id, .. }
         | SettingsRow::Environment { id, .. }
         | SettingsRow::FontFeatures { id, .. }
-        | SettingsRow::StatusSegments(StatusSegmentsSnapshot { id, .. })
         | SettingsRow::ModuleIntegrations(ModuleIntegrationsSnapshot { identity: id, .. })
         | SettingsRow::Remote(RemoteEditorSnapshot { id, .. }) => Some(id),
         SettingsRow::Section(_) | SettingsRow::Notice { .. } => None,

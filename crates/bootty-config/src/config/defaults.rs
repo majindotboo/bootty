@@ -3,8 +3,8 @@ use super::model::{
     BrowserConfig, BrowserSearchEngine, ChromeConfig, ComputerConfig, CursorConfig,
     DiagnosticsConfig, FontConfig, InputConfig, KeybindPreset, MacosOptionAsAltConfig,
     MacosTitlebarStyle, MultiplexerConfig, OnLastWindowClosed, OpenBehavior, RestoreOnStartup,
-    SegmentAlign, SessionConfig, SidebarConfig, SidebarPosition, SidebarSortOrder, StatusSegment,
-    WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen,
+    SessionConfig, SidebarConfig, SidebarPosition, SidebarSortOrder, WhenClosingWithNoTabs,
+    WindowConfig, WindowDecoration, WindowFullscreen,
 };
 use super::theme_catalog::{
     DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, default_dark_colors, default_light_colors,
@@ -63,30 +63,6 @@ impl Default for BrowserConfig {
         }
     }
 }
-fn default_status_segments() -> Vec<StatusSegment> {
-    vec![
-        StatusSegment {
-            align: SegmentAlign::Left,
-            module: "session".to_owned(),
-            ..StatusSegment::default()
-        },
-        StatusSegment {
-            align: SegmentAlign::Left,
-            module: "windows".to_owned(),
-            ..StatusSegment::default()
-        },
-        StatusSegment {
-            align: SegmentAlign::Right,
-            module: "sysinfo".to_owned(),
-            ..StatusSegment::default()
-        },
-        StatusSegment {
-            align: SegmentAlign::Right,
-            module: "clock".to_owned(),
-            ..StatusSegment::default()
-        },
-    ]
-}
 impl Default for FontConfig {
     fn default() -> Self {
         Self {
@@ -125,11 +101,7 @@ impl Default for ChromeConfig {
                 close_button: super::model::TabCloseButton::Always,
             },
             sidebar: true,
-            top_bar: true,
-            bottom_bar: false,
-            status_background: None,
             sidebar_width: 286.0,
-            status_height: 30.0,
             gap: 0.0,
             pane_divider_width: 1.0,
             pane_divider_color: None,
@@ -139,8 +111,6 @@ impl Default for ChromeConfig {
             pane_corner_radius: 0.0,
             unfocused_sidebar_dim: 0.16,
             unfocused_terminal_dim: 0.0,
-            top_segments: default_status_segments(),
-            bottom_segments: Vec::new(),
         }
     }
 }

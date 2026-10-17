@@ -8,7 +8,7 @@ use super::load::{
     validate_config_document,
 };
 use super::model::BoottyConfig;
-use super::model::{SegmentAlign, SshProfileConfig, SshRemoteConfig, StatusSegment};
+use super::model::{SshProfileConfig, SshRemoteConfig};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConfigWriteOutcome {
@@ -89,35 +89,6 @@ impl ConfigDocument {
 
     ///
     /// # Errors
-    /// Returns an error when the chrome parent is not a table.
-    pub fn set_top_bar_enabled(&mut self, enabled: bool) -> ConfigResult<()> {
-        self.remove(&["chrome", "status-bar"])?;
-        self.set_bool(&["chrome", "top-bar"], enabled)
-    }
-
-    ///
-    /// # Errors
-    /// Returns an error when the chrome parent is not a table.
-    pub fn set_top_status_segments(&mut self, segments: &[StatusSegment]) -> ConfigResult<()> {
-        self.remove(&["chrome", "status-segment"])?;
-        self.set_item(
-            &["chrome", "top-segment"],
-            toml_edit::value(serialize_status_segments(segments)),
-        )
-    }
-
-    ///
-    /// # Errors
-    /// Returns an error when the chrome parent is not a table.
-    pub fn set_bottom_status_segments(&mut self, segments: &[StatusSegment]) -> ConfigResult<()> {
-        self.set_item(
-            &["chrome", "bottom-segment"],
-            toml_edit::value(serialize_status_segments(segments)),
-        )
-    }
-
-    ///
-    /// # Errors
     /// Returns an error if the profile cannot be serialized or its parent is not a table.
     pub fn set_ssh_profile(&mut self, id: &str, profile: &SshProfileConfig) -> ConfigResult<()> {
         self.remove_ssh_profile(id)?;
@@ -159,40 +130,6 @@ impl ConfigDocument {
     pub fn remove_multiplexer_remote(&mut self) -> ConfigResult<()> {
         self.remove(&["multiplexer", "remote"])
     }
-}
-
-fn serialize_status_segments(segments: &[StatusSegment]) -> Array {
-    let mut array = Array::new();
-    for segment in segments {
-        let mut table = InlineTable::new();
-        let align = match segment.align {
-            SegmentAlign::Left => "left",
-            SegmentAlign::Center => "center",
-            SegmentAlign::Right => "right",
-        };
-        table.insert("align", Value::from(align));
-        table.insert("module", Value::from(segment.module.as_str()));
-        for (key, color) in [("fg", segment.fg), ("bg", segment.bg)] {
-            if let Some(color) = color {
-                let hex = if color.a == 0xff {
-                    format!("#{:02x}{:02x}{:02x}", color.r, color.g, color.b)
-                } else {
-                    format!(
-                        "#{:02x}{:02x}{:02x}{:02x}",
-                        color.r, color.g, color.b, color.a
-                    )
-                };
-                table.insert(key, Value::from(hex));
-            }
-        }
-        if let Some(icon) = &segment.icon
-            && !icon.is_empty()
-        {
-            table.insert("icon", Value::from(icon.as_str()));
-        }
-        array.push(table);
-    }
-    array
 }
 
 ///

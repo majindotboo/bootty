@@ -3952,12 +3952,8 @@ impl GpuiWorkspace {
             let config = self.state.config();
             chrome_snapshot.layout.top_inset = self.state.window_chrome_facts().top_inset(
                 config.window.fullscreen_tabs_in_notch,
-                config
-                    .chrome
-                    .status_height
-                    // Keep the tab strip's bottom border below the camera exclusion band.
-                    .max(crate::gpui::UI_TAB_BAR_HEIGHT)
-                    - 1.0,
+                // Keep the tab strip's bottom border below the camera exclusion band.
+                crate::gpui::UI_TAB_BAR_HEIGHT - 1.0,
                 config.window.fullscreen_top_offset,
             );
         }

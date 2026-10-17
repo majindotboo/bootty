@@ -18,7 +18,7 @@ pub enum SessionLifecycle {
 
 /// Durable presentation state. Archive and deletion retain every other value for restore.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default, deny_unknown_fields, from = "SavedSessionState")]
 // These independent flags survive archive/delete so restoring preserves prior presentation.
 #[allow(clippy::struct_excessive_bools)]
 pub struct SessionState {
@@ -26,7 +26,6 @@ pub struct SessionState {
     pub pinned: bool,
     pub archived: bool,
     pub deleted: bool,
-    pub hidden: bool,
     pub snoozed_until: Option<i64>,
     /// Absolute UTC seconds of accepted input; absent for work with no recorded activity.
     pub last_activity_at: Option<i64>,
@@ -36,13 +35,43 @@ pub struct SessionState {
     pub projectless: bool,
 }
 
+/// Saved state as any version wrote it. Sessions could once be hidden; a hidden one is archived.
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)]
+struct SavedSessionState {
+    lifecycle: SessionLifecycle,
+    pinned: bool,
+    archived: bool,
+    deleted: bool,
+    hidden: bool,
+    snoozed_until: Option<i64>,
+    last_activity_at: Option<i64>,
+    auto_settle_disabled: bool,
+    projectless: bool,
+}
+
+impl From<SavedSessionState> for SessionState {
+    fn from(saved: SavedSessionState) -> Self {
+        Self {
+            lifecycle: saved.lifecycle,
+            pinned: saved.pinned,
+            archived: saved.archived || saved.hidden,
+            deleted: saved.deleted,
+            snoozed_until: saved.snoozed_until,
+            last_activity_at: saved.last_activity_at,
+            auto_settle_disabled: saved.auto_settle_disabled,
+            projectless: saved.projectless,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionView {
     Active,
     Settled,
     Archived,
     Snoozed,
-    Hidden,
     Deleted,
 }
 
@@ -55,7 +84,6 @@ pub enum SessionStateChange {
     SnoozeUntil(i64),
     ClearSnooze,
     SetAutoSettle(bool),
-    SetHidden(bool),
     Delete,
     RestoreDeleted,
     RecordActivity { at: i64, now: i64 },
@@ -81,8 +109,6 @@ impl SessionState {
             SessionView::Deleted
         } else if self.archived {
             SessionView::Archived
-        } else if self.hidden {
-            SessionView::Hidden
         } else if self.is_snoozed(now) {
             SessionView::Snoozed
         } else {
@@ -100,10 +126,7 @@ impl SessionState {
 
     #[must_use]
     pub fn is_overdue(self, now: i64) -> bool {
-        !self.deleted
-            && !self.archived
-            && !self.hidden
-            && self.snoozed_until.is_some_and(|until| until <= now)
+        !self.deleted && !self.archived && self.snoozed_until.is_some_and(|until| until <= now)
     }
 
     #[must_use]
@@ -296,7 +319,6 @@ impl SessionMembership {
             SessionStateChange::SetAutoSettle(enabled) => {
                 session.state.auto_settle_disabled = !enabled;
             }
-            SessionStateChange::SetHidden(hidden) => session.state.hidden = hidden,
             SessionStateChange::Delete => session.state.deleted = true,
             SessionStateChange::RestoreDeleted => session.state.deleted = false,
             SessionStateChange::RecordActivity { at, now } => {

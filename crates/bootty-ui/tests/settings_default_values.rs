@@ -100,8 +100,6 @@ fn explicit_default_font_face_and_family_are_equivalent(#[case] id: &str) {
 fn structured_defaults_compare_actual_values_and_ignore_unrelated_edits() {
     let (_directory, mut session) = session("");
     let defaults = BoottyConfig::default();
-    assert!(session.set_status_segments(true, defaults.chrome.top_segments.clone()));
-    assert!(session.is_default("chrome.top-segment"));
     assert!(session.set_string_list("sidebar.modules", &defaults.sidebar.modules));
     assert!(session.is_default("sidebar.modules"));
     assert!(session.set_environment(Vec::new()));
@@ -109,7 +107,7 @@ fn structured_defaults_compare_actual_values_and_ignore_unrelated_edits() {
     assert!(session.set_environment(vec![("HELLO".into(), "world".into())]));
     assert!(!session.is_default("session.env"));
     assert!(session.set_value("font.size", &SettingValue::Number(22.0)));
-    assert!(session.is_default("chrome.top-segment"));
+    assert!(session.is_default("sidebar.modules"));
     assert!(!session.is_default("session.env"));
 }
 
@@ -136,21 +134,17 @@ fn colors_compare_rgba_values_instead_of_hex_spelling() {
 }
 
 #[rstest]
-fn resolved_inherited_values_and_aliases_are_used_when_the_root_has_no_value() {
+fn resolved_inherited_values_are_used_when_the_root_has_no_value() {
     let directory = assert_fs::TempDir::new().unwrap();
     directory
         .child("included.toml")
-        .write_str("[font]\nfamily = ['Lilex-Bold']\nsize = 23\n[chrome]\nstatus-bar = false\n")
+        .write_str("[font]\nfamily = ['Lilex-Bold']\nsize = 23\n")
         .unwrap();
     let path = directory.child("config.toml");
     path.write_str("include = ['included.toml']\n").unwrap();
     let mut session = SettingsSession::new(accepted(path.path(), 1), Catalogs::default());
     assert!(!session.is_default("font.family"));
     assert!(!session.is_default("font.size"));
-    assert_eq!(
-        session.is_default("chrome.top-bar"),
-        !BoottyConfig::default().chrome.top_bar
-    );
     assert!(session.set_value(
         "font.size",
         &SettingValue::Number(BoottyConfig::default().font.size)

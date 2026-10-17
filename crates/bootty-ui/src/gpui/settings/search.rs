@@ -4,7 +4,7 @@
 //! 2255-2488. Bootty keeps the synchronous exact/prefix half of Zed's index because its projected
 //! catalog is small; the page/header/item lookup and filter-table behavior are unchanged.
 
-use super::model::{SettingsPage, SettingsPageItem, SettingsRow, StatusSegmentsSnapshot};
+use super::model::{SettingsPage, SettingsPageItem, SettingsRow};
 
 #[derive(Clone, Debug)]
 struct SearchDocument {
@@ -180,10 +180,7 @@ fn row_search_parts(row: &SettingsRow) -> Vec<String> {
         }
         | SettingsRow::FontFeatures {
             id, label, help, ..
-        }
-        | SettingsRow::StatusSegments(StatusSegmentsSnapshot {
-            id, label, help, ..
-        }) => vec![id.clone(), label.clone(), help.clone()],
+        } => vec![id.clone(), label.clone(), help.clone()],
         SettingsRow::AnsiPalette { label, help, .. } => vec![label.clone(), help.clone()],
         SettingsRow::ModuleIntegrations(editor) => vec![editor.identity.clone()],
         SettingsRow::Remote(remote) => {

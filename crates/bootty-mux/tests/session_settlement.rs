@@ -26,7 +26,6 @@ proptest! {
 #[rstest]
 #[case(SessionState { archived: true, ..SessionState::default() })]
 #[case(SessionState { deleted: true, ..SessionState::default() })]
-#[case(SessionState { hidden: true, ..SessionState::default() })]
 #[case(SessionState { snoozed_until: Some(1), ..SessionState::default() })]
 #[case(SessionState { lifecycle: SessionLifecycle::Settled, ..SessionState::default() })]
 fn settlement_preserves_explicit_session_state(#[case] mut state: SessionState) {

@@ -275,30 +275,6 @@ fn missing_config_file_loads_with_selected_path() {
 }
 
 #[test]
-fn defaults_put_current_status_modules_in_visible_top_bar() {
-    let config = load_config_source("").expect("valid config");
-    let modules = config
-        .chrome
-        .top_segments
-        .iter()
-        .map(|segment| segment.module.as_str())
-        .collect::<Vec<_>>();
-    let session = modules
-        .iter()
-        .position(|module| *module == "session")
-        .expect("session status module is enabled by default");
-    let windows = modules
-        .iter()
-        .position(|module| *module == "windows")
-        .expect("windows status module is enabled by default");
-
-    assert!(config.chrome.top_bar);
-    assert!(!config.chrome.bottom_bar);
-    assert_eq!(config.chrome.bottom_segments, Vec::new());
-    assert!(session < windows, "session should appear before windows");
-}
-
-#[test]
 fn sidebar_modules_default_and_override_in_order() {
     let defaults = load_config_source("").expect("valid config");
     assert_eq!(defaults.sidebar.modules, ["sessions", "codexbar"]);
@@ -342,42 +318,6 @@ fn sidebar_modules_default_and_override_in_order() {
         defaults.sidebar.session_modules
     );
     assert!(!emptied.sidebar.session_modules_configured);
-}
-
-#[test]
-fn chrome_bars_configure_visibility_and_modules_independently() {
-    let config = load_config_source(indoc! {r#"
-        [chrome]
-        top-bar = false
-        bottom-bar = true
-
-        [[chrome.top-segment]]
-        module = "clock"
-
-        [[chrome.bottom-segment]]
-        module = "sysinfo"
-    "#})
-    .expect("valid config");
-
-    assert!(!config.chrome.top_bar);
-    assert!(config.chrome.bottom_bar);
-    assert_eq!(config.chrome.top_segments[0].module, "clock");
-    assert_eq!(config.chrome.bottom_segments[0].module, "sysinfo");
-}
-
-#[test]
-fn legacy_status_bar_config_maps_to_the_top_bar() {
-    let config = load_config_source(indoc! {r#"
-        [chrome]
-        status-bar = false
-
-        [[chrome.status-segment]]
-        module = "clock"
-    "#})
-    .expect("valid config");
-
-    assert!(!config.chrome.top_bar);
-    assert_eq!(config.chrome.top_segments[0].module, "clock");
 }
 
 #[test]
@@ -542,7 +482,6 @@ fn legacy_theme_and_colors_seed_appearance_branches() {
 fn config_resolves_sidebar_and_status_chrome_colors() {
     let config = load_config_source(indoc! {r##"
         [chrome]
-        status-background = "#090909"
         notched-fullscreen-black-chrome = false
         pane-focus-border-color = "#9e75c780"
 
@@ -557,10 +496,6 @@ fn config_resolves_sidebar_and_status_chrome_colors() {
     .expect("valid config");
 
     assert_eq!(config.sidebar.position, SidebarPosition::Right);
-    assert_eq!(
-        config.chrome.status_background,
-        Some(Color::from_hex("#090909").unwrap())
-    );
     assert_eq!(
         config.chrome.pane_focus_border_color,
         Some(Color::from_hex("#9e75c780").unwrap())
@@ -939,13 +874,22 @@ fn chrome_regions_are_flush_and_terminal_surfaces_match_by_default() {
     assert_eq!(chrome.unfocused_terminal_dim, 0.0);
 }
 
-#[test]
-fn obsolete_chrome_window_tabs_key_is_ignored() {
-    let config = load_config_source(indoc! {r#"
-        [chrome]
-        window-tabs = true
-    "#})
-    .expect("valid config");
+/// Chrome keys an earlier version read still load, and change nothing: the status bar has one
+/// layout now.
+#[rstest]
+#[case("window-tabs = true")]
+#[case("top-bar = false")]
+#[case("status-bar = false")]
+#[case("bottom-bar = true")]
+#[case("status-height = 40")]
+#[case("status-background = '#090909'")]
+#[case(
+    "status-segment = [{ align = 'left', module = 'session' }, { align = 'right', module = 'clock' }]"
+)]
+#[case("top-segment = [{ module = 'clock', fg = '#ffffff', icon = 'clock' }]")]
+#[case("bottom-segment = [{ align = 'center', module = 'sysinfo' }]")]
+fn obsolete_chrome_keys_are_ignored(#[case] key: &str) {
+    let config = load_config_source(&format!("[chrome]\n{key}\n")).expect("valid config");
     assert_eq!(config.chrome, BoottyConfig::default().chrome);
 }
 

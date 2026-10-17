@@ -268,26 +268,6 @@ pub(super) struct ConfigOverrides {
     #[arg(long, value_name = "#RRGGBB", value_parser = Color::from_hex)]
     sidebar_border: Option<Color>,
 
-    /// Force the top bar on. `--status-bar` remains a compatibility alias.
-    #[arg(long, alias = "status-bar", conflicts_with = "no_top_bar")]
-    top_bar: bool,
-
-    /// Force the top bar off. `--no-status-bar` remains a compatibility alias.
-    #[arg(long, alias = "no-status-bar")]
-    no_top_bar: bool,
-
-    /// Force the bottom bar on.
-    #[arg(long, conflicts_with = "no_bottom_bar")]
-    bottom_bar: bool,
-
-    /// Force the bottom bar off.
-    #[arg(long)]
-    no_bottom_bar: bool,
-
-    /// Force status bar height.
-    #[arg(long, value_name = "PX")]
-    status_height: Option<f32>,
-
     /// Force chrome gap size.
     #[arg(long = "chrome-gap", alias = "gap", value_name = "PX")]
     chrome_gap: Option<f32>,
@@ -499,14 +479,7 @@ impl ConfigOverrides {
         if let Some(sidebar) = bool_override(self.sidebar, self.no_sidebar) {
             config.chrome.sidebar = sidebar;
         }
-        if let Some(top_bar) = bool_override(self.top_bar, self.no_top_bar) {
-            config.chrome.top_bar = top_bar;
-        }
-        if let Some(bottom_bar) = bool_override(self.bottom_bar, self.no_bottom_bar) {
-            config.chrome.bottom_bar = bottom_bar;
-        }
         apply_value(&mut config.chrome.sidebar_width, self.sidebar_width);
-        apply_value(&mut config.chrome.status_height, self.status_height);
         apply_value(&mut config.chrome.gap, self.chrome_gap);
         if let Some(dim) = self.unfocused_sidebar_dim {
             config.chrome.unfocused_sidebar_dim = dim;

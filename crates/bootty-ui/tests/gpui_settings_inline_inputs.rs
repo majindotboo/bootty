@@ -4,9 +4,8 @@ use settings_support::GpuiSettingsSnapshot;
 use std::{cell::RefCell, rc::Rc};
 
 use bootty_ui::gpui::{
-    SettingsCategory, SettingsChoice, SettingsIntent, SettingsPage, SettingsPageItem, SettingsRow,
-    StatusSegmentAlignment, StatusSegmentEditorRow, StatusSegmentIntent, StatusSegmentsSnapshot,
-    UiPalette, init_theme,
+    SettingsCategory, SettingsIntent, SettingsPage, SettingsPageItem, SettingsRow, UiPalette,
+    init_theme,
 };
 use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::{
@@ -24,9 +23,7 @@ impl InlineInputProbe {
 }
 
 #[gpui_kit::test]
-fn dynamic_list_and_status_inputs_emit_typed_changes_and_restore_content_focus(
-    cx: &TestAppContext,
-) {
+fn dynamic_list_inputs_emit_typed_changes_and_restore_content_focus(cx: &TestAppContext) {
     init(cx);
     let (probe, mut cx) = rooted_probe(cx, dynamic_snapshot());
 
@@ -39,8 +36,8 @@ fn dynamic_list_and_status_inputs_emit_typed_changes_and_restore_content_focus(
         "Enter returns focus to settings content"
     );
 
-    click(&mut cx, "settings-status-segment-chrome.top-segment-0-icon");
-    replace_focused_text(&mut cx, "terminal");
+    click(&mut cx, "settings-string-list-session.args-0");
+    replace_focused_text(&mut cx, "--norc");
     assert!(focused_input(&mut cx));
     cx.simulate_keystrokes("escape");
     assert!(
@@ -55,16 +52,6 @@ fn dynamic_list_and_status_inputs_emit_typed_changes_and_restore_content_focus(
             SettingsIntent::SetStringListItem { id, index: 0, value }
                 if id == "session.args" && value == "--login"
         )));
-        assert!(intents.iter().any(|intent| matches!(
-            intent,
-            SettingsIntent::EditStatusSegments {
-                id,
-                edit: StatusSegmentIntent::SetIcon {
-                    index: 0,
-                    icon: Some(icon),
-                },
-            } if id == "chrome.top-segment" && icon == "terminal"
-        )));
         assert!(
             !intents
                 .iter()
@@ -74,35 +61,15 @@ fn dynamic_list_and_status_inputs_emit_typed_changes_and_restore_content_focus(
 }
 
 fn dynamic_snapshot() -> GpuiSettingsSnapshot {
-    snapshot(vec![
-        SettingsPageItem::Setting(SettingsRow::StringList {
-            id: "session.args".to_owned(),
-            label: "Shell arguments".to_owned(),
-            help: "Arguments passed to the shell.".to_owned(),
-            items: vec!["--interactive".to_owned()],
-            options: Vec::new(),
-            add_label: "Add argument".to_owned(),
-            enabled: true,
-        }),
-        SettingsPageItem::Setting(SettingsRow::StatusSegments(StatusSegmentsSnapshot {
-            id: "chrome.top-segment".to_owned(),
-            label: "Top bar modules".to_owned(),
-            help: "Modules rendered in the top bar.".to_owned(),
-            modules: vec![SettingsChoice {
-                token: "session".to_owned(),
-                label: "session".to_owned(),
-                description: None,
-            }],
-            segments: vec![StatusSegmentEditorRow {
-                module: "session".to_owned(),
-                alignment: StatusSegmentAlignment::Left,
-                foreground: None,
-                background: None,
-                icon: Some("S".to_owned()),
-            }],
-            add_label: "Add top module".to_owned(),
-        })),
-    ])
+    snapshot(vec![SettingsPageItem::Setting(SettingsRow::StringList {
+        id: "session.args".to_owned(),
+        label: "Shell arguments".to_owned(),
+        help: "Arguments passed to the shell.".to_owned(),
+        items: vec!["--interactive".to_owned()],
+        options: Vec::new(),
+        add_label: "Add argument".to_owned(),
+        enabled: true,
+    })])
 }
 
 fn snapshot(items: Vec<SettingsPageItem>) -> GpuiSettingsSnapshot {

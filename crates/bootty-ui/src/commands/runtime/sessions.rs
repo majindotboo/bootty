@@ -358,8 +358,6 @@ impl AppState {
                 | SessionAction::Snooze
                 | SessionAction::Unsnooze
                 | SessionAction::AutoSettle
-                | SessionAction::Hide
-                | SessionAction::Show
                 | SessionAction::Delete
                 | SessionAction::Restore,
                 Some(ExactMuxTarget::Binding(scope)),
@@ -1477,8 +1475,6 @@ fn session_state_arguments(
         SessionAction::Archive => SessionStateChange::Archive,
         SessionAction::Unarchive => SessionStateChange::RestoreArchive,
         SessionAction::Unsnooze => SessionStateChange::ClearSnooze,
-        SessionAction::Hide => SessionStateChange::SetHidden(true),
-        SessionAction::Show => SessionStateChange::SetHidden(false),
         SessionAction::Delete => SessionStateChange::Delete,
         SessionAction::Restore => SessionStateChange::RestoreDeleted,
         _ => return Err(invalid()),

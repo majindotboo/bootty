@@ -12,7 +12,6 @@ mod number_input;
 mod picker;
 mod provider_models;
 mod search;
-mod status_segments;
 mod text_input;
 mod theme_colors;
 mod theme_editor;

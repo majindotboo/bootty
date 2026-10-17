@@ -1294,7 +1294,6 @@ fn row_identity(row: &SettingsRow) -> &str {
         | SettingsRow::ModifierRemaps { id, .. }
         | SettingsRow::Environment { id, .. }
         | SettingsRow::FontFeatures { id, .. } => id,
-        SettingsRow::StatusSegments(snapshot) => &snapshot.id,
         SettingsRow::ModuleIntegrations(snapshot) => &snapshot.identity,
         SettingsRow::Remote(snapshot) => &snapshot.id,
     }

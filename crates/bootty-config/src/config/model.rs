@@ -451,13 +451,7 @@ pub struct ChromeConfig {
     pub tabs: TabConfig,
 
     pub sidebar: bool,
-    /// Whether to show the module bar above the terminal.
-    pub top_bar: bool,
-    /// Whether to show the module bar below the terminal.
-    pub bottom_bar: bool,
-    pub status_background: Option<Color>,
     pub sidebar_width: f32,
-    pub status_height: f32,
     pub gap: f32,
     /// Visual width (px) of the gap/divider between native split panes. The grab area is widened
     /// past this so thin dividers stay draggable.
@@ -475,10 +469,6 @@ pub struct ChromeConfig {
     pub pane_corner_radius: f32,
     pub unfocused_sidebar_dim: f32,
     pub unfocused_terminal_dim: f32,
-    /// Ordered top-bar segments. Composed left/center/right; builtins plus Lua modules.
-    pub top_segments: Vec<StatusSegment>,
-    /// Ordered bottom-bar segments. Composed left/center/right; builtins plus Lua modules.
-    pub bottom_segments: Vec<StatusSegment>,
 }
 
 /// Sidebar placement and color overrides. Colors layer on top of the active theme; an unset slot
@@ -537,32 +527,6 @@ impl SidebarSortOrder {
     }
 }
 
-/// One status-bar segment: a Luau module (builtin default or user file) plus optional style. The
-/// module's own per-item style overrides these; these fill in where it leaves a field unset.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct StatusSegment {
-    #[serde(default)]
-    pub align: SegmentAlign,
-    /// Module name: an embedded default (`windows`, `clock`, `session`, ...) or a `*.luau` file
-    /// stem under `<config>/status/`.
-    pub module: String,
-    #[serde(default)]
-    pub fg: Option<Color>,
-    #[serde(default)]
-    pub bg: Option<Color>,
-    #[serde(default)]
-    pub icon: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Hash, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum SegmentAlign {
-    #[default]
-    Left,
-    Center,
-    Right,
-}
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum SshAuthenticationConfig {

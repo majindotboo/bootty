@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use bootty_ui::gpui::{
-    Rgba, UiPalette, UiTheme, init_theme, init_ui_theme, readable_color, setup_ui_font,
+    Rgba, UiPalette, UiTheme, init_theme, init_ui_theme, mix, readable_color, setup_ui_font,
     update_ui_font, update_ui_font_families, update_ui_font_size, update_ui_font_weights,
     update_ui_theme,
 };
@@ -105,8 +105,9 @@ fn custom_theme_switch_resets_editor_and_component_surfaces(cx: &TestAppContext)
             readable_color(light.primary, light.base),
         );
         assert_component_color(component.colors.group_box, light.surface);
-        assert_component_color(component.colors.popover, light.surface);
-        assert_component_color(component.tokens.popover.color, light.surface);
+        let popover = mix(light.base, light.text, 0.1);
+        assert_component_color(component.colors.popover, popover);
+        assert_component_color(component.tokens.popover.color, popover);
         assert_component_color(component.colors.popover_foreground, light.text);
         assert_component_color(component.colors.table_head, light.pane);
         assert_component_color(component.colors.table_head_foreground, light.text);
@@ -409,4 +410,26 @@ fn live_ui_weight_assignment_publishes_a_new_family_to_kit(cx: &TestAppContext) 
         })
         .unwrap();
     });
+}
+
+/// Tooltips and menus keep a tinted theme's hue instead of turning gray.
+#[gpui_kit::test]
+fn popovers_keep_the_themes_tint(cx: &TestAppContext) {
+    let palette = UiPalette::from_terminal_colors(
+        Some(Rgba::rgb(0x1a, 0x1b, 0x26)),
+        Some(Rgba::rgb(0xc0, 0xca, 0xf5)),
+        [None; 16],
+    );
+    cx.update(|cx| init_theme(palette, cx));
+    let theme = cx.update(|cx| gpui_kit::component::Theme::global(cx).clone());
+    // The plain surface lifts toward white, which is what read gray.
+    let (popover, surface, background) = (theme.popover, theme.secondary, theme.background);
+    assert!(
+        popover.l > background.l,
+        "lifted above the background: {popover:?}"
+    );
+    assert!(
+        popover.s > surface.s,
+        "more of the theme's tint than a white lift: {popover:?} vs {surface:?}"
+    );
 }

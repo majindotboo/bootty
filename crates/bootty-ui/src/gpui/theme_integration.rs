@@ -252,7 +252,9 @@ fn component_colors(palette: UiPalette) -> gpui_kit::component::ThemeColor {
         list_hover: color(palette.element_hover),
         muted: color(palette.element_disabled),
         muted_foreground: color(palette.muted),
-        popover: color(palette.surface),
+        // Tooltips and menus lift toward the theme's own text color, which keeps its tint; white
+        // would wash them gray.
+        popover: color(super::mix(palette.base, palette.text, 0.1)),
         popover_foreground: color(palette.text),
         primary,
         primary_active,

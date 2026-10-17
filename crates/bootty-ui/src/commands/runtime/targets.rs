@@ -380,8 +380,6 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                         | "session.snooze"
                         | "session.unsnooze"
                         | "session.auto_settle"
-                        | "session.hide"
-                        | "session.show"
                         | "session.archive"
                         | "session.unarchive"
                         | "session.delete"

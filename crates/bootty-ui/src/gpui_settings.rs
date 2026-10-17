@@ -8,24 +8,21 @@ use crate::{
         ModuleSourceIntent, RemoteEditorSnapshot, RemoteProfileFieldSnapshot, RemoteProfileOption,
         RemoteProfileSnapshot, RemoteTestIntent, RemoteTestState, ScalarValue, SettingsCategory,
         SettingsChoice, SettingsContent, SettingsControl, SettingsIntent, SettingsListItem,
-        SettingsPage, SettingsPageItem, SettingsRow, StatusSegmentAlignment, StatusSegmentColor,
-        StatusSegmentEditorRow, StatusSegmentIntent, StatusSegmentsSnapshot,
+        SettingsPage, SettingsPageItem, SettingsRow,
     },
     gpui_settings_catalog::{
         advanced_configuration_rows, group_settings, setting_is_visible_in_native_settings,
         settings_catalog_pages, settings_category_for, settings_page,
     },
     settings_session::{
-        Catalogs, DefaultRemote, FontFeatureDraft, RemoteDraft, SettingsSession, StatusSegmentEdit,
-        normalize_number, parse_display_number,
+        Catalogs, DefaultRemote, FontFeatureDraft, RemoteDraft, SettingsSession, normalize_number,
+        parse_display_number,
     },
     state::AppState,
 };
 use bootty_config::{
     color::Color,
-    config::{
-        BoottyConfig, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, SegmentAlign, available_theme_names,
-    },
+    config::{BoottyConfig, DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, available_theme_names},
     settings_schema::{NumberControl, SettingEditor, SettingKind, SettingSpec, SettingValue},
 };
 use gpui_kit::{Context, Window};
@@ -39,8 +36,7 @@ impl GpuiSettings {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let draft =
-            SettingsSession::new(state.accepted_settings(), settings_catalogs(font_families));
+        let draft = SettingsSession::new(state.accepted_settings(), Catalogs { font_families });
         let content = settings_content(&draft, state, integrations);
         let mut settings = Self::new_with_window(content, draft, window, cx);
         settings.sync_provider_catalogs(state, cx);
@@ -59,8 +55,9 @@ impl GpuiSettings {
     ) -> bool {
         self.draft.reconcile_accepted(state.accepted_settings());
         self.sync_provider_catalogs(state, cx);
-        self.draft
-            .set_catalogs(settings_catalogs(Arc::clone(self.draft.font_families())));
+        self.draft.set_catalogs(Catalogs {
+            font_families: Arc::clone(self.draft.font_families()),
+        });
         self.set_theme_preview([
             state.config().appearance.light.theme_colors.clone(),
             state.config().appearance.dark.theme_colors.clone(),
@@ -93,9 +90,6 @@ impl GpuiSettings {
             }
             SettingsIntent::ReplaceAnsiPalette { id, colors } => {
                 self.replace_ansi_palette(&id, colors);
-            }
-            SettingsIntent::EditStatusSegments { id, edit } => {
-                self.edit_status_segments(&id, edit);
             }
             SettingsIntent::SetStringListItem { id, index, value } => {
                 let mut values = self.setting_string_list(&id, state);
@@ -420,67 +414,6 @@ impl GpuiSettings {
         }
     }
 
-    fn edit_status_segments(&mut self, id: &str, edit: StatusSegmentIntent) {
-        let top = match id {
-            "chrome.top-segment" => true,
-            "chrome.bottom-segment" => false,
-            _ => {
-                self.draft.reject(format!("Unknown status bar {id:?}."));
-                return;
-            }
-        };
-        let edit = match edit {
-            StatusSegmentIntent::Add { module } => StatusSegmentEdit::Add { module },
-            StatusSegmentIntent::Remove { index } => StatusSegmentEdit::Remove { index },
-            StatusSegmentIntent::Move { index, offset } => {
-                StatusSegmentEdit::Move { index, offset }
-            }
-            StatusSegmentIntent::SetModule { index, module } => {
-                StatusSegmentEdit::SetModule { index, module }
-            }
-            StatusSegmentIntent::SetAlignment { index, alignment } => {
-                StatusSegmentEdit::SetAlignment {
-                    index,
-                    alignment: match alignment {
-                        StatusSegmentAlignment::Left => SegmentAlign::Left,
-                        StatusSegmentAlignment::Center => SegmentAlign::Center,
-                        StatusSegmentAlignment::Right => SegmentAlign::Right,
-                    },
-                }
-            }
-            StatusSegmentIntent::SetColor {
-                index,
-                field,
-                value,
-            } => {
-                let color = match value {
-                    Some(value) => {
-                        if let Ok(color) = Color::from_hex(&value) {
-                            Some(color)
-                        } else {
-                            self.draft
-                                .reject("Color must contain 6 or 8 hexadecimal digits.");
-                            return;
-                        }
-                    }
-                    None => None,
-                };
-                match field {
-                    StatusSegmentColor::Foreground => {
-                        StatusSegmentEdit::SetForeground { index, color }
-                    }
-                    StatusSegmentColor::Background => {
-                        StatusSegmentEdit::SetBackground { index, color }
-                    }
-                }
-            }
-            StatusSegmentIntent::SetIcon { index, icon } => {
-                StatusSegmentEdit::SetIcon { index, icon }
-            }
-        };
-        self.draft.edit_status_segments(top, edit);
-    }
-
     fn set_setting_text(&mut self, id: &str, text: String, state: &AppState) {
         if id.starts_with("agents.") {
             if text.is_empty() && id.ends_with(".directory") {
@@ -577,15 +510,6 @@ impl GpuiSettings {
                 id,
             } => self.draft.uninstall_integration(identity, module, id),
         }
-    }
-}
-
-fn settings_catalogs(font_families: Arc<[String]>) -> Catalogs {
-    Catalogs {
-        font_families,
-        status_modules: ["session", "windows", "sysinfo", "clock"]
-            .map(str::to_owned)
-            .to_vec(),
     }
 }
 
@@ -1448,12 +1372,6 @@ fn structured_custom_setting(
             enabled: true,
         });
     }
-    if matches!(
-        spec.id().as_str(),
-        "chrome.top-segment" | "chrome.bottom-segment"
-    ) {
-        return Some(status_segments_setting(spec, session));
-    }
     let (label, help, items, add_label) = match spec.id().as_str() {
         "sidebar.session-modules" => (
             "Session details",
@@ -1532,48 +1450,6 @@ fn modifier_remap_choices() -> Vec<SettingsChoice> {
         .collect()
 }
 
-fn status_segments_setting(spec: &SettingSpec, session: &SettingsSession) -> SettingsRow {
-    let top = spec.id() == "chrome.top-segment";
-    let segments = session.status_segments(top);
-    let mut modules = session.status_modules().to_vec();
-    modules.extend(segments.iter().map(|segment| segment.module.clone()));
-    modules.sort_unstable_by_key(|module| module.to_ascii_lowercase());
-    modules.dedup_by(|left, right| left.eq_ignore_ascii_case(right));
-    let (label, help) = setting_copy(spec);
-    SettingsRow::StatusSegments(StatusSegmentsSnapshot {
-        id: spec.id(),
-        label,
-        help,
-        modules: modules
-            .into_iter()
-            .map(|module| SettingsChoice {
-                label: title_case(&module),
-                token: module,
-                description: None,
-            })
-            .collect(),
-        segments: segments
-            .iter()
-            .map(|segment| StatusSegmentEditorRow {
-                module: segment.module.clone(),
-                alignment: match segment.align {
-                    SegmentAlign::Left => StatusSegmentAlignment::Left,
-                    SegmentAlign::Center => StatusSegmentAlignment::Center,
-                    SegmentAlign::Right => StatusSegmentAlignment::Right,
-                },
-                foreground: segment.fg.map(color_hex),
-                background: segment.bg.map(color_hex),
-                icon: segment.icon.clone(),
-            })
-            .collect(),
-        add_label: if top {
-            "Add top module".to_owned()
-        } else {
-            "Add bottom module".to_owned()
-        },
-    })
-}
-
 fn choice_control(options: &[(&str, &str)]) -> SettingsControl {
     SettingsControl::Choice(
         options
@@ -1646,12 +1522,6 @@ fn custom_color_rows(
             &config.appearance.dark.colors,
             session,
         ),
-        "chrome.status-background" => editable_color_row(
-            spec,
-            "Status bar background",
-            "Status strip background; unset uses the sidebar background default.",
-            config.chrome.status_background,
-        ),
         "chrome.pane-divider-color" => editable_color_row(
             spec,
             "Pane divider",
@@ -1697,10 +1567,7 @@ fn is_scalar_color_setting(id: &str) -> bool {
         ["colors", leaf] | ["appearance", "light" | "dark", "colors", leaf] => {
             is_color_config_leaf(leaf)
         }
-        [
-            "chrome",
-            "status-background" | "pane-divider-color" | "pane-focus-border-color",
-        ]
+        ["chrome", "pane-divider-color" | "pane-focus-border-color"]
         | [
             "sidebar",
             "background" | "foreground" | "selected" | "hover" | "border",

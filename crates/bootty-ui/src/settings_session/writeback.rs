@@ -4,7 +4,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use bootty_config::{
     color::Color,
-    config::{ConfigDocument, ConfigResult, StatusSegment},
+    config::{ConfigDocument, ConfigResult},
     settings_schema::{SettingKind, SettingSpec, SettingValue, SettingsSchema},
 };
 
@@ -189,16 +189,6 @@ impl DraftWriteback {
 
     pub fn set_env(&mut self, path: &[&str], value: &[(String, String)]) {
         self.mutate_setting(path, |document| document.set_env(path, value));
-    }
-
-    pub fn set_top_status_segments(&mut self, value: &[StatusSegment]) {
-        let path = ["chrome", "top-segment"];
-        self.mutate_setting(&path, |document| document.set_top_status_segments(value));
-    }
-
-    pub fn set_bottom_status_segments(&mut self, value: &[StatusSegment]) {
-        let path = ["chrome", "bottom-segment"];
-        self.mutate_setting(&path, |document| document.set_bottom_status_segments(value));
     }
 
     pub fn set_color(&mut self, path: &[&str], color: Color) {
