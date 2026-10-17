@@ -157,11 +157,16 @@ impl ContextPanels {
             &panels.diff,
             |_, _, comment: &crate::gpui_git_panel::DiffComment, cx| cx.emit(comment.clone()),
         );
+        let changes_comment_subscription = cx.subscribe(
+            &panels.changes,
+            |_, _, comment: &crate::gpui_git_panel::DiffComment, cx| cx.emit(comment.clone()),
+        );
         panels.subscriptions = vec![
             diff_subscription,
             files_subscription,
             files_layout_subscription,
             comment_subscription,
+            changes_comment_subscription,
         ];
         panels
     }
@@ -559,7 +564,7 @@ impl WorkspaceDock {
         self.target == *target && self.panels.context.terminal.as_ref() == terminal
     }
 
-    /// Shows `contents`, a Git diff, in the session's diff panel, titled `title`.
+    /// Shows `contents`, a Git diff, in the session's Changes panel, titled `title`.
     pub(crate) fn show_turn_changes(
         &self,
         title: String,
@@ -567,12 +572,10 @@ impl WorkspaceDock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let diff = self.panels.diff.clone();
-        diff.update(cx, |diff, cx| diff.show(title, contents, window, cx));
-        self.add_document_panel(panel_handle(diff.clone()), window, cx);
-        self.area.update(cx, |area, cx| {
-            area.select_panel(PanelId::from(diff.entity_id()), window, cx);
+        self.panels.changes.update(cx, |changes, cx| {
+            changes.show_diff(title, contents, window, cx);
         });
+        self.show_tool(bootty_config::config::PanelKind::Changes, window, cx);
     }
 
     fn request_document(&mut self, path: String, window: &Window, cx: &Context<Self>) {

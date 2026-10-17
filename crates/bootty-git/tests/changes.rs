@@ -3,7 +3,10 @@
 use std::process::Command;
 
 use assert_fs::{TempDir, prelude::*};
-use bootty_git::{Git, changes::ChangeGroup};
+use bootty_git::{
+    Git,
+    changes::{ChangeGroup, LineCounts},
+};
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
@@ -125,6 +128,51 @@ fn filenames_are_literal_and_renames_unstage_both_paths(repository: anyhow::Resu
     repository.child("renamed.txt").assert("content\nmore\n");
     assert!(git.stage_file(root, "*").is_err());
     assert!(git.stage_file(root, "../outside").is_err());
+}
+
+/// Each changed file counts the lines its staged and unstaged changes add and remove, a rename
+/// under its new name; a binary file counts none.
+#[rstest]
+fn changes_count_each_sides_lines(repository: anyhow::Result<TempDir>) {
+    let repository = repository.expect("repository fixture");
+    let git = Git::new();
+    let root = repository.path().to_str().unwrap();
+    repository
+        .child("notes.txt")
+        .write_str("one\ntwo\nthree\n")
+        .unwrap();
+    repository.child("old.txt").write_str("a\nb\n").unwrap();
+    repository
+        .child("image.bin")
+        .write_binary(&[0, 1, 2])
+        .unwrap();
+    run(&repository, &["add", "."]).expect("git command");
+    git.commit_index(root, "initial", false).unwrap();
+    repository
+        .child("notes.txt")
+        .write_str("one\ntwo\nthree\nfour\nfive\n")
+        .unwrap();
+    git.stage_file(root, "notes.txt").unwrap();
+    repository
+        .child("notes.txt")
+        .write_str("two\nthree\nfour\nfive\n")
+        .unwrap();
+    run(&repository, &["mv", "old.txt", "new.txt"]).expect("git command");
+    repository.child("new.txt").write_str("a\nb\nc\n").unwrap();
+    git.stage_file(root, "new.txt").unwrap();
+    repository
+        .child("image.bin")
+        .write_binary(&[3, 0, 4])
+        .unwrap();
+    let changes = git.changes(root).unwrap();
+    let lines = |path: &str| {
+        let file = changes.files.iter().find(|file| file.path == path).unwrap();
+        (file.staged_lines, file.unstaged_lines)
+    };
+    let counts = |added, removed| Some(LineCounts { added, removed });
+    assert_eq!(lines("notes.txt"), (counts(2, 0), counts(0, 1)));
+    assert_eq!(lines("new.txt"), (counts(1, 0), None));
+    assert_eq!(lines("image.bin"), (None, None));
 }
 
 fn git_in(cwd: &std::path::Path, args: &[&str]) {

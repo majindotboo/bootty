@@ -2,8 +2,13 @@
 
 The Changes panel runs on the selected Space's host and now includes repository
 history, local branches and stashes beside its stage, diff and commit workflow.
-`git.overview` returns at most 200 date-ordered commits plus local branch/upstream
-and stash facts. Selecting a commit opens its full patch in the existing Diff
+It lists changed files flat under Staged, Unstaged and Untracked, each with its
+status letter, its folder and the lines it adds and removes (`git diff --numstat`
+for both sides). Clicking a file shows its diff in the panel, with the next and
+previous file; a narrow panel shows the diff in place of the list, a wide one
+beside it. `git.overview` returns at most 200 date-ordered commits plus local
+branch/upstream and stash facts. Selecting a commit, All changes, or a turn's
+changes shows its full patch the same way. Pull request files open in the Diff
 panel. Branch creation resolves an explicit start ref to a commit first. Checkout
 accepts only a currently listed local branch and requires a clean tree, so the
 panel never guesses how to carry edits across branches.

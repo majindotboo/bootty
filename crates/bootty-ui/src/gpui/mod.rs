@@ -1,5 +1,6 @@
 //! GPUI-native Bootty presentation primitives.
 
+mod changes;
 pub mod chrome;
 mod color_picker;
 mod config_editor;
@@ -11,6 +12,7 @@ mod keybinding;
 mod keymap_editor;
 mod overlay_host;
 mod panes;
+mod row;
 mod settings;
 mod space_editor;
 pub(crate) mod tabs;
@@ -22,6 +24,7 @@ mod theme_integration;
 mod tooltip;
 
 pub use crate::gpui_model_picker::{ModelPickerEvent, ModelPickerView};
+pub use changes::*;
 pub use chrome::*;
 pub use config_editor::*;
 pub use dialogs::*;
@@ -31,6 +34,7 @@ pub use keybinding::*;
 pub use keymap_editor::*;
 pub use overlay_host::*;
 pub use panes::*;
+pub use row::*;
 pub use settings::*;
 pub use space_editor::*;
 pub use terminal::*;

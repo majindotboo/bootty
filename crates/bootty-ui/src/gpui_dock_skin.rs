@@ -1,6 +1,6 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
-use crate::gpui::ElementTooltip as _;
+use crate::gpui::{ElementTooltip as _, RowLabel as _};
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
 use gpui_kit::base::Tab;
@@ -1097,8 +1097,8 @@ fn empty_sidebar(owner: &WeakEntity<WorkspaceDock>, cx: &App) -> AnyElement {
                     let creation = panel.creation;
                     let owner = owner.clone();
                     Button::new(SharedString::from(format!("empty-open-{}", panel.name)))
-                        .label(panel.label)
                         .icon(panel.icon.clone())
+                        .row_label(panel.label)
                         .outline()
                         .w_full()
                         .on_click(move |_, window, cx| match creation {

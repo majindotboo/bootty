@@ -573,6 +573,7 @@ impl RenderOnce for ScrollRow {
             .when(overflow, |row| {
                 row.child(scroll_button(&self.id, &self.scroll, false, left))
             })
+            // Tabs scrolled past an edge stay inside the strip, clear of the chevrons.
             .child(
                 div()
                     .flex_1()
@@ -580,6 +581,7 @@ impl RenderOnce for ScrollRow {
                     .h_full()
                     .flex()
                     .items_center()
+                    .overflow_hidden()
                     .child(self.bar),
             )
             .when(overflow, |row| {

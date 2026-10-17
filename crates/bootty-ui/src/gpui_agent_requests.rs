@@ -238,7 +238,18 @@ impl NativeRequestView {
             let files = super::parse_tool_diffs(input, cwd)
                 .unwrap_or_default()
                 .into_iter()
-                .map(|(path, file)| super::tool_diff(&path, file, cwd, window, cx))
+                .map(|(path, file)| {
+                    let diff = super::tool_diff(&path, file, cwd, window, cx);
+                    // A comment on the change goes on to the conversation's draft.
+                    cx.subscribe(
+                        &diff.view,
+                        |_, _, comment: &crate::gpui_git_panel::DiffComment, cx| {
+                            cx.emit(comment.clone());
+                        },
+                    )
+                    .detach();
+                    diff
+                })
                 .collect();
             self.diffs.insert(id.clone(), (input.clone(), files));
         }
@@ -1567,6 +1578,7 @@ impl NativeRequestView {
 }
 
 impl EventEmitter<NativeRequestResponse> for NativeRequestView {}
+impl EventEmitter<crate::gpui_git_panel::DiffComment> for NativeRequestView {}
 impl Render for NativeRequestView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.keys_shown = self.focus.contains_focused(window, cx);

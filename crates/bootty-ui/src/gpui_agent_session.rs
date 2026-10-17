@@ -1,5 +1,5 @@
 //! Native conversation presentation; provider processes and transcripts belong to bootty-agents.
-use crate::gpui::ElementTooltip as _;
+use crate::gpui::{ElementTooltip as _, RowLabel as _};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
@@ -202,6 +202,23 @@ struct ToolDiff {
     view: Entity<crate::gpui_git_panel::GitDiffPanel>,
     rows: f32,
     counts: Option<(usize, usize)>,
+    kind: crate::gpui::ChangeKind,
+    /// The change itself, for a turn's list of changed files to show again.
+    file: bootty_git::diff::FileDiff,
+}
+
+/// A file a turn changed: what the turn did to it and its lines, over every change it made.
+struct TurnChange {
+    path: String,
+    kind: crate::gpui::ChangeKind,
+    counts: Option<bootty_git::changes::LineCounts>,
+    files: Vec<bootty_git::diff::FileDiff>,
+}
+
+/// A diff shown under its file in a turn's list of changed files, and its height in rows.
+struct TurnChangeDiff {
+    view: Entity<crate::gpui_git_panel::GitDiffPanel>,
+    rows: f32,
 }
 
 struct WorkingIndicator {
@@ -279,6 +296,8 @@ pub struct NativeAgentSessionView {
     /// Where file links were added to each message's markdown, so selections map to its text.
     link_marks: BTreeMap<String, crate::transcript_links::LinkMarks>,
     tool_diffs: BTreeMap<String, ToolDiffs>,
+    /// Files opened in a turn's list of changed files, by the turn's last reply and the path.
+    turn_change_diffs: BTreeMap<(String, String), Vec<TurnChangeDiff>>,
     async_questions: BTreeMap<String, Entity<questions::AsyncQuestionsView>>,
     subagent_details: BTreeMap<String, subagents::SubagentConversation>,
     transcript_subscriptions: BTreeMap<String, Vec<Subscription>>,
@@ -385,6 +404,14 @@ impl NativeAgentSessionView {
             });
         let local = record.config.remote.is_none();
         let requests = cx.new(|cx| requests::NativeRequestView::new(record.target(), local, cx));
+        cx.subscribe_in(
+            &requests,
+            window,
+            |this, _, comment: &crate::gpui_git_panel::DiffComment, window, cx| {
+                this.add_diff_comment(comment, window, cx);
+            },
+        )
+        .detach();
         let request_subscription = cx.subscribe_in(
             &requests,
             window,
@@ -483,6 +510,7 @@ impl NativeAgentSessionView {
             transcript: BTreeMap::new(),
             link_marks: BTreeMap::new(),
             tool_diffs: BTreeMap::new(),
+            turn_change_diffs: BTreeMap::new(),
             async_questions: BTreeMap::new(),
             subagent_details: BTreeMap::new(),
             transcript_subscriptions: BTreeMap::new(),
@@ -1832,68 +1860,74 @@ impl NativeAgentSessionView {
         // Images the tool returned, such as a screenshot, show whether or not it is open.
         let images = (!item.attachments.is_empty())
             .then(|| self.render_sent_attachments(item, &owner, cx).pt_1());
-        let output = div()
-            .w_full()
-            .max_w(self.column_width())
-            .min_w_0()
-            .id(gpui_kit::SharedString::from(format!(
-                "message:{}:{}",
-                self.record.id, item.id
-            )))
-            .debug_selector({
-                let id = item.id.clone();
-                move || format!("native-message-{id}")
-            })
-            .child(
-                Collapsible::new()
-                    .open(open)
-                    .child(self.render_tool_disclosure(item, open, owner, cx))
-                    .content(self.render_tool_details(item, cx)),
-            )
-            .children(images)
-            .when(!open, |output| {
-                let Some(ToolDiffs::Ready(files)) = self.tool_diffs.get(&item.id) else {
-                    return output;
-                };
-                output.child(
-                    div()
-                        .pt_1()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .children(files.iter().map(|file| {
-                            div()
-                                .debug_selector({
-                                    let path = file.path.clone();
-                                    let counts = file.counts;
-                                    move || {
-                                        format!(
-                                            "native-file-change:{path}:+{}:-{}",
-                                            counts.map_or(0, |c| c.0),
-                                            counts.map_or(0, |c| c.1)
-                                        )
-                                    }
-                                })
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .text_sm()
-                                .child(div().flex_1().min_w_0().truncate().child(file.path.clone()))
-                                .when_some(file.counts, |row, (added, removed)| {
-                                    row.child(
-                                        div()
-                                            .text_color(cx.theme().success)
-                                            .child(format!("+{added}")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_color(cx.theme().danger)
-                                            .child(format!("−{removed}")),
-                                    )
-                                })
-                        })),
+        let output =
+            div()
+                .w_full()
+                .max_w(self.column_width())
+                .min_w_0()
+                .id(gpui_kit::SharedString::from(format!(
+                    "message:{}:{}",
+                    self.record.id, item.id
+                )))
+                .debug_selector({
+                    let id = item.id.clone();
+                    move || format!("native-message-{id}")
+                })
+                .child(
+                    Collapsible::new()
+                        .open(open)
+                        .child(self.render_tool_disclosure(item, open, owner.clone(), cx))
+                        .content(self.render_tool_details(item, cx)),
                 )
-            });
+                .children(images)
+                .when(!open, move |output| {
+                    let Some(ToolDiffs::Ready(files)) = self.tool_diffs.get(&item.id) else {
+                        return output;
+                    };
+                    let id = item.id.clone();
+                    output.child(div().pt_1().flex().flex_col().children(files.iter().map(
+                        |file| {
+                            let (owner, id) = (owner.clone(), id.clone());
+                            let counts = file.counts;
+                            let trailing = div().children(counts.map(|(added, removed)| {
+                                crate::gpui::line_counts(
+                                    bootty_git::changes::LineCounts {
+                                        added: u32::try_from(added).unwrap_or(u32::MAX),
+                                        removed: u32::try_from(removed).unwrap_or(u32::MAX),
+                                    },
+                                    cx,
+                                )
+                            }));
+                            crate::gpui::change_row(
+                                gpui_kit::SharedString::from(format!(
+                                    "file-change:{id}:{}",
+                                    file.path
+                                )),
+                                file.kind,
+                                &file.path,
+                                trailing,
+                                cx,
+                            )
+                            .debug_selector({
+                                let path = file.path.clone();
+                                move || {
+                                    format!(
+                                        "native-file-change:{path}:+{}:-{}",
+                                        counts.map_or(0, |c| c.0),
+                                        counts.map_or(0, |c| c.1)
+                                    )
+                                }
+                            })
+                            // The change's diff is in the tool's details.
+                            .on_click(move |_, _, cx| {
+                                _ = owner.update(cx, |this, cx| {
+                                    this.tool_disclosures.insert(id.clone(), true);
+                                    cx.notify();
+                                });
+                            })
+                        },
+                    )))
+                });
         div()
             .w_full()
             .min_w_0()
@@ -2415,7 +2449,7 @@ impl NativeAgentSessionView {
 
     /// The files the turn ending at `final_index` changed, in the order it first changed them,
     /// with +/− summed across its file changes.
-    fn turn_changes(&self, final_index: usize) -> Vec<(String, Option<(usize, usize)>)> {
+    fn turn_changes(&self, final_index: usize) -> Vec<TurnChange> {
         let transcript = &self.record.snapshot.transcript;
         let start = transcript
             .get(..final_index)
@@ -2423,7 +2457,7 @@ impl NativeAgentSessionView {
             .iter()
             .rposition(|item| item.role == "user" && !item.steered)
             .map_or(0, |user| user.saturating_add(1));
-        let mut changes: Vec<(String, Option<(usize, usize)>)> = Vec::new();
+        let mut changes: Vec<TurnChange> = Vec::new();
         for item in transcript.get(start..final_index).unwrap_or_default() {
             if item
                 .tool
@@ -2436,24 +2470,84 @@ impl NativeAgentSessionView {
                 continue;
             };
             for file in files {
-                match changes.iter_mut().find(|(path, _)| *path == file.path) {
-                    Some((_, counts)) => {
-                        *counts = counts.zip(file.counts).map(|(total, more)| {
-                            (
-                                total.0.saturating_add(more.0),
-                                total.1.saturating_add(more.1),
-                            )
-                        });
+                let counts = file
+                    .counts
+                    .map(|(added, removed)| bootty_git::changes::LineCounts {
+                        added: u32::try_from(added).unwrap_or(u32::MAX),
+                        removed: u32::try_from(removed).unwrap_or(u32::MAX),
+                    });
+                match changes.iter_mut().find(|change| change.path == file.path) {
+                    Some(change) => {
+                        change.counts = change
+                            .counts
+                            .zip(counts)
+                            .map(|(total, more)| total.plus(more));
+                        // A file the turn created stays new; one it removed last is gone.
+                        if file.kind == crate::gpui::ChangeKind::Deleted {
+                            change.kind = file.kind;
+                        }
+                        change.files.push(file.file.clone());
                     }
-                    None => changes.push((file.path.clone(), file.counts)),
+                    None => changes.push(TurnChange {
+                        path: file.path.clone(),
+                        kind: file.kind,
+                        counts,
+                        files: vec![file.file.clone()],
+                    }),
                 }
             }
         }
         changes
     }
 
-    /// Under a settled turn's reply, every file the turn changed, each opening the file. A turn
-    /// that changed one file already shows it at its change.
+    /// Shows or hides `path`'s diff under it in the list of files the turn ending at
+    /// `final_index` changed.
+    fn toggle_turn_change(
+        &mut self,
+        final_index: usize,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reply) = self.record.snapshot.transcript.get(final_index) else {
+            return;
+        };
+        let key = (reply.id.clone(), path.to_owned());
+        if self.turn_change_diffs.remove(&key).is_none() {
+            let files = self
+                .turn_changes(final_index)
+                .into_iter()
+                .find(|change| change.path == path)
+                .map_or_else(Vec::new, |change| change.files);
+            let diffs = files
+                .into_iter()
+                .map(|file| {
+                    let rows = diff_rows(&file);
+                    let view = cx.new(|cx| {
+                        let mut view = crate::gpui_git_panel::GitDiffPanel::new(window, cx);
+                        view.show_file_diff(file, window, cx);
+                        view
+                    });
+                    // A comment on the change goes into this conversation's draft.
+                    cx.subscribe_in(
+                        &view,
+                        window,
+                        |this, _, comment: &crate::gpui_git_panel::DiffComment, window, cx| {
+                            this.add_diff_comment(comment, window, cx);
+                        },
+                    )
+                    .detach();
+                    TurnChangeDiff { view, rows }
+                })
+                .collect();
+            self.turn_change_diffs.insert(key, diffs);
+        }
+        cx.notify();
+    }
+
+    /// Under a settled turn's reply, every file the turn changed; each opens its diff in place,
+    /// and Review shows them all in the Changes panel. A turn that changed one file already shows
+    /// it at its change.
     fn render_turn_changes(
         &self,
         final_index: usize,
@@ -2464,80 +2558,153 @@ impl NativeAgentSessionView {
         if changes.len() < 2 {
             return None;
         }
-        let total = changes.iter().filter_map(|(_, counts)| *counts).fold(
-            (0_usize, 0_usize),
-            |total, counts| {
-                (
-                    total.0.saturating_add(counts.0),
-                    total.1.saturating_add(counts.1),
-                )
-            },
+        let reply = self.record.snapshot.transcript.get(final_index)?;
+        let total = changes.iter().filter_map(|change| change.counts).fold(
+            bootty_git::changes::LineCounts::default(),
+            bootty_git::changes::LineCounts::plus,
         );
-        let counts = |row: gpui_kit::Div, (added, removed): (usize, usize)| {
-            row.child(
-                div()
-                    .text_color(cx.theme().success)
-                    .child(format!("+{added}")),
-            )
+        let summary = format!("+{}:-{}", total.added, total.removed);
+        let reviewable = self.turn_reviewable(reply);
+        let reply_id = reply.id.clone();
+        let heading = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h_8()
+            .px_2()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
             .child(
                 div()
-                    .text_color(cx.theme().danger)
-                    .child(format!("−{removed}")),
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(format!("Changed {} files", changes.len())),
             )
-        };
-        let summary = format!("+{}:-{}", total.0, total.1);
+            .child(crate::gpui::line_counts(total, cx))
+            .when(reviewable, |row| {
+                let (owner, id) = (owner.clone(), reply_id.clone());
+                row.child(
+                    Button::new(gpui_kit::SharedString::from(format!("review-turn:{id}")))
+                        .debug_selector({
+                            let id = id.clone();
+                            move || format!("review-turn:{id}")
+                        })
+                        .label("Review")
+                        .ghost()
+                        .xsmall()
+                        .loading(self.pending.contains("turn-diff"))
+                        .element_tooltip("Show every change in the Changes panel")
+                        .on_click(move |_, window, cx| {
+                            _ = owner.update(cx, |this, cx| {
+                                this.submit_command(
+                                    "turn-diff",
+                                    vec![id.clone()],
+                                    None,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }),
+                )
+            });
         Some(
             div()
                 .debug_selector(move || format!("native-turn-changes:{summary}"))
                 .mt_2()
-                .p_2()
                 .rounded_md()
                 .border_1()
                 .border_color(cx.theme().border)
+                .overflow_hidden()
                 .flex()
                 .flex_col()
-                .gap_1()
-                .text_sm()
-                .child(counts(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(
-                            div()
-                                .flex_1()
-                                .child(format!("{} files changed", changes.len())),
-                        ),
-                    total,
-                ))
-                .children(changes.into_iter().map(|(path, file_counts)| {
-                    let open = owner.clone();
-                    let target = path.clone();
-                    let row = div().flex().items_center().gap_2().child(
-                        Button::new(gpui_kit::SharedString::from(format!("turn-change:{path}")))
-                            .debug_selector({
-                                let path = path.clone();
-                                move || format!("native-turn-change:{path}")
-                            })
-                            .ghost()
-                            .xsmall()
-                            .flex_1()
-                            .min_w_0()
-                            .justify_start()
-                            .label(path)
-                            .on_click(move |_, window, cx| {
-                                _ = open.update(cx, |this, cx| {
-                                    this.command("open-link", vec![target.clone()], window, cx);
-                                });
-                            }),
-                    );
-                    match file_counts {
-                        Some(file_counts) => counts(row, file_counts),
-                        None => row,
-                    }
+                .child(heading)
+                .children(changes.into_iter().map(|change| {
+                    self.render_turn_change(&change, final_index, &reply_id, owner, cx)
                 })),
         )
+    }
+
+    /// One file in a turn's list of changed files, with its diff under it when open.
+    fn render_turn_change(
+        &self,
+        change: &TurnChange,
+        final_index: usize,
+        reply_id: &str,
+        owner: &gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::Div {
+        let open = self
+            .turn_change_diffs
+            .get(&(reply_id.to_owned(), change.path.clone()));
+        let toggle = owner.clone();
+        let path = change.path.clone();
+        let trailing = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .children(
+                change
+                    .counts
+                    .map(|counts| crate::gpui::line_counts(counts, cx)),
+            )
+            .child(crate::gpui::sized_icon(
+                if open.is_some() {
+                    "chevron-down"
+                } else {
+                    "chevron-right"
+                },
+                crate::gpui::IconSize::Small,
+                cx.theme().muted_foreground,
+            ));
+        let row = crate::gpui::change_row(
+            gpui_kit::SharedString::from(format!("turn-change:{reply_id}:{path}")),
+            change.kind,
+            &change.path,
+            trailing,
+            cx,
+        )
+        .debug_selector({
+            let path = path.clone();
+            move || format!("native-turn-change:{path}")
+        })
+        .on_click(move |_, window, cx| {
+            _ = toggle.update(cx, |this, cx| {
+                this.toggle_turn_change(final_index, &path, window, cx);
+            });
+        });
+        div()
+            .flex()
+            .flex_col()
+            .child(row)
+            .children(open.into_iter().flatten().map(|diff| {
+                div()
+                    .debug_selector({
+                        let path = change.path.clone();
+                        move || format!("native-turn-change-diff:{path}")
+                    })
+                    .h(cx.theme().mono_font_size.mul(diff.rows.mul_add(1.5, 1.0)))
+                    .min_w_0()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(diff.view.clone())
+            }))
+    }
+
+    /// Whether Git kept the files from before and after the turn ending in `reply`, so its
+    /// changes can show together.
+    fn turn_reviewable(&self, reply: &NativeTranscriptItem) -> bool {
+        reply.role == "assistant"
+            && reply.checkpoint.is_some()
+            && self
+                .record
+                .snapshot
+                .transcript
+                .iter()
+                .take_while(|earlier| earlier.id != reply.id)
+                .filter(|earlier| earlier.role == "user")
+                .last()
+                .is_some_and(|prompt| prompt.checkpoint.is_some())
     }
 
     /// Under a user message: "Sending…" until the provider confirms it, then "Steered" if it
@@ -2807,11 +2974,10 @@ impl NativeAgentSessionView {
         let item = |id: &'static str, label: &str| {
             Button::new(id)
                 .debug_selector(move || id.to_owned())
-                .label(label.to_owned())
+                .row_label(label.to_owned())
                 .small()
                 .ghost()
                 .w_full()
-                .justify_start()
         };
         let (open, reveal, copy) = (url.clone(), url.clone(), file.clone().unwrap_or(url));
         let surface = div()
@@ -2871,11 +3037,10 @@ impl NativeAgentSessionView {
                         editor.id
                     )))
                     .debug_selector(move || format!("native-link-edit-{}", editor.id))
-                    .label(format!("Open in {}", editor.name))
+                    .row_label(format!("Open in {}", editor.name))
                     .small()
                     .ghost()
                     .w_full()
-                    .justify_start()
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.link_menu = None;
                         this.command(
@@ -3097,17 +3262,7 @@ impl NativeAgentSessionView {
                     })
             });
         }
-        item.checkpoint.as_ref()?;
-        let earlier = self
-            .record
-            .snapshot
-            .transcript
-            .iter()
-            .take_while(|earlier| earlier.id != item.id)
-            .filter(|earlier| earlier.role == "user")
-            .last()
-            .is_some_and(|prompt| prompt.checkpoint.is_some());
-        (item.role == "assistant" && earlier).then(|| {
+        self.turn_reviewable(item).then(|| {
             Button::new(gpui_kit::SharedString::from(format!("turn-changes:{id}")))
                 .debug_selector({
                     let id = id.clone();
@@ -5524,16 +5679,12 @@ fn tool_diff(
             },
         )
     });
-    let rows = file
-        .hunks
-        .iter()
-        .map(|hunk| hunk.lines.len().saturating_add(1))
-        .fold(0_usize, usize::saturating_add)
-        .clamp(2, 14);
-    let rows = num_traits::ToPrimitive::to_f32(&rows).unwrap_or(14.0);
+    let rows = diff_rows(&file);
+    let kind = crate::gpui::ChangeKind::of_diff(&file);
+    let shown = file.clone();
     let view = cx.new(|cx| {
         let mut view = crate::gpui_git_panel::GitDiffPanel::new(window, cx);
-        view.show_file_diff(file, window, cx);
+        view.show_file_diff(shown, window, cx);
         view
     });
     let path = std::path::Path::new(path);
@@ -5546,7 +5697,20 @@ fn tool_diff(
         view,
         rows,
         counts,
+        kind,
+        file,
     }
+}
+
+/// How many rows an embedded diff of `file` takes: its lines and hunk headings, from 2 to 14.
+fn diff_rows(file: &bootty_git::diff::FileDiff) -> f32 {
+    let rows = file
+        .hunks
+        .iter()
+        .map(|hunk| hunk.lines.len().saturating_add(1))
+        .fold(0_usize, usize::saturating_add)
+        .clamp(2, 14);
+    num_traits::ToPrimitive::to_f32(&rows).unwrap_or(14.0)
 }
 
 /// Each changed file under its path, in a box sized to its patch.

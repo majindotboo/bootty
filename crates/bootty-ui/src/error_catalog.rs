@@ -204,5 +204,11 @@ fn known_cause(message: &str) -> Option<&'static str> {
     if lower.contains("images can be at most 50 mib") {
         return Some("Images can be at most 50 MiB.");
     }
+    if lower.contains("no such file or directory") {
+        return Some("It no longer exists.");
+    }
+    if lower.contains("permission denied") {
+        return Some("Permission to it was denied.");
+    }
     None
 }

@@ -2687,7 +2687,7 @@ fn sidebar_diff(diff: SidebarDiffSummary) -> gpui_kit::AnyElement {
             element.child(
                 div()
                     .text_color(color(diff.removed_color))
-                    .child(format!("-{}", diff.removed)),
+                    .child(format!("−{}", diff.removed)),
             )
         })
         .into_any_element()

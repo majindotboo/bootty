@@ -685,10 +685,10 @@ impl GpuiSettings {
                                         .text_xs()
                                         .truncate()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(if *enabled {
-                                            help.clone()
-                                        } else {
-                                            format!("Disabled · {help}")
+                                        .child(match (*enabled, help.is_empty()) {
+                                            (true, _) => help.clone(),
+                                            (false, true) => "Disabled".to_owned(),
+                                            (false, false) => format!("Disabled · {help}"),
                                         }),
                                 ),
                         ),
@@ -2664,14 +2664,16 @@ fn render_settings_item_layout(
                 .flex_1()
                 .min_w(rems(16.0))
                 .child(render_setting_label(id, label, draft, cx))
-                .child(
-                    gpui_kit::component::text::TextView::markdown(
-                        SharedString::from(format!("setting-help-{id}")),
-                        help.to_owned(),
+                .when(!help.is_empty(), |column| {
+                    column.child(
+                        gpui_kit::component::text::TextView::markdown(
+                            SharedString::from(format!("setting-help-{id}")),
+                            help.to_owned(),
+                        )
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
                     )
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground),
-                ),
+                }),
         )
         .child(control)
         .into_any_element()
@@ -2704,14 +2706,16 @@ fn render_structured_settings_item_layout(
                 .w_full()
                 .min_w_0()
                 .child(render_setting_label(id, label, draft, cx))
-                .child(
-                    gpui_kit::component::text::TextView::markdown(
-                        SharedString::from(format!("setting-help-{id}")),
-                        help.to_owned(),
+                .when(!help.is_empty(), |column| {
+                    column.child(
+                        gpui_kit::component::text::TextView::markdown(
+                            SharedString::from(format!("setting-help-{id}")),
+                            help.to_owned(),
+                        )
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground),
                     )
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground),
-                ),
+                }),
         )
         .child(
             div()

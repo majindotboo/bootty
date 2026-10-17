@@ -2631,6 +2631,14 @@ fn overflowing_tabs_keep_the_new_tab_button_clickable_after_scrolling(cx: &mut T
         let intents = probe.intents.borrow();
         assert!(matches!(intents.as_slice(), [ChromeIntent::Command(invocation)] if invocation.command == "new_tab"), "visible new tab button must emit its command: {intents:?}");
     });
+    // Tabs scrolled past the left chevron stay under it, so it still scrolls back.
+    let before = cx.debug_bounds("status-tab-top-1-tab-9").unwrap();
+    let back = cx
+        .debug_bounds("mux-tabs-top-1-scroll-left")
+        .expect("left chevron");
+    cx.simulate_click(back.center(), Modifiers::none());
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("status-tab-top-1-tab-9").unwrap().left() > before.left());
 }
 
 #[gpui_kit::test]

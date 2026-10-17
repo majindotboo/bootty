@@ -159,7 +159,9 @@ diff, and in a conversation's file changes, selected lines take a comment that g
 into the conversation's draft with the file, the lines and their text.
 In a Git work tree, every turn snapshots the files before it starts and after it
 ends, untracked files included, without touching the index. A reply's file-diff
-button opens that turn's changes (`agents.native.turn-diff`). A prompt's rewind
+button, or Review on the list of files a turn changed, opens that turn's changes
+in the Changes panel (`agents.native.turn-diff`). Each file in that list shows
+its diff in place when clicked. A prompt's rewind
 button asks how far to go back to before it. Rewinding the conversation
 (`agents.native.rewind PROMPT [files]`) makes the provider forget that message's
 turn and every later one, drops them from the transcript, and brings the message

@@ -589,6 +589,21 @@ pub fn snapshot(
 
 /// A pull request in words and color: merged in the accent, closed as a failure, a draft muted,
 /// and an open one by its checks.
+/// The lines a session's checkout adds and removes against its last commit; none when clean.
+fn sidebar_diff(
+    added: Option<u64>,
+    removed: Option<u64>,
+    theme: crate::gpui::UiPalette,
+) -> Option<crate::gpui::chrome::SidebarDiffSummary> {
+    let (added, removed) = (added.unwrap_or(0), removed.unwrap_or(0));
+    (added > 0 || removed > 0).then(|| crate::gpui::chrome::SidebarDiffSummary {
+        added,
+        removed,
+        added_color: ui_color!(theme.success),
+        removed_color: ui_color!(theme.destructive),
+    })
+}
+
 fn sidebar_pull_request(
     status: Option<&bootty_git::github::PullRequestStatus>,
     theme: crate::gpui::UiPalette,
@@ -1095,6 +1110,11 @@ fn sidebar_rows(
             branch: facts.branch,
             pull_request: sidebar_pull_request(
                 facts.pull_request.as_ref(),
+                state.ui_theme().palette,
+            ),
+            diff: sidebar_diff(
+                facts.diff_added,
+                facts.diff_removed,
                 state.ui_theme().palette,
             ),
             icon: Some("terminal".to_owned()),

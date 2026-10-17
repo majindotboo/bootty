@@ -640,10 +640,12 @@ impl DocumentPanel {
 
     fn fail(&mut self, error: String, saving: bool, cx: &mut Context<Self>) {
         let summary = if saving {
-            "Could not save this file. Your changes are still here."
+            "Could not save this file. Your changes are still here.".to_owned()
         } else {
-            "Could not open this file."
+            crate::error_catalog::ErrorNotice::failed("Could not open this file", &*error)
+                .to_string()
         };
+        let summary = summary.as_str();
         self.show_error(summary, error, cx);
         if saving && let Some(editor) = &self.editor {
             editor.update(cx, |editor, cx| editor.save_failed(summary.to_owned(), cx));

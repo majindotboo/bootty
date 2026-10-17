@@ -18,6 +18,31 @@ pub struct ChangedFile {
     pub previous_path: Option<String>,
     pub index: char,
     pub worktree: char,
+    /// Lines the staged change adds and removes; none when nothing is staged or the file is
+    /// binary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_lines: Option<LineCounts>,
+    /// Lines the unstaged change adds and removes, likewise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unstaged_lines: Option<LineCounts>,
+}
+
+/// Lines a change adds and removes.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct LineCounts {
+    pub added: u32,
+    pub removed: u32,
+}
+
+impl LineCounts {
+    /// Both changes together.
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            added: self.added.saturating_add(other.added),
+            removed: self.removed.saturating_add(other.removed),
+        }
+    }
 }
 
 impl ChangedFile {
@@ -127,7 +152,17 @@ impl<R: CommandRunner> Git<R> {
                 previous_path,
                 index,
                 worktree,
+                staged_lines: None,
+                unstaged_lines: None,
             });
+        }
+        if !files.is_empty() {
+            let staged = self.line_counts(&root, true)?;
+            let unstaged = self.line_counts(&root, false)?;
+            for file in &mut files {
+                file.staged_lines = staged.get(&file.path).copied();
+                file.unstaged_lines = unstaged.get(&file.path).copied();
+            }
         }
         Ok(RepositoryChanges {
             branch: self.head_branch(&root),
@@ -135,6 +170,21 @@ impl<R: CommandRunner> Git<R> {
             upstream,
             files,
         })
+    }
+
+    /// Each changed file's line counts in the index (`cached`) or the worktree, by path. Binary
+    /// files have none.
+    fn line_counts(
+        &self,
+        root: &str,
+        cached: bool,
+    ) -> Result<std::collections::HashMap<String, LineCounts>, String> {
+        let mut args = vec!["--no-optional-locks", "diff", "--numstat", "-z"];
+        if cached {
+            args.push("--cached");
+        }
+        let output = self.checked_output(root, &args)?;
+        Ok(parse_numstat(&output))
     }
 
     /// # Errors
@@ -774,4 +824,31 @@ impl<R: CommandRunner> Git<R> {
         }
         Ok(overview.root)
     }
+}
+
+/// `git diff --numstat -z` records, `added\tremoved\tpath`, by path. A rename's record has no
+/// path and is followed by its source and destination. Binary files count `-` and are left out.
+fn parse_numstat(output: &str) -> std::collections::HashMap<String, LineCounts> {
+    let mut fields = output.split_terminator('\0');
+    let mut counts = std::collections::HashMap::new();
+    while let Some(record) = fields.next() {
+        let mut columns = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) =
+            (columns.next(), columns.next(), columns.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            match (fields.next(), fields.next()) {
+                (Some(_), Some(destination)) => destination,
+                _ => break,
+            }
+        } else {
+            path
+        };
+        if let (Ok(added), Ok(removed)) = (added.parse(), removed.parse()) {
+            counts.insert(path.to_owned(), LineCounts { added, removed });
+        }
+    }
+    counts
 }

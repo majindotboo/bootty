@@ -5,26 +5,25 @@ mod pull_request;
 
 pub use diff::{DiffComment, GitDiffPanel};
 
-use crate::gpui::ElementTooltip as _;
+use crate::gpui::{ChangeKind, ElementTooltip as _, change_row, line_counts};
 use std::time::{Duration, Instant};
 
 use bootty_control::{
     BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
     CommandTarget,
 };
-use bootty_git::changes::{ChangeGroup, RepositoryChanges, RepositoryOverview};
+use bootty_git::changes::{ChangeGroup, ChangedFile, RepositoryChanges, RepositoryOverview};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName, Selectable as _,
+    Sizable as _,
     button::{Button, ButtonVariants as _},
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputState},
-    list::ListItem,
     menu::ContextMenuExt as _,
-    tree::{Tree, TreeEntry, TreeItem, TreeState},
 };
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window, div, prelude::*,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Pixels,
+    Render, SharedString, Styled, Window, div, prelude::*, px,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,10 +44,19 @@ pub struct GitChangesPanel {
     host_visible: bool,
     context: GitPanelContext,
     sender: BoundAppCommandSender,
+    /// The dock's diff panel, where pull request files open.
     diff: Entity<GitDiffPanel>,
+    /// The diff this panel shows in place of its list, or beside it when there is room.
+    detail: Entity<GitDiffPanel>,
+    /// What the shown diff is, like a file's path or "All changes"; without one the list shows.
+    detail_title: Option<String>,
+    /// The file the keyboard is on.
+    cursor: Option<(ChangeGroup, String)>,
+    list_focus: FocusHandle,
+    /// The panel's width, which decides whether the list and a diff fit side by side.
+    width: Pixels,
     message: Entity<InputState>,
     changes: Option<RepositoryChanges>,
-    tree: Entity<TreeState>,
     overview: Option<RepositoryOverview>,
     branch_name: Entity<InputState>,
     branch_start: Entity<InputState>,
@@ -69,7 +77,7 @@ pub struct GitChangesPanel {
     pull_requests: Option<Entity<pull_request::PullRequestView>>,
     pull_request_subscription: Option<gpui_kit::Subscription>,
     showing_pull_requests: bool,
-    _subscriptions: [gpui_kit::Subscription; 4],
+    _subscriptions: [gpui_kit::Subscription; 5],
     /// Diffs leave out whitespace changes, as the diff panel asked.
     ignore_whitespace: bool,
     /// Codex is writing a commit message for the staged changes.
@@ -84,6 +92,16 @@ pub struct GitChangesPanel {
 
 pub struct OpenDiff;
 impl EventEmitter<OpenDiff> for GitChangesPanel {}
+impl EventEmitter<DiffComment> for GitChangesPanel {}
+
+/// A change group's name in Git commands.
+const fn group_key(group: ChangeGroup) -> &'static str {
+    match group {
+        ChangeGroup::Staged => "staged",
+        ChangeGroup::Unstaged => "unstaged",
+        ChangeGroup::Untracked => "untracked",
+    }
+}
 
 impl GitChangesPanel {
     pub(crate) fn has_pending_work(&self, cx: &App) -> bool {
@@ -130,6 +148,90 @@ impl GitChangesPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::poll_worktree(window, cx);
+        let message =
+            cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t(cx, "git-message")));
+        let detail = cx.new(|cx| {
+            let mut detail = GitDiffPanel::new(window, cx);
+            detail.hide_toolbar();
+            detail
+        });
+        let branch_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a branch"));
+        // Hunks chosen in the diff stage or unstage through this panel's repository, hiding
+        // whitespace asks Git again for the shown diff, a comment goes on to the conversation,
+        // and the commit buttons follow the message.
+        let subscriptions = [
+            cx.subscribe_in(
+                &detail,
+                window,
+                |this, _, hunk: &diff::StageHunk, window, cx| {
+                    this.request(
+                        "git.stage-hunk",
+                        vec![hunk.patch.clone(), hunk.reverse.to_string()],
+                        window,
+                        cx,
+                    );
+                },
+            ),
+            cx.subscribe_in(
+                &detail,
+                window,
+                |this, _, changed: &diff::WhitespaceChanged, window, cx| {
+                    this.ignore_whitespace = changed.0;
+                    if this.selected_diff.is_some() {
+                        this.refresh_selected_diff(window, cx);
+                    } else {
+                        this.request_inner("git.diff-all", Vec::new(), false, window, cx);
+                    }
+                },
+            ),
+            cx.subscribe(&detail, |_, _, comment: &DiffComment, cx| {
+                cx.emit(comment.clone());
+            }),
+            cx.observe(&message, |_, _, cx| cx.notify()),
+            cx.observe(&branch_filter, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            host_visible: true,
+            context,
+            sender,
+            diff,
+            detail,
+            detail_title: None,
+            cursor: None,
+            list_focus: cx.focus_handle(),
+            width: px(0.),
+            active: false,
+            local_git,
+            revision: 0,
+            pending_directory: None,
+            pending_read: None,
+            messages: std::collections::HashMap::new(),
+            message,
+            changes: None,
+            overview: None,
+            branch_name: cx.new(|cx| InputState::new(window, cx).placeholder("new branch")),
+            branch_start: cx.new(|cx| InputState::new(window, cx).placeholder("start ref (HEAD)")),
+            branch_filter,
+            stash_message: cx
+                .new(|cx| InputState::new(window, cx).placeholder("stash message (optional)")),
+            pending: false,
+            request_revision: 0,
+            mutating: false,
+            selected_diff: None,
+            error: None,
+            pull_requests: None,
+            pull_request_subscription: None,
+            showing_pull_requests: false,
+            _subscriptions: subscriptions,
+            ignore_whitespace: false,
+            writing: false,
+            pull_request: None,
+        }
+    }
+
+    /// Every two seconds while it shows, asks Git again when the worktree changed.
+    fn poll_worktree(window: &Window, cx: &Context<Self>) {
         cx.spawn_in(window, async move |weak, cx| {
             loop {
                 cx.background_executor().timer(Duration::from_secs(2)).await;
@@ -164,72 +266,6 @@ impl GitChangesPanel {
             }
         })
         .detach();
-        let message =
-            cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t(cx, "git-message")));
-        let branch_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a branch"));
-        // Hunks chosen in the diff stage or unstage through this panel's repository, hiding
-        // whitespace asks Git again for the shown diff, and the commit buttons follow the message.
-        let subscriptions = [
-            cx.subscribe_in(
-                &diff,
-                window,
-                |this, _, hunk: &diff::StageHunk, window, cx| {
-                    this.request(
-                        "git.stage-hunk",
-                        vec![hunk.patch.clone(), hunk.reverse.to_string()],
-                        window,
-                        cx,
-                    );
-                },
-            ),
-            cx.subscribe_in(
-                &diff,
-                window,
-                |this, _, changed: &diff::WhitespaceChanged, window, cx| {
-                    this.ignore_whitespace = changed.0;
-                    if this.selected_diff.is_some() {
-                        this.refresh_selected_diff(window, cx);
-                    } else {
-                        this.request_inner("git.diff-all", Vec::new(), false, window, cx);
-                    }
-                },
-            ),
-            cx.observe(&message, |_, _, cx| cx.notify()),
-            cx.observe(&branch_filter, |_, _, cx| cx.notify()),
-        ];
-        Self {
-            host_visible: true,
-            context,
-            sender,
-            diff,
-            active: false,
-            local_git,
-            revision: 0,
-            pending_directory: None,
-            pending_read: None,
-            messages: std::collections::HashMap::new(),
-            message,
-            changes: None,
-            tree: cx.new(|cx| TreeState::new(cx)),
-            overview: None,
-            branch_name: cx.new(|cx| InputState::new(window, cx).placeholder("new branch")),
-            branch_start: cx.new(|cx| InputState::new(window, cx).placeholder("start ref (HEAD)")),
-            branch_filter,
-            stash_message: cx
-                .new(|cx| InputState::new(window, cx).placeholder("stash message (optional)")),
-            pending: false,
-            request_revision: 0,
-            mutating: false,
-            selected_diff: None,
-            error: None,
-            pull_requests: None,
-            pull_request_subscription: None,
-            showing_pull_requests: false,
-            _subscriptions: subscriptions,
-            ignore_whitespace: false,
-            writing: false,
-            pull_request: None,
-        }
     }
 
     pub(crate) fn browse(
@@ -269,10 +305,10 @@ impl GitChangesPanel {
             self.changes = None;
             self.overview = None;
             self.selected_diff = None;
+            self.detail_title = None;
+            self.cursor = None;
             self.error = None;
             self.revision = 0;
-            self.tree
-                .update(cx, |tree, cx| tree.set_items(Vec::new(), cx));
         }
         self.refresh(window, cx);
     }
@@ -293,7 +329,7 @@ impl GitChangesPanel {
         }
     }
 
-    fn refresh_selected_diff(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn refresh_selected_diff(&mut self, window: &Window, cx: &mut Context<Self>) {
         let Some((path, group)) = self.selected_diff.clone() else {
             return;
         };
@@ -323,15 +359,10 @@ impl GitChangesPanel {
                 cx,
             );
         } else {
+            // The file has no changes left, so it is gone from the list too.
             self.selected_diff = None;
-            self.diff.update(cx, |diff, cx| {
-                diff.show(
-                    path,
-                    "No changes remaining for this file.".to_owned(),
-                    window,
-                    cx,
-                );
-            });
+            self.detail_title = None;
+            cx.notify();
         }
     }
 
@@ -671,7 +702,7 @@ impl GitChangesPanel {
                 let changes = serde_json::from_value(value)?;
                 if self.changes.as_ref() != Some(&changes) {
                     self.changes = Some(changes);
-                    self.sync_tree(cx);
+                    self.keep_cursor();
                 }
                 self.ask_pull_request(window, cx);
                 if !self.showing_pull_requests {
@@ -688,7 +719,12 @@ impl GitChangesPanel {
                     .then(|| self.selected_diff.as_ref().map(|(_, group)| group.clone()))
                     .flatten();
                 let hide_whitespace = self.ignore_whitespace;
-                self.diff.update(cx, |diff, cx| {
+                // A refresh keeps a shown diff current; it never opens one.
+                if !reveal && self.detail_title.is_none() {
+                    return Ok(());
+                }
+                self.detail_title = Some(diff_title.clone());
+                self.detail.update(cx, |diff, cx| {
                     diff.show(diff_title, contents, window, cx);
                     if command != "git.commit-diff" {
                         diff.mark_from_changes(hide_whitespace, cx);
@@ -697,9 +733,6 @@ impl GitChangesPanel {
                         diff.allow_staging(group, cx);
                     }
                 });
-                if reveal {
-                    cx.emit(OpenDiff);
-                }
             }
             _ => {
                 self.overview = None;
@@ -713,166 +746,253 @@ impl GitChangesPanel {
         Ok(())
     }
 
-    fn sync_tree(&mut self, cx: &mut Context<Self>) {
+    /// Every changed file in the list's order, under the group it shows in. A file with staged
+    /// and unstaged changes shows in both.
+    fn listed(&self) -> Vec<(ChangeGroup, &ChangedFile)> {
         let Some(changes) = &self.changes else {
-            return;
+            return Vec::new();
         };
-        let items = [
-            (ChangeGroup::Staged, "staged"),
-            (ChangeGroup::Unstaged, "unstaged"),
-            (ChangeGroup::Untracked, "untracked"),
+        [
+            ChangeGroup::Staged,
+            ChangeGroup::Unstaged,
+            ChangeGroup::Untracked,
         ]
         .into_iter()
-        .filter_map(|(group, key)| {
-            let paths = changes
+        .flat_map(|group| {
+            changes
                 .files
                 .iter()
-                .filter(|file| file.groups().any(|candidate| candidate == group))
-                .map(|file| file.path.as_str())
-                .collect::<Vec<_>>();
-            if paths.is_empty() {
-                return None;
-            }
-            let count = paths.len();
-            let expanded = |id: &str| {
-                self.tree
-                    .read(cx)
-                    .index_of(&id.into())
-                    .and_then(|ix| self.tree.read(cx).entry(ix))
-                    .is_none_or(gpui_kit::base::TreeEntry::is_expanded)
-            };
-            // Files sit under their folder; those at the top of the repository sit alone.
-            let mut folders = std::collections::BTreeMap::<&str, Vec<&str>>::new();
-            for path in paths {
-                folders
-                    .entry(path.rsplit_once('/').map_or("", |(folder, _)| folder))
-                    .or_default()
-                    .push(path);
-            }
-            let file = |path: &str| TreeItem::new(format!("{key}:{path}"), path.to_owned());
-            let files = folders
-                .into_iter()
-                .flat_map(|(folder, paths)| {
-                    if folder.is_empty() {
-                        paths.into_iter().map(file).collect::<Vec<_>>()
-                    } else {
-                        let id = format!("{key}/{folder}");
-                        vec![
-                            TreeItem::new(id.clone(), format!("{folder}/"))
-                                .children(paths.into_iter().map(file))
-                                .expanded(expanded(&id)),
-                        ]
-                    }
-                })
-                .collect::<Vec<_>>();
-            let expanded = expanded(key);
-            Some(
-                TreeItem::new(
-                    key,
-                    format!("{} · {count}", crate::i18n::t(cx, &format!("git-{key}"))),
-                )
-                .children(files)
-                .expanded(expanded),
-            )
+                .filter(move |file| file.groups().any(|candidate| candidate == group))
+                .map(move |file| (group, file))
         })
-        .collect::<Vec<_>>();
-        let selected = self.tree.update(cx, |tree, cx| {
-            let selected = tree.selected_item().map(|item| item.id.clone());
-            tree.set_items(items, cx);
-            if let Some(id) = selected {
-                let index = tree.index_of(&id).or_else(|| {
-                    let (_, path) = id.split_once(':')?;
-                    ["staged", "unstaged", "untracked"]
-                        .into_iter()
-                        .find_map(|group| tree.index_of(&format!("{group}:{path}").into()))
-                });
-                tree.set_selected_index(index, cx);
-            }
-            tree.selected_item().map(|item| item.id.clone())
+        .collect()
+    }
+
+    /// Moves the keyboard to a listed file when the one it was on is gone.
+    fn keep_cursor(&mut self) {
+        let listed = self.listed();
+        let kept = self.cursor.as_ref().and_then(|(group, path)| {
+            listed
+                .iter()
+                .find(|(candidate, file)| candidate == group && file.path == *path)
+                .or_else(|| listed.iter().find(|(_, file)| file.path == *path))
         });
-        if let Some(id) = selected
-            && let Some((group, path)) = id.split_once(':')
-            && self
-                .selected_diff
-                .as_ref()
-                .is_some_and(|(selected, _)| selected == path)
-        {
-            self.selected_diff = Some((path.to_owned(), group.to_owned()));
+        let cursor = kept
+            .or_else(|| self.cursor.is_some().then(|| listed.first()).flatten())
+            .map(|(group, file)| (*group, file.path.clone()));
+        self.cursor = cursor;
+    }
+
+    fn open_change(
+        &mut self,
+        group: ChangeGroup,
+        path: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cursor = Some((group, path.to_owned()));
+        self.request(
+            "git.diff",
+            vec![path.to_owned(), group_key(group).to_owned()],
+            window,
+            cx,
+        );
+    }
+
+    /// Stages a file from the unstaged and untracked groups, or unstages it from the staged one.
+    fn toggle_staged(
+        &mut self,
+        group: ChangeGroup,
+        path: &str,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.request(
+            if group == ChangeGroup::Staged {
+                "git.unstage"
+            } else {
+                "git.stage"
+            },
+            vec![path.to_owned()],
+            window,
+            cx,
+        );
+    }
+
+    /// Opens the file `delta` places from the shown one in the list.
+    fn step_change(&mut self, delta: isize, window: &Window, cx: &mut Context<Self>) {
+        let listed = self.listed();
+        let Some((path, group)) = &self.selected_diff else {
+            return;
+        };
+        let Some(position) = listed
+            .iter()
+            .position(|(candidate, file)| group_key(*candidate) == group && file.path == *path)
+        else {
+            return;
+        };
+        let Some((group, file)) = position
+            .checked_add_signed(delta)
+            .and_then(|next| listed.get(next))
+        else {
+            return;
+        };
+        let (group, path) = (*group, file.path.clone());
+        self.open_change(group, &path, window, cx);
+    }
+
+    /// Steps the keyboard through the list.
+    fn move_cursor(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let listed = self.listed();
+        let position = self.cursor.as_ref().and_then(|(group, path)| {
+            listed
+                .iter()
+                .position(|(candidate, file)| candidate == group && file.path == *path)
+        });
+        let next = position.map_or(0, |position| {
+            position
+                .saturating_add_signed(delta)
+                .min(listed.len().saturating_sub(1))
+        });
+        if let Some((group, file)) = listed.get(next) {
+            self.cursor = Some((*group, file.path.clone()));
+            cx.notify();
         }
     }
 
-    fn open_change(&mut self, id: &str, window: &Window, cx: &mut Context<Self>) {
-        if let Some((group, path)) = id.split_once(':') {
-            self.request(
-                "git.diff",
-                vec![path.to_owned(), group.to_owned()],
-                window,
-                cx,
-            );
-        }
+    /// Back from a shown diff to the list.
+    fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.detail_title = None;
+        self.selected_diff = None;
+        self.list_focus.focus(window, cx);
+        cx.notify();
     }
 
-    fn file_row(
-        entry: &TreeEntry,
-        selected: bool,
-        owner: &gpui_kit::WeakEntity<Self>,
-        pending: bool,
-        cx: &App,
-    ) -> ListItem {
-        let item = entry.item();
-        let id = item.id.clone();
-        let owner = owner.clone();
-        let mut row = ListItem::new(id.clone())
-            .role(gpui_kit::Role::TreeItem)
-            .aria_label(item.label.clone())
-            .aria_selected(selected)
-            .w_full()
+    /// Shows `contents`, a Git diff such as a turn's changes, titled `title`, until going back to
+    /// the list.
+    pub(crate) fn show_diff(
+        &mut self,
+        title: String,
+        contents: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.showing_pull_requests = false;
+        self.overview = None;
+        self.selected_diff = None;
+        self.detail_title = Some(title.clone());
+        self.detail
+            .update(cx, |diff, cx| diff.show(title, contents, window, cx));
+        cx.notify();
+    }
+
+    /// One group's heading, with what it does to all of its files.
+    fn render_group_heading(
+        &self,
+        group: ChangeGroup,
+        count: usize,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Div {
+        let key = group_key(group);
+        let pending = self.mutating;
+        let (stage, label) = if group == ChangeGroup::Staged {
+            ("git.unstage-all", "Unstage all")
+        } else {
+            ("git.stage-all", "Stage all")
+        };
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
             .h_7()
             .px_2()
-            .py_0()
-            .text_sm();
-        if entry.is_folder() {
-            return Self::folder_row(row, entry, owner, pending);
-        }
-        let (group, path) = id.split_once(':').unwrap_or(("", &item.label));
-        let (directory, name) = path.rsplit_once('/').unwrap_or(("", path));
-        let staged = group == "staged";
-        let stage_path = path.to_owned();
-        let stage_owner = owner.clone();
-        let (menu_owner, menu_path) = (owner.clone(), path.to_owned());
-        row = row
-            .child(
-                div()
-                    .id(SharedString::from(format!("git-file-menu:{id}")))
-                    .context_menu(move |menu, _, cx| {
-                        Self::file_menu(&menu_owner, &menu_path, menu, cx)
-                    })
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        Icon::new(IconName::File)
-                            .small()
-                            .text_color(cx.theme().muted_foreground),
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(div().flex_1().min_w_0().truncate().child(format!(
+                "{} · {count}",
+                crate::i18n::t(cx, &format!("git-{key}"))
+            )))
+            .when(group == ChangeGroup::Unstaged, |row| {
+                row.child(
+                    Button::new("discard-all")
+                        .debug_selector(|| "git-discard-all".into())
+                        .icon(IconName::Delete)
+                        .ghost()
+                        .xsmall()
+                        .disabled(pending)
+                        .accessibility_label("Discard all changes")
+                        .element_tooltip("Discard all changes")
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.confirm_discard(None, window, cx);
+                        })),
+                )
+            })
+            // Staging everything in the unstaged group would sweep up untracked files too.
+            .when(
+                group != ChangeGroup::Untracked || !self.has_group(ChangeGroup::Unstaged),
+                |row| {
+                    row.child(
+                        Button::new(SharedString::from(format!("stage-group:{key}")))
+                            .debug_selector(move || format!("git-stage-group:{key}"))
+                            .icon(if group == ChangeGroup::Staged {
+                                IconName::Minus
+                            } else {
+                                IconName::Plus
+                            })
+                            .ghost()
+                            .xsmall()
+                            .disabled(pending)
+                            .accessibility_label(label)
+                            .element_tooltip(label)
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request(stage, Vec::new(), window, cx);
+                            })),
                     )
-                    .child(div().min_w_0().flex_1().truncate().child(name.to_owned()))
-                    // A file under its folder's row needs no folder of its own.
-                    .when(entry.depth() <= 1, |row| {
-                        row.child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .truncate()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(directory.to_owned()),
-                        )
-                    }),
+                },
             )
-            .suffix(move |_, _| {
-                let path = stage_path.clone();
-                let owner = stage_owner.clone();
+    }
+
+    fn has_group(&self, group: ChangeGroup) -> bool {
+        self.listed()
+            .iter()
+            .any(|(candidate, _)| *candidate == group)
+    }
+
+    /// A changed file's row: clicking shows its diff, and its button stages or unstages it.
+    fn render_file_row(
+        &self,
+        group: ChangeGroup,
+        file: &ChangedFile,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let path = file.path.clone();
+        let key = group_key(group);
+        let (kind, lines) = match group {
+            ChangeGroup::Staged => (ChangeKind::from_status(file.index), file.staged_lines),
+            ChangeGroup::Unstaged => (ChangeKind::from_status(file.worktree), file.unstaged_lines),
+            ChangeGroup::Untracked => (ChangeKind::Added, None),
+        };
+        let selected = self
+            .cursor
+            .as_ref()
+            .is_some_and(|(candidate, cursor)| *candidate == group && *cursor == path)
+            || self
+                .selected_diff
+                .as_ref()
+                .is_some_and(|(selected, selected_group)| {
+                    *selected == path && selected_group == key
+                });
+        let staged = group == ChangeGroup::Staged;
+        let pending = self.mutating;
+        let owner = cx.weak_entity();
+        let (menu_owner, menu_path) = (owner.clone(), path.clone());
+        let stage_path = path.clone();
+        let trailing = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .children(lines.map(|lines| line_counts(lines, cx)))
+            .child(
                 Button::new("stage-change")
                     .icon(if staged {
                         IconName::Minus
@@ -891,156 +1011,191 @@ impl GitChangesPanel {
                     .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         _ = owner.update(cx, |this, cx| {
-                            this.request(
-                                if staged { "git.unstage" } else { "git.stage" },
-                                vec![path.clone()],
-                                window,
-                                cx,
-                            );
-                        });
-                    })
-            })
-            .on_click(move |_, window, cx| {
-                _ = owner.update(cx, |this, cx| this.open_change(&id, window, cx));
-            });
-        row
-    }
-
-    /// A group's row, or a folder's under it; a group's row carries its actions.
-    fn folder_row(
-        row: ListItem,
-        entry: &TreeEntry,
-        owner: gpui_kit::WeakEntity<Self>,
-        pending: bool,
-    ) -> ListItem {
-        let group = entry.item().id.to_string();
-        row.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    Icon::new(if entry.is_expanded() {
-                        IconName::ChevronDown
-                    } else {
-                        IconName::ChevronRight
-                    })
-                    .xsmall(),
-                )
-                .child(entry.item().label.clone()),
-        )
-        .when(entry.depth() == 0, |row| {
-            row.suffix(move |_, _| Self::group_actions(&group, &owner, pending))
-        })
-    }
-
-    /// A group's own actions: everything staged or unstaged at once, and throwing every change
-    /// away from the unstaged group.
-    fn group_actions(
-        group: &str,
-        owner: &gpui_kit::WeakEntity<Self>,
-        pending: bool,
-    ) -> gpui_kit::Div {
-        let staged = group == "staged";
-        let (stage, label) = if staged {
-            ("git.unstage-all", "Unstage all")
-        } else {
-            ("git.stage-all", "Stage all")
-        };
-        let stage_owner = owner.clone();
-        div()
-            .flex()
-            .items_center()
-            .gap_1()
-            .when(group == "unstaged", |row| {
-                let discard = owner.clone();
-                row.child(
-                    Button::new("discard-all")
-                        .debug_selector(|| "git-discard-all".into())
-                        .icon(IconName::Delete)
-                        .ghost()
-                        .xsmall()
-                        .disabled(pending)
-                        .accessibility_label("Discard all changes")
-                        .element_tooltip("Discard all changes")
-                        .on_click(move |_, window, cx| {
-                            cx.stop_propagation();
-                            _ = discard
-                                .update(cx, |this, cx| this.confirm_discard(None, window, cx));
-                        }),
-                )
-            })
-            .child(
-                Button::new(SharedString::from(format!("stage-group:{group}")))
-                    .debug_selector({
-                        let group = group.to_owned();
-                        move || format!("git-stage-group:{group}")
-                    })
-                    .icon(if staged {
-                        IconName::Minus
-                    } else {
-                        IconName::Plus
-                    })
-                    .ghost()
-                    .xsmall()
-                    .disabled(pending)
-                    .accessibility_label(label)
-                    .element_tooltip(label)
-                    .on_click(move |_, window, cx| {
-                        cx.stop_propagation();
-                        _ = stage_owner.update(cx, |this, cx| {
-                            this.request(stage, Vec::new(), window, cx);
+                            this.toggle_staged(group, &stage_path, window, cx);
                         });
                     }),
-            )
+            );
+        change_row(
+            SharedString::from(format!("{key}:{path}")),
+            kind,
+            &path,
+            trailing,
+            cx,
+        )
+        .debug_selector({
+            let path = path.clone();
+            move || format!("git-change:{key}:{path}")
+        })
+        .selected(selected)
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.open_change(group, &path, window, cx);
+        }))
+        .context_menu(move |menu, _, cx| Self::file_menu(&menu_owner, &menu_path, menu, cx))
     }
 
     fn file_list(&self, cx: &Context<Self>) -> impl IntoElement {
-        let owner = cx.weak_entity();
-        let pending = self.mutating;
-        let tree = Tree::new(&self.tree, move |_, entry, selected, _, cx| {
-            Self::file_row(entry, selected, &owner, pending, cx)
-        });
-        let focus_tree = self.tree.clone();
-        div()
+        let listed = self.listed();
+        let mut list = div()
             .id("git-files")
+            .track_focus(&self.list_focus)
+            .flex()
+            .flex_col()
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .role(gpui_kit::Role::Tree)
+            .overflow_y_scroll()
+            .role(gpui_kit::Role::List)
             .aria_label("Changed files")
-            .on_mouse_down(gpui_kit::MouseButton::Left, move |_, window, cx| {
-                focus_tree.update(cx, |tree, cx| tree.focus(window, cx));
-            })
             .on_key_down(
                 cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
-                    if matches!(event.keystroke.key.as_str(), "enter" | "space") {
-                        let id = this
-                            .tree
-                            .read(cx)
-                            .selected_item()
-                            .map(|item| item.id.clone());
-                        if let Some(id) = id {
-                            if event.keystroke.key == "enter" {
-                                this.open_change(&id, window, cx);
-                            } else if let Some((group, path)) = id.split_once(':') {
-                                this.request(
-                                    if group == "staged" {
-                                        "git.unstage"
-                                    } else {
-                                        "git.stage"
-                                    },
-                                    vec![path.to_owned()],
-                                    window,
-                                    cx,
-                                );
+                    let cursor = this.cursor.clone();
+                    match event.keystroke.key.as_str() {
+                        "up" => this.move_cursor(-1, cx),
+                        "down" => this.move_cursor(1, cx),
+                        "enter" => {
+                            if let Some((group, path)) = cursor {
+                                this.open_change(group, &path, window, cx);
                             }
-                            cx.stop_propagation();
                         }
+                        "space" => {
+                            if let Some((group, path)) = cursor {
+                                this.toggle_staged(group, &path, window, cx);
+                            }
+                        }
+                        _ => return,
+                    }
+                    cx.stop_propagation();
+                }),
+            );
+        let mut group = None;
+        for (ix, (file_group, file)) in listed.iter().enumerate() {
+            if group != Some(*file_group) {
+                group = Some(*file_group);
+                let count = listed
+                    .get(ix..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take_while(|(candidate, _)| candidate == file_group)
+                    .count();
+                list = list.child(self.render_group_heading(*file_group, count, cx));
+            }
+            list = list.child(self.render_file_row(*file_group, file, cx));
+        }
+        list
+    }
+
+    /// The shown diff with its heading: back to the list, what it shows, the files next to it,
+    /// and the diff's view controls.
+    fn render_detail(&self, cx: &Context<Self>) -> gpui_kit::Stateful<gpui_kit::Div> {
+        let file = self.selected_diff.is_some();
+        let heading = div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .h_9()
+            .px_1()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+                Button::new("diff-back")
+                    .debug_selector(|| "git-diff-back".into())
+                    .icon(Icon::default().path("icons/arrow-left.svg"))
+                    .ghost()
+                    .small()
+                    .accessibility_label("Back to changes")
+                    .element_tooltip("Back to changes (Escape)")
+                    .on_click(cx.listener(|this, _, window, cx| this.close_detail(window, cx))),
+            )
+            .child(self.render_detail_title(cx))
+            .when(file, |row| {
+                row.child(
+                    Button::new("diff-previous")
+                        .icon(Icon::default().path("icons/chevron-up.svg"))
+                        .ghost()
+                        .xsmall()
+                        .accessibility_label("Previous file")
+                        .element_tooltip("Previous file")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.step_change(-1, window, cx)),
+                        ),
+                )
+                .child(
+                    Button::new("diff-next")
+                        .icon(Icon::default().path("icons/chevron-down.svg"))
+                        .ghost()
+                        .xsmall()
+                        .accessibility_label("Next file")
+                        .element_tooltip("Next file")
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.step_change(1, window, cx)),
+                        ),
+                )
+            })
+            .children(self.detail.read(cx).controls(self.detail.downgrade(), cx));
+        div()
+            .id("git-detail")
+            .debug_selector(|| "git-detail".into())
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .on_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" && !this.detail.read(cx).is_commenting() {
+                        this.close_detail(window, cx);
+                        cx.stop_propagation();
                     }
                 }),
             )
-            .child(tree)
+            .child(heading)
+            .child(div().flex_1().min_h_0().child(self.detail.clone()))
+    }
+
+    /// What the shown diff is: a file's name, its folder and its lines, or a title like
+    /// "All changes".
+    fn render_detail_title(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        let shown = self.selected_diff.as_ref().and_then(|(path, group)| {
+            self.listed()
+                .into_iter()
+                .find(|(candidate, file)| group_key(*candidate) == group && file.path == *path)
+                .map(|(group, file)| (group, file.clone()))
+        });
+        let Some((group, file)) = shown else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .px_1()
+                .text_sm()
+                .child(self.detail_title.clone().unwrap_or_default());
+        };
+        let (folder, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
+        let lines = match group {
+            ChangeGroup::Staged => file.staged_lines,
+            ChangeGroup::Unstaged => file.unstaged_lines,
+            ChangeGroup::Untracked => None,
+        };
+        div()
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .items_center()
+            .gap_2()
+            .px_1()
+            .text_sm()
+            .child(div().min_w_0().truncate().child(name.to_owned()))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(folder.to_owned()),
+            )
+            .children(lines.map(|lines| line_counts(lines, cx)))
     }
 
     /// Whether anything is staged to commit.
@@ -1780,11 +1935,49 @@ impl GitChangesPanel {
 
 impl Render for GitChangesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut body = div()
+        let owner = cx.weak_entity();
+        let detail = self.detail_title.is_some() && !self.showing_pull_requests;
+        // A wide panel keeps the list beside the diff; a narrow one shows one at a time.
+        let beside = self.width >= px(720.);
+        let root = div()
             .id("git-changes")
             .flex()
-            .flex_col()
             .size_full()
+            .min_w_0()
+            .overflow_hidden()
+            .on_prepaint(move |bounds, _, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    if this.width != bounds.size.width {
+                        this.width = bounds.size.width;
+                        cx.notify();
+                    }
+                });
+            });
+        if detail && !beside {
+            return root.child(self.render_detail(cx)).into_any_element();
+        }
+        let list = self.render_list(cx);
+        if !detail {
+            return root.child(list.flex_1()).into_any_element();
+        }
+        root.child(
+            list.w(px(320.))
+                .flex_shrink_0()
+                .border_r_1()
+                .border_color(cx.theme().border),
+        )
+        .child(self.render_detail(cx))
+        .into_any_element()
+    }
+}
+
+impl GitChangesPanel {
+    /// The repository's heading, its changed files or history, and the commit controls.
+    fn render_list(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .h_full()
             .min_w_0()
             .gap_2()
             .p_2()
@@ -1798,11 +1991,9 @@ impl Render for GitChangesPanel {
             ))
         });
         if self.showing_pull_requests {
-            return body
-                .when_some(self.pull_requests.as_ref(), |body, view| {
-                    body.child(view.clone())
-                })
-                .into_any_element();
+            return body.when_some(self.pull_requests.as_ref(), |body, view| {
+                body.child(view.clone())
+            });
         }
         if self
             .changes
@@ -1862,7 +2053,6 @@ impl Render for GitChangesPanel {
                 .disabled(self.mutating),
         ))
         .child(self.render_commit_controls(cx))
-        .into_any_element()
     }
 }
 

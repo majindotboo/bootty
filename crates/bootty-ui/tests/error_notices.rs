@@ -55,6 +55,14 @@ use rstest::rstest;
 )]
 #[case("Could not read archived logs", None)]
 #[case(
+    "/tmp/notes/doc.txt: No such file or directory (os error 2)",
+    Some("It no longer exists.")
+)]
+#[case(
+    "Permission denied (os error 13)",
+    Some("Permission to it was denied.")
+)]
+#[case(
     "Not logged in · /login",
     Some("Sign in to the selected provider account, then retry.")
 )]

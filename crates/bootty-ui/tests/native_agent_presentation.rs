@@ -4,7 +4,7 @@ use bootty_agents::{AgentKind, NativeSessionConfig, NativeSessionRecord};
 use bootty_control::Caller;
 use bootty_ui::{
     NativeAgentSessionView,
-    gpui::{CommandAction, UiPalette, init_theme},
+    gpui::{ChangeKind, CommandAction, UiPalette, init_theme},
 };
 use gpui_kit::{
     AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, MouseUpEvent, ScrollDelta,
@@ -2052,8 +2052,29 @@ fn copies_keep_the_whole_reply_and_the_prompts_context(cx: &mut TestAppContext) 
     assert!(prompt.ends_with("Attached: build.log"), "{prompt}");
 }
 
+/// A patch says what it did to its file: only added lines make it new, only removed lines make
+/// it gone, a previous name makes it renamed, and anything else modified it.
+#[rstest::rstest]
+#[case::new("@@ -0,0 +1,2 @@\n+a\n+b\n", None, ChangeKind::Added)]
+#[case::gone("@@ -1,2 +0,0 @@\n-a\n-b\n", None, ChangeKind::Deleted)]
+#[case::edited("@@ -1 +1 @@\n-a\n+b\n", None, ChangeKind::Modified)]
+#[case::renamed("@@ -1 +1 @@\n-a\n+b\n", Some("src/old.rs"), ChangeKind::Renamed)]
+fn patches_say_what_they_did_to_their_file(
+    #[case] patch: &str,
+    #[case] previous: Option<&str>,
+    #[case] kind: ChangeKind,
+) {
+    let file = bootty_git::diff::FileDiff::parse(
+        "src/main.rs".to_owned(),
+        previous.map(str::to_owned),
+        Some(patch),
+    )
+    .unwrap();
+    pretty_assertions::assert_eq!(ChangeKind::of_diff(&file), kind);
+}
+
 /// A settled turn lists every file it changed under its reply, with +/− summed across its
-/// edits, and each opens the file.
+/// edits, and each shows its diff in place until clicked again.
 #[gpui_kit::test]
 fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -2094,16 +2115,27 @@ fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     let main = visual
         .debug_bounds("native-turn-change:src/main.rs")
         .expect("main.rs once");
+    let diff = "native-turn-change-diff:src/main.rs";
+    assert!(visual.debug_bounds(diff).is_none());
     visual.simulate_click(main.center(), Modifiers::none());
     visual.run_until_parked();
-    let opened = commands
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|invocation| invocation.command == "agents.native.open-link")
-        .map(|invocation| invocation.arguments[2].clone())
-        .collect::<Vec<_>>();
-    assert_eq!(opened, ["src/main.rs"]);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual.debug_bounds(diff).is_some(),
+        "the file's diff opens under it"
+    );
+    assert!(
+        !commands
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|invocation| invocation.command == "agents.native.open-link"),
+        "a changed file shows its diff, not the file"
+    );
+    visual.simulate_click(main.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(visual.debug_bounds(diff).is_none());
 }
 
 /// Progress messages and changed files remain visible after a turn settles or another begins.

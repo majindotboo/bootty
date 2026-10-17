@@ -1601,12 +1601,7 @@ fn setting_copy(spec: &SettingSpec) -> (String, String) {
     } else {
         spec.label.to_string()
     };
-    let help = if spec.help.is_empty() {
-        "Configured in Bootty settings.".to_owned()
-    } else {
-        spec.help.to_string()
-    };
-    (label, help)
+    (label, spec.help.to_string())
 }
 
 fn custom_color_rows(

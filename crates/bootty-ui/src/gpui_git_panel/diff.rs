@@ -1,11 +1,12 @@
 //! Git and conversation patches use Kit's readonly diff surface and source-line selections.
+use crate::gpui::ElementTooltip as _;
 use bootty_control::CommandTarget;
 use bootty_git::{
     diff::{DiffAnchor, DiffSide, FileDiff},
     github::CodeComment,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
+    ActiveTheme as _, Disableable as _, ElementExt as _, Selectable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
     diff::{Diff, DiffEvent, DiffFile, DiffLineRange, DiffSide as ViewSide, DiffState},
     dock::{BasePanel, Panel, PanelEvent},
@@ -114,6 +115,11 @@ pub struct GitDiffPanel {
     hide_whitespace: Option<bool>,
     /// Long lines wrap rather than scroll sideways.
     wrap: bool,
+    /// The view controls show in a row of their own; a host showing them in its own header
+    /// turns this off.
+    toolbar: bool,
+    /// The panel's width; a narrow diff leaves out line numbers.
+    width: gpui_kit::Pixels,
     selection: Option<(DiffAnchor, String)>,
     editing: bool,
     submitting: bool,
@@ -164,6 +170,8 @@ impl GitDiffPanel {
             stage: None,
             hide_whitespace: None,
             wrap: false,
+            toolbar: true,
+            width: gpui_kit::px(0.),
             selection: None,
             editing: false,
             submitting: false,
@@ -238,58 +246,68 @@ impl GitDiffPanel {
         cx.notify();
     }
 
+    /// Leaves the view controls to a host that shows [`Self::controls`] in its own header.
+    pub(super) const fn hide_toolbar(&mut self) {
+        self.toolbar = false;
+    }
+
+    /// Whether a code comment is being written, which keeps the keyboard.
+    pub(super) const fn is_commenting(&self) -> bool {
+        self.editing
+    }
+
     /// The diff's view controls: unified or side by side, wrapped or not, and, for the
     /// session's changes, whether whitespace changes show.
-    fn toolbar(&self, cx: &Context<Self>) -> gpui_kit::Div {
+    pub(super) fn controls(&self, owner: gpui_kit::WeakEntity<Self>, cx: &App) -> Vec<Button> {
         let split = self.diff.read(cx).mode() == gpui_kit::component::diff::DiffMode::Split;
-        div()
-            .flex()
-            .items_center()
-            .justify_end()
-            .gap_1()
-            .px_2()
-            .py_1()
-            .border_b_1()
-            .border_color(cx.theme().border)
-            .when_some(self.hide_whitespace, |row, hidden| {
-                row.child(
-                    Button::new("diff-whitespace")
-                        .debug_selector(move || format!("diff-whitespace:{hidden}"))
-                        .label("Hide whitespace")
-                        .xsmall()
-                        .ghost()
-                        .selected(hidden)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.hide_whitespace = Some(!hidden);
-                            cx.emit(WhitespaceChanged(!hidden));
-                            cx.notify();
-                        })),
+        let wrap = self.wrap;
+        let toggle = |id: &'static str, icon: &'static str, label: &'static str, on: bool| {
+            Button::new(id)
+                .icon(gpui_kit::component::Icon::default().path(format!("icons/{icon}.svg")))
+                .xsmall()
+                .ghost()
+                .selected(on)
+                .accessibility_label(label)
+                .element_tooltip(label)
+        };
+        let mut controls = Vec::new();
+        if let Some(hidden) = self.hide_whitespace {
+            let owner = owner.clone();
+            controls.push(
+                toggle(
+                    "diff-whitespace",
+                    "space",
+                    "Hide whitespace changes",
+                    hidden,
                 )
-            })
-            .child(
-                Button::new("diff-wrap")
-                    .debug_selector({
-                        let wrap = self.wrap;
-                        move || format!("diff-wrap:{wrap}")
-                    })
-                    .label("Wrap lines")
-                    .xsmall()
-                    .ghost()
-                    .selected(self.wrap)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                .debug_selector(move || format!("diff-whitespace:{hidden}"))
+                .on_click(move |_, _, cx| {
+                    _ = owner.update(cx, |this, cx| {
+                        this.hide_whitespace = Some(!hidden);
+                        cx.emit(WhitespaceChanged(!hidden));
+                        cx.notify();
+                    });
+                }),
+            );
+        }
+        let wrap_owner = owner.clone();
+        controls.push(
+            toggle("diff-wrap", "text-wrap", "Wrap long lines", wrap)
+                .debug_selector(move || format!("diff-wrap:{wrap}"))
+                .on_click(move |_, _, cx| {
+                    _ = wrap_owner.update(cx, |this, cx| {
                         this.wrap = !this.wrap;
                         cx.notify();
-                    })),
-            )
-            .child(
-                Button::new("diff-mode")
-                    .debug_selector(move || {
-                        format!("diff-mode:{}", if split { "split" } else { "unified" })
-                    })
-                    .label(if split { "Unified" } else { "Side by side" })
-                    .xsmall()
-                    .ghost()
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    });
+                }),
+        );
+        controls.push(
+            toggle("diff-mode", "columns-2", "Side by side", split)
+                .debug_selector(move || {
+                    format!("diff-mode:{}", if split { "split" } else { "unified" })
+                })
+                .on_click(move |_, _, cx| {
+                    _ = owner.update(cx, |this, cx| {
                         this.diff.update(cx, |diff, cx| {
                             diff.set_mode(
                                 if split {
@@ -301,8 +319,10 @@ impl GitDiffPanel {
                             );
                         });
                         cx.notify();
-                    })),
-            )
+                    });
+                }),
+        );
+        controls
     }
 
     /// Lets the shown change's hunks stage, from the `unstaged` group, or unstage, from the
@@ -620,14 +640,39 @@ impl Panel for GitDiffPanel {
 }
 impl Render for GitDiffPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let owner = cx.weak_entity();
+        // Two columns of line numbers crowd out the code in a sidebar.
+        let numbered = self.width >= gpui_kit::px(480.);
         div()
             .flex()
             .flex_col()
             .size_full()
             .min_h_0()
-            .when(self.title.is_some() && self.notice.is_none(), |view| {
-                view.child(self.toolbar(cx))
+            .on_prepaint(move |bounds, _, cx| {
+                _ = owner.update(cx, |this, cx| {
+                    if this.width != bounds.size.width {
+                        this.width = bounds.size.width;
+                        cx.notify();
+                    }
+                });
             })
+            .when(
+                self.toolbar && self.title.is_some() && self.notice.is_none(),
+                |view| {
+                    view.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .gap_1()
+                            .px_2()
+                            .py_1()
+                            .border_b_1()
+                            .border_color(cx.theme().border)
+                            .children(self.controls(cx.weak_entity(), cx)),
+                    )
+                },
+            )
             .child(div().flex_1().min_h_0().child(
                 if self.title.is_none() || self.notice.is_some() {
                     div()
@@ -647,8 +692,8 @@ impl Render for GitDiffPanel {
                     // Several files need their names; one file's is the panel's title.
                     Diff::new(&self.diff)
                         .header_visible(self.diff.read(cx).files().len() > 1)
+                        .line_number(numbered)
                         .soft_wrap(self.wrap)
-                        .soft_wrap(true)
                         .size_full()
                         .into_any_element()
                 },
