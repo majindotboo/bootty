@@ -898,10 +898,15 @@ impl GpuiSettings {
                 else {
                     return gpui_kit::Empty.into_any_element();
                 };
-                let next_is_header = visible
-                    .get(logical_index.saturating_add(1))
-                    .and_then(|index| page.items.get(*index))
-                    .is_some_and(|item| matches!(item, SettingsPageItem::SectionHeader { .. }));
+                let is_header = |index: Option<usize>| {
+                    index
+                        .and_then(|index| visible.get(index))
+                        .and_then(|index| page.items.get(*index))
+                        .is_none_or(|item| matches!(item, SettingsPageItem::SectionHeader { .. }))
+                };
+                let next_is_header = is_header(logical_index.checked_add(1))
+                    && logical_index.saturating_add(1) < visible.len();
+                let first_in_section = is_header(logical_index.checked_sub(1));
                 let is_last = Some(actual_index) == last_non_header;
                 let is_last_in_section = next_is_header || is_last;
                 let section_title_selector = match &item {
@@ -924,14 +929,15 @@ impl GpuiSettings {
                     })
                     .w_full()
                     .min_w_0()
-                    .child(this.render_page_item(
+                    .px_8()
+                    .child(settings_column().child(this.render_page_item(
                         &item,
                         actual_index,
-                        !is_last_in_section,
+                        first_in_section,
                         is_last_in_section,
                         window,
                         cx,
-                    ))
+                    )))
                     .into_any_element()
             }),
         )
@@ -997,48 +1003,47 @@ impl GpuiSettings {
             .min_w_0()
             .bg(cx.theme().background)
             .child(
-                gpui_kit::div()
-                    .flex()
-                    .flex_col()
-                    .px_8()
-                    .gap_2()
-                    .child(
-                        gpui_kit::div()
-                            .flex()
-                            .items_center()
-                            .debug_selector(|| "settings-page-header".to_owned())
-                            .w_full()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .debug_selector(move || title_selector)
-                                    .child(Label::new(title).text_lg()),
-                            )
-                            .child(
-                                div()
-                                    .id("settings-open-config-selector")
-                                    .debug_selector(|| "settings-open-config".to_owned())
-                                    .child(
-                                        Button::new("settings-open-config")
-                                            .label("Edit config.toml")
-                                            .tab_index(0_isize)
-                                            .outline()
-                                            .on_click(move |_, _, app| {
-                                                open_entity.update(app, |this, cx| {
-                                                    this.emit(
-                                                        SettingsIntent::Invoke(
-                                                            "config:edit".to_owned(),
-                                                        ),
-                                                        cx,
-                                                    );
-                                                });
-                                            }),
-                                    ),
-                            ),
-                    )
-                    .when_some(warning, |this, warning| {
-                        this.child(self.render_write_warning(warning, cx))
-                    }),
+                gpui_kit::div().px_8().child(
+                    settings_column()
+                        .gap_2()
+                        .child(
+                            gpui_kit::div()
+                                .flex()
+                                .items_center()
+                                .debug_selector(|| "settings-page-header".to_owned())
+                                .w_full()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .debug_selector(move || title_selector)
+                                        .child(Label::new(title).text_lg()),
+                                )
+                                .child(
+                                    div()
+                                        .id("settings-open-config-selector")
+                                        .debug_selector(|| "settings-open-config".to_owned())
+                                        .child(
+                                            Button::new("settings-open-config")
+                                                .label("Edit config.toml")
+                                                .tab_index(0_isize)
+                                                .outline()
+                                                .on_click(move |_, _, app| {
+                                                    open_entity.update(app, |this, cx| {
+                                                        this.emit(
+                                                            SettingsIntent::Invoke(
+                                                                "config:edit".to_owned(),
+                                                            ),
+                                                            cx,
+                                                        );
+                                                    });
+                                                }),
+                                        ),
+                                ),
+                        )
+                        .when_some(warning, |this, warning| {
+                            this.child(self.render_write_warning(warning, cx))
+                        }),
+                ),
             )
             .child(
                 div()
@@ -1056,6 +1061,16 @@ impl GpuiSettings {
 }
 
 impl EventEmitter<SettingsIntent> for GpuiSettings {}
+
+/// The page's column: centered, and no wider than reads well.
+fn settings_column() -> gpui_kit::Div {
+    div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .max_w(gpui_kit::rems(46.))
+        .mx_auto()
+}
 
 fn settings_page_item_id(item: &SettingsPageItem, fallback_index: usize) -> String {
     let identity = match item {
@@ -1095,7 +1110,7 @@ fn normalize_navigation_titles(snapshot: &mut SettingsContent) {
             match item {
                 SettingsPageItem::SectionHeader { title, .. }
                 | SettingsPageItem::Setting(SettingsRow::Section(title)) => {
-                    *title = human_title_case(title);
+                    *title = sentence_case(title);
                 }
                 SettingsPageItem::Setting(_) | SettingsPageItem::Dependent { .. } => {}
             }
@@ -1103,7 +1118,9 @@ fn normalize_navigation_titles(snapshot: &mut SettingsContent) {
     }
 }
 
-fn human_title_case(label: &str) -> String {
+/// A schema's upper-case section name as a heading: only its first word capitalized, except
+/// acronyms and the names Bootty gives things.
+fn sentence_case(label: &str) -> String {
     if !label.is_ascii() {
         return label.to_owned();
     }
@@ -1116,17 +1133,24 @@ fn human_title_case(label: &str) -> String {
 
     label
         .split_whitespace()
-        .map(|word| match word {
+        .enumerate()
+        .map(|(index, word)| match word {
             "ANSI" | "API" | "CLI" | "CPU" | "CSI" | "GPU" | "HTTP" | "HTTPS" | "ID" | "IME"
             | "JSON" | "OS" | "OSC" | "PTY" | "SSH" | "TCP" | "TLS" | "TOML" | "UDP" | "UI"
-            | "URI" | "URL" | "UUID" | "VIM" | "WSL" => word.to_owned(),
-            _ => {
+            | "URI" | "URL" | "UUID" | "VIM" | "WSL" | "AI" | "MCP" => word.to_owned(),
+            "SPACE" => "Space".to_owned(),
+            "SPACES" => "Spaces".to_owned(),
+            "GIT" => "Git".to_owned(),
+            "GITHUB" => "GitHub".to_owned(),
+            "MACOS" => "macOS".to_owned(),
+            _ if index == 0 => {
                 let mut characters = word.chars();
                 characters.next().map_or_else(String::new, |first| {
                     first.to_uppercase().collect::<String>()
                         + characters.as_str().to_ascii_lowercase().as_str()
                 })
             }
+            _ => word.to_ascii_lowercase(),
         })
         .collect::<Vec<_>>()
         .join(" ")

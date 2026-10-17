@@ -31,7 +31,7 @@ fn native_settings_catalog_keeps_the_zed_page_snapshot() {
             (
                 SettingsCategory::WindowAndLayout,
                 "window-and-layout",
-                "Window & Layout",
+                "Window & layout",
             ),
             (SettingsCategory::Panels, "panels", "Panels"),
             (SettingsCategory::Terminal, "terminal", "Terminal"),

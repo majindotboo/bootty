@@ -374,6 +374,9 @@ impl GpuiSettings {
             .flex()
             .items_center()
             .gap_1p5()
+            .when(entry.is_root && entry.provider.is_none(), |button| {
+                button.child(category_tile(entry.category, cx))
+            })
             .when_some(entry.provider, |button, provider| {
                 button.child(crate::gpui::sized_icon(
                     provider.icon(),
@@ -417,12 +420,14 @@ impl GpuiSettings {
             .into_any_element()
     }
 
+    /// One item of a page. A section's rows sit together on one card: `first` and `last` say
+    /// where on it this row falls.
     pub(super) fn render_page_item(
         &self,
         item: &SettingsPageItem,
         item_index: usize,
-        bottom_border: bool,
-        extra_bottom_padding: bool,
+        first: bool,
+        last: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -433,29 +438,17 @@ impl GpuiSettings {
             SettingsPageItem::Setting(row) => {
                 let row_id = settings_row_identity(row)
                     .map_or_else(|| format!("index-{item_index}"), str::to_owned);
-                gpui_kit::div()
-                    .flex()
-                    .flex_col()
+                card_row(first, last, cx)
                     .group("setting-item")
-                    .px_8()
                     .child(
                         gpui_kit::div()
                             .flex()
                             .flex_col()
                             .id(SharedString::from(format!("settings-item-field-{row_id}")))
-                            .pt_4()
-                            .when(extra_bottom_padding, gpui_kit::Styled::pb_10)
-                            .when(!extra_bottom_padding, gpui_kit::Styled::pb_4)
+                            .py_3()
                             .child(self.render_setting(row, window, cx)),
                     )
-                    .when(bottom_border, |this| {
-                        this.child(
-                            gpui_kit::div()
-                                .w_full()
-                                .h(gpui_kit::px(1.0))
-                                .bg(cx.theme().border),
-                        )
-                    })
+                    .when(!last, |this| this.child(card_divider(cx)))
                     .into_any_element()
             }
             // Direct port of Zed's `SettingsPageItem::DynamicItem` treatment
@@ -465,40 +458,22 @@ impl GpuiSettings {
                 if provider_settings_kind(parent).is_some() {
                     return self.render_provider_settings(parent, children, window, cx);
                 }
-                let has_children = !children.is_empty();
                 let parent_id = settings_row_identity(parent)
                     .map_or_else(|| format!("index-{item_index}"), str::to_owned);
                 let dependent_selector = format!("settings-dependent-{parent_id}");
                 let parent_selector = format!("settings-dependent-parent-{parent_id}");
                 let dependent_debug_selector = dependent_selector.clone();
-                let mut content = gpui_kit::div()
-                    .flex()
-                    .flex_col()
+                let mut content = card_row(first, last, cx)
                     .id(SharedString::from(dependent_selector))
                     .debug_selector(move || dependent_debug_selector)
                     .child(
                         div()
                             .group("setting-item")
-                            .px_8()
                             .id(SharedString::from(parent_selector.clone()))
                             .debug_selector(move || parent_selector)
-                            .pt_4()
-                            .when(extra_bottom_padding, gpui_kit::Styled::pb_10)
-                            .when(!extra_bottom_padding, gpui_kit::Styled::pb_4)
-                            .child(self.render_setting(parent, window, cx))
-                            .when(has_children, gpui_kit::Styled::pb_4),
+                            .py_3()
+                            .child(self.render_setting(parent, window, cx)),
                     );
-
-                if !has_children && bottom_border {
-                    content = content.child(
-                        gpui_kit::div().flex().items_center().px_8().child(
-                            gpui_kit::div()
-                                .w_full()
-                                .h(gpui_kit::px(1.0))
-                                .bg(cx.theme().border),
-                        ),
-                    );
-                }
 
                 for (index, child) in children.iter().enumerate() {
                     let is_last = index.saturating_add(1) == children.len();
@@ -510,11 +485,11 @@ impl GpuiSettings {
                             .id(SharedString::from(child_selector.clone()))
                             .debug_selector(move || child_selector)
                             .group("setting-sub-item")
-                            .mx_8()
+                            // Indented under the setting it depends on, on the same card.
+                            .ml_6()
                             .p_4()
                             .border_t_1()
-                            .when(is_last, gpui_kit::Styled::border_b_1)
-                            .when(is_last && extra_bottom_padding, gpui_kit::Styled::mb_8)
+                            .when(is_last, |child| child.border_b_1().mb_3())
                             .border_dashed()
                             .border_color(cx.theme().input)
                             .bg(cx.theme().button.opacity(0.2))
@@ -522,7 +497,9 @@ impl GpuiSettings {
                     );
                 }
 
-                content.into_any_element()
+                content
+                    .when(!last, |content| content.child(card_divider(cx)))
+                    .into_any_element()
             }
         }
     }
@@ -546,7 +523,8 @@ impl GpuiSettings {
             .aria_level(2)
             .aria_label(label.clone())
             .w_full()
-            .px_8()
+            .px_1()
+            .pb_2()
             .gap_1p5()
             .child(
                 gpui_kit::div()
@@ -571,12 +549,6 @@ impl GpuiSettings {
                             .font_weight(gpui_kit::FontWeight::SEMIBOLD),
                     ),
             )
-            .child(
-                gpui_kit::div()
-                    .w_full()
-                    .h(gpui_kit::px(1.0))
-                    .bg(cx.theme().border),
-            )
             .into_any_element()
     }
 
@@ -599,7 +571,6 @@ impl GpuiSettings {
         div()
             .id(SharedString::from(selector))
             .debug_selector(move || debug_selector)
-            .mx_8()
             .mb_2()
             .rounded_lg()
             .overflow_hidden()
@@ -2764,4 +2735,39 @@ fn provider_settings_kind(row: &SettingsRow) -> Option<bootty_agents::AgentKind>
     bootty_agents::AgentKind::ALL
         .into_iter()
         .find(|kind| kind.to_string() == key)
+}
+
+/// A category's icon on a tile of its hue, as the navigation lists it.
+fn category_tile(category: super::model::SettingsCategory, cx: &gpui_kit::App) -> gpui_kit::Div {
+    div()
+        .size_5()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .bg(category.tint(cx.theme()))
+        .child(crate::gpui::sized_icon(
+            category.icon(),
+            crate::gpui::IconSize::XSmall,
+            gpui_kit::white(),
+        ))
+}
+
+/// One row of a section's card: its sides, and its rounded top or bottom where the card
+/// starts or ends. A card ends with room before the next section.
+fn card_row(first: bool, last: bool, cx: &gpui_kit::App) -> gpui_kit::Div {
+    div()
+        .flex()
+        .flex_col()
+        .px_4()
+        .bg(cx.theme().muted.opacity(0.35))
+        .border_x_1()
+        .border_color(cx.theme().border)
+        .when(first, |row| row.border_t_1().rounded_t_lg())
+        .when(last, |row| row.border_b_1().rounded_b_lg().mb_6())
+}
+
+fn card_divider(cx: &gpui_kit::App) -> gpui_kit::Div {
+    div().w_full().h(gpui_kit::px(1.0)).bg(cx.theme().border)
 }

@@ -340,7 +340,7 @@ fn settings_expose_the_product_pages_in_order(cx: &mut TestAppContext) {
         ("settings-category-general", "General"),
         ("settings-category-appearance", "Appearance"),
         ("settings-category-keymap", "Keymap"),
-        ("settings-category-window-and-layout", "Window & Layout"),
+        ("settings-category-window-and-layout", "Window & layout"),
         ("settings-category-panels", "Panels"),
         ("settings-category-terminal", "Terminal"),
         ("settings-category-ai", "AI"),
@@ -362,7 +362,7 @@ fn settings_expose_the_product_pages_in_order(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn translated_category_titles_survive_rendering_and_english_sections_use_human_titles(
+fn translated_category_titles_survive_rendering_and_english_sections_use_sentence_case(
     cx: &mut TestAppContext,
 ) {
     init_zed_ui(cx);
@@ -387,7 +387,7 @@ fn translated_category_titles_survive_rendering_and_english_sections_use_human_t
     assert!(cx.debug_bounds("settings-page-title=Connexions").is_some());
     assert!(cx.debug_bounds("settings-page-title=Remotes").is_none());
     assert!(
-        cx.debug_bounds("settings-section-title=SSH Profiles")
+        cx.debug_bounds("settings-section-title=SSH profiles")
             .is_some()
     );
     assert!(
@@ -728,8 +728,9 @@ fn settings_focus_hint_is_vertically_centered_in_footer(cx: &mut TestAppContext)
     assert_close(hint_content_center, hint_slot_center, 1.0);
 }
 
+/// A setting's dependent children sit on its card, indented under it.
 #[gpui_kit::test]
-fn dependent_settings_use_zeds_single_inset_child_group(cx: &mut TestAppContext) {
+fn dependent_settings_indent_their_children_on_the_card(cx: &mut TestAppContext) {
     init_zed_ui(cx);
     let mut snapshot = snapshot_with_category(SettingsCategory::General);
     snapshot.pages[0].items = vec![
@@ -758,11 +759,14 @@ fn dependent_settings_use_zeds_single_inset_child_group(cx: &mut TestAppContext)
     let parent_left: f32 = parent.origin.x.into();
     let child_left: f32 = child.origin.x.into();
 
-    assert_close(parent_left, content_left, 1.0);
-    assert_close(child_left - parent_left, 32.0, 1.0);
-    let parent_width: f32 = parent.size.width.into();
-    let child_width: f32 = child.size.width.into();
-    assert_close(child_width, parent_width - 64.0, 1.0);
+    assert!(parent_left > content_left, "the card keeps a margin");
+    assert_close(child_left - parent_left, 24.0, 1.0);
+    assert_close(bounds_right(child), bounds_right(parent), 1.0);
+    assert!(
+        cx.debug_bounds("settings-toggle-general.parent").is_some()
+            && cx.debug_bounds("settings-toggle-general.child").is_some(),
+        "parent and dependent child controls both remain interactive"
+    );
 }
 
 #[gpui_kit::test]

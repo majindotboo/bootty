@@ -50,7 +50,7 @@ impl SettingsCategory {
             Self::Appearance => "Appearance",
             Self::Theme => "Theme",
             Self::Keymap => "Keyboard",
-            Self::WindowAndLayout => "Window & Layout",
+            Self::WindowAndLayout => "Window & layout",
             Self::Panels => "Panels",
             Self::Terminal => "Terminal",
             Self::Browser => "Browser",
@@ -58,6 +58,39 @@ impl SettingsCategory {
             Self::Ai => "AI",
             Self::Remotes => "Remotes",
             Self::Advanced => "Advanced",
+        }
+    }
+
+    /// The icon the navigation shows for the category.
+    #[must_use]
+    pub const fn icon(self) -> &'static str {
+        match self {
+            Self::General => "settings",
+            Self::Appearance => "palette",
+            Self::Theme => "swatch-book",
+            Self::Keymap => "keyboard",
+            Self::WindowAndLayout => "app-window",
+            Self::Panels => "panels-top-left",
+            Self::Terminal => "square-terminal",
+            Self::Browser => "globe",
+            Self::Permissions => "shield-check",
+            Self::Ai => "sparkles",
+            Self::Remotes => "server",
+            Self::Advanced => "wrench",
+        }
+    }
+
+    /// The theme's hue behind the category's icon.
+    #[must_use]
+    pub const fn tint(self, colors: &gpui_kit::component::ThemeColor) -> gpui_kit::Hsla {
+        match self {
+            Self::General | Self::Browser => colors.blue,
+            Self::Appearance | Self::Theme | Self::Ai => colors.magenta,
+            Self::Keymap | Self::Remotes => colors.cyan,
+            Self::WindowAndLayout => colors.yellow,
+            Self::Panels => colors.green,
+            Self::Permissions => colors.red,
+            Self::Terminal | Self::Advanced => colors.muted_foreground,
         }
     }
 }
