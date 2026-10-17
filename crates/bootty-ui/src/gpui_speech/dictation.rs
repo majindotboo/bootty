@@ -12,6 +12,8 @@ use gpui_kit::{App, Subscription};
 pub(super) struct Settings {
     pub account: Option<SpeechCommand>,
     pub availability: bootty_agents::voice::SpeechAvailability,
+    /// Where the microphone's loudness goes while dictating, for the waveform.
+    levels: Option<(AudioFormat, AudioSink)>,
 }
 
 pub(super) struct Recognizer(pub Rc<RefCell<Settings>>);
@@ -32,6 +34,8 @@ impl SpeechRecognizer for Recognizer {
             SpeechError::recognizer(anyhow::anyhow!("The Codex account is unavailable"))
         })?;
         let codex = settings.availability.codex;
+        drop(settings);
+        let shared = Rc::clone(&self.0);
         let (session, mut events) = SpeechSession::start(program);
         session
             .send(account)
@@ -70,6 +74,16 @@ impl SpeechRecognizer for Recognizer {
                     SpeechEvent::Error { message } => {
                         sink.error(SpeechError::recognizer(anyhow::anyhow!(message)), cx);
                     }
+                    SpeechEvent::Level { rms } => {
+                        // The helper sends only loudness; 80 ms at that level reads as it did.
+                        if let Some((format, levels)) = &shared.borrow().levels {
+                            let samples = (format.sample_rate() / 1000)
+                                .saturating_mul(80)
+                                .saturating_mul(u32::from(format.channels()));
+                            let rms = i16::try_from(rms).unwrap_or(i16::MAX);
+                            levels.push(vec![rms; usize::try_from(samples).unwrap_or(0)], cx);
+                        }
+                    }
                     SpeechEvent::Closed => sink.error(
                         SpeechError::recognizer(anyhow::anyhow!("The speech helper disconnected")),
                         cx,
@@ -106,17 +120,21 @@ impl RecognitionSession for Recognition {
     }
 }
 
-/// The helper captures and recognizes together, with the recognition session owning both.
-/// No PCM crosses the UI. Use a PCM `AudioInput` when the helper exports levels for `SpeechWaveform`.
-pub(super) struct HelperInput;
+/// The helper captures and recognizes together, with the recognition session owning both. No
+/// audio crosses to the UI: the helper reports only how loud it is, which feeds the waveform.
+pub(super) struct HelperInput(pub Rc<RefCell<Settings>>);
 
 impl AudioInput for HelperInput {
     fn start(
         &self,
-        _: AudioFormat,
-        _: AudioSink,
+        format: AudioFormat,
+        sink: AudioSink,
         _: &mut App,
     ) -> Result<Subscription, SpeechError> {
-        Ok(Subscription::new(|| {}))
+        self.0.borrow_mut().levels = Some((format, sink));
+        let settings = Rc::clone(&self.0);
+        Ok(Subscription::new(move || {
+            settings.borrow_mut().levels = None;
+        }))
     }
 }

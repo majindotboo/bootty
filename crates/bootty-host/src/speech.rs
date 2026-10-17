@@ -27,6 +27,10 @@ pub enum SpeechEvent {
     Final {
         text: String,
     },
+    /// How loud the microphone was over the last 80 ms: the RMS of its 16-bit samples.
+    Level {
+        rms: u16,
+    },
     /// Voice mode's WebRTC offer, for the conversation to take to its provider.
     Offer {
         sdp: String,

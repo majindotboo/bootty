@@ -102,7 +102,7 @@ impl SpeechInput {
             SpeechState::new(cx)
                 .system_fallback(false)
                 .recognizer(dictation::Recognizer(settings.clone()))
-                .input(dictation::HelperInput)
+                .input(dictation::HelperInput(settings.clone()))
         });
         let subscription = cx.subscribe(&dictation, |_, _, event, cx| match event {
             DictationEvent::Final(text) if !text.is_empty() => cx.emit(SpeechInputEvent::Final {
@@ -298,7 +298,8 @@ impl SpeechInput {
                             SpeechEvent::Ready
                             | SpeechEvent::Stopped
                             | SpeechEvent::Partial { .. }
-                            | SpeechEvent::Final { .. } => {}
+                            | SpeechEvent::Final { .. }
+                            | SpeechEvent::Level { .. } => {}
                         }
                         cx.notify();
                         this.session.is_some()
@@ -350,6 +351,13 @@ impl Render for SpeechInput {
             .flex()
             .items_center()
             .gap_1()
+            .when(dictating, |row| {
+                row.child(
+                    gpui_kit::component::speech::SpeechWaveform::new(&self.dictation)
+                        .small()
+                        .w(gpui_kit::rems(4.)),
+                )
+            })
             .when(voice || dictating, |row| {
                 row.child(
                     div()

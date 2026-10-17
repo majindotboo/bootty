@@ -16,7 +16,7 @@ def emit(event,**fields): print(json.dumps({'event':event,**fields}),flush=True)
 emit('ready')
 for line in sys.stdin:
  command=json.loads(line)
- if command['action']=='listen': emit('listening'); emit('partial',text='Recognized words')
+ if command['action']=='listen': emit('listening'); emit('level',rms=1200); emit('partial',text='Recognized words')
  elif command['action']=='stop': emit('final',text='Recognized words'); emit('stopped')
  elif command['action']=='answer': emit('listening')
 ",
@@ -28,6 +28,11 @@ for line in sys.stdin:
         .send(SpeechCommand::Listen { voice: false })
         .unwrap();
     assert_eq!(events.blocking_recv(), Some(SpeechEvent::Listening));
+    // Only loudness crosses for the waveform, never the audio itself.
+    assert_eq!(
+        events.blocking_recv(),
+        Some(SpeechEvent::Level { rms: 1200 })
+    );
     assert_eq!(
         events.blocking_recv(),
         Some(SpeechEvent::Partial {

@@ -28,7 +28,35 @@ pub(super) struct Session {
     sink: Sink,
     closed: bool,
     audio_bytes: usize,
+    loudness: Loudness,
     deadline: Option<Instant>,
+}
+
+/// The microphone's loudness over successive 80 ms windows.
+#[derive(Default)]
+struct Loudness {
+    squares: u64,
+    samples: u64,
+}
+
+impl Loudness {
+    /// 80 ms of 24 kHz mono audio.
+    const WINDOW: u64 = 1_920;
+
+    /// Adds a frame of little-endian 16-bit samples, and gives the window's RMS once it fills.
+    fn add(&mut self, frame: &[u8]) -> Option<u16> {
+        for &sample in frame.as_chunks::<2>().0 {
+            let value = u64::from(i16::from_le_bytes(sample).unsigned_abs());
+            self.squares = self.squares.saturating_add(value.saturating_mul(value));
+            self.samples = self.samples.saturating_add(1);
+        }
+        if self.samples < Self::WINDOW {
+            return None;
+        }
+        let rms = self.squares.checked_div(self.samples).unwrap_or(0).isqrt();
+        *self = Self::default();
+        Some(u16::try_from(rms).unwrap_or(u16::MAX))
+    }
 }
 
 impl Session {
@@ -57,6 +85,7 @@ impl Session {
             sink,
             closed: false,
             audio_bytes: 0,
+            loudness: Loudness::default(),
             deadline: None,
         })
     }
@@ -237,6 +266,9 @@ impl Session {
                     return Err("Oversized microphone audio frame".into());
                 }
                 self.audio_bytes = self.audio_bytes.saturating_add(bytes.len());
+                if let Some(rms) = self.loudness.add(&bytes) {
+                    publish(&SpeechEvent::Level { rms })?;
+                }
                 match &mut self.sink {
                     Sink::Call => Ok(()),
                     Sink::OpenAi(socket) => socket
