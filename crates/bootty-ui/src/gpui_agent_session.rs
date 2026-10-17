@@ -2839,7 +2839,11 @@ impl NativeAgentSessionView {
         let user = item.role == "user";
         let collapsible = collapsible_prompt(item);
         let expanded = self.expanded_messages.contains(&item.id);
-        let bubble_background = cx.theme().accent.mix_oklab(cx.theme().background, 0.5);
+        // A prompt sits on a faint wash of the text color, quieter than an accent tint.
+        let bubble_background = cx.theme().foreground.mix_oklab(
+            cx.theme().background,
+            if cx.theme().is_dark() { 0.08 } else { 0.04 },
+        );
         let title = match item.role.as_str() {
             "change" => "Changes",
             "plan" => "Plan",
@@ -2857,8 +2861,8 @@ impl NativeAgentSessionView {
             .when(user, |row| {
                 // Rich-text lists have no intrinsic width. Give their wrapping
                 // layout the same bounded lane as other user message content.
-                row.w_full().max_w(gpui_kit::relative(0.8)).p_2().rounded(cx.theme().radius)
-                    .bg(bubble_background).text_color(cx.theme().accent_foreground)
+                row.w_full().max_w(gpui_kit::relative(0.8)).px_4().py_2p5().rounded_2xl()
+                    .bg(bubble_background)
             })
             .when(item.role == "notice", |row| {
                 row.text_sm().text_color(cx.theme().muted_foreground)

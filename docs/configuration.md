@@ -1203,8 +1203,8 @@ diagram in the theme's colors; one still streaming, or one Mermaid can't draw, s
 source, with the reason. An ```` ```html ```` block offers to open the page in your
 browser from a private file. Code blocks highlight the languages agents write most,
 SQL included.
-`agents.transcript-width` sets how wide messages run: `"wide"` (default, 72rem),
-`"normal"` (48rem), or `"full"`. In a wide window the conversation details card
+`agents.transcript-width` sets how wide messages run: `"normal"` (default, 48rem),
+`"wide"` (72rem), or `"full"`. In a wide window the conversation details card
 sits in the margin beside centered messages, and moves them aside only when it
 would cover them. The card names the project, the conversation's directory (with a
 copy button, and a worktree tag in a linked worktree), the branch, its pull request by
