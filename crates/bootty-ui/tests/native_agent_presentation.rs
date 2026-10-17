@@ -4,7 +4,7 @@ use bootty_agents::{AgentKind, NativeSessionConfig, NativeSessionRecord};
 use bootty_control::Caller;
 use bootty_ui::{
     NativeAgentSessionView,
-    gpui::{ChangeKind, CommandAction, UiPalette, init_theme},
+    gpui::{ChangeKind, CommandAction, Rgba, SidebarPullRequest, UiPalette, init_theme},
 };
 use gpui_kit::{
     AppContext as _, Entity, Focusable as _, Modifiers, MouseButton, MouseUpEvent, ScrollDelta,
@@ -5324,6 +5324,7 @@ fn the_composer_switches_the_checkout_branch(cx: &mut TestAppContext) {
         binding: Some(binding.clone()),
         diff: None,
         target: None,
+        worktree: false,
     };
     let (_, visual) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {
@@ -5712,6 +5713,7 @@ fn narrow_conversations_open_the_context_card_on_request(cx: &mut TestAppContext
         binding: None,
         diff: None,
         target: None,
+        worktree: false,
     };
     let (_, visual) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {
@@ -5745,6 +5747,69 @@ fn narrow_conversations_open_the_context_card_on_request(cx: &mut TestAppContext
     assert_eq!(shown(visual), (true, true), "opened");
     visual.simulate_click(point(px(40.), px(40.)), Modifiers::none());
     assert_eq!(shown(visual), (false, true), "closed by a click outside");
+}
+
+/// The context card says where the conversation works and who answers it, shows its pull
+/// request by title, and copies its directory.
+#[gpui_kit::test]
+fn the_context_card_names_the_checkout_model_and_pull_request(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.config.model = Some("pi-model".to_owned());
+    let (sender, _) = native_command_sender(&record);
+    let context = bootty_ui::ConversationContext {
+        project: Some("bootty".to_owned()),
+        branch: Some("feature".to_owned()),
+        pull_request: Some(SidebarPullRequest {
+            number: 7,
+            title: "Tidy the card".to_owned(),
+            url: String::new(),
+            status: "Open".to_owned(),
+            color: Rgba::rgb(80, 200, 120),
+        }),
+        binding: None,
+        diff: None,
+        target: None,
+        worktree: true,
+    };
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.set_conversation_context(Some(context), cx);
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1600.), px(900.)));
+    redraw(visual);
+    redraw(visual);
+    for row in [
+        "native-context-directory",
+        "native-context-model",
+        "native-context-pull-request",
+    ] {
+        assert!(visual.debug_bounds(row).is_some(), "{row}");
+    }
+    let copy = visual
+        .debug_bounds("native-context-copy-path")
+        .expect("copy path");
+    visual.simulate_click(copy.center(), Modifiers::none());
+    visual.update(|_, cx| {
+        pretty_assertions::assert_eq!(
+            cx.read_from_clipboard().and_then(|item| item.text()),
+            Some("/tmp/project".to_owned())
+        );
+    });
 }
 
 /// Right-clicking a text field opens Bootty's own menu, whose items act on the field: Copy puts

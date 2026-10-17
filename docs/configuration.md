@@ -1206,7 +1206,9 @@ SQL included.
 `agents.transcript-width` sets how wide messages run: `"wide"` (default, 72rem),
 `"normal"` (48rem), or `"full"`. In a wide window the conversation details card
 sits in the margin beside centered messages, and moves them aside only when it
-would cover them.
+would cover them. The card names the project, the conversation's directory (with a
+copy button, and a worktree tag in a linked worktree), the branch, its pull request by
+number and title (which opens it), and the provider, model and effort.
 `agents.collapse-composer-on-scroll` defaults to true; an empty, unfocused composer
 folds to one line while reading older turns, and opens when focused. Drafts and
 attachments keep the composer expanded.

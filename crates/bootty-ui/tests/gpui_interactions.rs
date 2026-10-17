@@ -144,6 +144,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 icon: None,
                 diff: None,
                 pull_request: None,
+                worktree: false,
                 scripts: Vec::new(),
                 color: color(220, 220, 230),
                 dim_color: color(150, 150, 160),
@@ -184,6 +185,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 icon: Some("folder".to_owned()),
                 diff: None,
                 pull_request: None,
+                worktree: false,
                 scripts: Vec::new(),
                 color: color(180, 180, 190),
                 dim_color: color(130, 130, 140),
@@ -3262,6 +3264,8 @@ fn a_branch_shows_its_pull_request(cx: &mut TestAppContext) {
     row.branch = Some("feature/login".to_owned());
     row.pull_request = Some(SidebarPullRequest {
         number: 42,
+        title: "Fix the login".to_owned(),
+        url: "https://github.com/o/r/pull/42".to_owned(),
         status: "Open · checks passing".to_owned(),
         color: color(80, 200, 120),
     });

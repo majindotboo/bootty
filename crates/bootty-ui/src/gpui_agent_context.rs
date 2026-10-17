@@ -11,6 +11,8 @@ pub struct ConversationContext {
     pub binding: Option<CommandTarget>,
     pub diff: Option<SidebarDiffSummary>,
     pub target: Option<SessionTarget>,
+    /// The session works in a linked worktree of its project.
+    pub worktree: bool,
 }
 
 /// Where the context card shows.
@@ -101,6 +103,9 @@ impl NativeAgentSessionView {
                     .text_color(cx.theme().muted_foreground)
                     .child(project),
             )
+            .child(
+                self.render_context_directory(context.is_some_and(|context| context.worktree), cx),
+            )
             .when_some(
                 context.and_then(|context| context.branch.clone()),
                 |card, branch| {
@@ -120,6 +125,7 @@ impl NativeAgentSessionView {
                     .and_then(|context| context.pull_request.clone())
                     .map(|pull_request| Self::render_context_pull_request(pull_request, cx)),
             )
+            .child(self.render_context_model(cx))
             .when_some(
                 context.and_then(|context| context.target.clone()),
                 |card, target| card.child(self.render_context_changes(target, cx)),
@@ -191,26 +197,121 @@ impl NativeAgentSessionView {
             )
     }
 
-    /// The branch's pull request: its number in the color of where it stands, then in words.
+    /// Where the conversation works, to copy, and whether that's a linked worktree.
+    fn render_context_directory(&self, worktree: bool, cx: &Context<Self>) -> gpui_kit::Div {
+        let path = self.record.config.cwd.to_string_lossy().into_owned();
+        let shown = readable_path(&self.record.config.cwd, self.record.config.remote.is_some());
+        card_row()
+            .debug_selector(|| "native-context-directory".into())
+            .child(crate::gpui::sized_icon(
+                if worktree { "git-fork" } else { "folder" },
+                crate::gpui::IconSize::Small,
+                cx.theme().muted_foreground,
+            ))
+            .child(div().flex_1().min_w_0().truncate().child(shown))
+            .when(worktree, |row| {
+                row.child(
+                    div()
+                        .flex_none()
+                        .px_1()
+                        .rounded(cx.theme().radius)
+                        .bg(cx.theme().muted)
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("worktree"),
+                )
+            })
+            .child(
+                Button::new("native-context-copy-path")
+                    .debug_selector(|| "native-context-copy-path".into())
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Copy)
+                    .accessibility_label("Copy path")
+                    .element_tooltip(path.clone())
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
+                    }),
+            )
+    }
+
+    /// Who answers: the provider, its model and how hard it thinks.
+    fn render_context_model(&self, cx: &Context<Self>) -> gpui_kit::Div {
+        let config = &self.record.config;
+        let model = config.model.as_deref().map(|id| {
+            self.models
+                .iter()
+                .flatten()
+                .find(|model| model.id == id)
+                .map_or(id, |model| model.display_name.as_str())
+        });
+        let effort = config
+            .reasoning_effort
+            .as_deref()
+            .map(super::models::reasoning_label);
+        let words = [
+            Some(config.provider.display_name()),
+            model,
+            effort.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" · ");
+        card_row()
+            .debug_selector(|| "native-context-model".into())
+            .child(crate::gpui::sized_icon(
+                config.provider.icon(),
+                crate::gpui::IconSize::Small,
+                crate::gpui::provider_color(&config.provider.to_string(), cx),
+            ))
+            .child(div().min_w_0().truncate().child(words))
+    }
+
+    /// The branch's pull request: its number in the color of where it stands and its title,
+    /// which opens it, then where it stands in words.
     fn render_context_pull_request(
         pull_request: SidebarPullRequest,
         cx: &Context<Self>,
-    ) -> gpui_kit::Div {
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
         let tint = gpui_kit::Hsla::from(pull_request.color);
-        card_row()
+        let url = pull_request.url.clone();
+        div()
+            .id("native-context-pull-request")
             .debug_selector(|| "native-context-pull-request".into())
-            .child(crate::gpui::sized_icon(
-                "git-pull-request",
-                crate::gpui::IconSize::Small,
-                tint,
-            ))
+            .px_2()
+            .py_1()
+            .flex()
+            .flex_col()
+            .rounded(cx.theme().radius)
+            .text_sm()
+            .when(!url.is_empty(), |row| {
+                row.cursor_pointer()
+                    .hover(|row| row.bg(cx.theme().muted.opacity(0.5)))
+                    .on_click(move |_, _, cx| cx.open_url(&url))
+            })
             .child(
                 div()
-                    .text_color(tint)
-                    .child(format!("#{}", pull_request.number)),
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(crate::gpui::sized_icon(
+                        "git-pull-request",
+                        crate::gpui::IconSize::Small,
+                        tint,
+                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(tint)
+                            .child(format!("#{}", pull_request.number)),
+                    )
+                    .child(div().min_w_0().truncate().child(pull_request.title)),
             )
             .child(
                 div()
+                    .pl_5()
+                    .text_xs()
                     .text_color(cx.theme().muted_foreground)
                     .child(pull_request.status),
             )
@@ -358,6 +459,28 @@ impl NativeAgentSessionView {
 }
 
 /// A card row, laid out like the card's small buttons so icons and words line up with theirs.
+/// A local path under the home directory reads from `~`; a remote host's path stays whole.
+fn readable_path(path: &std::path::Path, remote: bool) -> String {
+    (!remote)
+        .then(crate::strings::home_dir)
+        .flatten()
+        .and_then(|home| {
+            path.strip_prefix(home)
+                .ok()
+                .map(std::path::Path::to_path_buf)
+        })
+        .map_or_else(
+            || path.display().to_string(),
+            |rest| {
+                if rest.as_os_str().is_empty() {
+                    "~".to_owned()
+                } else {
+                    format!("~/{}", rest.display())
+                }
+            },
+        )
+}
+
 fn card_row() -> gpui_kit::Div {
     div().h_6().px_2().flex().items_center().gap_1().text_sm()
 }

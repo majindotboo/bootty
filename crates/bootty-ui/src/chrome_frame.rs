@@ -613,6 +613,8 @@ fn sidebar_pull_request(
     };
     Some(crate::gpui::chrome::SidebarPullRequest {
         number: status.number,
+        title: status.title.clone(),
+        url: status.url.clone(),
         status: format!("{state}{checks}"),
         color: ui_color!(color),
     })
@@ -876,6 +878,7 @@ fn empty_project_row(
         icon: Some("folder".to_owned()),
         diff: None,
         pull_request: None,
+        worktree: false,
         scripts: Vec::new(),
         color: palette.text,
         dim_color: palette.muted,
@@ -920,6 +923,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             icon: Some("circle-dashed".to_owned()),
             diff: None,
             pull_request: None,
+            worktree: false,
             scripts: Vec::new(),
             color: palette.text,
             dim_color: palette.muted,
@@ -958,6 +962,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                 icon: Some("bootty".to_owned()),
                 diff: None,
                 pull_request: None,
+                worktree: false,
                 scripts: Vec::new(),
                 color: palette.text,
                 dim_color: palette.muted,
@@ -1091,6 +1096,7 @@ fn sidebar_rows(
                 facts.diff_removed,
                 state.ui_theme().palette,
             ),
+            worktree: facts.project.is_some(),
             icon: Some("terminal".to_owned()),
             kind: if session.detached {
                 SidebarRowKind::DetachedSession
@@ -1508,6 +1514,7 @@ fn sidebar_session_base(
         icon: None,
         diff: None,
         pull_request: None,
+        worktree: false,
         scripts: Vec::new(),
         color,
         dim_color,

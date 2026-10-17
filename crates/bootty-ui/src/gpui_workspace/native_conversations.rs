@@ -1473,6 +1473,7 @@ impl GpuiWorkspace {
                     binding: binding.clone(),
                     diff: row.diff,
                     target: row.target.clone(),
+                    worktree: row.worktree,
                 });
             view.update(cx, |view, cx| {
                 view.set_speech_visible(

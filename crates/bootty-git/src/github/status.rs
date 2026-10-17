@@ -1,4 +1,5 @@
-//! A branch's pull request at a glance: its number, where it stands, and how its checks went.
+//! A branch's pull request at a glance: its number and title, where it stands, and how its
+//! checks went.
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -7,6 +8,9 @@ use crate::{Git, runner::CommandRunner};
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct PullRequestStatus {
     pub number: u32,
+    /// Answers saved before titles were asked for have none.
+    #[serde(default)]
+    pub title: String,
     pub state: PullRequestState,
     pub checks: ChecksState,
     pub url: String,
@@ -32,7 +36,7 @@ pub enum ChecksState {
 }
 
 impl PullRequestStatus {
-    /// Reads `gh pr view --json number,state,isDraft,url,statusCheckRollup`.
+    /// Reads `gh pr view --json number,title,state,isDraft,url,statusCheckRollup`.
     /// # Errors
     /// Returns output gh didn't shape that way.
     pub fn from_gh(value: &Value) -> Result<Self, String> {
@@ -56,6 +60,11 @@ impl PullRequestStatus {
             .map_or(ChecksState::None, |checks| summarize_checks(checks));
         Ok(Self {
             number,
+            title: value
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             state,
             checks,
             url: value
@@ -115,7 +124,7 @@ impl<R: CommandRunner> Git<R> {
                     "view".into(),
                     branch.into(),
                     "--json".into(),
-                    "number,state,isDraft,url,statusCheckRollup".into(),
+                    "number,title,state,isDraft,url,statusCheckRollup".into(),
                 ],
             )
             .map_err(|error| error.to_string())?;

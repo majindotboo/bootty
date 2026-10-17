@@ -90,6 +90,8 @@ pub struct SidebarDiffSummary {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarPullRequest {
     pub number: u32,
+    pub title: String,
+    pub url: String,
     /// Where it stands and how its checks went, like "Open · checks passing".
     pub status: String,
     pub color: Rgba,
@@ -358,6 +360,8 @@ pub struct SidebarRow {
     pub icon: Option<String>,
     pub diff: Option<SidebarDiffSummary>,
     pub pull_request: Option<SidebarPullRequest>,
+    /// The session works in a linked worktree of its project.
+    pub worktree: bool,
     /// The names of its project's scripts, to run from its menu.
     pub scripts: Vec<String>,
     pub color: Rgba,

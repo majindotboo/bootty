@@ -72,8 +72,8 @@ impl CommandRunner for Host {
 }
 
 fn pull_request(state: &str, draft: bool, checks: &Value) -> Value {
-    json!({"number": 42, "state": state, "isDraft": draft, "url": "https://github.com/o/r/pull/42",
-        "statusCheckRollup": checks})
+    json!({"number": 42, "title": "Fix the thing", "state": state, "isDraft": draft,
+        "url": "https://github.com/o/r/pull/42", "statusCheckRollup": checks})
 }
 
 /// A pull request's state reads as GitHub reports it, and its checks as one: any failure fails,
@@ -99,6 +99,7 @@ fn branches_read_their_pull_request(
         git.branch_pull_request("/repo", "feature"),
         Ok(Some(PullRequestStatus {
             number: 42,
+            title: "Fix the thing".to_owned(),
             state,
             checks,
             url: "https://github.com/o/r/pull/42".to_owned(),
