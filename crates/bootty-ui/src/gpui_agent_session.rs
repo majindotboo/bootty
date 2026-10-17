@@ -1856,10 +1856,12 @@ impl NativeAgentSessionView {
             )
     }
 
+    /// A tool's row. `rail` hangs it from an open work group's rail, `Some(true)` as its last row.
     fn render_tool_output(
         &self,
         item: &NativeTranscriptItem,
         owner: gpui_kit::WeakEntity<Self>,
+        rail: Option<bool>,
         cx: &App,
     ) -> gpui_kit::AnyElement {
         let open = self
@@ -1938,15 +1940,7 @@ impl NativeAgentSessionView {
                         },
                     )))
                 });
-        div()
-            .w_full()
-            .min_w_0()
-            .px_4()
-            .py_1()
-            .flex()
-            .justify_center()
-            .child(output)
-            .into_any_element()
+        work_row(output, rail, self.column_width(), cx)
     }
 
     fn render_tool_disclosure(
@@ -2033,14 +2027,20 @@ impl NativeAgentSessionView {
     }
 
     /// A thought inside an expanded Work row: one line, like a tool, until opened.
+    /// Reasoning, open while it streams and folded once settled unless the reader chose.
     fn render_thinking(
         &self,
         item: &NativeTranscriptItem,
         owner: gpui_kit::WeakEntity<Self>,
+        rail: Option<bool>,
         cx: &App,
     ) -> gpui_kit::AnyElement {
         let id = item.id.clone();
-        let open = self.tool_disclosures.get(&id).copied().unwrap_or(false);
+        let open = self
+            .tool_disclosures
+            .get(&id)
+            .copied()
+            .unwrap_or(!item.complete);
         let label = if item.complete { "Thought" } else { "Thinking" };
         // Reasoning summaries often open with a bold title; it reads as plain text here.
         let summary = item
@@ -2104,22 +2104,17 @@ impl NativeAgentSessionView {
                     self.message_text(state, &id, owner),
                 ))
             });
-        div()
-            .w_full()
-            .min_w_0()
-            .px_4()
-            .py_1()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .w_full()
-                    .max_w(self.column_width())
-                    .min_w_0()
-                    .debug_selector(move || format!("native-message-{id}"))
-                    .child(Collapsible::new().open(open).child(toggle).content(body)),
-            )
-            .into_any_element()
+        work_row(
+            div()
+                .w_full()
+                .max_w(self.column_width())
+                .min_w_0()
+                .debug_selector(move || format!("native-message-{id}"))
+                .child(Collapsible::new().open(open).child(toggle).content(body)),
+            rail,
+            self.column_width(),
+            cx,
+        )
     }
 
     fn tool_name<'a>(&self, item: &'a NativeTranscriptItem) -> std::borrow::Cow<'a, str> {
@@ -2759,10 +2754,10 @@ impl NativeAgentSessionView {
             return self.render_compaction(item, status, window, cx);
         }
         if is_tool_output(&item.role) || item.tool.is_some() {
-            return self.render_tool_output(item, owner, cx);
+            return self.render_tool_output(item, owner, None, cx);
         }
         if matches!(item.role.as_str(), "thinking" | "reasoning") {
-            return self.render_thinking(item, owner, cx);
+            return self.render_thinking(item, owner, None, cx);
         }
         let user = item.role == "user";
         let quiet = item.role == "notice";
@@ -6185,4 +6180,29 @@ fn copied_text(transcript: &[NativeTranscriptItem], id: &str) -> Option<String> 
     } else {
         replies.join("\n\n")
     })
+}
+
+/// A tool or reasoning row in the message column. Hung from a work group's rail, the rail spans
+/// the row's whole height so the trunk runs unbroken from row to row.
+fn work_row(
+    content: impl IntoElement,
+    rail: Option<bool>,
+    column: gpui_kit::Length,
+    cx: &App,
+) -> gpui_kit::AnyElement {
+    let row = div().w_full().min_w_0().px_4().flex().justify_center();
+    match rail {
+        None => row.py_1().child(content).into_any_element(),
+        Some(last) => row
+            .child(
+                div()
+                    .w_full()
+                    .max_w(column)
+                    .min_w_0()
+                    .flex()
+                    .child(timeline::work_rail(last, cx))
+                    .child(div().flex_1().min_w_0().py_1().child(content)),
+            )
+            .into_any_element(),
+    }
 }

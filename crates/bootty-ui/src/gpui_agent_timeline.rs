@@ -19,6 +19,8 @@ pub(super) enum TranscriptRow {
         /// Timestamp and actions belong to user messages and a settled turn's final reply,
         /// not to the commentary between tools.
         meta: bool,
+        /// A row of an open work group hangs from its rail; `Some(true)` for the last row.
+        rail: Option<bool>,
     },
     Work {
         id: String,
@@ -88,6 +90,7 @@ pub(super) fn rows(
                     index: end,
                     id: item.id.clone(),
                     meta: true,
+                    rail: None,
                 });
             }
             start = end.saturating_add(1);
@@ -142,6 +145,7 @@ fn append_turn(
             id: item.id.clone(),
             // A steering message keeps its actions where it sits inside the turn.
             meta: Some(index) == final_message || item.role == "user",
+            rail: None,
         });
     }
     // Only the trailing run can still be working.
@@ -186,11 +190,13 @@ fn push_work_run(
         live,
     });
     if open {
+        let last = members.last().copied();
         rows.extend(members.into_iter().filter_map(|index| {
             transcript.get(index).map(|item| TranscriptRow::Message {
                 index,
                 id: item.id.clone(),
                 meta: false,
+                rail: Some(Some(index) == last),
             })
         }));
     }
@@ -569,6 +575,11 @@ impl NativeAgentSessionView {
         cx: &App,
     ) -> gpui_kit::AnyElement {
         match self.timeline.get(ix) {
+            Some(TranscriptRow::Message {
+                index,
+                rail: Some(last),
+                ..
+            }) => self.render_work_member(*index, *last, owner, window, cx),
             Some(TranscriptRow::Message { index, meta, .. }) => {
                 self.render_message(*index, *meta, owner, window, cx)
             }
@@ -673,10 +684,15 @@ impl NativeAgentSessionView {
         if live && let Some(tool) = active {
             return running_label(tool);
         }
-        let summary = if tools.is_empty() {
+        let thoughts = members
+            .iter()
+            .filter_map(|ix| self.record.snapshot.transcript.get(*ix))
+            .filter(|item| matches!(item.role.as_str(), "thinking" | "reasoning"))
+            .count();
+        let summary = if tools.is_empty() && thoughts == 1 {
             "Thought process".to_owned()
         } else {
-            activity_summary(&tools)
+            activity_summary(thoughts, &tools)
         };
         // A turn can fold several runs; its duration reads once, on the last.
         match members
@@ -766,6 +782,27 @@ impl NativeAgentSessionView {
                 })
                 .child(duration),
         )
+    }
+
+    /// A row of an open work group, hanging from the group's rail.
+    fn render_work_member(
+        &self,
+        ix: usize,
+        last: bool,
+        owner: gpui_kit::WeakEntity<Self>,
+        window: &gpui_kit::Window,
+        cx: &App,
+    ) -> gpui_kit::AnyElement {
+        let Some(item) = self.record.snapshot.transcript.get(ix) else {
+            return div().into_any_element();
+        };
+        if item.subagent.is_none() && (super::is_tool_output(&item.role) || item.tool.is_some()) {
+            return self.render_tool_output(item, owner, Some(last), cx);
+        }
+        if matches!(item.role.as_str(), "thinking" | "reasoning") {
+            return self.render_thinking(item, owner, Some(last), cx);
+        }
+        self.render_message(ix, false, owner, window, cx)
     }
 
     fn render_work_group(
@@ -901,33 +938,31 @@ fn tool_activity(tool: &bootty_agents::NativeToolCall) -> ToolActivity {
     }
 }
 
-/// "Ran 3 commands, read 2 files, 1 failed": what a run of tools did, in a fixed order.
-fn activity_summary(tools: &[&bootty_agents::NativeToolCall]) -> String {
+/// "Thought 2 times · Ran 3 commands · Read 2 files · 1 failed": what a run of work did, in a
+/// fixed order.
+fn activity_summary(thoughts: usize, tools: &[&bootty_agents::NativeToolCall]) -> String {
     let mut counts = BTreeMap::new();
     for tool in tools {
         let count = counts.entry(tool_activity(tool)).or_insert(0_usize);
         *count = count.saturating_add(1);
     }
-    let phrases = counts
+    let plural = |count: usize| if count == 1 { "" } else { "s" };
+    let thought = (thoughts > 0).then(|| {
+        if thoughts == 1 {
+            "Thought once".to_owned()
+        } else {
+            format!("Thought {thoughts} times")
+        }
+    });
+    thought
         .into_iter()
-        .map(|(activity, count)| {
-            let plural = count != 1;
-            match activity {
-                ToolActivity::Command => {
-                    format!("ran {count} command{}", if plural { "s" } else { "" })
-                }
-                ToolActivity::Read => format!("read {count} file{}", if plural { "s" } else { "" }),
-                ToolActivity::Edit => {
-                    format!("edited {count} file{}", if plural { "s" } else { "" })
-                }
-                ToolActivity::Search => {
-                    format!("searched {count} time{}", if plural { "s" } else { "" })
-                }
-                ToolActivity::Other => {
-                    format!("used {count} tool{}", if plural { "s" } else { "" })
-                }
-            }
-        })
+        .chain(counts.into_iter().map(|(activity, count)| match activity {
+            ToolActivity::Command => format!("Ran {count} command{}", plural(count)),
+            ToolActivity::Read => format!("Read {count} file{}", plural(count)),
+            ToolActivity::Edit => format!("Edited {count} file{}", plural(count)),
+            ToolActivity::Search => format!("Searched {count} time{}", plural(count)),
+            ToolActivity::Other => format!("Used {count} tool{}", plural(count)),
+        }))
         .chain(
             Some(
                 tools
@@ -939,11 +974,7 @@ fn activity_summary(tools: &[&bootty_agents::NativeToolCall]) -> String {
             .map(|failed| format!("{failed} failed")),
         )
         .collect::<Vec<_>>()
-        .join(", ");
-    let mut chars = phrases.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
+        .join(" · ")
 }
 
 /// A running command reads "Running cargo"; the full command stays in the expanded row.
@@ -992,4 +1023,37 @@ fn compacted_tokens(item: &NativeTranscriptItem) -> Option<String> {
         super::compact_tokens(before),
         super::compact_tokens(after)
     ))
+}
+
+/// The tree line an open work group's rows hang from: a trunk past every row but the last, and
+/// a rounded elbow into each row's first line.
+pub(super) fn work_rail(last: bool, cx: &App) -> gpui_kit::Div {
+    let line = cx.theme().border;
+    div()
+        .relative()
+        .w_5()
+        .flex_none()
+        .when(!last, |rail| {
+            rail.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(gpui_kit::px(7.))
+                    .w(gpui_kit::px(1.))
+                    .bg(line),
+            )
+        })
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .left(gpui_kit::px(7.))
+                .w(gpui_kit::px(9.))
+                .h(gpui_kit::px(16.))
+                .border_l_1()
+                .border_b_1()
+                .border_color(line)
+                .rounded_bl(gpui_kit::px(6.)),
+        )
 }

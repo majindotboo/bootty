@@ -563,10 +563,10 @@ fn verify_responsive_fold(visual: &mut gpui_kit::VisualTestContext) {
         let tool = visual
             .debug_bounds("native-tool-heading-tool")
             .expect("expanded tool disclosure");
-        pretty_assertions::assert_eq!(
-            tool.left(),
-            reply.left(),
-            "tool headings share the text lane"
+        let indent = f32::from(tool.left()) - f32::from(reply.left());
+        assert!(
+            (indent - 20.).abs() < 0.5,
+            "expanded work hangs from its rail inside the text lane, {indent}px in"
         );
         assert!(
             user.left() > reply.left(),
@@ -2434,7 +2434,7 @@ fn work_folds_summarize_what_their_tools_did(cx: &mut TestAppContext) {
         (
             "idle",
             settled,
-            "native-work-summary:Ran 2 commands, read 1 file, 1 failed",
+            "native-work-summary:Ran 2 commands · Read 1 file · 1 failed",
         ),
         ("working", live, "native-work-summary:Running cargo"),
     ] {
@@ -2508,7 +2508,7 @@ fn tool_rows_name_what_each_tool_did(cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let fold = visual
-        .debug_bounds("native-work-summary:Ran 1 command, used 4 tools, 1 failed")
+        .debug_bounds("native-work-summary:Ran 1 command · Used 4 tools · 1 failed")
         .expect("work fold");
     visual.simulate_click(fold.center(), Modifiers::none());
     visual.run_until_parked();
@@ -2558,7 +2558,7 @@ fn thoughts_in_work_rows_open_one_at_a_time(cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let fold = visual
-        .debug_bounds("native-work-summary:Ran 1 command")
+        .debug_bounds("native-work-summary:Thought once · Ran 1 command")
         .expect("work fold");
     visual.simulate_click(fold.center(), Modifiers::none());
     visual.run_until_parked();
