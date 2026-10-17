@@ -462,6 +462,11 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
             "Focus composer",
         ),
         ("stash", CommandAction::Stash, "Stash or restore prompt"),
+        (
+            "expand",
+            CommandAction::Expand,
+            "Expand or shrink the composer",
+        ),
     ]
     .into_iter()
     .chain(
@@ -497,6 +502,7 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
                             | CommandAction::ToggleFast
                             | CommandAction::FocusComposer
                             | CommandAction::Stash
+                            | CommandAction::Expand
                     ),
                 },
                 executor: CommandExecutorResolver::Composer(action),

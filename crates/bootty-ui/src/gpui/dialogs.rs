@@ -225,6 +225,8 @@ pub enum CommandAction {
     FocusComposer,
     /// Put the composer's words aside, or bring the newest stashed prompt back.
     Stash,
+    /// Give the composer the conversation's room to write in, or shrink it back.
+    Expand,
 }
 use gpui_kit::EntityInputHandler as _;
 
@@ -963,7 +965,8 @@ impl DialogView {
             | CommandAction::TogglePlan
             | CommandAction::ToggleFast
             | CommandAction::FocusComposer
-            | CommandAction::Stash => {}
+            | CommandAction::Stash
+            | CommandAction::Expand => {}
         }
     }
 

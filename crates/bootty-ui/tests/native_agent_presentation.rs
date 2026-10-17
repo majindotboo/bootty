@@ -1527,6 +1527,50 @@ fn disconnected_conversation_offers_an_exact_resume_without_submitting_its_draft
     );
 }
 
+/// Expanding the composer gives it the transcript's room; Escape gives the room back.
+#[gpui_kit::test]
+fn an_expanded_composer_writes_where_the_transcript_was(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(600.), px(800.)));
+    visual.run_until_parked();
+    let draw = |visual: &mut gpui_kit::VisualTestContext| {
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.debug_bounds("native-composer").expect("composer")
+    };
+    let resting = draw(visual);
+    visual.simulate_click(resting.center(), Modifiers::none());
+    visual.simulate_input("A long draft");
+    let expand = visual
+        .debug_bounds("native-composer-expand")
+        .expect("expand");
+    visual.simulate_click(expand.center(), Modifiers::none());
+    let expanded = draw(visual);
+    assert!(
+        expanded.size.height > px(600.),
+        "{expanded:?} fills the window"
+    );
+    visual.simulate_keystrokes("escape");
+    let shrunk = draw(visual);
+    pretty_assertions::assert_eq!(shrunk.size.height, resting.size.height);
+}
+
 #[gpui_kit::test]
 fn current_subagents_share_a_group_beside_working_and_can_open_individually(
     cx: &mut TestAppContext,

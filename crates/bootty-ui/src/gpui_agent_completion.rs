@@ -351,6 +351,43 @@ impl NativeAgentSessionView {
     }
 
     /// The stashed prompts, from a badge beside the composer's controls when there are any.
+    /// Gives the composer the conversation's room to write in, or shrinks it back. Either way
+    /// the words stay where they are and keep focus.
+    pub(super) fn set_composer_expanded(
+        &mut self,
+        expanded: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.composer_expanded != expanded {
+            self.composer_expanded = expanded;
+            self.composer
+                .update(cx, |composer, cx| composer.focus(window, cx));
+            cx.notify();
+        }
+    }
+
+    fn toggle_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_composer_expanded(!self.composer_expanded, window, cx);
+    }
+
+    pub(super) fn render_expand(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
+        let (icon, label) = if self.composer_expanded {
+            (IconName::Minimize, "Shrink the composer")
+        } else {
+            (IconName::Maximize, "Expand the composer")
+        };
+        Button::new("native-composer-expand")
+            .debug_selector(|| "native-composer-expand".into())
+            .ghost()
+            .xsmall()
+            .icon(icon)
+            .text_color(cx.theme().muted_foreground)
+            .accessibility_label(label)
+            .element_tooltip(label)
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_composer(window, cx)))
+    }
+
     pub(super) fn render_stash(cx: &Context<Self>) -> Option<impl IntoElement + use<>> {
         let entries = cx
             .try_global::<crate::prompt_stash::PromptStash>()?
@@ -616,25 +653,27 @@ impl NativeAgentSessionView {
             self.set_plan_mode(plan, window, cx);
             return true;
         }
-        if action == CommandAction::FocusComposer {
-            if window.has_active_dialog(cx) || self.subagent.is_some() {
-                return false;
-            }
-            self.composer
-                .update(cx, |composer, cx| composer.focus(window, cx));
-            return true;
-        }
         if action == CommandAction::ToggleFast {
             if window.has_active_dialog(cx) || !self.provider_enabled() {
                 return false;
             }
             return self.toggle_fast_mode(window, cx);
         }
-        if action == CommandAction::Stash {
+        if matches!(
+            action,
+            CommandAction::FocusComposer | CommandAction::Stash | CommandAction::Expand
+        ) {
             if window.has_active_dialog(cx) || self.subagent.is_some() {
                 return false;
             }
-            return self.stash_or_restore(window, cx);
+            match action {
+                CommandAction::Stash => return self.stash_or_restore(window, cx),
+                CommandAction::Expand => self.toggle_composer(window, cx),
+                _ => self
+                    .composer
+                    .update(cx, |composer, cx| composer.focus(window, cx)),
+            }
+            return true;
         }
         if matches!(action, CommandAction::EffortDown | CommandAction::EffortUp) {
             if window.has_active_dialog(cx) {

@@ -1170,7 +1170,9 @@ Shift+Tab toggles plan mode (`ui.composer.toggle-plan`) when the provider offers
 Ctrl+Alt+F toggles fast mode (`ui.composer.toggle-fast`) for a model that offers it,
 Ctrl+Alt+D and Ctrl+Alt+V start dictation (`ui.composer.dictate`) and voice mode
 (`ui.composer.voice`), and Ctrl+Alt+I moves focus back to the composer
-(`ui.composer.focus-composer`). Cmd+S (Ctrl+S elsewhere, `ui.composer.stash`) puts
+(`ui.composer.focus-composer`). Ctrl+Alt+E (`ui.composer.expand`), or the expand button
+beside the attach button, gives the composer the transcript's room to write in;
+Escape or sending shrinks it back. Cmd+S (Ctrl+S elsewhere, `ui.composer.stash`) puts
 the composer's words aside, in a stash any conversation can use; on an empty
 composer it brings the newest stashed prompt back. The bookmark badge beside the
 controls lists the stash, and choosing a prompt brings it back. Attachments stay in

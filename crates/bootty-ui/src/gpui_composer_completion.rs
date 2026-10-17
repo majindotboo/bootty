@@ -795,7 +795,8 @@ impl ComposerCompletion {
             | CommandAction::TogglePlan
             | CommandAction::ToggleFast
             | CommandAction::FocusComposer
-            | CommandAction::Stash => return false,
+            | CommandAction::Stash
+            | CommandAction::Expand => return false,
         }
         true
     }

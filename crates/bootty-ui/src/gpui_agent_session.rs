@@ -263,6 +263,8 @@ pub struct NativeAgentSessionView {
     providers: Vec<String>,
     sender: BoundAppCommandSender,
     composer: Entity<TextareaState>,
+    /// The composer has the conversation's room to write in.
+    composer_expanded: bool,
     /// Which sent message Up last put in the composer, newest first.
     recalled_prompt: Option<usize>,
     /// A plan mode toggle waiting for the model catalog it rides on.
@@ -505,6 +507,7 @@ impl NativeAgentSessionView {
             provider_permissions: None,
             model_picker: None,
             available_efforts: Vec::new(),
+            composer_expanded: false,
             providers: Vec::new(),
             model_picker_subscription: None,
             annotations: Vec::new(),
@@ -1266,6 +1269,10 @@ impl NativeAgentSessionView {
         // A prompt sent now shows at the end of the transcript, which follows its reply.
         if matches!(operation, "prompt" | "interrupt-send") {
             self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
+        }
+        // Words sent from an expanded composer give the room back to the transcript.
+        if matches!(operation, "prompt" | "queue" | "interrupt-send") {
+            self.composer_expanded = false;
         }
         let submitted_draft =
             matches!(operation, "prompt" | "queue" | "interrupt-send").then(|| SubmittedPrompt {
@@ -4270,32 +4277,44 @@ impl NativeAgentSessionView {
     }
 
     fn render_composer(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::Div {
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .justify_center()
-            .px_4()
-            .py_3()
-            .child(
+        // Expanded, every box down to the text area grows into the transcript's room.
+        let grow = |element: gpui_kit::Div| {
+            element.when(self.composer_expanded, |element| element.flex_1().min_h_0())
+        };
+        grow(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .justify_center()
+                .px_4()
+                .py_3(),
+        )
+        .child(
+            grow(
                 div()
                     .w_full()
                     .max_w(self.column_width())
                     .min_w_0()
                     .flex()
-                    .flex_col()
-                    .child(self.render_queued_messages(cx))
-                    .child(
-                        // An opaque base hides the drawer seam beneath the translucent editor.
-                        div()
-                            .relative()
-                            .w_full()
-                            .min_w_0()
-                            .rounded_xl()
-                            .bg(cx.theme().background)
-                            .child(self.render_composer_body(window, cx)),
-                    ),
+                    .flex_col(),
             )
+            .child(self.render_queued_messages(cx))
+            .child(
+                // An opaque base hides the drawer seam beneath the translucent editor.
+                grow(
+                    div()
+                        .relative()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .rounded_xl()
+                        .bg(cx.theme().background),
+                )
+                .child(grow(self.render_composer_body(window, cx))),
+            ),
+        )
     }
 
     fn render_composer_body(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::Div {
@@ -4308,6 +4327,7 @@ impl NativeAgentSessionView {
                 .child(self.render_writer_callout(cx));
         }
         if self.presentation.collapse_composer_on_scroll
+            && !self.composer_expanded
             && !self.list.is_following_tail()
             // Collapsing frees height; near the end that would reveal the end again and resume
             // following, so the composer would flicker back open.
@@ -4329,10 +4349,13 @@ impl NativeAgentSessionView {
             } else {
                 "BoottyComposer"
             })
-            // Escape the text area had nothing to dismiss interrupts a running turn.
+            // Escape the text area had nothing to dismiss shrinks an expanded composer, then
+            // interrupts a running turn.
             .on_action(
                 cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
-                    if is_busy(this.record.snapshot.status)
+                    if this.composer_expanded {
+                        this.set_composer_expanded(false, window, cx);
+                    } else if is_busy(this.record.snapshot.status)
                         && !this.record.snapshot.stopping()
                         && !this.pending.contains("interrupt")
                     {
@@ -4395,10 +4418,11 @@ impl NativeAgentSessionView {
             .when(!self.annotations.is_empty(), |body| {
                 body.child(self.render_annotations(cx))
             })
+            .when(self.composer_expanded, |body| body.flex_1().min_h_0())
             .child(self.render_composer_input(cx))
             .child(self.render_composer_controls(window, cx))
             .children(self.completion.clone());
-        div().w_full().min_w_0().child(composer)
+        div().w_full().min_w_0().flex().flex_col().child(composer)
     }
 
     /// Up in an empty composer brings back the last sent message, then older ones; Down goes
@@ -4446,11 +4470,11 @@ impl NativeAgentSessionView {
         true
     }
 
-    fn render_composer_input(&self, cx: &Context<Self>) -> Textarea {
+    fn render_composer_input(&self, cx: &Context<Self>) -> gpui_kit::Div {
         let owner = cx.weak_entity();
         let token_owner = owner.clone();
         let token_click_owner = owner.clone();
-        Textarea::new(&self.composer)
+        let input = Textarea::new(&self.composer)
             .context_menu(crate::gpui::text_menu(&self.composer))
             .token(move |context, _, cx| {
                 token_owner.upgrade().map_or_else(
@@ -4479,7 +4503,12 @@ impl NativeAgentSessionView {
             .aria_label(format!(
                 "Message to {}",
                 self.record.config.provider.display_name()
-            ))
+            ));
+        div()
+            .flex()
+            .flex_col()
+            .when(self.composer_expanded, |box_| box_.flex_1().min_h_0())
+            .child(input)
     }
 
     #[expect(
@@ -4591,6 +4620,7 @@ impl NativeAgentSessionView {
             )
             .child(options)
             .children(Self::render_stash(cx))
+            .child(self.render_expand(cx))
             .child(
                 div()
                     .flex()
@@ -4993,6 +5023,10 @@ impl NativeAgentSessionView {
 }
 
 impl Render for NativeAgentSessionView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one column lays out the conversation's panes and their expanded-composer variant"
+    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.busy();
         // A subagent's view shows its transcript; the conversation's controls stay with the parent.
@@ -5072,18 +5106,22 @@ impl Render for NativeAgentSessionView {
                         .child("This conversation is archived in Codex. Unarchive it to continue."),
                 )
             })
-            .child(
-                self.transcript_pane
-                    .clone()
-                    .cached(panes::TranscriptPane::style()),
-            )
+            // An expanded composer writes where the transcript was; questions stay in view.
+            .when(!self.composer_expanded, |body| {
+                body.child(
+                    self.transcript_pane
+                        .clone()
+                        .cached(panes::TranscriptPane::style()),
+                )
+            })
             .when(!self.record.snapshot.requests.is_empty(), |body| {
                 body.child(self.requests.clone())
             })
-            .when(busy || !self.subagents().is_empty(), |body| {
-                body.child(self.activity_pane.clone())
-            })
-            .when(conversation && !wide, |body| {
+            .when(
+                !self.composer_expanded && (busy || !self.subagents().is_empty()),
+                |body| body.child(self.activity_pane.clone()),
+            )
+            .when(conversation && !wide && !self.composer_expanded, |body| {
                 body.child(self.render_related_conversations(cx).px_4())
             })
             .child(self.render_error_recovery(cx))

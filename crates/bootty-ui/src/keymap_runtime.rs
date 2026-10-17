@@ -765,6 +765,7 @@ fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
         ("ctrl+alt+d", "ui.composer.dictate"),
         ("ctrl+alt+v", "ui.composer.voice"),
         ("ctrl+alt+i", "ui.composer.focus-composer"),
+        ("ctrl+alt+e", "ui.composer.expand"),
         (STASH_KEYSTROKE, "ui.composer.stash"),
     ] {
         bindings.push(KeymapBindingSnapshot {
