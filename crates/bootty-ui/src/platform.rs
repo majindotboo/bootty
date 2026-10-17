@@ -195,7 +195,11 @@ pub fn native_options_for_config(
             Some(TitlebarOptions {
                 title: Some(config.window.title.clone().into()),
                 appears_transparent: true,
-                ..Default::default()
+                // The 14-pixel buttons sit centred in Bootty's own titlebar row.
+                traffic_light_position: Some(gpui_kit::point(
+                    gpui_kit::px(14.0),
+                    gpui_kit::px((crate::gpui::UI_TAB_BAR_HEIGHT - 14.0) / 2.0),
+                )),
             })
         }
         MacosTitlebarStyle::Hidden

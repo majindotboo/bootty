@@ -17,8 +17,8 @@ pub const UI_RADIUS_LG: f32 = 8.0;
 
 /// Height of a regular compact control in the application chrome.
 pub const UI_CONTROL_HEIGHT: f32 = 28.0;
-/// Height of the tab bar container.
-pub const UI_TAB_BAR_HEIGHT: f32 = 32.0;
+/// Height of the tab bar container, which is also the window's titlebar row.
+pub const UI_TAB_BAR_HEIGHT: f32 = 40.0;
 
 /// Height of a standard list row.
 pub const UI_ROW_HEIGHT: f32 = 28.0;

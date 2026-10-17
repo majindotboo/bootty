@@ -501,7 +501,7 @@ impl Render for WorkspaceTitleBar {
                     .items_center()
                     .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
                     .pl(px(inset))
-                    .pr_1()
+                    .pr_2()
             })
             .when(!left_open, |bar| {
                 bar.child(
@@ -1027,7 +1027,7 @@ impl TabGroupRenderer for WorkspaceTabGroup {
             } else {
                 self.chrome.read(cx).panel_background()
             })
-            .pr_1()
+            .pr_2()
             .child(div().flex_1().min_w_0().h_full().child(tabs))
             .into_any_element()
     }
@@ -1356,7 +1356,7 @@ fn dock_title_row(background: gpui_kit::Hsla) -> Div {
         .flex()
         .items_center()
         .min_w_0()
-        .px_1()
+        .px_2()
         .bg(background)
         .window_control_area(WindowControlArea::Drag)
 }
