@@ -61,10 +61,9 @@ fn chrome_snapshot() -> ChromeSnapshot {
         palette: palette(),
         layout: chrome_layout(),
         titlebar: bootty_gpui::TitlebarSnapshot {
-            title: "Bootty".to_owned(),
-            icon: None,
-            session_count: 1,
             reserve_window_controls: false,
+            back: false,
+            forward: false,
         },
         sidebar: Some(sidebar_snapshot(session)),
         spaces: vec![
@@ -111,10 +110,8 @@ fn chrome_layout() -> ChromeLayout {
         top_inset: 0.0,
         notch_span: None,
         wrap_tabs_at_notch: true,
-        titlebar_height: 32.0,
         status_height: 28.0,
         sidebar_visible: true,
-        titlebar_visible: true,
         fullscreen: false,
     }
 }
@@ -621,7 +618,7 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
         scrolled.top() > selected_before.top(),
         "manual scrolling must remain available"
     );
-    snapshot.titlebar.title = "Updated title".to_owned();
+    snapshot.titlebar.back = true;
     cx.update(|window, cx| {
         probe
             .read(cx)
@@ -2592,7 +2589,7 @@ fn tab_strip_reveals_selection_and_preserves_manual_scrolling(cx: &mut TestAppCo
         after.left() > before.left(),
         "vertical wheel must scroll tabs horizontally"
     );
-    snapshot.titlebar.title = "Unrelated update".into();
+    snapshot.titlebar.back = true;
     update_chrome(&probe, &snapshot, cx);
     assert_eq!(cx.debug_bounds("status-tab-top-1-tab-9"), Some(after));
     let next = cx.debug_bounds("mux-tabs-top-1-scroll-right").unwrap();

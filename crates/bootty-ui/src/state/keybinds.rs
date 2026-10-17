@@ -220,6 +220,11 @@ impl AppState {
                     effects.push(AppEffect::RequestRepaint);
                 }
             }
+            AppAction::Navigate(step) => {
+                if self.navigate(step) {
+                    effects.push(AppEffect::RequestRepaint);
+                }
+            }
             AppAction::ShowKeybinds => {
                 self.open_keybind_help_dialog();
                 effects.push(AppEffect::RequestRepaint);

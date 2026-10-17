@@ -150,12 +150,7 @@ fn terminal_area(chrome: &ChromeSnapshot, docked: bool) -> SurfaceRect {
     let bottom_status = chrome.bottom_status.as_ref().map_or(0.0, |status| {
         status.rows.max(1).to_f32().unwrap_or(f32::MAX) * chrome.layout.status_height
     });
-    let titlebar_height = if chrome.layout.titlebar_visible {
-        chrome.layout.titlebar_height
-    } else {
-        0.0
-    };
-    let min_y = titlebar_height + chrome.layout.top_inset + if docked { 0.0 } else { top_status };
+    let min_y = chrome.layout.top_inset + if docked { 0.0 } else { top_status };
     let width = (chrome.layout.width - sidebar_width).max(1.0);
     let height = (chrome.layout.height - min_y - if docked { 0.0 } else { bottom_status }).max(1.0);
     SurfaceRect {

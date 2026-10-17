@@ -23,6 +23,10 @@ use gpui_kit::{
 use crate::{gpui::chrome::GpuiChrome, gpui_dock::WorkspaceDock};
 
 const DOCK_RESIZE_GUTTER: f32 = 8.0;
+/// The left dock's toggle and the space after it.
+const TOGGLE_WIDTH: f32 = 32.0;
+/// Back, Forward and New session: three 24px buttons 2px apart, then the space after them.
+const NAVIGATION_WIDTH: f32 = 84.0;
 
 pub struct WorkspaceDockSkin {
     kit: Rc<DockSkin>,
@@ -132,41 +136,25 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             Some(
                 dock_title_row(self.chrome.read(cx).panel_background())
                     .pl(px(inset))
-                    .gap_2()
-                    .when(show_left, |header| {
-                        header.child(panel_toggle(
-                            self.owner.clone(),
-                            placement,
-                            true,
-                            &self.chrome,
-                            cx,
-                        ))
-                    })
+                    .child(leading_controls(
+                        &self.owner,
+                        show_left.then_some(true),
+                        &self.chrome,
+                        cx,
+                    ))
                     .child(
                         div()
                             .id("sidebar-window-drag-region")
-                            .flex()
                             .flex_1()
                             .min_w_0()
                             .h_full()
-                            .items_center()
-                            .gap_2()
                             .window_control_area(WindowControlArea::Drag)
                             // macOS requires an explicit move for custom titlebar content.
                             .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, cx| {
                                 window.prevent_default();
                                 cx.stop_propagation();
                                 window.start_window_move();
-                            })
-                            .child(crate::gpui::icon("bootty", 16.0, cx.theme().primary))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_sm()
-                                    .truncate()
-                                    .child("Bootty"),
-                            ),
+                            }),
                     ),
             )
         } else if placement.is_right() {
@@ -403,7 +391,12 @@ impl Render for WorkspaceTitleBar {
                     chrome.notch_span(),
                 )
             });
-        let first_inset = inset + if show_left { 32.0 } else { 0.0 };
+        let first_inset = inset
+            + if left_open {
+                0.0
+            } else {
+                leading_width(show_left)
+            };
         let notch = notch_span.map(|(left, right)| crate::gpui::tabs::NotchTabLayout {
             width: (left - left_width - first_inset).max(0.0),
             inset: first_inset,
@@ -451,22 +444,12 @@ impl Render for WorkspaceTitleBar {
                     .pl(px(inset))
                     .pr_1()
             })
-            .when(show_left, |bar| {
+            .when(!left_open, |bar| {
                 bar.child(
-                    div()
-                        .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
-                        .flex()
-                        .items_center()
-                        .when(notch.is_some(), |toggle| {
-                            toggle.absolute().top_0().left(px(inset))
-                        })
-                        .child(panel_toggle(
-                            self.dock.clone(),
-                            DockPlacement::Left,
-                            false,
-                            &self.chrome,
-                            cx,
-                        )),
+                    leading_controls(&self.dock, show_left.then_some(false), &self.chrome, cx)
+                        .when(notch.is_some(), |leading| {
+                            leading.absolute().top_0().left(px(inset))
+                        }),
                 )
             })
             .child(
@@ -492,6 +475,99 @@ pub fn group_placement(area: &DockArea, target: NodeId) -> Option<DockPlacement>
         area.layout(*placement)
             .is_some_and(|tree| tree.find_node(target).is_some())
     })
+}
+
+fn leading_width(toggle: bool) -> f32 {
+    NAVIGATION_WIDTH + if toggle { TOGGLE_WIDTH } else { 0.0 }
+}
+
+/// The left edge of the window: the left dock's toggle, when shown and `Some(open)`, then Back,
+/// Forward and New session. It sits in the left dock's header, or in the titlebar while that
+/// dock is closed.
+fn leading_controls(
+    owner: &WeakEntity<WorkspaceDock>,
+    toggle: Option<bool>,
+    chrome: &Entity<GpuiChrome>,
+    cx: &App,
+) -> Div {
+    let (back, forward) = chrome.read(cx).navigation();
+    let button = |label, icon, command, enabled| {
+        navigation_button(owner.clone(), label, icon, command, enabled, chrome, cx)
+    };
+    div()
+        .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
+        .w(px(leading_width(toggle.is_some())))
+        .flex_none()
+        .flex()
+        .items_center()
+        .when_some(toggle, |leading, open| {
+            leading.child(div().w(px(TOGGLE_WIDTH)).flex_none().child(panel_toggle(
+                owner.clone(),
+                DockPlacement::Left,
+                open,
+                chrome,
+                cx,
+            )))
+        })
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(2.0))
+                .child(button("Back", IconName::ArrowLeft, "navigate_back", back))
+                .child(button(
+                    "Forward",
+                    IconName::ArrowRight,
+                    "navigate_forward",
+                    forward,
+                ))
+                .child(button(
+                    "New session",
+                    IconName::Plus,
+                    "new_mux_session",
+                    true,
+                )),
+        )
+}
+
+fn navigation_button(
+    owner: WeakEntity<WorkspaceDock>,
+    label: &'static str,
+    icon: IconName,
+    command: &'static str,
+    enabled: bool,
+    chrome: &Entity<GpuiChrome>,
+    cx: &App,
+) -> Button {
+    Button::new(command)
+        .icon(icon)
+        .ghost()
+        .small()
+        .rounded(cx.theme().radius)
+        .disabled(!enabled)
+        .element_tooltip_with_action(
+            label,
+            &crate::gpui_actions::InvokeCommand::new(
+                bootty_control::CommandInvocation::from_action(
+                    command,
+                    bootty_control::Caller::Keybinding,
+                ),
+            ),
+            Some(chrome.read(cx).keymap_context()),
+        )
+        .accessibility_label(label)
+        .on_click(move |_, window, cx| {
+            _ = owner.update(cx, |owner, cx| {
+                owner.submit_command(
+                    bootty_control::CommandInvocation::from_action(
+                        command,
+                        bootty_control::Caller::Internal,
+                    ),
+                    window,
+                    cx,
+                );
+            });
+        })
 }
 
 fn panel_toggle(

@@ -133,10 +133,8 @@ pub struct ChromeLayout {
     pub top_inset: f32,
     pub notch_span: Option<(f32, f32)>,
     pub wrap_tabs_at_notch: bool,
-    pub titlebar_height: f32,
     pub status_height: f32,
     pub sidebar_visible: bool,
-    pub titlebar_visible: bool,
     pub fullscreen: bool,
 }
 
@@ -162,10 +160,10 @@ impl ChromeLayout {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TitlebarSnapshot {
-    pub title: String,
-    pub icon: Option<String>,
-    pub session_count: usize,
     pub reserve_window_controls: bool,
+    /// Whether Back and Forward have a session to go to.
+    pub back: bool,
+    pub forward: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]

@@ -55,6 +55,8 @@ pub(super) const fn common_keybinds_macos() -> &'static [&'static str] {
         "cmd+t=new_tab",
         "ctrl+Tab=last_session",
         "ctrl+shift+Tab=last_session",
+        "cmd+[=navigate_back",
+        "cmd+]=navigate_forward",
         "cmd+shift+n=next_session",
         "cmd+shift+]=next_session",
         "cmd+shift+p=previous_session",

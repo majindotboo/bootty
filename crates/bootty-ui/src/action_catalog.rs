@@ -299,6 +299,12 @@ command_catalog! {
     LastSession:
         "Last Session", "Toggle back to the most recent session",
         "last_session", "history", Sessions, shown, Write, Binding, None;
+    NavigateBack:
+        "Back", "Show the session this window showed before",
+        "navigate_back", "arrow-left", Sessions, shown, Write, ApplicationWindow, None;
+    NavigateForward:
+        "Forward", "Show the session Back left",
+        "navigate_forward", "arrow-right", Sessions, shown, Write, ApplicationWindow, None;
     NewNativeAgentTab:
         "New agent tab…", "Choose a provider and account for an agent tab",
         "agents.native.open", "bot", Layout, shown, Write, ApplicationWindow, None;

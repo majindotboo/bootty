@@ -52,6 +52,8 @@ mod terminal_agent_recovery;
 mod terminal_history;
 pub use dialog_runtime::ModalDialog;
 pub use mux_actions::ExactMuxAction;
+mod navigation;
+pub use navigation::NavigationStep;
 mod recorded_chord;
 mod spaces;
 
@@ -340,6 +342,7 @@ pub struct AppState {
     dialogs: DialogRuntime,
     creation_drafts: creation_draft::CreationDraftStore,
     sidebar_hovered_session: Option<ScopedSessionTarget>,
+    navigation: navigation::NavHistory,
     displayed_sessions: Option<Vec<ScopedSessionTarget>>,
     theme_picker_restore_config: Option<(BoottyConfig, AppearanceVariant)>,
     macos_non_native_fullscreen_active: bool,
@@ -524,6 +527,7 @@ impl AppState {
             dialogs: DialogRuntime::with_creation_draft(creation_draft),
             creation_drafts,
             sidebar_hovered_session: None,
+            navigation: navigation::NavHistory::default(),
             displayed_sessions: None,
             theme_picker_restore_config: None,
             macos_non_native_fullscreen_active,
@@ -1787,6 +1791,7 @@ impl AppState {
                 &mut effects,
             ))
             .saturating_add(self.handle_dropped_file_paths(&dropped_file_paths));
+        self.record_navigation();
         // Sampled last: this frame's keybinds may have toggled fullscreen and its config reload may
         // have changed the tabs-in-notch gate, and the chrome paint that follows must see both.
         self.sample_window_chrome(viewport, display_id, window_focused);

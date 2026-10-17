@@ -485,6 +485,8 @@ binding_actions! {
     PreviousSpace => "previous_space" [unit],
     SelectSpace(value: u32) => "select_space" [positive_index],
     LastSession => "last_session" [unit],
+    NavigateBack => "navigate_back" [unit],
+    NavigateForward => "navigate_forward" [unit],
     SelectSession(value: u32) => "select_session" [positive_index],
     MoveSession(value: i32) => "move_session" [number(parse_i32)],
     RenameSession => "rename_session" [unit],

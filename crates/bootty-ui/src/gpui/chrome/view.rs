@@ -19,8 +19,8 @@ use gpui_kit::component::{
 };
 use gpui_kit::{
     App, Bounds, Context, DragMoveEvent, EventEmitter, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Render, SharedString, Styled, Window, WindowControlArea, div, prelude::*, px,
+    KeyDownEvent, MouseButton, MouseUpEvent, ParentElement, Pixels, Render, SharedString, Styled,
+    Window, div, prelude::*, px,
 };
 
 /// GPUI-owned interaction state for Bootty chrome.
@@ -346,6 +346,11 @@ impl GpuiChrome {
         }
     }
 
+    /// Whether Back and Forward have a session to go to.
+    pub(crate) const fn navigation(&self) -> (bool, bool) {
+        (self.snapshot.titlebar.back, self.snapshot.titlebar.forward)
+    }
+
     pub(crate) const fn notch_span(&self) -> Option<(f32, f32)> {
         self.snapshot.layout.notch_span
     }
@@ -661,57 +666,6 @@ impl GpuiChrome {
         }
         cx.notify();
     }
-
-    fn titlebar(&self, cx: &Context<Self>) -> impl IntoElement {
-        let colors = self.snapshot.palette;
-        let title = self.snapshot.titlebar.clone();
-        let reserve_window_controls = title.reserve_window_controls;
-        div()
-            .id("bootty-gpui-titlebar")
-            .h(px(self.snapshot.layout.titlebar_height))
-            .w_full()
-            .px_3()
-            .when(reserve_window_controls, |element| element.pl(px(76.0)))
-            .flex()
-            .items_center()
-            .gap_2()
-            .bg(color(colors.mantle))
-            .window_control_area(WindowControlArea::Drag)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _: &MouseDownEvent, _, _| {
-                    this.window_drag.arm();
-                }),
-            )
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _: &MouseUpEvent, _, _| this.window_drag.cancel()),
-            )
-            .on_mouse_down_out(cx.listener(|this, _: &MouseDownEvent, _, _| {
-                this.window_drag.cancel();
-            }))
-            .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| {
-                if this.window_drag.take_on_motion() {
-                    cx.emit(ChromeIntent::StartWindowDrag);
-                }
-            }))
-            .when_some(title.icon, |element, icon| {
-                element.child(crate::gpui::icon(&icon, 15.0, color(colors.accent)))
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(color(colors.text))
-                    .child(title.title),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(color(colors.muted))
-                    .child(title.session_count.to_string()),
-            )
-    }
 }
 
 impl EventEmitter<ChromeIntent> for GpuiChrome {}
@@ -977,9 +931,6 @@ impl Render for GpuiChrome {
             .flex_col()
             .overflow_hidden()
             .text_color(color(colors.text))
-            .when(layout.titlebar_visible, |element| {
-                element.child(self.titlebar(cx))
-            })
             .child(body)
             .when_some(tab_drag_preview, |element, (x, y, label)| {
                 element.child(

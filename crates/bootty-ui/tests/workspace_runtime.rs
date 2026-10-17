@@ -42,7 +42,9 @@ use bootty_mux::{
         TerminalRuntime,
     },
 };
-use bootty_ui::{AppState, ModalDialog, presentation::dialogs::NewSessionPickerEvent};
+use bootty_ui::{
+    AppState, ModalDialog, NavigationStep, presentation::dialogs::NewSessionPickerEvent,
+};
 use rusqlite::Connection;
 
 #[path = "support/idle_frames.rs"]
@@ -535,6 +537,82 @@ fn moving_a_session_publishes_the_new_order_immediately(directory: assert_fs::Te
         assert!(matches!(outcome, CommandOutcome::Success { .. }));
         assert_eq!(order(&state), expected);
     }
+}
+
+/// Back and Forward retrace the sessions the window showed, wherever the switch came from, and a
+/// session reached any other way drops the ones ahead.
+#[rstest]
+fn back_and_forward_retrace_the_sessions_shown(directory: assert_fs::TempDir) {
+    let config_path = directory.path().join("config.toml");
+    let config = test_config::config(config_path.clone(), MultiplexerBackendConfig::Tmux);
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let (mut repository, snapshot) = WorkspaceRepository::open(&config_path).expect("workspace");
+    let space = &snapshot.spaces()[0];
+    let names = ["first", "second", "third"];
+    let mut claimed = space.binding().sessions().clone();
+    for name in names {
+        assert!(claimed.claim(claimed_session(&format!("{name}-id"), name, &cwd)));
+    }
+    repository
+        .commit_binding_state(space.binding().mux_scope(), &claimed)
+        .expect("claim sessions");
+    let sessions = Arc::new(Mutex::new(
+        names
+            .into_iter()
+            .map(|name| {
+                let tag = MuxSessionTag {
+                    identity: Some(format!("{name}-id")),
+                    space: Some(space.remote_id().to_owned()),
+                };
+                mux_session(name, cwd.clone(), tag, name == "first")
+            })
+            .collect(),
+    ));
+    drop(repository);
+    let backends = registry(
+        [Arc::new(restore_provider(
+            MuxBackendKind::Tmux,
+            sessions,
+            Arc::new(AtomicUsize::new(0)),
+        ))],
+        [MuxBackendKind::Tmux],
+    );
+    let mut state =
+        AppState::new(config, backends, Arc::new(|| {}), None, None).expect("app state");
+    let show = |state: &mut AppState, session: &str| {
+        state.activate_session_from_ui(session);
+        state.update_frame(frames::idle_frame(Instant::now()));
+    };
+    let step = |state: &mut AppState, command: &str| {
+        let outcome = submit_command(
+            state,
+            CommandInvocation::from_action(command, Caller::Socket),
+            Instant::now(),
+        );
+        assert!(
+            matches!(outcome, CommandOutcome::Success { .. }),
+            "{command}: {outcome:?}"
+        );
+        (
+            state.mux().selected_session().map(str::to_owned),
+            state.can_navigate(NavigationStep::Back),
+            state.can_navigate(NavigationStep::Forward),
+        )
+    };
+    let at = |session: &str, back, forward| (Some(session.to_owned()), back, forward);
+    state.update_frame(frames::idle_frame(Instant::now()));
+    show(&mut state, "second");
+    show(&mut state, "third");
+
+    assert_eq!(step(&mut state, "navigate_back"), at("second", true, true));
+    assert_eq!(step(&mut state, "navigate_back"), at("first", false, true));
+    assert_eq!(
+        step(&mut state, "navigate_forward"),
+        at("second", true, true)
+    );
+    show(&mut state, "first");
+    assert!(!state.can_navigate(NavigationStep::Forward));
+    assert_eq!(step(&mut state, "navigate_back"), at("second", true, true));
 }
 
 fn session_with_pane(id: &str) -> MuxSession {

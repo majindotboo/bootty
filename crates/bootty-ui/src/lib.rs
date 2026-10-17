@@ -94,8 +94,8 @@ pub use gpui_settings_catalog::{
     settings_dependency_for,
 };
 pub use state::{
-    AppEffect, AppState, CursorIcon, FrameInputs, ModalDialog, OpenFilesRequest, ViewportSnapshot,
-    WindowChromeFacts,
+    AppEffect, AppState, CursorIcon, FrameInputs, ModalDialog, NavigationStep, OpenFilesRequest,
+    ViewportSnapshot, WindowChromeFacts,
 };
 
 pub mod recovery;

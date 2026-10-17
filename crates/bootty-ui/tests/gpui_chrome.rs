@@ -187,10 +187,8 @@ fn sidebar_width_matches_zed_bounds_without_starving_the_center(
         top_inset: 0.0,
         notch_span: None,
         wrap_tabs_at_notch: true,
-        titlebar_height: 0.0,
         status_height: 30.0,
         sidebar_visible: true,
-        titlebar_visible: false,
         fullscreen: false,
     };
 

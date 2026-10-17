@@ -6,6 +6,7 @@ use crate::{
         AppearanceChoice, BindingAction, BindingKey, BindingTrigger, CopyToClipboard,
         NavigateSearch, PaneDirection, parse_action,
     },
+    state::NavigationStep,
 };
 use anyhow::Result;
 use bootty_config::{
@@ -54,6 +55,8 @@ pub enum AppAction {
     NextSpace,
     PreviousSpace,
     SelectSpace(u32),
+    /// Back or Forward through the sessions this window showed.
+    Navigate(NavigationStep),
     ShowKeybinds,
 }
 
@@ -508,6 +511,8 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::NextSpace => Keybind::App(AppAction::NextSpace),
         Binding::PreviousSpace => Keybind::App(AppAction::PreviousSpace),
         Binding::SelectSpace(index) => Keybind::App(AppAction::SelectSpace(index)),
+        Binding::NavigateBack => Keybind::App(AppAction::Navigate(NavigationStep::Back)),
+        Binding::NavigateForward => Keybind::App(AppAction::Navigate(NavigationStep::Forward)),
         Binding::ShowKeybinds => Keybind::App(AppAction::ShowKeybinds),
         terminal => return terminal_keybind_action(terminal),
     })
