@@ -1,7 +1,12 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
 use crate::gpui::{ElementTooltip as _, RowLabel as _};
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::Arc,
+    time::Instant,
+};
 
 use gpui_kit::base::Tab;
 use gpui_kit::component::{
@@ -20,7 +25,10 @@ use gpui_kit::{
     WindowControlArea, canvas, div, prelude::*, px,
 };
 
-use crate::{gpui::chrome::GpuiChrome, gpui_dock::WorkspaceDock};
+use crate::{
+    gpui::chrome::GpuiChrome,
+    gpui_dock::{WorkspaceDock, motion::DockMotion},
+};
 
 const DOCK_RESIZE_GUTTER: f32 = 8.0;
 /// The left dock's toggle and the space after it.
@@ -33,12 +41,14 @@ pub struct WorkspaceDockSkin {
     area: WeakEntity<DockArea>,
     owner: WeakEntity<WorkspaceDock>,
     chrome: Entity<GpuiChrome>,
+    motion: Rc<RefCell<DockMotion>>,
 }
 
 impl WorkspaceDockSkin {
     pub(crate) fn new(
         owner: WeakEntity<WorkspaceDock>,
         chrome: Entity<GpuiChrome>,
+        motion: Rc<RefCell<DockMotion>>,
         cx: &mut Context<DockArea>,
     ) -> Rc<Self> {
         let mut bottom_height = chrome.read(cx).dock_bottom_height();
@@ -55,7 +65,30 @@ impl WorkspaceDockSkin {
             area: cx.weak_entity(),
             owner,
             chrome,
+            motion,
         })
+    }
+
+    /// Asks for the next frame while a dock slides, and closes in Kit each dock that has slid
+    /// shut.
+    fn settle_slides(&self, now: Instant, window: &Window, cx: &mut App) {
+        let mut motion = self.motion.borrow_mut();
+        if !motion.moving() {
+            return;
+        }
+        window.request_animation_frame();
+        for placement in motion.finish(now) {
+            let (area, motion) = (self.area.clone(), self.motion.clone());
+            window.defer(cx, move |window, cx| {
+                motion.borrow_mut().clear(placement);
+                _ = area.update(cx, |area, cx| {
+                    if area.is_dock_open(placement) {
+                        area.toggle_dock(placement, window, cx);
+                    }
+                    cx.notify();
+                });
+            });
+        }
     }
 }
 
@@ -78,9 +111,21 @@ impl DockAreaRenderer for WorkspaceDockSkin {
     }
 
     fn center_frame(&self, window: &mut Window, cx: &mut App) -> Stateful<Div> {
+        let now = cx.background_executor().now();
+        let (left, right) = {
+            let motion = self.motion.borrow();
+            (
+                motion.hidden(DockPlacement::Left, now),
+                motion.hidden(DockPlacement::Right, now),
+            )
+        };
+        self.settle_slides(now, window, cx);
         self.kit
             .center_frame(window, cx)
             .relative()
+            // The centre covers what a sliding dock leaves.
+            .ml(px(-left))
+            .mr(px(-right))
             // Bottom segments belong below the terminals, within the side docks.
             .pb(self.chrome.read(cx).dock_bottom_height())
             .child(
@@ -129,13 +174,18 @@ impl DockAreaRenderer for WorkspaceDockSkin {
         cx: &mut App,
     ) -> AnyElement {
         let placement = dock.placement();
+        let hidden = self
+            .motion
+            .borrow()
+            .hidden(placement, cx.background_executor().now());
         let handle = dock_resize_handle(dock, cx);
         let (show_left, show_right, _, _) = self.chrome.read(cx).dock_presentation();
         let inset = self.chrome.read(cx).window_controls_inset();
         let header = if placement.is_left() {
             Some(
                 dock_title_row(self.chrome.read(cx).panel_background())
-                    .pl(px(inset))
+                    // The controls hold still while the dock slides, clear of the window's.
+                    .pl(px(inset + hidden))
                     .child(leading_controls(
                         &self.owner,
                         show_left.then_some(true),
@@ -187,6 +237,8 @@ impl DockAreaRenderer for WorkspaceDockSkin {
         };
         div()
             .relative()
+            // A sliding dock's content moves out toward the window edge.
+            .left(px(if placement.is_left() { -hidden } else { hidden }))
             .flex()
             .size_full()
             .flex_col()
@@ -348,23 +400,34 @@ impl Render for WorkspaceTitleBar {
     )]
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let area = self.area.upgrade();
-        let left_open = area
-            .as_ref()
-            .is_some_and(|area| area.read(cx).is_dock_open(DockPlacement::Left));
-        let left_width = if left_open {
+        let now = cx.background_executor().now();
+        let (closing_left, closing_right, hidden_left) =
+            self.dock.upgrade().map_or((false, false, 0.0), |dock| {
+                let motion = dock.read(cx).motion.borrow();
+                (
+                    motion.closing(DockPlacement::Left),
+                    motion.closing(DockPlacement::Right),
+                    motion.hidden(DockPlacement::Left, now),
+                )
+            });
+        let open_width = |placement| {
             area.as_ref()
-                .and_then(|area| area.read(cx).dock_size(DockPlacement::Left))
-                .map_or(0.0, f32::from)
+                .filter(|area| area.read(cx).is_dock_open(placement))
+                .and_then(|area| area.read(cx).dock_size(placement))
+                .map(f32::from)
+        };
+        // A dock sliding shut already counts as closed: its controls move here as it goes.
+        let left_open = !closing_left && open_width(DockPlacement::Left).is_some();
+        let left_width = if left_open {
+            open_width(DockPlacement::Left).unwrap_or(0.0)
         } else {
             0.0
         };
-        let right_open = area
-            .as_ref()
-            .is_some_and(|area| area.read(cx).is_dock_open(DockPlacement::Right));
+        // How much of the left dock shows, sliding or not; the window controls need the rest.
+        let left_shown = (open_width(DockPlacement::Left).unwrap_or(0.0) - hidden_left).max(0.0);
+        let right_open = !closing_right && open_width(DockPlacement::Right).is_some();
         let right_width = if right_open {
-            area.as_ref()
-                .and_then(|area| area.read(cx).dock_size(DockPlacement::Right))
-                .map_or(0.0, f32::from)
+            open_width(DockPlacement::Right).unwrap_or(0.0)
         } else {
             0.0
         };
@@ -381,11 +444,7 @@ impl Render for WorkspaceTitleBar {
                         false,
                         cx,
                     ),
-                    if left_open {
-                        0.0
-                    } else {
-                        chrome.window_controls_inset()
-                    },
+                    (chrome.window_controls_inset() - left_shown).max(0.0),
                     show_left && !left_open,
                     show_right && !right_open,
                     chrome.notch_span(),

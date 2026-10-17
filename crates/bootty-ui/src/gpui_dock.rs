@@ -2,6 +2,7 @@
 
 mod browser;
 mod layout;
+pub mod motion;
 mod registry;
 pub mod surfaces;
 
@@ -202,6 +203,7 @@ pub struct WorkspaceDock {
     restored_agent_destination: Option<(String, String, String)>,
     document_context: Rc<RefCell<GitPanelContext>>,
     pub(crate) titlebar: Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
+    pub(crate) motion: Rc<RefCell<motion::DockMotion>>,
     /// The initial terminal window adapter; subsequent windows have distinct center panels.
     terminal: Entity<crate::gpui_terminal_panel::TerminalPanel>,
     attachment: Entity<crate::gpui_terminal_panel::TerminalAttachmentPanel>,
@@ -253,10 +255,12 @@ impl WorkspaceDock {
             context.host_identity
         );
         let dock_owner = cx.weak_entity();
+        let motion = Rc::<RefCell<motion::DockMotion>>::default();
         let area = cx.new(|cx| {
             let skin = crate::gpui_dock_skin::WorkspaceDockSkin::new(
                 dock_owner.clone(),
                 chrome.clone(),
+                motion.clone(),
                 cx,
             );
             DockArea::new("workspace", Some(8), window, cx).with_renderer(skin)
@@ -337,6 +341,7 @@ impl WorkspaceDock {
             document_context,
             area,
             titlebar,
+            motion,
             terminal: terminal_panel,
             attachment,
             focused_group: None,
@@ -1554,13 +1559,31 @@ impl WorkspaceDock {
         true
     }
 
+    /// Opens or closes a dock for the user. A side dock slides; one sliding shut slides back.
     pub(crate) fn toggle_dock(
         &self,
         placement: DockPlacement,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.area.read(cx).has_dock(placement) {
+        let area = self.area.read(cx);
+        if area.has_dock(placement) {
+            let open = area.is_dock_open(placement);
+            let width = area.dock_size(placement).map_or(0.0, f32::from);
+            let slides = placement.is_left() || placement.is_right();
+            let now = cx.background_executor().now();
+            let mut motion = self.motion.borrow_mut();
+            if slides && !cx.reduce_motion() && open && area.is_dock_collapsible(placement) {
+                let shut = !motion.closing(placement);
+                motion.start(placement, shut, width, now);
+                drop(motion);
+                self.area.update(cx, |_, cx| cx.notify());
+                return;
+            }
+            if slides && !cx.reduce_motion() && !open {
+                motion.start(placement, false, width, now);
+            }
+            drop(motion);
             self.area
                 .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
         } else {
