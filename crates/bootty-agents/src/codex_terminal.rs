@@ -116,6 +116,7 @@ impl CodexTerminalObserver {
         // A killed owner can leave its directory behind; never reuse a recycled process ID.
         let directory =
             std::env::temp_dir().join(format!("codex-{:016x}", u64::from_ne_bytes(random)));
+        let arguments = provider_arguments(&launch.arguments).map_err(io::Error::other)?;
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let endpoint = directory.join("tui.sock");
         let provider_endpoint = directory.join("provider.sock");
@@ -126,7 +127,7 @@ impl CodexTerminalObserver {
             command
                 .args(["app-server", "--listen"])
                 .arg(format!("unix://{}", provider_endpoint.display()))
-                .args(provider_arguments(&launch.arguments))
+                .args(&arguments)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
             if let Some(directory) = &launch.account_directory {
@@ -312,7 +313,10 @@ impl Drop for OwnedProvider {
     }
 }
 
-pub fn provider_arguments(arguments: &[String]) -> Vec<String> {
+/// The Codex config overrides a launch's arguments ask for.
+/// # Errors
+/// Refuses `--profile`: Bootty runs Codex's app server, which has no profiles.
+pub fn provider_arguments(arguments: &[String]) -> Result<Vec<String>, String> {
     let mut result = Vec::new();
     let mut arguments = arguments.iter();
     while let Some(argument) = arguments.next() {
@@ -322,8 +326,14 @@ pub fn provider_arguments(arguments: &[String]) -> Vec<String> {
         let (key, inline) = argument
             .split_once('=')
             .map_or((argument.as_str(), None), |(key, value)| (key, Some(value)));
+        if matches!(key, "--profile" | "-p") {
+            return Err(
+                "Codex's app server takes no --profile. Point this profile's directory \
+                at a Codex home with its own config.toml instead."
+                    .to_owned(),
+            );
+        }
         let config_key = match key {
-            "--profile" | "-p" => Some("profile"),
             "--model" | "-m" => Some("model"),
             "--sandbox" | "-s" => Some("sandbox_mode"),
             "--ask-for-approval" | "-a" => Some("approval_policy"),
@@ -352,7 +362,7 @@ pub fn provider_arguments(arguments: &[String]) -> Vec<String> {
             ]);
         }
     }
-    result
+    Ok(result)
 }
 
 impl Drop for CodexTerminalObserver {

@@ -1079,17 +1079,12 @@ fn completion_survives_attachment_resume_without_inference_from_history(#[case] 
 }
 
 #[rstest]
-fn captures_account_and_profile_and_resumes_exact_thread() {
+fn captures_account_and_launch_arguments_and_resumes_exact_thread() {
     let root = TempDir::new().unwrap();
     let launch = AgentLaunch {
         program: fixture(root.path()).unwrap(),
         cwd: Some(root.path().to_string_lossy().into_owned()),
-        arguments: vec![
-            "--profile".to_owned(),
-            "personal".to_owned(),
-            "--model".to_owned(),
-            "chosen-model".to_owned(),
-        ],
+        arguments: vec!["--model".to_owned(), "chosen-model".to_owned()],
         ephemeral: false,
         account_directory: Some(
             root.path()
@@ -1108,7 +1103,6 @@ fn captures_account_and_profile_and_resumes_exact_thread() {
         serde_json::from_slice(&fs::read(root.path().join("launch.json")).unwrap()).unwrap();
     assert_eq!(launched["home"].as_str(), account.as_deref());
     let argv = launched["argv"].as_array().unwrap();
-    assert!(argv.contains(&json!("profile=\"personal\"")));
     assert!(argv.contains(&json!("model=\"chosen-model\"")));
     let target = record.target();
     service.prompt(&target, "hello").unwrap();

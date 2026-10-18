@@ -1058,6 +1058,10 @@ The default account uses the provider's existing store. A named profile can sele
 an absolute account directory and literal launch arguments. Credentials and
 conversation history remain provider-owned; Bootty never imports or copies them.
 
+A Codex profile can't pass `--profile`: Bootty runs Codex's app server, which has no
+profiles, so the launch refuses it. Give the profile a `directory` holding its own
+`config.toml` instead.
+
 Pi profiles retain literal `--extension` / `-e` paths on creation and resume.
 Provider credentials, prompt arguments and prior session selectors are still
 excluded from reusable launch metadata.

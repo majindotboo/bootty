@@ -460,6 +460,33 @@ fn invalid_upgrade_cannot_publish_provider_activity(#[case] client: bool, #[case
     );
 }
 
+/// Codex's app server has no profiles, so a launch that asks for one says what to do instead.
+#[rstest]
+#[case::flag(&["--profile", "work"][..])]
+#[case::short(&["-p", "work"][..])]
+#[case::inline(&["--profile=work"][..])]
+fn a_codex_profile_flag_is_refused_with_what_works(#[case] arguments: &[&str]) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let launch = AgentLaunch {
+        program: "codex".to_owned(),
+        cwd: None,
+        arguments: arguments
+            .iter()
+            .map(|argument| (*argument).to_owned())
+            .collect(),
+        ephemeral: false,
+        account_directory: None,
+    };
+    let error = CodexTerminalObserver::prepare(&launch, directory.path(), Arc::new(|_| {}))
+        .err()
+        .unwrap();
+    assert_eq!(
+        error.to_string(),
+        "Codex's app server takes no --profile. Point this profile's directory at a Codex home \
+         with its own config.toml instead."
+    );
+}
+
 #[rstest]
 fn explicit_external_endpoints_are_not_adopted() {
     let directory = assert_fs::TempDir::new().unwrap();
@@ -567,8 +594,6 @@ finally:
             program: executable.path().to_str().unwrap().to_owned(),
             cwd: None,
             arguments: vec![
-                "--profile".to_owned(),
-                "work".to_owned(),
                 "-c".to_owned(),
                 "shell_environment_policy.inherit=all".to_owned(),
                 "--sandbox=read-only".to_owned(),
@@ -610,8 +635,6 @@ finally:
     assert_eq!(
         &provider_arguments[3..],
         [
-            "--config",
-            "profile=\"work\"",
             "-c",
             "shell_environment_policy.inherit=all",
             "--config",

@@ -161,7 +161,7 @@ pub fn quick_json(
     let mut command = Command::new(&config.program);
     command
         .current_dir(temporary.path())
-        .args(quick_arguments(config, model))
+        .args(quick_arguments(config, model)?)
         .arg("--output-schema")
         .arg(&schema_path)
         .arg("--output-last-message")
@@ -200,8 +200,8 @@ fn bounded_output(bytes: Vec<u8>, what: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
-fn quick_arguments(config: &NativeSessionConfig, model: &str) -> Vec<String> {
-    let mut arguments = crate::codex_terminal::provider_arguments(&config.arguments);
+fn quick_arguments(config: &NativeSessionConfig, model: &str) -> Result<Vec<String>, String> {
+    let mut arguments = crate::codex_terminal::provider_arguments(&config.arguments)?;
     arguments.extend(
         [
             "exec",
@@ -224,7 +224,7 @@ fn quick_arguments(config: &NativeSessionConfig, model: &str) -> Vec<String> {
         ]
         .map(str::to_owned),
     );
-    arguments
+    Ok(arguments)
 }
 
 // The owning host creates the ephemeral schema/output; no desktop path crosses this boundary.
@@ -266,7 +266,7 @@ fn remote_json(
         ),
         config.program.clone(),
     ];
-    arguments.extend(quick_arguments(config, model));
+    arguments.extend(quick_arguments(config, model)?);
     let remote = bootty_host::remote::RemoteHost::new(remote.host.clone());
     let (program, arguments) = remote
         .proxy_command_in("/", "/bin/sh", &arguments)

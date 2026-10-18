@@ -2855,7 +2855,9 @@ fn native_command(
                 // A scoped override lets older SDKs ignore the unknown question feature.
                 .args(["--config", "features.default_mode_request_user_input=true"])
                 .args(tool_arguments)
-                .args(crate::codex_terminal::provider_arguments(&config.arguments));
+                .args(crate::codex_terminal::provider_arguments(
+                    &config.arguments,
+                )?);
         }
         if let Some(remote) = &config.remote {
             command = remote_native_command(config, remote, &command)?;
