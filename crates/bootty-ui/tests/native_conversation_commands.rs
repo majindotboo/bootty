@@ -1646,6 +1646,7 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
             start_ref: String::new(),
             suffix: "dialog".to_owned(),
             identity: "task-dialog".to_owned(),
+            fan_out: Vec::new(),
             directories: HashMap::new(),
         },
         vec![SessionDestination {

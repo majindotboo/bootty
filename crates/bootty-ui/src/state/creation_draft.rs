@@ -136,6 +136,7 @@ impl From<SavedDraft> for NewSessionDraft {
             suffix: saved.suffix,
             identity: saved.identity,
             directories: saved.directories.into_iter().collect::<HashMap<_, _>>(),
+            fan_out: Vec::new(),
         }
     }
 }

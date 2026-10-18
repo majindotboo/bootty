@@ -36,6 +36,15 @@ pub struct NewSessionDialog {
     worktree_repository: Option<String>,
     surface_request_id: Option<u64>,
     registration_target: Option<bootty_control::CommandTarget>,
+    fan_out: Option<FanOutRun>,
+}
+
+/// A prompt going to several models: the repository their worktrees come from, the names the
+/// first session took, and the models still to start.
+struct FanOutRun {
+    repo: String,
+    names: Option<(String, String)>,
+    remaining: VecDeque<crate::presentation::new_session_form::FanOutModel>,
 }
 
 struct PendingNames {
@@ -181,6 +190,7 @@ impl NewSessionDialog {
             empty_enter_armed: false,
             shell_fallback: false,
             worktree_repository: None,
+            fan_out: None,
             surface_request_id: None,
             registration_target: None,
         }
@@ -235,6 +245,7 @@ impl NewSessionDialog {
             empty_enter_armed: false,
             shell_fallback: false,
             worktree_repository: None,
+            fan_out: None,
             surface_request_id: None,
             registration_target: None,
         }
@@ -575,8 +586,105 @@ impl NewSessionDialog {
         self.catalog_queue.push_front(refresh);
     }
 
+    /// One prompt to several models: every session gets its own worktree, so none of them edit
+    /// another's checkout. Says whether the start can go ahead.
+    fn begin_fan_out(&mut self) -> bool {
+        self.fan_out = None;
+        let Some(form) = self.form.as_mut() else {
+            return true;
+        };
+        if self.shell_fallback
+            || self.purpose != NewSessionPurpose::CreateSession
+            || form.draft.mode != crate::presentation::new_session_form::NewSessionMode::Agent
+            || form.draft.fan_out.is_empty()
+        {
+            return true;
+        }
+        if !form.worktree_available {
+            form.error = Some(
+                "Each model needs its own worktree, and this project can't make worktrees"
+                    .to_owned(),
+            );
+            return false;
+        }
+        form.draft.isolated = true;
+        self.fan_out = Some(FanOutRun {
+            repo: form.draft.cwd.clone(),
+            names: None,
+            remaining: form.draft.fan_out.iter().cloned().collect(),
+        });
+        true
+    }
+
+    /// After a session of a prompt sent to several models starts, starts the next model in a
+    /// new worktree named after the first session's, or returns `None` once all have.
+    pub fn next_fan_out(&mut self) -> Option<NewSessionPickerEvent> {
+        let (Some(run), Some(form)) = (self.fan_out.as_mut(), self.form.as_mut()) else {
+            return None;
+        };
+        let Some(next) = run.remaining.pop_front() else {
+            self.fan_out = None;
+            return None;
+        };
+        let (branch, folder) = run
+            .names
+            .get_or_insert_with(|| (form.draft.branch.clone(), form.draft.folder.clone()))
+            .clone();
+        let suffix = branch_safe(&next.model);
+        let named = |base: &str| {
+            if base.is_empty() {
+                suffix.clone()
+            } else {
+                format!("{base}-{suffix}")
+            }
+        };
+        form.draft.cwd.clone_from(&run.repo);
+        form.worktree_available = true;
+        form.draft.isolated = true;
+        form.draft.branch = named(&branch);
+        form.draft.folder = named(&folder);
+        if let Some(provider) = bootty_agents::AgentKind::ALL
+            .into_iter()
+            .find(|provider| provider.to_string() == next.provider)
+            && !form.draft.permissions.supports(provider)
+        {
+            form.draft.permissions = bootty_agents::NativePermissionMode::ProviderDefault;
+        }
+        let plan_mode = form
+            .draft
+            .model_selection
+            .as_ref()
+            .and_then(|selection| selection.plan_mode);
+        form.draft.provider = next.provider;
+        form.draft.model_selection = Some(bootty_agents::NativeModelSelection {
+            plan_mode,
+            fast_mode: None,
+            model: next.model,
+            reasoning_effort: None,
+        });
+        form.draft.identity = bootty_mux::snapshot::new_session_identity();
+        form.draft.suffix.clone_from(&form.draft.identity);
+        self.launch_direction = LaunchDirection::Background;
+        self.starting = true;
+        match form.worktree_request() {
+            Ok(Some(request)) => Some(NewSessionPickerEvent::CreateWorktree {
+                repo: run.repo.clone(),
+                request,
+            }),
+            Ok(None) => None,
+            Err(error) => {
+                form.error = Some(error);
+                self.starting = false;
+                self.fan_out = None;
+                None
+            }
+        }
+    }
+
     pub fn failed(&mut self, error: String) {
         self.starting = false;
+        // The models after a failed start wait for the user to try again.
+        self.fan_out = None;
         if let NewSessionStep::BranchName(draft) = &mut self.step {
             draft.error = Some(error);
         } else if let Some(form) = &mut self.form {
@@ -1131,6 +1239,10 @@ impl NewSessionDialog {
         };
         self.shell_fallback = shell_fallback;
         self.empty_enter_armed = false;
+        if !self.begin_fan_out() {
+            return None;
+        }
+        let form = self.form.as_mut()?;
         let invocation = if self.shell_fallback {
             form.shell_invocation(&form.draft.cwd)
         } else {
@@ -1695,4 +1807,17 @@ fn native_tab_field(field: &str) -> bool {
             | "plan-mode"
             | "goal"
     )
+}
+
+/// A model id as part of a branch or folder name: letters, digits and dashes.
+fn branch_safe(model: &str) -> String {
+    let mut name = String::new();
+    for character in model.chars() {
+        if character.is_ascii_alphanumeric() {
+            name.push(character.to_ascii_lowercase());
+        } else if !name.is_empty() && !name.ends_with('-') {
+            name.push('-');
+        }
+    }
+    name.trim_end_matches('-').to_owned()
 }

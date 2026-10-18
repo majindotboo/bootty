@@ -63,6 +63,7 @@ fn form() -> NewSessionForm {
             start_ref: String::new(),
             suffix: "a123".to_owned(),
             identity: "0123456789abcdef0123456789abcdef".to_owned(),
+            fan_out: Vec::new(),
             directories: HashMap::new(),
         },
         vec![
@@ -282,6 +283,126 @@ fn accepted_worktree_is_retained_when_provider_start_fails(
     assert_eq!(retry.command, "agents.native.start");
     assert_eq!(retry.arguments[1], first.arguments[1]);
     Ok(())
+}
+
+/// One prompt sent to several models starts each in its own worktree, named after the first,
+/// one after another, and creation ends after the last.
+#[rstest]
+fn a_prompt_sent_to_several_models_starts_each_in_its_own_worktree(
+    mut form: NewSessionForm,
+) -> anyhow::Result<()> {
+    use bootty_control::CommandOutcome;
+    use bootty_ui::presentation::{dialogs::NewSessionPickerEvent, new_session_form::FanOutModel};
+    let project = git_project()?;
+    form.set_directory(project.path().to_string_lossy().into_owned());
+    // The start waits for the project to prove it can make worktrees.
+    form.change_field("isolation", "New worktree");
+    form.change_text("Fix the login");
+    form.set_generated_names(bootty_agents::GeneratedSessionNames {
+        title: "Fix the login".to_owned(),
+        slug: "fix-login".to_owned(),
+    })
+    .map_err(anyhow::Error::msg)?;
+    let other = FanOutModel {
+        provider: "claude".to_owned(),
+        model: "claude-opus-5-5".to_owned(),
+        name: "Opus 5.5".to_owned(),
+    };
+    form.change_field("fan-out", &other.encode());
+    let mut dialog = ready_dialog(form)?;
+    let event = dialog.apply(&start_intent("start-session"), &[]);
+    let Some(NewSessionPickerEvent::CreateWorktree { repo, request }) = event else {
+        anyhow::bail!(
+            "several models need a worktree each, the first included: {event:?} {:?}",
+            dialog
+                .spec()
+                .rows
+                .first()
+                .and_then(|row| row.detail.clone())
+        )
+    };
+    assert_eq!(request.name.as_deref(), Some("fix-login"));
+    let start = |dialog: &mut bootty_ui::presentation::dialogs::NewSessionDialog,
+                 checkout: &str|
+     -> anyhow::Result<NewSessionPickerEvent> {
+        let (sender, reply) = std::sync::mpsc::channel();
+        dialog.worktree_started(reply);
+        sender.send(CommandOutcome::Success {
+            value: serde_json::json!(checkout),
+            warnings: Vec::new(),
+        })?;
+        let Some(NewSessionPickerEvent::Submit(invocation)) = dialog.poll() else {
+            anyhow::bail!("a made worktree starts its session")
+        };
+        assert_eq!(invocation.arguments[1], checkout);
+        let (sender, reply) = std::sync::mpsc::channel();
+        dialog.started(reply);
+        sender.send(CommandOutcome::Success {
+            value: serde_json::json!({}),
+            warnings: Vec::new(),
+        })?;
+        dialog
+            .poll()
+            .ok_or_else(|| anyhow::anyhow!("a started session reports it"))
+    };
+    assert_eq!(repo, project.path().to_string_lossy());
+    let first = start(&mut dialog, "/project/fix-login")?;
+    anyhow::ensure!(matches!(first, NewSessionPickerEvent::Started { .. }));
+    let Some(NewSessionPickerEvent::CreateWorktree {
+        repo: next_repo,
+        request: next,
+    }) = dialog.next_fan_out()
+    else {
+        anyhow::bail!("the next model gets its own worktree")
+    };
+    assert_eq!(
+        next_repo, repo,
+        "every worktree comes from the project itself"
+    );
+    assert_eq!(next.name.as_deref(), Some("fix-login-claude-opus-5-5"));
+    assert_eq!(
+        dialog.draft().map(|draft| draft.provider.clone()),
+        Some("claude".to_owned())
+    );
+    let second = start(&mut dialog, "/project/fix-login-claude-opus-5-5")?;
+    anyhow::ensure!(matches!(second, NewSessionPickerEvent::Started { .. }));
+    assert_eq!(
+        dialog.next_fan_out(),
+        None,
+        "creation ends after the last model"
+    );
+    Ok(())
+}
+
+/// A project with one commit, where new worktrees can be made.
+fn git_project() -> anyhow::Result<assert_fs::TempDir> {
+    let repo = assert_fs::TempDir::new()?;
+    for args in [
+        &["init", "--quiet"][..],
+        &[
+            "-c",
+            "user.name=Bootty Test",
+            "-c",
+            "user.email=bootty@example.invalid",
+            "commit",
+            "--quiet",
+            "--allow-empty",
+            "-m",
+            "initial",
+        ],
+    ] {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(args)
+            .output()?;
+        anyhow::ensure!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(repo)
 }
 
 #[rstest]

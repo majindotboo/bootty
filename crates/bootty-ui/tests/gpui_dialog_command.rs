@@ -951,6 +951,7 @@ fn native_agent_form_spec() -> DialogSpec {
             start_ref: String::new(),
             suffix: "a123".to_owned(),
             identity: "0123456789abcdef0123456789abcdef".to_owned(),
+            fan_out: Vec::new(),
             directories: std::collections::HashMap::default(),
         },
         vec![destination],

@@ -645,6 +645,43 @@ impl AppState {
             })
     }
 
+    fn session_started(
+        &mut self,
+        value: &serde_json::Value,
+        warnings: Vec<bootty_control::CommandWarning>,
+        foreground: bool,
+        setup: Option<String>,
+    ) {
+        self.name_created_session(value);
+        if let Some(repository) = setup {
+            self.run_setup_scripts(value, repository);
+        }
+        if foreground {
+            self.focus_created_session(value);
+        }
+        if !warnings.is_empty() {
+            self.record_error(
+                "The session started with a problem",
+                warnings
+                    .into_iter()
+                    .map(|warning| warning.message)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+            );
+        }
+        // A prompt sent to several models starts the next one in its own worktree.
+        let next = match self.dialogs.current_mut() {
+            Some(ModalDialog::NewSession(dialog)) => dialog.next_fan_out(),
+            _ => None,
+        };
+        if let Some(next) = next {
+            self.apply_picker_event(next);
+            return;
+        }
+        // Accepted creation owns removal of its chooser; this is not cancellation.
+        self.complete_creation(value);
+    }
+
     pub fn apply_picker_event(&mut self, event: NewSessionPickerEvent) {
         match event {
             NewSessionPickerEvent::Names { invocation, action } => {
@@ -678,27 +715,7 @@ impl AppState {
                 warnings,
                 foreground,
                 setup,
-            } => {
-                self.name_created_session(&value);
-                if let Some(repository) = setup {
-                    self.run_setup_scripts(&value, repository);
-                }
-                if foreground {
-                    self.focus_created_session(&value);
-                }
-                // Accepted creation owns removal of its chooser; this is not cancellation.
-                self.complete_creation(&value);
-                if !warnings.is_empty() {
-                    self.record_error(
-                        "The session started with a problem",
-                        warnings
-                            .into_iter()
-                            .map(|warning| warning.message)
-                            .collect::<Vec<_>>()
-                            .join("; "),
-                    );
-                }
-            }
+            } => self.session_started(&value, warnings, foreground, setup),
             NewSessionPickerEvent::Close => {
                 self.dismiss_modal_dialog();
             }
@@ -1237,6 +1254,7 @@ impl AppState {
                     suffix: format!("{suffix:x}"),
                     identity: bootty_mux::snapshot::new_session_identity(),
                     directories: std::collections::HashMap::new(),
+                    fan_out: Vec::new(),
                 }
             })
     }

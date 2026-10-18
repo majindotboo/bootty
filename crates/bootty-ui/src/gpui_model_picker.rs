@@ -39,6 +39,8 @@ pub enum ModelPickerEvent {
     Select(String),
     SelectProvider(String),
     Favorite(String),
+    /// Send the prompt to this model too, or stop sending it there.
+    FanOut(String),
     Reasoning(bootty_agents::NativeModelSelection),
     FastMode(bool),
 }
@@ -64,6 +66,8 @@ struct ModelList {
     expanded_legacy: bool,
     rows: Vec<Row>,
     selected: Option<IndexPath>,
+    /// The models a new session's prompt also goes to, when the picker offers that.
+    fan_out: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -251,6 +255,11 @@ impl ListDelegate for ModelList {
                                     slot.child(Icon::new(IconName::Check).small())
                                 }))
                                 .child(div().w(rems(2.0)).flex_shrink_0().children(hint))
+                                .children(self.fan_out.as_ref().filter(|_| !selected).map(
+                                    |fan_out| {
+                                        fan_out_button(&model, fan_out.contains(&model.id), cx)
+                                    },
+                                ))
                                 .child(favorite_button(&model, cx)),
                         ),
                 )
@@ -277,6 +286,18 @@ pub struct ModelPickerView {
 }
 
 impl ModelPickerView {
+    /// Offers sending the prompt to more models, `fan_out` being those already chosen; `None`
+    /// offers nothing.
+    pub fn set_fan_out(&mut self, fan_out: Option<Vec<String>>, cx: &mut Context<Self>) {
+        self.list.update(cx, |list, cx| {
+            let delegate = list.delegate_mut();
+            if delegate.fan_out != fan_out {
+                delegate.fan_out = fan_out;
+                cx.notify();
+            }
+        });
+    }
+
     pub fn set_fast_mode(&mut self, fast: bool, cx: &mut Context<Self>) {
         if self.fast_mode != fast {
             self.fast_mode = fast;
@@ -381,6 +402,7 @@ impl ModelPickerView {
             expanded_legacy,
             rows: Vec::new(),
             selected: None,
+            fan_out: None,
         };
         delegate.rebuild();
         let groups = model_groups(&delegate);
@@ -1113,6 +1135,46 @@ fn legacy_row(count: usize, expanded: bool, cx: &App) -> ListItem {
                         .child(count.to_string()),
                 ),
         )
+}
+
+fn fan_out_button(
+    model: &NativeModelOption,
+    chosen: bool,
+    cx: &Context<ListState<ModelList>>,
+) -> Button {
+    let owner = cx.entity().downgrade();
+    let id = model.id.clone();
+    let label = if chosen {
+        format!("Don't send to {} too", model.display_name)
+    } else {
+        format!("Send to {} too", model.display_name)
+    };
+    Button::new(SharedString::from(format!("fan-out-model:{}", model.id)))
+        .debug_selector({
+            let id = model.id.clone();
+            move || format!("model-fan-out:{id}")
+        })
+        .ghost()
+        .xsmall()
+        .w_6()
+        .h_6()
+        .flex_shrink_0()
+        .icon(Icon::default().path("icons/copy-plus.svg"))
+        .selected(chosen)
+        .text_color(if chosen {
+            cx.theme().primary
+        } else {
+            cx.theme().muted_foreground
+        })
+        .accessibility_label(label.clone())
+        .element_tooltip(label)
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            _ = owner.update(cx, |list, cx| {
+                list.focus(window, cx);
+                cx.emit(ModelPickerEvent::FanOut(id.clone()));
+            });
+        })
 }
 
 fn favorite_button(model: &NativeModelOption, cx: &Context<ListState<ModelList>>) -> Button {

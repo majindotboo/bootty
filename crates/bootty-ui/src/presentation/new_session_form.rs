@@ -86,6 +86,40 @@ pub struct NewSessionDraft {
     pub suffix: String,
     pub identity: String,
     pub directories: HashMap<SpaceId, String>,
+    /// More models the prompt goes to, each starting its own session in its own worktree.
+    pub fan_out: Vec<FanOutModel>,
+}
+
+/// A model a new session's prompt also goes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FanOutModel {
+    pub provider: String,
+    pub model: String,
+    /// What the model is called, for its chip.
+    pub name: String,
+}
+
+impl FanOutModel {
+    /// The `fan-out` field's wire form: provider, model and name, tab separated.
+    #[must_use]
+    pub fn encode(&self) -> String {
+        format!("{}\t{}\t{}", self.provider, self.model, self.name)
+    }
+
+    #[must_use]
+    pub fn decode(value: &str) -> Option<Self> {
+        let mut parts = value.splitn(3, '\t');
+        let (provider, model) = (parts.next()?, parts.next()?);
+        (!provider.is_empty() && !model.is_empty()).then(|| Self {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            name: parts
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(model)
+                .to_owned(),
+        })
+    }
 }
 
 pub struct NewSessionForm {
@@ -337,6 +371,7 @@ impl NewSessionForm {
                 self.change_model_field(field, value);
             }
             "goal" => value.trim().clone_into(&mut self.draft.goal),
+            "fan-out" => self.toggle_fan_out(value),
             "permissions" => {
                 self.draft.permissions = bootty_agents::NativePermissionMode::from_choice(value)
                     .unwrap_or(self.draft.permissions);
@@ -380,6 +415,23 @@ impl NewSessionForm {
                 self.reset_provider_permissions();
             }
             provider.clone_into(&mut self.draft.provider);
+        }
+    }
+
+    /// Sends the prompt to one more model, or stops sending it there.
+    fn toggle_fan_out(&mut self, value: &str) {
+        let Some(model) = FanOutModel::decode(value) else {
+            return;
+        };
+        if let Some(at) = self
+            .draft
+            .fan_out
+            .iter()
+            .position(|chosen| chosen.provider == model.provider && chosen.model == model.model)
+        {
+            self.draft.fan_out.remove(at);
+        } else {
+            self.draft.fan_out.push(model);
         }
     }
 
@@ -1330,6 +1382,23 @@ impl NewSessionForm {
         fields
     }
 
+    /// The other models the prompt goes to, one per line.
+    fn fan_out_field(&self) -> DialogField {
+        DialogField {
+            id: "fan-out".into(),
+            label: "Also send to".into(),
+            value: self
+                .draft
+                .fan_out
+                .iter()
+                .map(FanOutModel::encode)
+                .collect::<Vec<_>>()
+                .join("\n"),
+            placeholder: String::new(),
+            kind: DialogFieldKind::Text,
+        }
+    }
+
     fn model_fields(&self) -> Vec<DialogField> {
         let mut fields = Vec::new();
         if self.draft.mode == NewSessionMode::Agent && !self.model_options.is_empty() {
@@ -1394,6 +1463,7 @@ impl NewSessionForm {
                     .to_string(),
                 vec!["false".into(), "true".into()],
             ));
+            fields.push(self.fan_out_field());
         }
         if self.draft.mode == NewSessionMode::Agent && self.draft.provider != "pi" {
             let fast = self

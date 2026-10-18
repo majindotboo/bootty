@@ -123,6 +123,11 @@ typing stops, and return when it reopens, including after a restart. The New Ses
 form's words and choices are saved beside the configuration, in
 `new-session-draft.json`, a second after they stop changing, and return when the form
 next opens on the same project; pasted files, which live in temporary files, don't.
+The New Session model picker's send-too button on a model, of any enabled provider, sends
+the same prompt there as well: each model starts its own session, one after another, in a
+new worktree named after the first session's with the model added, so none edits another's
+checkout. A project that can't make worktrees can't send to several models. The extra
+models aren't saved with the draft.
 A conversation that finishes a turn shows Finished in the sidebar until its pane is
 seen; Mark unread in its row menu shows it again.
 

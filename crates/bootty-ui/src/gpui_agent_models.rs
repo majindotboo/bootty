@@ -367,6 +367,8 @@ impl NativeAgentSessionView {
                     );
                 }
             }
+            // Only a new session's composer sends one prompt to several models.
+            ModelPickerEvent::FanOut(_) => {}
             // A conversation keeps its provider; another one continues it in a side chat.
             ModelPickerEvent::SelectProvider(provider) => {
                 let provider = provider.to_ascii_lowercase();
