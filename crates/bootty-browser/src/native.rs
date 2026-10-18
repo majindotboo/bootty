@@ -65,6 +65,8 @@ pub enum BrowserEvent {
     TitleChanged(String),
     OpenTab(String),
     Notice(String),
+    /// What an MCP app page relayed.
+    App(crate::McpAppMessage),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -213,23 +215,11 @@ impl BrowserView {
         persist_site_data: bool,
     ) -> Result<Self, NativeBrowserError> {
         let address = normalize_address(address)?;
-        let handle = window
-            .window_handle()
-            .map_err(|error| NativeBrowserError::Platform(error.to_string()))?;
-        let supported = match handle.as_raw() {
-            RawWindowHandle::AppKit(_) => cfg!(target_os = "macos"),
-            RawWindowHandle::Win32(_) => cfg!(target_os = "windows"),
-            RawWindowHandle::Xlib(_) => cfg!(target_os = "linux"),
-            RawWindowHandle::Xcb(_) => cfg!(target_os = "linux"),
-            #[cfg(target_os = "linux")]
-            RawWindowHandle::Wayland(_) => return Err(NativeBrowserError::XwaylandRequired),
-            _ => false,
-        };
-        if !supported {
-            return Err(NativeBrowserError::UnsupportedWindow);
-        }
+        let handle = native_parent(window)?;
         #[cfg(target_os = "linux")]
-        let linux_host = crate::linux_host::LinuxBrowserHost::new(handle.as_raw(), bounds)?;
+        let linux_host = crate::linux_host::LinuxBrowserHost::new(handle, bounds)?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = handle;
         let title_events = events.clone();
         let popup_events = events.clone();
         let permission_events = events.clone();
@@ -243,16 +233,9 @@ impl BrowserView {
             .with_bounds(view_bounds(bounds))
             .with_visible(false)
             .with_focused(false)
+            .with_initialization_script(PAGE_FOCUS_SCRIPT)
             .with_initialization_script(
                 r"
-                for (const type of ['pointerdown', 'focusin']) {
-                    document.addEventListener(type, event => {
-                        if (event.isTrusted) window.ipc.postMessage('browser-focus');
-                    }, true);
-                }
-                document.documentElement.addEventListener('pointerenter', event => {
-                    if (event.isTrusted) window.ipc.postMessage('browser-pointer-enter');
-                });
                 document.addEventListener('keydown', event => {
                     if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
                     const key = event.key.toLowerCase();
@@ -311,6 +294,74 @@ impl BrowserView {
             visible: false,
             annotation_captures,
         })
+    }
+
+    /// Creates a child webview showing an MCP app's `html` (see [`crate::mcp_app_page`]). It
+    /// keeps no site data, loads nothing but the app's own document, and denies popups,
+    /// permissions and downloads. The app's messages arrive as [`BrowserEvent::App`].
+    ///
+    /// # Errors
+    /// Reports unsupported window handles, platform initialization, and webview creation failures.
+    pub fn mcp_app(
+        window: &impl HasWindowHandle,
+        html: &str,
+        policy: &crate::McpAppPolicy,
+        bounds: BrowserBounds,
+        events: Sender<BrowserEvent>,
+    ) -> Result<Self, NativeBrowserError> {
+        let handle = native_parent(window)?;
+        #[cfg(target_os = "linux")]
+        let linux_host = crate::linux_host::LinuxBrowserHost::new(handle, bounds)?;
+        #[cfg(not(target_os = "linux"))]
+        let _ = handle;
+        let mut secret = [0_u8; 16];
+        getrandom::fill(&mut secret)
+            .map_err(|error| NativeBrowserError::Platform(error.to_string()))?;
+        let secret = format!("{:032x}", u128::from_ne_bytes(secret));
+        let page = crate::mcp_app_page(html, policy, &secret);
+        let builder = wry::WebViewBuilder::new()
+            .with_incognito(true)
+            .with_html(page)
+            .with_bounds(view_bounds(bounds))
+            .with_visible(false)
+            .with_focused(false)
+            .with_initialization_script(PAGE_FOCUS_SCRIPT)
+            .with_ipc_handler(move |request| {
+                if let Some(message) = crate::McpAppMessage::parse(request.body(), &secret) {
+                    _ = events.try_send(BrowserEvent::App(message));
+                } else {
+                    handle_ipc(request.body(), &events);
+                }
+            })
+            // The page is inline HTML and the app its srcdoc frame. Nothing else loads, so a
+            // frame that navigates itself stays put.
+            .with_navigation_handler(|url| matches!(url.as_str(), "about:blank" | "about:srcdoc"))
+            .with_new_window_req_handler(|_, _| NewWindowResponse::Deny)
+            .with_permission_handler(|_| PermissionResponse::Deny)
+            .with_download_started_handler(|_, _| false);
+        #[cfg(target_os = "linux")]
+        let view = linux_host.build(builder)?;
+        #[cfg(not(target_os = "linux"))]
+        let view = builder.build_as_child(window)?;
+        Ok(Self {
+            view,
+            #[cfg(target_os = "linux")]
+            linux_host,
+            bounds,
+            visible: false,
+            annotation_captures: annotations::CaptureResponses::default(),
+        })
+    }
+
+    /// Delivers one message to an MCP app page.
+    ///
+    /// # Errors
+    /// Reports a failed native script dispatch.
+    pub fn post_app_message(&self, message: &str) -> Result<(), NativeBrowserError> {
+        // `message` is JSON the host serialized, so it is a JavaScript expression as written.
+        Ok(self.view.evaluate_script(&format!(
+            "window.__boottyApp&&window.__boottyApp({message})"
+        ))?)
     }
 
     /// Returns the native page address, including navigation not yet published to the host.
@@ -488,6 +539,40 @@ pub fn poll_platform_events() {
 /// Native desktop event loops already dispatch the webview callbacks on these platforms.
 #[cfg(not(target_os = "linux"))]
 pub const fn poll_platform_events() {}
+
+/// Tells the host when the page takes focus or the pointer enters it.
+const PAGE_FOCUS_SCRIPT: &str = r"
+    for (const type of ['pointerdown', 'focusin']) {
+        document.addEventListener(type, event => {
+            if (event.isTrusted) window.ipc.postMessage('browser-focus');
+        }, true);
+    }
+    document.documentElement.addEventListener('pointerenter', event => {
+        if (event.isTrusted) window.ipc.postMessage('browser-pointer-enter');
+    });
+";
+
+/// The raw handle of a parent window that can hold a child webview.
+fn native_parent(window: &impl HasWindowHandle) -> Result<RawWindowHandle, NativeBrowserError> {
+    let handle = window
+        .window_handle()
+        .map_err(|error| NativeBrowserError::Platform(error.to_string()))?
+        .as_raw();
+    let supported = match handle {
+        RawWindowHandle::AppKit(_) => cfg!(target_os = "macos"),
+        RawWindowHandle::Win32(_) => cfg!(target_os = "windows"),
+        RawWindowHandle::Xlib(_) => cfg!(target_os = "linux"),
+        RawWindowHandle::Xcb(_) => cfg!(target_os = "linux"),
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Wayland(_) => return Err(NativeBrowserError::XwaylandRequired),
+        _ => false,
+    };
+    if supported {
+        Ok(handle)
+    } else {
+        Err(NativeBrowserError::UnsupportedWindow)
+    }
+}
 
 fn handle_ipc(message: &str, events: &Sender<BrowserEvent>) {
     if let Some(message) = message.strip_prefix("browser-annotation:") {

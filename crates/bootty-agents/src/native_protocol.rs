@@ -170,6 +170,20 @@ pub struct NativeToolCall {
     pub input: String,
     /// Completed records an observed result; it does not infer success from output text.
     pub status: NativeToolStatus,
+    /// The app the tool's MCP server offers to show this call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<NativeMcpApp>,
+}
+
+/// An MCP app: the HTML document an MCP server offers to show one of its tool calls.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct NativeMcpApp {
+    pub server: String,
+    /// The `ui://` resource holding the app's document.
+    pub resource: String,
+    /// What the call was asked and returned, when it fits in 64 KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call: Option<std::sync::Arc<crate::McpAppCall>>,
 }
 
 impl NativeTranscriptItem {
@@ -1010,6 +1024,7 @@ impl NativeSessionSnapshot {
                     name: bounded_text(name.to_owned()),
                     input: input.map_or(previous_input, |input| bounded_tool_input(name, input)),
                     status,
+                    app: item.tool.take().and_then(|tool| tool.app),
                 });
             } else if let Some(tool) = &mut item.tool {
                 tool.status = status;
@@ -1554,6 +1569,15 @@ impl NativeSessionSnapshot {
             output,
             codex_tool_status(item, complete),
         );
+        if let Some(app) = codex_mcp_app(item)
+            && let Some(tool) = self
+                .transcript
+                .iter_mut()
+                .find(|row| row.id == id)
+                .and_then(|row| row.tool.as_mut())
+        {
+            tool.app = Some(app);
+        }
         self.tool_images(id, content);
     }
 
@@ -1785,6 +1809,36 @@ fn web_search_input(item: &Value) -> String {
         input.insert("url".into(), url.into());
     }
     Value::Object(input).to_string()
+}
+
+/// The app Codex says an MCP tool call's server offers to show it.
+fn codex_mcp_app(item: &Value) -> Option<NativeMcpApp> {
+    if field(item, "type") != "mcpToolCall" {
+        return None;
+    }
+    let resource = field(field(item, "mcpAppUi"), "resourceUri")
+        .as_str()
+        .or_else(|| field(item, "mcpAppResourceUri").as_str())
+        .filter(|resource| !resource.is_empty() && resource.len() <= 4096)?;
+    let server = field(item, "server")
+        .as_str()
+        .filter(|server| !server.is_empty())?;
+    let arguments = item.get("arguments").cloned().unwrap_or(Value::Null);
+    let result = item
+        .get("result")
+        .filter(|result| !result.is_null())
+        .cloned();
+    // The call is kept with the transcript; a larger one opens its app without it.
+    let size = arguments
+        .to_string()
+        .len()
+        .saturating_add(result.as_ref().map_or(0, |result| result.to_string().len()));
+    Some(NativeMcpApp {
+        server: server.to_owned(),
+        resource: resource.to_owned(),
+        call: (size <= 64 * 1024)
+            .then(|| std::sync::Arc::new(crate::McpAppCall { arguments, result })),
+    })
 }
 
 fn codex_tool_status(item: &Value, complete: bool) -> NativeToolStatus {

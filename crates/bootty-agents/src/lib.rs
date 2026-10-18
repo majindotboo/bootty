@@ -4,6 +4,11 @@ mod commands;
 mod events;
 mod integration;
 mod launch;
+mod mcp_app;
+pub use mcp_app::{
+    MCP_APP_PROTOCOL_VERSION, McpAppBridge, McpAppCall, McpAppDocument, McpAppEffect,
+    McpAppRequestId, McpAppTool, McpAppToolCall,
+};
 mod native_annotations;
 pub use native_annotations::{NativeResponseAnnotation, response_annotations};
 mod native_attachments;
@@ -23,6 +28,7 @@ mod native_history_claude;
 mod native_history_pi;
 pub use native_history::{NativeHistoryPage, PAGE_SIZE as HISTORY_PAGE_SIZE};
 mod native_goal;
+mod native_mcp_apps;
 mod native_models;
 mod native_pi;
 mod native_prompt;
@@ -152,10 +158,10 @@ pub use native_permissions::{
     NativeApprovalDecision, NativePermissionMode, NativePermissionUpdate,
 };
 pub use native_protocol::{
-    NativeAgentRequest, NativeAsyncQuestion, NativeProviderArchiveState, NativeProviderWriterState,
-    NativeSessionSnapshot, NativeSessionStatus, NativeTodo, NativeTodoStatus, NativeToolCall,
-    NativeToolStatus, NativeTranscriptItem, NativeTurnOutcome, NativeTurnReceipt,
-    native_error_message,
+    NativeAgentRequest, NativeAsyncQuestion, NativeMcpApp, NativeProviderArchiveState,
+    NativeProviderWriterState, NativeSessionSnapshot, NativeSessionStatus, NativeTodo,
+    NativeTodoStatus, NativeToolCall, NativeToolStatus, NativeTranscriptItem, NativeTurnOutcome,
+    NativeTurnReceipt, native_error_message,
 };
 pub use native_service::{
     NativeAgentService, NativeCreationError, NativeDraft, NativeProviderInfo, NativeQueuedMessage,

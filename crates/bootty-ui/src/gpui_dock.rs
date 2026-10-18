@@ -2,6 +2,7 @@
 
 mod browser;
 mod layout;
+mod mcp_apps;
 pub mod motion;
 mod registry;
 pub mod surfaces;
@@ -199,6 +200,7 @@ pub struct WorkspaceDock {
             std::collections::BTreeMap<String, Entity<crate::gpui_subagent_panel::SubagentPanel>>,
         >,
     >,
+    mcp_apps: mcp_apps::McpAppPanels,
     center_task: Option<String>,
     restored_agent_destination: Option<(String, String, String)>,
     document_context: Rc<RefCell<GitPanelContext>>,
@@ -298,6 +300,7 @@ impl WorkspaceDock {
             cx,
         );
         let subagents = Self::subagent_panels(&area, cx);
+        let mcp_apps = Self::mcp_app_panels(&area, cx);
         let subagents_hub = cx.new(crate::gpui_sidebar_panel::SubagentsPanel::new);
         register(&area, subagents_hub.clone(), cx);
         let panels = ContextPanels::new(context.clone(), sender.clone(), local_git, window, cx);
@@ -336,6 +339,7 @@ impl WorkspaceDock {
             centers: std::collections::BTreeMap::new(),
             rights: std::collections::BTreeMap::new(),
             subagents,
+            mcp_apps,
             center_task: None,
             restored_agent_destination: None,
             document_context,
@@ -1524,6 +1528,9 @@ impl WorkspaceDock {
                 window,
                 cx,
             );
+            return true;
+        }
+        if self.close_mcp_app(id, window, cx) {
             return true;
         }
         if let Some(kind) = bootty_config::config::PanelKind::ALL

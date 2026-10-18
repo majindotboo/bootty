@@ -1197,6 +1197,9 @@ impl GpuiWorkspace {
                     });
                 }
             }
+            OpenNativeSession::McpApp { source, item, app } => {
+                self.open_mcp_app(source, item, app, window, cx);
+            }
             OpenNativeSession::Related { target } => {
                 if let Some(dock) = &self.tools {
                     dock.update(cx, |dock, cx| dock.restore_full_view(window, cx));
@@ -1236,6 +1239,36 @@ impl GpuiWorkspace {
                     });
                 }
             }
+        }
+    }
+
+    /// Shows the app for a tool call of `source`'s conversation in the dock.
+    fn open_mcp_app(
+        &self,
+        source: &CommandTarget,
+        item: &str,
+        app: &bootty_agents::NativeMcpApp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(record) = self
+            .native_conversations
+            .records
+            .iter()
+            .find(|record| record.target() == *source)
+            && let Some(parent) = self.native_conversations.views.get(&record.id).cloned()
+            && let Some(dock) = &self.tools
+        {
+            dock.update(cx, |dock, cx| {
+                dock.open_mcp_app(
+                    format!("{}:{item}", source.handle),
+                    &parent,
+                    item.to_owned(),
+                    app.clone(),
+                    window,
+                    cx,
+                );
+            });
         }
     }
 

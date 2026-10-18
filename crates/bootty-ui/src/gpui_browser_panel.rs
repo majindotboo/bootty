@@ -993,7 +993,8 @@ impl BrowserPanel {
                 | BrowserEvent::PointerEntered
                 | BrowserEvent::Annotation(_)
                 | BrowserEvent::OpenTab(_)
-                | BrowserEvent::Shortcut(_) => {}
+                | BrowserEvent::Shortcut(_)
+                | BrowserEvent::App(_) => {}
             }
             if sync_address {
                 let address = tab.address.clone();

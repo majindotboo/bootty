@@ -8,6 +8,7 @@ mod credentials;
 mod input;
 #[cfg(target_os = "linux")]
 mod linux_host;
+mod mcp_app;
 mod native;
 mod profile;
 mod snapshot;
@@ -28,6 +29,7 @@ pub use credential::{
 pub use credential_store::PlatformCredentialStore;
 pub use credentials::{CredentialStore, Credentials};
 pub use input::{BrowserInput, BrowserModifier, BrowserMouseButton};
+pub use mcp_app::{McpAppMessage, McpAppPolicy, mcp_app_page};
 pub use native::{
     BrowserBounds, BrowserEvent, BrowserShortcut, BrowserView, NativeBrowserError,
     poll_platform_events,

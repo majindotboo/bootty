@@ -20,7 +20,7 @@ bootty-host = { path = "../bootty-host" }
 bootty-git = { path = "../bootty-git" }
 bootty-config = { path = "../bootty-config" }
 bootty-write = { path = "../bootty-write" }
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 sha2.workspace = true
 tungstenite = { version = "0.28", features = ["rustls-tls-native-roots"] }

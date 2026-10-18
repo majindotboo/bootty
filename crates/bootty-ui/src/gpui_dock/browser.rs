@@ -367,17 +367,19 @@ impl WorkspaceDock {
             .update(cx, |browser, _| browser.record_interaction());
     }
 
+    /// Whether a browser page or an MCP app holds a native view, which overlays must hide.
     pub(crate) fn browser_has_native_views(&self, cx: &App) -> bool {
-        self.browser.session.read(cx).has_native_views()
+        self.browser.session.read(cx).has_native_views() || self.mcp_apps_have_views(cx)
     }
 
     pub(crate) fn browser_page_active(&self, cx: &App) -> bool {
         let page = self.browser.session.read(cx).selected();
-        let pages = self.browser.pages.borrow();
-        let Some(panel) = pages.get(&page) else {
-            return false;
-        };
-        let id = PanelId::from(panel.entity_id());
+        let panel = self.browser.pages.borrow().get(&page).cloned();
+        panel.is_some_and(|panel| self.right_panel_shown(PanelId::from(panel.entity_id()), cx))
+    }
+
+    /// Whether the right-dock tab `id` is on screen with nothing drawn over it.
+    pub(super) fn right_panel_shown(&self, id: PanelId, cx: &App) -> bool {
         let area = self.area.read(cx);
         self.present
             && self.browser.allowed
@@ -397,5 +399,6 @@ impl WorkspaceDock {
         self.browser.session.update(cx, |browser, cx| {
             browser.set_visible(visible, cx);
         });
+        self.sync_mcp_app_visibility(cx);
     }
 }

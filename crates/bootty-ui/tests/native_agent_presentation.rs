@@ -2524,6 +2524,79 @@ fn tool_rows_name_what_each_tool_did(cx: &mut TestAppContext) {
     }
 }
 
+/// An MCP call whose server offers an app shows a button that opens it, once the call is done.
+#[gpui_kit::test]
+fn an_mcp_call_with_an_app_offers_to_open_it(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let app = serde_json::json!({"server": "weather", "resource": "ui://weather/forecast.html"});
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Forecast?", "complete": true},
+        {"id": "done", "role": "tool", "text": "sunny", "complete": true,
+         "tool": {"name": "forecast", "input": "{}", "status": "completed", "app": app}},
+        {"id": "running", "role": "tool", "text": "", "complete": false,
+         "tool": {"name": "forecast", "input": "{}", "status": "running", "app": app}},
+        {"id": "reply", "role": "assistant", "text": "Sunny.", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let events = opened.clone();
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        cx.subscribe(
+            &view,
+            move |_, _, event: &bootty_ui::OpenNativeSession, _| {
+                if let bootty_ui::OpenNativeSession::McpApp { item, app, .. } = event {
+                    events.lock().unwrap().push((
+                        item.clone(),
+                        app.server.clone(),
+                        app.resource.clone(),
+                    ));
+                }
+            },
+        )
+        .detach();
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(1200.)));
+    redraw(visual);
+    let fold = visual
+        .debug_bounds("native-work-group-done")
+        .expect("work fold");
+    visual.simulate_click(fold.center(), Modifiers::none());
+    redraw(visual);
+    assert!(visual.debug_bounds("native-open-app:running").is_none());
+    let open = visual
+        .debug_bounds("native-open-app:done")
+        .expect("open app button");
+    visual.simulate_click(open.center(), Modifiers::none());
+    redraw(visual);
+    pretty_assertions::assert_eq!(
+        *opened.lock().unwrap(),
+        [(
+            "done".to_owned(),
+            "weather".to_owned(),
+            "ui://weather/forecast.html".to_owned()
+        )]
+    );
+    assert!(
+        visual.debug_bounds("tool-input-scroll:done").is_none(),
+        "opening the app leaves the tool's row closed"
+    );
+}
+
 /// A tool that worked on one file names it as a badge that opens the file, without opening
 /// the tool's row.
 #[gpui_kit::test]

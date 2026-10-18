@@ -175,6 +175,23 @@ pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
             vec!["id", "generation", "subagent"],
             ResourceKind::Session,
         ),
+        (
+            "mcp-app-read",
+            vec!["id", "generation", "server", "uri", "call"],
+            ResourceKind::Session,
+        ),
+        (
+            "mcp-app-call",
+            vec![
+                "id",
+                "generation",
+                "server",
+                "tool",
+                "arguments",
+                "approved",
+            ],
+            ResourceKind::Session,
+        ),
         ("implement", vec!["id", "generation"], ResourceKind::Session),
         ("interrupt", vec!["id", "generation"], ResourceKind::Session),
         ("stop", vec!["id", "generation"], ResourceKind::Session),
@@ -311,6 +328,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                 | "completions"
                 | "catalog-completions"
                 | "subagent-read"
+                | "mcp-app-read"
                 | "history"
                 | "turn-diff"
                 | "terminal"
@@ -345,6 +363,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                             | "conversations"
                             | "goal"
                             | "files"
+                            | "approved"
                     ) || name == "permissions" && operation != "permissions"
                         || matches!(name, "response" | "provider") && operation == "fork"),
                     choices: match (name, operation) {
@@ -352,6 +371,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                         ("direction", "queue-move") => vec!["earlier".into(), "later".into()],
                         ("status", "goal-status") => vec!["active".into(), "paused".into()],
                         ("files", "rewind") => vec!["files".into()],
+                        ("approved", "mcp-app-call") => vec!["approved".into()],
                         _ => Vec::new(),
                     },
                     minimum: None,

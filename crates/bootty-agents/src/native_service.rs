@@ -853,6 +853,36 @@ impl NativeAgentService {
         self.resolve(target)?.stop_subagent(id)
     }
 
+    /// Reads a resource for an MCP app the conversation showed.
+    /// # Errors
+    /// Returns stale targets, a conversation without a Codex thread, or the server's refusal.
+    pub fn read_mcp_app_resource(
+        &self,
+        target: &CommandTarget,
+        server: &str,
+        uri: &str,
+        origin: &str,
+    ) -> Result<serde_json::Value, String> {
+        self.resolve(target)?
+            .read_mcp_app_resource(server, uri, origin)
+    }
+
+    /// Calls a tool for an MCP app the conversation showed, once allowed if it may change
+    /// something.
+    /// # Errors
+    /// Returns stale targets, a tool kept from apps, or the server's refusal.
+    pub fn call_mcp_app_tool(
+        &self,
+        target: &CommandTarget,
+        server: &str,
+        tool: &str,
+        arguments: &serde_json::Value,
+        approved: bool,
+    ) -> Result<crate::McpAppToolCall, String> {
+        self.resolve(target)?
+            .call_mcp_app_tool(server, tool, arguments, approved)
+    }
+
     /// Project favorites for this exact provider account into its advertised catalog.
     /// Retain observed catalog data so starring a model does not restart provider discovery.
     /// # Errors

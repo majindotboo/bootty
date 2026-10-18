@@ -12,6 +12,7 @@ sha2.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bootty-write = { path = "../bootty-write" }
+getrandom.workspace = true
 wry.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]

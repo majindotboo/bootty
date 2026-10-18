@@ -570,6 +570,8 @@ pub fn fixed_panel_layout(mut layout: DockAreaState) -> DockAreaState {
                 | "bootty.runs"
                 | "bootty.terminal-window"
                 | "bootty.surface-chooser"
+                // An app's document and bridge end with the window.
+                | "bootty.mcp_app"
         ) && !tools.contains(&panel)
         {
             tools.push(panel);

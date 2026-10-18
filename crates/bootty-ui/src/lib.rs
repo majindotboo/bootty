@@ -38,6 +38,7 @@ mod gpui_git_panel;
 pub mod gpui_image_viewer;
 mod gpui_input;
 mod gpui_keymap_editor;
+mod gpui_mcp_app;
 mod gpui_model_picker;
 mod gpui_prompt_attachments;
 mod gpui_settings;

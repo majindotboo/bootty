@@ -384,3 +384,17 @@ selected session, because the provider's OAuth flow needs a terminal. Pi's MCP s
 come from its extensions, so Pi has no Connectors. The commands are
 `agents.<provider>.connectors`, `agents.<provider>.connector.add` and
 `agents.<provider>.connector.login`.
+
+A Codex MCP tool call whose server offers an app (`mcpAppUi`, MCP Apps 2026-01-26)
+shows **Open app** once it finishes. The app opens in a right-sidebar tab: its
+document, read through `mcpServer/resource/read`, runs in an opaque-origin frame in a
+private native view under a content policy that admits only the plain https or wss
+origins the app declared. The tab's bridge sends the app the call's arguments and
+result, which the conversation keeps when they fit in 64 KiB, the theme and its size. The app's tool calls and resource reads reach its own
+server through the conversation's thread (`mcpServer/tool/call`); it may call only tools
+its server shows to apps, and a tool its server doesn't mark read-only waits for
+**Allow** in the tab. Links open in the default browser only from a click in the app. A
+message the app sends lands in the composer for the user to send. Model context,
+downloads and other display modes are not offered. Those requests reach
+`agents.native.mcp-app-read` and `agents.native.mcp-app-call`, which accept only the
+app's own view. App tabs close with the window.

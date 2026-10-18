@@ -166,6 +166,12 @@ pub enum OpenNativeSession {
         source: CommandTarget,
         id: String,
     },
+    /// Show the app an MCP server offers for the tool call `item`, in its own tab.
+    McpApp {
+        source: CommandTarget,
+        item: String,
+        app: bootty_agents::NativeMcpApp,
+    },
     DetachAnnotation {
         target: CommandTarget,
         annotation: Box<Annotation>,
@@ -2166,6 +2172,7 @@ impl NativeAgentSessionView {
             tool_input_summary,
         );
         let file = item.tool.as_ref().and_then(tool_file);
+        let app_owner = owner.clone();
         div()
             .debug_selector({
                 let id = item.id.clone();
@@ -2214,6 +2221,7 @@ impl NativeAgentSessionView {
                         .child(status),
                 )
             })
+            .children(Self::open_app_button(item, app_owner))
             // A closed row shows where it opens only under the pointer.
             .child(
                 div()
@@ -2232,6 +2240,32 @@ impl NativeAgentSessionView {
                         .small(),
                     ),
             )
+    }
+
+    /// Opens the app an MCP call's server offers for it, once the call is done.
+    fn open_app_button(
+        item: &NativeTranscriptItem,
+        owner: gpui_kit::WeakEntity<Self>,
+    ) -> Option<Button> {
+        item.tool.as_ref().filter(|tool| {
+            tool.app.is_some() && tool.status != bootty_agents::NativeToolStatus::Running
+        })?;
+        let id = item.id.clone();
+        Some(
+            Button::new(gpui_kit::SharedString::from(format!("open-app:{id}")))
+                .debug_selector({
+                    let id = id.clone();
+                    move || format!("native-open-app:{id}")
+                })
+                .xsmall()
+                .ghost()
+                .flex_shrink_0()
+                .label("Open app")
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    _ = owner.update(cx, |this, cx| this.open_mcp_app(&id, cx));
+                }),
+        )
     }
 
     /// The file a tool worked on, as a badge that opens it.
@@ -3401,6 +3435,59 @@ impl NativeAgentSessionView {
             });
         })
         .detach();
+    }
+
+    /// Offers `text` as the next message: in place of an empty composer, or into the draft where
+    /// the cursor is. The user sends it.
+    pub(crate) fn offer_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.return_rewound(text, &[], window, cx);
+        cx.notify();
+    }
+
+    /// Sends `agents.native.<operation>` for this conversation on behalf of a view beside it, such
+    /// as an MCP app's.
+    pub(crate) fn native_request(
+        &self,
+        operation: &str,
+        arguments: Vec<String>,
+    ) -> Result<std::sync::mpsc::Receiver<CommandOutcome>, String> {
+        let mut invocation = CommandInvocation::new(
+            format!("agents.native.{operation}"),
+            Vec::new(),
+            Caller::Internal,
+        );
+        invocation.target = Some(self.record.target());
+        invocation.arguments = vec![self.record.id.clone(), self.record.generation.to_string()];
+        invocation.arguments.extend(arguments);
+        self.sender
+            .submit(
+                invocation,
+                Instant::now()
+                    .checked_add(Duration::from_secs(60))
+                    .unwrap_or_else(Instant::now),
+                CommandCancellation::new(),
+            )
+            .map_err(|_| {
+                "Could not send the request. Reopen this conversation and retry.".to_owned()
+            })
+    }
+
+    fn open_mcp_app(&self, item: &str, cx: &mut Context<Self>) {
+        if let Some(app) = self
+            .record
+            .snapshot
+            .transcript
+            .iter()
+            .find(|row| row.id == item)
+            .and_then(|row| row.tool.as_ref())
+            .and_then(|tool| tool.app.clone())
+        {
+            cx.emit(OpenNativeSession::McpApp {
+                source: self.record.target(),
+                item: item.to_owned(),
+                app,
+            });
+        }
     }
 
     /// Brings a rewound message back: in place of an empty composer, with its files, or into the

@@ -953,6 +953,7 @@ dependencies = [
  "assert_fs",
  "async-channel",
  "bootty-write",
+ "getrandom 0.4.3",
  "gtk",
  "image",
  "num-traits",

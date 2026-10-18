@@ -14,9 +14,9 @@ use std::{
 
 use assert_fs::TempDir;
 use bootty_agents::{
-    AgentKind, AgentLaunch, NativeAgentService, NativeAgentSession, NativeSessionConfig,
-    NativeSessionStatus, NativeTodo, NativeTodoStatus, NativeToolStatus, NativeTurnOutcome,
-    NativeTurnReceipt,
+    AgentKind, AgentLaunch, McpAppCall, McpAppToolCall, NativeAgentService, NativeAgentSession,
+    NativeSessionConfig, NativeSessionStatus, NativeTodo, NativeTodoStatus, NativeToolStatus,
+    NativeTurnOutcome, NativeTurnReceipt,
 };
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
@@ -112,6 +112,16 @@ for line in sys.stdin:
   if method == 'thread/resume' and os.path.exists('history-timestamps.json'):
    with open('history-timestamps.json') as source: history=json.load(source)
   reply(ident,{'thread':{'id':thread,'turns':history}})
+ elif method == 'mcpServer/resource/read':
+  assert params['threadId'] == thread and params['server'] == 'fixture'
+  reply(ident,{'contents':[{'uri':params['uri'],'mimeType':'text/html;profile=mcp-app','text':'<p>'+params['originCallId']+'</p>'}]})
+ elif method == 'mcpServerStatus/list':
+  assert params['threadId'] == thread and params['serverName'] == 'fixture'
+  tools={'look':{'name':'look','inputSchema':{},'annotations':{'readOnlyHint':True}},'change':{'name':'change','title':'Change it','inputSchema':{}},'hidden':{'name':'hidden','inputSchema':{},'_meta':{'ui':{'visibility':['model']}}}}
+  reply(ident,{'data':[{'name':'fixture','authStatus':'unsupported','resources':[],'resourceTemplates':[],'tools':tools}]})
+ elif method == 'mcpServer/tool/call':
+  assert params['threadId'] == thread and params['server'] == 'fixture'
+  reply(ident,{'content':[{'type':'text','text':params['tool']+' '+json.dumps(params['arguments'])}]})
  elif method == 'thread/compact/start':
   assert params == {'threadId':thread}
   with open('compact-request.json','w') as output: json.dump(params,output)
@@ -177,7 +187,7 @@ for line in sys.stdin:
    notice('item/started',item={'id':'typed-command','type':'commandExecution','command':'echo typed','status':'inProgress'})
    notice('item/commandExecution/outputDelta',itemId='typed-command',delta='streamed output')
    notice('item/completed',item={'id':'typed-command','type':'commandExecution','command':'echo typed','status':status,'aggregatedOutput':''})
-   notice('item/completed',item={'id':'typed-mcp','type':'mcpToolCall','server':'fixture','tool':'inspect','arguments':{'path':'source.rs'},'status':'failed' if status=='declined' else status,'result':{'content':[{'type':'text','text':'inspection output'}]}})
+   notice('item/completed',item={'id':'typed-mcp','type':'mcpToolCall','server':'fixture','tool':'inspect','arguments':{'path':'source.rs'},'status':'failed' if status=='declined' else status,'result':{'content':[{'type':'text','text':'inspection output'}]},'mcpAppUi':{'resourceUri':'ui://fixture/inspect.html','preferredModelDisplayMode':'inline'}})
   if text in ['retried-error','fatal-error']:
    notice('error',error={'message':'stream disconnected'},willRetry=text=='retried-error')
   if text == 'bounded':
@@ -859,6 +869,69 @@ fn codex_tool_projection_keeps_command_streams_and_actual_tool_status(
             }
         );
     }
+    // The app's call is saved with the conversation, so its app opens whole after a restart.
+    let saved = snapshot
+        .transcript
+        .iter()
+        .find(|item| item.id == "typed-mcp")
+        .map(|item| serde_json::to_value(item).unwrap());
+    let app = saved
+        .and_then(|item| serde_json::from_value::<bootty_agents::NativeTranscriptItem>(item).ok())
+        .and_then(|item| item.tool?.app)
+        .map(|app| (app.server, app.resource, app.call.as_deref().cloned()));
+    assert_eq!(
+        app,
+        Some((
+            "fixture".to_owned(),
+            "ui://fixture/inspect.html".to_owned(),
+            Some(McpAppCall {
+                arguments: json!({"path":"source.rs"}),
+                result: Some(json!({"content":[{"type":"text","text":"inspection output"}]})),
+            }),
+        ))
+    );
+    session.stop();
+}
+
+/// An app reaches its own server through the conversation's thread, and a tool its server
+/// doesn't mark read-only waits for the user.
+#[rstest]
+fn codex_mcp_apps_reach_their_server_through_the_thread() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    assert_eq!(
+        session.read_mcp_app_resource("fixture", "ui://fixture/inspect.html", "typed-mcp"),
+        Ok(json!({"contents":[{
+            "uri":"ui://fixture/inspect.html",
+            "mimeType":"text/html;profile=mcp-app",
+            "text":"<p>typed-mcp</p>",
+        }]}))
+    );
+    let calls = [
+        ("look", false),
+        ("change", false),
+        ("change", true),
+        ("hidden", true),
+        ("missing", true),
+    ]
+    .map(|(tool, approved)| session.call_mcp_app_tool("fixture", tool, &json!({"n":1}), approved));
+    let ran = |tool: &str| {
+        Ok(McpAppToolCall::Result(
+            json!({"content":[{"type":"text","text":format!("{tool} {{\"n\": 1}}")}]}),
+        ))
+    };
+    assert_eq!(
+        calls,
+        [
+            ran("look"),
+            Ok(McpAppToolCall::Approve {
+                title: "Change it".to_owned()
+            }),
+            ran("change"),
+            Err("This app can't call hidden".to_owned()),
+            Err("fixture has no tool named missing".to_owned()),
+        ]
+    );
     session.stop();
 }
 

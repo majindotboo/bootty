@@ -3042,6 +3042,27 @@ fn invoke(
             .read_subagent(target, arg(2))
             .and_then(|detail| serde_json::to_value(detail).map_err(|error| error.to_string())),
         "subagent-stop" => service.stop_subagent(target, arg(2)).map(|()| Value::Null),
+        // An MCP app's requests come only from the view hosting it, which asks the user first.
+        "mcp-app-read" if invocation.caller == Caller::Internal => {
+            service.read_mcp_app_resource(target, arg(2), arg(3), arg(4))
+        }
+        "mcp-app-call" if invocation.caller == Caller::Internal => {
+            serde_json::from_str::<Value>(arg(4))
+                .map_err(|error| format!("The tool's arguments aren't JSON: {error}"))
+                .and_then(|arguments| {
+                    service.call_mcp_app_tool(
+                        target,
+                        arg(2),
+                        arg(3),
+                        &arguments,
+                        arg(5) == "approved",
+                    )
+                })
+                .and_then(|call| serde_json::to_value(call).map_err(|error| error.to_string()))
+        }
+        "mcp-app-read" | "mcp-app-call" => {
+            Err("MCP app requests come only from the app's own view".to_owned())
+        }
         "history" => service
             .read_history(target, arg(2))
             .and_then(|page| serde_json::to_value(page).map_err(|error| error.to_string())),
