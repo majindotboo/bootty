@@ -374,3 +374,13 @@ Claude Desktop has; Bootty passes only its own tool server beside them. A Claude
 signed in with an Anthropic Console key has no account connectors, and its status
 in Settings says so. **Sign in** runs `claude auth login`, which uses the Claude
 subscription.
+
+Settings → AI lists Codex's and Claude's MCP connectors under **Connectors** with
+`codex mcp list --json` and `claude mcp list`, on request, since Claude connects to every
+server to report its health. Each provider keeps its connectors: **Add connector** runs
+its own `mcp add` with a name and an https:// URL or a command, and **Sign in** on a
+connector that needs it runs its own `mcp login <name>`, both in a terminal tab of the
+selected session, because the provider's OAuth flow needs a terminal. Pi's MCP servers
+come from its extensions, so Pi has no Connectors. The commands are
+`agents.<provider>.connectors`, `agents.<provider>.connector.add` and
+`agents.<provider>.connector.login`.

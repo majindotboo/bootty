@@ -250,6 +250,48 @@ fn category_changes_reset_scroll_even_when_row_identities_match(cx: &mut TestApp
     );
 }
 
+/// Rows that come and go inside one item, like a provider's listed connectors, keep the page
+/// where the reader left it.
+#[gpui_kit::test]
+fn rows_inside_a_dependent_item_keep_the_scroll(cx: &mut TestAppContext) {
+    init_zed_ui(cx);
+    let with_children = |children: usize| {
+        let mut snapshot = scrollable_snapshot();
+        snapshot.pages[0].items.push(SettingsPageItem::Dependent {
+            parent: SettingsRow::Value {
+                id: "appearance.parent".to_owned(),
+                label: "Parent".to_owned(),
+                help: String::new(),
+                value: ScalarValue::Bool(true),
+                control: SettingsControl::Toggle,
+                enabled: true,
+            },
+            children: (0..children)
+                .map(|index| SettingsRow::Value {
+                    id: format!("appearance.child-{index}"),
+                    label: format!("Child {index}"),
+                    help: String::new(),
+                    value: ScalarValue::Bool(false),
+                    control: SettingsControl::Toggle,
+                    enabled: true,
+                })
+                .collect(),
+        });
+        snapshot
+    };
+    let (probe, cx) =
+        cx.add_window_view(|_, cx| ScrollbarProbe::with_snapshot(with_children(1), cx));
+    scroll_first_row_out_of_view(cx);
+
+    publish_snapshot(&probe, with_children(3), cx);
+
+    assert!(
+        cx.debug_bounds("settings-toggle-appearance.option-0")
+            .is_none(),
+        "the page stays where it was scrolled"
+    );
+}
+
 #[gpui_kit::test]
 fn visible_row_structure_changes_reset_scroll(cx: &mut TestAppContext) {
     init_zed_ui(cx);

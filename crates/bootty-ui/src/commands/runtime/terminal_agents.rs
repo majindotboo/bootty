@@ -330,8 +330,9 @@ fn execute(
         "provider.status" | "account.status" => {
             inspect_provider(service, invocation, provider, operation, &context)
         }
+        "connectors" => list_connectors(service, provider, &context),
         "start" | "tab" | "pane" | "resume" | "fork" | "account.login" | "account.logout"
-        | "provider.update" => {
+        | "provider.update" | "connector.add" | "connector.login" => {
             if !context.preferences.enabled
                 && matches!(operation, "start" | "tab" | "pane" | "resume" | "fork")
             {
@@ -716,6 +717,33 @@ pub(super) fn prepare_launch(
             .filter(|argument| !argument.is_empty())
             .cloned()
     };
+    // A connector command's arguments are the connector's, not a launch's.
+    if let Some(action) = operation.strip_prefix("connector.") {
+        let argument = |index: usize| invocation.arguments.get(index).map_or("", String::as_str);
+        let action = match action {
+            "login" => bootty_agents::ConnectorAction::SignIn { name: argument(0) },
+            "add" => bootty_agents::ConnectorAction::Add {
+                name: argument(0),
+                target: argument(1),
+            },
+            _ => return Err("Unsupported connector operation".to_owned()),
+        };
+        let mut launch = bootty_agents::terminal_connector_launch(
+            provider,
+            provider_program(provider, preferences),
+            action,
+        )?;
+        launch.cwd = cwd.map(str::to_owned).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned())
+        });
+        launch.account_directory = preferences
+            .selected_profile()
+            .and_then(|profile| profile.directory.clone());
+        launch.validate()?;
+        return Ok(launch);
+    }
     let offset = usize::from(matches!(operation, "resume" | "fork"));
     let program = arg(offset.saturating_add(1))
         .unwrap_or_else(|| provider_program(provider, preferences).to_owned());
@@ -936,7 +964,9 @@ fn start_terminal(
     {
         return failure("Named agent creation requires an explicit host destination");
     }
-    let account = operation.starts_with("account.") || operation == "provider.update";
+    let account = operation.starts_with("account.")
+        || operation.starts_with("connector.")
+        || operation == "provider.update";
     if (context.remote || cfg!(windows)) && launch.account_directory.is_some() {
         return CommandOutcome::Unsupported { message: "Account directory selection requires a local POSIX terminal; remote accounts remain owned by their host".to_owned() };
     }
@@ -1144,6 +1174,31 @@ fn provider_program(
         provider.default_program()
     } else {
         &preferences.program
+    }
+}
+
+/// Lists the selected account's connectors through the provider's own CLI.
+fn list_connectors(
+    service: &TerminalAgentService,
+    provider: AgentKind,
+    context: &LaunchContext,
+) -> CommandOutcome {
+    if context.remote {
+        return CommandOutcome::Unsupported {
+            message: "A remote account's connectors are listed on its own host".to_owned(),
+        };
+    }
+    let directory = context
+        .preferences
+        .selected_profile()
+        .and_then(|profile| profile.directory.as_deref());
+    match service.list_connectors(
+        provider,
+        provider_program(provider, &context.preferences),
+        directory,
+    ) {
+        bootty_agents::ConnectorListing::Failed(error) => failure(&error),
+        listing => serialized_command_outcome(listing),
     }
 }
 

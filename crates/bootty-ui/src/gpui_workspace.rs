@@ -1475,6 +1475,46 @@ impl GpuiWorkspace {
         cx.notify();
     }
 
+    /// A connector action from Settings, `provider:list`, `provider:add` or
+    /// `provider:login:name`, as the provider's own command.
+    fn invoke_connector(&mut self, action: &str, cx: &mut Context<Self>) {
+        let mut parts = action.splitn(3, ':');
+        let (Some(provider), Some(operation)) = (parts.next(), parts.next()) else {
+            return;
+        };
+        let (command, arguments) = match operation {
+            "list" => (format!("agents.{provider}.connectors"), Vec::new()),
+            "login" => (
+                format!("agents.{provider}.connector.login"),
+                parts.next().map(str::to_owned).into_iter().collect(),
+            ),
+            "add" => {
+                let arguments = self.settings_view.update(cx, |view, _| {
+                    let field = |name: &str| {
+                        view.draft
+                            .connector_draft(&format!("{provider}:{name}"))
+                            .trim()
+                            .to_owned()
+                    };
+                    let arguments = vec![field("name"), field("target")];
+                    view.draft.clear_connector_drafts(provider);
+                    arguments
+                });
+                (format!("agents.{provider}.connector.add"), arguments)
+            }
+            _ => return,
+        };
+        let mut invocation =
+            CommandInvocation::new(&command, arguments, bootty_control::Caller::Internal);
+        if operation != "list" {
+            invocation.target = self
+                .state
+                .current_command_target_for(&command, bootty_control::ResourceKind::Session);
+        }
+        self.state.commands.queue(invocation);
+        (self.repaint)();
+    }
+
     fn apply_settings_intent(&mut self, intent: SettingsIntent, cx: &mut Context<Self>) {
         let prior_providers = self.state.config().agents.clone();
         let provider_terminal = match &intent {
@@ -1485,7 +1525,11 @@ impl GpuiWorkspace {
             }),
             _ => false,
         };
-        let close = matches!(intent, SettingsIntent::Close) || provider_terminal;
+        // Adding a connector or signing in to one runs in a terminal tab, like Sign in.
+        let connector_terminal = matches!(&intent, SettingsIntent::Invoke(id)
+            if id.starts_with("connector:") && !id.ends_with(":list"));
+        let close =
+            matches!(intent, SettingsIntent::Close) || provider_terminal || connector_terminal;
         let open_keymap = matches!(&intent, SettingsIntent::Invoke(id) if id == "keymap:open");
         let open_config = matches!(&intent, SettingsIntent::Invoke(id) if id == "config:edit");
         if matches!(intent, SettingsIntent::DiscardChanges) {
@@ -1502,6 +1546,8 @@ impl GpuiWorkspace {
                 }
                 self.state.commands.queue(invocation);
                 (self.repaint)();
+            } else if let Some(action) = id.strip_prefix("connector:") {
+                self.invoke_connector(action, cx);
             } else if id == "config:reload" {
                 self.state.reload_config(&mut self.pending_effects);
             } else if let Some(action) = id.strip_prefix("panel:show:")

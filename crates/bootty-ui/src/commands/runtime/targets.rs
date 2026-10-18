@@ -349,6 +349,7 @@ fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
                     ".account.logout",
                     ".account.status",
                     ".provider.status",
+                    ".connectors",
                 ]
                 .iter()
                 .any(|suffix| command.ends_with(suffix)))

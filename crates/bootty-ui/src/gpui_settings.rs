@@ -415,6 +415,10 @@ impl GpuiSettings {
     }
 
     fn set_setting_text(&mut self, id: &str, text: String, state: &AppState) {
+        if let Some(key) = id.strip_prefix("connector:") {
+            self.draft.set_connector_draft(key, text);
+            return;
+        }
         if id.starts_with("agents.") {
             if text.is_empty() && id.ends_with(".directory") {
                 self.draft.remove_custom_value(id);
@@ -772,6 +776,17 @@ fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<Se
                 bootty_control::ResourceKind::Session,
             )
             .is_some();
+        if bootty_agents::manages_connectors(provider) && !remote {
+            let listing = state
+                .terminal_agent_service()
+                .and_then(|service| service.connectors(provider, program, directory));
+            rows.extend(connector_rows(
+                provider,
+                listing.as_ref(),
+                session,
+                has_session,
+            ));
+        }
         for (operation, title, help, button, enabled) in [
             (
                 "account.login",
@@ -818,6 +833,96 @@ fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<Se
             });
         }
     }
+    rows
+}
+
+/// A provider's MCP connectors: the ones it lists, sign-in for those that need it, and a form
+/// that adds one with the provider's own command, in a terminal tab of this session.
+fn connector_rows(
+    provider: bootty_agents::AgentKind,
+    listing: Option<&bootty_agents::ConnectorListing>,
+    session: &SettingsSession,
+    has_session: bool,
+) -> Vec<SettingsRow> {
+    use bootty_agents::ConnectorListing;
+    let (key, name) = (provider.to_string(), provider.display_name());
+    let help = match listing {
+        None => format!("The MCP servers {name} connects to."),
+        Some(ConnectorListing::Listing) => "Listing…".to_owned(),
+        Some(ConnectorListing::Listed(connectors)) if connectors.is_empty() => {
+            format!("{name} has no connectors.")
+        }
+        Some(ConnectorListing::Listed(connectors)) => format!(
+            "{} connector{}.",
+            connectors.len(),
+            if connectors.len() == 1 { "" } else { "s" }
+        ),
+        Some(ConnectorListing::Failed(error)) => error.clone(),
+    };
+    let mut rows = vec![SettingsRow::Action {
+        id: format!("connector:{key}:list"),
+        label: "Connectors".to_owned(),
+        help,
+        button: if listing.is_some() { "Refresh" } else { "List" }.to_owned(),
+        enabled: listing != Some(&ConnectorListing::Listing),
+    }];
+    if let Some(ConnectorListing::Listed(connectors)) = listing {
+        rows.extend(connectors.iter().map(|connector| {
+            if connector.needs_sign_in {
+                SettingsRow::Action {
+                    id: format!("connector:{key}:login:{}", connector.name),
+                    label: connector.name.clone(),
+                    help: format!("{} · {}", connector.target, connector.status),
+                    button: "Sign in…".to_owned(),
+                    enabled: has_session,
+                }
+            } else {
+                SettingsRow::Value {
+                    id: format!("connector:{key}:item:{}", connector.name),
+                    label: connector.name.clone(),
+                    help: connector.target.clone(),
+                    value: ScalarValue::Text(connector.status.clone()),
+                    control: SettingsControl::ReadOnly,
+                    enabled: true,
+                }
+            }
+        }));
+    }
+    let draft = |field: &str| {
+        session
+            .connector_draft(&format!("{key}:{field}"))
+            .to_owned()
+    };
+    let (new_name, target) = (draft("name"), draft("target"));
+    rows.push(SettingsRow::Value {
+        id: format!("connector:{key}:name"),
+        label: "New connector".to_owned(),
+        help: "What to call it.".to_owned(),
+        value: ScalarValue::Text(new_name.clone()),
+        control: SettingsControl::Text {
+            placeholder: "linear".to_owned(),
+            optional: true,
+        },
+        enabled: true,
+    });
+    rows.push(SettingsRow::Value {
+        id: format!("connector:{key}:target"),
+        label: "URL or command".to_owned(),
+        help: "A server on the web by its https:// address, or the command that starts one, with its arguments after it.".to_owned(),
+        value: ScalarValue::Text(target.clone()),
+        control: SettingsControl::Text {
+            placeholder: "https://mcp.linear.app/mcp".to_owned(),
+            optional: true,
+        },
+        enabled: true,
+    });
+    rows.push(SettingsRow::Action {
+        id: format!("connector:{key}:add"),
+        label: "Add connector".to_owned(),
+        help: format!("Adds it with {name}'s own mcp add in a terminal tab, so {name} keeps it."),
+        button: "Add…".to_owned(),
+        enabled: has_session && !new_name.trim().is_empty() && !target.trim().is_empty(),
+    });
     rows
 }
 

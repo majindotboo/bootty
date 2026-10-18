@@ -45,9 +45,28 @@ pub struct SettingsSession {
     environment: Vec<EnvironmentDraft>,
     environment_unsubmitted: bool,
     effects: Vec<SettingsEffect>,
+    /// What the add-connector forms hold, by `provider:field`. Never configuration: each
+    /// provider owns its connectors.
+    connector_drafts: BTreeMap<String, String>,
 }
 
 impl SettingsSession {
+    /// What an add-connector form holds for `key`, like `claude:name`.
+    #[must_use]
+    pub fn connector_draft(&self, key: &str) -> &str {
+        self.connector_drafts.get(key).map_or("", String::as_str)
+    }
+
+    pub fn set_connector_draft(&mut self, key: &str, value: String) {
+        self.connector_drafts.insert(key.to_owned(), value);
+    }
+
+    /// Empties `provider`'s add-connector form once its connector is on its way.
+    pub fn clear_connector_drafts(&mut self, provider: &str) {
+        self.connector_drafts
+            .retain(|key, _| key.split(':').next() != Some(provider));
+    }
+
     #[must_use]
     pub fn new(accepted: AcceptedSettings, catalogs: Catalogs) -> Self {
         let writeback = DraftWriteback::new(accepted.document, accepted.schema);
@@ -66,6 +85,7 @@ impl SettingsSession {
             environment,
             environment_unsubmitted: false,
             effects: Vec::new(),
+            connector_drafts: BTreeMap::new(),
         }
     }
 

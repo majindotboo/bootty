@@ -44,7 +44,8 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
             .into_iter()
             .chain(control_specs(label))
             .chain(recovery_specs(label))
-            .chain(history_account_specs(label));
+            .chain(history_account_specs(label))
+            .chain(connector_specs(provider, label));
         for (operation, title, names, required, target, mutation, palette) in specs {
             descriptors.push(CommandDescriptor {
                 id: format!("agents.{provider}.{operation}"),
@@ -54,6 +55,13 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
                     "tab" => format!("Start {label} in a new tab in this session."),
                     "pane" => format!("Start {label} in a split of the captured terminal."),
                     "account.login" => format!("Open {label}'s sign-in flow in a terminal."),
+                    "connectors" => format!("List the MCP connectors {label} has."),
+                    "connector.add" => format!(
+                        "Add an MCP connector, reached at a URL or started by a command, with {label}'s own command in a terminal."
+                    ),
+                    "connector.login" => {
+                        format!("Open {label}'s sign-in flow for an MCP connector in a terminal.")
+                    }
                     "history.open" => format!(
                         "Browse saved {label} conversations in the selected account and project."
                     ),
@@ -253,6 +261,43 @@ fn control_specs(label: &str) -> [TerminalCommandSpec; 7] {
             0,
             Some(ResourceKind::Terminal),
             MutationClass::Destructive,
+            false,
+        ),
+    ]
+}
+
+/// A provider's MCP connectors stay its own: listed through its CLI, and added and signed in to
+/// in a terminal it runs.
+fn connector_specs(provider: AgentKind, label: &str) -> Vec<TerminalCommandSpec> {
+    if !crate::manages_connectors(provider) {
+        return Vec::new();
+    }
+    vec![
+        (
+            "connectors",
+            format!("List {label} connectors"),
+            vec![],
+            0,
+            Some(ResourceKind::Binding),
+            MutationClass::Read,
+            false,
+        ),
+        (
+            "connector.add",
+            format!("Add a {label} connector"),
+            vec!["name", "target"],
+            2,
+            Some(ResourceKind::Session),
+            MutationClass::Write,
+            false,
+        ),
+        (
+            "connector.login",
+            format!("Sign in to a {label} connector"),
+            vec!["name"],
+            1,
+            Some(ResourceKind::Session),
+            MutationClass::Write,
             false,
         ),
     ]

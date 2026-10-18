@@ -206,11 +206,20 @@ impl GpuiSettings {
         let matches = self.search_index.matches(&self.content.pages, &self.search);
         self.filter_table = matches.table;
         self.has_query = matches.has_query;
-        let structure_changed = old_structure
-            != visible_structure_signature(&self.content, self.category, &self.filter_table);
+        let new_structure =
+            visible_structure_signature(&self.content, self.category, &self.filter_table);
+        let structure_changed = old_structure != new_structure;
         self.rebuild_navbar(cx);
         if structure_changed {
+            // Rows that change inside an item, such as a provider's listed connectors, keep the
+            // page where the reader left it.
+            let same_items = old_structure.category == new_structure.category
+                && old_structure.top == new_structure.top;
+            let top = self.list_state.logical_scroll_top();
             self.reset_list_state();
+            if same_items {
+                self.list_state.scroll_to(top);
+            }
         } else {
             // Value-only publications must not throw away the user's scroll position.
             // Remeasure because errors and custom editors can still change row height.
@@ -1258,6 +1267,8 @@ fn font_feature_editor_snapshot(snapshot: &SettingsContent) -> Option<&FontFeatu
 struct VisibleStructureSignature {
     category: SettingsCategory,
     items: Vec<String>,
+    /// The items alone, without the rows inside dependent items.
+    top: Vec<String>,
 }
 
 fn visible_structure_signature(
@@ -1274,10 +1285,11 @@ fn visible_structure_signature(
         return VisibleStructureSignature {
             category,
             items: Vec::new(),
+            top: Vec::new(),
         };
     };
 
-    let items = page
+    let visible = page
         .items
         .iter()
         .enumerate()
@@ -1288,7 +1300,21 @@ fn visible_structure_signature(
                 .copied()
                 .unwrap_or(false)
         })
-        .map(|(_, item)| match item {
+        .map(|(_, item)| item)
+        .collect::<Vec<_>>();
+    let top = visible
+        .iter()
+        .map(|item| match item {
+            SettingsPageItem::SectionHeader { id, .. } => format!("section:{id}"),
+            SettingsPageItem::Setting(row) => format!("setting:{}", row_identity(row)),
+            SettingsPageItem::Dependent { parent, .. } => {
+                format!("dependent:{}", row_identity(parent))
+            }
+        })
+        .collect();
+    let items = visible
+        .into_iter()
+        .map(|item| match item {
             SettingsPageItem::SectionHeader { id, .. } => format!("section:{id}"),
             SettingsPageItem::Setting(row) => format!("setting:{}", row_identity(row)),
             SettingsPageItem::Dependent { parent, children } => {
@@ -1302,7 +1328,11 @@ fn visible_structure_signature(
         })
         .collect();
 
-    VisibleStructureSignature { category, items }
+    VisibleStructureSignature {
+        category,
+        items,
+        top,
+    }
 }
 
 fn row_identity(row: &SettingsRow) -> &str {

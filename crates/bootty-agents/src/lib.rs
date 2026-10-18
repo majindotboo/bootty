@@ -57,6 +57,7 @@ mod terminal_account_response;
 mod terminal_accounts;
 mod terminal_codex_account;
 mod terminal_commands;
+mod terminal_connectors;
 mod terminal_history;
 mod terminal_history_codex;
 mod terminal_history_files;
@@ -102,6 +103,11 @@ pub use terminal_accounts::{
     terminal_account_status_in, terminal_account_status_with_pi_selector_in,
 };
 pub use terminal_commands::terminal_command_descriptors;
+pub use terminal_connectors::{
+    ConnectorAction, ConnectorListing, ProviderConnector, manages_connectors,
+    parse_claude_connectors, parse_codex_connectors, terminal_connector_launch,
+    terminal_connectors,
+};
 pub use terminal_history::{TerminalHistoryEntry, TerminalHistoryQuery, terminal_provider_history};
 pub use terminal_observation::{
     AgentObservation, ObservationSink, TerminalAgentStatus, terminal_session_id,

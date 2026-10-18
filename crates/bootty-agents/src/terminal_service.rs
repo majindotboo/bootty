@@ -182,6 +182,15 @@ impl LiveObservation {
     }
 }
 
+/// The connectors last listed for one provider account, newest request first.
+struct ConnectorRequest {
+    request: Arc<()>,
+    provider: AgentKind,
+    program: String,
+    directory: Option<String>,
+    listing: crate::ConnectorListing,
+}
+
 struct ProviderInspection {
     request: Arc<()>,
     provider: AgentKind,
@@ -212,6 +221,7 @@ pub struct TerminalAgentService {
     tools: Mutex<Vec<ToolAttachment>>,
     revision: AtomicU64,
     provider_status: Mutex<Vec<ProviderInspection>>,
+    connectors: Mutex<Vec<ConnectorRequest>>,
     change: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
@@ -284,6 +294,7 @@ impl TerminalAgentService {
             tools: Mutex::new(Vec::new()),
             revision: AtomicU64::new(1),
             provider_status: Mutex::new(Vec::new()),
+            connectors: Mutex::new(Vec::new()),
             change: Mutex::new(None),
             clock,
         })
@@ -320,6 +331,69 @@ impl TerminalAgentService {
                     && entry.pi_selector.as_ref() == selector
             })
             .map(|entry| entry.status.clone())
+    }
+
+    /// What Bootty last learned of this account's connectors, if it has listed them.
+    #[must_use]
+    pub fn connectors(
+        &self,
+        provider: AgentKind,
+        program: &str,
+        directory: Option<&str>,
+    ) -> Option<crate::ConnectorListing> {
+        self.connectors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .find(|entry| {
+                entry.provider == provider
+                    && entry.program == program
+                    && entry.directory.as_deref() == directory
+            })
+            .map(|entry| entry.listing.clone())
+    }
+
+    /// Lists this account's connectors through the provider's CLI, publishing that it's
+    /// listing first. A newer listing of the provider replaces this one's answer.
+    pub fn list_connectors(
+        &self,
+        provider: AgentKind,
+        program: &str,
+        directory: Option<&str>,
+    ) -> crate::ConnectorListing {
+        let request = Arc::new(());
+        {
+            let mut entries = self
+                .connectors
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            entries.retain(|entry| entry.provider != provider);
+            entries.push(ConnectorRequest {
+                request: Arc::clone(&request),
+                provider,
+                program: program.to_owned(),
+                directory: directory.map(str::to_owned),
+                listing: crate::ConnectorListing::Listing,
+            });
+        }
+        self.changed();
+        let listing = match crate::terminal_connectors(provider, program, directory) {
+            Ok(connectors) => crate::ConnectorListing::Listed(connectors),
+            Err(error) => crate::ConnectorListing::Failed(error),
+        };
+        let mut entries = self
+            .connectors
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = entries
+            .iter_mut()
+            .find(|entry| entry.provider == provider && Arc::ptr_eq(&entry.request, &request))
+        {
+            entry.listing = listing.clone();
+            drop(entries);
+            self.changed();
+        }
+        listing
     }
 
     fn begin_provider_status(&self, entry: ProviderInspection) {
