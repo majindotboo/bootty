@@ -1968,7 +1968,7 @@ impl NativeAgentSessionView {
             "{} {name} details",
             if open { "Hide" } else { "Show" }
         ))
-        .child(self.render_tool_heading(item, open, cx))
+        .child(self.render_tool_heading(item, open, owner.clone(), cx))
         .on_click(move |_, _, cx| {
             _ = owner.update(cx, |this, cx| this.toggle_disclosure(&id, open, cx));
         })
@@ -2147,6 +2147,7 @@ impl NativeAgentSessionView {
         &self,
         item: &NativeTranscriptItem,
         open: bool,
+        owner: gpui_kit::WeakEntity<Self>,
         cx: &App,
     ) -> gpui_kit::Div {
         let name = self.tool_name(item);
@@ -2164,11 +2165,13 @@ impl NativeAgentSessionView {
             || (gpui_kit::assets::IconName::Wrench, String::new()),
             tool_input_summary,
         );
+        let file = item.tool.as_ref().and_then(tool_file);
         div()
             .debug_selector({
                 let id = item.id.clone();
                 move || format!("native-tool-heading-{id}")
             })
+            .group("tool-heading")
             .w_full()
             .min_w_0()
             .flex()
@@ -2188,6 +2191,9 @@ impl NativeAgentSessionView {
                     .child(name.into_owned()),
             )
             .child(div().flex_1().min_w_0().truncate().map(|row| {
+                if let Some(file) = file {
+                    return row.child(Self::render_file_badge(&item.id, file, owner, cx));
+                }
                 if item
                     .tool
                     .as_ref()
@@ -2208,14 +2214,55 @@ impl NativeAgentSessionView {
                         .child(status),
                 )
             })
+            // A closed row shows where it opens only under the pointer.
             .child(
-                gpui_kit::component::Icon::new(if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                })
-                .small(),
+                div()
+                    .flex_none()
+                    .when(!open, |chevron| {
+                        chevron
+                            .invisible()
+                            .group_hover("tool-heading", gpui_kit::Styled::visible)
+                    })
+                    .child(
+                        gpui_kit::component::Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .small(),
+                    ),
             )
+    }
+
+    /// The file a tool worked on, as a badge that opens it.
+    fn render_file_badge(
+        id: &str,
+        file: String,
+        owner: gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div()
+            .id(gpui_kit::SharedString::from(format!("tool-file:{id}")))
+            .debug_selector({
+                let file = file.clone();
+                move || format!("native-tool-file:{file}")
+            })
+            .max_w_full()
+            .px_1()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().muted.opacity(0.5))
+            .font_family(cx.theme().mono_font_family.clone())
+            .text_xs()
+            .truncate()
+            .cursor_pointer()
+            .hover(|badge| badge.text_color(cx.theme().foreground))
+            .child(file.clone())
+            .on_click(move |_, window, cx| {
+                cx.stop_propagation();
+                _ = owner.update(cx, |this, cx| {
+                    this.command("open-link", vec![file.clone()], window, cx);
+                });
+            })
     }
 
     fn load_tool_diffs(&mut self, id: String, input: String, window: &Window, cx: &Context<Self>) {
@@ -5637,6 +5684,24 @@ fn tool_input_summary(
         .trim()
         .to_owned();
     (icon, summary)
+}
+
+/// The one file a tool read or wrote, when that's what it did; a command or a search names
+/// more than a file.
+fn tool_file(tool: &bootty_agents::NativeToolCall) -> Option<String> {
+    let input = serde_json::from_str::<Value>(&tool.input).ok()?;
+    let has = |key: &str| input.get(key).is_some();
+    if ["command", "cmd", "pattern", "query", "url"]
+        .into_iter()
+        .any(has)
+    {
+        return None;
+    }
+    ["file_path", "filePath", "notebook_path", "path"]
+        .into_iter()
+        .find_map(|key| input.get(key).and_then(Value::as_str))
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_owned)
 }
 
 /// The task in progress, or how far the list has come.

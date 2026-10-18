@@ -2524,6 +2524,64 @@ fn tool_rows_name_what_each_tool_did(cx: &mut TestAppContext) {
     }
 }
 
+/// A tool that worked on one file names it as a badge that opens the file, without opening
+/// the tool's row.
+#[gpui_kit::test]
+fn a_tools_file_badge_opens_the_file(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Read it", "complete": true},
+        {"id": "read", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "Read", "input": "{\"file_path\":\"src/main.rs\"}", "status": "completed"}},
+        {"id": "reply", "role": "assistant", "text": "Read.", "complete": true}
+    ]))
+    .unwrap();
+    let (sender, commands) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(1200.)));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let fold = visual
+        .debug_bounds("native-work-summary:Read 1 file")
+        .expect("work fold");
+    visual.simulate_click(fold.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let badge = visual
+        .debug_bounds("native-tool-file:src/main.rs")
+        .expect("file badge");
+    visual.simulate_click(badge.center(), Modifiers::none());
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let opened = commands
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.command == "agents.native.open-link")
+        .map(|call| call.arguments.last().cloned())
+        .collect::<Vec<_>>();
+    pretty_assertions::assert_eq!(opened, [Some("src/main.rs".to_owned())]);
+    assert!(
+        visual.debug_bounds("tool-input-scroll:read").is_none(),
+        "the badge opens the file, not the row"
+    );
+}
+
 /// Opening a Work row lists each thought as one line; its text shows only once opened.
 #[gpui_kit::test]
 fn thoughts_in_work_rows_open_one_at_a_time(cx: &mut TestAppContext) {
