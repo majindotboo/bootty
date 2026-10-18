@@ -654,7 +654,7 @@ impl NativeAgentSessionView {
             )
             .children(self.render_copy_mode_badge(cx))
             // Floats over the list so showing it never resizes the transcript.
-            .when(self.needs_jump_to_latest(), |view| {
+            .when(self.needs_jump_to_latest(window.rem_size()), |view| {
                 view.child(
                     div()
                         .absolute()

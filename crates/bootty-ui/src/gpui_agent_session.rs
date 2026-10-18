@@ -4911,8 +4911,10 @@ impl NativeAgentSessionView {
         (max - top).max(0.)
     }
 
-    fn needs_jump_to_latest(&self) -> bool {
-        !self.list.is_following_tail()
+    /// The way back to the latest shows once the reader is a screenful away, not for a nudge;
+    /// an older history page always offers it.
+    fn needs_jump_to_latest(&self, rem: gpui_kit::Pixels) -> bool {
+        (!self.list.is_following_tail() && self.distance_from_end() > f32::from(rem) * 20.)
             || self
                 .history_page
                 .as_ref()
@@ -4929,6 +4931,7 @@ impl NativeAgentSessionView {
                 .outline()
                 .rounded_full()
                 .bg(cx.theme().background)
+                .shadow_md()
                 .small()
                 .accessibility_label("Jump to latest")
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -5179,17 +5182,18 @@ fn code_block_actions(
                     .element_tooltip("Open in your browser"),
             )
         })
+        // A check stands in for the copy icon for a moment after copying.
         .child(
-            Button::new(gpui_kit::SharedString::from(format!("copy-code:{id}")))
+            div()
                 .debug_selector(move || format!("copy-code:{lang}"))
-                .icon(IconName::Copy)
-                .ghost()
-                .xsmall()
-                .accessibility_label("Copy code")
-                .on_click(move |_, _, cx| {
-                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(code.to_string()));
-                })
-                .element_tooltip("Copy code"),
+                .child(
+                    gpui_kit::component::clipboard::Clipboard::new(gpui_kit::SharedString::from(
+                        format!("copy-code:{id}"),
+                    ))
+                    .value(code)
+                    .accessibility_label("Copy code")
+                    .tooltip("Copy code"),
+                ),
         )
 }
 
