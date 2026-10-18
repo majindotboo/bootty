@@ -116,7 +116,11 @@ impl FakeRemote {
 
 impl Drop for FakeRemote {
     fn drop(&mut self) {
-        let _ = self.run("tmux kill-server");
+        // The daemon names its server after the build's identity, so stop every server on the
+        // private socket directory rather than tmux's default one.
+        let _ = self.run(
+            r#"for socket in "$TMUX_TMPDIR"/tmux-*/*; do tmux -S "$socket" kill-server; done"#,
+        );
     }
 }
 
