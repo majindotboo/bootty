@@ -9,7 +9,40 @@ use gpui_kit::{
     App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _, Window, div,
     list, prelude::*,
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, time::Duration};
+
+/// How long a work group's rows take to slide open or shut.
+const WORK_MOTION: Duration = Duration::from_millis(160);
+
+/// Blank space after a prompt just sent, so the prompt can sit at the top while its reply streams
+/// in below. It shrinks as the reply grows and goes once the reply fills the view.
+/// A prompt just sent: the first user message after `after`, or the first of all, pins once it
+/// shows.
+pub(super) struct Pin {
+    pub(super) after: Option<String>,
+}
+
+/// The room always follows the latest prompt, whose id changes when the provider echoes it.
+pub(super) struct Room {
+    height: gpui_kit::Pixels,
+}
+
+/// How long the transcript takes to glide down to its latest reply.
+const GLIDE: Duration = Duration::from_millis(280);
+
+/// The transcript easing down to its latest reply, then following it again.
+pub(super) struct Glide {
+    started: std::time::Instant,
+    distance: f32,
+    travelled: f32,
+}
+
+/// A work group sliding its rows open or shut. Shutting keeps the rows until they have faded.
+pub(super) struct WorkMotion {
+    group: String,
+    started: std::time::Instant,
+    opening: bool,
+}
 
 #[derive(Clone)]
 pub(super) enum TranscriptRow {
@@ -28,6 +61,8 @@ pub(super) enum TranscriptRow {
         open: bool,
         live: bool,
     },
+    /// The room after a prompt just sent; always the last row.
+    Room,
     /// The provider's report that the last turn failed, shown where the turn ended.
     Failure { error: String },
 }
@@ -38,6 +73,7 @@ impl TranscriptRow {
             Self::Message { id, meta, .. } => format!("message:{id}:{meta}"),
             Self::Work { id, .. } => format!("work:{id}"),
             Self::Failure { error } => format!("failure:{error}"),
+            Self::Room => "room".to_owned(),
         }
     }
 }
@@ -295,6 +331,85 @@ impl NativeAgentSessionView {
             .into_any_element()
     }
 
+    /// Opens or shuts a work group. Its rows slide in as it opens and fade before it shuts,
+    /// unless the system asks for less motion.
+    fn toggle_work_group(
+        &mut self,
+        key: &str,
+        open: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let started = cx.background_executor().now();
+        if !open {
+            self.work_disclosures.insert(key.to_owned(), true);
+            self.refresh_timeline();
+            self.work_motion = (!cx.reduce_motion()).then(|| WorkMotion {
+                group: key.to_owned(),
+                started,
+                opening: true,
+            });
+        } else if cx.reduce_motion() {
+            self.work_motion = None;
+            self.work_disclosures.insert(key.to_owned(), false);
+            self.refresh_timeline();
+        } else {
+            self.work_motion = Some(WorkMotion {
+                group: key.to_owned(),
+                started,
+                opening: false,
+            });
+            let key = key.to_owned();
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(WORK_MOTION).await;
+                _ = this.update(cx, |this, cx| {
+                    // A later toggle owns the group now.
+                    if this
+                        .work_motion
+                        .as_ref()
+                        .is_some_and(|motion| motion.group == key && !motion.opening)
+                    {
+                        this.work_motion = None;
+                        this.work_disclosures.insert(key, false);
+                        this.refresh_timeline();
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
+        }
+        cx.notify();
+    }
+
+    /// How much of the work row at `ix` shows while its group slides open or shut, from 0 to 1.
+    /// `None` once it rests.
+    fn work_member_shown(&self, ix: usize, window: &Window, cx: &App) -> Option<f32> {
+        let motion = self.work_motion.as_ref()?;
+        let group = self
+            .timeline
+            .get(..ix)?
+            .iter()
+            .rev()
+            .find_map(|row| match row {
+                TranscriptRow::Work { id, .. } => Some(id),
+                _ => None,
+            })?;
+        if *group != motion.group {
+            return None;
+        }
+        let elapsed = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(motion.started);
+        let progress = (elapsed.as_secs_f32() / WORK_MOTION.as_secs_f32()).min(1.);
+        if motion.opening && progress >= 1. {
+            return None;
+        }
+        window.request_animation_frame();
+        let eased = 1. - (1. - progress).powi(3);
+        Some(if motion.opening { eased } else { 1. - eased })
+    }
+
     pub(super) fn refresh_timeline(&mut self) {
         let mut new = rows(
             &self.record.snapshot.transcript,
@@ -305,6 +420,21 @@ impl NativeAgentSessionView {
             self.turn_failure()
                 .map(|error| TranscriptRow::Failure { error }),
         );
+        // Anchored at the latest prompt, the view stays there when the provider's echo replaces
+        // Bootty's own copy of it.
+        let anchored_prompt = self.room.is_some()
+            && !self.list.is_following_tail()
+            && self
+                .latest_prompt(&self.timeline)
+                .is_some_and(|(row, _)| row == self.list.logical_scroll_top().item_ix);
+        let pinned = self.pin_prompt(&new).or_else(|| {
+            anchored_prompt
+                .then(|| self.latest_prompt(&new).map(|(row, _)| row))
+                .flatten()
+        });
+        if self.room.is_some() {
+            new.push(TranscriptRow::Room);
+        }
         let old_keys = self
             .timeline
             .iter()
@@ -368,11 +498,129 @@ impl NativeAgentSessionView {
         self.hovered_turn = self
             .hovered_turn
             .filter(|ix| *ix < self.history_turns.len());
-        if let Some((key, mut offset)) = anchor
+        if let Some(prompt) = pinned {
+            // Pinned at its own row, the prompt stays put while the reply grows below it.
+            self.list.set_follow_mode(gpui_kit::FollowMode::Normal);
+            self.list.scroll_to(gpui_kit::ListOffset {
+                item_ix: prompt,
+                offset_in_item: gpui_kit::px(0.),
+            });
+        } else if let Some((key, mut offset)) = anchor
             && let Some(ix) = new_keys.iter().position(|candidate| *candidate == key)
         {
             offset.item_ix = ix;
             self.list.scroll_to(offset);
+        }
+    }
+
+    /// Glides down to the latest reply, or jumps there when the system asks for less motion.
+    pub(super) fn glide_to_latest(&mut self, cx: &App) {
+        if cx.reduce_motion() {
+            self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
+            return;
+        }
+        self.glide = Some(Glide {
+            started: cx.background_executor().now(),
+            distance: self.distance_from_end(),
+            travelled: 0.,
+        });
+    }
+
+    /// Moves a glide on by one frame, eased, and follows the latest reply once it lands.
+    pub(super) fn step_glide(&mut self, window: &Window, cx: &App) {
+        let Some(glide) = &mut self.glide else {
+            return;
+        };
+        let elapsed = cx
+            .background_executor()
+            .now()
+            .saturating_duration_since(glide.started);
+        let progress = (elapsed.as_secs_f32() / GLIDE.as_secs_f32()).min(1.);
+        if progress >= 1. {
+            self.glide = None;
+            self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
+            return;
+        }
+        let eased = 1. - (1. - progress).powi(3);
+        let target = glide.distance * eased;
+        self.list.scroll_by(gpui_kit::px(target - glide.travelled));
+        glide.travelled = target;
+        window.request_animation_frame();
+    }
+
+    /// Pins the prompt just sent once it shows in `rows`, giving it a screenful of room, and
+    /// returns its row.
+    fn pin_prompt(&mut self, rows: &[TranscriptRow]) -> Option<usize> {
+        let after = self.pin.as_ref()?.after.as_deref();
+        let (row, id) = self.latest_prompt(rows)?;
+        if after == Some(id) {
+            return None;
+        }
+        self.pin = None;
+        let viewport = self.list.viewport_bounds().size.height;
+        self.room = Some(Room {
+            height: if viewport > gpui_kit::px(0.) {
+                viewport
+            } else {
+                gpui_kit::px(600.)
+            },
+        });
+        Some(row)
+    }
+
+    /// The latest prompt's row in `rows`, and its id.
+    fn latest_prompt<'a>(&self, rows: &'a [TranscriptRow]) -> Option<(usize, &'a str)> {
+        rows.iter().enumerate().rev().find_map(|(row, candidate)| {
+            let TranscriptRow::Message { index, id, .. } = candidate else {
+                return None;
+            };
+            self.record
+                .snapshot
+                .transcript
+                .get(*index)
+                .filter(|item| item.role == "user" && !item.steered)
+                .map(|_| (row, id.as_str()))
+        })
+    }
+
+    /// Fits the room to what the prompt's reply has left of the view, as last laid out. Once the
+    /// reply fills the view the room goes and the transcript follows the reply again.
+    pub(super) fn settle_room(&mut self, cx: &mut Context<Self>) {
+        let Some(room) = &self.room else {
+            return;
+        };
+        let Some((prompt, _)) = self.latest_prompt(&self.timeline) else {
+            self.room = None;
+            self.refresh_timeline();
+            return;
+        };
+        let last = self.timeline.len().saturating_sub(2);
+        let (Some(top), Some(bottom)) = (
+            self.list.bounds_for_item(prompt),
+            self.list.bounds_for_item(last),
+        ) else {
+            return;
+        };
+        let viewport = f32::from(self.list.viewport_bounds().size.height);
+        let wanted = (viewport - (f32::from(bottom.bottom()) - f32::from(top.top()))).max(0.);
+        if wanted <= 0. {
+            let top = self.list.logical_scroll_top();
+            self.room = None;
+            self.refresh_timeline();
+            self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
+            // A reader who scrolled away keeps their place; tail following waits for them.
+            if top.item_ix != prompt || top.offset_in_item > gpui_kit::px(1.) {
+                self.list.scroll_to(top);
+            }
+            cx.notify();
+        } else if (wanted - f32::from(room.height)).abs() > 0.5 {
+            self.room = Some(Room {
+                height: gpui_kit::px(wanted),
+            });
+            let room_row = self.timeline.len().saturating_sub(1);
+            self.list
+                .remeasure_items(room_row..room_row.saturating_add(1));
+            cx.notify();
         }
     }
 
@@ -579,7 +827,18 @@ impl NativeAgentSessionView {
                 index,
                 rail: Some(last),
                 ..
-            }) => self.render_work_member(*index, *last, owner, window, cx),
+            }) => {
+                let member = self.render_work_member(*index, *last, owner, window, cx);
+                match self.work_member_shown(ix, window, cx) {
+                    Some(shown) => div()
+                        .relative()
+                        .top(gpui_kit::px((1. - shown) * -6.))
+                        .opacity(shown)
+                        .child(member)
+                        .into_any_element(),
+                    None => member,
+                }
+            }
             Some(TranscriptRow::Message { index, meta, .. }) => {
                 self.render_message(*index, *meta, owner, window, cx)
             }
@@ -590,6 +849,12 @@ impl NativeAgentSessionView {
                 live,
             }) => self.render_work_group(id, members, *open, *live, owner, cx),
             Some(TranscriptRow::Failure { error }) => self.render_turn_failure(error, owner, cx),
+            Some(TranscriptRow::Room) => div()
+                .h(self
+                    .room
+                    .as_ref()
+                    .map_or(gpui_kit::px(0.), |room| room.height))
+                .into_any_element(),
             None => div().into_any_element(),
         }
     }
@@ -864,11 +1129,9 @@ impl NativeAgentSessionView {
                             .child(summary),
                     ),
             )
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 _ = owner.update(cx, |this, cx| {
-                    this.work_disclosures.insert(key.clone(), !open);
-                    this.refresh_timeline();
-                    cx.notify();
+                    this.toggle_work_group(&key, open, window, cx);
                 });
             });
         div()

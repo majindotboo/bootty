@@ -344,6 +344,14 @@ pub struct NativeAgentSessionView {
     hovered_turn: Option<usize>,
     history_rail_focus: FocusHandle,
     work_disclosures: BTreeMap<String, bool>,
+    /// The work group whose rows are sliding open or shut.
+    work_motion: Option<timeline::WorkMotion>,
+    /// Blank space after the prompt just sent, so it sits at the top while its reply arrives.
+    room: Option<timeline::Room>,
+    /// A prompt just sent, to pin once it shows.
+    pin: Option<timeline::Pin>,
+    /// The transcript gliding down to its latest reply.
+    glide: Option<timeline::Glide>,
     working_indicator: WorkingIndicator,
     transcript_pane: Entity<panes::TranscriptPane>,
     activity_pane: Entity<panes::ActivityPane>,
@@ -550,6 +558,10 @@ impl NativeAgentSessionView {
             hovered_turn: None,
             history_rail_focus: cx.focus_handle().tab_stop(true),
             work_disclosures: BTreeMap::new(),
+            work_motion: None,
+            room: None,
+            pin: None,
+            glide: None,
             working_indicator: WorkingIndicator {
                 subagents_expanded: false,
                 side_chats_expanded: false,
@@ -1272,9 +1284,20 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        // A prompt sent now shows at the end of the transcript, which follows its reply.
+        // A prompt sent now shows at the end of the transcript, which follows its reply. Once
+        // it arrives it pins to the top, with room below for the reply.
         if matches!(operation, "prompt" | "interrupt-send") {
             self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
+            self.pin = Some(timeline::Pin {
+                after: self
+                    .record
+                    .snapshot
+                    .transcript
+                    .iter()
+                    .rev()
+                    .find(|item| item.role == "user")
+                    .map(|item| item.id.clone()),
+            });
         }
         // Words sent from an expanded composer give the room back to the transcript.
         if matches!(operation, "prompt" | "queue" | "interrupt-send") {
@@ -2354,7 +2377,7 @@ impl NativeAgentSessionView {
                                 .get(*index)
                                 .is_some_and(|item| item.id == id)
                         }),
-                        TranscriptRow::Failure { .. } => false,
+                        TranscriptRow::Failure { .. } | TranscriptRow::Room => false,
                     };
                     if contains {
                         this.list.remeasure_items(index..index.saturating_add(1));
@@ -5045,10 +5068,12 @@ impl NativeAgentSessionView {
         (max - top).max(0.)
     }
 
-    /// The way back to the latest shows once the reader is a screenful away, not for a nudge;
-    /// an older history page always offers it.
+    /// The way back to the latest shows once the reader is a screenful away, not for a nudge,
+    /// and not while it glides there; an older history page always offers it.
     fn needs_jump_to_latest(&self, rem: gpui_kit::Pixels) -> bool {
-        (!self.list.is_following_tail() && self.distance_from_end() > f32::from(rem) * 20.)
+        (self.glide.is_none()
+            && !self.list.is_following_tail()
+            && self.distance_from_end() > f32::from(rem) * 20.)
             || self
                 .history_page
                 .as_ref()
@@ -5076,7 +5101,7 @@ impl NativeAgentSessionView {
                     {
                         this.command("history", vec!["latest".into()], window, cx);
                     } else {
-                        this.list.set_follow_mode(gpui_kit::FollowMode::Tail);
+                        this.glide_to_latest(cx);
                     }
                     cx.notify();
                 }))

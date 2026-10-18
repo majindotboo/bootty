@@ -582,6 +582,10 @@ fn verify_responsive_fold(visual: &mut gpui_kit::VisualTestContext) {
             .debug_bounds("native-work-group-tool")
             .expect("expanded work disclosure");
         visual.simulate_click(fold.center(), Modifiers::none());
+        // Its rows fade before they go.
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(400));
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(visual.debug_bounds("native-tool-heading-tool").is_none());
@@ -1130,6 +1134,7 @@ fn history_gutter_jumps_to_saved_turns_without_mounting_the_whole_transcript(
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("native-jump-latest").is_none());
+    glide_frames(visual);
     let copy = visual
         .debug_bounds("copy-message:reply-two")
         .expect("completed reply copy action");
@@ -5153,6 +5158,18 @@ fn redraw(visual: &mut gpui_kit::VisualTestContext) {
     visual.update(|window, cx| window.draw(cx).clear(cx));
 }
 
+/// Plays a glide out. Test windows draw only when asked, so each step stands in for a display
+/// frame.
+fn glide_frames(visual: &mut gpui_kit::VisualTestContext) {
+    for _ in 0..10 {
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(50));
+        visual.update(|window, _| window.refresh());
+        redraw(visual);
+    }
+}
+
 /// Find counts a query's matches across the conversation, ignoring case, steps through them
 /// with Enter and Shift-Enter, and closes with Escape.
 #[gpui_kit::test]
@@ -6151,4 +6168,157 @@ fn pressing_the_composer_box_focuses_it(cx: &mut TestAppContext) {
     );
     redraw(visual);
     assert!(visual.update(|window, cx| view.read(cx).focus_handle(cx).is_focused(window)));
+}
+
+/// A view of a long settled conversation, with the record it shows.
+fn long_conversation<'a>(
+    cx: &'a mut TestAppContext,
+    extra: &[serde_json::Value],
+) -> (
+    NativeSessionRecord,
+    Entity<NativeAgentSessionView>,
+    &'a mut gpui_kit::VisualTestContext,
+) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    let mut transcript = vec![
+        serde_json::json!({"id": "ask", "role": "user", "text": "Earlier", "complete": true}),
+        serde_json::json!({"id": "answer", "role": "assistant",
+            "text": "An earlier reply that runs long.\n\n".repeat(30), "complete": true}),
+    ];
+    transcript.extend(extra.iter().cloned());
+    record.snapshot.transcript =
+        serde_json::from_value(serde_json::Value::Array(transcript)).unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let mut conversation = None;
+    let shown = record.clone();
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                shown,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        conversation = Some(view.clone());
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(900.), px(700.)));
+    redraw(visual);
+    (record, conversation.unwrap(), visual)
+}
+
+/// A prompt just sent sits at the top with room below for its reply, rather than at the bottom
+/// of a long conversation, and stays there when the provider's copy replaces Bootty's.
+#[gpui_kit::test]
+fn a_sent_prompt_sits_at_the_top_with_room_for_its_reply(cx: &mut TestAppContext) {
+    let (mut record, view, visual) = long_conversation(cx, &[]);
+    let editor = visual.debug_bounds("native-composer").expect("composer");
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_input("Next");
+    visual.simulate_keystrokes("enter");
+    redraw(visual);
+    for (id, selector) in [
+        ("local-user-1", "native-message-local-user-1"),
+        ("provider-user-1", "native-message-provider-user-1"),
+    ] {
+        record.snapshot.revision = record.snapshot.revision.saturating_add(1);
+        record
+            .snapshot
+            .transcript
+            .retain(|item| item.role != "user" || item.id == "ask");
+        record.snapshot.transcript.push(
+            serde_json::from_value(
+                serde_json::json!({"id": id, "role": "user", "text": "Next", "complete": true}),
+            )
+            .unwrap(),
+        );
+        view.update_in(visual, |view, window, cx| {
+            view.update_record(record.clone(), window, cx);
+        });
+        redraw(visual);
+        redraw(visual);
+        let prompt = visual.debug_bounds(selector).expect("the prompt shows");
+        assert!(prompt.top() < px(120.), "{id} sits at the top: {prompt:?}");
+    }
+}
+
+/// Closing a work group fades its rows before they go.
+#[gpui_kit::test]
+fn closing_a_work_group_fades_its_rows_first(cx: &mut TestAppContext) {
+    let (_, _, visual) = long_conversation(
+        cx,
+        &[
+            serde_json::json!({"id": "next", "role": "user", "text": "And then?", "complete": true}),
+            serde_json::json!({"id": "thought", "role": "thinking", "text": "Weighing it", "complete": true}),
+            serde_json::json!({"id": "run", "role": "tool", "text": "ok", "complete": true,
+                "tool": {"name": "commandExecution", "input": "echo ok", "status": "completed"}}),
+            serde_json::json!({"id": "then", "role": "assistant", "text": "Then this.", "complete": true}),
+        ],
+    );
+    let fold = visual
+        .debug_bounds("native-work-group-thought")
+        .expect("work fold");
+    visual.simulate_click(fold.center(), Modifiers::none());
+    redraw(visual);
+    assert!(visual.debug_bounds("native-message-thought").is_some());
+    let fold = visual
+        .debug_bounds("native-work-group-thought")
+        .expect("work fold");
+    visual.simulate_click(fold.center(), Modifiers::none());
+    redraw(visual);
+    assert!(
+        visual.debug_bounds("native-message-thought").is_some(),
+        "a closing group's rows stay while they fade"
+    );
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    redraw(visual);
+    assert!(visual.debug_bounds("native-message-thought").is_none());
+}
+
+/// Latest glides down to the latest reply, then follows it.
+#[gpui_kit::test]
+fn latest_glides_down_to_the_latest_reply(cx: &mut TestAppContext) {
+    let (_, view, visual) = long_conversation(
+        cx,
+        &[
+            serde_json::json!({"id": "last", "role": "assistant", "text": "The latest reply.", "complete": true}),
+        ],
+    );
+    visual.simulate_event(ScrollWheelEvent {
+        position: point(px(400.), px(300.)),
+        delta: ScrollDelta::Pixels(point(px(0.), px(100_000.))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    redraw(visual);
+    assert!(visual.debug_bounds("native-message-last").is_none());
+    let latest = visual
+        .debug_bounds("native-jump-latest")
+        .expect("Latest shows a screenful away");
+    visual.simulate_click(latest.center(), Modifiers::none());
+    redraw(visual);
+    assert!(
+        visual.debug_bounds("native-jump-latest").is_none(),
+        "Latest goes once it's taken"
+    );
+    visual
+        .executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    view.update(visual, |_, cx| cx.notify());
+    redraw(visual);
+    assert!(
+        visual.debug_bounds("native-message-last").is_none(),
+        "the first frame is still on its way down"
+    );
+    glide_frames(visual);
+    assert!(visual.debug_bounds("native-message-last").is_some());
+    assert!(visual.debug_bounds("native-jump-latest").is_none());
 }

@@ -833,7 +833,8 @@ impl NativeAgentSessionView {
                                 super::TranscriptRow::Work { members, .. } => {
                                     members.iter().any(has_image)
                                 }
-                                super::TranscriptRow::Failure { .. } => false,
+                                super::TranscriptRow::Failure { .. }
+                                | super::TranscriptRow::Room => false,
                             };
                             if changed {
                                 this.list.remeasure_items(ix..ix.saturating_add(1));
