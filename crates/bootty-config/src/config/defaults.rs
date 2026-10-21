@@ -230,6 +230,7 @@ impl Default for BoottyConfig {
             browser: BrowserConfig::default(),
             computer: ComputerConfig::default(),
             session: SessionConfig::default(),
+            tray: super::TrayConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             window: WindowConfig {
                 background_opacity: 1.0,

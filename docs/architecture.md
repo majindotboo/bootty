@@ -1168,6 +1168,11 @@ Agent attention sequences and acknowledgement cursors belong to `bootty-agents`.
 targets, and owns unread presentation and notification delivery. Agents Dock
 actions and automatic acknowledgement submit the shared command catalog.
 
+The tray's visibility, mascot appearance and macOS unread count belong to
+`bootty-config::TrayConfig` and reload through the ordinary settings path. The
+tray is hidden by default; disabling it drops the backend and ends its macOS
+helper without waiting on the workspace UI thread.
+
 The process-wide agent tray in `bootty-ui` aggregates window projections and
 retains window-bound command senders. Native menu callbacks enqueue shared
 commands; they never mutate GPUI entities or provider state. Linux DBus work

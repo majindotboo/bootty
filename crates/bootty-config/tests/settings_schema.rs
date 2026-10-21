@@ -391,6 +391,10 @@ fn partial_tab_settings_preserve_defaults(#[case] section: &str) {
 #[case("panels.changes.dock")]
 #[case("panels.diff.dock")]
 #[case("panels.agents.dock")]
+#[case("panels.sessions.button")]
+#[case("panels.files.button")]
+#[case("panels.changes.button")]
+#[case("panels.diff.button")]
 #[case("panels.agents.button")]
 fn retired_placement_and_tab_preferences_do_not_offer_settings_controls(#[case] path: &str) {
     let schema = SettingsSchema::builtin();
@@ -445,4 +449,33 @@ fn help_text_keeps_placeholders_in_code_spans() {
             spec.id()
         );
     }
+}
+
+#[rstest::rstest]
+#[case::hidden_even_with_attention("hidden", true, true, false)]
+#[case::always_without_agents("always", false, false, true)]
+#[case::working_turn("working", true, false, true)]
+#[case::working_stops_at_wait("working", false, true, false)]
+#[case::waiting_for_attention("attention", false, true, true)]
+#[case::working_without_attention("attention", true, false, false)]
+fn tray_is_opt_in_and_visibility_follows_the_selected_activity(
+    #[case] value: &str,
+    #[case] working: bool,
+    #[case] attention: bool,
+    #[case] shown: bool,
+) {
+    use bootty_config::config::{TrayIconStyle, TrayVisibility};
+    let default = BoottyConfig::default().tray;
+    assert_eq!(default.visibility, TrayVisibility::Hidden);
+    assert_eq!(
+        default.icon_style,
+        if cfg!(target_os = "macos") {
+            TrayIconStyle::Monochrome
+        } else {
+            TrayIconStyle::Color
+        }
+    );
+    assert!(!default.macos_unread_count);
+    let configured = load_with(&["tray", "visibility"], &format!("\"{value}\"")).unwrap();
+    assert_eq!(configured.tray.visibility.allows(working, attention), shown);
 }

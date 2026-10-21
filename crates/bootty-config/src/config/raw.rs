@@ -42,6 +42,7 @@ pub(super) struct RawConfig {
     pub(super) browser: BrowserPatch,
     pub(super) computer: ComputerPatch,
     pub(super) session: SessionPatch,
+    pub(super) tray: Option<super::TrayConfig>,
     pub(super) diagnostics: DiagnosticsPatch,
     pub(super) window: WindowPatch,
 }

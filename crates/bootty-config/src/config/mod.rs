@@ -3,6 +3,8 @@ pub use agents::{
     AgentProfileConfig, AgentProviderConfig, AgentProvidersConfig, ComposerSendShortcut,
     FollowUpBehavior, ResponseStreaming, TranscriptWidth,
 };
+mod tray;
+pub use tray::{TrayConfig, TrayIconStyle, TrayVisibility};
 mod defaults;
 mod keybind_presets;
 mod load;

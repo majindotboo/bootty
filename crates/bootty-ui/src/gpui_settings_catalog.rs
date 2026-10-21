@@ -217,7 +217,7 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 12] = [
         category: SettingsCategory::General,
         id: SettingsCategory::General.id(),
         label: SettingsCategory::General.label(),
-        search_terms: "general|startup|restore|reopen|window|workspace|session|open behavior|close|quit|update|multiplexer|backend|terminal provider|native|herdr|rmux|tmux",
+        search_terms: "tray|menu bar|mascot|general|startup|restore|reopen|window|workspace|session|open behavior|close|quit|update|multiplexer|backend|terminal provider|native|herdr|rmux|tmux",
     },
     SettingsCatalogPage {
         category: SettingsCategory::Appearance,

@@ -154,6 +154,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(font_metrics_specs());
     specs.extend(terminal_integration_specs());
     specs.extend(notifications_specs());
+    specs.extend(tray_specs());
     specs.extend(terminal_environment_specs());
     specs.extend(status_bar_specs());
     specs.extend(diagnostics_specs());
@@ -1083,6 +1084,51 @@ fn terminal_integration_specs() -> [SettingSpec; 4] {
             SettingDefault::Field(|config| {
                 SettingValue::Text(config.session.clipboard_write_hosts.clone())
             }),
+        ),
+    ]
+}
+
+fn tray_specs() -> [SettingSpec; 3] {
+    use crate::config::{TrayIconStyle, TrayVisibility};
+    [
+        spec(
+            &["tray", "visibility"],
+            "Show icon",
+            "Choose when the mascot appears.",
+            "general",
+            "MENU BAR & TRAY",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&TrayVisibility::Hidden, "Hidden"),
+                    SettingOption::of(&TrayVisibility::Always, "Always"),
+                    SettingOption::of(&TrayVisibility::Working, "While agents work"),
+                    SettingOption::of(&TrayVisibility::Attention, "When agents need attention"),
+                ],
+            },
+            SettingDefault::Field(|config| SettingValue::Token(token(&config.tray.visibility))),
+        ),
+        spec(
+            &["tray", "icon-style"],
+            "Icon appearance",
+            "Monochrome adapts to the macOS menu bar theme.",
+            "general",
+            "MENU BAR & TRAY",
+            SettingKind::Choice {
+                options: vec![
+                    SettingOption::of(&TrayIconStyle::Color, "Color"),
+                    SettingOption::of(&TrayIconStyle::Monochrome, "Monochrome"),
+                ],
+            },
+            SettingDefault::Field(|config| SettingValue::Token(token(&config.tray.icon_style))),
+        ),
+        spec(
+            &["tray", "macos-unread-count"],
+            "Unread count",
+            "Show unread conversations beside the icon. macOS only.",
+            "general",
+            "MENU BAR & TRAY",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| SettingValue::Bool(config.tray.macos_unread_count)),
         ),
     ]
 }

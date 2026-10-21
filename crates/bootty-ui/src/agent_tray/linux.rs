@@ -61,13 +61,15 @@ impl ksni::Tray for Sni {
         }
     }
     fn icon_pixmap(&self) -> Vec<ksni::Icon> {
-        let mut data = super::icon(self.0.unread > 0);
+        let Ok(mut data) = super::artwork::icon(self.0.config.icon_style) else {
+            return Vec::new();
+        };
         for pixel in data.as_chunks_mut::<4>().0 {
             pixel.rotate_right(1);
         }
         vec![ksni::Icon {
-            width: 16,
-            height: 16,
+            width: i32::try_from(super::artwork::SIZE).unwrap_or(36),
+            height: i32::try_from(super::artwork::SIZE).unwrap_or(36),
             data,
         }]
     }

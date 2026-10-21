@@ -1034,6 +1034,16 @@ WSL commands return Unsupported on other operating systems. Configuration and
 transport tests run across platforms; the full Windows/WSL GUI workflow has not
 been certified from the macOS development environment.
 
+Settings → General → Menu bar & tray controls the optional mascot icon. It is
+hidden by default. `tray.visibility` accepts `"hidden"`, `"always"`, `"working"`
+(while an agent works), or `"attention"` (unread results, input requests or errors).
+`tray.icon-style` selects `"color"` or `"monochrome"`. macOS defaults to monochrome,
+which adapts to the menu bar theme; Windows and Linux default to color. `tray.macos-unread-count = true` adds the unread
+conversation count beside the macOS icon. The tray menu focuses agents across
+open windows. These settings reload live, including hiding the icon and stopping
+its macOS helper. Desktop notifications and the Dock attention badge remain
+independent.
+
 Agent alerts use `session.agent-notifications = "unfocused"` by default. Set
 `"always"` to include the focused terminal or `"never"` to disable desktop alerts.
 Unread markers and sequence-safe acknowledgement remain available in all modes.

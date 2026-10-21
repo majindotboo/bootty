@@ -1,5 +1,6 @@
 //! One process-wide attention tray. Menu routes retain the originating window and pane target.
 use crate::state::agent_attention::AgentOverview;
+use bootty_config::config::TrayConfig;
 use bootty_control::{BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation};
 use gpui_kit::{App, EntityId, Global};
 use std::{
@@ -21,6 +22,9 @@ pub use platform::run_helper;
 #[cfg(target_os = "linux")]
 #[path = "agent_tray/linux.rs"]
 mod platform;
+
+#[path = "agent_tray/icon.rs"]
+mod artwork;
 
 type Route = (BoundAppCommandSender, CommandInvocation);
 static ROUTES: OnceLock<Mutex<HashMap<String, Route>>> = OnceLock::new();
@@ -54,6 +58,8 @@ pub fn dispatch(id: &str) -> bool {
 
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct Snapshot {
+    #[serde(default)]
+    config: TrayConfig,
     unread: usize,
     total: usize,
     items: Vec<(String, String)>,
@@ -66,7 +72,8 @@ impl Snapshot {
 
 #[derive(Default)]
 struct AgentTray {
-    windows: HashMap<EntityId, (Vec<AgentOverview>, BoundAppCommandSender)>,
+    windows: HashMap<EntityId, (Vec<AgentOverview>, BoundAppCommandSender, TrayConfig)>,
+    config: TrayConfig,
     revision: u64,
     backend: Option<platform::Backend>,
     failed: bool,
@@ -79,20 +86,26 @@ pub fn update(
     id: EntityId,
     entries: Vec<AgentOverview>,
     sender: BoundAppCommandSender,
+    config: TrayConfig,
     cx: &mut App,
 ) {
     if cx.try_global::<AgentTray>().is_none() {
         cx.set_global(AgentTray::default());
     }
     let tray = cx.global_mut::<AgentTray>();
-    if tray
-        .windows
-        .get(&id)
-        .is_some_and(|(current, _)| *current == entries)
-    {
-        return;
+    if let Some((current, _, previous_config)) = tray.windows.get(&id) {
+        if *current == entries && *previous_config == config {
+            return;
+        }
+        // A passive window's unchanged projection must not undo a setting just accepted in
+        // another window while its own configuration watcher catches up.
+        if *previous_config != config {
+            tray.config = config;
+        }
+    } else {
+        tray.config = config;
     }
-    tray.windows.insert(id, (entries, sender));
+    tray.windows.insert(id, (entries, sender, config));
     tray.refresh();
 }
 pub fn remove(id: EntityId, cx: &mut App) {
@@ -105,12 +118,15 @@ pub fn remove(id: EntityId, cx: &mut App) {
 impl AgentTray {
     fn refresh(&mut self) {
         self.revision = self.revision.wrapping_add(1);
-        let mut snapshot = Snapshot::default();
+        let mut snapshot = Snapshot {
+            config: self.config,
+            ..Snapshot::default()
+        };
         let mut routes = HashMap::new();
         let mut entries = self
             .windows
             .values()
-            .flat_map(|(entries, sender)| entries.iter().map(move |entry| (entry, sender)))
+            .flat_map(|(entries, sender, _)| entries.iter().map(move |entry| (entry, sender)))
             .collect::<Vec<_>>();
         entries.sort_by(|(a, _), (b, _)| {
             b.unread
@@ -127,6 +143,20 @@ impl AgentTray {
         if badge != self.badge {
             self.badge = badge;
             crate::platform::set_dock_badge(badge);
+        }
+        let working = entries
+            .iter()
+            .any(|(entry, _)| entry.status == "working" || entry.status.starts_with("tool:"));
+        if !self.config.visibility.allows(working, badge > 0) {
+            self.backend = None;
+            self.failed = false;
+            if let Some(routes) = ROUTES.get() {
+                routes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clear();
+            }
+            return;
         }
         for (index, (entry, sender)) in entries.into_iter().take(128).enumerate() {
             let id = format!("bootty.agent-tray.{}.{index}", self.revision);
@@ -146,7 +176,7 @@ impl AgentTray {
             ));
         }
         // Keep the native menu bounded; the Dock panel always contains the full list.
-        for (index, (_, sender)) in self.windows.values().enumerate() {
+        for (index, (_, sender, _)) in self.windows.values().enumerate() {
             let id = format!("bootty.agent-tray.{}.window.{index}", self.revision);
             routes.insert(
                 id.clone(),
@@ -164,10 +194,6 @@ impl AgentTray {
             .get_or_init(Mutex::default)
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = routes;
-        // Keep the tray owner alive even when no agents remain.
-        if snapshot.total == 0 && self.backend.is_none() {
-            return;
-        }
         if self.backend.is_none() && !self.failed {
             match platform::Backend::new(snapshot.clone()) {
                 Ok(backend) => self.backend = Some(backend),
@@ -180,29 +206,4 @@ impl AgentTray {
             backend.update(snapshot);
         }
     }
-}
-
-/// The tray's prompt mark, 16 pixels square, with an orange dot while agents wait. On macOS it's
-/// a template image: black shapes the menu bar tints to its theme, and the waiting count shows as
-/// the item's title rather than a dot.
-fn icon(unread: bool) -> Vec<u8> {
-    let template = cfg!(target_os = "macos");
-    let mut bytes = vec![0; 16 * 16 * 4];
-    for (y, row) in bytes.as_chunks_mut::<{ 16 * 4 }>().0.iter_mut().enumerate() {
-        for (x, pixel) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
-            let chevron = (3..=11).contains(&y) && x == 7_usize.saturating_sub(y.abs_diff(7));
-            let underline = y == 11 && (9..=13).contains(&x);
-            let dot = unread && !template && x >= 11 && y <= 4;
-            if chevron || underline || dot {
-                pixel.copy_from_slice(if dot {
-                    &[255, 140, 0, 255]
-                } else if template {
-                    &[0, 0, 0, 255]
-                } else {
-                    &[128, 128, 128, 255]
-                });
-            }
-        }
-    }
-    bytes
 }

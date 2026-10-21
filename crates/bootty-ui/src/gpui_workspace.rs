@@ -2311,6 +2311,7 @@ impl GpuiWorkspace {
             cx.entity_id(),
             self.state.agent_overview(),
             self.state.app_command_sender(Caller::Internal),
+            self.state.config().tray,
             cx,
         );
     }

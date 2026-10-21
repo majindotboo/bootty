@@ -1,4 +1,5 @@
-use super::Snapshot;
+use super::{Snapshot, artwork};
+use bootty_config::config::TrayIconStyle;
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
     menu::{Menu, MenuItem},
@@ -16,17 +17,21 @@ impl Backend {
         }));
         let tray = TrayIconBuilder::new()
             .with_icon(
-                Icon::from_rgba(super::icon(snapshot.unread > 0), 16, 16)
-                    .map_err(|error| error.to_string())?,
+                Icon::from_rgba(
+                    artwork::icon(snapshot.config.icon_style)?,
+                    artwork::SIZE,
+                    artwork::SIZE,
+                )
+                .map_err(|error| error.to_string())?,
             )
-            .with_icon_as_template(cfg!(target_os = "macos"))
+            .with_icon_as_template(snapshot.config.icon_style == TrayIconStyle::Monochrome)
             .with_tooltip(snapshot.title())
             .with_menu(Box::new(menu(&snapshot)?))
             .with_menu_on_left_click(true)
             .build()
             .map_err(|error| error.to_string())?;
         #[cfg(target_os = "macos")]
-        set_unread_title(&tray, snapshot.unread);
+        set_unread_title(&tray, &snapshot);
         Ok(Self {
             tray,
             shown: snapshot,
@@ -46,28 +51,41 @@ impl Backend {
         if snapshot.title() != self.shown.title() {
             let _ = self.tray.set_tooltip(Some(snapshot.title()));
         }
-        if (snapshot.unread > 0) != (self.shown.unread > 0)
-            && let Ok(icon) = Icon::from_rgba(super::icon(snapshot.unread > 0), 16, 16)
-        {
-            let _ = self.tray.set_icon(Some(icon));
-            #[cfg(target_os = "macos")]
-            self.tray.set_icon_as_template(true);
+        if snapshot.config.icon_style != self.shown.config.icon_style {
+            match artwork::icon(snapshot.config.icon_style).and_then(|rgba| {
+                Icon::from_rgba(rgba, artwork::SIZE, artwork::SIZE)
+                    .map_err(|error| error.to_string())
+            }) {
+                Ok(icon) => {
+                    if let Err(error) = self.tray.set_icon_with_as_template(
+                        Some(icon),
+                        snapshot.config.icon_style == TrayIconStyle::Monochrome,
+                    ) {
+                        eprintln!("Agent tray icon unavailable: {error}");
+                    }
+                }
+                Err(error) => eprintln!("Agent tray icon unavailable: {error}"),
+            }
         }
         #[cfg(target_os = "macos")]
-        if snapshot.unread != self.shown.unread {
-            set_unread_title(&self.tray, snapshot.unread);
+        if snapshot.unread != self.shown.unread
+            || snapshot.config.macos_unread_count != self.shown.config.macos_unread_count
+        {
+            set_unread_title(&self.tray, &snapshot);
         }
         self.shown = snapshot;
     }
 }
 
 #[cfg(target_os = "macos")]
-fn set_unread_title(tray: &TrayIcon, unread: usize) {
-    tray.set_title(Some(if unread > 0 {
-        unread.to_string()
-    } else {
-        String::new()
-    }));
+fn set_unread_title(tray: &TrayIcon, snapshot: &Snapshot) {
+    tray.set_title(Some(
+        if snapshot.config.macos_unread_count && snapshot.unread > 0 {
+            snapshot.unread.to_string()
+        } else {
+            String::new()
+        },
+    ));
 }
 fn menu(snapshot: &Snapshot) -> Result<Menu, String> {
     let menu = Menu::new();

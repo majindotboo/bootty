@@ -189,6 +189,7 @@ pub struct BoottyConfig {
     pub browser: BrowserConfig,
     pub computer: ComputerConfig,
     pub session: SessionConfig,
+    pub tray: super::TrayConfig,
     pub diagnostics: DiagnosticsConfig,
     pub window: WindowConfig,
     pub config_path: PathBuf,
@@ -1070,6 +1071,7 @@ pub enum PanelButton {
 #[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
 pub struct PanelConfig {
     pub dock: Option<PanelDock>,
+    /// Retired status bar placement; accepted for compatibility without affecting the UI.
     pub button: PanelButton,
 }
 impl PanelConfig {

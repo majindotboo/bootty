@@ -32,6 +32,13 @@ include = [
 # next to this config file before falling back to the built-in catalog.
 theme = "One Dark"
 
+# The optional mascot icon is hidden until enabled.
+[tray]
+visibility = "hidden" # hidden | always | working | attention
+# macOS defaults to monochrome; Windows and Linux default to color.
+# icon-style = "monochrome" # color | monochrome
+macos-unread-count = false # count beside the macOS menu bar icon
+
 [window]
 background-opacity = 1.0
 background-image-opacity = 1.0
