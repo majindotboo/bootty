@@ -1071,7 +1071,9 @@ renderers. Opaque
 attachments without identity stamping cannot restore inner topology.
 
 The GUI captures immutable terminal history on workers and commits it through the
-mux repository. Capture runs independently of optional output archives. Closing
+mux repository. Backend captures run one at a time within the save worker; another
+checkpoint cannot start while a backend request is still running. Capture runs
+independently of optional output archives. Closing
 a started terminal waits for its own complete checkpoint receipt before the
 backend mutation. Creation, tab and pane success also wait for startup and that
 session's committed checkpoint. OSC 7 file URIs are decoded into host paths at

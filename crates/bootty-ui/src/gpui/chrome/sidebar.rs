@@ -2880,25 +2880,7 @@ pub(super) fn place_menu(scope: SpaceKey, place: &super::view::SessionPlace) -> 
             )
         }));
     }
-    // Editors differ by computer, so they follow the rows every session has.
-    if let Some(path) = place.project.as_ref().filter(|_| place.local) {
-        rows.extend(
-            crate::editors::installed()
-                .iter()
-                .enumerate()
-                .map(|(index, editor)| {
-                    row(
-                        &format!("Open in {}", editor.name),
-                        index == 0,
-                        ChromeIntent::OpenInEditor {
-                            scope,
-                            path: path.clone(),
-                            editor: editor.id,
-                        },
-                    )
-                }),
-        );
-    }
+
     rows
 }
 
@@ -3138,14 +3120,8 @@ pub(super) fn saved_state_invocation(
     Some(invocation)
 }
 
-/// `live` sessions still hold a terminal; the store only deletes closed ones. Archiving
-/// `working` sessions asks first, since their work goes on out of sight.
-pub(super) fn saved_session_menu(
-    task: &SidebarTask,
-    now: i64,
-    live: bool,
-    working: bool,
-) -> Vec<MenuRow> {
+/// Archiving working sessions and deleting saved work ask first.
+pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, working: bool) -> Vec<MenuRow> {
     use bootty_mux::session_membership::SessionLifecycle;
     let row = |label: &str, command, starts_group| {
         saved_state_invocation(task, command, Vec::new()).map(|invocation| MenuRow {
@@ -3208,7 +3184,6 @@ pub(super) fn saved_session_menu(
         }),
     );
     rows.extend(row("Delete…", "session.delete", false).map(|mut delete| {
-        delete.enabled &= !live;
         delete.confirm = Some(delete_confirmation(&task.title));
         delete
     }));
@@ -3216,7 +3191,7 @@ pub(super) fn saved_session_menu(
 }
 
 /// One action on several saved sessions: pin or unpin, settle, mark unread, archive, or delete
-/// the closed ones.
+/// them after closing their terminals.
 pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)], now: i64) -> Vec<MenuRow> {
     use bootty_mux::session_membership::SessionLifecycle;
     let count = tasks.len();
@@ -3281,13 +3256,12 @@ pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)], now: i64) -> Vec<Menu
         all("session.archive", &|task, _| !task.state.archived),
         true,
     ));
-    let closed = all("session.delete", &|_, live| !live);
-    let mut delete = row(format!("Delete {count} sessions…"), closed, false);
-    delete.enabled &= tasks.iter().all(|(_, live)| !live);
+    let deletable = all("session.delete", &|_, _| true);
+    let mut delete = row(format!("Delete {count} sessions…"), deletable, false);
     delete.destructive = true;
     delete.confirm = Some(Confirmation {
         question: format!("Delete {count} sessions permanently?"),
-        detail: "This removes their saved history from Bootty. Archive keeps them recoverable instead.",
+        detail: "This stops their work, closes their terminals and removes their saved history from Bootty.",
         action: "Delete permanently",
     });
     rows.push(delete);
@@ -3347,7 +3321,7 @@ fn delete_confirmation(title: &str) -> Confirmation {
         } else {
             format!("Delete “{title}” permanently?")
         },
-        detail: "This removes its saved history from Bootty. Archive keeps it recoverable instead.",
+        detail: "This stops its work, closes its terminals and removes its saved history from Bootty.",
         action: "Delete permanently",
     }
 }

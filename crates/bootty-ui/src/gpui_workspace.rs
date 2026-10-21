@@ -1005,12 +1005,7 @@ impl GpuiWorkspace {
         cx.notify();
     }
 
-    pub(crate) fn invoke_gpui_command(
-        &mut self,
-        invocation: CommandInvocation,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn sync_displayed_sessions(&mut self, cx: &Context<Self>) {
         let displayed = self
             .chrome_view
             .read(cx)
@@ -1024,6 +1019,15 @@ impl GpuiWorkspace {
             })
             .collect();
         self.state.set_displayed_sessions(displayed);
+    }
+
+    pub(crate) fn invoke_gpui_command(
+        &mut self,
+        invocation: CommandInvocation,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sync_displayed_sessions(cx);
         if matches!(
             self.state
                 .command_catalog()
@@ -1429,6 +1433,7 @@ impl GpuiWorkspace {
     }
 
     fn apply_chrome_intent(&mut self, mut intent: ChromeIntent, cx: &mut Context<Self>) {
+        self.sync_displayed_sessions(cx);
         let focus_terminal = matches!(
             &intent,
             ChromeIntent::Status(

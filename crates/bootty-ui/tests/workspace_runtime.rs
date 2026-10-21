@@ -68,6 +68,11 @@ fn create_space(
 
 type PaneInputs = Arc<Mutex<Vec<(String, PaneInput)>>>;
 
+struct CaptureGate {
+    started: mpsc::Sender<String>,
+    release: Mutex<mpsc::Receiver<()>>,
+}
+
 struct RestoreBackend {
     sessions: Arc<Mutex<Vec<MuxSession>>>,
     create_calls: Arc<AtomicUsize>,
@@ -75,6 +80,7 @@ struct RestoreBackend {
     fail_commands: bool,
     created_panes: bool,
     pane_inputs: PaneInputs,
+    capture_gate: Option<Arc<CaptureGate>>,
 }
 
 impl RestoreBackend {
@@ -220,6 +226,10 @@ impl MuxBackend for RestoreBackend {
     }
 
     fn capture_pane(&self, pane_id: &str, _capture: PaneCapture) -> Result<PaneText> {
+        if let Some(gate) = &self.capture_gate {
+            gate.started.send(pane_id.to_owned())?;
+            gate.release.lock().expect("capture release").recv()?;
+        }
         Ok(PaneText {
             text: format!("{pane_id} read by its backend"),
             captured_lines: 1,
@@ -241,6 +251,7 @@ struct RestoreProvider {
     fail_commands: bool,
     created_panes: bool,
     pane_inputs: PaneInputs,
+    capture_gate: Option<Arc<CaptureGate>>,
 }
 
 fn restore_provider(
@@ -261,6 +272,7 @@ fn restore_provider(
         fail_commands: false,
         created_panes: false,
         pane_inputs: PaneInputs::default(),
+        capture_gate: None,
     }
 }
 
@@ -339,6 +351,7 @@ impl MuxBackendProvider for RestoreProvider {
             fail_commands: self.fail_commands,
             created_panes: self.created_panes,
             pane_inputs: Arc::clone(&self.pane_inputs),
+            capture_gate: self.capture_gate.clone(),
         })
     }
 }
@@ -3452,7 +3465,6 @@ fn current_session_checkpoint_preserves_complete_backend_history_and_saved_work(
 ) {
     let SavedLifecycleWorkspace {
         mut config,
-        backends,
         sessions,
         state,
         ..
@@ -3487,6 +3499,18 @@ fn current_session_checkpoint_preserves_complete_backend_history_and_saved_work(
         original.windows = vec![window];
         drop(reported);
     }
+    let (started, captures) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let backends = registry(
+        [Arc::new(RestoreProvider {
+            capture_gate: Some(Arc::new(CaptureGate {
+                started,
+                release: Mutex::new(released),
+            })),
+            ..restore_provider(MuxBackendKind::Tmux, Arc::clone(&sessions), Arc::default())
+        })],
+        [MuxBackendKind::Tmux],
+    );
     let (wake, wakes) = mpsc::channel();
     let mut state = AppState::new_for_window(
         config.clone(),
@@ -3502,6 +3526,32 @@ fn current_session_checkpoint_preserves_complete_backend_history_and_saved_work(
     let binding = listed_spaces(&mut state)[0].2.clone();
     let before = saved_metadata_listing(&mut state, binding.clone());
     state.checkpoint_sessions(123);
+    for pane in ["%first", "%second"] {
+        assert_eq!(
+            captures
+                .recv_timeout(Duration::from_secs(2))
+                .expect("capture starts"),
+            pane
+        );
+        assert!(state.session_checkpoint_pending());
+        state.checkpoint_sessions(124);
+        assert!(matches!(
+            captures.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let (_, persisted) = WorkspaceRepository::open(&config.config_path).expect("workspace");
+        assert!(
+            persisted.spaces()[0]
+                .binding()
+                .sessions()
+                .get("saved")
+                .expect("saved task")
+                .terminal_snapshot
+                .is_none(),
+            "a pending capture cannot publish a partial checkpoint"
+        );
+        release.send(()).expect("release capture");
+    }
     while state.session_checkpoint_pending() {
         wakes
             .recv_timeout(Duration::from_secs(2))
@@ -4220,6 +4270,7 @@ struct SavedLifecycleWorkspace {
 fn closing_saved_work_checkpoints_before_ending_its_process_and_honors_cancellation(
     directory: assert_fs::TempDir,
     #[values(false, true)] cancel_close: bool,
+    #[values(false, true)] delete: bool,
 ) {
     let SavedLifecycleWorkspace {
         mut config,
@@ -4287,7 +4338,15 @@ fn closing_saved_work_checkpoints_before_ending_its_process_and_honors_cancellat
             Caller::Socket,
         ),
     );
-    let mut close = targeted("session.close", Vec::new(), value["target"].clone());
+    let mut close = if delete {
+        targeted(
+            "session.delete",
+            vec!["saved".to_owned()],
+            listed_spaces(&mut state)[0].2.clone(),
+        )
+    } else {
+        targeted("session.close", Vec::new(), value["target"].clone())
+    };
     close.confirmation = Some(close.confirmation());
     let cancellation = CommandCancellation::new();
     let deadline = Instant::now()
@@ -4346,11 +4405,12 @@ fn closing_saved_work_checkpoints_before_ending_its_process_and_honors_cancellat
     }
     let (_, persisted) =
         WorkspaceRepository::open(&config.config_path).expect("persisted workspace");
-    let saved = persisted.spaces()[0]
-        .binding()
-        .sessions()
-        .get("saved")
-        .expect("same logical work remains saved");
+    let saved = persisted.spaces()[0].binding().sessions().get("saved");
+    if delete && !cancel_close {
+        assert!(saved.is_none(), "deletion follows the accepted close");
+        return;
+    }
+    let saved = saved.expect("same logical work remains saved");
     let checkpoint = saved
         .terminal_snapshot
         .as_ref()
@@ -4979,6 +5039,172 @@ fn saved_retry_cannot_claim_an_identity_owned_by_another_space(directory: assert
     );
 }
 
+fn two_live_saved_sessions(directory: &Path) -> SavedLifecycleWorkspace {
+    let mut fixture = saved_lifecycle_workspace(directory, true);
+    let tag = fixture.sessions.lock().unwrap()[0].tag.clone();
+    fixture.sessions.lock().unwrap().push(mux_session(
+        "sibling-backend-id",
+        directory.to_string_lossy().into_owned(),
+        MuxSessionTag {
+            identity: Some("sibling".to_owned()),
+            ..tag
+        },
+        false,
+    ));
+    drop(fixture.state);
+    fixture.state = app_state(fixture.config.clone(), Arc::clone(&fixture.backends));
+    fixture.state.activate_session_from_ui("backend-id");
+    fixture
+}
+
+#[rstest]
+fn settling_current_work_advances_and_wraps_only_for_bootty_callers(
+    directory: assert_fs::TempDir,
+    #[values("settle_session", "session.settle")] command: &str,
+    #[values(
+        Caller::Internal,
+        Caller::Keybinding,
+        Caller::BuiltinKeybinding,
+        Caller::CommandPalette,
+        Caller::Cli,
+        Caller::Socket,
+        Caller::Luau
+    )]
+    caller: Caller,
+    #[values(false, true)] wrap: bool,
+) {
+    let mut fixture = two_live_saved_sessions(directory.path());
+    let state = &mut fixture.state;
+    let (selected, identity, next) = if wrap {
+        ("sibling-backend-id", "sibling", "backend-id")
+    } else {
+        ("backend-id", "saved", "sibling-backend-id")
+    };
+    state.activate_session_from_ui(selected);
+    let binding = listed_spaces(state)[0].2.clone();
+    let invocation = if command == "session.settle" {
+        targeted(command, vec![identity.to_owned()], binding.clone())
+    } else {
+        CommandInvocation::from_action(command, caller)
+    };
+    let processes = fixture.sessions.lock().unwrap().clone();
+    let outcome = submit_command_as(state, invocation, caller, Instant::now());
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        state.mux().selected_session(),
+        Some(
+            if matches!(caller, Caller::Cli | Caller::Socket | Caller::Luau) {
+                selected
+            } else {
+                next
+            }
+        )
+    );
+    assert!(state.modal_dialog().is_none());
+    assert_eq!(*fixture.sessions.lock().unwrap(), processes);
+    assert_eq!(fixture.creates.load(Ordering::SeqCst), 0);
+    let saved = saved_metadata_listing(state, binding);
+    assert_eq!(
+        saved
+            .iter()
+            .find(|saved| saved["identity"] == identity)
+            .unwrap()["state"]["lifecycle"],
+        "settled"
+    );
+}
+
+#[rstest]
+#[case::settled("session.settle", None)]
+#[case::archived("session.archive", None)]
+#[case::snoozed("session.snooze", Some("4102444800"))]
+fn settling_last_active_work_opens_a_draft_in_its_directory(
+    directory: assert_fs::TempDir,
+    #[case] park: &str,
+    #[case] extra: Option<&str>,
+) {
+    let mut state = two_live_saved_sessions(directory.path()).state;
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let mut arguments = vec!["sibling".to_owned()];
+    arguments.extend(extra.map(str::to_owned));
+    let parked = saved_metadata_command(&mut state, park, arguments, binding);
+    assert!(matches!(parked, CommandOutcome::Success { .. }));
+    let outcome = submit_command_as(
+        &mut state,
+        CommandInvocation::from_action("settle_session", Caller::Keybinding),
+        Caller::Keybinding,
+        Instant::now(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
+        panic!("the last active session opens a new draft");
+    };
+    assert_eq!(
+        dialog.spec().selected_project.as_deref(),
+        Some(directory.path().to_str().unwrap())
+    );
+}
+
+#[rstest]
+fn background_and_failed_settlement_keep_the_current_session(directory: assert_fs::TempDir) {
+    let mut state = two_live_saved_sessions(directory.path()).state;
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let background = targeted(
+        "session.settle",
+        vec!["sibling".to_owned()],
+        binding.clone(),
+    );
+    let outcome = submit_command_as(&mut state, background, Caller::Internal, Instant::now());
+    assert!(matches!(outcome, CommandOutcome::Success { .. }));
+    assert_eq!(state.mux().selected_session(), Some("backend-id"));
+    assert!(state.modal_dialog().is_none());
+    let database = Connection::open(directory.path().join("session-order.sqlite3")).unwrap();
+    database.execute_batch("CREATE TRIGGER reject_lifecycle BEFORE DELETE ON workspace_sessions BEGIN SELECT RAISE(ABORT, 'injected state write failure'); END;").unwrap();
+    let outcome = submit_command_as(
+        &mut state,
+        CommandInvocation::from_action("settle_session", Caller::Keybinding),
+        Caller::Keybinding,
+        Instant::now(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(state.mux().selected_session(), Some("backend-id"));
+    assert!(state.modal_dialog().is_none());
+    assert_eq!(
+        saved_metadata_listing(&mut state, binding)[0]["state"]["lifecycle"],
+        "active"
+    );
+}
+
+#[rstest]
+fn automatic_settlement_keeps_the_current_session(directory: assert_fs::TempDir) {
+    let mut state = two_live_saved_sessions(directory.path()).state;
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let activity = targeted(
+        "session.activity",
+        vec!["saved".to_owned(), "0".to_owned()],
+        binding.clone(),
+    );
+    let outcome = submit_command_as(&mut state, activity, Caller::Internal, Instant::now());
+    assert!(matches!(outcome, CommandOutcome::Success { .. }));
+    state.update_frame(frames::idle_frame(
+        Instant::now().checked_add(Duration::from_secs(61)).unwrap(),
+    ));
+    assert_eq!(
+        saved_metadata_listing(&mut state, binding)[0]["state"]["lifecycle"],
+        "settled"
+    );
+    assert_eq!(state.mux().selected_session(), Some("backend-id"));
+    assert!(state.modal_dialog().is_none());
+}
+
 #[rstest]
 fn current_session_actions_use_the_issued_saved_session_and_preserve_other_space_focus(
     directory: assert_fs::TempDir,
@@ -5304,7 +5530,7 @@ fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
 #[rstest]
 #[case::closed(false)]
 #[case::live(true)]
-fn deletion_removes_closed_history_and_rejects_live_sessions(
+fn deletion_closes_live_sessions_before_removing_saved_history(
     directory: assert_fs::TempDir,
     #[case] attached: bool,
 ) {
@@ -5312,6 +5538,7 @@ fn deletion_removes_closed_history_and_rejects_live_sessions(
         config,
         backends,
         mut state,
+        sessions,
         ..
     } = saved_lifecycle_workspace(directory.path(), attached);
     let binding = listed_spaces(&mut state)[0].2.clone();
@@ -5322,24 +5549,47 @@ fn deletion_removes_closed_history_and_rejects_live_sessions(
         vec!["saved".to_owned()],
         binding.clone(),
     );
-    let expected = if attached {
-        assert!(
-            matches!(outcome, CommandOutcome::Failed { .. }),
-            "{outcome:?}"
-        );
-        before
-    } else {
-        assert!(
-            matches!(outcome, CommandOutcome::Success { .. }),
-            "{outcome:?}"
-        );
-        vec![before[1].clone()]
-    };
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    assert!(sessions.lock().unwrap().is_empty());
+    let expected = vec![before[1].clone()];
     assert_eq!(saved_metadata_listing(&mut state, binding), expected);
     drop(state);
     let mut reopened = app_state(config, backends);
     let binding = listed_spaces(&mut reopened)[0].2.clone();
     assert_eq!(saved_metadata_listing(&mut reopened, binding), expected);
+}
+
+#[rstest]
+fn failed_session_close_preserves_the_saved_session_on_delete(directory: assert_fs::TempDir) {
+    let fixture = saved_lifecycle_workspace(directory.path(), true);
+    let mut provider = restore_provider(
+        MuxBackendKind::Tmux,
+        Arc::clone(&fixture.sessions),
+        Arc::clone(&fixture.creates),
+    );
+    provider.fail_commands = true;
+    drop(fixture.state);
+    let mut state = app_state(
+        fixture.config,
+        registry([Arc::new(provider)], [MuxBackendKind::Tmux]),
+    );
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let before = saved_metadata_listing(&mut state, binding.clone());
+    let outcome = saved_metadata_command(
+        &mut state,
+        "session.delete",
+        vec!["saved".to_owned()],
+        binding.clone(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Failed { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(saved_metadata_listing(&mut state, binding), before);
+    assert_eq!(fixture.sessions.lock().unwrap().len(), 1);
 }
 
 fn git(cwd: &Path, args: &[&str]) {

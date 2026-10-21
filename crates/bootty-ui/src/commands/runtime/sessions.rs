@@ -13,8 +13,8 @@ use bootty_mux::{
 };
 
 use super::{
-    CommandDispatch, PendingCommandResult, command_outcome_for_mux_error, command_outcome_message,
-    serialized_command_outcome,
+    CommandDispatch, PendingAppCommand, PendingCommandResult, command_outcome_for_mux_error,
+    command_outcome_message, serialized_command_outcome,
 };
 use crate::{
     commands::{ExactMuxTarget, SessionAction},
@@ -214,6 +214,10 @@ impl AppState {
 
     /// Create or close a session in the target's Space, leaving selection, focus and the active
     /// Space alone, or list the Spaces.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One dispatcher prepares exact session operations and their checkpoint boundary"
+    )]
     pub(super) fn dispatch_session_command(
         &mut self,
         action: SessionAction,
@@ -221,6 +225,17 @@ impl AppState {
         exact_target: Option<ExactMuxTarget>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
+        if action == SessionAction::Delete
+            && let Some(ExactMuxTarget::Binding(scope)) = &exact_target
+            && let [identity] = arguments
+            && let Some(session) = self
+                .workspace
+                .binding(*scope)
+                .and_then(|binding| binding.session_attachment(identity))
+                .map(|session| session.id.clone())
+        {
+            return self.delete_live_session(*scope, identity, session, execution);
+        }
         if action == SessionAction::InspectSpace
             && let Some(ExactMuxTarget::Binding(scope)) = exact_target
         {
@@ -772,6 +787,11 @@ impl AppState {
             .pending
             .iter()
             .any(|pending| match &pending.result {
+                PendingCommandResult::SessionDelete {
+                    scope: pending_scope,
+                    identity: pending_identity,
+                    ..
+                } => *pending_scope == scope && pending_identity == identity,
                 PendingCommandResult::Mux {
                     scope: pending_scope,
                     membership: Some(membership),
@@ -779,6 +799,69 @@ impl AppState {
                 } => *pending_scope == scope && membership.identity() == identity,
                 _ => false,
             })
+    }
+
+    fn delete_live_session(
+        &mut self,
+        scope: SpaceId,
+        identity: &str,
+        session: String,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let (deadline, cancellation) = executor::command_execution(execution);
+        match self.dispatch_session_command(
+            SessionAction::Close,
+            &[],
+            Some(ExactMuxTarget::Session(scope, session)),
+            Some((deadline, cancellation.clone())),
+        ) {
+            CommandDispatch::Complete(outcome) => {
+                CommandDispatch::Complete(self.finish_session_delete(scope, identity, outcome))
+            }
+            CommandDispatch::Pending(result) => {
+                CommandDispatch::Pending(PendingCommandResult::SessionDelete {
+                    scope,
+                    identity: identity.to_owned(),
+                    command: Box::new(PendingAppCommand {
+                        creation_receipt: None,
+                        label: "Close session before deleting".to_owned(),
+                        user_initiated_annotation_capture: false,
+                        deadline,
+                        cancellation,
+                        response: None,
+                        result,
+                    }),
+                })
+            }
+        }
+    }
+
+    pub(super) fn finish_session_delete(
+        &mut self,
+        scope: SpaceId,
+        identity: &str,
+        outcome: CommandOutcome,
+    ) -> CommandOutcome {
+        let CommandOutcome::Success { warnings, .. } = outcome else {
+            return outcome;
+        };
+        // Closing already admitted the mutation. A failed delete keeps the now-closed saved work.
+        let CommandDispatch::Complete(mut deleted) =
+            self.saved_session_metadata(SessionAction::Delete, scope, &[identity.to_owned()], None)
+        else {
+            return CommandOutcome::Failed {
+                code: "session_state_failed".to_owned(),
+                message: "The closed session could not be deleted".to_owned(),
+            };
+        };
+        if let CommandOutcome::Success {
+            warnings: deleted_warnings,
+            ..
+        } = &mut deleted
+        {
+            deleted_warnings.extend(warnings);
+        }
+        deleted
     }
 
     pub(crate) fn saved_session_invocation(

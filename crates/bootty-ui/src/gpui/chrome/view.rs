@@ -481,7 +481,7 @@ impl GpuiChrome {
                 let mut rows = sidebar::session_menu(target, *options);
                 rows.extend(sidebar::place_menu(target.scope, place));
                 if let Some(task) = task {
-                    rows.extend(sidebar::saved_session_menu(task, *now, true, *working));
+                    rows.extend(sidebar::saved_session_menu(task, *now, *working));
                 }
                 rows
             }
@@ -494,7 +494,7 @@ impl GpuiChrome {
                 let mut rows = sidebar::detached_session_menu(target);
                 rows.extend(sidebar::place_menu(target.scope, place));
                 if let Some(task) = task {
-                    rows.extend(sidebar::saved_session_menu(task, *now, false, false));
+                    rows.extend(sidebar::saved_session_menu(task, *now, false));
                 }
                 rows
             }
@@ -1005,7 +1005,7 @@ pub(super) fn popup_session_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     menu = popup_focus_context(menu, owner, cx);
-    let (task, mut snooze) = match context {
+    let (task, snooze) = match context {
         ContextMenu::Session { task, now, .. } | ContextMenu::DetachedSession { task, now, .. } => {
             (
                 task.as_ref(),
@@ -1020,66 +1020,151 @@ pub(super) fn popup_session_menu(
         }
         _ => return popup_menu(menu, context, owner),
     };
+    let mut project = Vec::new();
+    let mut more = Vec::new();
+    let mut destructive = Vec::new();
     for row in GpuiChrome::menu_rows(context) {
-        if matches!(&row.intent, ChromeIntent::Command(invocation) if matches!(invocation.command.as_str(), "session.archive" | "session.unarchive"))
-            && let Some(task) = task
-            && !task.state.deleted
-        {
-            let task = task.clone();
-            let owner = owner.clone();
-            menu = menu.submenu("Auto-settle behavior", window, cx, move |mut menu, _, _| {
-                for (label, enabled) in [("Use inactivity setting", true), ("Keep active", false)] {
-                    let mut invocation = bootty_control::CommandInvocation::new(
-                        "session.auto_settle",
-                        vec![task.identity.clone(), enabled.to_string()],
-                        bootty_control::Caller::Internal,
-                    );
-                    invocation.target.clone_from(&task.binding);
-                    let owner = owner.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(label)
-                            .checked(enabled != task.state.auto_settle_disabled)
-                            .disabled(task.pending)
-                            .on_click(move |_, _, cx| {
-                                _ = owner.update(cx, |_, cx| {
-                                    cx.emit(ChromeIntent::Command(invocation.clone()));
-                                });
-                            }),
-                    );
-                }
-                menu
+        match &row.intent {
+            ChromeIntent::NewSessionInProject { .. }
+            | ChromeIntent::RevealPath { .. }
+            | ChromeIntent::CopyText(_)
+            | ChromeIntent::RunProjectScript { .. } => project.push(row),
+            ChromeIntent::SessionContext {
+                action: super::SessionContextAction::MoveToSpace,
+                ..
+            }
+            | ChromeIntent::ForkConversation(_) => more.push(row),
+            ChromeIntent::Command(invocation)
+                if invocation.command.starts_with("agents.native.") =>
+            {
+                more.push(row);
+            }
+            ChromeIntent::Command(invocation)
+                if matches!(
+                    invocation.command.as_str(),
+                    "session.archive" | "session.unarchive" | "session.delete"
+                ) =>
+            {
+                destructive.push(row);
+            }
+            ChromeIntent::Commands(invocations)
+                if invocations.first().is_some_and(|invocation| {
+                    matches!(
+                        invocation.command.as_str(),
+                        "session.archive" | "session.delete"
+                    )
+                }) =>
+            {
+                destructive.push(row);
+            }
+            _ => menu = append_menu_row(menu, row, owner),
+        }
+    }
+    if !snooze.is_empty() {
+        let owner = owner.clone();
+        menu = menu.submenu_with_icon(
+            Some(gpui_kit::component::Icon::new(
+                gpui_kit::assets::IconName::Clock,
+            )),
+            "Snooze",
+            window,
+            cx,
+            move |menu, _, _| append_menu_rows(menu, &snooze, &owner),
+        );
+    }
+    if !project.is_empty() {
+        let owner = owner.clone();
+        menu = menu
+            .separator()
+            .submenu("Project", window, cx, move |menu, window, cx| {
+                popup_project_actions(menu, &project, &owner, window, cx)
             });
-        }
-        // Snooze goes before Archive.
-        if (matches!(&row.intent, ChromeIntent::Command(invocation) if matches!(invocation.command.as_str(), "session.archive" | "session.unarchive"))
-            || matches!(&row.intent, ChromeIntent::Commands(invocations) if invocations.first().is_some_and(|invocation| invocation.command == "session.archive")))
-            && !snooze.is_empty()
-        {
-            let rows = std::mem::take(&mut snooze);
-            let owner = owner.clone();
-            menu = if rows.iter().all(|row| !row.enabled) {
-                menu.item(
-                    PopupMenuItem::new("Snooze")
-                        .icon(gpui_kit::assets::IconName::Clock)
-                        .disabled(true),
-                )
-            } else {
-                menu.submenu_with_icon(
-                    Some(gpui_kit::component::Icon::new(
-                        gpui_kit::assets::IconName::Clock,
-                    )),
-                    "Snooze",
-                    window,
-                    cx,
-                    move |menu, _, _| {
-                        rows.iter()
-                            .cloned()
-                            .fold(menu, |menu, row| append_menu_row(menu, row, &owner))
-                    },
-                )
+    }
+    let auto_settle = task.filter(|task| !task.state.deleted).cloned();
+    if !more.is_empty() || auto_settle.is_some() {
+        let owner = owner.clone();
+        menu = menu.submenu("More", window, cx, move |menu, window, cx| {
+            let menu = append_menu_rows(menu, &more, &owner);
+            let Some(task) = &auto_settle else {
+                return menu;
             };
-        }
+            popup_auto_settle(menu.separator(), task, &owner, window, cx)
+        });
+    }
+    for row in destructive {
         menu = append_menu_row(menu, row, owner);
+    }
+    menu
+}
+
+fn popup_auto_settle(
+    menu: PopupMenu,
+    task: &SidebarTask,
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let owner = owner.clone();
+    let task = task.clone();
+    menu.submenu("Auto-settle behavior", window, cx, move |mut menu, _, _| {
+        for (label, enabled) in [("Use inactivity setting", true), ("Keep active", false)] {
+            let mut invocation = bootty_control::CommandInvocation::new(
+                "session.auto_settle",
+                vec![task.identity.clone(), enabled.to_string()],
+                bootty_control::Caller::Internal,
+            );
+            invocation.target.clone_from(&task.binding);
+            let owner = owner.clone();
+            menu = menu.item(
+                PopupMenuItem::new(label)
+                    .checked(enabled != task.state.auto_settle_disabled)
+                    .disabled(task.pending)
+                    .on_click(move |_, _, cx| {
+                        _ = owner.update(cx, |_, cx| {
+                            cx.emit(ChromeIntent::Command(invocation.clone()));
+                        });
+                    }),
+            );
+        }
+        menu
+    })
+}
+
+fn append_menu_rows(
+    menu: PopupMenu,
+    rows: &[MenuRow],
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+) -> PopupMenu {
+    rows.iter()
+        .cloned()
+        .enumerate()
+        .fold(menu, |menu, (index, mut row)| {
+            row.starts_group &= index != 0;
+            append_menu_row(menu, row, owner)
+        })
+}
+
+fn popup_project_actions(
+    mut menu: PopupMenu,
+    rows: &[MenuRow],
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let mut copy = Vec::new();
+    for mut row in rows.iter().cloned() {
+        if matches!(row.intent, ChromeIntent::CopyText(_)) {
+            copy.push(row);
+        } else {
+            row.starts_group = false;
+            menu = append_menu_row(menu, row, owner);
+        }
+    }
+    if !copy.is_empty() {
+        let owner = owner.clone();
+        menu = menu.submenu("Copy", window, cx, move |menu, _, _| {
+            append_menu_rows(menu, &copy, &owner)
+        });
     }
     menu
 }

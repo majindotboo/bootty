@@ -3,4 +3,6 @@
 # workspace run open for 22 minutes. Report a test as slow after 30s and kill it
 # once it has been slow four times over, so a wedge costs two minutes, not a run.
 [profile.default]
+# Provider fixtures start child processes; more workers saturate macOS executable assessment.
+test-threads = 8
 slow-timeout = { period = "30s", terminate-after = 4 }

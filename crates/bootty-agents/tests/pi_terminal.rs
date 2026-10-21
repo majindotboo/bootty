@@ -52,14 +52,20 @@ fn launch() -> AgentLaunch {
     }
 }
 
-fn connection(observer: &PiTerminalObserver) -> io::Result<Connection> {
-    let arguments = observer.arguments();
-    let extension = arguments.get(1).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "Pi launch requires extension path",
-        )
-    })?;
+fn connection(arguments: &[String]) -> io::Result<Connection> {
+    let extension = arguments
+        .windows(2)
+        .find(|pair| {
+            pair.first()
+                .is_some_and(|argument| argument == "--extension")
+        })
+        .and_then(|pair| pair.get(1))
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Pi launch requires extension path",
+            )
+        })?;
     serde_json::from_slice(&fs::read(
         PathBuf::from(extension).with_file_name("connection.json"),
     )?)
@@ -127,7 +133,7 @@ fn launch_preserves_literal_arguments_and_owns_only_private_runtime_files() {
     for file in [
         extension.clone(),
         runtime.join("connection.json"),
-        connection(&observer).unwrap().socket_path,
+        connection(&observer.arguments()).unwrap().socket_path,
     ] {
         assert_eq!(
             fs::metadata(file).unwrap().permissions().mode() & 0o777,
@@ -160,7 +166,7 @@ fn native_snapshots_report_exact_identity_and_activity(
         }),
     )
     .unwrap();
-    let connection = connection(&observer).unwrap();
+    let connection = connection(&observer.arguments()).unwrap();
     send(
         &connection,
         &encode(&snapshot(&connection, activity)).unwrap(),
@@ -192,7 +198,7 @@ fn untrusted_or_unbounded_events_cannot_publish_activity(#[case] invalid: Invali
         }),
     )
     .unwrap();
-    let connection = connection(&observer).unwrap();
+    let connection = connection(&observer.arguments()).unwrap();
     let mut event = snapshot(&connection, "working");
     match invalid {
         InvalidSnapshot::WrongToken => event["token"] = "unrelated-launch".into(),
@@ -241,7 +247,7 @@ fn native_session_switches_publish_new_identity_on_the_same_owned_channel() {
         }),
     )
     .unwrap();
-    let connection = connection(&observer).unwrap();
+    let connection = connection(&observer.arguments()).unwrap();
     send(
         &connection,
         &encode(&snapshot(&connection, "working")).unwrap(),
@@ -395,4 +401,78 @@ fn working_duration_tracks_live_transitions_without_restarting_on_updates(
     let activity = restored.activity(&target).unwrap();
     assert_eq!(activity.status, TerminalAgentStatus::Unavailable);
     assert_eq!(activity.working_elapsed, None);
+}
+
+fn retirement_target(generation: u64) -> CommandTarget {
+    CommandTarget {
+        kind: ResourceKind::Terminal,
+        handle: "host-issued-retirement-terminal".to_owned(),
+        generation,
+    }
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn exact_retirement_preserves_observed_identity_and_commits_before_publication(
+    #[case] initially_failed_commit: bool,
+) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().join("terminals.json");
+    let service = Arc::new(TerminalAgentService::open(&path).unwrap());
+    let prepared = service.prepare(AgentKind::Pi, launch()).unwrap();
+    let connection = connection(&prepared.argv()).unwrap();
+    service
+        .register(prepared, retirement_target(1), "binding".to_owned())
+        .unwrap();
+    let (changed, published) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = changed.send(());
+    }));
+    let observation = snapshot(&connection, "working");
+    let session = observation["sessionId"].as_str().unwrap();
+    send(&connection, &encode(&observation).unwrap()).unwrap();
+    published
+        .recv()
+        .expect("native snapshot commits before retirement");
+    let before = serde_json::to_value(service.records()).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert!(service.retire(&retirement_target(2)).is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    assert_eq!(serde_json::to_value(service.records()).unwrap(), before);
+    if initially_failed_commit {
+        let preserved = directory.path().join("preserved.json");
+        fs::rename(&path, &preserved).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(service.retire(&retirement_target(1)).is_err());
+        assert_eq!(serde_json::to_value(service.records()).unwrap(), before);
+        fs::remove_dir(&path).unwrap();
+        fs::rename(preserved, &path).unwrap();
+    }
+    assert_eq!(
+        service.live_session(AgentKind::Pi, session, "binding", None),
+        Some(retirement_target(1))
+    );
+    assert_eq!(
+        service.live_session(AgentKind::Pi, session, "another-binding", None),
+        None
+    );
+    assert_eq!(
+        service.live_session(AgentKind::Pi, session, "binding", Some("/another-account")),
+        None
+    );
+    let retired = service.retire(&retirement_target(1)).unwrap();
+    assert_eq!(retired.observation.status, TerminalAgentStatus::Stopped);
+    assert_eq!(retired.observation.session_id.as_deref(), Some(session));
+    let persisted: Vec<bootty_agents::TerminalAgentRecord> =
+        serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        serde_json::to_value(persisted).unwrap(),
+        serde_json::to_value(service.records()).unwrap()
+    );
+    drop(service);
+    let restored = TerminalAgentService::open(path).unwrap();
+    let activity = restored.activity(&retirement_target(1)).unwrap();
+    assert_eq!(activity.status, TerminalAgentStatus::Stopped);
+    assert_eq!(activity.session_id.as_deref(), Some(session));
 }

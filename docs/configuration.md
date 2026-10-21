@@ -710,8 +710,10 @@ chat from it. Command-click (Control-click on Linux and Windows) chooses several
 sessions and Shift-click a range; right-click one of them to pin, settle, snooze,
 mark unread, archive or delete them together. Escape, a plain click or returning to
 the terminal lets go. Archive retains saved work, asks first
-when the session is working, and offers Undo; Delete permanently removes a
-closed session's saved record and requires confirmation.
+when the session is working, and offers Undo; Delete asks for confirmation,
+closes the session's terminals and permanently removes its saved record. A failed
+close keeps the saved record. Project tools live under **Project** in a session's
+menu; title, unread, side chat, moving and auto-settle actions live under **More**.
 
 Open **Settings → Projects** to add a registered folder, open its settings, or
 remove its registration. Removal preserves files and existing sessions.
@@ -754,7 +756,11 @@ every host and reports what each removed and kept. It asks for confirmation from
 the CLI and socket.
 
 `settle_session` settles the exact current saved session without closing its
-terminal. `toggle_session_pin` pins it, or unpins it when already pinned, and
+terminal. Settling the session you are viewing from the sidebar, palette or a
+shortcut opens the next active session in sidebar order, wrapping to the top.
+If none remain, it opens the new-session form in the settled session's directory.
+Settling another session, automatic settlement, and CLI or socket commands preserve
+your selection. `toggle_session_pin` pins it, or unpins it when already pinned, and
 `archive_session` archives it. All three are in the palette. Every preset binds:
 
 | Command                | macOS         | Linux and Windows  |

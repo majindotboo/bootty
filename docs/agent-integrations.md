@@ -371,6 +371,9 @@ Other conversations and drafts show no voice button.
 Speech notifications and conversation errors offer **Copy details** for the original
 diagnostic. A conversation that failed because its provider account needs signing
 in also offers **Sign in**, which runs the same sign-in flow as Settings.
+Model capacity and usage-limit failures appear in the transcript with **Retry**.
+Retry sends the failed turn's message and attachments again; an edited draft stays
+in place until it is sent or cleared.
 
 Claude loads the connectors of the Claude account it signs in with, the same ones
 Claude Desktop has; Bootty passes only its own tool server beside them. A Claude

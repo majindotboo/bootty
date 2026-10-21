@@ -812,16 +812,9 @@ impl PendingSessionCheckpoint {
                 PendingCapture::Queued(response) => {
                     response.receive_for("checkpoint terminal", Duration::from_secs(5))?
                 }
-                // The budget starts with this capture, not with the queue of panes before it.
-                PendingCapture::Backend(capture) => {
-                    let (sender, receiver) = mpsc::channel();
-                    std::thread::spawn(move || {
-                        let _ = sender.send(capture());
-                    });
-                    receiver
-                        .recv_timeout(Duration::from_secs(5))
-                        .context("Backend pane capture did not finish within 5 seconds")?
-                }
+                // Network captures already run off the UI thread. Keep ownership until the
+                // backend answers so later checkpoints cannot overlap an abandoned request.
+                PendingCapture::Backend(capture) => capture(),
             }
             .map_err(anyhow::Error::msg)?;
             capture.text = bootty_terminal::terminal_history::sanitize_history(&capture.text)?;

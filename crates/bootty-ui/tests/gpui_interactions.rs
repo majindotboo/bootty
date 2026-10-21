@@ -1406,28 +1406,28 @@ fn session_menus_offer_the_sessions_place(cx: &mut TestAppContext) {
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     let row = center(cx.debug_bounds("sidebar-row-session").expect("session row"));
-    // Rename and Move to Space come first, then the session's place.
+    // Project tools and copy actions stay in their own submenus.
     for (keys, expected) in [
         (
-            "down down down enter",
+            "down down right enter",
             ChromeIntent::NewSessionInProject {
                 scope: target().scope,
                 path: "/tmp/project".to_owned(),
             },
         ),
         (
-            "down down down down enter",
+            "down down right down enter",
             ChromeIntent::RevealPath {
                 scope: target().scope,
                 path: "/tmp/project".to_owned(),
             },
         ),
         (
-            "down down down down down enter",
+            "down down right down down right enter",
             ChromeIntent::CopyText("/tmp/project".to_owned()),
         ),
         (
-            "down down down down down down enter",
+            "down down right down down right down enter",
             ChromeIntent::CopyText("feature/rail".to_owned()),
         ),
     ] {
@@ -1474,14 +1474,14 @@ fn disabled_session_context_action_is_a_keyboard_noop(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn session_menu_keeps_only_rename_and_move_before_saved_lifecycle_actions(cx: &mut TestAppContext) {
+fn session_menu_groups_move_to_space_under_more(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let (probe, cx) = cx.add_window_view(ChromeProbe::new);
     let row = cx.debug_bounds("sidebar-row-session").unwrap();
     for (keys, action) in [
         ("down enter", bootty_gpui::SessionContextAction::Rename),
         (
-            "down down enter",
+            "down down right enter",
             bootty_gpui::SessionContextAction::MoveToSpace,
         ),
         (
@@ -3478,11 +3478,11 @@ fn saved_task_keyboard_menu_captures_binding_identity_and_absolute_snooze(cx: &m
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     let row = cx.debug_bounds("sidebar-row-session").expect("saved row");
     for (position, preset, command, deadline) in [
-        (3, None, "session.pin", None),
-        (4, None, "session.settle", None),
-        (7, None, "session.archive", None),
-        (6, Some(0), "session.snooze", Some("4600")),
-        (6, Some(1), "session.snooze", Some("11800")),
+        (2, None, "session.pin", None),
+        (3, None, "session.settle", None),
+        (6, None, "session.archive", None),
+        (4, Some(0), "session.snooze", Some("4600")),
+        (4, Some(1), "session.snooze", Some("11800")),
     ] {
         cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
         draw_chrome(cx);
@@ -3534,11 +3534,11 @@ fn native_task_menu_captures_the_conversation_generation(cx: &mut TestAppContext
     for kind in [SidebarRowKind::Session, SidebarRowKind::DetachedSession] {
         for (keys, expected) in [
             (
-                "down down down enter",
+                "down down down down down right down enter",
                 ChromeIntent::Command(regenerate.clone()),
             ),
             (
-                "down down down down down enter",
+                "down down down down down right down down down enter",
                 ChromeIntent::ForkConversation(target.clone()),
             ),
         ] {
@@ -3597,7 +3597,7 @@ fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
                 ..SessionState::default()
             },
             0,
-            4,
+            3,
             "session.activate",
         ),
         (
@@ -3606,7 +3606,7 @@ fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
                 ..SessionState::default()
             },
             2,
-            4,
+            3,
             "session.unarchive",
         ),
         (
@@ -3615,7 +3615,7 @@ fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
                 ..SessionState::default()
             },
             3,
-            5,
+            4,
             "session.unsnooze",
         ),
     ] {
@@ -4454,7 +4454,9 @@ fn permanent_session_deletion_requires_the_visible_confirmation(cx: &mut TestApp
     let capture = holder.clone();
     let (_, visual) = cx.add_window_view(move |window, cx| {
         let probe = cx.new(|cx| {
-            ChromeProbe::with_snapshot(saved_task_snapshot(SessionState::default()), window, cx)
+            let mut snapshot = saved_task_snapshot(SessionState::default());
+            snapshot.sidebar.as_mut().unwrap().rows[0].kind = SidebarRowKind::Session;
+            ChromeProbe::with_snapshot(snapshot, window, cx)
         });
         *capture.borrow_mut() = Some(probe.clone());
         gpui_kit::component::Root::new(probe, window, cx)
@@ -4463,7 +4465,7 @@ fn permanent_session_deletion_requires_the_visible_confirmation(cx: &mut TestApp
     let row = visual.debug_bounds("sidebar-row-session").unwrap();
     visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
     draw_chrome(visual);
-    for _ in 0..8 {
+    for _ in 0..7 {
         visual.simulate_keystrokes("down");
     }
     visual.simulate_keystrokes("enter");
@@ -4504,7 +4506,7 @@ fn archiving_a_working_session_asks_first(cx: &mut TestAppContext) {
         let row = visual.debug_bounds("sidebar-row-session").unwrap();
         visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
         draw_chrome(visual);
-        for _ in 0..7 {
+        for _ in 0..6 {
             visual.simulate_keystrokes("down");
         }
         visual.simulate_keystrokes("enter");

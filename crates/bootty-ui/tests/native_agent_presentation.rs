@@ -3141,43 +3141,48 @@ fn failed_turns_retry_by_sending_their_message_again(cx: &mut TestAppContext) {
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
     });
-    let mut record = saved_record("idle");
-    record.snapshot.error = Some("stream disconnected before completion".into());
-    let prompt = record
-        .snapshot
-        .transcript
-        .iter()
-        .rfind(|item| item.role == "user")
-        .map(|item| item.text.clone())
-        .expect("a sent message");
-    let (sender, commands) = native_command_sender(&record);
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            NativeAgentSessionView::new(
-                record,
-                sender.for_caller(Caller::Internal),
-                true,
-                window,
-                cx,
-            )
+    for status in ["idle", "error"] {
+        let mut record = saved_record(status);
+        record.snapshot.error =
+            Some("Selected model is at capacity. Please try a different model".into());
+        let prompt = record
+            .snapshot
+            .transcript
+            .iter()
+            .rfind(|item| item.role == "user")
+            .map(|item| item.text.clone())
+            .expect("a sent message");
+        let (sender, commands) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
         });
-        gpui_kit::component::Root::new(view, window, cx)
-    });
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    let retry = visual.debug_bounds("native-retry-turn").expect("retry");
-    visual.simulate_click(retry.center(), Modifiers::none());
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    let sent = commands
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|invocation| invocation.command == "agents.native.prompt")
-        .map(|invocation| invocation.arguments[2].clone())
-        .collect::<Vec<_>>();
-    assert_eq!(sent, [prompt]);
-    assert!(visual.debug_bounds("native-retry-turn").is_none());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(visual.debug_bounds("native-turn-failure:The turn failed. This model is at capacity. Retry or choose another model.").is_some());
+        assert!(visual.debug_bounds("conversation-recover-error").is_none());
+        let retry = visual.debug_bounds("native-retry-turn").expect("retry");
+        visual.simulate_click(retry.center(), Modifiers::none());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let sent = commands
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|invocation| invocation.command == "agents.native.prompt")
+            .map(|invocation| invocation.arguments[2].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(sent, [prompt]);
+        assert!(visual.debug_bounds("native-retry-turn").is_none());
+    }
 }
 
 /// A message that steered a running turn stays inside that turn: it says so, and the turn rail
@@ -3224,7 +3229,13 @@ fn steering_messages_stay_inside_their_turn(cx: &mut TestAppContext) {
     visual.simulate_click(steer.center(), Modifiers::none());
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(visual.debug_bounds("native-steered-steer").is_some());
+    let caption = visual.debug_bounds("native-steered-steer").unwrap();
+    let bubble = visual.debug_bounds("native-message-body-steer").unwrap();
+    assert_eq!(
+        caption.right(),
+        bubble.right(),
+        "the delivery caption shares the bubble's trailing edge"
+    );
 }
 
 /// A sent message comes back to the composer to change and send again.

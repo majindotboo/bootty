@@ -6,7 +6,10 @@ use std::{
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
 };
-use bootty_mux::{controller::SpaceId, executor};
+use bootty_mux::{
+    controller::{CommandSelection, SpaceId},
+    executor,
+};
 use serde_json::json;
 
 use super::{
@@ -640,6 +643,7 @@ impl AppState {
             viewport,
             effects,
             Some((deadline, cancellation.clone())),
+            CommandSelection::Preserve,
         ) {
             CommandDispatch::Complete(outcome) => {
                 match self.finish_surface_creation(id, &outcome, effects) {
@@ -687,6 +691,7 @@ impl AppState {
             viewport,
             effects,
             Some((deadline, cancellation.clone())),
+            CommandSelection::Preserve,
         ) {
             CommandDispatch::Complete(outcome) => self
                 .continue_restored_surface(request.id, choice, caller, deadline, outcome, effects),
@@ -805,6 +810,7 @@ impl AppState {
             ViewportSnapshot::default(),
             effects,
             Some((deadline, cancellation.clone())),
+            CommandSelection::Preserve,
         ) {
             CommandDispatch::Complete(created) => {
                 let accepted = if matches!(created, CommandOutcome::Success { .. }) {

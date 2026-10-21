@@ -1706,7 +1706,14 @@ impl NativeAgentSessionView {
         }
         // A turn waiting on an approval can't take a steer yet; the service holds one until it
         // can, so the composer sends in either follow-up mode.
-        (self.record.snapshot.status == NativeSessionStatus::Idle
+        ((self.record.snapshot.status == NativeSessionStatus::Idle
+            || (self.record.snapshot.status == NativeSessionStatus::Error
+                && self
+                    .record
+                    .snapshot
+                    .error
+                    .as_deref()
+                    .is_some_and(crate::error_catalog::retryable_model_error)))
             && !self.record.permissions_pending
             && !self.resuming())
             || is_busy(self.record.snapshot.status)
@@ -2879,7 +2886,7 @@ impl NativeAgentSessionView {
         Some(
             div()
                 .debug_selector(move || selector)
-                .h_8()
+                .h_6()
                 .flex()
                 .items_center()
                 .when(item.steered, gpui_kit::Styled::justify_end)
@@ -3368,13 +3375,12 @@ impl NativeAgentSessionView {
         });
         // Reserve the metadata lane so hover/focus never moves the transcript.
         div()
-            .h_8()
+            .h_6()
             .w_full()
             .flex()
             .items_center()
             .when(item.role == "user", gpui_kit::Styled::justify_end)
             .gap_2()
-            .children(self.delivery_caption(item, cx))
             .children(self.render_unfolded_turn_duration(item, cx))
             .child(
                 div()
@@ -3432,6 +3438,7 @@ impl NativeAgentSessionView {
                         },
                     ),
             )
+            .children(self.delivery_caption(item, cx))
     }
 
     /// On a prompt, rewinding to before it; on a turn's last reply, the files it changed, from the
@@ -4140,21 +4147,25 @@ impl NativeAgentSessionView {
             )
     }
 
-    fn render_error_recovery(&self, cx: &Context<Self>) -> impl IntoElement {
+    fn error_recovery_message(&self) -> Option<(String, Option<String>)> {
         // The view writes its own messages for people; the provider's error passes the catalog.
-        let message = self
-            .error
+        self.error
             .clone()
             .filter(|_| !self.record.snapshot.provider_writer_blocked())
             .map(|message| (message, None))
             .or_else(|| {
                 self.command_error
                     .clone()
+                    .filter(|(_, details)| {
+                        !crate::error_catalog::retryable_model_error(details)
+                            || self.turn_failure().is_none()
+                    })
                     .map(|(message, details)| (message, Some(details)))
             })
             .or_else(|| {
                 // A failed turn shows where it ended; only a provider that stopped shows here.
                 (self.record.snapshot.status == NativeSessionStatus::Error
+                    && self.turn_failure().is_none()
                     && !self.record.snapshot.transport_lost
                     && !self.record.snapshot.provider_archived()
                     && !self.record.snapshot.provider_writer_blocked())
@@ -4172,7 +4183,11 @@ impl NativeAgentSessionView {
                         }),
                 )
                 .flatten()
-            });
+            })
+    }
+
+    fn render_error_recovery(&self, cx: &Context<Self>) -> impl IntoElement {
+        let message = self.error_recovery_message();
         let provider = self.record.config.provider;
         // The error sits in the message column, above the composer it belongs to.
         div().w_full().flex().justify_center().px_4().when_some(
@@ -4248,7 +4263,11 @@ impl NativeAgentSessionView {
     pub(super) fn turn_failure(&self) -> Option<String> {
         let snapshot = &self.record.snapshot;
         (self.subagent.is_none()
-            && snapshot.status != NativeSessionStatus::Error
+            && (snapshot.status != NativeSessionStatus::Error
+                || snapshot
+                    .error
+                    .as_deref()
+                    .is_some_and(crate::error_catalog::retryable_model_error))
             && !snapshot.transport_lost
             && !snapshot.provider_archived()
             && !snapshot.provider_writer_blocked())
@@ -4423,7 +4442,6 @@ impl NativeAgentSessionView {
                                 let message = message.clone();
                                 move || format!("native-turn-failure:{message}")
                             })
-                            .flex_1()
                             .min_w_0()
                             .text_color(cx.theme().danger)
                             .child(message),

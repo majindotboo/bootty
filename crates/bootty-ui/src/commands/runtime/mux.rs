@@ -145,6 +145,9 @@ impl AppState {
             PendingCommandResult::NativePanelFocus {
                 command: pending, ..
             }
+            | PendingCommandResult::SessionDelete {
+                command: pending, ..
+            }
             | PendingCommandResult::NativePanelClose {
                 command: pending, ..
             }

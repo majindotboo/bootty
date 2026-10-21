@@ -55,7 +55,7 @@ use bootty_mux::repository::BindingMembershipMutation;
 use bootty_mux::{
     RepaintHandle,
     command::MuxCommand,
-    controller::{MuxCommandError, MuxCommandResult, SpaceId},
+    controller::{CommandSelection, MuxCommandError, MuxCommandResult, SpaceId},
     executor,
     provider::PaneTopology,
     workspace::{StartingSession, WorkspaceRuntime},
@@ -133,6 +133,11 @@ struct ResolvedCommandContext {
 }
 
 pub enum PendingCommandResult {
+    SessionDelete {
+        scope: SpaceId,
+        identity: String,
+        command: Box<PendingAppCommand>,
+    },
     NativePanelFocus {
         target: CommandTarget,
         command: Box<PendingAppCommand>,
@@ -546,6 +551,7 @@ impl AppState {
                 }
             }
             PendingCommandResult::NativePanelFocus { command, .. }
+            | PendingCommandResult::SessionDelete { command, .. }
             | PendingCommandResult::NativePanelClose { command, .. }
             | PendingCommandResult::SurfaceCreation { command, .. }
             | PendingCommandResult::SurfaceRestore { command, .. } => {
@@ -691,6 +697,7 @@ impl AppState {
                     viewport,
                     effects,
                     Some((request.deadline, request.cancellation.clone())),
+                    CommandSelection::Follow,
                 );
                 self.last_error = previous_error;
                 dispatch
@@ -872,6 +879,10 @@ impl AppState {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "One match routes every pending command to its completion owner"
+    )]
     fn poll_started_pending_command(
         &mut self,
         pending: &mut PendingAppCommand,
@@ -879,6 +890,16 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
     ) -> Poll<Option<CommandOutcome>> {
         let outcome = match &mut pending.result {
+            PendingCommandResult::SessionDelete {
+                scope,
+                identity,
+                command,
+            } => {
+                let outcome = ready!(self.poll_pending_app_command(command, now, effects));
+                return Poll::Ready(
+                    outcome.map(|outcome| self.finish_session_delete(*scope, identity, outcome)),
+                );
+            }
             PendingCommandResult::SessionCheckpointClose { .. }
             | PendingCommandResult::SessionStart { .. }
             | PendingCommandResult::SessionAgentAssociation { .. }
@@ -1011,6 +1032,21 @@ impl AppState {
         viewport: ViewportSnapshot,
         effects: &mut Vec<AppEffect>,
     ) -> CommandOutcome {
+        self.dispatch_command_with_selection(
+            invocation,
+            viewport,
+            effects,
+            CommandSelection::Follow,
+        )
+    }
+
+    pub(crate) fn dispatch_command_with_selection(
+        &mut self,
+        invocation: CommandInvocation,
+        viewport: ViewportSnapshot,
+        effects: &mut Vec<AppEffect>,
+        selection: CommandSelection,
+    ) -> CommandOutcome {
         let user_initiated_annotation_capture = user_initiated_annotation_capture(&invocation);
         let label = self
             .commands
@@ -1042,7 +1078,9 @@ impl AppState {
             || invocation.command.starts_with("computer.");
         let (deadline, cancellation) = executor::command_execution(None);
         let execution = asynchronous.then(|| (deadline, cancellation.clone()));
-        match self.dispatch_command_with_execution(invocation, viewport, effects, execution) {
+        match self
+            .dispatch_command_with_execution(invocation, viewport, effects, execution, selection)
+        {
             CommandDispatch::Complete(outcome) => outcome,
             CommandDispatch::Pending(result) => {
                 self.commands.pending.push(PendingAppCommand {
@@ -1110,7 +1148,19 @@ impl AppState {
         viewport: ViewportSnapshot,
         effects: &mut Vec<AppEffect>,
         execution: Option<(Instant, CommandCancellation)>,
+        selection: CommandSelection,
     ) -> CommandDispatch {
+        let settlement_navigation = (selection == CommandSelection::Follow
+            && !matches!(
+                invocation.caller,
+                Caller::Cli | Caller::Socket | Caller::Luau
+            )
+            && matches!(
+                invocation.command.as_str(),
+                "settle_session" | "session.settle"
+            ))
+        .then(|| self.session_settlement_navigation())
+        .flatten();
         let title = self
             .commands
             .catalog
@@ -1124,6 +1174,11 @@ impl AppState {
             Err(outcome) => self.reject_command(outcome),
         };
         self.commands.title = outer;
+        if let (Some(navigation), CommandDispatch::Complete(outcome)) =
+            (settlement_navigation, &dispatch)
+        {
+            self.advance_after_session_settlement(navigation, outcome, effects);
+        }
         dispatch
     }
 

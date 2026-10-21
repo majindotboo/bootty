@@ -147,6 +147,16 @@ pub fn needs_sign_in(message: &str) -> bool {
     lower.contains("not logged in") || lower.contains("sign in") || lower.contains("unauthorized")
 }
 
+/// A provider rejected this model request; another explicit attempt can use the same process.
+#[must_use]
+pub fn retryable_model_error(message: &str) -> bool {
+    let message = bootty_agents::native_error_message(message).to_ascii_lowercase();
+    !message.starts_with("agent process ended")
+        && ["at capacity", "overloaded", "rate limit", "usage limit"]
+            .iter()
+            .any(|cause| message.contains(cause))
+}
+
 /// A cause people can act on, recognized in a failure's text.
 fn known_cause(message: &str) -> Option<&'static str> {
     let message = bootty_agents::native_error_message(message);
@@ -170,6 +180,9 @@ fn known_cause(message: &str) -> Option<&'static str> {
     }
     if lower.contains("rate limit") || lower.contains("usage limit") {
         return Some("The provider's usage limit was reached. Retry when it resets.");
+    }
+    if lower.contains("at capacity") || lower.contains("overloaded") {
+        return Some("This model is at capacity. Retry or choose another model.");
     }
     if lower.contains("current voice call") {
         return Some("Wait for the current voice call to end before starting another.");
