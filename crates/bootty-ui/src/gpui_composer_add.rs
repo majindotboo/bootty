@@ -2,7 +2,7 @@
 use super::*;
 use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
-    Disableable as _, Sizable as _,
+    Disableable as _,
     button::{Button, ButtonVariants as _},
     menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
 };
@@ -46,7 +46,6 @@ impl ComposerCompletion {
         let button = Button::new(id)
             .debug_selector(move || id.into())
             .icon(IconName::Plus)
-            .small()
             .ghost()
             .accessibility_label("Add to message")
             .element_tooltip("Add to message")

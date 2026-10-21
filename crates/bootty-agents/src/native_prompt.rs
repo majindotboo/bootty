@@ -7,11 +7,12 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const MAX_NATIVE_PROMPT_IMAGES: usize = 4;
+// Images use the existing prompt attachment count; bytes stay bounded independently.
+pub const MAX_NATIVE_PROMPT_IMAGES: usize = crate::MAX_NATIVE_PROMPT_ATTACHMENTS;
 pub const MAX_NATIVE_PROMPT_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_NATIVE_PROMPT_TEXT_BYTES: usize = 64 * 1024;
 const MAX_NATIVE_PROMPT_CITATIONS: usize = 16;
-// Four validated PNGs fit in 8 MiB raw / 11.2 MiB base64. Revisit only for a supported
+// Admitted PNGs fit in 8 MiB raw / 11.2 MiB base64. Revisit only for a supported
 // provider format requiring a larger bounded envelope; ordinary control records stay at 1 MiB.
 pub const MAX_NATIVE_IMAGE_ENVELOPE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DECODE_BYTES: usize = 64 * 1024 * 1024;
@@ -170,6 +171,7 @@ pub struct NativePrompt {
     files: Vec<NativePromptFile>,
     attachment_references: Vec<crate::NativeAttachmentReference>,
     citations: Vec<crate::NativeResponseCitation>,
+    review_comments: Vec<crate::NativeReviewComment>,
     skills: Vec<crate::NativeCompletionOption>,
     applications: Vec<crate::NativeApplicationMention>,
     provider_mentions: Vec<crate::NativeProviderMention>,
@@ -187,6 +189,8 @@ pub struct SavedNativePrompt {
     images: Vec<(NativeImageReference, Vec<u8>)>,
     pub(crate) attachments: Vec<crate::NativeAttachmentReference>,
     citations: Vec<crate::NativeResponseCitation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) review_comments: Vec<crate::NativeReviewComment>,
     applications: Vec<crate::NativeApplicationMention>,
     #[serde(default)]
     provider_mentions: Vec<crate::NativeProviderMention>,
@@ -200,6 +204,7 @@ impl SavedNativePrompt {
             &self.text,
             &self.citations,
             &self.attachments,
+            &self.review_comments,
         )
     }
 
@@ -220,6 +225,7 @@ impl SavedNativePrompt {
                 .collect(),
             attachments: prompt.attachment_references.clone(),
             citations: prompt.citations.clone(),
+            review_comments: prompt.review_comments.clone(),
             applications: prompt.applications.clone(),
             provider_mentions: prompt.provider_mentions.clone(),
             mentioned_conversations: prompt.mentioned_conversations.clone(),
@@ -240,11 +246,12 @@ impl SavedNativePrompt {
                 NativePromptImage::from_host_png(reference.clone(), png.clone())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        NativePrompt::new_with_context(
+        NativePrompt::new_with_review_comments(
             self.text.clone(),
             images,
             attachments,
             self.citations.clone(),
+            self.review_comments.clone(),
         )?
         .with_attachment_ranges(
             self.attachments
@@ -276,10 +283,24 @@ impl NativePrompt {
         attachments: NativePromptAttachments,
         citations: Vec<crate::NativeResponseCitation>,
     ) -> Result<Self, String> {
+        Self::new_with_review_comments(text, images, attachments, citations, Vec::new())
+    }
+
+    /// Construct a submission with structured review comments attached to inline chips.
+    /// # Errors
+    /// Rejects invalid comments or references and the same aggregate prompt budgets.
+    pub fn new_with_review_comments(
+        text: String,
+        images: Vec<NativePromptImage>,
+        attachments: NativePromptAttachments,
+        citations: Vec<crate::NativeResponseCitation>,
+        review_comments: Vec<crate::NativeReviewComment>,
+    ) -> Result<Self, String> {
+        crate::native_review_comments::validate(&text, &review_comments)?;
         if text.len() > MAX_NATIVE_PROMPT_TEXT_BYTES
             || citations.len() > MAX_NATIVE_PROMPT_CITATIONS
         {
-            return Err("Native prompts require text or up to four PNGs within 64 KiB text / 8 MiB image limits".to_owned());
+            return Err("Native prompts exceed the text or citation limit".to_owned());
         }
         let mut end = 0;
         let mut ranges = citations
@@ -300,6 +321,7 @@ impl NativePrompt {
             files: Vec::new(),
             attachment_references: Vec::new(),
             citations,
+            review_comments,
             skills: Vec::new(),
             applications: Vec::new(),
             provider_mentions: Vec::new(),
@@ -311,6 +333,7 @@ impl NativePrompt {
             && prompt.images.is_empty()
             && prompt.files.is_empty()
             && prompt.citations.is_empty()
+            && prompt.review_comments.is_empty()
         {
             return Err("Native prompts require text or an attachment".to_owned());
         }
@@ -347,6 +370,11 @@ impl NativePrompt {
     #[must_use]
     pub fn citations(&self) -> &[crate::NativeResponseCitation] {
         &self.citations
+    }
+
+    #[must_use]
+    pub fn review_comments(&self) -> &[crate::NativeReviewComment] {
+        &self.review_comments
     }
 
     /// Attach references admitted by this session's native attachment store.
@@ -423,6 +451,11 @@ impl NativePrompt {
             .citations
             .iter()
             .filter_map(|citation| citation.prompt_range.clone())
+            .chain(
+                self.review_comments
+                    .iter()
+                    .map(|comment| comment.prompt_range.clone()),
+            )
             .collect::<Vec<_>>();
         for (id, ranges) in ranges {
             let reference = self
@@ -756,7 +789,9 @@ impl NativePrompt {
                 .sum::<usize>()
                 > MAX_NATIVE_PROMPT_IMAGE_BYTES
         {
-            return Err("Native prompts support up to four PNGs within 8 MiB total".to_owned());
+            return Err(format!(
+                "Native prompts support up to {MAX_NATIVE_PROMPT_IMAGES} PNGs within 8 MiB total"
+            ));
         }
         Ok(())
     }
@@ -820,6 +855,7 @@ impl NativePrompt {
             message.push_str("\n</application_mentions>");
         }
         crate::native_citations::append_citation_context(&mut message, &self.citations)?;
+        crate::native_review_comments::append_context(&mut message, &self.review_comments)?;
         if let Some(quoted) = &self.mentioned_conversations {
             message.push_str("\n\n<mentioned_conversations>\n");
             message.push_str(quoted);

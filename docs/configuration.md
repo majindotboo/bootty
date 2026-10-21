@@ -829,9 +829,8 @@ the macOS Ghostty preset and Cmd+Shift+E in the macOS Bootty/Tmux presets.
 Toggle Right Dock defaults to Cmd+Option+B on macOS and Ctrl+Alt+B elsewhere.
 Existing custom keybindings are preserved.
 
-Settings → Panels offers an optional status bar button (none, top, bottom) for
-Sessions, Files, Changes and Diff. Panel placement is fixed. Legacy `dock`
-preferences and Agents button preferences remain loadable but have no effect.
+The top bar owns panel controls. Legacy panel `dock` and `button` preferences
+remain loadable but have no effect.
 
 The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
 underline, pill, outline, or segmented tabs; close-button side (left/right); and
@@ -869,15 +868,11 @@ commits and changes since its base (`git.write-pull-request REPOSITORY BASE`).
 
 The header shows the branch's pull request, with its state and checks, from the host's
 `gh` account (`git.pull-request`); it opens among the pull requests. Sidebar rows and a
-conversation's context card show the same pull request, asked about once a minute for
+conversation's details panel show the same pull request, asked about once a minute for
 the selected session and every five minutes for the rest. The branch list has a search,
 shows each branch's distance from its upstream, and switches from a tree with changes by
 stashing them first, untracked files included (`git.branch-stash-switch`); the stash
-stays for you to apply. A conversation's composer shows its branch and switches the
-checkout from a menu of recent local branches. Git errors stay visible in the
-panel. The message box remains disabled while its command is running. When the
-branch has an upstream, the header fetches, and shows ↓ and ↑ counts that pull
-(fast-forward only) and push (never forced) the commits the two don't share.
+stays for you to apply.
 
 CLI/socket/keybinding callers use the same commands: `git.open REPOSITORY`,
 `git.status REPOSITORY`, `git.diff REPOSITORY PATH staged|unstaged|untracked [show|ignore]`,
@@ -1183,9 +1178,10 @@ Shift+Tab toggles plan mode (`ui.composer.toggle-plan`) when the provider offers
 Ctrl+Alt+F toggles fast mode (`ui.composer.toggle-fast`) for a model that offers it,
 Ctrl+Alt+D and Ctrl+Alt+V start dictation (`ui.composer.dictate`) and voice mode
 (`ui.composer.voice`), and Ctrl+Alt+I moves focus back to the composer
-(`ui.composer.focus-composer`). Ctrl+Alt+E (`ui.composer.expand`), or the expand button
-beside the attach button, gives the composer the transcript's room to write in;
-Escape or sending shrinks it back. Cmd+S (Ctrl+S elsewhere, `ui.composer.stash`) puts
+(`ui.composer.focus-composer`), also bound to Cmd+L on macOS and Ctrl+L elsewhere.
+Ctrl+Alt+E (`ui.composer.expand`), also available in the command palette, gives the
+composer the transcript's room to write in. The shrink button, Escape, or sending
+shrinks it back. Cmd+S (Ctrl+S elsewhere, `ui.composer.stash`) puts
 the composer's words aside, in a stash any conversation can use; on an empty
 composer it brings the newest stashed prompt back. The bookmark badge beside the
 controls lists the stash, and choosing a prompt brings it back. Attachments stay in
@@ -1216,12 +1212,19 @@ diagram in the theme's colors; one still streaming, or one Mermaid can't draw, s
 source, with the reason. An ```` ```html ```` block offers to open the page in your
 browser from a private file. Code blocks highlight the languages agents write most,
 SQL included.
-`agents.transcript-width` sets how wide messages run: `"normal"` (default, 48rem),
-`"wide"` (72rem), or `"full"`. In a wide window the conversation details card
-sits in the margin beside centered messages, and moves them aside only when it
-would cover them. The card names the project, the conversation's directory (with a
+`agents.transcript-width` sets how wide messages run: `"wide"` (default, 72rem),
+`"normal"` (48rem), or `"full"`. In a wide window the conversation details card
+sits beside the messages. Narrow conversations open it from the details button in
+the existing top bar. Context usage remains a read-only indicator in the composer.
+The card names its project and directory (with a
 copy button, and a worktree tag in a linked worktree), the branch, its pull request by
 number and title (which opens it), and the provider, model and effort.
+Asynchronous questions stay above the composer until you respond, with selectable
+options and a separate custom-answer choice. New questions raise an in-app notice;
+background questions also follow the agent notification preference. Steering a
+running turn preserves your reading position. The composer uses one primary
+button, switching between Stop and Send as a draft is entered.
+
 `agents.collapse-composer-on-scroll` defaults to true; an empty, unfocused composer
 folds to one line while reading older turns, and opens when focused. Drafts and
 attachments keep the composer expanded.

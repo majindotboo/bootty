@@ -32,6 +32,8 @@ mod native_mcp_apps;
 mod native_models;
 mod native_pi;
 mod native_prompt;
+mod native_review_comments;
+pub use native_review_comments::NativeReviewComment;
 mod native_protocol;
 mod native_rate_limits;
 mod native_subagents;

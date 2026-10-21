@@ -434,20 +434,6 @@ palette = [
   # "#cba6f7",
 ]
 
-# Optional tool buttons: none/top/bottom. Sessions live on the left; tools on the right.
-
-[panels.sessions]
-button = "none"
-
-[panels.files]
-button = "none"
-
-[panels.changes]
-button = "none"
-
-[panels.diff]
-button = "none"
-
 # Agent launch preferences. Credentials remain in the provider's own account store.
 [agents]
 # Parents can control only shells/native children created under this exact live grant.
@@ -457,7 +443,7 @@ quick-model = "gpt-6-luna" # names sessions, writes commit messages and PR text
 follow-up-behavior = "queue" # queue | steer | interrupt
 send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
 response-streaming = "live" # live | paragraph | complete
-transcript-width = "normal" # normal | wide | full
+transcript-width = "wide" # normal | wide | full
 collapse-composer-on-scroll = true
 
 [agents.codex]

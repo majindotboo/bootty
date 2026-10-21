@@ -19,6 +19,12 @@ pub const UI_RADIUS_LG: f32 = 8.0;
 pub const UI_CONTROL_HEIGHT: f32 = 28.0;
 /// Height of the tab bar container, which is also the window's titlebar row.
 pub const UI_TAB_BAR_HEIGHT: f32 = 40.0;
+/// Shared spacing between every window header control, including fitted status items.
+pub const UI_HEADER_GAP: gpui_kit::Rems = gpui_kit::rems(0.25);
+/// Icon button size shared by header controls and their reserved layout slots.
+pub const UI_HEADER_CONTROL_SIZE: gpui_kit::Rems = gpui_kit::rems(2.0);
+/// Inset between the window edge (or native window controls) and header content.
+pub const UI_HEADER_EDGE_PADDING: gpui_kit::Rems = gpui_kit::rems(0.5);
 
 /// Height of a standard list row.
 pub const UI_ROW_HEIGHT: f32 = 28.0;

@@ -24,28 +24,30 @@ pub fn display_prompt_citations(
     text: &str,
     citations: &[NativeResponseCitation],
     attachments: &[crate::NativeAttachmentReference],
+    review_comments: &[crate::NativeReviewComment],
 ) -> String {
-    display_prompt(text, citations, attachments, false)
+    display_prompt(text, citations, attachments, review_comments, false)
 }
 
 pub fn queued_prompt_preview(
     text: &str,
     citations: &[NativeResponseCitation],
     attachments: &[crate::NativeAttachmentReference],
+    review_comments: &[crate::NativeReviewComment],
 ) -> String {
-    display_prompt(text, citations, attachments, true)
+    display_prompt(text, citations, attachments, review_comments, true)
 }
 
 fn display_prompt(
     text: &str,
     citations: &[NativeResponseCitation],
     attachments: &[crate::NativeAttachmentReference],
+    review_comments: &[crate::NativeReviewComment],
     omit_images: bool,
 ) -> String {
     let mut replacements = citations
         .iter()
-        .enumerate()
-        .filter_map(|(ix, citation)| {
+        .filter_map(|citation| {
             let range = citation.prompt_range.as_ref()?;
             (text.get(range.clone()) == Some("[quote]")).then(|| {
                 let label = if omit_images {
@@ -55,11 +57,26 @@ fn display_prompt(
                         citation.comment.clone()
                     }
                 } else {
-                    citation_label(citation, ix)
+                    citation.comment.clone()
                 };
                 (range.clone(), label)
             })
         })
+        .chain(
+            review_comments
+                .iter()
+                .filter(|comment| text.get(comment.prompt_range.clone()) == Some("[review]"))
+                .map(|comment| {
+                    (
+                        comment.prompt_range.clone(),
+                        if omit_images {
+                            format!("{}: {}", comment.label(), comment.body)
+                        } else {
+                            String::new()
+                        },
+                    )
+                }),
+        )
         .chain(attachments.iter().flat_map(|attachment| {
             attachment
                 .prompt_ranges
@@ -101,27 +118,6 @@ fn display_prompt(
         }
     }
     display
-}
-
-fn citation_label(citation: &NativeResponseCitation, ix: usize) -> String {
-    let label = if citation.comment.trim().is_empty() {
-        &citation.quote
-    } else {
-        &citation.comment
-    };
-    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
-    let label = label
-        .chars()
-        .take(40)
-        .flat_map(|ch| {
-            if matches!(ch, '\\' | '[' | ']' | '*' | '_' | '`') {
-                vec!['\\', ch]
-            } else {
-                vec![ch]
-            }
-        })
-        .collect::<String>();
-    format!("[❝ {label}](bootty-citation:{ix})")
 }
 
 impl NativeResponseCitation {

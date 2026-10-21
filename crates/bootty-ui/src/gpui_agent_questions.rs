@@ -1,14 +1,16 @@
-//! Async questions are transcript content; their answers use the ordinary prompt path.
+//! Async questions use the ordinary prompt path and preserve the conversation's draft.
 use bootty_agents::NativeAsyncQuestion;
 use bootty_control::CommandTarget;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _,
-    button::Button,
+    ActiveTheme as _, Disableable as _, ElementExt as _, Sizable as _,
+    button::{Button, ButtonVariants as _},
     input::{InputEvent, Textarea, TextareaState},
+    radio::{Radio, RadioGroup},
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Window, div,
+    AppContext as _, Context, Entity, EventEmitter, Focusable as _, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, ScrollHandle, SharedString, Styled as _, Window, div,
+    prelude::*,
 };
 
 pub(super) struct AsyncQuestionAnswer {
@@ -22,7 +24,9 @@ pub(super) struct AsyncQuestionsView {
     item: String,
     questions: Vec<NativeAsyncQuestion>,
     answers: Vec<Entity<TextareaState>>,
+    selections: Vec<Option<usize>>,
     enabled: bool,
+    scroll: ScrollHandle,
 }
 
 impl AsyncQuestionsView {
@@ -39,11 +43,27 @@ impl AsyncQuestionsView {
                 let answer = cx.new(|cx| {
                     TextareaState::new(window, cx)
                         .auto_grow(1, 6)
-                        .submit_on_enter(false)
+                        .submit_on_enter(true)
                 });
-                cx.subscribe(&answer, |_, _, _: &InputEvent, cx| cx.notify())
-                    .detach();
+                cx.subscribe(&answer, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::PressEnter { shift: false, .. }) {
+                        this.submit(cx);
+                    }
+                    cx.notify();
+                })
+                .detach();
                 answer
+            })
+            .collect();
+        let scroll = ScrollHandle::new();
+        let selections = questions
+            .iter()
+            .map(|question| {
+                question
+                    .options
+                    .as_ref()
+                    .filter(|options| !options.is_empty())
+                    .map(|_| 0)
             })
             .collect();
         Self {
@@ -51,7 +71,9 @@ impl AsyncQuestionsView {
             item,
             questions,
             answers,
+            selections,
             enabled: true,
+            scroll,
         }
     }
 
@@ -66,6 +88,22 @@ impl AsyncQuestionsView {
         }
     }
 
+    fn answer(&self, ix: usize, cx: &Context<Self>) -> String {
+        self.selections
+            .get(ix)
+            .copied()
+            .flatten()
+            .and_then(|selected| self.questions.get(ix)?.options.as_ref()?.get(selected))
+            .map_or_else(
+                || {
+                    self.answers.get(ix).map_or_else(String::new, |answer| {
+                        answer.read(cx).value().trim().to_owned()
+                    })
+                },
+                Clone::clone,
+            )
+    }
+
     fn render_question(
         &self,
         ix: usize,
@@ -73,65 +111,112 @@ impl AsyncQuestionsView {
         answer: &Entity<TextareaState>,
         cx: &Context<Self>,
     ) -> impl IntoElement {
+        let options = question.options.as_deref().unwrap_or_default();
+        let selected = self.selections.get(ix).copied().flatten();
+        let count = options.len();
         div()
             .flex()
             .flex_col()
             .gap_2()
             .child(div().text_sm().child(question.title.clone()))
-            .child(div().flex().flex_wrap().gap_1().children(
-                question.options.iter().flatten().map(|option| {
-                    let answer = answer.clone();
-                    let value = option.clone();
-                    Button::new(SharedString::from(format!(
-                        "async-option:{}:{ix}:{option}",
+            .when(!options.is_empty(), |body| {
+                body.child(
+                    RadioGroup::vertical(SharedString::from(format!(
+                        "async-choices:{}:{ix}",
                         self.item
                     )))
-                    .debug_selector({
-                        let id = self.item.clone();
-                        let value = value.clone();
-                        move || format!("async-option:{id}:{ix}:{value}")
-                    })
-                    .small()
-                    .outline()
-                    .label(option.clone())
-                    .selected(answer.read(cx).value().as_ref() == option.as_str())
+                    .w_full()
                     .disabled(!self.enabled)
-                    .on_click(move |_, window, cx| {
-                        answer.update(cx, |answer, cx| answer.set_value(value.clone(), window, cx));
-                    })
-                }),
-            ))
-            .child(
-                div()
-                    .debug_selector({
-                        let id = self.item.clone();
-                        move || format!("async-input:{id}:{ix}")
-                    })
+                    .selected_index(Some(selected.unwrap_or(count)))
+                    .children(options.iter().map(|option| {
+                        let id = format!("async-option:{}:{ix}:{option}", self.item);
+                        Radio::new(SharedString::from(id.clone()))
+                            .small()
+                            .py_2()
+                            .px_2()
+                            .w_full()
+                            .accessibility_label(option.clone())
+                            .child(
+                                div()
+                                    .debug_selector(move || id)
+                                    .flex_1()
+                                    .text_sm()
+                                    .child(option.clone()),
+                            )
+                    }))
                     .child(
-                        Textarea::new(answer)
-                            .context_menu(crate::gpui::text_menu(answer))
-                            .aria_label(question.title.clone())
-                            .disabled(!self.enabled),
-                    ),
-            )
+                        Radio::new(SharedString::from(format!(
+                            "async-other:{}:{ix}",
+                            self.item
+                        )))
+                        .small()
+                        .py_2()
+                        .px_2()
+                        .accessibility_label("Write an answer…")
+                        .child(
+                            div().text_sm().child("Write an answer…").debug_selector({
+                                let id = self.item.clone();
+                                move || format!("async-other:{id}:{ix}")
+                            }),
+                        ),
+                    )
+                    .on_change(cx.listener(
+                        move |this, index: &usize, window, cx| {
+                            if let Some(selection) = this.selections.get_mut(ix) {
+                                *selection = (*index < count).then_some(*index);
+                            }
+                            if *index == count
+                                && let Some(answer) = this.answers.get(ix)
+                            {
+                                answer.read(cx).focus_handle(cx).focus(window, cx);
+                            }
+                            cx.notify();
+                        },
+                    )),
+                )
+            })
+            .when(selected.is_none(), |body| {
+                body.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "async-input:{}:{ix}",
+                            self.item
+                        )))
+                        .on_prepaint({
+                            let answer = answer.clone();
+                            let scroll = self.scroll.clone();
+                            move |bounds, window, cx| {
+                                if answer.read(cx).focus_handle(cx).is_focused(window) {
+                                    reveal_answer(&scroll, bounds, window);
+                                }
+                            }
+                        })
+                        .debug_selector({
+                            let id = self.item.clone();
+                            move || format!("async-input:{id}:{ix}")
+                        })
+                        .child(
+                            Textarea::new(answer)
+                                .context_menu(crate::gpui::text_menu(answer))
+                                .aria_label("Your answer")
+                                .disabled(!self.enabled),
+                        ),
+                )
+            })
     }
 
     fn submit(&self, cx: &mut Context<Self>) {
-        if !self.enabled
-            || self
-                .answers
-                .iter()
-                .any(|answer| answer.read(cx).value().trim().is_empty())
-        {
+        let answers: Vec<_> = (0..self.questions.len())
+            .map(|ix| self.answer(ix, cx))
+            .collect();
+        if !self.enabled || answers.iter().any(String::is_empty) {
             return;
         }
         let text = self
             .questions
             .iter()
-            .zip(&self.answers)
-            .map(|(question, answer)| {
-                format!("{}\n{}", question.title, answer.read(cx).value().trim())
-            })
+            .zip(answers)
+            .map(|(question, answer)| format!("{}\n{answer}", question.title))
             .collect::<Vec<_>>()
             .join("\n\n");
         cx.emit(AsyncQuestionAnswer {
@@ -145,39 +230,87 @@ impl AsyncQuestionsView {
 impl EventEmitter<AsyncQuestionAnswer> for AsyncQuestionsView {}
 impl Render for AsyncQuestionsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let empty = self
-            .answers
-            .iter()
-            .any(|answer| answer.read(cx).value().trim().is_empty());
+        let empty = (0..self.questions.len()).any(|ix| self.answer(ix, cx).is_empty());
         div()
+            .id(SharedString::from(format!("async-questions:{}", self.item)))
             .debug_selector({
                 let id = self.item.clone();
                 move || format!("async-questions:{id}")
             })
+            .w_full()
+            .min_h_0()
+            .max_h_full()
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .p_3()
             .border_1()
-            .border_color(cx.theme().border)
-            .rounded(cx.theme().radius)
-            .children(
-                self.questions
-                    .iter()
-                    .zip(&self.answers)
-                    .enumerate()
-                    .map(|(ix, (question, answer))| self.render_question(ix, question, answer, cx)),
+            .border_color(cx.theme().primary.opacity(0.5))
+            .rounded_lg()
+            .bg(cx.theme().popover)
+            .child(
+                div()
+                    .flex_none()
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().primary)
+                    .child("Your input"),
             )
             .child(
-                Button::new("send-answer")
-                    .debug_selector({
-                        let id = self.item.clone();
-                        move || format!("async-answer:{id}")
-                    })
-                    .small()
-                    .label("Send answer")
-                    .disabled(!self.enabled || empty)
-                    .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                div()
+                    .id("question-content")
+                    .track_scroll(&self.scroll)
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .gap_4()
+                    .children(self.questions.iter().zip(&self.answers).enumerate().map(
+                        |(ix, (question, answer))| self.render_question(ix, question, answer, cx),
+                    )),
             )
+            .child(
+                div().flex_none().flex().justify_end().child(
+                    Button::new("send-answer")
+                        .debug_selector({
+                            let id = self.item.clone();
+                            move || format!("async-answer:{id}")
+                        })
+                        .primary()
+                        .label("Send answer")
+                        .disabled(!self.enabled || empty)
+                        .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
+                ),
+            )
+    }
+}
+
+/// Keep a focused answer in its own scroll region after its bounds are known.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Finite measured scroll geometry is adjusted to a visible edge"
+)]
+fn reveal_answer(
+    scroll: &ScrollHandle,
+    bounds: gpui_kit::Bounds<gpui_kit::Pixels>,
+    window: &mut Window,
+) {
+    let viewport = scroll.bounds();
+    if viewport.size.height <= gpui_kit::px(0.) {
+        return;
+    }
+    let delta = if bounds.size.height >= viewport.size.height || bounds.bottom() > viewport.bottom()
+    {
+        viewport.bottom() - bounds.bottom()
+    } else if bounds.top() < viewport.top() {
+        viewport.top() - bounds.top()
+    } else {
+        return;
+    };
+    if delta != gpui_kit::px(0.) {
+        let mut offset = scroll.offset();
+        offset.y += delta;
+        scroll.set_offset(offset);
+        window.refresh();
     }
 }

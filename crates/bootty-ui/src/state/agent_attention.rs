@@ -57,7 +57,7 @@ pub(super) struct AgentNotifications {
     observed: HashMap<(AgentKind, AgentPaneKey), u64>,
     acknowledgements: HashMap<(AgentKind, AgentPaneKey), u64>,
     /// Each native conversation's last seen generation and status.
-    native: HashMap<String, (u64, NativeSessionStatus)>,
+    native: HashMap<String, (u64, NativeSessionStatus, Option<String>)>,
     /// Conversations already sent `agents.native.seen` for their current unread turn.
     native_seen: std::collections::HashSet<String>,
     /// Each observed terminal agent's last status, by its terminal target and generation.
@@ -541,10 +541,23 @@ impl AppState {
                 .agent_notifications
                 .native
                 .get(&activity.id)
-                .filter(|(generation, _)| *generation == activity.generation)
-                .map(|(_, status)| *status);
-            seen.insert(activity.id.clone(), (activity.generation, activity.status));
-            let Some(event) = before.and_then(|before| native_event(before, activity)) else {
+                .filter(|(generation, _, _)| *generation == activity.generation);
+            let event = if activity.pending_question.is_some()
+                && before.is_some_and(|(_, _, question)| *question != activity.pending_question)
+            {
+                Some("Needs input")
+            } else {
+                before.and_then(|(_, status, _)| native_event(*status, activity))
+            };
+            seen.insert(
+                activity.id.clone(),
+                (
+                    activity.generation,
+                    activity.status,
+                    activity.pending_question.clone(),
+                ),
+            );
+            let Some(event) = event else {
                 continue;
             };
             if self.config().session.agent_notifications.allows(visible) {

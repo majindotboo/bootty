@@ -898,6 +898,23 @@ fn captured_provider_delegation_keeps_account_and_ancestor_authority(
     };
     assert!(parent.authorize_spawn(&forged).is_err());
     let protocol = ToolProtocol::new(parent.clone());
+    let catalog = protocol
+        .handle(
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+            Instant::now(),
+            &record(Arc::default()),
+        )
+        .unwrap();
+    let spawn = catalog["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "spawn_agent")
+        .unwrap();
+    assert_eq!(
+        spawn["inputSchema"]["properties"]["provider"]["enum"],
+        json!([provider])
+    );
     let response = call(
         &protocol,
         "list_providers",

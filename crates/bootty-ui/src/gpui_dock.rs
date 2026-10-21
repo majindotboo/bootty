@@ -204,6 +204,7 @@ pub struct WorkspaceDock {
     center_task: Option<String>,
     restored_agent_destination: Option<(String, String, String)>,
     document_context: Rc<RefCell<GitPanelContext>>,
+    pub(crate) navigation: Entity<crate::gpui_dock_skin::WorkspaceNavigation>,
     pub(crate) titlebar: Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
     pub(crate) motion: Rc<RefCell<motion::DockMotion>>,
     /// The initial terminal window adapter; subsequent windows have distinct center panels.
@@ -266,6 +267,14 @@ impl WorkspaceDock {
                 cx,
             );
             DockArea::new("workspace", Some(8), window, cx).with_renderer(skin)
+        });
+        let navigation = cx.new(|cx| {
+            crate::gpui_dock_skin::WorkspaceNavigation::new(
+                dock_owner.clone(),
+                &area,
+                chrome.clone(),
+                cx,
+            )
         });
         let titlebar = cx.new(|cx| {
             crate::gpui_dock_skin::WorkspaceTitleBar::new(chrome.clone(), dock_owner, &area, cx)
@@ -345,6 +354,7 @@ impl WorkspaceDock {
             document_context,
             area,
             titlebar,
+            navigation,
             motion,
             terminal: terminal_panel,
             attachment,
@@ -571,6 +581,16 @@ impl WorkspaceDock {
         terminal: Option<&CommandTarget>,
     ) -> bool {
         self.target == *target && self.panels.context.terminal.as_ref() == terminal
+    }
+
+    pub(crate) fn set_conversation(
+        &self,
+        conversation: Option<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.panels
+            .changes
+            .update(cx, |changes, cx| changes.set_conversation(conversation, cx));
     }
 
     /// Shows `contents`, a Git diff, in the session's Changes panel, titled `title`.
@@ -1202,6 +1222,11 @@ impl WorkspaceDock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if kind == bootty_config::config::PanelKind::Changes {
+            self.panels
+                .changes
+                .update(cx, |changes, cx| changes.open_review(window, cx));
+        }
         let panel = self.tool_panel(kind);
         let id = panel.panel_id(cx);
         let home = if kind == bootty_config::config::PanelKind::Sessions {
@@ -1661,11 +1686,18 @@ impl WorkspaceDock {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bootty_control::CommandOutcome {
-        let node = node.or_else(|| {
-            group_paths(self.area.read(cx))
-                .into_iter()
-                .find_map(|(path, node)| path.starts_with("right").then_some(node))
-        });
+        let node = node
+            .or_else(|| {
+                self.focused_group.filter(|node| {
+                    crate::gpui_dock_skin::group_placement(self.area.read(cx), *node)
+                        == Some(DockPlacement::Right)
+                })
+            })
+            .or_else(|| {
+                group_paths(self.area.read(cx))
+                    .into_iter()
+                    .find_map(|(path, node)| path.starts_with("right").then_some(node))
+            });
         let Some(node) = node else {
             return bootty_control::CommandOutcome::Unavailable {
                 message: "Open a right-hand panel first.".into(),

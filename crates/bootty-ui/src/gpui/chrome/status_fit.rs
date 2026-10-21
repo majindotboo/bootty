@@ -1,17 +1,33 @@
-//! Fit whole status controls into the header; omitted controls have no hitboxes.
-use num_traits::ToPrimitive as _;
-
+//! One header row fits optional status cells between the controls that must stay available.
 use gpui_kit::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId,
-    InspectorElementId, IntoElement, LayoutId, Pixels, Size, Style, Window, point, px, size,
+    InspectorElementId, IntoElement, LayoutId, Pixels, Rems, Size, Style, Window, point, px, size,
 };
+use num_traits::ToPrimitive as _;
 
 pub(super) struct StatusFit {
     pub id: ElementId,
+    pub leading: Vec<AnyElement>,
     pub items: Vec<AnyElement>,
+    pub trailing: Vec<AnyElement>,
     pub height: Pixels,
-    pub gap: Pixels,
-    pub partition: Option<(Pixels, bool)>,
+    pub gap: Rems,
+}
+impl StatusFit {
+    const fn required(&self, index: usize) -> bool {
+        index < self.leading.len() || index >= self.leading.len().saturating_add(self.items.len())
+    }
+    fn width(&self, sizes: &[Size<Pixels>], required_only: bool, gap: f32) -> f32 {
+        let mut width = 0.0;
+        let mut count = 0_usize;
+        for (ix, size) in sizes.iter().enumerate() {
+            if !required_only || self.required(ix) {
+                width += f32::from(size.width);
+                count = count.saturating_add(1);
+            }
+        }
+        gap.mul_add(count.saturating_sub(1).to_f32().unwrap_or(f32::MAX), width)
+    }
 }
 impl IntoElement for StatusFit {
     type Element = Self;
@@ -20,7 +36,7 @@ impl IntoElement for StatusFit {
     }
 }
 impl Element for StatusFit {
-    type RequestLayoutState = Vec<(Size<Pixels>, bool)>;
+    type RequestLayoutState = Vec<Size<Pixels>>;
     type PrepaintState = Vec<usize>;
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -35,48 +51,32 @@ impl Element for StatusFit {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut measured: Vec<_> = self
-            .items
+        let measured = self
+            .leading
             .iter_mut()
+            .chain(&mut self.items)
+            .chain(&mut self.trailing)
             .map(|item| {
-                (
-                    item.layout_as_root(
-                        Size {
-                            width: AvailableSpace::MaxContent,
-                            height: AvailableSpace::Definite(self.height),
-                        },
-                        window,
-                        cx,
-                    ),
-                    true,
+                item.layout_as_root(
+                    Size {
+                        width: AvailableSpace::MaxContent,
+                        height: AvailableSpace::Definite(self.height),
+                    },
+                    window,
+                    cx,
                 )
             })
-            .collect();
-        // Report the controls' natural width, not the entire header width: the mux tabs
-        // need the remaining space. Prepaint still omits whole controls when constrained.
-        if let Some((remaining, in_dock)) = self.partition {
-            let mut remaining = f32::from(remaining);
-            for (item, eligible) in measured.iter_mut().rev() {
-                let fits = f32::from(item.width) <= remaining;
-                if fits {
-                    remaining -= f32::from(item.width) + f32::from(self.gap);
-                }
-                *eligible = fits == in_dock;
-            }
-        }
-        let count = measured.iter().filter(|(_, eligible)| *eligible).count();
-        let item_width = measured
-            .iter()
-            .filter(|(_, eligible)| *eligible)
-            .map(|(item, _)| f32::from(item.width))
-            .sum::<f32>();
-        let width = px(f32::from(self.gap).mul_add(
-            count.saturating_sub(1).to_f32().unwrap_or(f32::MAX),
-            item_width,
-        ));
+            .collect::<Vec<_>>();
+        let gap = f32::from(self.gap.to_pixels(window.rem_size()));
         let style = Style {
-            size: size(width.into(), self.height.into()),
-            min_size: size(px(0.0).into(), self.height.into()),
+            size: size(
+                px(self.width(&measured, false, gap)).into(),
+                self.height.into(),
+            ),
+            min_size: size(
+                px(self.width(&measured, true, gap)).into(),
+                self.height.into(),
+            ),
             ..Default::default()
         };
         (window.request_layout(style, [], cx), measured)
@@ -90,27 +90,47 @@ impl Element for StatusFit {
         window: &mut Window,
         cx: &mut App,
     ) -> Vec<usize> {
-        let mut right = f32::from(bounds.right());
-        let mut visible = Vec::new();
-        for (ix, (item, (measured, eligible))) in
-            self.items.iter_mut().zip(measured.iter()).enumerate().rev()
+        let gap = f32::from(self.gap.to_pixels(window.rem_size()));
+        let mut visible = measured
+            .iter()
+            .enumerate()
+            .filter(|(ix, _)| self.required(*ix))
+            .map(|(ix, _)| ix)
+            .collect::<Vec<_>>();
+        let mut width = self.width(measured, true, gap);
+        for (ix, size) in measured
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(ix, _)| !self.required(*ix))
         {
-            if !*eligible {
-                continue;
+            let added = f32::from(size.width) + if visible.is_empty() { 0.0 } else { gap };
+            if width + added <= f32::from(bounds.size.width) {
+                width += added;
+                visible.push(ix);
             }
-            if f32::from(measured.width) <= right - f32::from(bounds.left()) {
-                right -= f32::from(measured.width);
+        }
+        visible.sort_unstable();
+        let mut x = f32::from(bounds.right()) - width;
+        for ((ix, item), size) in self
+            .leading
+            .iter_mut()
+            .chain(&mut self.items)
+            .chain(&mut self.trailing)
+            .enumerate()
+            .zip(measured.iter())
+        {
+            if visible.binary_search(&ix).is_ok() {
                 item.prepaint_at(
                     point(
-                        px(right),
-                        px((f32::from(bounds.size.height) - f32::from(measured.height))
+                        px(x),
+                        px((f32::from(bounds.size.height) - f32::from(size.height))
                             .mul_add(0.5, f32::from(bounds.top()))),
                     ),
                     window,
                     cx,
                 );
-                visible.push(ix);
-                right -= f32::from(self.gap);
+                x += f32::from(size.width) + gap;
             }
         }
         visible
@@ -125,8 +145,14 @@ impl Element for StatusFit {
         window: &mut Window,
         cx: &mut App,
     ) {
-        for ix in visible.iter().rev() {
-            if let Some(item) = self.items.get_mut(*ix) {
+        for (ix, item) in self
+            .leading
+            .iter_mut()
+            .chain(&mut self.items)
+            .chain(&mut self.trailing)
+            .enumerate()
+        {
+            if visible.binary_search(&ix).is_ok() {
                 item.paint(window, cx);
             }
         }

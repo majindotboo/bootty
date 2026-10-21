@@ -14,19 +14,6 @@ use std::{collections::BTreeMap, time::Duration};
 /// How long a work group's rows take to slide open or shut.
 const WORK_MOTION: Duration = Duration::from_millis(160);
 
-/// Blank space after a prompt just sent, so the prompt can sit at the top while its reply streams
-/// in below. It shrinks as the reply grows and goes once the reply fills the view.
-/// A prompt just sent: the first user message after `after`, or the first of all, pins once it
-/// shows.
-pub(super) struct Pin {
-    pub(super) after: Option<String>,
-}
-
-/// The room always follows the latest prompt, whose id changes when the provider echoes it.
-pub(super) struct Room {
-    height: gpui_kit::Pixels,
-}
-
 /// How long the transcript takes to glide down to its latest reply.
 const GLIDE: Duration = Duration::from_millis(280);
 
@@ -61,8 +48,6 @@ pub(super) enum TranscriptRow {
         open: bool,
         live: bool,
     },
-    /// The room after a prompt just sent; always the last row.
-    Room,
     /// The provider's report that the last turn failed, shown where the turn ended.
     Failure { error: String },
 }
@@ -73,7 +58,6 @@ impl TranscriptRow {
             Self::Message { id, meta, .. } => format!("message:{id}:{meta}"),
             Self::Work { id, .. } => format!("work:{id}"),
             Self::Failure { error } => format!("failure:{error}"),
-            Self::Room => "room".to_owned(),
         }
     }
 }
@@ -420,21 +404,6 @@ impl NativeAgentSessionView {
             self.turn_failure()
                 .map(|error| TranscriptRow::Failure { error }),
         );
-        // Anchored at the latest prompt, the view stays there when the provider's echo replaces
-        // Bootty's own copy of it.
-        let anchored_prompt = self.room.is_some()
-            && !self.list.is_following_tail()
-            && self
-                .latest_prompt(&self.timeline)
-                .is_some_and(|(row, _)| row == self.list.logical_scroll_top().item_ix);
-        let pinned = self.pin_prompt(&new).or_else(|| {
-            anchored_prompt
-                .then(|| self.latest_prompt(&new).map(|(row, _)| row))
-                .flatten()
-        });
-        if self.room.is_some() {
-            new.push(TranscriptRow::Room);
-        }
         let old_keys = self
             .timeline
             .iter()
@@ -498,14 +467,7 @@ impl NativeAgentSessionView {
         self.hovered_turn = self
             .hovered_turn
             .filter(|ix| *ix < self.history_turns.len());
-        if let Some(prompt) = pinned {
-            // Pinned at its own row, the prompt stays put while the reply grows below it.
-            self.list.set_follow_mode(gpui_kit::FollowMode::Normal);
-            self.list.scroll_to(gpui_kit::ListOffset {
-                item_ix: prompt,
-                offset_in_item: gpui_kit::px(0.),
-            });
-        } else if let Some((key, mut offset)) = anchor
+        if let Some((key, mut offset)) = anchor
             && let Some(ix) = new_keys.iter().position(|candidate| *candidate == key)
         {
             offset.item_ix = ix;
@@ -548,82 +510,6 @@ impl NativeAgentSessionView {
         window.request_animation_frame();
     }
 
-    /// Pins the prompt just sent once it shows in `rows`, giving it a screenful of room, and
-    /// returns its row.
-    fn pin_prompt(&mut self, rows: &[TranscriptRow]) -> Option<usize> {
-        let after = self.pin.as_ref()?.after.as_deref();
-        let (row, id) = self.latest_prompt(rows)?;
-        if after == Some(id) {
-            return None;
-        }
-        self.pin = None;
-        let viewport = self.list.viewport_bounds().size.height;
-        self.room = Some(Room {
-            height: if viewport > gpui_kit::px(0.) {
-                viewport
-            } else {
-                gpui_kit::px(600.)
-            },
-        });
-        Some(row)
-    }
-
-    /// The latest prompt's row in `rows`, and its id.
-    fn latest_prompt<'a>(&self, rows: &'a [TranscriptRow]) -> Option<(usize, &'a str)> {
-        rows.iter().enumerate().rev().find_map(|(row, candidate)| {
-            let TranscriptRow::Message { index, id, .. } = candidate else {
-                return None;
-            };
-            self.record
-                .snapshot
-                .transcript
-                .get(*index)
-                .filter(|item| item.role == "user" && !item.steered)
-                .map(|_| (row, id.as_str()))
-        })
-    }
-
-    /// Fits the room to what the prompt's reply has left of the view, as last laid out. Once the
-    /// reply fills the view the room goes and the transcript follows the reply again.
-    pub(super) fn settle_room(&mut self, cx: &mut Context<Self>) {
-        let Some(room) = &self.room else {
-            return;
-        };
-        let Some((prompt, _)) = self.latest_prompt(&self.timeline) else {
-            self.room = None;
-            self.refresh_timeline();
-            return;
-        };
-        let last = self.timeline.len().saturating_sub(2);
-        let (Some(top), Some(bottom)) = (
-            self.list.bounds_for_item(prompt),
-            self.list.bounds_for_item(last),
-        ) else {
-            return;
-        };
-        let viewport = f32::from(self.list.viewport_bounds().size.height);
-        let wanted = (viewport - (f32::from(bottom.bottom()) - f32::from(top.top()))).max(0.);
-        if wanted <= 0. {
-            let top = self.list.logical_scroll_top();
-            self.room = None;
-            self.refresh_timeline();
-            self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
-            // A reader who scrolled away keeps their place; tail following waits for them.
-            if top.item_ix != prompt || top.offset_in_item > gpui_kit::px(1.) {
-                self.list.scroll_to(top);
-            }
-            cx.notify();
-        } else if (wanted - f32::from(room.height)).abs() > 0.5 {
-            self.room = Some(Room {
-                height: gpui_kit::px(wanted),
-            });
-            let room_row = self.timeline.len().saturating_sub(1);
-            self.list
-                .remeasure_items(room_row..room_row.saturating_add(1));
-            cx.notify();
-        }
-    }
-
     // All loaded turns fit one strip; the transcript remains the only scroll owner. The gutter is
     // reserved for any conversation with messages, so a second turn doesn't move the column.
     pub(super) fn render_history_gutter(
@@ -633,10 +519,13 @@ impl NativeAgentSessionView {
     ) -> gpui_kit::Div {
         use num_traits::ToPrimitive as _;
         let top = self.list.logical_scroll_top().item_ix;
-        let active = self
-            .history_turns
-            .iter()
-            .rposition(|(row, _, _)| *row <= top);
+        let active = if self.list.is_following_tail() {
+            self.history_turns.len().checked_sub(1)
+        } else {
+            self.history_turns
+                .iter()
+                .rposition(|(row, _, _)| *row <= top)
+        };
         let count = self.history_turns.len().to_f32().unwrap_or(1.);
         let previewed = self
             .hovered_turn
@@ -737,6 +626,7 @@ impl NativeAgentSessionView {
         cx: &Context<Self>,
     ) -> Button {
         let highlighted = previewed == Some(ix) || active == Some(ix);
+        let current_id = id.to_owned();
         Button::new(SharedString::from(format!("history-turn:{id}")))
             .debug_selector({
                 let id = id.to_owned();
@@ -760,10 +650,16 @@ impl NativeAgentSessionView {
                     .h(gpui_kit::rems(0.1875))
                     .w(gpui_kit::rems(if highlighted { 1.5 } else { 0.75 }))
                     .rounded_full()
-                    .bg(cx
-                        .theme()
-                        .foreground
-                        .opacity(if highlighted { 0.8 } else { 0.35 })),
+                    .when(active == Some(ix), |mark| {
+                        mark.debug_selector(move || format!("history-current:{current_id}"))
+                    })
+                    .bg(cx.theme().foreground.opacity(if active == Some(ix) {
+                        0.8
+                    } else if previewed == Some(ix) {
+                        0.55
+                    } else {
+                        0.35
+                    })),
             )
             .on_hover(cx.listener(move |this, hovering: &bool, _, cx| {
                 this.hovered_turn = hovering.then_some(ix);
@@ -849,12 +745,6 @@ impl NativeAgentSessionView {
                 live,
             }) => self.render_work_group(id, members, *open, *live, owner, cx),
             Some(TranscriptRow::Failure { error }) => self.render_turn_failure(error, owner, cx),
-            Some(TranscriptRow::Room) => div()
-                .h(self
-                    .room
-                    .as_ref()
-                    .map_or(gpui_kit::px(0.), |room| room.height))
-                .into_any_element(),
             None => div().into_any_element(),
         }
     }

@@ -325,7 +325,6 @@ impl SpeechInput {
         Button::new("composer-dictation")
             .debug_selector(|| "composer-dictation".into())
             .ghost()
-            .small()
             .icon(if status.is_capturing() {
                 IconName::Square
             } else {
@@ -380,7 +379,6 @@ impl Render for SpeechInput {
                     Button::new("composer-voice")
                         .debug_selector(|| "composer-voice".into())
                         .ghost()
-                        .small()
                         .selected(voice)
                         .disabled(dictating || !voice && !self.enabled)
                         .accessibility_label(if voice {

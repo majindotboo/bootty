@@ -19,7 +19,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     dock::{BasePanel, Panel, PanelEvent},
     input::{Input, InputState},
-    menu::ContextMenuExt as _,
+    menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenuItem},
 };
 use gpui_kit::{
     App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Pixels,
@@ -46,16 +46,15 @@ pub struct GitChangesPanel {
     sender: BoundAppCommandSender,
     /// The dock's diff panel, where pull request files open.
     diff: Entity<GitDiffPanel>,
-    /// The diff this panel shows in place of its list, or beside it when there is room.
+    /// The current scoped review. Its optional file list belongs to the patch view.
     detail: Entity<GitDiffPanel>,
-    /// What the shown diff is, like a file's path or "All changes"; without one the list shows.
+    /// The shown scope or file title.
     detail_title: Option<String>,
     /// The file the keyboard is on.
     cursor: Option<(ChangeGroup, String)>,
     list_focus: FocusHandle,
-    /// The panel's width, which decides whether the list and a diff fit side by side.
+    /// The available width selects compact or expanded view controls.
     width: Pixels,
-    message: Entity<InputState>,
     changes: Option<RepositoryChanges>,
     overview: Option<RepositoryOverview>,
     branch_name: Entity<InputState>,
@@ -66,28 +65,48 @@ pub struct GitChangesPanel {
     pending: bool,
     request_revision: u64,
     mutating: bool,
-    selected_diff: Option<(String, String)>,
+    selected_diff: Option<ChangeDiff>,
+    conversation: Option<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
+    conversation_subscription: Option<gpui_kit::Subscription>,
     error: Option<String>,
     active: bool,
     local_git: Option<bootty_git::GitFactsCache>,
     revision: u64,
     pending_directory: Option<String>,
     pending_read: Option<(&'static str, Vec<String>)>,
-    messages: std::collections::HashMap<String, String>,
+    /// The asked-for read in flight, which a write that supersedes it asks for again.
+    revealing: Option<(&'static str, Vec<String>)>,
+    /// Advances when a diff is asked for, shown from elsewhere or left; a diff answer from
+    /// before then doesn't replace what shows.
+    detail_generation: u64,
     pull_requests: Option<Entity<pull_request::PullRequestView>>,
     pull_request_subscription: Option<gpui_kit::Subscription>,
     showing_pull_requests: bool,
     _subscriptions: [gpui_kit::Subscription; 5],
     /// Diffs leave out whitespace changes, as the diff panel asked.
     ignore_whitespace: bool,
-    /// Codex is writing a commit message for the staged changes.
-    writing: bool,
     /// The branch last asked about, when, and its pull request once GitHub answered.
     pull_request: Option<(
         String,
         Instant,
         Option<bootty_git::github::PullRequestStatus>,
     )>,
+}
+
+#[derive(Clone)]
+enum ChangeDiff {
+    File(String, String),
+    All,
+    Turn(String),
+}
+
+impl ChangeDiff {
+    fn file(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::File(path, group) => Some((path, group)),
+            Self::All | Self::Turn(_) => None,
+        }
+    }
 }
 
 pub struct OpenDiff;
@@ -104,21 +123,32 @@ const fn group_key(group: ChangeGroup) -> &'static str {
 }
 
 impl GitChangesPanel {
-    pub(crate) fn has_pending_work(&self, cx: &App) -> bool {
-        self.pull_requests
+    pub(crate) fn set_conversation(
+        &mut self,
+        conversation: Option<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.conversation == conversation {
+            return;
+        }
+        self.conversation_subscription = conversation
             .as_ref()
-            .is_some_and(|view| view.read(cx).has_draft(cx))
+            .map(|view| cx.observe(view, |_, _, cx| cx.notify()));
+        self.conversation = conversation;
+        cx.notify();
+    }
+
+    pub(crate) fn has_pending_work(&self, cx: &App) -> bool {
+        self.detail.read(cx).is_commenting()
+            || self
+                .pull_requests
+                .as_ref()
+                .is_some_and(|view| view.read(cx).has_draft(cx))
             || self.mutating
             || self.error.is_some()
-            || [
-                &self.message,
-                &self.branch_name,
-                &self.branch_start,
-                &self.stash_message,
-            ]
-            .into_iter()
-            .any(|input| !input.read(cx).value().is_empty())
-            || self.messages.values().any(|message| !message.is_empty())
+            || [&self.branch_name, &self.branch_start, &self.stash_message]
+                .into_iter()
+                .any(|input| !input.read(cx).value().is_empty())
     }
 
     pub(crate) fn decoration(&self, path: &str) -> String {
@@ -149,17 +179,14 @@ impl GitChangesPanel {
         cx: &mut Context<Self>,
     ) -> Self {
         Self::poll_worktree(window, cx);
-        let message =
-            cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::t(cx, "git-message")));
+        cx.defer_in(window, |this, window, cx| this.open_review(window, cx));
         let detail = cx.new(|cx| {
             let mut detail = GitDiffPanel::new(window, cx);
             detail.hide_toolbar();
             detail
         });
         let branch_filter = cx.new(|cx| InputState::new(window, cx).placeholder("Find a branch"));
-        // Hunks chosen in the diff stage or unstage through this panel's repository, hiding
-        // whitespace asks Git again for the shown diff, a comment goes on to the conversation,
-        // and the commit buttons follow the message.
+        // The diff routes whitespace changes and comments through this repository and session.
         let subscriptions = [
             cx.subscribe_in(
                 &detail,
@@ -178,18 +205,19 @@ impl GitChangesPanel {
                 window,
                 |this, _, changed: &diff::WhitespaceChanged, window, cx| {
                     this.ignore_whitespace = changed.0;
+                    // Asked for, so a read in flight queues it rather than dropping it.
                     if this.selected_diff.is_some() {
-                        this.refresh_selected_diff(window, cx);
+                        this.refresh_selected_diff(true, window, cx);
                     } else {
-                        this.request_inner("git.diff-all", Vec::new(), false, window, cx);
+                        this.request("git.diff-all", Vec::new(), window, cx);
                     }
                 },
             ),
             cx.subscribe(&detail, |_, _, comment: &DiffComment, cx| {
                 cx.emit(comment.clone());
             }),
-            cx.observe(&message, |_, _, cx| cx.notify()),
             cx.observe(&branch_filter, |_, _, cx| cx.notify()),
+            cx.observe(&detail, |_, _, cx| cx.notify()),
         ];
         Self {
             host_visible: true,
@@ -206,8 +234,8 @@ impl GitChangesPanel {
             revision: 0,
             pending_directory: None,
             pending_read: None,
-            messages: std::collections::HashMap::new(),
-            message,
+            revealing: None,
+            detail_generation: 0,
             changes: None,
             overview: None,
             branch_name: cx.new(|cx| InputState::new(window, cx).placeholder("new branch")),
@@ -219,13 +247,14 @@ impl GitChangesPanel {
             request_revision: 0,
             mutating: false,
             selected_diff: None,
+            conversation: None,
+            conversation_subscription: None,
             error: None,
             pull_requests: None,
             pull_request_subscription: None,
             showing_pull_requests: false,
             _subscriptions: subscriptions,
             ignore_whitespace: false,
-            writing: false,
             pull_request: None,
         }
     }
@@ -268,12 +297,7 @@ impl GitChangesPanel {
         .detach();
     }
 
-    pub(crate) fn browse(
-        &mut self,
-        directory: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn browse(&mut self, directory: String, window: &Window, cx: &mut Context<Self>) {
         if self.pending {
             self.pending_directory = Some(directory);
             return;
@@ -291,17 +315,7 @@ impl GitChangesPanel {
             self.pull_requests = None;
             self.pull_request_subscription = None;
             self.showing_pull_requests = false;
-            self.messages.insert(
-                self.context.directory.clone(),
-                self.message.read(cx).value().to_string(),
-            );
             self.context.directory = directory;
-            let message = self
-                .messages
-                .remove(&self.context.directory)
-                .unwrap_or_default();
-            self.message
-                .update(cx, |input, cx| input.set_value(message, window, cx));
             self.changes = None;
             self.overview = None;
             self.selected_diff = None;
@@ -311,10 +325,21 @@ impl GitChangesPanel {
             self.revision = 0;
         }
         self.refresh(window, cx);
+        self.open_review(window, cx);
     }
 
     pub(crate) const fn set_host_visible(&mut self, visible: bool) {
         self.host_visible = visible;
+    }
+
+    /// Opening Changes starts with its review surface; Back keeps Git management available.
+    pub(crate) fn open_review(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.showing_pull_requests
+            && self.detail_title.is_none()
+            && self.selected_diff.is_none()
+        {
+            self.request("git.diff-all", Vec::new(), window, cx);
+        }
     }
 
     pub(crate) fn refresh(&mut self, window: &Window, cx: &mut Context<Self>) {
@@ -329,8 +354,15 @@ impl GitChangesPanel {
         }
     }
 
-    fn refresh_selected_diff(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let Some((path, group)) = self.selected_diff.clone() else {
+    /// Asks Git again for the shown file's diff; `reveal` when the person asked for it.
+    fn refresh_selected_diff(&mut self, reveal: bool, window: &Window, cx: &mut Context<Self>) {
+        if self.detail.read(cx).is_commenting() {
+            return;
+        }
+        let Some(ChangeDiff::File(path, group)) = self.selected_diff.clone() else {
+            if matches!(self.selected_diff, Some(ChangeDiff::All)) {
+                self.request_inner("git.diff-all", Vec::new(), reveal, window, cx);
+            }
             return;
         };
         let file = self
@@ -354,7 +386,7 @@ impl GitChangesPanel {
             self.request_inner(
                 "git.diff",
                 vec![path, (*group).to_owned()],
-                false,
+                reveal,
                 window,
                 cx,
             );
@@ -385,7 +417,7 @@ impl GitChangesPanel {
             let [path, group] = args else {
                 return Err("A diff path and change group are required");
             };
-            self.selected_diff = Some((path.clone(), group.clone()));
+            self.selected_diff = Some(ChangeDiff::File(path.clone(), group.clone()));
         } else if command == "git.commit-diff" {
             let [commit] = args else {
                 return Err("A commit is required");
@@ -393,13 +425,23 @@ impl GitChangesPanel {
             self.selected_diff = None;
             return Ok(format!("Commit {}", short_commit(commit)));
         } else if command == "git.diff-all" {
-            self.selected_diff = None;
-            return Ok("All changes".to_owned());
+            self.selected_diff = Some(ChangeDiff::All);
+            return Ok("Uncommitted".to_owned());
+        } else if command == "agents.native.turn-diff" {
+            let [_, _, reply] = args else {
+                return Err("A conversation and turn are required");
+            };
+            self.selected_diff = Some(ChangeDiff::Turn(reply.clone()));
+            return Ok("Turn changes".to_owned());
         }
-        Ok(self.selected_diff.as_ref().map_or_else(
-            || "Diff".to_owned(),
-            |(path, group)| format!("{path} · {group}"),
-        ))
+        Ok(self
+            .selected_diff
+            .as_ref()
+            .and_then(ChangeDiff::file)
+            .map_or_else(
+                || "Diff".to_owned(),
+                |(path, group)| format!("{path} · {group}"),
+            ))
     }
 
     /// A changed file's actions: show it in the file manager or open it in an installed editor
@@ -575,25 +617,45 @@ impl GitChangesPanel {
         &self,
         command: &str,
         mut args: Vec<String>,
-    ) -> Result<std::sync::mpsc::Receiver<CommandOutcome>, bootty_control::AppCommandSendError>
-    {
-        let root = self
-            .changes
-            .as_ref()
-            .map_or(&self.context.directory, |changes| &changes.root)
-            .clone();
-        args.insert(0, root);
+    ) -> Result<std::sync::mpsc::Receiver<CommandOutcome>, String> {
+        let native = command == "agents.native.turn-diff";
+        if !native {
+            let root = self
+                .changes
+                .as_ref()
+                .map_or(&self.context.directory, |changes| &changes.root)
+                .clone();
+            args.insert(0, root);
+        }
         let mut invocation = CommandInvocation::from_action(command, Caller::Internal);
         invocation.arguments = args;
-        invocation.target = Some(self.context.target.clone());
+        invocation.target = Some(if native {
+            CommandTarget {
+                kind: bootty_control::ResourceKind::Session,
+                handle: invocation
+                    .arguments
+                    .first()
+                    .ok_or("A conversation is required")?
+                    .clone(),
+                generation: invocation
+                    .arguments
+                    .get(1)
+                    .and_then(|value| value.parse().ok())
+                    .ok_or("A conversation generation is required")?,
+            }
+        } else {
+            self.context.target.clone()
+        });
         let cancellation = CommandCancellation::new();
-        self.sender.submit(
-            invocation,
-            Instant::now()
-                .checked_add(Duration::from_mins(2))
-                .unwrap_or_else(Instant::now),
-            cancellation,
-        )
+        self.sender
+            .submit(
+                invocation,
+                Instant::now()
+                    .checked_add(Duration::from_mins(2))
+                    .unwrap_or_else(Instant::now),
+                cancellation,
+            )
+            .map_err(|error| format!("{error:?}"))
     }
 
     fn request_inner(
@@ -604,18 +666,19 @@ impl GitChangesPanel {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        let mutation = !matches!(
-            command,
-            "git.status" | "git.diff" | "git.diff-all" | "git.overview" | "git.commit-diff"
-        );
+        let mutation = command != "git.status" && !is_detail_read(command);
+        let asked = reveal && is_detail_read(command);
+        if asked && command != "git.overview" && !self.can_change_detail(cx) {
+            return;
+        }
         if self.pending && (!mutation || self.mutating) {
-            if reveal
-                && matches!(
-                    command,
-                    "git.diff" | "git.diff-all" | "git.commit-diff" | "git.overview"
-                )
-            {
+            if asked {
                 self.pending_read = Some((command, args));
+            } else if mutation {
+                // Hunks and confirmed changes arrive while their buttons can't be disabled.
+                self.error =
+                    Some("Wait for the current Git change to finish, then try again.".into());
+                cx.notify();
             }
             return;
         }
@@ -627,6 +690,7 @@ impl GitChangesPanel {
                 return;
             }
         };
+        let asked_read = asked.then(|| (command, args.clone()));
         let mut args = args;
         if matches!(command, "git.diff" | "git.diff-all") && self.ignore_whitespace {
             args.push("ignore".to_owned());
@@ -639,6 +703,15 @@ impl GitChangesPanel {
                 return;
             }
         };
+        // A write drops the read it supersedes, so a read the person asked for runs after it.
+        if let Some(read) = self.revealing.take() {
+            self.pending_read.get_or_insert(read);
+        }
+        self.revealing = asked_read;
+        if reveal && is_detail_read(command) {
+            self.detail_generation = self.detail_generation.wrapping_add(1);
+        }
+        let detail = self.detail_generation;
         self.pending = true;
         self.mutating = mutation;
         self.request_revision = self.request_revision.wrapping_add(1);
@@ -660,7 +733,10 @@ impl GitChangesPanel {
                 }
                 this.pending = false;
                 this.mutating = false;
+                this.revealing = None;
                 match outcome {
+                    // A diff from before going back or showing another one stays unshown.
+                    _ if is_detail_read(command) && detail != this.detail_generation => {}
                     Ok(CommandOutcome::Success { value, .. }) => {
                         if let Err(error) = this
                             .receive_command_value(command, value, diff_title, reveal, window, cx)
@@ -706,41 +782,67 @@ impl GitChangesPanel {
                 }
                 self.ask_pull_request(window, cx);
                 if !self.showing_pull_requests {
-                    self.refresh_selected_diff(window, cx);
+                    self.refresh_selected_diff(false, window, cx);
                 }
             }
             "git.overview" => self.overview = Some(serde_json::from_value(value)?),
-            "git.diff" | "git.diff-all" | "git.commit-diff" => {
+            "git.diff" | "git.diff-all" | "git.commit-diff" | "agents.native.turn-diff" => {
                 if self.showing_pull_requests {
                     return Ok(());
                 }
-                let contents = value.as_str().unwrap_or_default().to_owned();
-                let group = (command == "git.diff")
-                    .then(|| self.selected_diff.as_ref().map(|(_, group)| group.clone()))
-                    .flatten();
+                let contents = if command == "agents.native.turn-diff" {
+                    value.get("diff")
+                } else {
+                    Some(&value)
+                }
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+                // A diff without its whitespace changes doesn't apply to the index, so its hunks
+                // don't stage.
                 let hide_whitespace = self.ignore_whitespace;
+                let group = (command == "git.diff" && !hide_whitespace)
+                    .then(|| {
+                        self.selected_diff
+                            .as_ref()
+                            .and_then(ChangeDiff::file)
+                            .map(|(_, group)| group.to_owned())
+                    })
+                    .flatten();
                 // A refresh keeps a shown diff current; it never opens one.
-                if !reveal && self.detail_title.is_none() {
+                if !reveal && (self.detail_title.is_none() || self.detail.read(cx).is_commenting())
+                {
                     return Ok(());
                 }
-                self.detail_title = Some(diff_title.clone());
+                let opened = self.detail_title.replace(diff_title.clone()).is_none();
                 self.detail.update(cx, |diff, cx| {
                     diff.show(diff_title, contents, window, cx);
-                    if command != "git.commit-diff" {
+                    if matches!(command, "git.diff" | "git.diff-all") {
                         diff.mark_from_changes(hide_whitespace, cx);
                     }
-                    if let Some(group) = &group {
-                        diff.allow_staging(group, cx);
-                    }
+                    diff.allow_staging(group.as_deref(), cx);
                 });
+                // A narrow panel shows the diff in place of the list, which held the keyboard.
+                if opened {
+                    self.detail.focus_handle(cx).focus(window, cx);
+                }
             }
             _ => {
-                self.overview = None;
-                if matches!(command, "git.commit" | "git.amend") {
-                    self.message
-                        .update(cx, |message, cx| message.set_value("", window, cx));
+                if command == "git.branch-create" {
+                    for input in [&self.branch_name, &self.branch_start] {
+                        input.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                }
+                if command == "git.stash-push" {
+                    self.stash_message
+                        .update(cx, |input, cx| input.set_value("", window, cx));
                 }
                 self.refresh(window, cx);
+                // History, branches and stashes stay open and catch up after the change.
+                if self.overview.is_some() {
+                    self.pending_read
+                        .get_or_insert_with(|| ("git.overview", vec![OVERVIEW_LIMIT.to_owned()]));
+                }
             }
         }
         Ok(())
@@ -822,12 +924,12 @@ impl GitChangesPanel {
     /// Opens the file `delta` places from the shown one in the list.
     fn step_change(&mut self, delta: isize, window: &Window, cx: &mut Context<Self>) {
         let listed = self.listed();
-        let Some((path, group)) = &self.selected_diff else {
+        let Some((path, group)) = self.selected_diff.as_ref().and_then(ChangeDiff::file) else {
             return;
         };
         let Some(position) = listed
             .iter()
-            .position(|(candidate, file)| group_key(*candidate) == group && file.path == *path)
+            .position(|(candidate, file)| group_key(*candidate) == group && file.path == path)
         else {
             return;
         };
@@ -860,12 +962,28 @@ impl GitChangesPanel {
         }
     }
 
-    /// Back from a shown diff to the list.
-    fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.detail_title = None;
-        self.selected_diff = None;
-        self.list_focus.focus(window, cx);
-        cx.notify();
+    fn can_change_detail(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.detail.read(cx).is_commenting() {
+            self.error = Some("Add or cancel the code comment before changing files.".into());
+            cx.notify();
+            false
+        } else {
+            true
+        }
+    }
+
+    /// Diffs asked for so far stay unshown, so going back or showing another diff sticks.
+    fn forget_diff_reads(&mut self) {
+        self.detail_generation = self.detail_generation.wrapping_add(1);
+        let diff = |read: Option<&(&str, Vec<String>)>| {
+            read.is_some_and(|(command, _)| is_detail_read(command))
+        };
+        if diff(self.pending_read.as_ref()) {
+            self.pending_read = None;
+        }
+        if diff(self.revealing.as_ref()) {
+            self.revealing = None;
+        }
     }
 
     /// Shows `contents`, a Git diff such as a turn's changes, titled `title`, until going back to
@@ -877,6 +995,10 @@ impl GitChangesPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.can_change_detail(cx) {
+            return;
+        }
+        self.forget_diff_reads();
         self.showing_pull_requests = false;
         self.overview = None;
         self.selected_diff = None;
@@ -979,8 +1101,9 @@ impl GitChangesPanel {
             || self
                 .selected_diff
                 .as_ref()
+                .and_then(ChangeDiff::file)
                 .is_some_and(|(selected, selected_group)| {
-                    *selected == path && selected_group == key
+                    selected == path && selected_group == key
                 });
         let staged = group == ChangeGroup::Staged;
         let pending = self.mutating;
@@ -1087,7 +1210,11 @@ impl GitChangesPanel {
     /// The shown diff with its heading: back to the list, what it shows, the files next to it,
     /// and the diff's view controls.
     fn render_detail(&self, cx: &Context<Self>) -> gpui_kit::Stateful<gpui_kit::Div> {
-        let file = self.selected_diff.is_some();
+        let file = self
+            .selected_diff
+            .as_ref()
+            .and_then(ChangeDiff::file)
+            .is_some();
         let heading = div()
             .flex()
             .items_center()
@@ -1097,17 +1224,8 @@ impl GitChangesPanel {
             .flex_shrink_0()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(
-                Button::new("diff-back")
-                    .debug_selector(|| "git-diff-back".into())
-                    .icon(Icon::default().path("icons/arrow-left.svg"))
-                    .ghost()
-                    .small()
-                    .accessibility_label("Back to changes")
-                    .element_tooltip("Back to changes (Escape)")
-                    .on_click(cx.listener(|this, _, window, cx| this.close_detail(window, cx))),
-            )
             .child(self.render_detail_title(cx))
+            .when(!file, |row| row.child(div().flex_1().min_w_0()))
             .when(file, |row| {
                 row.child(
                     Button::new("diff-previous")
@@ -1132,7 +1250,24 @@ impl GitChangesPanel {
                         ),
                 )
             })
-            .children(self.detail.read(cx).controls(self.detail.downgrade(), cx));
+            .when(!file, |row| {
+                row.children(
+                    self.detail
+                        .read(cx)
+                        .line_counts(cx)
+                        .map(|counts| line_counts(counts, cx)),
+                )
+            })
+            .when(self.width >= px(480.), |row| {
+                row.children(self.detail.read(cx).controls(self.detail.downgrade(), cx))
+            })
+            .when(self.width < px(480.), |row| {
+                row.child(
+                    self.detail
+                        .read(cx)
+                        .controls_menu(self.detail.downgrade(), cx),
+                )
+            });
         div()
             .id("git-detail")
             .debug_selector(|| "git-detail".into())
@@ -1141,35 +1276,105 @@ impl GitChangesPanel {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .on_key_down(
-                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
-                    if event.keystroke.key == "escape" && !this.detail.read(cx).is_commenting() {
-                        this.close_detail(window, cx);
-                        cx.stop_propagation();
-                    }
-                }),
-            )
             .child(heading)
+            .when_some(self.error.as_ref(), |body, error| {
+                body.child(gpui_kit::component::alert::Alert::error(
+                    "git-error",
+                    error.clone(),
+                ))
+            })
             .child(div().flex_1().min_h_0().child(self.detail.clone()))
+    }
+
+    fn scope_picker(&self, cx: &Context<Self>) -> impl IntoElement {
+        let turns = self
+            .conversation
+            .as_ref()
+            .map_or_else(Vec::new, |view| view.read(cx).change_turns());
+        let selected = match &self.selected_diff {
+            Some(ChangeDiff::All) => "Uncommitted".to_owned(),
+            Some(ChangeDiff::Turn(id)) if turns.last().is_some_and(|(reply, _)| reply == id) => {
+                "Latest turn".to_owned()
+            }
+            Some(ChangeDiff::Turn(id)) => turns
+                .iter()
+                .find(|(reply, _)| reply == id)
+                .map_or_else(|| "Turn changes".to_owned(), |(_, label)| label.clone()),
+            _ => self
+                .detail_title
+                .clone()
+                .unwrap_or_else(|| "Changes".to_owned()),
+        };
+        let owner = cx.weak_entity();
+        let target = self
+            .conversation
+            .as_ref()
+            .map(|view| view.read(cx).changes_target());
+        Button::new("diff-scope")
+            .debug_selector(|| "git-diff-scope".into())
+            .label(selected)
+            .icon(IconName::ChevronDown)
+            .ghost()
+            .dropdown_menu(move |mut menu, _, _| {
+                let changes = owner.clone();
+                menu = menu.item(PopupMenuItem::new("Uncommitted").on_click(
+                    move |_, window, cx| {
+                        _ = changes.update(cx, |this, cx| {
+                            this.request("git.diff-all", Vec::new(), window, cx);
+                        });
+                    },
+                ));
+                if let Some(target) = &target {
+                    for (index, (reply, label)) in turns.iter().rev().enumerate() {
+                        let label = if index == 0 {
+                            "Latest turn".to_owned()
+                        } else {
+                            label.clone()
+                        };
+                        let (owner, target, reply) = (owner.clone(), target.clone(), reply.clone());
+                        menu =
+                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                _ = owner.update(cx, |this, cx| {
+                                    this.request(
+                                        "agents.native.turn-diff",
+                                        vec![
+                                            target.handle.clone(),
+                                            target.generation.to_string(),
+                                            reply.clone(),
+                                        ],
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }));
+                    }
+                }
+                menu
+            })
     }
 
     /// What the shown diff is: a file's name, its folder and its lines, or a title like
     /// "All changes".
     fn render_detail_title(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        let shown = self.selected_diff.as_ref().and_then(|(path, group)| {
-            self.listed()
-                .into_iter()
-                .find(|(candidate, file)| group_key(*candidate) == group && file.path == *path)
-                .map(|(group, file)| (group, file.clone()))
-        });
+        let shown = self
+            .selected_diff
+            .as_ref()
+            .and_then(ChangeDiff::file)
+            .and_then(|(path, group)| {
+                self.listed()
+                    .into_iter()
+                    .find(|(candidate, file)| group_key(*candidate) == group && file.path == path)
+                    .map(|(group, file)| (group, file.clone()))
+            });
         let Some((group, file)) = shown else {
             return div()
-                .flex_1()
+                .flex()
+                .items_center()
+                .flex_none()
                 .min_w_0()
-                .truncate()
                 .px_1()
                 .text_sm()
-                .child(self.detail_title.clone().unwrap_or_default());
+                .child(self.scope_picker(cx));
         };
         let (folder, name) = file.path.rsplit_once('/').unwrap_or(("", &file.path));
         let lines = match group {
@@ -1196,102 +1401,6 @@ impl GitChangesPanel {
                     .child(folder.to_owned()),
             )
             .children(lines.map(|lines| line_counts(lines, cx)))
-    }
-
-    /// Whether anything is staged to commit.
-    fn has_staged(&self) -> bool {
-        self.changes.as_ref().is_some_and(|changes| {
-            changes
-                .files
-                .iter()
-                .any(|file| file.groups().any(|group| group == ChangeGroup::Staged))
-        })
-    }
-
-    /// Asks Codex for a message describing the staged changes, into an empty message box; a
-    /// message typed meanwhile stays.
-    fn write_message(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if self.writing {
-            return;
-        }
-        let receiver = match self.submit_command("git.write-message", Vec::new()) {
-            Ok(receiver) => receiver,
-            Err(error) => {
-                self.error = Some(format!("Git command unavailable: {error:?}"));
-                cx.notify();
-                return;
-            }
-        };
-        self.writing = true;
-        self.error = None;
-        cx.notify();
-        let directory = self.context.directory.clone();
-        cx.spawn_in(window, async move |weak, cx| {
-            let outcome = cx
-                .background_executor()
-                .spawn(async move { receiver.recv() })
-                .await;
-            _ = weak.update_in(cx, |this, window, cx| {
-                this.writing = false;
-                if this.context.directory != directory {
-                    return;
-                }
-                match outcome {
-                    Ok(CommandOutcome::Success { value, .. }) => {
-                        let written = value
-                            .get("message")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or_default()
-                            .to_owned();
-                        if this.message.read(cx).value().trim().is_empty() {
-                            this.message
-                                .update(cx, |message, cx| message.set_value(written, window, cx));
-                        }
-                    }
-                    Ok(outcome) => {
-                        this.error = Some(
-                            super::commands::command_outcome_message(&outcome)
-                                .unwrap_or_else(|| "Codex couldn't write a message".to_owned()),
-                        );
-                    }
-                    Err(error) => this.error = Some(error.to_string()),
-                }
-                cx.notify();
-            });
-        })
-        .detach();
-    }
-
-    fn commit(&mut self, amend: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let message = self.message.read(cx).value().to_string();
-        if !amend {
-            self.request("git.commit", vec![message], window, cx);
-            return;
-        }
-        let directory = self.context.directory.clone();
-        let answer = crate::gpui::prompt(
-            crate::i18n::t(cx, "git-amend-confirm").as_str(),
-            Some(crate::i18n::t(cx, "git-amend-detail").as_str()),
-            &[
-                gpui_kit::PromptButton::Other(crate::i18n::t(cx, "git-amend-action").into()),
-                gpui_kit::PromptButton::Cancel(crate::i18n::t(cx, "common-cancel").into()),
-            ],
-            window,
-            cx,
-        );
-        cx.spawn_in(window, async move |weak, cx| {
-            if answer.await == Ok(0) {
-                _ = weak.update_in(cx, |this, window, cx| {
-                    if this.context.directory != directory {
-                        this.error = Some("Repository changed while confirming the amend. Retry from its Changes panel.".to_owned());
-                        cx.notify();
-                        return;
-                    }
-                    this.request("git.amend", vec![message], window, cx);
-                });
-            }
-        })
-        .detach();
     }
 
     fn drop_stash(
@@ -1666,7 +1775,7 @@ impl GitChangesPanel {
                 .child(
                     Button::new("all-changes")
                         .debug_selector(|| "git-all-changes".into())
-                        .label("All changes")
+                        .label("Uncommitted")
                         .ghost()
                         .small()
                         .disabled(
@@ -1710,7 +1819,7 @@ impl GitChangesPanel {
 impl EventEmitter<PanelEvent> for GitChangesPanel {}
 impl Focusable for GitChangesPanel {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.message.focus_handle(cx)
+        self.detail.focus_handle(cx)
     }
 }
 impl BasePanel for GitChangesPanel {
@@ -1882,62 +1991,11 @@ impl GitChangesPanel {
     }
 }
 
-impl GitChangesPanel {
-    /// Commit and Amend, which need a message and Commit staged changes too, and writing the
-    /// message with Codex from the staged changes.
-    fn render_commit_controls(&self, cx: &Context<Self>) -> gpui_kit::Div {
-        let empty = self.message.read(cx).value().trim().is_empty();
-        let staged = self.has_staged();
-        div()
-            .flex()
-            .gap_2()
-            .child(
-                Button::new("commit")
-                    .label(crate::i18n::t(cx, "git-commit"))
-                    .small()
-                    .disabled(self.mutating || empty || !staged)
-                    .when(!staged, |button| {
-                        button.element_tooltip("Stage changes to commit first")
-                    })
-                    .when(staged && empty, |button| {
-                        button.element_tooltip("Write a message first")
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| this.commit(false, window, cx))),
-            )
-            .child(
-                Button::new("amend")
-                    .label(crate::i18n::t(cx, "git-amend"))
-                    .small()
-                    .disabled(self.mutating || empty)
-                    .when(empty, |button| {
-                        button.element_tooltip("Write a message first")
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| this.commit(true, window, cx))),
-            )
-            .child(
-                Button::new("write-message")
-                    .icon(gpui_kit::assets::IconName::Sparkles)
-                    .small()
-                    .ghost()
-                    .loading(self.writing)
-                    .disabled(self.mutating || !staged)
-                    .accessibility_label("Write the message with Codex")
-                    .element_tooltip(if staged {
-                        "Write the message with Codex"
-                    } else {
-                        "Stage changes for Codex to describe first"
-                    })
-                    .on_click(cx.listener(|this, _, window, cx| this.write_message(window, cx))),
-            )
-    }
-}
-
 impl Render for GitChangesPanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let owner = cx.weak_entity();
-        let detail = self.detail_title.is_some() && !self.showing_pull_requests;
-        // A wide panel keeps the list beside the diff; a narrow one shows one at a time.
-        let beside = self.width >= px(720.);
+        let detail = !self.showing_pull_requests;
+
         let root = div()
             .id("git-changes")
             .flex()
@@ -1952,26 +2010,19 @@ impl Render for GitChangesPanel {
                     }
                 });
             });
-        if detail && !beside {
+        if detail {
             return root.child(self.render_detail(cx)).into_any_element();
         }
         let list = self.render_list(cx);
         if !detail {
             return root.child(list.flex_1()).into_any_element();
         }
-        root.child(
-            list.w(px(320.))
-                .flex_shrink_0()
-                .border_r_1()
-                .border_color(cx.theme().border),
-        )
-        .child(self.render_detail(cx))
-        .into_any_element()
+        root.child(list.flex_1()).into_any_element()
     }
 }
 
 impl GitChangesPanel {
-    /// The repository's heading, its changed files or history, and the commit controls.
+    /// The pull request browser and repository navigation.
     fn render_list(&self, cx: &Context<Self>) -> gpui_kit::Div {
         let mut body = div()
             .flex()
@@ -2023,9 +2074,15 @@ impl GitChangesPanel {
                     .disabled(self.mutating)
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.overview.take().is_some() {
+                            this.forget_diff_reads();
                             cx.notify();
                         } else {
-                            this.request("git.overview", vec!["100".into()], window, cx);
+                            this.request(
+                                "git.overview",
+                                vec![OVERVIEW_LIMIT.to_owned()],
+                                window,
+                                cx,
+                            );
                         }
                     })),
             ),
@@ -2045,13 +2102,7 @@ impl GitChangesPanel {
             content = self.append_stashes(content, &overview.stashes, cx);
             body = body.child(content);
         }
-        body.child(crate::gpui::focus_input(
-            &self.message,
-            Input::new(&self.message)
-                .context_menu(crate::gpui::text_menu(&self.message))
-                .disabled(self.mutating),
-        ))
-        .child(self.render_commit_controls(cx))
+        body
     }
 }
 
@@ -2068,6 +2119,21 @@ pub fn branch_distance(branch: &bootty_git::changes::GitBranch) -> String {
 /// Branches the list shows at most; the search finds the rest.
 // Raise it if long lists turn out to be browsed rather than searched.
 const MAX_SHOWN_BRANCHES: usize = 50;
+
+/// Commits the history shows.
+const OVERVIEW_LIMIT: &str = "100";
+
+/// Reads whose answer shows in the diff beside or in place of the list.
+fn is_detail_read(command: &str) -> bool {
+    matches!(
+        command,
+        "git.diff"
+            | "git.diff-all"
+            | "git.commit-diff"
+            | "git.overview"
+            | "agents.native.turn-diff"
+    )
+}
 
 fn short_commit(commit: &str) -> String {
     commit.chars().take(10).collect()

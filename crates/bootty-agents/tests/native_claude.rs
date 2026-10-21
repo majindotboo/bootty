@@ -1577,7 +1577,19 @@ fn drafts_survive_a_restart_and_only_name_held_attachments() {
     placed.name = "renamed by the client".to_owned();
     placed.prompt_ranges = std::iter::once(0..10).collect();
     let draft = bootty_agents::NativeDraft {
-        text: "[notes.md] then this".to_owned(),
+        review_comments: vec![bootty_agents::NativeReviewComment {
+            id: "saved-review".into(),
+            anchor: bootty_git::diff::DiffAnchor {
+                path: "notes.md".into(),
+                side: bootty_git::diff::DiffSide::Left,
+                start_line: 1,
+                line: 1,
+            },
+            quote: "Original note".into(),
+            body: "Please keep this".into(),
+            prompt_range: 21..29,
+        }],
+        text: "[notes.md] then this [review]".to_owned(),
         attachments: vec![placed.clone()],
     };
     service.save_draft(&record.target(), draft.clone()).unwrap();
@@ -1588,6 +1600,7 @@ fn drafts_survive_a_restart_and_only_name_held_attachments() {
             .save_draft(
                 &record.target(),
                 bootty_agents::NativeDraft {
+                    review_comments: Vec::new(),
                     text: String::new(),
                     attachments: vec![foreign],
                 },
@@ -1603,6 +1616,7 @@ fn drafts_survive_a_restart_and_only_name_held_attachments() {
     assert_eq!(
         restored.sessions()[0].draft,
         Some(bootty_agents::NativeDraft {
+            review_comments: draft.review_comments,
             text: draft.text,
             attachments: vec![expected],
         })

@@ -1150,6 +1150,40 @@ fn history_gutter_jumps_to_saved_turns_without_mounting_the_whole_transcript(
     assert!(visual.debug_bounds("native-message-user-two").is_some());
 }
 
+/// Following the transcript's tail selects its latest turn even when earlier text is visible.
+#[gpui_kit::test]
+fn history_gutter_tracks_the_latest_turn_while_following(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id":"first", "role":"user", "text":"The first question", "complete":true},
+        {"id":"first-reply", "role":"assistant", "text":"Earlier text.\n\n".repeat(50), "complete":true},
+        {"id":"latest", "role":"user", "text":"The latest question", "complete":true},
+        {"id":"latest-reply", "role":"assistant", "text":"The latest answer", "complete":true}
+    ])).unwrap();
+    let visual = open_conversation(record, cx);
+    redraw(visual);
+    let latest = visual
+        .debug_bounds("native-message-latest")
+        .expect("the latest turn is visible");
+    // A resting pointer previews an older marker without changing the current turn.
+    let first = visual.debug_bounds("history-turn:first").unwrap();
+    visual.simulate_mouse_move(first.center(), None, Modifiers::none());
+    redraw(visual);
+    assert!(visual.debug_bounds("history-preview:0").is_some());
+    assert!(
+        visual.debug_bounds("history-current:latest").is_some(),
+        "the latest visible turn stays current at the tail: {latest:?}"
+    );
+    visual.simulate_click(first.center(), Modifiers::none());
+    redraw(visual);
+    assert!(visual.debug_bounds("native-message-first").is_some());
+    assert!(visual.debug_bounds("history-current:first").is_some());
+}
+
 /// The rail answers the keyboard: once focused it previews the turn in view, arrows pick
 /// another, and Enter jumps to it. A second turn doesn't move the messages.
 #[gpui_kit::test]
@@ -1388,7 +1422,7 @@ fn narrow_conversation_keeps_interrupt_and_send_inside_the_pane(cx: &mut TestApp
         visual.simulate_resize(size(px(width), px(600.)));
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
-        for selector in ["native-attach", "native-interrupt", "native-send"] {
+        for selector in ["native-attach", "native-interrupt"] {
             let bounds = visual.debug_bounds(selector).expect("composer action");
             assert!(
                 bounds.left() >= px(0.) && bounds.right() <= px(width),
@@ -1396,6 +1430,19 @@ fn narrow_conversation_keeps_interrupt_and_send_inside_the_pane(cx: &mut TestApp
             );
         }
     }
+    assert!(visual.debug_bounds("native-send").is_none());
+    let composer = visual.debug_bounds("native-composer").unwrap();
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("A follow-up");
+    redraw(visual);
+    assert!(visual.debug_bounds("native-interrupt").is_none());
+    assert!(visual.debug_bounds("native-send").is_some());
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a backspace"
+    } else {
+        "ctrl-a backspace"
+    });
+    redraw(visual);
     let interrupt = visual.debug_bounds("native-interrupt").unwrap();
     visual.simulate_click(interrupt.center(), Modifiers::none());
     let invocation = calls
@@ -1460,8 +1507,6 @@ fn interrupt_tooltip_leaves_with_the_finished_turn(cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let editor = visual.debug_bounds("native-composer").expect("composer");
-    visual.simulate_click(editor.center(), Modifiers::none());
-    visual.simulate_input("Wrap up");
     let interrupt = visual
         .debug_bounds("native-interrupt")
         .expect("a working turn offers Interrupt");
@@ -1473,6 +1518,10 @@ fn interrupt_tooltip_leaves_with_the_finished_turn(cx: &mut TestAppContext) {
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("tooltip:Interrupt").is_some());
 
+    visual.simulate_click(editor.center(), Modifiers::none());
+    visual.simulate_input("Wrap up");
+    redraw(visual);
+    assert!(visual.debug_bounds("native-send").is_some());
     visual.simulate_keystrokes("enter");
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
@@ -1541,6 +1590,7 @@ fn an_expanded_composer_writes_where_the_transcript_was(cx: &mut TestAppContext)
     });
     let record = saved_record("idle");
     let (sender, _) = native_command_sender(&record);
+    let mut conversation = None;
     let (_, visual) = cx.add_window_view(|window, cx| {
         let view = cx.new(|cx| {
             NativeAgentSessionView::new(
@@ -1551,6 +1601,7 @@ fn an_expanded_composer_writes_where_the_transcript_was(cx: &mut TestAppContext)
                 cx,
             )
         });
+        conversation = Some(view.clone());
         gpui_kit::component::Root::new(view, window, cx)
     });
     visual.simulate_resize(size(px(600.), px(800.)));
@@ -1562,18 +1613,22 @@ fn an_expanded_composer_writes_where_the_transcript_was(cx: &mut TestAppContext)
     let resting = draw(visual);
     visual.simulate_click(resting.center(), Modifiers::none());
     visual.simulate_input("A long draft");
-    let expand = visual
-        .debug_bounds("native-composer-expand")
-        .expect("expand");
-    visual.simulate_click(expand.center(), Modifiers::none());
+    assert!(visual.debug_bounds("native-composer-shrink").is_none());
+    visual.update(|window, cx| {
+        conversation.as_ref().unwrap().update(cx, |view, cx| {
+            assert!(view.perform_completion(CommandAction::Expand, window, cx));
+        });
+    });
     let expanded = draw(visual);
     assert!(
         expanded.size.height > px(600.),
         "{expanded:?} fills the window"
     );
+    assert!(visual.debug_bounds("native-composer-shrink").is_some());
     visual.simulate_keystrokes("escape");
     let shrunk = draw(visual);
     pretty_assertions::assert_eq!(shrunk.size.height, resting.size.height);
+    assert!(visual.debug_bounds("native-composer-shrink").is_none());
 }
 
 #[gpui_kit::test]
@@ -2325,6 +2380,25 @@ fn expanded_tool_output_scrolls_within_a_capped_box(cx: &mut TestAppContext) {
         output.size.height < px(400.),
         "200 lines stay in a capped box: {:?}",
         output.size
+    );
+    visual.simulate_resize(size(px(900.), px(650.)));
+    redraw(visual);
+    let output = visual.debug_bounds("tool-output-scroll:log").unwrap();
+    let body = visual.debug_bounds("tool-output-scroll:log-body").unwrap();
+    let reply = visual.debug_bounds("native-message-reply").unwrap();
+    visual.simulate_event(ScrollWheelEvent {
+        position: output.center(),
+        delta: ScrollDelta::Pixels(point(px(0.), px(-100.))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    redraw(visual);
+    let after = visual.debug_bounds("tool-output-scroll:log-body").unwrap();
+    assert!(after.top() < body.top(), "the output itself scrolls");
+    assert_eq!(
+        visual.debug_bounds("native-message-reply").unwrap().top(),
+        reply.top(),
+        "scrolling output keeps the transcript in place"
     );
 }
 
@@ -3432,10 +3506,9 @@ fn narrow_composers_compact_their_controls(cx: &mut TestAppContext) {
     }
 }
 
-/// With a narrower message width, a wide conversation keeps its messages centered once the
-/// context card fits in the margin, and moves them aside only when the card would cover them.
+/// Wide conversations reserve room beside the transcript for their details card.
 #[gpui_kit::test]
-fn wide_conversations_center_messages_beside_the_context_card(cx: &mut TestAppContext) {
+fn conversations_keep_messages_centered_within_their_pane(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
@@ -4388,6 +4461,7 @@ fn queued_drawer_stays_attached_and_keeps_actions_reachable_at_zoom(cx: &mut Tes
     ]
     .into_iter()
     .map(|(id, status)| NativeQueuedMessage {
+            review_comments: Vec::new(),
         id: id.into(),
         text: "A long queued follow-up that should stay readable without pushing its actions out of the pane".into(),
         preview_text: "A long queued follow-up that should stay readable without pushing its actions out of the pane".into(),
@@ -4839,6 +4913,10 @@ fn compaction_is_an_operation_instead_of_a_model_response(cx: &mut TestAppContex
 }
 
 #[gpui_kit::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Exercise choice and multiline answers with visibility, submission and draft retention"
+)]
 fn async_question_answers_steer_without_consuming_the_composer_draft(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::component::init(cx);
@@ -4874,10 +4952,34 @@ fn async_question_answers_steer_without_consuming_the_composer_draft(cx: &mut Te
         visual.simulate_click(composer.center(), Modifiers::none());
         visual.simulate_input("Unrelated draft");
         visual.update(|window, cx| window.draw(cx).clear(cx));
+        let pending = visual.debug_bounds("native-pending-questions").unwrap();
+        let question = visual.debug_bounds("async-questions:question").unwrap();
+        assert!(pending.contains(&question.center()));
+        assert!(
+            question.bottom() <= composer.top(),
+            "questions stay above the composer"
+        );
         let value = if free_text {
+            let other = visual.debug_bounds("async-other:question:0").unwrap();
+            visual.simulate_click(other.center(), Modifiers::none());
+            visual.simulate_resize(size(px(1000.), px(500.)));
+            redraw(visual);
+            redraw(visual);
             let input = visual.debug_bounds("async-input:question:0").unwrap();
+            let card = visual.debug_bounds("async-questions:question").unwrap();
+            let send = visual.debug_bounds("async-answer:question").unwrap();
+            assert!(
+                input.top() >= card.top(),
+                "the focused answer stays inside its card"
+            );
+            assert!(
+                input.bottom() <= send.top(),
+                "the focused answer stays above its submit button: {input:?}, {send:?}"
+            );
             visual.simulate_click(input.center(), Modifiers::none());
-            visual.simulate_input("A custom\nmultiline answer");
+            visual.simulate_input("A custom");
+            visual.simulate_keystrokes("shift-enter");
+            visual.simulate_input("multiline answer");
             "A custom\nmultiline answer"
         } else {
             let option = visual.debug_bounds("async-option:question:0:B").unwrap();
@@ -4886,8 +4988,20 @@ fn async_question_answers_steer_without_consuming_the_composer_draft(cx: &mut Te
         };
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
-        let send = visual.debug_bounds("async-answer:question").unwrap();
-        visual.simulate_click(send.center(), Modifiers::none());
+        if free_text {
+            assert!(
+                !calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|call| call.command == "agents.native.prompt"),
+                "Shift-Enter keeps editing"
+            );
+            visual.simulate_keystrokes("enter");
+        } else {
+            let send = visual.debug_bounds("async-answer:question").unwrap();
+            visual.simulate_click(send.center(), Modifiers::none());
+        }
         visual.run_until_parked();
         let answer = calls
             .lock()
@@ -5276,55 +5390,6 @@ fn turn_usage_shows_on_the_turns_reply(cx: &mut TestAppContext) {
     );
 }
 
-/// The context meter's menu compacts the conversation the way `/compact` does, and keeps the
-/// draft.
-#[gpui_kit::test]
-fn context_meter_compacts_the_conversation(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    let mut record = saved_record("idle");
-    record.snapshot.usage =
-        Some(serde_json::json!({"input": 150_000, "modelContextWindow": 200_000}));
-    let (sender, commands) = native_command_sender(&record);
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            NativeAgentSessionView::new(
-                record,
-                sender.for_caller(Caller::Internal),
-                true,
-                window,
-                cx,
-            )
-        });
-        gpui_kit::component::Root::new(view, window, cx)
-    });
-    visual.simulate_resize(size(px(900.), px(700.)));
-    redraw(visual);
-    let composer = visual.debug_bounds("native-composer").unwrap();
-    visual.simulate_click(composer.center(), Modifiers::none());
-    visual.simulate_input("A draft");
-    let meter = visual.debug_bounds("native-context-trigger").unwrap();
-    visual.simulate_click(meter.center(), Modifiers::none());
-    redraw(visual);
-    visual.simulate_keystrokes("down enter");
-    redraw(visual);
-    // The draft stays to send afterwards.
-    let composer = visual.debug_bounds("native-composer").unwrap();
-    visual.simulate_click(composer.center(), Modifiers::none());
-    visual.simulate_keystrokes("enter");
-    redraw(visual);
-    let prompts = commands
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|call| call.command == "agents.native.prompt")
-        .map(|call| call.arguments[2].clone())
-        .collect::<Vec<_>>();
-    assert_eq!(prompts, ["/compact", "A draft"]);
-}
-
 /// A reply's image that names a file shows that file, read from the conversation's directory;
 /// one whose file is missing says so where the image would be.
 #[gpui_kit::test]
@@ -5447,94 +5512,6 @@ fn mermaid_fences_draw_once_finished(cx: &mut TestAppContext) {
         "The flow:\n\n```mermaid\nflowchart LR\n  Plan --> Bu",
         cx
     ));
-}
-
-/// The composer shows the conversation's branch and switches its checkout to another local
-/// branch through the conversation's binding.
-#[gpui_kit::test]
-fn the_composer_switches_the_checkout_branch(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    let record = saved_record("idle");
-    let cwd = record.config.cwd.to_string_lossy().into_owned();
-    let (sender, commands) = native_command_sender(&record);
-    let binding = bootty_control::CommandTarget {
-        kind: bootty_control::ResourceKind::Binding,
-        handle: "binding".to_owned(),
-        generation: 1,
-    };
-    let context = bootty_ui::ConversationContext {
-        project: None,
-        branch: Some("feature".to_owned()),
-        pull_request: None,
-        binding: Some(binding.clone()),
-        diff: None,
-        target: None,
-        worktree: false,
-    };
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            NativeAgentSessionView::new(
-                record,
-                sender.for_caller(Caller::Internal),
-                true,
-                window,
-                cx,
-            )
-        });
-        view.update(cx, |view, cx| {
-            view.set_conversation_context(Some(context), cx);
-        });
-        gpui_kit::component::Root::new(view, window, cx)
-    });
-    redraw(visual);
-    let picker = visual.debug_bounds("native-branch-picker").unwrap();
-    visual.simulate_click(picker.center(), Modifiers::none());
-    redraw(visual);
-    visual.simulate_keystrokes("down enter");
-    redraw(visual);
-    let git = commands
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|call| call.command.starts_with("git."))
-        .map(|call| {
-            (
-                call.command.clone(),
-                call.arguments.clone(),
-                call.target.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        git,
-        [
-            (
-                "git.overview".to_owned(),
-                vec![cwd.clone(), "1".to_owned()],
-                Some(binding.clone())
-            ),
-            (
-                "git.status".to_owned(),
-                vec![cwd.clone()],
-                Some(binding.clone())
-            ),
-            (
-                "git.branch-checkout".to_owned(),
-                vec![cwd.clone(), "main".to_owned()],
-                Some(binding.clone())
-            ),
-            // The branches are read again for the checkout's new state.
-            (
-                "git.overview".to_owned(),
-                vec![cwd.clone(), "1".to_owned()],
-                Some(binding.clone())
-            ),
-            ("git.status".to_owned(), vec![cwd], Some(binding)),
-        ]
-    );
 }
 
 /// The composer drawer shows the conversation's goal with what it has spent, and pauses or
@@ -5694,10 +5671,9 @@ fn ready_plans_can_go_to_a_new_conversation(cx: &mut TestAppContext) {
     assert_eq!(*plans.lock().unwrap(), ["1. Fix the bug"]);
 }
 
-/// A comment on changed lines goes into the draft with the file, the lines and their text, and
-/// is sent like anything else written there.
+/// Review source is attached to an inline chip; only the authored message fills the editor.
 #[gpui_kit::test]
-fn diff_comments_join_the_draft_with_their_lines(cx: &mut TestAppContext) {
+fn diff_comments_are_inline_context_instead_of_raw_prompt_text(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
@@ -5735,21 +5711,30 @@ fn diff_comments_join_the_draft_with_their_lines(cx: &mut TestAppContext) {
             cx,
         );
     });
+    redraw(visual);
+    assert!(visual.debug_bounds("review-comment-token").is_some());
     visual.simulate_keystrokes("enter");
     redraw(visual);
     let sent = commands
         .lock()
         .unwrap()
         .iter()
-        .filter(|call| call.command == "agents.native.prompt")
-        .map(|call| call.arguments[2].trim_end().to_owned())
-        .collect::<Vec<_>>();
+        .find(|call| call.command == "agents.native.prompt")
+        .cloned()
+        .unwrap();
+    assert_eq!(sent.arguments[2], "[review]");
+    let reviews: Vec<bootty_agents::NativeReviewComment> =
+        serde_json::from_str(&sent.arguments[11]).unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].anchor.path, "src/main.rs");
+    assert_eq!(reviews[0].anchor.side, bootty_git::diff::DiffSide::Left);
     assert_eq!(
-        sent,
-        [
-            "@src/main.rs:2-3 (as it was before the change)\n```\n-- old comment\nlet x = 1;\n```\nWhy remove these?"
-        ]
+        (reviews[0].anchor.start_line, reviews[0].anchor.line),
+        (2, 3)
     );
+    assert_eq!(reviews[0].quote, "-- old comment\nlet x = 1;");
+    assert_eq!(reviews[0].body, "Why remove these?");
+    assert_eq!(reviews[0].prompt_range, 0..8);
 }
 
 /// A turn whose files Git kept shows what it changed, and its prompt rewinds the conversation
@@ -5842,59 +5827,6 @@ fn turns_show_their_changes_and_rewind(cx: &mut TestAppContext) {
             "agents.native.prompt Review this change."
         ]
     );
-}
-
-/// A wide conversation shows its context card beside the messages. A narrow one opens it from
-/// the composer, over the messages, and a click outside closes it.
-#[gpui_kit::test]
-fn narrow_conversations_open_the_context_card_on_request(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    let record = saved_record("idle");
-    let (sender, _) = native_command_sender(&record);
-    let context = bootty_ui::ConversationContext {
-        project: Some("bootty".to_owned()),
-        branch: Some("feature".to_owned()),
-        pull_request: None,
-        binding: None,
-        diff: None,
-        target: None,
-        worktree: false,
-    };
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            NativeAgentSessionView::new(
-                record,
-                sender.for_caller(Caller::Internal),
-                true,
-                window,
-                cx,
-            )
-        });
-        view.update(cx, |view, cx| {
-            view.set_conversation_context(Some(context), cx);
-        });
-        gpui_kit::component::Root::new(view, window, cx)
-    });
-    let shown = |visual: &mut gpui_kit::VisualTestContext| {
-        redraw(visual);
-        redraw(visual);
-        (
-            visual.debug_bounds("native-context-card").is_some(),
-            visual.debug_bounds("native-context-card-button").is_some(),
-        )
-    };
-    visual.simulate_resize(size(px(1600.), px(900.)));
-    assert_eq!(shown(visual), (true, false), "wide");
-    visual.simulate_resize(size(px(900.), px(900.)));
-    assert_eq!(shown(visual), (false, true), "narrow");
-    let button = visual.debug_bounds("native-context-card-button").unwrap();
-    visual.simulate_click(button.center(), Modifiers::none());
-    assert_eq!(shown(visual), (true, true), "opened");
-    visual.simulate_click(point(px(40.), px(40.)), Modifiers::none());
-    assert_eq!(shown(visual), (false, true), "closed by a click outside");
 }
 
 /// The context card says where the conversation works and who answers it, shows its pull
@@ -6213,10 +6145,44 @@ fn long_conversation<'a>(
     (record, conversation.unwrap(), visual)
 }
 
-/// A prompt just sent sits at the top with room below for its reply, rather than at the bottom
-/// of a long conversation, and stays there when the provider's copy replaces Bootty's.
+/// Steering a running turn preserves the reader's scroll position.
 #[gpui_kit::test]
-fn a_sent_prompt_sits_at_the_top_with_room_for_its_reply(cx: &mut TestAppContext) {
+fn steering_preserves_the_transcript_reading_position(cx: &mut TestAppContext) {
+    let (mut record, view, visual) = long_conversation(
+        cx,
+        &[
+            serde_json::json!({"id":"next", "role":"user", "text":"Keep going", "complete":true}),
+            serde_json::json!({"id":"working", "role":"assistant", "text":"Working further.\n\n".repeat(30), "complete":false}),
+        ],
+    );
+    record.snapshot.status = bootty_agents::NativeSessionStatus::Working;
+    record.snapshot.revision = record.snapshot.revision.saturating_add(1);
+    view.update_in(visual, |view, window, cx| {
+        view.update_record(record, window, cx);
+    });
+    redraw(visual);
+    let first = visual.debug_bounds("history-turn:ask").unwrap();
+    visual.simulate_click(first.center(), Modifiers::none());
+    redraw(visual);
+    let composer = visual
+        .debug_bounds("native-collapsed-composer")
+        .or_else(|| visual.debug_bounds("native-composer"))
+        .unwrap();
+    visual.simulate_click(composer.center(), Modifiers::none());
+    visual.simulate_input("Steer this turn");
+    redraw(visual);
+    let before = visual.debug_bounds("native-message-answer").unwrap();
+    visual.simulate_keystrokes("cmd-enter");
+    redraw(visual);
+    let after = visual
+        .debug_bounds("native-message-answer")
+        .expect("the message being read stays visible");
+    assert!((f32::from(after.top()) - f32::from(before.top())).abs() < 1.);
+}
+
+/// A sent prompt stays at the real tail, including when the provider replaces its local copy.
+#[gpui_kit::test]
+fn a_sent_prompt_keeps_the_transcript_bounded_to_its_content(cx: &mut TestAppContext) {
     let (mut record, view, visual) = long_conversation(cx, &[]);
     let editor = visual.debug_bounds("native-composer").expect("composer");
     visual.simulate_click(editor.center(), Modifiers::none());
@@ -6244,7 +6210,29 @@ fn a_sent_prompt_sits_at_the_top_with_room_for_its_reply(cx: &mut TestAppContext
         redraw(visual);
         redraw(visual);
         let prompt = visual.debug_bounds(selector).expect("the prompt shows");
-        assert!(prompt.top() < px(120.), "{id} sits at the top: {prompt:?}");
+        let composer = visual.debug_bounds("native-composer").unwrap();
+        assert!(
+            prompt.bottom() <= composer.top(),
+            "{id} stays above the composer: {prompt:?}"
+        );
+        assert!(
+            f32::from(composer.top()) - f32::from(prompt.bottom()) < 100.,
+            "{id} leaves no empty viewport after the transcript: {prompt:?}"
+        );
+        visual.simulate_event(ScrollWheelEvent {
+            position: prompt.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-100_000.))),
+            modifiers: Modifiers::none(),
+            touch_phase: TouchPhase::Moved,
+        });
+        redraw(visual);
+        let at_end = visual
+            .debug_bounds(selector)
+            .expect("the last message remains visible");
+        assert!(
+            (f32::from(at_end.bottom()) - f32::from(prompt.bottom())).abs() < 1.,
+            "scrolling cannot move past the transcript tail"
+        );
     }
 }
 
@@ -6321,4 +6309,93 @@ fn latest_glides_down_to_the_latest_reply(cx: &mut TestAppContext) {
     glide_frames(visual);
     assert!(visual.debug_bounds("native-message-last").is_some());
     assert!(visual.debug_bounds("native-jump-latest").is_none());
+}
+
+struct ConversationDetailsProbe {
+    view: Entity<NativeAgentSessionView>,
+}
+
+impl gpui_kit::Render for ConversationDetailsProbe {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        cx: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        use gpui_kit::{ParentElement as _, Styled as _};
+        let button = self
+            .view
+            .update(cx, |view, cx| view.render_context_card_button(cx));
+        gpui_kit::div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .children(button)
+            .child(self.view.clone())
+    }
+}
+
+#[gpui_kit::test]
+fn conversation_details_toggle_survives_width_changes(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let record = saved_record("idle");
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        view.update(cx, |view, cx| {
+            view.set_conversation_context(
+                Some(bootty_ui::ConversationContext {
+                    project: Some("bootty".to_owned()),
+                    branch: None,
+                    pull_request: None,
+                    binding: None,
+                    diff: None,
+                    target: None,
+                    worktree: false,
+                }),
+                cx,
+            );
+        });
+        let probe = cx.new(|cx| {
+            cx.observe(&view, |_, _, cx| cx.notify()).detach();
+            ConversationDetailsProbe { view }
+        });
+        gpui_kit::component::Root::new(probe, window, cx)
+    });
+    visual.simulate_resize(size(px(1600.), px(900.)));
+    redraw(visual);
+    redraw(visual);
+    for (width, before, after) in [
+        (1600., true, false),
+        (800., false, true),
+        (1600., true, false),
+        (800., false, true),
+        (800., true, false),
+    ] {
+        visual.simulate_resize(size(px(width), px(900.)));
+        redraw(visual);
+        redraw(visual);
+        assert_eq!(visual.debug_bounds("native-context-card").is_some(), before);
+        let button = visual
+            .debug_bounds("native-context-card-button")
+            .expect("details toggle at every width");
+        visual.simulate_click(button.center(), Modifiers::none());
+        redraw(visual);
+        redraw(visual);
+        assert_eq!(
+            visual.debug_bounds("native-context-card").is_some(),
+            after,
+            "toggle at width {width} from visible={before}"
+        );
+    }
 }

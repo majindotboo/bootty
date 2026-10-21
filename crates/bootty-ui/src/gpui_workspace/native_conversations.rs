@@ -1228,7 +1228,8 @@ impl GpuiWorkspace {
                 target,
                 text,
                 attachments,
-            } => self.edit_and_resend(target, text, attachments, window, cx),
+                review_comments,
+            } => self.edit_and_resend(target, text, attachments, review_comments, window, cx),
             OpenNativeSession::ImplementInNew { target, plan } => {
                 self.implement_in_new_conversation(target, plan);
             }
@@ -1299,6 +1300,7 @@ impl GpuiWorkspace {
         target: &CommandTarget,
         text: &str,
         attachments: &[bootty_agents::NativeAttachmentReference],
+        review_comments: &[bootty_agents::NativeReviewComment],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1322,7 +1324,7 @@ impl GpuiWorkspace {
             });
         let restored = reattached.unwrap_or(text).to_owned();
         view.update(cx, |view, cx| {
-            view.edit_and_resend(&restored, attachments, window, cx);
+            view.edit_and_resend(&restored, attachments, review_comments, window, cx);
         });
     }
 

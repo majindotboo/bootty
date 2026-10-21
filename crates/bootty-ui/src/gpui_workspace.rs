@@ -4043,27 +4043,6 @@ impl GpuiWorkspace {
                 config.window.fullscreen_top_offset,
             );
         }
-        if let Some(tools) = &self.tools {
-            for bar in [
-                &mut chrome_snapshot.top_status,
-                &mut chrome_snapshot.bottom_status,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                for item in bar
-                    .segments
-                    .iter_mut()
-                    .flat_map(|segment| &mut segment.items)
-                {
-                    if let Some(crate::gpui::chrome::NativeChromeAction::TogglePanel(kind)) =
-                        item.action
-                    {
-                        item.active = tools.read(cx).panel_visible(kind, cx);
-                    }
-                }
-            }
-        }
     }
 
     fn prepare_chrome_frame(
@@ -4108,6 +4087,19 @@ impl GpuiWorkspace {
         );
         self.last_maintenance_chrome = Some(chrome_snapshot.clone());
         self.sync_conversation_context(&chrome_snapshot, cx);
+        if let Some(tools) = &self.tools {
+            let conversation = self
+                .native_conversation_view(cx)
+                .filter(|_| self.new_session_surface(cx).is_none());
+            tools.update(cx, |tools, cx| {
+                tools.set_conversation(conversation.clone(), cx);
+            });
+            tools
+                .read(cx)
+                .titlebar
+                .clone()
+                .update(cx, |bar, cx| bar.set_conversation(conversation, cx));
+        }
         self.decorate_dock_chrome(&mut chrome_snapshot, cx);
         if self.new_session_surface(cx).is_some() {
             if let Some(sidebar) = &mut chrome_snapshot.sidebar {

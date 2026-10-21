@@ -100,6 +100,10 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
         &["panels", "recovery", "button"],
         &["panels", "shell", "dock"],
         &["panels", "shell", "button"],
+        &["panels", "sessions", "button"],
+        &["panels", "files", "button"],
+        &["panels", "changes", "button"],
+        &["panels", "diff", "button"],
         &["panels", "sessions", "dock"],
         &["panels", "files", "dock"],
         &["panels", "changes", "dock"],
@@ -233,7 +237,6 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(computer_specs());
     specs.extend(custom_runtime_specs());
     specs.extend(font_weight_specs());
-    specs.extend(panel_specs());
     specs
 }
 
@@ -307,41 +310,6 @@ fn font_weight_specs() -> impl Iterator<Item = SettingSpec> {
             supersedes: Vec::new(),
             default: SettingDefault::UiFontWeight(role),
     })
-}
-
-fn panel_specs() -> Vec<SettingSpec> {
-    let mut specs = Vec::new();
-    macro_rules! panel {
-        ($kind:ident, $name:literal, $label:literal) => {
-            specs.push(spec(
-                &["panels", $name, "button"],
-                "Status bar button",
-                "",
-                "panels",
-                $label,
-                SettingKind::Choice {
-                    options: [
-                        (&crate::config::PanelButton::None, "None"),
-                        (&crate::config::PanelButton::Top, "Top bar"),
-                        (&crate::config::PanelButton::Bottom, "Bottom bar"),
-                    ]
-                    .into_iter()
-                    .map(|(value, label)| SettingOption::of(value, label))
-                    .collect(),
-                },
-                SettingDefault::Field(|config| {
-                    SettingValue::Token(token(
-                        &config.panel(crate::config::PanelKind::$kind).button,
-                    ))
-                }),
-            ));
-        };
-    }
-    panel!(Sessions, "sessions", "Sessions");
-    panel!(Files, "files", "Files");
-    panel!(Changes, "changes", "Changes");
-    panel!(Diff, "diff", "Diff");
-    specs
 }
 
 fn computer_specs() -> [SettingSpec; 4] {

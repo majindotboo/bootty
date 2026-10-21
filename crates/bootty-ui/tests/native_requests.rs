@@ -398,6 +398,7 @@ fn approvals_stop_the_turn_or_deny_with_a_note(cx: &mut TestAppContext) {
 fn approvals_leave_a_draft_in_progress_focused(cx: &mut TestAppContext) {
     let mut record = command_approval();
     record.draft = Some(bootty_agents::NativeDraft {
+        review_comments: Vec::new(),
         text: "Before you run that".to_owned(),
         attachments: Vec::new(),
     });

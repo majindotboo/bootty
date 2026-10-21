@@ -163,7 +163,9 @@ conversation in the same session with the same provider and settings; Claude's i
 then declined here with a note saying so. A question's answer can carry files, by
 drop or Attach files…, which go to a local provider as their paths. In the Changes
 diff, and in a conversation's file changes, selected lines take a comment that goes
-into the conversation's draft with the file, the lines and their text.
+into the conversation's draft with the file, the lines and their text. Drag the comment
+handle or select a range using line numbers. The editor names the selected range.
+The optional file list navigates exactly the files in the shown uncommitted or turn diff.
 In a Git work tree, every turn snapshots the files before it starts and after it
 ends, untracked files included, without touching the index. A reply's file-diff
 button, or Review on the list of files a turn changed, opens that turn's changes
@@ -196,6 +198,7 @@ conversation's sent messages, newest first, and Down goes forward again. A sent
 message's pencil brings it back to change and send again, with its attachments; its
 browser notes return as notes, screenshots included, while they're still saved, and
 otherwise their text returns with the message.
+A message accepts up to 16 image attachments within the existing 8 MiB aggregate image budget.
 Images a tool returns show under its row, open or folded. Any image opens in a
 viewer that fits it to the window; Ctrl or Command with the wheel, a pinch, `+`
 and `-` zoom, dragging or the wheel pans, a double click zooms in or back to fit,
@@ -398,3 +401,5 @@ message the app sends lands in the composer for the user to send. Model context,
 downloads and other display modes are not offered. Those requests reach
 `agents.native.mcp-app-read` and `agents.native.mcp-app-call`, which accept only the
 app's own view. App tabs close with the window.
+
+Review comments attach to native messages as inline context chips. Their previews show the file, source side, selected lines and comment; removing a chip removes its context. Drafts, queued inputs, retries and transcript history retain the structured comment. `agents.native.prompt`, `queue` and `interrupt-send` accept optional trailing `review_comments` JSON without changing existing argument positions.

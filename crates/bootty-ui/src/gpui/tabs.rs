@@ -366,7 +366,11 @@ impl RenderOnce for ScrollableTabBar {
             .notch
             .filter(|notch| notch.wrap)
             .map_or((0, 0.0, false), |notch| {
-                notch.first_row_tabs(&widths, gap, NEW_TAB_WIDTH + 4.0)
+                notch.first_row_tabs(
+                    &widths,
+                    gap,
+                    f32::from(super::UI_HEADER_CONTROL_SIZE.to_pixels(window.rem_size())) + gap,
+                )
             });
         let target = state.update(cx, |state, _| state.reveal(selected, focused, first_count));
         let (scroll, edges, viewport_width) = {
@@ -487,9 +491,6 @@ const fn tab_gap(appearance: TabAppearance) -> f32 {
         TabAppearance::Underline => 12.0,
     }
 }
-
-/// Reserved width for the trailing new-tab button when fitting the first notch row.
-const NEW_TAB_WIDTH: f32 = 24.0;
 
 fn take_or_empty(plus: &mut Option<AnyElement>) -> AnyElement {
     plus.take()

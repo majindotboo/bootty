@@ -402,7 +402,6 @@ impl NativeAgentSessionView {
                 || {
                     Button::new("native-model")
                         .ghost()
-                        .small()
                         .disabled(self.pending.contains("models-info") || busy)
                         .loading(self.pending.contains("models-info"))
                         .accessibility_label(if self.pending.contains("models-info") {
@@ -451,7 +450,6 @@ impl NativeAgentSessionView {
         let owner = cx.entity().downgrade();
         Button::new("native-permissions")
             .ghost()
-            .small()
             .min_w_0()
             .dropdown_caret(true)
             .accessibility_label(format!("Permissions: {label}"))

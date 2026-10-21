@@ -355,6 +355,7 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
                             | "annotations"
                             | "attachments"
                             | "citations"
+                            | "review_comments"
                             | "authored_bytes"
                             | "attachment_ranges"
                             | "applications"
@@ -405,6 +406,7 @@ fn prompt_arguments() -> Vec<&'static str> {
         "attachment_ranges",
         "provider_mentions",
         "conversations",
+        "review_comments",
     ]
 }
 

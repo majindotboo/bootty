@@ -5,6 +5,7 @@ use rstest::rstest;
 
 fn response(text: &str, role: &str) -> NativeTranscriptItem {
     NativeTranscriptItem {
+        review_comments: Vec::new(),
         id: "response-1".to_owned(),
         role: role.to_owned(),
         text: text.to_owned(),
@@ -38,7 +39,7 @@ proptest! {
         };
         let mut item = response(&text, "user");
         item.citations = vec![citation.clone()];
-        prop_assert_eq!(item.display_text(), format!("{prefix}[quote] is literal; [❝ Clarify](bootty-citation:0) please revise"));
+        prop_assert_eq!(item.display_text(), format!("{prefix}[quote] is literal; Clarify please revise"));
         prop_assert!(bootty_agents::NativePrompt::new_with_context(text, vec![], bootty_agents::NativePromptAttachments::default(), vec![citation]).is_ok());
     }
 
@@ -152,7 +153,7 @@ proptest! {
             prompt_range: Some(quote_start..quote_start.saturating_add(7)),
             quote: "claim".into(), comment: "Clarify".into(),
         }];
-        prop_assert_eq!(item.display_text(), format!("{prefix}{literal}` notes.md ` then [❝ Clarify](bootty-citation:0)"));
+        prop_assert_eq!(item.display_text(), format!("{prefix}{literal}` notes.md ` then Clarify"));
         let saved: NativeTranscriptItem = serde_json::from_str(&serde_json::to_string(&item).unwrap()).unwrap();
         prop_assert_eq!(saved.display_text(), item.display_text());
     }
@@ -232,4 +233,83 @@ fn annotation_envelopes_render_selected_text_and_user_comment() {
         Vec::<bootty_agents::NativeResponseAnnotation>::new()
     );
     assert_eq!(response(malformed, "user").display_text(), malformed);
+}
+
+#[rstest]
+#[case(
+    bootty_git::diff::DiffSide::Left,
+    "first source line\nsecond source line",
+    3
+)]
+#[case(bootty_git::diff::DiffSide::Right, "", 2)]
+fn review_comments_keep_source_out_of_the_authored_message(
+    #[case] side: bootty_git::diff::DiffSide,
+    #[case] quote: &str,
+    #[case] last: u32,
+) {
+    let text = "Please revise [review]";
+    let comment = bootty_agents::NativeReviewComment {
+        id: "review-1".into(),
+        anchor: bootty_git::diff::DiffAnchor {
+            path: "src/main.rs".into(),
+            side,
+            start_line: 2,
+            line: last,
+        },
+        quote: quote.into(),
+        body: "Keep the original behavior".into(),
+        prompt_range: 14..22,
+    };
+    let prompt = bootty_agents::NativePrompt::new_with_review_comments(
+        text.into(),
+        vec![],
+        bootty_agents::NativePromptAttachments::default(),
+        vec![],
+        vec![comment.clone()],
+    )
+    .unwrap();
+    assert_eq!(prompt.message(), text);
+    assert_eq!(prompt.review_comments(), std::slice::from_ref(&comment));
+    let mut item = response(text, "user");
+    item.review_comments = vec![comment];
+    assert_eq!(item.display_text(), "Please revise ");
+    let roundtrip: NativeTranscriptItem =
+        serde_json::from_value(serde_json::to_value(&item).unwrap()).unwrap();
+    assert_eq!(roundtrip, item);
+}
+
+#[rstest]
+#[case("../outside.rs", 1, 2, 0..8)]
+#[case("/absolute.rs", 1, 2, 0..8)]
+#[case("src/main.rs", 0, 2, 0..8)]
+#[case("src/main.rs", 2, 1, 0..8)]
+#[case("src/main.rs", 1, 2, 1..8)]
+fn rejects_invalid_review_context(
+    #[case] path: &str,
+    #[case] first: u32,
+    #[case] last: u32,
+    #[case] range: std::ops::Range<usize>,
+) {
+    let comment = bootty_agents::NativeReviewComment {
+        id: "review".into(),
+        anchor: bootty_git::diff::DiffAnchor {
+            path: path.into(),
+            side: bootty_git::diff::DiffSide::Right,
+            start_line: first,
+            line: last,
+        },
+        quote: "line".into(),
+        body: "Revise".into(),
+        prompt_range: range,
+    };
+    assert!(
+        bootty_agents::NativePrompt::new_with_review_comments(
+            "[review]".into(),
+            vec![],
+            bootty_agents::NativePromptAttachments::default(),
+            vec![],
+            vec![comment]
+        )
+        .is_err()
+    );
 }

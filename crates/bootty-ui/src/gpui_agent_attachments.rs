@@ -47,8 +47,8 @@ impl NativeAgentSessionView {
             .iter()
             .filter(|annotation| annotation.image.is_some())
             .collect::<Vec<_>>();
-        if images.len() > 4 {
-            return Err("Include at most four images".into());
+        if images.len() > bootty_agents::MAX_NATIVE_PROMPT_IMAGES {
+            return Err(too_many_images());
         }
         let images = if images.is_empty() {
             String::new()
@@ -86,6 +86,8 @@ impl NativeAgentSessionView {
             )
             .map_err(|error| error.to_string())?,
             serde_json::to_string(&self.active_conversation_mentions(cx))
+                .map_err(|error| error.to_string())?,
+            serde_json::to_string(&self.active_review_comments(cx))
                 .map_err(|error| error.to_string())?,
         ])
     }
@@ -397,42 +399,6 @@ impl NativeAgentSessionView {
         };
         self.composer.update(cx, |input, cx| {
             input.insert(mention, window, cx);
-            input.focus(window, cx);
-        });
-        cx.notify();
-    }
-
-    /// Writes a comment on changed lines into the draft: the file and lines it is about, those
-    /// lines, and the comment.
-    pub fn add_diff_comment(
-        &mut self,
-        comment: &crate::gpui_git_panel::DiffComment,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let anchor = &comment.anchor;
-        let lines = if anchor.line > anchor.start_line {
-            format!("{}-{}", anchor.start_line, anchor.line)
-        } else {
-            anchor.start_line.to_string()
-        };
-        let path = if anchor.path.contains(char::is_whitespace) {
-            format!("@\"{}\"", anchor.path)
-        } else {
-            format!("@{}", anchor.path)
-        };
-        let side = if anchor.side == bootty_git::diff::DiffSide::Left {
-            " (as it was before the change)"
-        } else {
-            ""
-        };
-        let text = format!(
-            "{path}:{lines}{side}\n```\n{}\n```\n{}\n\n",
-            comment.quote,
-            comment.body.trim()
-        );
-        self.composer.update(cx, |input, cx| {
-            input.insert(text, window, cx);
             input.focus(window, cx);
         });
         cx.notify();
@@ -833,8 +799,7 @@ impl NativeAgentSessionView {
                                 super::TranscriptRow::Work { members, .. } => {
                                     members.iter().any(has_image)
                                 }
-                                super::TranscriptRow::Failure { .. }
-                                | super::TranscriptRow::Room => false,
+                                super::TranscriptRow::Failure { .. } => false,
                             };
                             if changed {
                                 this.list.remeasure_items(ix..ix.saturating_add(1));

@@ -23,6 +23,8 @@ pub struct NativeQueuedMessage {
     pub text: String,
     pub preview_text: String,
     pub attachments: Vec<crate::NativeAttachmentReference>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_comments: Vec<crate::NativeReviewComment>,
     pub status: NativeQueuedMessageStatus,
     /// It steers the active turn as soon as the turn can take it.
     #[serde(default)]
@@ -93,6 +95,7 @@ pub(super) fn projection(store: &Store, session: &str) -> Vec<NativeQueuedMessag
             text: input.prompt.text.clone(),
             preview_text: input.prompt.preview_text(),
             attachments: input.prompt.attachments.clone(),
+            review_comments: input.prompt.review_comments.clone(),
             status: input.status,
             steer: input.steer,
         })
@@ -218,6 +221,7 @@ impl NativeAgentService {
             text: prompt.message().into(),
             preview_text: saved_prompt.preview_text(),
             attachments: saved_prompt.attachments.clone(),
+            review_comments: saved_prompt.review_comments.clone(),
             status: NativeQueuedMessageStatus::Queued,
             steer,
         };

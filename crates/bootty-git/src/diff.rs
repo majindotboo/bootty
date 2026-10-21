@@ -14,6 +14,8 @@ pub struct DiffLine {
     pub old_line: Option<u32>,
     pub new_line: Option<u32>,
     pub text: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_newline: bool,
 }
 
 impl DiffLine {
@@ -49,6 +51,10 @@ pub struct FileDiff {
     pub hunks: Vec<DiffHunk>,
     /// A missing hosted patch cannot be presented as an empty text file.
     pub patch_unavailable: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub new_file: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub deleted_file: bool,
 }
 
 impl FileDiff {
@@ -69,6 +75,8 @@ impl FileDiff {
             previous_path,
             hunks: Vec::new(),
             patch_unavailable: contents.is_none(),
+            new_file: false,
+            deleted_file: false,
         };
         let Some(contents) = contents else {
             return Ok(result);
@@ -98,8 +106,18 @@ impl FileDiff {
                 });
                 continue;
             }
-            if line.starts_with("\\ No newline at end of file") {
+            if line == "\\ No newline at end of file" {
+                let previous = result
+                    .hunks
+                    .last_mut()
+                    .and_then(|hunk| hunk.lines.last_mut())
+                    .ok_or("Missing line before no-newline marker")?;
+                previous.no_newline = true;
                 continue;
+            }
+            if result.hunks.is_empty() {
+                result.new_file |= line == "--- /dev/null";
+                result.deleted_file |= line == "+++ /dev/null";
             }
             let Some(hunk) = result.hunks.last_mut() else {
                 continue;
@@ -120,6 +138,7 @@ impl FileDiff {
                 old_line: old.then_some(numbers.0),
                 new_line: new.then_some(numbers.1),
                 text: line.get(1..).ok_or("Invalid diff line")?.into(),
+                no_newline: false,
             });
             if old {
                 remaining.0 = remaining.0.checked_sub(1).ok_or("Invalid old hunk count")?;
@@ -170,6 +189,7 @@ impl FileDiff {
                         .filter(|path| *path != "/dev/null")
                 };
                 let path = named("+++ ").or_else(|| named("--- "))?;
+                let path = path.split_once('\t').map_or(path, |(path, _)| path);
                 let path = serde_json::from_str::<String>(path).unwrap_or_else(|_| path.to_owned());
                 let path = path
                     .strip_prefix("b/")
@@ -200,11 +220,21 @@ impl FileDiff {
         if hunks.is_empty() {
             return None;
         }
-        let mut patch = format!(
-            "--- a/{}\n+++ b/{}\n",
-            self.previous_path.as_deref().unwrap_or(&self.path),
-            self.path
-        );
+        let old = if self.new_file {
+            "/dev/null".to_owned()
+        } else {
+            serde_json::to_string(&format!(
+                "a/{}",
+                self.previous_path.as_deref().unwrap_or(&self.path)
+            ))
+            .ok()?
+        };
+        let new = if self.deleted_file {
+            "/dev/null".to_owned()
+        } else {
+            serde_json::to_string(&format!("b/{}", self.path)).ok()?
+        };
+        let mut patch = format!("--- {old}\n+++ {new}\n");
         for hunk in hunks {
             patch.push_str(&hunk.header);
             patch.push('\n');
@@ -216,6 +246,9 @@ impl FileDiff {
                 });
                 patch.push_str(&line.text);
                 patch.push('\n');
+                if line.no_newline {
+                    patch.push_str("\\ No newline at end of file\n");
+                }
             }
         }
         Some(patch)

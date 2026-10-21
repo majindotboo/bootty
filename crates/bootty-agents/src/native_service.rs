@@ -75,6 +75,8 @@ pub struct NativeSessionRecord {
 #[serde(deny_unknown_fields)]
 pub struct NativeDraft {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_comments: Vec<crate::NativeReviewComment>,
     /// Attachments this conversation holds, each with where its chip sits in `text`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<NativeAttachmentReference>,
@@ -184,6 +186,9 @@ pub struct NativeSessionActivity {
     pub first_turn: Option<crate::NativeTurnReceipt>,
     pub approval: bool,
     pub input: bool,
+    /// Newest asynchronous question since the user's last response, while work can continue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_question: Option<String>,
     /// Elapsed time from this live turn's accepted prompt; absent outside `Working`.
     pub working_elapsed: Option<Duration>,
     /// Subagents still running for this live process, including after its own turn ended.
@@ -378,6 +383,7 @@ impl NativeAgentService {
     /// Returns stale targets, oversized drafts, attachments the conversation doesn't hold, or
     /// persistence failures.
     pub fn save_draft(&self, target: &CommandTarget, draft: NativeDraft) -> Result<(), String> {
+        crate::native_review_comments::validate(&draft.text, &draft.review_comments)?;
         if draft.text.len() > crate::MAX_NATIVE_PROMPT_TEXT_BYTES {
             return Err("The draft exceeds the message limit".to_owned());
         }
@@ -405,6 +411,7 @@ impl NativeAgentService {
         let draft =
             (!draft.text.trim().is_empty() || !attachments.is_empty()).then_some(NativeDraft {
                 text: draft.text,
+                review_comments: draft.review_comments,
                 attachments,
             });
         if record.draft == draft {
@@ -1925,17 +1932,26 @@ impl NativeAgentService {
                                 | "pi.confirm"
                         )
                 }),
-                input: record.snapshot.requests.iter().any(|request| {
-                    (request.method == "mcpServer/elicitation/request"
-                        && !request.is_mcp_approval())
-                        || (request.method == "claude.permission"
-                            && crate::native_protocol::field(&request.parameters, "tool_name")
-                                == "AskUserQuestion")
-                        || matches!(
-                            request.method.as_str(),
-                            "item/tool/requestUserInput" | "pi.select" | "pi.input" | "pi.editor"
-                        )
-                }),
+                input: record.snapshot.pending_async_questions().next().is_some()
+                    || record.snapshot.requests.iter().any(|request| {
+                        (request.method == "mcpServer/elicitation/request"
+                            && !request.is_mcp_approval())
+                            || (request.method == "claude.permission"
+                                && crate::native_protocol::field(&request.parameters, "tool_name")
+                                    == "AskUserQuestion")
+                            || matches!(
+                                request.method.as_str(),
+                                "item/tool/requestUserInput"
+                                    | "pi.select"
+                                    | "pi.input"
+                                    | "pi.editor"
+                            )
+                    }),
+                pending_question: record
+                    .snapshot
+                    .pending_async_questions()
+                    .next_back()
+                    .map(|item| item.id.clone()),
                 working_elapsed: record.snapshot.working_elapsed(now),
                 running_subagents: record.snapshot.running_subagents(),
             })

@@ -677,6 +677,16 @@ const STASH_KEYSTROKE: &str = if cfg!(target_os = "macos") {
     "ctrl+s"
 };
 
+const FOCUS_COMPOSER_KEYSTROKE: &str = if cfg!(target_os = "macos") {
+    "cmd+l"
+} else {
+    "ctrl+l"
+};
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "One finite table owns built-in command bindings"
+)]
 fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
     let mut bindings = Vec::new();
     for (keystrokes, command) in [
@@ -765,6 +775,7 @@ fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
         ("ctrl+alt+d", "ui.composer.dictate"),
         ("ctrl+alt+v", "ui.composer.voice"),
         ("ctrl+alt+i", "ui.composer.focus-composer"),
+        (FOCUS_COMPOSER_KEYSTROKE, "ui.composer.focus-composer"),
         ("ctrl+alt+e", "ui.composer.expand"),
         (STASH_KEYSTROKE, "ui.composer.stash"),
     ] {

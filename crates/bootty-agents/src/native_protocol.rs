@@ -115,6 +115,8 @@ pub struct NativeTranscriptItem {
     pub attachments: Vec<crate::NativeAttachmentReference>,
     #[serde(default)]
     pub citations: Vec<crate::NativeResponseCitation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_comments: Vec<crate::NativeReviewComment>,
     /// Apps the user mentioned in this prompt, once each, for presentation.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applications: Vec<crate::NativeApplication>,
@@ -213,12 +215,15 @@ impl NativeTranscriptItem {
     #[must_use]
     pub fn display_text(&self) -> String {
         let text = if self.role == "user"
-            && (!self.citations.is_empty() || !self.attachments.is_empty())
+            && (!self.citations.is_empty()
+                || !self.attachments.is_empty()
+                || !self.review_comments.is_empty())
         {
             crate::native_citations::display_prompt_citations(
                 &self.text,
                 &self.citations,
                 &self.attachments,
+                &self.review_comments,
             )
         } else {
             self.text.clone()
@@ -553,6 +558,21 @@ const MAX_PENDING_REQUEST_BYTES: usize = 4 * 1024 * 1024;
 const MAX_PENDING_REQUESTS: usize = 32;
 
 impl NativeSessionSnapshot {
+    /// Nonblocking questions asked since the user's most recent response to the conversation.
+    pub fn pending_async_questions(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = &NativeTranscriptItem> {
+        let start = self
+            .transcript
+            .iter()
+            .rposition(|item| item.role == "user")
+            .map_or(0, |index| index.saturating_add(1));
+        self.transcript
+            .iter()
+            .skip(start)
+            .filter(|item| !item.questions.is_empty())
+    }
+
     #[must_use]
     pub fn waiting_for_input(&self) -> bool {
         self.requests.iter().any(NativeAgentRequest::is_blocking)
@@ -893,7 +913,8 @@ impl NativeSessionSnapshot {
             item.complete = complete;
             item.created_at = self.message_times.0.or(item.created_at);
             item.updated_at = self.message_times.1.or(item.updated_at);
-            self.pending_user_item = None;
+            // A started echo changes identity before completion confirms delivery.
+            self.pending_user_item = (!complete).then(|| id.clone());
             self.trim_transcript();
             return;
         }
@@ -922,6 +943,7 @@ impl NativeSessionSnapshot {
                 images: Vec::new(),
                 attachments: Vec::new(),
                 citations: Vec::new(),
+                review_comments: Vec::new(),
                 applications: Vec::new(),
                 questions,
                 steered: false,
@@ -961,6 +983,14 @@ impl NativeSessionSnapshot {
                             attachment.id.len(),
                             attachment.name.len(),
                             attachment.mime_type.len(),
+                        ]
+                    }))
+                    .chain(item.review_comments.iter().flat_map(|comment| {
+                        [
+                            comment.id.len(),
+                            comment.anchor.path.len(),
+                            comment.quote.len(),
+                            comment.body.len(),
                         ]
                     }))
                     .chain(item.citations.iter().flat_map(|citation| {
@@ -1107,6 +1137,7 @@ impl NativeSessionSnapshot {
                     item.attachments.clone_from(&saved.attachments);
                 }
                 item.citations.clone_from(&saved.citations);
+                item.review_comments.clone_from(&saved.review_comments);
                 item.usage = item.usage.or(saved.usage);
                 item.checkpoint = item.checkpoint.take().or_else(|| saved.checkpoint.clone());
                 item.applications.clone_from(&saved.applications);
@@ -1129,6 +1160,7 @@ impl NativeSessionSnapshot {
             item.images = prompt.image_references();
             item.attachments = prompt.attachment_references();
             item.citations = prompt.citations().to_vec();
+            item.review_comments = prompt.review_comments().to_vec();
             item.applications.clear();
             for mention in prompt.applications() {
                 let application = crate::NativeApplication::from(&mention.target);

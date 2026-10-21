@@ -191,15 +191,24 @@ impl GpuiChrome {
 
     pub(crate) fn dock_status(
         &self,
-        right_width: f32,
-        in_right: bool,
+        leading: Vec<gpui_kit::AnyElement>,
+        trailing: Vec<gpui_kit::AnyElement>,
         cx: &Context<Self>,
-    ) -> Option<gpui_kit::AnyElement> {
-        let mut status = self.snapshot.top_status.clone()?;
+    ) -> gpui_kit::AnyElement {
+        let mut status =
+            self.snapshot
+                .top_status
+                .clone()
+                .unwrap_or_else(|| super::StatusBarSnapshot {
+                    key: "top".to_owned(),
+                    rows: 1,
+                    background: self.snapshot.palette.base,
+                    segments: Vec::new(),
+                });
         status
             .segments
             .retain(|segment| segment.surface != "windows");
-        Some(status_bar::render(
+        status_bar::render(
             status_bar::RenderParams {
                 tab_config: self.snapshot.layout.tabs,
                 keymap_context: &self.keymap_context,
@@ -212,7 +221,8 @@ impl GpuiChrome {
                 top_padding: 0.0,
                 notch_span: None,
                 compact: true,
-                partition: Some((right_width, in_right)),
+                leading,
+                trailing,
                 colors: self.snapshot.palette,
                 tab_bounds: self.tab_bounds.clone(),
                 insertion_target: None,
@@ -221,7 +231,7 @@ impl GpuiChrome {
                 hint_modifiers: self.hint_modifiers,
             },
             cx,
-        ))
+        )
     }
 
     pub(crate) fn set_navigation_hints(
@@ -338,12 +348,14 @@ impl GpuiChrome {
         )
     }
 
-    pub(crate) const fn window_controls_inset(&self) -> f32 {
-        if self.snapshot.titlebar.reserve_window_controls && !self.snapshot.layout.fullscreen {
-            76.0
-        } else {
-            0.0
-        }
+    pub(crate) fn window_controls_inset(&self, window: &Window) -> f32 {
+        let native =
+            if self.snapshot.titlebar.reserve_window_controls && !self.snapshot.layout.fullscreen {
+                76.0
+            } else {
+                0.0
+            };
+        native + f32::from(crate::gpui::UI_HEADER_EDGE_PADDING.to_pixels(window.rem_size()))
     }
 
     /// Whether Back and Forward have a session to go to.
@@ -743,7 +755,8 @@ impl GpuiChrome {
                                 ((left - offset).max(0.0), (right - offset).max(0.0))
                             }),
                             compact: false,
-                            partition: None,
+                            leading: Vec::new(),
+                            trailing: Vec::new(),
                             colors,
                             tab_bounds: self.tab_bounds.clone(),
                             insertion_target: insertion_target.as_ref(),
@@ -768,7 +781,8 @@ impl GpuiChrome {
                         top_padding: 0.0,
                         notch_span: None,
                         compact: false,
-                        partition: None,
+                        leading: Vec::new(),
+                        trailing: Vec::new(),
                         colors,
                         tab_bounds: self.tab_bounds.clone(),
                         insertion_target: insertion_target.as_ref(),

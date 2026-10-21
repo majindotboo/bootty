@@ -58,7 +58,7 @@ impl NativeAgentSessionView {
         window: &mut gpui_kit::Window,
         cx: &mut Context<Self>,
     ) {
-        self.restore_draft(text, &[], window, cx);
+        self.restore_draft(text, &[], &[], window, cx);
         cx.notify();
     }
 
@@ -348,6 +348,7 @@ impl NativeAgentSessionView {
         let id = message.id.clone();
         let text = message.text.clone();
         let attachments = message.attachments.clone();
+        let reviews = message.review_comments.clone();
         let sending = message.status == NativeQueuedMessageStatus::Sending;
         // Editing never replaces a draft already in the composer.
         let editable = !sending && self.composer.read(cx).value().is_empty();
@@ -369,20 +370,25 @@ impl NativeAgentSessionView {
             .accessibility_label("More actions for this queued message")
             .dropdown_menu(move |menu, _, _| {
                 let edit = {
-                    let (owner, id, text, attachments) =
-                        (owner.clone(), id.clone(), text.clone(), attachments.clone());
+                    let (owner, id, text, attachments, reviews) = (
+                        owner.clone(),
+                        id.clone(),
+                        text.clone(),
+                        attachments.clone(),
+                        reviews.clone(),
+                    );
                     PopupMenuItem::new("Edit message")
                         .icon(lucide("pencil"))
                         .disabled(!editable)
                         .on_click(move |_, window, cx| {
                             _ = owner.update(cx, |this, cx| {
-                                this.restore_draft(&text, &attachments, window, cx);
+                                this.restore_draft(&text, &attachments, &reviews, window, cx);
                                 this.command("queue-cancel", vec![id.clone()], window, cx);
                             });
                         })
                 };
                 // A side chat starts its own attachment store, so only text can move there.
-                let side_chat = attachments.is_empty().then(|| {
+                let side_chat = (attachments.is_empty() && reviews.is_empty()).then(|| {
                     let (owner, id, text) = (owner.clone(), id.clone(), text.clone());
                     PopupMenuItem::new("Open in side chat")
                         .icon(lucide("message-circle-plus"))

@@ -109,6 +109,7 @@ impl<R: CommandRunner> GitHub<'_, R> {
             Some(&output.stdout),
         )?;
         if old == new && request.context_lines == 100_000 && !new.is_empty() {
+            let line_count = new.lines().count();
             let lines = new
                 .lines()
                 .enumerate()
@@ -119,6 +120,7 @@ impl<R: CommandRunner> GitHub<'_, R> {
                         old_line: Some(number),
                         new_line: Some(number),
                         text: text.into(),
+                        no_newline: !new.ends_with('\n') && index.saturating_add(1) == line_count,
                     })
                 })
                 .collect::<Result<Vec<_>, String>>()?;

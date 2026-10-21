@@ -47,7 +47,6 @@ impl ActivityPane {
 impl Render for TranscriptPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let drawn = self.session.update(cx, |session, cx| {
-            session.settle_room(cx);
             session.step_glide(window, cx);
             session.render_transcript(window, cx).into_any_element()
         });

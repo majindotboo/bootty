@@ -1,6 +1,7 @@
 //! Conversation context reuses the workspace's committed project and cached Git projection.
 use super::*;
 use crate::gpui::chrome::{SessionTarget, SidebarDiffSummary, SidebarPullRequest};
+use gpui_kit::component::ElementExt as _;
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConversationContext {
@@ -18,10 +19,8 @@ pub struct ConversationContext {
 /// Where the context card shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CardPlace {
-    /// A narrow conversation, with the card closed.
-    Closed,
-    /// A narrow conversation, with the card open over the messages.
-    Open,
+    /// A narrow conversation, with the card drawn over the messages when opened.
+    Overlay,
     /// A wide conversation, with the messages moved aside for the card.
     Aside,
     /// A wide conversation whose centered messages leave room for the card beside them.
@@ -34,13 +33,12 @@ impl CardPlace {
     }
 
     /// The place after measuring the conversation `wide` or not, with room for the card
-    /// `beside` its messages or not. A narrow conversation keeps the card open or closed.
-    const fn measured(self, wide: bool, beside: bool) -> Self {
-        match (wide, beside, self) {
-            (true, true, _) => Self::Beside,
-            (true, false, _) => Self::Aside,
-            (false, _, Self::Open) => Self::Open,
-            (false, _, _) => Self::Closed,
+    /// `beside` its messages or not. Visibility is a separate user choice.
+    const fn measured(wide: bool, beside: bool) -> Self {
+        match (wide, beside) {
+            (true, true) => Self::Beside,
+            (true, false) => Self::Aside,
+            (false, _) => Self::Overlay,
         }
     }
 }
@@ -60,7 +58,6 @@ impl NativeAgentSessionView {
     ) {
         if self.context_card != context {
             self.context_card = context;
-            self.refresh_branches(cx);
             cx.notify();
         }
     }
@@ -71,13 +68,10 @@ impl NativeAgentSessionView {
             .and_then(|context| context.project.clone())
             .unwrap_or_else(|| "No project".into());
         let sources = self.render_context_sources(cx);
-        div()
+        let card = div()
             .id("native-context-card")
             .debug_selector(|| "native-context-card".into())
-            .absolute()
-            .top_4()
-            .right_4()
-            .w(gpui_kit::rems(18.))
+            .w_full()
             .max_h_full()
             .overflow_y_scroll()
             .occlude()
@@ -95,9 +89,17 @@ impl NativeAgentSessionView {
                 cx.theme().popover
             })
             .shadow_sm()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.close_context_card(cx);
-            }))
+            .on_mouse_down_out(
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                    if this
+                        .card_button_bounds
+                        .get()
+                        .is_none_or(|bounds| !bounds.contains(&event.position))
+                    {
+                        this.close_context_card(cx);
+                    }
+                }),
+            )
             .child(
                 card_row()
                     .text_color(cx.theme().muted_foreground)
@@ -153,31 +155,57 @@ impl NativeAgentSessionView {
                         )
                         .children(sources),
                 )
-            })
+            });
+        div()
+            .absolute()
+            .top_4()
+            .right_4()
+            .bottom_4()
+            .w(gpui_kit::rems(18.))
+            .flex()
+            .flex_col()
+            .child(card)
     }
 
-    /// Opens the context card over a conversation too narrow to show it beside the messages.
-    pub(super) fn render_context_card_button(&self, cx: &Context<Self>) -> impl IntoElement {
-        Button::new("native-context-card-button")
+    /// The same details toggle at every conversation width.
+    #[must_use]
+    pub fn render_context_card_button(&self, cx: &Context<Self>) -> Option<gpui_kit::AnyElement> {
+        self.context_card.as_ref()?;
+        let button = Button::new("native-context-card-button")
             .debug_selector(|| "native-context-card-button".into())
             .ghost()
-            .small()
-            .icon(gpui_kit::component::Icon::default().path("icons/panel-right-open.svg"))
+            .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+            .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
+            .icon(IconName::Info)
             .accessibility_label("Conversation details")
             .element_tooltip("Conversation details")
-            .selected(self.card == CardPlace::Open)
-            // A click outside the open card closes it first, so this only opens.
+            .selected(self.context_card_visible())
             .on_click(cx.listener(|this, _, _, cx| {
-                this.card = CardPlace::Open;
+                this.card_open = Some(!this.context_card_visible());
                 cx.notify();
-            }))
+            }));
+        let bounds = self.card_button_bounds.clone();
+        Some(
+            div()
+                .flex()
+                .flex_none()
+                .on_prepaint(move |current, _, _| {
+                    bounds.set(Some(current));
+                })
+                .child(button)
+                .into_any_element(),
+        )
     }
 
-    /// Closes the context card opened over a narrow conversation, saying whether it was open.
+    pub(super) fn context_card_visible(&self) -> bool {
+        self.card_open.unwrap_or_else(|| self.card.wide())
+    }
+
+    /// Dismisses an overlay; the wide card stays until its toggle is used.
     pub(super) fn close_context_card(&mut self, cx: &mut Context<Self>) -> bool {
-        let open = self.card == CardPlace::Open;
+        let open = self.card == CardPlace::Overlay && self.context_card_visible();
         if open {
-            self.card = CardPlace::Closed;
+            self.card_open = Some(false);
             cx.notify();
         }
         open
@@ -363,9 +391,7 @@ impl NativeAgentSessionView {
         cx: &mut Context<Self>,
     ) {
         let wide = width >= gpui_kit::rems(76.).to_pixels(window.rem_size());
-        let card = self
-            .card
-            .measured(wide, self.card_fits_beside(width, window.rem_size()));
+        let card = CardPlace::measured(wide, self.card_fits_beside(width, window.rem_size()));
         if self.card != card {
             self.card = card;
             cx.notify();
@@ -387,12 +413,12 @@ impl NativeAgentSessionView {
                 let rem = window.rem_size();
                 let wide = bounds.size.width >= gpui_kit::rems(76.).to_pixels(rem);
                 let beside = card_fits_beside(column, bounds.size.width, rem);
-                if card.measured(wide, beside) != card {
+                if CardPlace::measured(wide, beside) != card {
                     let owner = geometry_owner;
                     cx.defer(move |cx| {
                         cx.set_global(LastWide(wide));
                         _ = owner.update(cx, |this, cx| {
-                            let next = this.card.measured(wide, beside);
+                            let next = CardPlace::measured(wide, beside);
                             if this.card != next {
                                 this.card = next;
                                 cx.notify();

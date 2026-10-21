@@ -196,8 +196,8 @@ impl ComposerSendShortcut {
 #[serde(rename_all = "kebab-case")]
 pub enum TranscriptWidth {
     /// A reading column, like a page.
-    #[default]
     Normal,
+    #[default]
     Wide,
     Full,
 }

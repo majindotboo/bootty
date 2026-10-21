@@ -412,6 +412,7 @@ fn composer_shortcuts_reach_terminals_unless_a_composer_is_shown(cx: &mut TestAp
                 "ui.composer.dictate",
                 "ui.composer.voice",
                 "ui.composer.focus-composer",
+                "ui.composer.focus-composer",
                 "start_search",
             ],
         ),
@@ -421,7 +422,12 @@ fn composer_shortcuts_reach_terminals_unless_a_composer_is_shown(cx: &mut TestAp
         cx.simulate_keystrokes(
             *window,
             &format!(
-                "alt-. shift-tab ctrl-alt-f ctrl-alt-d ctrl-alt-v ctrl-alt-i {}",
+                "alt-. shift-tab ctrl-alt-f ctrl-alt-d ctrl-alt-v ctrl-alt-i {} {}",
+                if cfg!(target_os = "macos") {
+                    "cmd-l"
+                } else {
+                    "ctrl-l"
+                },
                 if cfg!(target_os = "macos") {
                     "cmd-f"
                 } else {

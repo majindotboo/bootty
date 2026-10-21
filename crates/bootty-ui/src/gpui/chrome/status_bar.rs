@@ -77,7 +77,8 @@ pub(super) struct RenderParams<'a> {
     pub(super) top_padding: f32,
     pub(super) notch_span: Option<(f32, f32)>,
     pub(super) compact: bool,
-    pub(super) partition: Option<(f32, bool)>,
+    pub(super) leading: Vec<gpui_kit::AnyElement>,
+    pub(super) trailing: Vec<gpui_kit::AnyElement>,
     pub(super) colors: ChromePalette,
     pub(super) tab_bounds: TabBounds,
     pub(super) insertion_target: Option<&'a TabInsertionTarget>,
@@ -95,7 +96,8 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
         top_padding,
         notch_span,
         compact,
-        partition,
+        leading,
+        trailing,
         colors,
         tab_bounds,
         insertion_target,
@@ -147,7 +149,7 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
             .chain(right)
             .map(|item| {
                 div()
-                    .h(px(row_height - 8.0))
+                    .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
                     .rounded(cx.theme().radius)
                     .overflow_hidden()
                     .child(item)
@@ -155,16 +157,12 @@ pub(super) fn render(params: RenderParams<'_>, cx: &Context<GpuiChrome>) -> gpui
             })
             .collect();
         return super::status_fit::StatusFit {
-            id: SharedString::from(format!(
-                "{}-status-fit-{}",
-                bar.key,
-                partition.is_some_and(|(_, dock)| dock)
-            ))
-            .into(),
+            id: SharedString::from(format!("{}-header-controls", bar.key)).into(),
             items,
             height: px(row_height),
-            gap: px(4.0),
-            partition: partition.map(|(width, side)| (px(width), side)),
+            gap: crate::gpui::UI_HEADER_GAP,
+            leading,
+            trailing,
         }
         .into_any_element();
     }
@@ -597,8 +595,8 @@ fn new_tab_button(
         .debug_selector(move || selector)
         .icon(IconName::Plus)
         .ghost()
-        .xsmall()
-        .size_6()
+        .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+        .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .accessibility_label("New tab")
         .element_tooltip("New tab")
         .on_click(cx.listener(|_, _, _, cx| {
@@ -1015,6 +1013,7 @@ fn render_item(
 ) -> gpui_kit::AnyElement {
     let tab = tab_active.is_some();
     let action = item.action.clone();
+    let bounded = action.is_some() || item.background.is_some();
     if let Some(super::NativeChromeAction::TogglePanel(kind)) = &item.action {
         return panel_button(*kind, item, bar, colors, cx);
     }
@@ -1051,7 +1050,10 @@ fn render_item(
         .when(layout.stretch, |element| element.flex_1().min_w_0())
         .when(!layout.stretch, gpui_kit::Styled::flex_none)
         .h_full()
-        .when(!tab, |element| {
+        .when(!tab && bar.segmented && bounded, |element| {
+            element.px_2().min_w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+        })
+        .when(!tab && !bar.segmented, |element| {
             element
                 .pl(px(8.0 + item.pad_left.max(0.0)))
                 .pr(px(8.0 + item.pad_right.max(0.0)))
@@ -1061,8 +1063,14 @@ fn render_item(
         .gap_1()
         .overflow_hidden()
         .when(!tab, gpui_kit::Styled::text_xs)
+        .when(!tab && bar.segmented, |element| {
+            element.font_features(gpui_kit::FontFeatures(std::sync::Arc::new(vec![(
+                "tnum".into(),
+                1,
+            )])))
+        })
         .when(!tab, |element| element.text_color(color(foreground)))
-        .when(!tab, |element| {
+        .when(!tab && (!bar.segmented || bounded), |element| {
             element.bg(if bar.segmented && item.background.is_none() {
                 cx.theme().tab_active
             } else {

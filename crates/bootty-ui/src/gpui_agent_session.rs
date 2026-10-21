@@ -49,11 +49,11 @@ pub use models::reasoning_label;
 
 #[path = "gpui_agent_citations.rs"]
 mod citations;
+#[path = "gpui_agent_review_comments.rs"]
+mod review_comments;
 pub use citations::init_reaction_keys;
 use citations::{ResponseCitation, ResponseSelection};
 pub use requests::init_request_keys;
-#[path = "gpui_agent_branch.rs"]
-mod branch;
 #[path = "gpui_agent_copy_mode.rs"]
 mod copy_mode;
 #[path = "gpui_agent_find.rs"]
@@ -186,6 +186,7 @@ pub enum OpenNativeSession {
         target: CommandTarget,
         text: String,
         attachments: Vec<bootty_agents::NativeAttachmentReference>,
+        review_comments: Vec<bootty_agents::NativeReviewComment>,
     },
 }
 
@@ -194,6 +195,7 @@ struct SubmittedPrompt {
     revision: u64,
     annotations: Vec<Annotation>,
     citations: Vec<ResponseCitation>,
+    review_comments: Vec<bootty_agents::NativeReviewComment>,
     attachments: Vec<String>,
 }
 
@@ -256,10 +258,12 @@ pub struct NativeAgentSessionView {
     /// What to call this conversation in writing, like `bootty-7c`.
     short_name: String,
     context_card: Option<ConversationContext>,
+    card: context_card::CardPlace,
+    /// None uses the initial responsive default; an explicit choice survives resizing.
+    card_open: Option<bool>,
+    card_button_bounds: std::rc::Rc<std::cell::Cell<Option<gpui_kit::Bounds<gpui_kit::Pixels>>>>,
     /// The pictures of the markdown blocks replies show, as far as each has loaded or drawn.
     markdown_blocks: std::collections::HashMap<String, markdown_blocks::BlockMedia>,
-    branch_choices: branch::BranchChoices,
-    card: context_card::CardPlace,
     speech: Entity<crate::gpui_speech::SpeechInput>,
     _speech_subscription: Subscription,
     focus: FocusHandle,
@@ -315,13 +319,15 @@ pub struct NativeAgentSessionView {
     expanded_messages: BTreeSet<String>,
     copied_message: Option<String>,
     /// The message a rewind is taking back, to return to the composer once it has.
-    rewound: Option<(String, Vec<bootty_agents::NativeAttachmentReference>)>,
+    rewound: Option<bootty_agents::NativeDraft>,
     copy_feedback: Option<gpui_kit::Task<()>>,
     find: Option<find::TranscriptFind>,
     copy_mode: Option<copy_mode::CopyMode>,
     /// Holds the keys while copy mode is on.
     copy_focus: FocusHandle,
     citations: Vec<ResponseCitation>,
+    review_comments: Vec<bootty_agents::NativeReviewComment>,
+    review_preview: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
     selected_response: Option<ResponseSelection>,
     /// The link right-clicked in a message, and where.
     link_menu: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
@@ -347,9 +353,7 @@ pub struct NativeAgentSessionView {
     /// The work group whose rows are sliding open or shut.
     work_motion: Option<timeline::WorkMotion>,
     /// Blank space after the prompt just sent, so it sits at the top while its reply arrives.
-    room: Option<timeline::Room>,
     /// A prompt just sent, to pin once it shows.
-    pin: Option<timeline::Pin>,
     /// The transcript gliding down to its latest reply.
     glide: Option<timeline::Glide>,
     working_indicator: WorkingIndicator,
@@ -478,16 +482,17 @@ impl NativeAgentSessionView {
             related: Vec::new(),
             short_name: String::new(),
             context_card: None,
-            markdown_blocks: std::collections::HashMap::new(),
-            branch_choices: branch::BranchChoices::default(),
             card: if cx
                 .try_global::<context_card::LastWide>()
                 .is_some_and(|last| last.0)
             {
                 context_card::CardPlace::Aside
             } else {
-                context_card::CardPlace::Closed
+                context_card::CardPlace::Overlay
             },
+            card_open: None,
+            card_button_bounds: std::rc::Rc::default(),
+            markdown_blocks: std::collections::HashMap::new(),
             speech,
             _speech_subscription: speech_subscription,
             focus: cx.focus_handle(),
@@ -543,6 +548,8 @@ impl NativeAgentSessionView {
             copy_focus: cx.focus_handle(),
             copy_feedback: None,
             citations: Vec::new(),
+            review_comments: Vec::new(),
+            review_preview: None,
             selected_response: None,
             link_menu: None,
             reaction_menu: None,
@@ -559,8 +566,6 @@ impl NativeAgentSessionView {
             history_rail_focus: cx.focus_handle().tab_stop(true),
             work_disclosures: BTreeMap::new(),
             work_motion: None,
-            room: None,
-            pin: None,
             glide: None,
             working_indicator: WorkingIndicator {
                 subagents_expanded: false,
@@ -815,7 +820,7 @@ impl NativeAgentSessionView {
             && let Some(message) = self.record.pending_initial_message.clone()
         {
             let attachments = self.record.attachments.clone();
-            self.restore_draft(&message, &attachments, window, cx);
+            self.restore_draft(&message, &attachments, &[], window, cx);
         }
     }
 
@@ -825,6 +830,7 @@ impl NativeAgentSessionView {
         &mut self,
         message: &str,
         attachments: &[bootty_agents::NativeAttachmentReference],
+        review_comments: &[bootty_agents::NativeReviewComment],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -887,6 +893,7 @@ impl NativeAgentSessionView {
                 }
             }
         }
+        self.restore_review_comments(review_comments, window, cx);
         self.draft_replaced(cx);
     }
 
@@ -1042,6 +1049,7 @@ impl NativeAgentSessionView {
                 if previous.get(item.id.as_str()).is_none_or(|old| {
                     old.text != item.text
                         || old.citations != item.citations
+                        || old.review_comments != item.review_comments
                         || old.complete != item.complete
                 }) {
                     if self
@@ -1174,11 +1182,10 @@ impl NativeAgentSessionView {
         self.async_questions.retain(|id, _| {
             self.record
                 .snapshot
-                .transcript
-                .iter()
-                .any(|item| item.id == *id && !item.questions.is_empty())
+                .pending_async_questions()
+                .any(|item| item.id == *id)
         });
-        for item in &self.record.snapshot.transcript {
+        for item in self.record.snapshot.pending_async_questions() {
             if item.questions.is_empty()
                 || self
                     .async_questions
@@ -1213,6 +1220,30 @@ impl NativeAgentSessionView {
                 },
             )
             .detach();
+            if self
+                .record
+                .snapshot
+                .pending_async_questions()
+                .any(|question| question.id == item.id)
+            {
+                let message = item
+                    .questions
+                    .iter()
+                    .map(|question| question.title.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let provider = self.record.config.provider.display_name();
+                let id = format!("{}:{}", self.record.id, item.id);
+                cx.defer_in(window, move |_, window, cx| {
+                    use gpui_kit::component::{WindowExt as _, notification::Notification};
+                    window.push_notification(
+                        Notification::info(message)
+                            .title(format!("{provider} needs your input"))
+                            .id1::<questions::AsyncQuestionsView>(gpui_kit::SharedString::from(id)),
+                        cx,
+                    );
+                });
+            }
             self.async_questions.insert(item.id.clone(), view);
         }
     }
@@ -1284,20 +1315,11 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        // A prompt sent now shows at the end of the transcript, which follows its reply. Once
-        // it arrives it pins to the top, with room below for the reply.
-        if matches!(operation, "prompt" | "interrupt-send") {
+        // New prompts follow the transcript's real tail without adding scrollable blank space.
+        if operation == "interrupt-send"
+            || (operation == "prompt" && !is_busy(self.record.snapshot.status))
+        {
             self.list.set_follow_mode(gpui_kit::FollowMode::Tail);
-            self.pin = Some(timeline::Pin {
-                after: self
-                    .record
-                    .snapshot
-                    .transcript
-                    .iter()
-                    .rev()
-                    .find(|item| item.role == "user")
-                    .map(|item| item.id.clone()),
-            });
         }
         // Words sent from an expanded composer give the room back to the transcript.
         if matches!(operation, "prompt" | "queue" | "interrupt-send") {
@@ -1309,6 +1331,7 @@ impl NativeAgentSessionView {
                 revision: self.draft_revision,
                 annotations: self.annotations.clone(),
                 citations: self.active_citations(cx),
+                review_comments: self.active_review_comments(cx),
                 attachments: self.active_attachment_ids(cx),
             });
         self.submit_command(operation, arguments, submitted_draft, window, cx);
@@ -1421,12 +1444,6 @@ impl NativeAgentSessionView {
         cx.notify();
     }
 
-    /// Asks the provider to compact the conversation's context, as `/compact` does, leaving the
-    /// draft alone.
-    fn compact_context(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.submit_command("prompt", vec!["/compact".to_owned()], None, window, cx);
-    }
-
     /// Reports a command the host refused.
     fn command_failed(&mut self, operation: &str, outcome: &CommandOutcome) {
         self.command_error = Some(command_failure(operation, outcome));
@@ -1440,8 +1457,14 @@ impl NativeAgentSessionView {
         cx: &mut Context<Self>,
     ) {
         if operation == "rewind" {
-            if let Some((text, attachments)) = self.rewound.take() {
-                self.return_rewound(&text, &attachments, window, cx);
+            if let Some(draft) = self.rewound.take() {
+                self.return_rewound(
+                    &draft.text,
+                    &draft.attachments,
+                    &draft.review_comments,
+                    window,
+                    cx,
+                );
             }
             return;
         }
@@ -1550,6 +1573,7 @@ impl NativeAgentSessionView {
             revision,
             annotations,
             citations,
+            review_comments,
             attachments,
         } = draft;
         if self.draft_revision == revision
@@ -1568,6 +1592,12 @@ impl NativeAgentSessionView {
             });
         }
         self.clear_submitted_citations(&citations, cx);
+        let active = self.active_review_comments(cx);
+        self.review_comments.retain(|comment| {
+            !review_comments.iter().any(|sent| sent.id == comment.id)
+                || active.iter().any(|placed| placed.id == comment.id)
+        });
+        self.review_preview = None;
         let apps = self.active_applications(cx);
         self.applications
             .retain(|mention| apps.iter().any(|active| active.id == mention.id));
@@ -1639,6 +1669,7 @@ impl NativeAgentSessionView {
         if !message.trim().is_empty()
             || !attachment_ids.is_empty()
             || !self.active_citations(cx).is_empty()
+            || !self.active_review_comments(cx).is_empty()
         {
             match self.prompt_arguments(message, authored_bytes, cx) {
                 Ok(arguments) => {
@@ -2377,7 +2408,7 @@ impl NativeAgentSessionView {
                                 .get(*index)
                                 .is_some_and(|item| item.id == id)
                         }),
-                        TranscriptRow::Failure { .. } | TranscriptRow::Room => false,
+                        TranscriptRow::Failure { .. } => false,
                     };
                     if contains {
                         this.list.remeasure_items(index..index.saturating_add(1));
@@ -2799,6 +2830,26 @@ impl NativeAgentSessionView {
             }))
     }
 
+    pub(crate) fn changes_target(&self) -> CommandTarget {
+        self.record.target()
+    }
+
+    pub(crate) fn change_turns(&self) -> Vec<(String, String)> {
+        self.record
+            .snapshot
+            .transcript
+            .iter()
+            .filter(|reply| self.turn_reviewable(reply))
+            .enumerate()
+            .map(|(index, reply)| {
+                (
+                    reply.id.clone(),
+                    format!("Turn {}", index.saturating_add(1)),
+                )
+            })
+            .collect()
+    }
+
     /// Whether Git kept the files from before and after the turn ending in `reply`, so its
     /// changes can show together.
     fn turn_reviewable(&self, reply: &NativeTranscriptItem) -> bool {
@@ -2838,6 +2889,10 @@ impl NativeAgentSessionView {
         )
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one message composes its content, attachments and metadata"
+    )]
     fn render_message(
         &self,
         ix: usize,
@@ -2849,6 +2904,15 @@ impl NativeAgentSessionView {
         let Some(item) = self.record.snapshot.transcript.get(ix) else {
             return div().into_any_element();
         };
+        if !item.questions.is_empty()
+            && self
+                .record
+                .snapshot
+                .pending_async_questions()
+                .any(|question| question.id == item.id)
+        {
+            return div().into_any_element();
+        }
         if let Some(agent) = &item.subagent {
             return self
                 .render_subagent(item, agent, owner, cx)
@@ -2886,9 +2950,23 @@ impl NativeAgentSessionView {
             .when(!item.text.is_empty() || item.questions.is_empty(), |row| {
                 row.child(self.render_message_body(item, owner.clone(), cx))
             })
-            .when_some(self.async_questions.get(&item.id), |row, questions| {
-                row.gap_3().child(questions.clone())
-            })
+            .when(
+                !item.questions.is_empty() && item.text.trim().is_empty(),
+                |row| {
+                    row.child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(
+                                item.questions
+                                    .iter()
+                                    .map(|question| question.title.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            ),
+                    )
+                },
+            )
             .when(self.record.snapshot.undelivered(item), |row| {
                 // Attachments the conversation still holds go back with the text.
                 let held = item
@@ -2904,7 +2982,9 @@ impl NativeAgentSessionView {
                     .collect();
                 row.child(Self::undelivered_notice(item, held, owner.clone(), cx))
             })
-            .children(self.delivery_caption(item, cx))
+            .when(!meta || !item.complete, |row| {
+                row.children(self.delivery_caption(item, cx))
+            })
             .when(
                 meta && item.complete && matches!(item.role.as_str(), "assistant" | "plan"),
                 |row| row.children(self.render_turn_changes(ix, &owner, cx)),
@@ -2977,6 +3057,8 @@ impl NativeAgentSessionView {
             .when(!title.is_empty(), |row| {
                 row.child(div().text_xs().text_color(cx.theme().muted_foreground).child(title))
             })
+            .when(!item.review_comments.is_empty(), |row| row.child(Self::render_sent_review_comments(item, cx).mb_2()))
+            .when(!item.citations.is_empty(), |row| row.child(Self::render_sent_citations(item, &owner, cx).mb_2()))
             .when_some(self.transcript.get(&item.id), |body, state| {
                 body.child(div().min_w_0().relative()
                     .when(collapsible && !expanded, |text| text.max_h(gpui_kit::rems(11.)).overflow_hidden())
@@ -2988,7 +3070,6 @@ impl NativeAgentSessionView {
                                 gpui_kit::linear_color_stop(bubble_background, 1.))),
                     )))
             })
-            .when(!item.citations.is_empty(), |row| row.child(Self::render_sent_citations(item, &owner, cx).mt_1()))
             .when(!item.attachments.is_empty(), |row| row.child(self.render_sent_attachments(item, &owner, cx).mt_1()))
             .when(!item.applications.is_empty(), |row| row.child(Self::render_sent_applications(item, cx).mt_1()))
             .when(collapsible, |row| {
@@ -3182,6 +3263,7 @@ impl NativeAgentSessionView {
     ) -> gpui_kit::Div {
         let id = item.id.clone();
         let text = item.text.clone();
+        let reviews = item.review_comments.clone();
         div()
             .debug_selector({
                 let id = id.clone();
@@ -3202,7 +3284,7 @@ impl NativeAgentSessionView {
                     .label("Edit and resend")
                     .on_click(move |_, window, cx| {
                         _ = owner.update(cx, |this, cx| {
-                            this.restore_draft(&text, &attachments, window, cx);
+                            this.restore_draft(&text, &attachments, &reviews, window, cx);
                             this.composer.read(cx).focus_handle(cx).focus(window, cx);
                         });
                     }),
@@ -3216,7 +3298,11 @@ impl NativeAgentSessionView {
         owner: gpui_kit::WeakEntity<Self>,
         cx: &App,
     ) -> Button {
-        let (text, attachments) = (item.text.clone(), item.attachments.clone());
+        let (text, attachments, reviews) = (
+            item.text.clone(),
+            item.attachments.clone(),
+            item.review_comments.clone(),
+        );
         let empty = self.composer.read(cx).value().trim().is_empty() && self.attachments.is_empty();
         let id = item.id.clone();
         Button::new(format!("edit-resend:{id}"))
@@ -3238,9 +3324,10 @@ impl NativeAgentSessionView {
                             target: this.record.target(),
                             text: text.clone(),
                             attachments: attachments.clone(),
+                            review_comments: reviews.clone(),
                         });
                     } else {
-                        this.edit_and_resend(&text, &attachments, window, cx);
+                        this.edit_and_resend(&text, &attachments, &reviews, window, cx);
                     }
                 });
             })
@@ -3251,10 +3338,11 @@ impl NativeAgentSessionView {
         &mut self,
         text: &str,
         attachments: &[bootty_agents::NativeAttachmentReference],
+        review_comments: &[bootty_agents::NativeReviewComment],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.restore_draft(text, attachments, window, cx);
+        self.restore_draft(text, attachments, review_comments, window, cx);
         self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
 
@@ -3285,6 +3373,8 @@ impl NativeAgentSessionView {
             .flex()
             .items_center()
             .when(item.role == "user", gpui_kit::Styled::justify_end)
+            .gap_2()
+            .children(self.delivery_caption(item, cx))
             .children(self.render_unfolded_turn_duration(item, cx))
             .child(
                 div()
@@ -3433,7 +3523,11 @@ impl NativeAgentSessionView {
             window,
             cx,
         );
-        let message = (item.text.clone(), item.attachments.clone());
+        let message = bootty_agents::NativeDraft {
+            text: item.text.clone(),
+            attachments: item.attachments.clone(),
+            review_comments: item.review_comments.clone(),
+        };
         let (id, target) = (id.to_owned(), self.record.target());
         cx.spawn_in(window, async move |owner, cx| {
             let choice = answer.await;
@@ -3463,7 +3557,7 @@ impl NativeAgentSessionView {
     /// Offers `text` as the next message: in place of an empty composer, or into the draft where
     /// the cursor is. The user sends it.
     pub(crate) fn offer_draft(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.return_rewound(text, &[], window, cx);
+        self.return_rewound(text, &[], &[], window, cx);
         cx.notify();
     }
 
@@ -3519,15 +3613,23 @@ impl NativeAgentSessionView {
         &mut self,
         text: &str,
         attachments: &[bootty_agents::NativeAttachmentReference],
+        review_comments: &[bootty_agents::NativeReviewComment],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.composer.read(cx).value().trim().is_empty() && self.attachments.is_empty() {
-            self.restore_draft(text, attachments, window, cx);
+            self.restore_draft(text, attachments, review_comments, window, cx);
         } else {
             self.composer.update(cx, |composer, cx| {
-                composer.insert(text.to_owned(), window, cx);
+                composer.insert(
+                    review_comments::without_tokens(text, review_comments),
+                    window,
+                    cx,
+                );
             });
+            for comment in review_comments {
+                self.insert_review_comment(comment.clone(), window, cx);
+            }
         }
         self.composer.read(cx).focus_handle(cx).focus(window, cx);
     }
@@ -4183,19 +4285,25 @@ impl NativeAgentSessionView {
 
     /// Sends a failed turn's prompt again, with its attachments, and puts its failure away.
     fn retry_turn(&mut self, error: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((text, attachments)) = self
+        let Some((text, attachments, reviews)) = self
             .record
             .snapshot
             .transcript
             .iter()
             .rfind(|item| item.role == "user")
-            .map(|item| (item.text.clone(), item.attachments.clone()))
+            .map(|item| {
+                (
+                    item.text.clone(),
+                    item.attachments.clone(),
+                    item.review_comments.clone(),
+                )
+            })
         else {
             return;
         };
         self.scheduled_retry = None;
         self.dismissed_error = Some(error.to_owned());
-        self.restore_draft(&text, &attachments, window, cx);
+        self.restore_draft(&text, &attachments, &reviews, window, cx);
         self.send_prompt(window, cx);
         self.refresh_timeline();
     }
@@ -4432,6 +4540,40 @@ impl NativeAgentSessionView {
         )
     }
 
+    fn render_pending_questions(&self) -> Option<gpui_kit::AnyElement> {
+        let questions: Vec<_> = self
+            .record
+            .snapshot
+            .pending_async_questions()
+            .filter_map(|item| self.async_questions.get(&item.id).cloned())
+            .collect();
+        if questions.is_empty() {
+            return None;
+        }
+        Some(
+            div()
+                .id("native-pending-questions")
+                .debug_selector(|| "native-pending-questions".into())
+                .w_full()
+                .min_h_0()
+                .max_h(gpui_kit::relative(0.45))
+                .flex()
+                .justify_center()
+                .px_4()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(self.column_width())
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .children(questions),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn render_composer(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::Div {
         // Expanded, every box down to the text area grows into the transcript's room.
         let grow = |element: gpui_kit::Div| {
@@ -4587,14 +4729,14 @@ impl NativeAgentSessionView {
         if self.completion_active(window, cx) {
             return false;
         }
-        let mut prompts = Vec::<&str>::new();
+        let mut prompts = Vec::<&NativeTranscriptItem>::new();
         for item in self.record.snapshot.transcript.iter().rev() {
             if item.role == "user"
                 && item.complete
                 && !item.text.trim().is_empty()
-                && prompts.last() != Some(&item.text.as_str())
+                && prompts.last().is_none_or(|last| last.text != item.text)
             {
-                prompts.push(&item.text);
+                prompts.push(item);
             }
         }
         let value = self.composer.read(cx).value();
@@ -4603,7 +4745,7 @@ impl NativeAgentSessionView {
         } else if self
             .recalled_prompt
             .and_then(|index| prompts.get(index))
-            .is_none_or(|recalled| *recalled != value.as_ref())
+            .is_none_or(|recalled| recalled.text != value.as_ref())
         {
             return false;
         }
@@ -4615,13 +4757,22 @@ impl NativeAgentSessionView {
             (false, Some(index)) => index.checked_sub(1),
             _ => return false,
         };
-        let text = next
-            .and_then(|index| prompts.get(index))
-            .map_or_else(String::new, |text| (*text).to_owned());
+        let draft = next.and_then(|index| prompts.get(index)).map_or_else(
+            bootty_agents::NativeDraft::default,
+            |item| bootty_agents::NativeDraft {
+                text: item.text.clone(),
+                attachments: item.attachments.clone(),
+                review_comments: item.review_comments.clone(),
+            },
+        );
         self.recalled_prompt = next;
-        self.composer
-            .update(cx, |composer, cx| composer.set_value(text, window, cx));
-        self.draft_replaced(cx);
+        self.restore_draft(
+            &draft.text,
+            &draft.attachments,
+            &draft.review_comments,
+            window,
+            cx,
+        );
         cx.notify();
         true
     }
@@ -4641,6 +4792,7 @@ impl NativeAgentSessionView {
             .on_token_click(move |event, window, cx| {
                 _ = token_click_owner.update(cx, |this, cx| {
                     this.open_attachment(event.token().id(), window, cx);
+                    this.open_review_token(event.token().id(), event.bounds().origin, cx);
                     this.open_citation_token(
                         event.token().id(),
                         event.bounds().bottom_left(),
@@ -4697,7 +4849,12 @@ impl NativeAgentSessionView {
                 | NativeSessionStatus::Stopped
                 | NativeSessionStatus::Error
         );
-        let interruptible = is_busy(self.record.snapshot.status) || send_pending;
+        let has_draft = !self.composer.read(cx).value().trim().is_empty()
+            || !self.attachments.is_empty()
+            || !self.annotations.is_empty()
+            || !self.active_citations(cx).is_empty()
+            || !self.active_review_comments(cx).is_empty();
+        let interruptible = send_pending || (is_busy(self.record.snapshot.status) && !has_draft);
         let resumable = !self.record.snapshot.transport_lost
             && matches!(
                 self.record.snapshot.status,
@@ -4776,7 +4933,9 @@ impl NativeAgentSessionView {
             )
             .child(options)
             .children(Self::render_stash(cx))
-            .child(self.render_expand(cx))
+            .when(self.composer_expanded, |row| {
+                row.child(Self::render_shrink(cx))
+            })
             .child(
                 div()
                     .flex()
@@ -4784,10 +4943,6 @@ impl NativeAgentSessionView {
                     .items_center()
                     .gap_2()
                     .child(self.render_context_usage(cx))
-                    .children(self.render_branch_picker(cx))
-                    .when(!self.card.wide() && self.context_card.is_some(), |row| {
-                        row.child(self.render_context_card_button(cx))
-                    })
                     .child(
                         div()
                             .id("native-model-control")
@@ -4804,8 +4959,8 @@ impl NativeAgentSessionView {
                                 .debug_selector(|| "native-interrupt".into())
                                 .accessibility_label("Interrupt")
                                 .icon(gpui_kit::assets::IconName::Square)
-                                .small()
-                                .ghost()
+                                .primary()
+                                .rounded_full()
                                 .loading(interrupt_pending)
                                 .disabled(interrupt_pending)
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -4842,12 +4997,11 @@ impl NativeAgentSessionView {
                                 })),
                         )
                     })
-                    .when(!resumable, |row| {
+                    .when(!resumable && !interruptible, |row| {
                         row.child(
                             Button::new("native-send")
                                 .debug_selector(|| "native-send".into())
                                 .icon(IconName::ArrowUp)
-                                .small()
                                 .primary()
                                 .rounded_full()
                                 .accessibility_label(send_blocker.unwrap_or(send_label))
@@ -4862,7 +5016,8 @@ impl NativeAgentSessionView {
                                         || (self.composer.read(cx).value().trim().is_empty()
                                             && self.attachments.is_empty()
                                             && self.annotations.is_empty()
-                                            && self.active_citations(cx).is_empty()),
+                                            && self.active_citations(cx).is_empty()
+                                            && self.active_review_comments(cx).is_empty()),
                                 )
                                 .on_click(
                                     cx.listener(|this, _, window, cx| this.send_prompt(window, cx)),
@@ -4870,52 +5025,6 @@ impl NativeAgentSessionView {
                         )
                     }),
             )
-    }
-
-    /// The context meter's ring, whose menu compacts the conversation.
-    fn context_trigger(
-        &self,
-        percent: Option<u16>,
-        color: gpui_kit::Hsla,
-        label: String,
-        accessible: String,
-        cx: &Context<Self>,
-    ) -> impl IntoElement {
-        use gpui_kit::component::progress::ProgressCircle;
-        Button::new("native-context-trigger")
-            .debug_selector(|| "native-context-trigger".into())
-            .ghost()
-            .small()
-            .accessibility_label(accessible)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(
-                        ProgressCircle::new("native-context-ring")
-                            .value(f32::from(percent.unwrap_or(0)))
-                            .color(color)
-                            .size(gpui_kit::rems(1.)),
-                    )
-                    .when(percent.is_none(), |row| row.child(label)),
-            )
-            .dropdown_menu({
-                let owner = cx.weak_entity();
-                let idle = self.provider_enabled() && !is_busy(self.record.snapshot.status);
-                move |menu, _, _| {
-                    let owner = owner.clone();
-                    menu.item(
-                        gpui_kit::component::menu::PopupMenuItem::new("Compact context")
-                            .disabled(!idle)
-                            .on_click(move |_, window, cx| {
-                                _ = owner.update(cx, |this, cx| {
-                                    this.compact_context(window, cx);
-                                });
-                            }),
-                    )
-                }
-            })
     }
 
     /// The account's usage limits, as the provider last reported them, a line each.
@@ -5021,7 +5130,20 @@ impl NativeAgentSessionView {
                 })
                 .build(window, cx)
             })
-            .child(self.context_trigger(percent, color, label, accessible, cx))
+            .aria_label(accessible)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(
+                        gpui_kit::component::progress::ProgressCircle::new("native-context-ring")
+                            .value(f32::from(percent.unwrap_or(0)))
+                            .color(color)
+                            .size(gpui_kit::rems(1.)),
+                    )
+                    .when(percent.is_none(), |row| row.child(label)),
+            )
             .into_any_element()
     }
 }
@@ -5186,7 +5308,7 @@ impl NativeAgentSessionView {
 impl Render for NativeAgentSessionView {
     #[expect(
         clippy::too_many_lines,
-        reason = "one column lays out the conversation's panes and their expanded-composer variant"
+        reason = "one conversation composes its transcript, requests, composer and details card"
     )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.busy();
@@ -5210,7 +5332,8 @@ impl Render for NativeAgentSessionView {
             );
         self.speech
             .update(cx, |speech, cx| speech.set_enabled(enabled, cx));
-        let wide = self.card.wide() && conversation;
+        let card_visible = self.context_card_visible();
+        let wide = self.card.wide() && conversation && card_visible;
         div()
             .id(gpui_kit::SharedString::from(self.record.id.clone()))
             .relative()
@@ -5235,7 +5358,7 @@ impl Render for NativeAgentSessionView {
                 .child(self.render_context_geometry(cx))
             })
             .when(
-                conversation && self.card == context_card::CardPlace::Aside,
+                conversation && card_visible && self.card == context_card::CardPlace::Aside,
                 |view| view.pr(gpui_kit::rems(20.)),
             )
             .bg(cx.theme().background)
@@ -5288,9 +5411,10 @@ impl Render for NativeAgentSessionView {
             .child(self.render_error_recovery(cx))
             .child(self.render_link_menu(cx))
             .when(conversation, |body| {
-                body.child(self.render_composer(window, cx))
+                body.children(self.render_pending_questions())
+                    .child(self.render_composer(window, cx))
                     .child(self.render_selection_toolbar(window, cx))
-                    .when(self.card != context_card::CardPlace::Closed, |body| {
+                    .when(card_visible, |body| {
                         body.child(self.render_context_card(cx))
                     })
             })
@@ -5374,12 +5498,14 @@ fn capped_scroll(
     max_rems: f32,
     content: impl IntoElement,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let body = format!("{id}-body");
     div()
         .id(gpui_kit::SharedString::from(id.clone()))
         .debug_selector(move || id)
         .max_h(gpui_kit::rems(max_rems))
         .overflow_y_scroll()
-        .child(content)
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .child(div().debug_selector(move || body).child(content))
 }
 
 /// Runs the provider's own sign-in flow, the same one Settings offers.

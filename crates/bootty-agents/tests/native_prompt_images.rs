@@ -5,10 +5,11 @@ use std::{error::Error, fs, path::Path, sync::Arc, time::Instant};
 use assert_fs::TempDir;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_agents::{
-    AgentKind, MAX_NATIVE_PROMPT_IMAGE_BYTES, MAX_NATIVE_PROMPT_TEXT_BYTES, NativeAgentService,
-    NativeAttachmentKind, NativeAttachmentReference, NativeImageReference, NativePrompt,
-    NativePromptImage, NativeSessionConfig, NativeSessionStatus, NativeTurnOutcome, ToolBridge,
-    ToolBridgeContext, ToolCapture, ToolCapturedCommand, ToolPolicy, ToolScope,
+    AgentKind, MAX_NATIVE_PROMPT_IMAGE_BYTES, MAX_NATIVE_PROMPT_IMAGES,
+    MAX_NATIVE_PROMPT_TEXT_BYTES, NativeAgentService, NativeAttachmentKind,
+    NativeAttachmentReference, NativeImageReference, NativePrompt, NativePromptImage,
+    NativeSessionConfig, NativeSessionStatus, NativeTurnOutcome, ToolBridge, ToolBridgeContext,
+    ToolCapture, ToolCapturedCommand, ToolPolicy, ToolScope,
 };
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
@@ -215,19 +216,23 @@ fn large_fork_context_echoes_preserve_turn_ownership_and_image_delivery(
 }
 
 #[rstest]
-#[case::codex_text(AgentKind::Codex, "Read this annotation", 0, false)]
-#[case::pi_text(AgentKind::Pi, "Read this annotation", 0, false)]
-#[case::claude_text(AgentKind::Claude, "Read this annotation", 0, false)]
-#[case::claude_reencoded_echo(AgentKind::Claude, "Read this annotation", 0, true)]
-#[case::codex_large_image_only(AgentKind::Codex, "", 1024 * 1024, false)]
-#[case::pi_large_image_only(AgentKind::Pi, "", 1024 * 1024, false)]
-#[case::claude_large_image_only(AgentKind::Claude, "", 1024 * 1024, false)]
-#[case::claude_large_reencoded_echo(AgentKind::Claude, "", 1024 * 1024, true)]
+#[case::codex_text(AgentKind::Codex, "Read this annotation", 0, false, 1)]
+#[case::pi_text(AgentKind::Pi, "Read this annotation", 0, false, 1)]
+#[case::claude_text(AgentKind::Claude, "Read this annotation", 0, false, 1)]
+#[case::claude_reencoded_echo(AgentKind::Claude, "Read this annotation", 0, true, 1)]
+#[case::codex_large_image_only(AgentKind::Codex, "", 1024 * 1024, false, 1)]
+#[case::pi_large_image_only(AgentKind::Pi, "", 1024 * 1024, false, 1)]
+#[case::claude_large_image_only(AgentKind::Claude, "", 1024 * 1024, false, 1)]
+#[case::claude_large_reencoded_echo(AgentKind::Claude, "", 1024 * 1024, true, 1)]
+#[case::codex_five(AgentKind::Codex, "Five screenshots", 0, false, 5)]
+#[case::pi_five(AgentKind::Pi, "Five screenshots", 0, false, 5)]
+#[case::claude_five(AgentKind::Claude, "Five screenshots", 0, false, 5)]
 fn provider_images_are_exact_transport_bytes_and_durable_safe_references(
     #[case] provider: AgentKind,
     #[case] text: &str,
     #[case] metadata_bytes: usize,
     #[case] jpeg_echo: bool,
+    #[case] image_count: usize,
 ) {
     let root = TempDir::new().unwrap();
     if jpeg_echo {
@@ -239,9 +244,16 @@ fn provider_images_are_exact_transport_bytes_and_durable_safe_references(
     config.fresh_session_id = (provider == AgentKind::Claude).then(|| SESSION.to_owned());
     config.account_directory = Some(root.path().join("account").to_string_lossy().into_owned());
     let bytes = png(metadata_bytes).unwrap();
-    let image =
-        NativePromptImage::from_host_png(reference("annotation_123"), bytes.clone()).unwrap();
-    let prompt = NativePrompt::new(text.to_owned(), vec![image]).unwrap();
+    let references = (0..image_count)
+        .map(|ix| reference(&format!("annotation_{ix}")))
+        .collect::<Vec<_>>();
+    let images = references
+        .iter()
+        .map(|reference| {
+            NativePromptImage::from_host_png(reference.clone(), bytes.clone()).unwrap()
+        })
+        .collect();
+    let prompt = NativePrompt::new(text.to_owned(), images).unwrap();
     let service = NativeAgentService::open(&path).unwrap();
     let record = service
         .create_for_task("binding", "task", "Image annotation", config)
@@ -277,11 +289,11 @@ fn provider_images_are_exact_transport_bytes_and_durable_safe_references(
     assert_eq!(users.len(), 1);
     let user = users.first().unwrap();
     assert_eq!(user.text, text);
-    assert_eq!(user.images, vec![reference("annotation_123")]);
+    assert_eq!(user.images, references);
     assert_eq!(fs::read(root.path().join("received.png")).unwrap(), bytes);
     let wire: Value =
         serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
-    assert_eq!(prompt.image_count(), 1);
+    assert_eq!(prompt.image_count(), image_count);
     assert!(wire.to_string().contains(&STANDARD.encode(&bytes)));
     let refreshed = session.refresh_history().unwrap();
     let refreshed_user = refreshed
@@ -308,7 +320,7 @@ fn provider_images_are_exact_transport_bytes_and_durable_safe_references(
         .iter()
         .find(|item| item.role == "user")
         .unwrap();
-    assert_eq!(user.images, vec![reference("annotation_123")]);
+    assert_eq!(user.images, references);
     assert_eq!(user.text, text);
     restored.shutdown().unwrap();
 }
@@ -339,7 +351,16 @@ fn image_admission_checks_pixels_dimensions_and_submission_budgets() {
         .is_err()
     );
     let image = NativePromptImage::from_host_png(reference("valid"), bytes).unwrap();
-    assert!(NativePrompt::new(String::new(), vec![image.clone(); 5]).is_err());
+    assert!(
+        NativePrompt::new(String::new(), vec![image.clone(); MAX_NATIVE_PROMPT_IMAGES]).is_ok()
+    );
+    assert!(
+        NativePrompt::new(
+            String::new(),
+            vec![image.clone(); MAX_NATIVE_PROMPT_IMAGES + 1]
+        )
+        .is_err()
+    );
     assert!(NativePrompt::text(&"x".repeat(MAX_NATIVE_PROMPT_TEXT_BYTES + 1)).is_err());
     assert!(NativePrompt::text("").is_err());
     assert!(NativePrompt::new(String::new(), vec![image]).is_ok());
@@ -730,6 +751,96 @@ fn large_tool_records_bootty_did_not_capture_never_become_images(
             .any(|item| item.role == "notice" && item.text.starts_with("Omitted ")),
         "{:#?}",
         snapshot.transcript
+    );
+    service.shutdown().unwrap();
+}
+
+#[rstest]
+#[case(AgentKind::Codex)]
+#[case(AgentKind::Claude)]
+#[case(AgentKind::Pi)]
+fn review_comment_context_reaches_the_provider_and_survives_history(#[case] provider: AgentKind) {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let mut config = NativeSessionConfig::new(provider, root.path());
+    config.program = fixture(root.path()).unwrap();
+    config.fresh_session_id = (provider == AgentKind::Claude).then(|| SESSION.to_owned());
+    config.account_directory = Some(root.path().join("account").to_string_lossy().into_owned());
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service
+        .create_for_task("binding", "task", "Review", config)
+        .unwrap();
+    let review = bootty_agents::NativeReviewComment {
+        id: "review-source".into(),
+        anchor: bootty_git::diff::DiffAnchor {
+            path: "src/main.rs".into(),
+            side: bootty_git::diff::DiffSide::Left,
+            start_line: 2,
+            line: 3,
+        },
+        quote: "before\nsecond source line".into(),
+        body: "Preserve the original behavior".into(),
+        prompt_range: 0..8,
+    };
+    let prompt = NativePrompt::new_with_review_comments(
+        "[review]".into(),
+        vec![],
+        bootty_agents::NativePromptAttachments::default(),
+        vec![],
+        vec![review.clone()],
+    )
+    .unwrap();
+    let queued = service.queue_input(&record.target(), &prompt).unwrap();
+    assert_eq!(queued.review_comments, vec![review.clone()]);
+    assert_eq!(
+        queued.preview_text,
+        "main.rs:2–3: Preserve the original behavior"
+    );
+    service.shutdown().unwrap();
+    drop(service);
+    let service = NativeAgentService::open(&path).unwrap();
+    assert_eq!(
+        service.sessions()[0].queued_messages[0].review_comments,
+        vec![review.clone()]
+    );
+    service
+        .cancel_followup(&record.target(), &queued.id)
+        .unwrap();
+    let record = service.resume(&record.target()).unwrap();
+    service.prompt_input(&record.target(), &prompt).unwrap();
+    let session = service.resolve(&record.target()).unwrap();
+    let (barrier, params) = match provider {
+        AgentKind::Codex => ("thread/read", json!({"threadId":"image-session"})),
+        AgentKind::Pi => ("get_state", json!({})),
+        AgentKind::Claude => ("initialize", json!({})),
+    };
+    session.rpc(barrier, params).unwrap();
+    let wire: Value =
+        serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
+    assert!(wire.to_string().contains("Preserve the original behavior"));
+    assert!(wire.to_string().contains("second source line"));
+    let refreshed = session.refresh_history().unwrap();
+    let user = refreshed
+        .transcript
+        .iter()
+        .find(|item| item.role == "user")
+        .unwrap();
+    assert_eq!(user.text, "[review]");
+    assert_eq!(user.review_comments, vec![review.clone()]);
+    service.checkpoint().unwrap();
+    service.shutdown().unwrap();
+    drop(service);
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service.sessions().remove(0);
+    assert_eq!(
+        record
+            .snapshot
+            .transcript
+            .iter()
+            .find(|item| item.role == "user")
+            .unwrap()
+            .review_comments,
+        vec![review]
     );
     service.shutdown().unwrap();
 }

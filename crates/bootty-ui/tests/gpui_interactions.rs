@@ -949,6 +949,9 @@ fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping
     assert!(
         input.right() <= menu.left() && menu.right() <= add.left() && add.right() <= create.left()
     );
+    cx.simulate_click(center(create), Modifiers::none());
+    probe.update(cx, |probe, _| assert!(matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)] if invocation.command == "new_mux_session")));
+    probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
     cx.simulate_click(center(input), Modifiers::none());
     cx.simulate_input("RENDER");
     cx.run_until_parked();
@@ -965,6 +968,10 @@ fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping
     cx.run_until_parked();
     assert!(cx.debug_bounds("sidebar-row-task-1").is_some());
     assert!(cx.debug_bounds("sidebar-row-task-0").is_none());
+    assert!(
+        cx.debug_bounds("sidebar-new-session").is_none(),
+        "grouped sessions start from their project header"
+    );
     probe.update(cx, |probe, _| {
         assert!(
             probe
@@ -991,8 +998,6 @@ fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping
         );
         probe.intents.borrow_mut().clear();
     });
-    cx.simulate_click(center(create), Modifiers::none());
-    probe.update(cx, |probe, _| assert!(matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)] if invocation.command == "new_mux_session")));
 }
 
 #[gpui_kit::test]
@@ -4403,6 +4408,22 @@ fn project_disclosure_hides_sessions_and_empty_projects_remain_operable(cx: &mut
     snapshot.sidebar.as_mut().unwrap().projects[0].collapsed = false;
     update_chrome(&probe, &snapshot, cx);
     assert!(cx.debug_bounds("sidebar-row-session").is_some());
+    // The header's own button opens the new-session form in that project.
+    let new_session = cx
+        .debug_bounds("project-new-session-registered-project")
+        .expect("project new session");
+    cx.simulate_click(new_session.center(), Modifiers::none());
+    draw_chrome(cx);
+    probe.update(cx, |probe, _| {
+        assert_eq!(
+            probe.intents.borrow().last(),
+            Some(&ChromeIntent::NewSessionInProject {
+                scope: SpaceKey(1),
+                path: "/work/project".to_owned(),
+            })
+        );
+        probe.intents.borrow_mut().clear();
+    });
     // A project's actions start a session there, as a session's own menu does.
     let actions = cx
         .debug_bounds("project-actions-registered-project")

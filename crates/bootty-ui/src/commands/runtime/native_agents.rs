@@ -3321,21 +3321,34 @@ fn resolve_native_prompt(
     } else {
         service.resolve_prompt_attachments(target, &[])?
     };
-    let citations = if let Some(encoded) = invocation
-        .arguments
-        .get(5)
-        .filter(|encoded| !encoded.is_empty())
-    {
-        if encoded.len() > 64 * 1024 {
-            return Err("Response citations exceed the prompt limit".to_owned());
-        }
-        serde_json::from_str(encoded).map_err(|_| "Invalid response citations")?
-    } else {
-        Vec::new()
-    };
-    let prompt =
-        bootty_agents::NativePrompt::new_with_context(text, images, native_attachments, citations)?;
+    let citations = prompt_context(invocation, 5, "response citations")?;
+    let reviews = prompt_context(invocation, 11, "review comments")?;
+    let prompt = bootty_agents::NativePrompt::new_with_review_comments(
+        text,
+        images,
+        native_attachments,
+        citations,
+        reviews,
+    )?;
     append_prompt_applications(prompt, invocation)?.with_mentioned_conversations(mentioned)
+}
+
+fn prompt_context<T: serde::de::DeserializeOwned>(
+    invocation: &CommandInvocation,
+    index: usize,
+    name: &str,
+) -> Result<Vec<T>, String> {
+    let Some(encoded) = invocation
+        .arguments
+        .get(index)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(Vec::new());
+    };
+    if encoded.len() > bootty_agents::MAX_NATIVE_PROMPT_TEXT_BYTES {
+        return Err(format!("The {name} exceed the prompt limit"));
+    }
+    serde_json::from_str(encoded).map_err(|_| format!("Invalid {name}"))
 }
 
 fn native_input_runner(

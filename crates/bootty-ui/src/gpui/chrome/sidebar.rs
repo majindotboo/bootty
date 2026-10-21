@@ -24,10 +24,9 @@ use gpui_kit::{
 
 use super::{
     ChromeIntent, ChromeLayout, ChromePalette, Confirmation, ContextMenu, GpuiChrome, MenuRow,
-    Rgba, SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarDiffSummary,
-    SidebarPosition, SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceKey,
-    SpaceSnapshot, SpaceTransition, TaskView, TitlebarSnapshot, UsageMeterSnapshot, color,
-    space_switcher,
+    Rgba, SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarPosition, SidebarRow,
+    SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceKey, SpaceSnapshot, SpaceTransition,
+    TaskView, TitlebarSnapshot, UsageMeterSnapshot, color, space_switcher,
 };
 use crate::gpui::theme::{mix, readable_color};
 
@@ -567,20 +566,23 @@ impl SidebarRows {
                     .element_tooltip("Add project")
                     .on_click(move |_, _, cx| emit_sidebar_command(&add_owner, "add_project", cx)),
             )
-            .child(
-                Button::new("sidebar-new-session")
-                    .debug_selector(|| "sidebar-new-session".to_owned())
-                    .ghost()
-                    .small()
-                    .size_7()
-                    .icon(gpui_kit::assets::IconName::SquarePen)
-                    .text_color(color(self.colors.subtext))
-                    .accessibility_label("New session")
-                    .element_tooltip("New session")
-                    .on_click(move |_, _, cx| {
-                        emit_sidebar_command(&create_owner, "new_mux_session", cx);
-                    }),
-            )
+            // Grouped sessions start from their project header instead.
+            .when(!self.snapshot.group_by_project, |toolbar| {
+                toolbar.child(
+                    Button::new("sidebar-new-session")
+                        .debug_selector(|| "sidebar-new-session".to_owned())
+                        .ghost()
+                        .small()
+                        .size_7()
+                        .icon(gpui_kit::assets::IconName::SquarePen)
+                        .text_color(color(self.colors.subtext))
+                        .accessibility_label("New session")
+                        .element_tooltip("New session")
+                        .on_click(move |_, _, cx| {
+                            emit_sidebar_command(&create_owner, "new_mux_session", cx);
+                        }),
+                )
+            })
             .child(
                 Button::new("sidebar-resume-session")
                     .ghost()
@@ -2109,25 +2111,6 @@ impl SidebarRows {
         .into()
     }
 
-    fn diff_button(&self, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
-        let diff = row.diff?;
-        let owner = self.owner.clone();
-        let target = row.target.clone();
-        div()
-            .id(format!("git-diff-{}", row.key))
-            .child(sidebar_diff(diff))
-            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
-                cx.stop_propagation();
-                if let Some(target) = &target {
-                    _ = owner.update(cx, |_, cx| {
-                        cx.emit(ChromeIntent::OpenGitChanges(target.clone()));
-                    });
-                }
-            })
-            .into_any_element()
-            .into()
-    }
-
     fn drag_row(&self, element: Stateful<Div>, row: &SidebarRow) -> Stateful<Div> {
         if self.rename_input(row).is_some() {
             return element;
@@ -2250,7 +2233,9 @@ impl SidebarRows {
                     row.text
                 ))
                 .child(element);
-            let actions = self.project_actions(row, &path, &target);
+            let group = project_header_group(&row.key);
+            let new_session = self.project_new_session(row, &path);
+            let actions = self.project_actions(row, &path, &target, group.clone());
             let disclosure = super::button::activated_button(
                 div().w_full().h(gpui_kit::rems(row_height)),
                 button,
@@ -2268,9 +2253,11 @@ impl SidebarRows {
             )
             .into_any_element();
             gpui_kit::component::h_flex()
+                .group(group)
                 .w_full()
                 .min_w_0()
                 .child(div().flex_1().min_w_0().child(disclosure))
+                .children(new_session)
                 .child(actions)
                 .into_any_element()
         } else if row.selectable {
@@ -2280,6 +2267,37 @@ impl SidebarRows {
         }
     }
 
+    /// Opens the new-session form for this project's Space with the project's path filled in.
+    fn project_new_session(&self, row: &SidebarRow, path: &str) -> Option<gpui_kit::AnyElement> {
+        let scope = self.scope?;
+        let path = path.to_owned();
+        let owner = self.owner.clone();
+        Some(
+            Button::new(SharedString::from(format!(
+                "project-new-session-{}",
+                row.key
+            )))
+            .debug_selector({
+                let key = row.key.clone();
+                move || format!("project-new-session-{key}")
+            })
+            .ghost()
+            .icon(gpui_kit::assets::IconName::SquarePen)
+            .text_color(color(self.colors.muted))
+            .element_tooltip("New session in project")
+            .accessibility_label(format!("New session in {}", row.text))
+            .on_click(move |_, _, cx| {
+                _ = owner.update(cx, |_, cx| {
+                    cx.emit(ChromeIntent::NewSessionInProject {
+                        scope,
+                        path: path.clone(),
+                    });
+                });
+            })
+            .into_any_element(),
+        )
+    }
+
     /// A project header's actions: start a session there, reveal or copy its path, and open its
     /// settings.
     fn project_actions(
@@ -2287,7 +2305,8 @@ impl SidebarRows {
         row: &SidebarRow,
         path: &str,
         target: &bootty_control::CommandTarget,
-    ) -> impl IntoElement + use<> {
+        group: SharedString,
+    ) -> ProjectActions {
         let mut rows = self.scope.map_or_else(Vec::new, |scope| {
             place_menu(
                 scope,
@@ -2313,22 +2332,14 @@ impl SidebarRows {
             starts_group: true,
             intent: ChromeIntent::Command(settings),
         });
-        let owner = self.owner.clone();
-        Button::new(SharedString::from(format!("project-actions-{}", row.key)))
-            .debug_selector({
-                let key = row.key.clone();
-                move || format!("project-actions-{key}")
-            })
-            .ghost()
-            .xsmall()
-            .icon(gpui_kit::component::IconName::Ellipsis)
-            .element_tooltip("Project actions")
-            .accessibility_label(format!("Project actions for {}", row.text))
-            .dropdown_menu(move |menu, _, _| {
-                rows.iter().cloned().fold(menu, |menu, row| {
-                    super::view::append_menu_row(menu, row, &owner)
-                })
-            })
+        ProjectActions {
+            key: row.key.clone(),
+            name: row.text.clone(),
+            group,
+            tint: self.colors.muted,
+            rows,
+            owner: self.owner.clone(),
+        }
     }
 
     fn row_menu(&self, row: &SidebarRow) -> Option<ContextMenu> {
@@ -2567,8 +2578,7 @@ impl SidebarRows {
                 },
             )
             .children(shortcut)
-            .children(self.bounds_probe(row))
-            .children(self.diff_button(row));
+            .children(self.bounds_probe(row));
         let element = self.drag_row(element, row);
         let element = if !in_session_block && matches!(row.kind, SidebarRowKind::Group) {
             self.drop_target(element, row)
@@ -2666,30 +2676,6 @@ fn session_tooltip(row: &SidebarRow, age: Option<String>) -> Tooltip {
                     )
             }))
     })
-}
-
-fn sidebar_diff(diff: SidebarDiffSummary) -> gpui_kit::AnyElement {
-    div()
-        .flex_none()
-        .flex()
-        .items_center()
-        .gap_1()
-        .text_xs()
-        .when(diff.added > 0, |element| {
-            element.child(
-                div()
-                    .text_color(color(diff.added_color))
-                    .child(format!("+{}", diff.added)),
-            )
-        })
-        .when(diff.removed > 0, |element| {
-            element.child(
-                div()
-                    .text_color(color(diff.removed_color))
-                    .child(format!("−{}", diff.removed)),
-            )
-        })
-        .into_any_element()
 }
 
 /// A quota in two rows: what it is, how much is left and when it resets; then the meter with the
@@ -2976,6 +2962,59 @@ pub(super) fn render_codexbar(
                 }))
         })
         .map(IntoElement::into_any_element)
+}
+
+/// The hover group of one project header, from its stable row key.
+fn project_header_group(key: &str) -> SharedString {
+    SharedString::from(format!("sidebar-project-header-{key}"))
+}
+
+/// A project header's quiet actions menu. Its trigger shows while the header is hovered, while it
+/// holds keyboard focus, and while its menu is open.
+#[derive(IntoElement)]
+struct ProjectActions {
+    key: String,
+    name: String,
+    group: SharedString,
+    tint: Rgba,
+    rows: Vec<MenuRow>,
+    owner: WeakEntity<GpuiChrome>,
+}
+
+impl RenderOnce for ProjectActions {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let open = window.use_keyed_state(
+            SharedString::from(format!("project-actions-open-{}", self.key)),
+            cx,
+            |_, _| false,
+        );
+        let shown = *open.read(cx);
+        let (rows, owner) = (self.rows, self.owner);
+        let key = self.key.clone();
+        Button::new(SharedString::from(format!("project-actions-{}", self.key)))
+            .debug_selector(move || format!("project-actions-{key}"))
+            .ghost()
+            .icon(gpui_kit::component::IconName::Ellipsis)
+            .text_color(color(self.tint))
+            .opacity(if shown { 1. } else { 0. })
+            .group_hover(self.group, |style| style.opacity(1.))
+            .focus_visible(|style| style.opacity(1.))
+            .element_tooltip("Project actions")
+            .accessibility_label(format!("Project actions for {}", self.name))
+            .dropdown_menu(move |menu, _, _| {
+                rows.iter().cloned().fold(menu, |menu, row| {
+                    super::view::append_menu_row(menu, row, &owner)
+                })
+            })
+            .on_open_change(move |is_open, _, cx| {
+                open.update(cx, |open, cx| {
+                    if *open != *is_open {
+                        *open = *is_open;
+                        cx.notify();
+                    }
+                });
+            })
+    }
 }
 
 fn project_name(path: &str) -> &str {

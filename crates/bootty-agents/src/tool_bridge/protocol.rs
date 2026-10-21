@@ -60,7 +60,7 @@ impl ToolProtocol {
                 json!({
                     "protocolVersion":"2025-06-18", "capabilities":{"tools":{}},
                     "serverInfo":{"name":"Bootty", "version":env!("CARGO_PKG_VERSION")},
-                    "instructions":"Read your exact launched terminal. Capture and typed creation tools require explicit host permission. Arbitrary commands, paths, accounts and targets are unavailable.",
+                    "instructions":"You are running inside Bootty. Delegate work through list_providers and spawn_agent to create native Claude Code, Codex or Pi subagents under this conversation, using captured accounts and project context. Do not launch agent CLIs through shell commands for delegation. Capture and typed creation require host permission; tools cannot choose arbitrary commands, paths, accounts or targets.",
                 }),
                 false,
             ),
@@ -136,6 +136,20 @@ impl ToolProtocol {
             tools.push(json!({"name":"computer_input","description":"Focus, press an element, click, type, press a key, move or scroll in the window from the app's latest computer_snapshot. Take a snapshot first. press takes an element number from that snapshot; it uses the element's own action, or clicks its center when it has none. x and y are desktop points; the snapshot caption maps its pixels to them. On macOS input reaches the window behind other apps: a left click in an app that is not frontmost presses the element under the point when it has its own action, so web content responds too, and type_text and key go to the app's focused window, so focus the window first when the app has several. Elsewhere, focus the app first. After the window moves or resizes, take a new snapshot. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.spawn_enabled() {
+            let providers = self
+                .lease
+                .spawn_context()
+                .filter(|spawn| !spawn.providers.is_empty())
+                .map_or_else(
+                    || vec![self.lease.scope().provider],
+                    |spawn| {
+                        spawn
+                            .providers
+                            .iter()
+                            .map(|provider| provider.provider)
+                            .collect()
+                    },
+                );
             let labels = json!({
                 "name":{"type":"string", "minLength":1,"maxLength":256},
                 "title":{"type":"string", "minLength":1,"maxLength":256}
@@ -165,11 +179,11 @@ impl ToolProtocol {
                         "annotations":{"readOnlyHint":false,"destructiveHint":destructive,"openWorldHint":false}}));
                 }
             }
-            tools.push(json!({"name":"spawn_agent", "description":"Create a detached agent task with a typed prompt, using your captured provider, profile and project. Its tools are read only and revoked with your parent grant.",
+            tools.push(json!({"name":"spawn_agent", "description":"Delegate work to a native Bootty subagent using Claude Code, Codex or Pi. Call list_providers to select an enabled provider, then pass its provider ID and the task prompt here. The child uses the captured account and project and appears under this conversation. Its Bootty tools are read-only and revoked with the parent grant.",
                 "inputSchema":{"type":"object","properties":{
                     "name":{"type":"string","minLength":1,"maxLength":256},
                     "title":{"type":"string","minLength":1,"maxLength":256},
-                    "provider":{"type":"string","enum":[self.lease.scope().provider]},
+                    "provider":{"type":"string","enum":providers},
                     "profile":{"type":"string","minLength":1,"maxLength":256},
                     "prompt":{"type":"string","minLength":1,"maxLength":65536}},
                     "required":["name","provider","prompt"],"additionalProperties":false},

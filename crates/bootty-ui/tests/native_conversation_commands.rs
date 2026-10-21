@@ -151,6 +151,9 @@ for line in source:
   if text == 'wait': waiting=ident; continue
   # The turn starts but never reports an end, even after an acknowledged interrupt.
   if text == 'stuck': stuck=True; reply(ident,{'turn':{'id':'turn-'+str(turn)}}); continue
+  if text == 'async-question':
+   notice('item/completed',item={'id':'question-'+str(turn),'type':'agentMessage','text':'','delivery':'async','questions':[{'title':'Which option?','options':['A','B']}]})
+   reply(ident,{'turn':{'id':'turn-'+str(turn)}});continue
   if text == 'approval':
    approval=True
    emit({'id':900,'method':'item/commandExecution/requestApproval','params':{'threadId':thread,'turnId':'turn-'+str(turn),'itemId':'command','command':'echo approved'}})
@@ -1264,6 +1267,29 @@ fn native_conversations_notify_when_they_need_approval_and_finish() -> TestResul
     listed.sort();
     // The Agents panel lists both conversations: the finished one and the one in view.
     assert_eq!(listed, vec!["complete".to_owned(), "idle".to_owned()]);
+    host.effects.clear();
+    success(host.submit(native_command(
+        "agents.native.prompt",
+        &target,
+        &["async-question"],
+        Caller::Socket,
+    ))?)?;
+    notified(&mut host, "Codex: Needs input")?;
+    let activity = host
+        .state
+        .native_agent_service()
+        .ok_or("native owner missing")?
+        .activity(&target)?;
+    assert_eq!(
+        activity.status,
+        NativeSessionStatus::Working,
+        "async questions do not block ongoing work"
+    );
+    assert!(activity.input);
+    assert!(activity.pending_question.is_some());
+    host.effects.clear();
+    host.tick();
+    assert!(!host.effects.iter().any(|effect| matches!(effect, AppEffect::DesktopNotification { title, .. } if title == "Codex: Needs input")));
     Ok(())
 }
 

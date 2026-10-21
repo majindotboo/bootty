@@ -14,7 +14,13 @@ impl NativeAgentSessionView {
         if let Some(draft) = self.record.draft.clone()
             && self.composer.read(cx).value().is_empty()
         {
-            self.restore_draft(&draft.text, &draft.attachments, window, cx);
+            self.restore_draft(
+                &draft.text,
+                &draft.attachments,
+                &draft.review_comments,
+                window,
+                cx,
+            );
         }
     }
 
@@ -56,6 +62,7 @@ impl NativeAgentSessionView {
         let draft = bootty_agents::NativeDraft {
             text: composer.value().to_string(),
             attachments,
+            review_comments: self.active_review_comments(cx),
         };
         let Ok(draft) = serde_json::to_string(&draft) else {
             return;

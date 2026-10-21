@@ -336,7 +336,7 @@ impl NativeAgentSessionView {
             cx.update_global(|stash: &mut crate::prompt_stash::PromptStash, _| stash.take(id));
         match taken {
             Ok(Some(entry)) if self.composer.read(cx).value().trim().is_empty() => {
-                self.restore_draft(&entry.text, &[], window, cx);
+                self.restore_draft(&entry.text, &[], &[], window, cx);
             }
             Ok(Some(entry)) => self.composer.update(cx, |composer, cx| {
                 composer.insert(entry.text, window, cx);
@@ -371,20 +371,15 @@ impl NativeAgentSessionView {
         self.set_composer_expanded(!self.composer_expanded, window, cx);
     }
 
-    pub(super) fn render_expand(&self, cx: &Context<Self>) -> impl IntoElement + use<> {
-        let (icon, label) = if self.composer_expanded {
-            (IconName::Minimize, "Shrink the composer")
-        } else {
-            (IconName::Maximize, "Expand the composer")
-        };
-        Button::new("native-composer-expand")
-            .debug_selector(|| "native-composer-expand".into())
+    pub(super) fn render_shrink(cx: &Context<Self>) -> impl IntoElement + use<> {
+        Button::new("native-composer-shrink")
+            .debug_selector(|| "native-composer-shrink".into())
             .ghost()
             .xsmall()
-            .icon(icon)
+            .icon(IconName::Minimize)
             .text_color(cx.theme().muted_foreground)
-            .accessibility_label(label)
-            .element_tooltip(label)
+            .accessibility_label("Shrink the composer")
+            .element_tooltip("Shrink the composer")
             .on_click(cx.listener(|this, _, window, cx| this.toggle_composer(window, cx)))
     }
 

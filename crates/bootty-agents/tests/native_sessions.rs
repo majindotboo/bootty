@@ -209,7 +209,8 @@ for line in sys.stdin:
   if text == 'reject-steer':
    emit({'id':ident,'error':{'code':-32600,'message':'steer rejected'}})
    continue
-  notice('item/completed',item={'id':'steered-user-'+str(turn),'type':'userMessage','content':params['input']})
+  notice('item/started',item={'id':'steered-user-'+str(turn),'type':'userMessage','content':params['input']})
+  if text != 'pending-steer': notice('item/completed',item={'id':'steered-user-'+str(turn),'type':'userMessage','content':params['input']})
   reply(ident,{'turnId':'turn-'+str(turn)})
  elif method == 'turn/interrupt':
   if params['threadId'] == 'child-thread':
@@ -1366,6 +1367,39 @@ fn active_followup_steers_the_existing_turn_and_rejection_preserves_work() {
             .iter()
             .any(|item| item.text == "reject-steer")
     );
+    session.interrupt().unwrap();
+}
+
+/// A provider's started echo is still in flight until its completion confirms delivery.
+#[rstest]
+fn a_started_steer_never_flashes_as_undelivered() {
+    let root = TempDir::new().unwrap();
+    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    session.send_prompt("active").unwrap();
+    session.send_prompt("pending-steer").unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    let item = snapshot
+        .transcript
+        .iter()
+        .find(|item| item.text == "pending-steer")
+        .unwrap();
+    assert!(snapshot.sending(item));
+    assert!(!snapshot.undelivered(item));
+    fs::write(root.path().join("events.json"), json!([{"method":"item/completed","params":{
+        "threadId":snapshot.session_id,"turnId":snapshot.turn_id,
+        "item":{"id":item.id,"type":"userMessage","content":[{"type":"text","text":"pending-steer"}]}
+    }}]).to_string()).unwrap();
+    barrier(&session).unwrap();
+    let snapshot = session.snapshot();
+    let item = snapshot
+        .transcript
+        .iter()
+        .find(|item| item.text == "pending-steer")
+        .unwrap();
+    assert!(item.complete);
+    assert!(!snapshot.sending(item));
+    assert!(!snapshot.undelivered(item));
     session.interrupt().unwrap();
 }
 
@@ -3550,6 +3584,21 @@ fn codex_async_questions_survive_live_updates_history_and_serialization(#[case] 
     let snapshot = session.snapshot();
     assert_eq!(snapshot.status, NativeSessionStatus::Working);
     assert!(!snapshot.waiting_for_input());
+    assert_eq!(
+        snapshot
+            .pending_async_questions()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["async-question"]
+    );
+    let mut responded = snapshot.clone();
+    responded.transcript.push(
+        serde_json::from_value(
+            json!({"id":"response","role":"user","text":"Use A","complete":true,"steered":true}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(responded.pending_async_questions().count(), 0);
     let question = snapshot
         .transcript
         .iter()

@@ -492,3 +492,58 @@ fn branches_report_their_distance_and_switch_by_stashing(repository: anyhow::Res
         "On feature: Stashed switching from feature to main\n"
     );
 }
+
+/// Selected hunks remain applicable for new/deleted files and either side's missing EOF newline.
+#[rstest]
+#[case("new", ChangeGroup::Untracked, false)]
+#[case("modified", ChangeGroup::Unstaged, false)]
+#[case("deleted", ChangeGroup::Unstaged, true)]
+fn hunk_staging_preserves_file_headers_and_eof(
+    repository: anyhow::Result<TempDir>,
+    #[case] change: &str,
+    #[case] group: ChangeGroup,
+    #[case] deleted: bool,
+) {
+    use bootty_git::diff::{DiffAnchor, DiffSide, FileDiff};
+    let repository = repository.unwrap();
+    let git = Git::new();
+    let root = repository.path().to_str().unwrap();
+    let path = "my notes.txt";
+    repository.child("kept.txt").write_str("kept\n").unwrap();
+    if change != "new" {
+        repository.child(path).write_str("before").unwrap();
+    }
+    git.stage_all(root).unwrap();
+    git.commit_index(root, "initial", false).unwrap();
+    if deleted {
+        std::fs::remove_file(repository.child(path).path()).unwrap();
+    } else {
+        repository.child(path).write_str("after").unwrap();
+    }
+    let source = git.file_diff(root, path, group).unwrap();
+    let file = FileDiff::parse_all(&source).remove(0);
+    let patch = file
+        .hunk_patch(&DiffAnchor {
+            path: path.to_owned(),
+            side: if deleted {
+                DiffSide::Left
+            } else {
+                DiffSide::Right
+            },
+            start_line: 1,
+            line: 1,
+        })
+        .unwrap();
+    git.apply_to_index(root, &patch, false).unwrap();
+    if deleted {
+        assert_eq!(run(&repository, &["ls-files", path]).unwrap(), "");
+    } else {
+        assert_eq!(
+            run(&repository, &["show", &format!(":{path}")]).unwrap(),
+            "after"
+        );
+        repository.child(path).assert("after");
+    }
+    git.apply_to_index(root, &patch, true).unwrap();
+    assert_eq!(run(&repository, &["diff", "--cached"]).unwrap(), "");
+}

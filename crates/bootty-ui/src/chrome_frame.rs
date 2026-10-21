@@ -645,64 +645,18 @@ fn status_bars(
     status_background: Rgba,
 ) -> (Option<StatusBarSnapshot>, Option<StatusBarSnapshot>) {
     let theme = state.ui_theme().palette;
-    let mut top_status = Some(status_snapshot(
-        state,
-        "top",
-        &TOP_BAR,
-        native,
-        theme,
-        projection,
-        status_background,
-    ));
-    let mut bottom_status = None;
-    for kind in bootty_config::config::PanelKind::ALL
-        .into_iter()
-        .filter(|kind| *kind != bootty_config::config::PanelKind::Agents)
-    {
-        let target = match state.config().panel(kind).button {
-            bootty_config::config::PanelButton::None => continue,
-            bootty_config::config::PanelButton::Top => &mut top_status,
-            bootty_config::config::PanelButton::Bottom => &mut bottom_status,
-        };
-        let key = if state.config().panel(kind).button == bootty_config::config::PanelButton::Top {
-            "top"
-        } else {
-            "bottom"
-        };
-        let bar = target.get_or_insert_with(|| {
-            status_snapshot(
-                state,
-                key,
-                &[],
-                native,
-                theme,
-                projection,
-                status_background,
-            )
-        });
-        let command = crate::commands::DockAction::TogglePanel(kind).command();
-        bar.segments.push(StatusSegmentSnapshot {
-            align: StatusAlignment::Right,
-            source_slot: bar.segments.len(),
-            surface: format!("panel:{}", kind.name()),
-            items: vec![StatusItemSnapshot {
-                key: kind.name().into(),
-                text: String::new(),
-                icon: Some(command.icon().into()),
-                gauge: None,
-                pad_left: 0.0,
-                pad_right: 0.0,
-                progress: None,
-                foreground: None,
-                background: None,
-                active: false,
-                action: Some(NativeChromeAction::TogglePanel(kind)),
-                reorder_anchor: None,
-                tab_context: None,
-            }],
-        });
-    }
-    (top_status, bottom_status)
+    (
+        Some(status_snapshot(
+            state,
+            "top",
+            &TOP_BAR,
+            native,
+            theme,
+            projection,
+            status_background,
+        )),
+        None,
+    )
 }
 
 fn sidebar_snapshot(
@@ -997,23 +951,10 @@ fn session_title<'a>(name: &'a str, project: &str, explicit: bool) -> &'a str {
     }
 }
 
-fn live_native_activities(state: &AppState) -> Vec<bootty_agents::NativeSessionActivity> {
-    let native_panes = state
-        .mux()
-        .all_sessions()
-        .iter()
-        .flat_map(|session| &session.windows)
-        .flat_map(|window| &window.panes)
-        .filter_map(|pane| pane.native_agent.as_deref())
-        .collect::<HashSet<_>>();
-    state
-        .native_agent_service()
-        .map_or_else(Vec::new, |agents| agents.activities())
-        .into_iter()
-        .filter(|activity| native_panes.contains(activity.id.as_str()))
-        .collect()
-}
-
+#[expect(
+    clippy::too_many_lines,
+    reason = "Projects and their session rows share one projection pass"
+)]
 fn sidebar_rows(
     state: &AppState,
     native: &NativeChrome,
@@ -1021,14 +962,28 @@ fn sidebar_rows(
     palette: ChromePalette,
 ) -> Vec<SidebarRow> {
     let sessions = &projection.mux.sessions;
-    let native_activities = live_native_activities(state);
+    let native_activities = state
+        .native_agent_service()
+        .map_or_else(Vec::new, |agents| agents.activities());
     let scope = state.mux_scope().persistence_value().to_string();
     let now = std::time::Instant::now();
     let mut rows = Vec::new();
     let grouped = state.config().sidebar.group_by_project;
     let names = state.saved_session_names();
     let mut groups = Vec::<(Option<&str>, Vec<(usize, &SessionView)>)>::new();
+    let delegated: HashSet<_> = native_activities
+        .iter()
+        .filter(|activity| activity.spawn_parent.is_some())
+        .filter_map(|activity| activity.task_identity.as_deref())
+        .collect();
     for (index, session) in sessions.iter().enumerate() {
+        if session
+            .identity
+            .as_deref()
+            .is_some_and(|identity| delegated.contains(identity))
+        {
+            continue;
+        }
         let group = session_project_path(projection, session);
         if grouped && let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
             indices.push((index, session));

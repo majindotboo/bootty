@@ -1386,6 +1386,7 @@ fn saved_native_transcript_presents_plain_text_without_rewriting_its_source(
     #[case] plain: &str,
 ) {
     let item = NativeTranscriptItem {
+        review_comments: Vec::new(),
         id: "saved".to_owned(),
         role: "notice".to_owned(),
         text: saved.to_owned(),

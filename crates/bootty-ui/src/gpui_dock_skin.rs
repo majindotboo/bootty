@@ -22,7 +22,7 @@ use gpui_kit::component::{
 use gpui_kit::{
     AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, FocusHandle, IntoElement,
     ParentElement, Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window,
-    WindowControlArea, canvas, div, prelude::*, px,
+    WindowControlArea, canvas, deferred, div, prelude::*, px,
 };
 
 use crate::{
@@ -31,10 +31,6 @@ use crate::{
 };
 
 const DOCK_RESIZE_GUTTER: f32 = 8.0;
-/// The left dock's toggle and the space after it.
-const TOGGLE_WIDTH: f32 = 32.0;
-/// Back, Forward and New session: three 24px buttons 2px apart, then the space after them.
-const NAVIGATION_WIDTH: f32 = 84.0;
 
 pub struct WorkspaceDockSkin {
     kit: Rc<DockSkin>,
@@ -100,6 +96,12 @@ impl DockAreaRenderer for WorkspaceDockSkin {
         let area = self.area.clone();
         self.kit
             .frame(window, cx)
+            .relative()
+            .bg(self.chrome.read(cx).panel_background())
+            // Window controls keep one identity while the full-height docks slide beneath.
+            .when_some(self.owner.upgrade(), |frame, owner| {
+                frame.child(deferred(owner.read(cx).navigation.clone()))
+            })
             .on_drag_move::<DraggedDockResize>(|event, window, cx| {
                 let dock = event.drag(cx).0.clone();
                 dock.resize_to(event.event.position, window, cx);
@@ -179,62 +181,6 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             .borrow()
             .hidden(placement, cx.background_executor().now());
         let handle = dock_resize_handle(dock, cx);
-        let (show_left, show_right, _, _) = self.chrome.read(cx).dock_presentation();
-        let inset = self.chrome.read(cx).window_controls_inset();
-        let header = if placement.is_left() {
-            Some(
-                dock_title_row(self.chrome.read(cx).panel_background())
-                    // The controls hold still while the dock slides, clear of the window's.
-                    .pl(px(inset + hidden))
-                    .child(leading_controls(
-                        &self.owner,
-                        show_left.then_some(true),
-                        &self.chrome,
-                        cx,
-                    ))
-                    .child(
-                        div()
-                            .id("sidebar-window-drag-region")
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .window_control_area(WindowControlArea::Drag)
-                            // macOS requires an explicit move for custom titlebar content.
-                            .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, cx| {
-                                window.prevent_default();
-                                cx.stop_propagation();
-                                window.start_window_move();
-                            }),
-                    ),
-            )
-        } else if placement.is_right() {
-            let width = dock_status_width(f32::from(dock.size()), show_right);
-            let status = self
-                .chrome
-                .update(cx, |chrome, cx| chrome.dock_status(width, true, cx));
-            Some(
-                dock_title_row(self.chrome.read(cx).panel_background())
-                    .child(
-                        div()
-                            .flex()
-                            .flex_1()
-                            .min_w_0()
-                            .justify_end()
-                            .children(status),
-                    )
-                    .when(show_right, |header| {
-                        header.child(panel_toggle(
-                            self.owner.clone(),
-                            placement,
-                            true,
-                            &self.chrome,
-                            cx,
-                        ))
-                    }),
-            )
-        } else {
-            None
-        };
         div()
             .relative()
             // A sliding dock's content moves out toward the window edge.
@@ -242,7 +188,21 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             .flex()
             .size_full()
             .flex_col()
-            .children(header)
+            .bg(self.chrome.read(cx).panel_background())
+            .when(placement.is_left(), |dock| {
+                dock.child(
+                    div()
+                        .id("sidebar-window-drag-region")
+                        .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
+                        .flex_none()
+                        .window_control_area(WindowControlArea::Drag)
+                        .on_mouse_down(gpui_kit::MouseButton::Left, |_, window, cx| {
+                            window.prevent_default();
+                            cx.stop_propagation();
+                            window.start_window_move();
+                        }),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -352,6 +312,8 @@ pub struct WorkspaceTitleBar {
     dock: WeakEntity<WorkspaceDock>,
     area: WeakEntity<DockArea>,
     measured_height: Rc<Cell<Pixels>>,
+    conversation: Option<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
+    conversation_subscription: Option<gpui_kit::Subscription>,
 }
 
 impl WorkspaceTitleBar {
@@ -365,10 +327,27 @@ impl WorkspaceTitleBar {
         cx.observe(area, |_, _, cx| cx.notify()).detach();
         Self {
             chrome,
+            conversation: None,
+            conversation_subscription: None,
             dock,
             area: area.downgrade(),
             measured_height: Rc::new(Cell::new(px(crate::gpui::UI_TAB_BAR_HEIGHT))),
         }
+    }
+
+    pub(crate) fn set_conversation(
+        &mut self,
+        conversation: Option<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.conversation == conversation {
+            return;
+        }
+        self.conversation_subscription = conversation
+            .as_ref()
+            .map(|view| cx.observe(view, |_, _, cx| cx.notify()));
+        self.conversation = conversation;
+        cx.notify();
     }
 
     pub(crate) fn height(&self) -> Pixels {
@@ -378,11 +357,13 @@ impl WorkspaceTitleBar {
     fn measure_height(&self) -> impl IntoElement {
         let height = self.measured_height.clone();
         let dock = self.dock.clone();
+        let area = self.area.clone();
         canvas(
             move |bounds, _, cx| {
                 if height.replace(bounds.size.height) != bounds.size.height {
                     cx.defer(move |cx| {
                         _ = dock.update(cx, |_, cx| cx.notify());
+                        _ = area.update(cx, |_, cx| cx.notify());
                     });
                 }
             },
@@ -394,102 +375,83 @@ impl WorkspaceTitleBar {
 }
 
 impl Render for WorkspaceTitleBar {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one titlebar layout owns the notch split"
-    )]
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let area = self.area.upgrade();
-        let now = cx.background_executor().now();
-        let (closing_left, closing_right, hidden_left) =
-            self.dock.upgrade().map_or((false, false, 0.0), |dock| {
-                let motion = dock.read(cx).motion.borrow();
-                (
-                    motion.closing(DockPlacement::Left),
-                    motion.closing(DockPlacement::Right),
-                    motion.hidden(DockPlacement::Left, now),
-                )
-            });
-        let open_width = |placement| {
-            area.as_ref()
-                .filter(|area| area.read(cx).is_dock_open(placement))
-                .and_then(|area| area.read(cx).dock_size(placement))
-                .map(f32::from)
-        };
-        // A dock sliding shut already counts as closed: its controls move here as it goes.
-        let left_open = !closing_left && open_width(DockPlacement::Left).is_some();
-        let left_width = if left_open {
-            open_width(DockPlacement::Left).unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        // How much of the left dock shows, sliding or not; the window controls need the rest.
-        let left_shown = (open_width(DockPlacement::Left).unwrap_or(0.0) - hidden_left).max(0.0);
-        let right_open = !closing_right && open_width(DockPlacement::Right).is_some();
-        let right_width = if right_open {
-            open_width(DockPlacement::Right).unwrap_or(0.0)
-        } else {
-            0.0
-        };
-        let (status, inset, show_left, show_right, notch_span) =
-            self.chrome.update(cx, |chrome, cx| {
-                let (show_left, show_right, _, _) = chrome.dock_presentation();
-                (
-                    chrome.dock_status(
-                        if right_open {
-                            dock_status_width(right_width, show_right)
-                        } else {
-                            0.0
-                        },
-                        false,
-                        cx,
-                    ),
-                    (chrome.window_controls_inset() - left_shown).max(0.0),
-                    show_left && !left_open,
-                    show_right && !right_open,
-                    chrome.notch_span(),
-                )
-            });
-        let first_inset = inset
-            + if left_open {
-                0.0
-            } else {
-                leading_width(show_left)
-            };
-        let notch = notch_span.map(|(left, right)| crate::gpui::tabs::NotchTabLayout {
-            width: (left - left_width - first_inset).max(0.0),
-            inset: first_inset,
-            height: crate::gpui::UI_TAB_BAR_HEIGHT,
-            right_edge: (right - left_width).max(0.0),
-            wrap: self.chrome.read(cx).wrap_tabs_at_notch(),
+        let left_width = area
+            .as_ref()
+            .filter(|area| area.read(cx).is_dock_open(DockPlacement::Left))
+            .and_then(|area| area.read(cx).dock_size(DockPlacement::Left))
+            .map_or(0.0, f32::from);
+        let hidden = self.dock.upgrade().map_or(0.0, |dock| {
+            dock.read(cx)
+                .motion
+                .borrow()
+                .hidden(DockPlacement::Left, cx.background_executor().now())
         });
+        let left_shown = (left_width - hidden).max(0.0);
+        let right_open = area
+            .as_ref()
+            .is_some_and(|area| area.read(cx).is_dock_open(DockPlacement::Right));
+        let (show_left, show_right, _, _) = self.chrome.read(cx).dock_presentation();
+        let inset = self.chrome.read(cx).window_controls_inset(window);
+        let leading = (inset + f32::from(leading_width(show_left).to_pixels(window.rem_size()))
+            - left_shown)
+            .max(0.0);
+        let notch = self.chrome.read(cx).notch_span().map(|(left, right)| {
+            crate::gpui::tabs::NotchTabLayout {
+                width: (left - left_shown - leading).max(0.0),
+                inset: leading,
+                height: crate::gpui::UI_TAB_BAR_HEIGHT,
+                right_edge: (right - left_shown).max(0.0),
+                wrap: self.chrome.read(cx).wrap_tabs_at_notch(),
+            }
+        });
+        let context_button = self
+            .conversation
+            .as_ref()
+            .and_then(|view| view.update(cx, |view, cx| view.render_context_card_button(cx)));
         let tabs = self
             .chrome
             .update(cx, |chrome, cx| chrome.dock_tabs(notch, cx));
+        let leading_controls = context_button.into_iter().collect();
+        let mut trailing_controls = if right_open {
+            Vec::new()
+        } else {
+            vec![sidebar_tab_picker(self.dock.clone(), cx).into_any_element()]
+        };
+        if !right_open && show_right {
+            trailing_controls.push(
+                div()
+                    .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+                    .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
+                    .flex_none()
+                    .into_any_element(),
+            );
+        }
+        let status = self.chrome.update(cx, |chrome, cx| {
+            chrome.dock_status(leading_controls, trailing_controls, cx)
+        });
         let controls = div()
+            .min_w_0()
+            .flex_initial()
             .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
             .flex()
             .items_center()
-            .when_some(notch_span, |controls, (_, right)| {
+            .when_some(notch, |controls, notch| {
                 controls
                     .absolute()
                     .top_0()
                     .right_0()
-                    .left(px((right - left_width).max(0.0)))
+                    .left(px(notch.right_edge))
                     .justify_end()
             })
-            .children(status)
-            .when(show_right, |element| {
-                element.child(panel_toggle(
-                    self.dock.clone(),
-                    DockPlacement::Right,
-                    false,
-                    &self.chrome,
-                    cx,
-                ))
-            });
+            .when(notch.is_some(), |controls| {
+                controls.pr(crate::gpui::UI_HEADER_EDGE_PADDING)
+            })
+            .child(status);
         div()
             .id("workspace-titlebar")
+            .debug_selector(|| "workspace-titlebar".into())
             .relative()
             .flex_none()
             .w_full()
@@ -500,25 +462,89 @@ impl Render for WorkspaceTitleBar {
                 bar.flex()
                     .items_center()
                     .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
-                    .pl(px(inset))
-                    .pr_2()
-            })
-            .when(!left_open, |bar| {
-                bar.child(
-                    leading_controls(&self.dock, show_left.then_some(false), &self.chrome, cx)
-                        .when(notch.is_some(), |leading| {
-                            leading.absolute().top_0().left(px(inset))
-                        }),
-                )
+                    .pl(px(leading))
+                    .pr(crate::gpui::UI_HEADER_EDGE_PADDING)
             })
             .child(
                 div()
                     .min_w_0()
-                    .when(notch.is_none(), |tabs| tabs.flex_1().h_full())
+                    .when(notch.is_none(), |tabs| tabs.flex_1().h_full().min_w_32())
                     .children(tabs),
             )
             .child(controls)
             .child(self.measure_height())
+    }
+}
+
+/// Window navigation is rendered after `DockArea` releases its update borrow.
+/// It keeps one identity while conversation and tool headers follow their columns.
+pub struct WorkspaceNavigation {
+    owner: WeakEntity<WorkspaceDock>,
+    area: WeakEntity<DockArea>,
+    chrome: Entity<GpuiChrome>,
+}
+
+impl WorkspaceNavigation {
+    pub(crate) fn new(
+        owner: WeakEntity<WorkspaceDock>,
+        area: &Entity<DockArea>,
+        chrome: Entity<GpuiChrome>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        cx.observe(area, |_, _, cx| cx.notify()).detach();
+        cx.observe(&chrome, |_, _, cx| cx.notify()).detach();
+        Self {
+            owner,
+            area: area.downgrade(),
+            chrome,
+        }
+    }
+}
+
+impl Render for WorkspaceNavigation {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let area = self.area.upgrade();
+        let chrome = &self.chrome;
+        let owner = &self.owner;
+        let (show_left, show_right, _, _) = chrome.read(cx).dock_presentation();
+        let open = |placement| {
+            area.as_ref()
+                .is_some_and(|area| area.read(cx).is_dock_open(placement))
+        };
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
+            .child(
+                div()
+                    .absolute()
+                    .left(px(chrome.read(cx).window_controls_inset(window)))
+                    .child(leading_controls(
+                        owner,
+                        show_left.then_some(open(DockPlacement::Left)),
+                        chrome,
+                        cx,
+                    )),
+            )
+            .when(show_right, |bar| {
+                bar.child(
+                    div()
+                        .absolute()
+                        .right(crate::gpui::UI_HEADER_EDGE_PADDING)
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(panel_toggle(
+                            owner.clone(),
+                            DockPlacement::Right,
+                            open(DockPlacement::Right),
+                            chrome,
+                            cx,
+                        )),
+                )
+            })
     }
 }
 
@@ -536,13 +562,15 @@ pub fn group_placement(area: &DockArea, target: NodeId) -> Option<DockPlacement>
     })
 }
 
-fn leading_width(toggle: bool) -> f32 {
-    NAVIGATION_WIDTH + if toggle { TOGGLE_WIDTH } else { 0.0 }
+const fn toggle_width() -> gpui_kit::Rems {
+    gpui_kit::rems(crate::gpui::UI_HEADER_CONTROL_SIZE.0 + crate::gpui::UI_HEADER_GAP.0)
+}
+const fn leading_width(toggle: bool) -> gpui_kit::Rems {
+    gpui_kit::rems(toggle_width().0 * if toggle { 3.0 } else { 2.0 })
 }
 
 /// The left edge of the window: the left dock's toggle, when shown and `Some(open)`, then Back,
-/// Forward and New session. It sits in the left dock's header, or in the titlebar while that
-/// dock is closed.
+/// Forward. These controls stay in the shared top bar while the docks animate.
 fn leading_controls(
     owner: &WeakEntity<WorkspaceDock>,
     toggle: Option<bool>,
@@ -555,12 +583,12 @@ fn leading_controls(
     };
     div()
         .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
-        .w(px(leading_width(toggle.is_some())))
+        .w(leading_width(toggle.is_some()))
         .flex_none()
         .flex()
         .items_center()
         .when_some(toggle, |leading, open| {
-            leading.child(div().w(px(TOGGLE_WIDTH)).flex_none().child(panel_toggle(
+            leading.child(div().w(toggle_width()).flex_none().child(panel_toggle(
                 owner.clone(),
                 DockPlacement::Left,
                 open,
@@ -572,19 +600,13 @@ fn leading_controls(
             div()
                 .flex()
                 .items_center()
-                .gap(px(2.0))
+                .gap(crate::gpui::UI_HEADER_GAP)
                 .child(button("Back", IconName::ArrowLeft, "navigate_back", back))
                 .child(button(
                     "Forward",
                     IconName::ArrowRight,
                     "navigate_forward",
                     forward,
-                ))
-                .child(button(
-                    "New session",
-                    IconName::Plus,
-                    "new_mux_session",
-                    true,
                 )),
         )
 }
@@ -601,7 +623,8 @@ fn navigation_button(
     Button::new(command)
         .icon(icon)
         .ghost()
-        .small()
+        .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+        .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .rounded(cx.theme().radius)
         .disabled(!enabled)
         .element_tooltip_with_action(
@@ -653,7 +676,8 @@ fn panel_toggle(
     Button::new(id)
         .icon(icon)
         .ghost()
-        .small()
+        .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+        .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .rounded(cx.theme().radius)
         .selected(open)
         .element_tooltip_with_action(
@@ -740,14 +764,20 @@ impl WorkspaceTabGroup {
         div()
             .flex()
             .items_center()
+            .h_full()
             .w_full()
             .when(group.is_zoomed(), |row| {
-                row.pl(px(self.chrome.read(cx).window_controls_inset()))
+                row.pl(px(self.chrome.read(cx).window_controls_inset(window)
+                    + f32::from(
+                        leading_width(self.chrome.read(cx).dock_presentation().0)
+                            .to_pixels(window.rem_size()),
+                    )))
             })
             .min_w_0()
             .child(
                 div()
                     .flex_1()
+                    .h_full()
                     .min_w_0()
                     .child(crate::gpui::tabs::ScrollableTabBar {
                         id: format!("workspace-tabs-{:?}", group.node()).into(),
@@ -759,39 +789,6 @@ impl WorkspaceTabGroup {
                         end: div().min_w_1().into_any_element(),
                         plus: None,
                     }),
-            )
-            .when(
-                self.area.upgrade().is_some_and(|area| {
-                    group_placement(area.read(cx), group.node()) == Some(DockPlacement::Right)
-                }),
-                |row| {
-                    let owner = self.owner.clone();
-                    let node = group.node();
-                    let full = group.is_zoomed();
-                    row.child(
-                        Button::new("panel-full-view")
-                            .icon(if full {
-                                IconName::Minimize
-                            } else {
-                                IconName::Maximize
-                            })
-                            .ghost()
-                            .small()
-                            .accessibility_label(if full { "Restore view" } else { "Full view" })
-                            .element_tooltip(if full { "Restore view" } else { "Full view" })
-                            .on_click(move |_, window, cx| {
-                                _ = owner.update(cx, |owner, cx| {
-                                    owner.invoke_action(
-                                        crate::commands::DockAction::ToggleFullView,
-                                        Some(node),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }),
-                    )
-                    .child(sidebar_tab_picker(self.owner.clone(), cx))
-                },
             )
             .into_any_element()
     }
@@ -1017,6 +1014,7 @@ impl TabGroupRenderer for WorkspaceTabGroup {
             .id("workspace-header")
             .flex()
             .items_center()
+            .gap(crate::gpui::UI_HEADER_GAP)
             .flex_shrink_0()
             .w_full()
             .min_w_0()
@@ -1027,8 +1025,37 @@ impl TabGroupRenderer for WorkspaceTabGroup {
             } else {
                 self.chrome.read(cx).panel_background()
             })
-            .pr_2()
+            .window_control_area(WindowControlArea::Drag)
+            .pr(crate::gpui::UI_HEADER_EDGE_PADDING)
             .child(div().flex_1().min_w_0().h_full().child(tabs))
+            .when(!group.panels().is_empty(), |header| {
+                header.child(navigation_button(
+                    self.owner.clone(),
+                    if group.is_zoomed() {
+                        "Restore view"
+                    } else {
+                        "Full view"
+                    },
+                    if group.is_zoomed() {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    },
+                    "toggle_panel_full_view",
+                    true,
+                    &self.chrome,
+                    cx,
+                ))
+            })
+            .child(sidebar_tab_picker(self.owner.clone(), cx))
+            .when(self.chrome.read(cx).dock_presentation().1, |header| {
+                header.child(
+                    div()
+                        .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+                        .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
+                        .flex_none(),
+                )
+            })
             .into_any_element()
     }
 
@@ -1106,7 +1133,6 @@ fn sidebar_tools() -> impl Iterator<Item = &'static crate::commands::PanelDescri
             crate::commands::PanelCreation::Command(
                 crate::commands::DockAction::Files
                     | crate::commands::DockAction::Changes
-                    | crate::commands::DockAction::Diff
                     | crate::commands::DockAction::Subagents
             ) | crate::commands::PanelCreation::Browser
         )
@@ -1162,8 +1188,8 @@ fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>, cx: &App) -> impl IntoEl
     Button::new("new-sidebar-tab")
         .icon(IconName::Plus)
         .ghost()
-        .small()
-        .size_6()
+        .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
+        .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .accessibility_label("Open a tool")
         .disabled(all_open)
         .element_tooltip(if all_open {
@@ -1344,24 +1370,6 @@ fn terminal_panel_name(name: &str) -> bool {
     matches!(name, "bootty.terminal" | "bootty.attachment")
 }
 
-fn dock_status_width(width: f32, toggle: bool) -> f32 {
-    (width - if toggle { 36.0 } else { 8.0 }).max(0.0)
-}
-
-fn dock_title_row(background: gpui_kit::Hsla) -> Div {
-    div()
-        .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
-        .w_full()
-        .flex_none()
-        .flex()
-        .items_center()
-        .min_w_0()
-        .px_2()
-        .bg(background)
-        .window_control_area(WindowControlArea::Drag)
-}
-
-/// A tab's tooltip: its label, and for a conversation the name to write it by too.
 fn tab_tooltip(
     panel: &Arc<dyn BasePanelView>,
     label: &SharedString,

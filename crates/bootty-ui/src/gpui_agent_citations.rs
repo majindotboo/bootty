@@ -1,5 +1,4 @@
 //! Composer quotes are view-owned drafts; their context is persisted with the sent native prompt.
-use crate::gpui::ElementTooltip as _;
 pub(super) use bootty_agents::NativeResponseCitation as ResponseCitation;
 use bootty_agents::{NATIVE_CITATION_TEXT_LIMIT as CITATION_TEXT_LIMIT, NativeTranscriptItem};
 use gpui_kit::component::{
@@ -485,6 +484,13 @@ impl NativeAgentSessionView {
         context: &InlineTokenContext,
         cx: &App,
     ) -> gpui_kit::AnyElement {
+        if let Some(comment) = self
+            .review_comments
+            .iter()
+            .find(|comment| format!("review:{}", comment.id) == context.token().id().as_ref())
+        {
+            return Self::render_review_token(comment, context, cx);
+        }
         let Some(key) = context.token().id().strip_prefix("citation:") else {
             let kind = self
                 .completion
@@ -589,6 +595,11 @@ impl NativeAgentSessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.review_preview.take().is_some() {
+            window.focus(&self.composer.focus_handle(cx), cx);
+            cx.notify();
+            return true;
+        }
         if self.reaction_menu.is_some() {
             self.dismiss_reaction_menu(window, cx);
             return true;
@@ -646,32 +657,45 @@ impl NativeAgentSessionView {
     ) -> gpui_kit::Div {
         div()
             .flex()
-            .flex_wrap()
+            .flex_col()
             .gap_2()
             .text_color(cx.theme().foreground)
-            .children(
-                item.citations
-                    .iter()
-                    .filter(|citation| citation.prompt_range.is_none())
-                    .map(|citation| {
-                        let message_id = citation.message_id.clone();
-                        let owner = owner.clone();
+            .children(item.citations.iter().map(|citation| {
+                let message_id = citation.message_id.clone();
+                let owner = owner.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
                         Button::new(SharedString::from(format!(
                             "sent-citation:{}:{}",
                             item.id,
                             citation_key(citation)
                         )))
-                        .label(format!("❝ {}", citation_label(citation)))
-                        .small()
-                        .outline()
-                        .element_tooltip(format!("{}\nView quoted response", citation.quote))
+                        .ghost()
+                        .w_full()
+                        .h_auto()
+                        .accessibility_label("View quoted response")
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .border_l_2()
+                                .border_color(cx.theme().border)
+                                .pl_3()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(citation.quote.clone()),
+                        )
                         .on_click(move |_, _, cx| {
-                            _ = owner.update(cx, |this, cx| {
-                                this.reveal_response(&message_id, cx);
-                            });
-                        })
-                    }),
-            )
+                            _ = owner.update(cx, |this, cx| this.reveal_response(&message_id, cx));
+                        }),
+                    )
+                    .when(
+                        citation.prompt_range.is_none() && !citation.comment.is_empty(),
+                        |row| row.child(citation.comment.clone()),
+                    )
+            }))
     }
 
     fn render_reaction_menu(&self, too_long: bool, window: &Window, cx: &Context<Self>) -> Popover {
@@ -728,6 +752,9 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
+        if let Some(preview) = self.render_review_preview(cx) {
+            return preview;
+        }
         if let Some((key, position)) = &self.editing_citation
             && let Some(citation) = self
                 .citations
