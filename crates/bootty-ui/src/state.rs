@@ -949,6 +949,12 @@ impl AppState {
         self.macos_non_native_fullscreen_active
     }
 
+    pub(crate) const fn restore_window_fullscreen(&mut self, enabled: bool) {
+        self.macos_non_native_fullscreen_active =
+            enabled && self.config().window.uses_non_native_fullscreen_style();
+        self.macos_non_native_fullscreen_pending_apply = self.macos_non_native_fullscreen_active;
+    }
+
     pub const fn window_chrome_facts(&self) -> WindowChromeFacts {
         self.window_chrome
     }

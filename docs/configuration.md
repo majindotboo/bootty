@@ -527,6 +527,10 @@ configured size. These bind `increase_all_font_sizes:1`,
 The UI size also scales monospace editors. Zoom is temporary and does not write
 the config.
 
+On macOS, `SF Pro` in the font picker uses the local system font. It works without
+installing Apple's design-time font download. The selected family and face are
+shared by UI text, terminal text, and font fallbacks; no Apple font is bundled.
+
 Terminal-only `increase_font_size`, `decrease_font_size`, `reset_font_size`, and
 `set_font_size` retain their existing behavior. UI-only equivalents use
 `ui_font_size` (for example, `increase_ui_font_size:1`). Both sets are unbound
@@ -584,8 +588,13 @@ borderless or fullscreen. Decoration changes apply to newly opened windows.
 `[window].fullscreen` accepts `false`, `true`/`"native"`, `"non-native"`,
 `"non-native-visible-menu"`, or `"non-native-padded-notch"` and records the
 style to use. `[window].fullscreen-enabled` is the launch preference for that
-style. `toggle_fullscreen` changes only the running window; it never rewrites
-either setting. Configurations without `fullscreen-enabled` retain the legacy
+style when a window has no saved state. Workspace windows remember their size,
+position, display, and fullscreen state when closed or when Bootty quits, in
+`windows.json` beside the configuration. Restoring a fullscreen window retains
+its previous windowed size and position; disconnected displays restore onto an
+available display. Saved state takes precedence over launch dimensions and
+`fullscreen-enabled`. `toggle_fullscreen` never rewrites either setting.
+Configurations without `fullscreen-enabled` retain the legacy
 behavior: any non-disabled `fullscreen` value starts active.
 Native fullscreen uses the platform fullscreen path. Non-native modes create a
 borderless fullscreen-style window.

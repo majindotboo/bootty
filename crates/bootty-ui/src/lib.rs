@@ -86,6 +86,7 @@ pub mod theme;
 pub mod transcript_links;
 pub mod usage;
 pub mod window;
+pub mod window_state;
 pub mod workspace_composition;
 
 pub use gpui_keymap_editor::{load_keymap_text_file, reload_saved_keymap_text};

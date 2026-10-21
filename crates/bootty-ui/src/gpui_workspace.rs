@@ -301,7 +301,18 @@ impl GpuiWorkspace {
         launch: WorkspaceLaunch,
         cx: &mut App,
     ) -> Result<(AnyWindowHandle, Entity<Self>)> {
-        let options = crate::platform::native_options_for_config(&config, cx);
+        let mut options = crate::platform::native_options_for_config(&config, cx);
+        let saved_window =
+            match crate::window_state::WindowState::load(&config.config_path, &window_state_key) {
+                Ok(saved) => saved,
+                Err(error) => {
+                    eprintln!("Could not restore window state: {error:#}");
+                    None
+                }
+            };
+        if let Some(saved) = &saved_window {
+            saved.restore(&config, &mut options, cx);
+        }
         // Every window shares one stash of prompts put aside.
         if !cx.has_global::<crate::prompt_stash::PromptStash>() {
             cx.set_global(crate::prompt_stash::PromptStash::open(&config.config_path));
@@ -321,8 +332,11 @@ impl GpuiWorkspace {
             None,
             Some(launch.control_plane.event_sender()),
         )?;
+        if let Some(saved) = saved_window {
+            state.restore_window_fullscreen(saved.fullscreen);
+        }
         gpui_kit::open_window(options, cx, move |window, cx| {
-            crate::window::macos_enable_window_resizing(window);
+            crate::window::macos_enable_window_resizing(window, &state.config().window);
             crate::window::macos_expose_text_target(window);
             state.native_computer_window = crate::window::native_computer_window_id(window);
             cx.new(|cx| {
@@ -662,11 +676,28 @@ impl GpuiWorkspace {
     ) -> (Subscription, Option<u32>) {
         Self::observe_workspace_focus_loss(window, cx);
         let keymap_context_for_release = keymap_context.to_owned();
-        cx.on_app_quit(|this, cx| {
+        let window_handle = window.window_handle();
+        cx.on_app_quit(move |this, cx| {
             let owner = cx.entity();
+            let window_state = window_handle
+                .update(cx, |_, window, cx| {
+                    crate::window_state::WindowState::capture(
+                        window,
+                        this.state.macos_non_native_fullscreen_active(),
+                        cx,
+                    )
+                })
+                .ok();
             // Normal close already saved while the window and its workers were alive.
             let flush = this.state.take_session_checkpoint_flush(!this.exit_pending);
+            let config_path = this.state.config().config_path.clone();
+            let key = this.state.window_state_key.clone();
             let checkpoint = cx.background_executor().spawn(async move {
+                if let Some(state) = window_state
+                    && let Err(error) = state.save(&config_path, &key)
+                {
+                    eprintln!("Could not save window state: {error:#}");
+                }
                 flush();
             });
             let cleanup = this.close_link_forwards(cx);
@@ -703,8 +734,9 @@ impl GpuiWorkspace {
             this.window_viewport = viewport;
             cx.notify();
             // AppKit finishes rebuilding native controls after fullscreen bounds change.
-            window.on_next_frame(|window, _| {
-                crate::window::macos_enable_window_resizing(window);
+            let config = this.state.config().window.clone();
+            window.on_next_frame(move |window, _| {
+                crate::window::macos_enable_window_resizing(window, &config);
             });
             // GPUI reports screen changes through this callback even if bounds stay equal.
             this.display_id = window
@@ -1314,6 +1346,18 @@ impl GpuiWorkspace {
     }
 
     fn finish_document_exit(&mut self, quit: bool, window: &Window, cx: &mut Context<Self>) {
+        let window_state = crate::window_state::WindowState::capture(
+            window,
+            self.state.macos_non_native_fullscreen_active(),
+            cx,
+        );
+        let config_path = self.state.config().config_path.clone();
+        let key = self.state.window_state_key.clone();
+        let placement = cx.background_executor().spawn(async move {
+            if let Err(error) = window_state.save(&config_path, &key) {
+                eprintln!("Could not save window state: {error:#}");
+            }
+        });
         self.exit_pending = true;
         let mut checkpoints = vec![Self::checkpoint_before_exit(cx)];
         if quit {
@@ -1336,6 +1380,7 @@ impl GpuiWorkspace {
         }
         let cleanup = self.close_link_forwards(cx);
         cx.spawn_in(window, async move |weak, cx| {
+            placement.await;
             for checkpoint in checkpoints {
                 checkpoint.await;
             }

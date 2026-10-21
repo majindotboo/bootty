@@ -114,8 +114,24 @@ impl Fonts {
     }
 
     fn select(&mut self, descriptor: &Font) -> Result<NativeFont> {
-        if let Some(name) = postscript_name(&descriptor.family) {
-            let database = crate::font_database::system_font_database();
+        let database = crate::font_database::system_font_database();
+        let name = postscript_name(&descriptor.family).or_else(|| {
+            if descriptor.family.as_ref() != "SF Pro" {
+                return None;
+            }
+            let id = database.query(&fontdb::Query {
+                families: &[fontdb::Family::Name("SF Pro")],
+                weight: fontdb::Weight(descriptor.weight.0.to_u16()?),
+                style: match descriptor.style {
+                    gpui_kit::FontStyle::Normal => fontdb::Style::Normal,
+                    gpui_kit::FontStyle::Italic => fontdb::Style::Italic,
+                    gpui_kit::FontStyle::Oblique => fontdb::Style::Oblique,
+                },
+                ..Default::default()
+            })?;
+            Some(database.face(id)?.post_script_name.as_str())
+        });
+        if let Some(name) = name {
             let face = database
                 .faces()
                 .find(|face| face.post_script_name == name)
@@ -179,6 +195,15 @@ impl PlatformTextSystem for CoreTextSystem {
     }
     fn all_font_names(&self) -> Vec<String> {
         let mut names = self.native.all_font_names();
+        if crate::font_database::system_font_database()
+            .query(&fontdb::Query {
+                families: &[fontdb::Family::Name("SF Pro")],
+                ..Default::default()
+            })
+            .is_some()
+        {
+            names.push("SF Pro".to_owned());
+        }
         names.extend(
             self.state
                 .lock()

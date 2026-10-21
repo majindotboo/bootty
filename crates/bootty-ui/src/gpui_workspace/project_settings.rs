@@ -11,8 +11,8 @@ use gpui_kit::component::{
     menu::{DropdownMenu as _, PopupMenuItem},
 };
 use gpui_kit::{
-    App, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render, Styled as _,
-    Window, div, prelude::*, rems,
+    App, Context, Entity, EventEmitter, Focusable as _, IntoElement, ParentElement as _, Render,
+    Styled as _, Window, div, prelude::*, rems,
 };
 use std::time::{Duration, Instant};
 
@@ -77,6 +77,14 @@ pub(super) struct ProjectSettingsView {
     sender: BoundAppCommandSender,
     saving: bool,
 }
+
+/// What the page asks of the settings window, which owns the project's tab and removal.
+pub(super) enum ProjectSettingsEvent {
+    /// Unregister this page's project from the Space the page was opened for.
+    Remove,
+}
+
+impl EventEmitter<ProjectSettingsEvent> for ProjectSettingsView {}
 
 /// One script's name, command and whether new worktrees run it, as they're being edited.
 struct ScriptFields {
@@ -194,6 +202,12 @@ impl ProjectSettingsView {
                 )
     }
 
+    /// Shows a failure the settings window observed for this page's project.
+    pub(super) fn set_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.model.error = Some(error);
+        cx.notify();
+    }
+
     pub(super) fn focus(&self, window: &Window, cx: &mut Context<Self>) {
         super::schedule_focus(self.name.read(cx).focus_handle(cx), window, cx);
     }
@@ -266,7 +280,7 @@ impl ProjectSettingsView {
         };
         let selected = selected.to_owned();
         let owner = cx.weak_entity();
-        Button::new(id)
+        let button = Button::new(id)
             .outline()
             .small()
             .accessibility_label(format!("{field}: {label}"))
@@ -296,7 +310,10 @@ impl ProjectSettingsView {
                     );
                 }
                 menu
-            })
+            });
+        // A block cell would stretch the button across the row.
+        gpui_kit::component::h_flex()
+            .child(button)
             .into_any_element()
     }
 
@@ -453,8 +470,8 @@ impl ProjectSettingsView {
             .border_color(cx.theme().border)
             .child(
                 div()
-                    .w(rems(18.0))
-                    .flex_shrink_0()
+                    .flex_1()
+                    .max_w(rems(18.0))
                     .flex()
                     .flex_col()
                     .gap_1()
@@ -539,7 +556,7 @@ impl ProjectSettingsView {
                     )
             }))
             .child(
-                div().child(
+                gpui_kit::component::h_flex().child(
                     Button::new("project-script-add")
                         .outline()
                         .small()
@@ -612,6 +629,10 @@ impl ProjectSettingsView {
 }
 
 impl Render for ProjectSettingsView {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one settings page composes its header, form, scripts and save actions"
+    )]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let [icon, provider, isolation] = self.project_choices(cx);
         let dirty = self.is_dirty(cx);
@@ -688,6 +709,23 @@ impl Render for ProjectSettingsView {
                             .context_menu(crate::gpui::text_menu(&self.teardown))
                             .disabled(self.saving)
                             .aria_label("Before removing a worktree"),
+                        cx,
+                    ))
+                    .child(Self::section("Registration", cx))
+                    .child(Self::row(
+                        "Remove project",
+                        "Unregisters it from this Space. Files and sessions are kept.",
+                        gpui_kit::component::h_flex().child(
+                            Button::new("project-remove")
+                                .outline()
+                                .small()
+                                .label("Remove…")
+                                .accessibility_label(format!("Remove {}", self.model.name()))
+                                .disabled(self.saving)
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(ProjectSettingsEvent::Remove);
+                                })),
+                        ),
                         cx,
                     ))
                     .when_some(self.model.error.as_ref(), |page, error| {

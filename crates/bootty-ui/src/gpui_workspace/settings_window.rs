@@ -80,12 +80,16 @@ pub(super) struct GpuiSettingsWindow {
     close_after_theme_restore: bool,
     projects: Vec<ProjectSettingsTab>,
     project_error: Option<String>,
+    /// The Space the Projects page browses; `None` follows the workspace's active Space. Choosing
+    /// one here never switches the running workspace.
+    project_space: Option<bootty_mux::controller::SpaceId>,
     _workspace_subscription: Option<Subscription>,
 }
 
 struct ProjectSettingsTab {
     view: Entity<super::project_settings::ProjectSettingsView>,
     _observe: Subscription,
+    _events: Subscription,
 }
 
 const SETTINGS_CONTENT_MIN_WIDTH_REMS: f32 = 25.0;
@@ -228,6 +232,7 @@ impl GpuiSettingsWindow {
             close_after_theme_restore: false,
             projects: Vec::new(),
             project_error: None,
+            project_space: None,
             _workspace_subscription: workspace_subscription,
         }
     }
@@ -327,9 +332,21 @@ impl GpuiSettingsWindow {
                     view.update(cx, |view, cx| view.focus(window, cx));
                     self.active_tab = SettingsWindowTab::Project(id);
                     let observe = cx.observe(&view, |_, _, cx| cx.notify());
+                    let events = cx.subscribe_in(
+                        &view,
+                        window,
+                        |_,
+                         view,
+                         event: &super::project_settings::ProjectSettingsEvent,
+                         window,
+                         cx| {
+                            Self::on_project_settings_event(view, event, window, cx);
+                        },
+                    );
                     self.projects.push(ProjectSettingsTab {
                         view,
                         _observe: observe,
+                        _events: events,
                     });
                 }
             }

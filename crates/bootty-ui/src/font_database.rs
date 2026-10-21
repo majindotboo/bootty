@@ -414,6 +414,45 @@ fn load_macos_fonts(database: &mut fontdb::Database) {
     ] {
         database.load_fonts_dir(dir);
     }
+    expose_macos_system_font(database);
+}
+
+#[cfg(target_os = "macos")]
+fn expose_macos_system_font(database: &mut fontdb::Database) {
+    if database
+        .query(&fontdb::Query {
+            families: &[fontdb::Family::Name("SF Pro")],
+            ..Default::default()
+        })
+        .is_some()
+    {
+        return;
+    }
+    // CoreText owns the system face's identity; give its local faces a picker-friendly name.
+    let system = core_text::font::new_ui_font_for_language(
+        core_text::font::kCTFontSystemFontType,
+        16.0,
+        None,
+    );
+    let name = system.postscript_name();
+    let Some((family, _)) = name.rsplit_once('-') else {
+        return;
+    };
+    let prefix = format!("{family}-");
+    let faces = database
+        .faces()
+        .filter(|face| face.post_script_name.starts_with(&prefix))
+        .cloned()
+        .collect::<Vec<_>>();
+    for mut face in faces {
+        database.remove_face(face.id);
+        face.id = fontdb::ID::dummy();
+        face.families.insert(
+            0,
+            ("SF Pro".to_owned(), fontdb::Language::English_UnitedStates),
+        );
+        database.push_face_info(face);
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

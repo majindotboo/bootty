@@ -61,6 +61,7 @@ This file describes the current production structure.
 | Workspace composition | `bootty-ui::workspace_composition` | Projects real backend windows and pane layouts. A pane carrying a native conversation identity renders its agent view in that pane's rectangle. Numbered tabs, navigation, splits and close operations use the same backend targets for terminals and agents. Documents live in the right sidebar; the center has no inner tab strip. |
 | Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock composes Sessions on the left, the selected backend window in the center, and tools/documents on the right. `native-panels.json` stores sidebar sizes, visibility and documents; each session keeps its own right dock. Center projections retain logical task/window keys and resolve through the current binding mapping. Agent placement belongs to real mux panes, never a separate Dock conversation tab or split tree. Transient creation choosers are not saved. |
 | Per-window coordination and GPUI projections | `bootty-ui::{AppState, GpuiWorkspace}` | Views consume snapshots and emit typed intents; they do not become domain owners. |
+| Saved workspace window size, position, display and fullscreen state | `bootty-ui::window_state` | Closing or quitting saves to identity-scoped `windows.json` atomically; restore keeps windows within an available display. |
 | Preserved custom script diagnostics | `bootty-ui` | Existing Lua and Luau files remain on disk and are reported as unsupported. |
 
 ## Process composition

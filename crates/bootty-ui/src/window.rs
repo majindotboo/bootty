@@ -146,30 +146,41 @@ pub(crate) fn native_browser_capture_region(
     observed
 }
 
-/// Restore native resizing before GPUI captures the window's style for simple fullscreen.
+/// Preserve the configured chrome when `AppKit` rebuilds controls during fullscreen transitions.
 #[cfg(target_os = "macos")]
-pub(crate) fn macos_enable_window_resizing(window: &mut gpui_kit::Window) {
-    if window.is_fullscreen() || window.is_simple_fullscreen() {
-        return;
-    }
+pub(crate) fn macos_enable_window_resizing(
+    window: &mut gpui_kit::Window,
+    config: &bootty_config::config::WindowConfig,
+) {
+    let resizable = !window.is_fullscreen() && !window.is_simple_fullscreen();
+    let hidden = !config.decorations_enabled()
+        || config.macos_titlebar_style == bootty_config::config::MacosTitlebarStyle::Hidden;
     // Remove this adapter once GPUI honors is_resizable with titlebar: None (0.3.4 does not).
     with_native_window(window, |native| {
         let style = native.styleMask();
-        if !style.contains(NSWindowStyleMask::Resizable) {
+        if resizable && !style.contains(NSWindowStyleMask::Resizable) {
             native.setStyleMask(style | NSWindowStyleMask::Resizable);
         }
-        // AppKit recreates the zoom button when restoring the window's fullscreen style.
-        if !style.contains(NSWindowStyleMask::Closable)
-            && let Some(button) = native.standardWindowButton(NSWindowButton::ZoomButton)
-            && !button.isHidden()
-        {
-            button.setHidden(true);
+        if hidden {
+            for kind in [
+                NSWindowButton::CloseButton,
+                NSWindowButton::MiniaturizeButton,
+                NSWindowButton::ZoomButton,
+            ] {
+                if let Some(button) = native.standardWindowButton(kind) {
+                    button.setHidden(true);
+                }
+            }
         }
     });
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) const fn macos_enable_window_resizing(_window: &mut gpui_kit::Window) {}
+pub(crate) const fn macos_enable_window_resizing(
+    _window: &mut gpui_kit::Window,
+    _config: &bootty_config::config::WindowConfig,
+) {
+}
 
 /// Report GPUI's view to Accessibility as a text area. Dictation apps such as Monologue only
 /// paste into a focused text role, and GPUI's macOS view exposes no role at all.

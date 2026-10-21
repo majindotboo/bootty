@@ -101,6 +101,39 @@ fn pixels(system: &dyn PlatformTextSystem, id: FontId, glyph: GlyphId) -> Vec<u8
 }
 
 #[gpui_kit::test]
+fn sf_pro_is_selectable_and_renders_the_macos_system_face(cx: &TestAppContext) {
+    let mappings = FontMappings::default();
+    let system = wrap_text_system(Arc::new(NoopTextSystem), mappings.clone());
+    BoottyAssets
+        .load_fonts(&TextSystem::new(system.clone()))
+        .unwrap();
+    assert!(system.all_font_names().iter().any(|name| name == "SF Pro"));
+    let native = core_text::font::new_ui_font_for_language(
+        core_text::font::kCTFontSystemFontType,
+        16.0,
+        None,
+    );
+    cx.update(|cx| {
+        cx.set_global(mappings);
+        init_theme(UiPalette::default(), cx);
+        update_ui_font(&["SF Pro".into()], 16.0, cx);
+        cx.open_window(gpui_kit::WindowOptions::default(), |window, cx| {
+            let font = setup_ui_font(window, cx);
+            let id = assert_face(&*system, &font, &native.postscript_name());
+            let glyph = system.glyph_for_char(id, 'a').unwrap();
+            pixels(&*system, id, glyph);
+            cx.new(|_| gpui_kit::Empty)
+        })
+        .unwrap();
+    });
+    assert_face(
+        &*system,
+        &gpui_kit::font("SF Pro"),
+        &native.postscript_name(),
+    );
+}
+
+#[gpui_kit::test]
 fn accepted_ui_styles_reach_exact_native_faces_and_keep_old_snapshots(cx: &TestAppContext) {
     let mappings = FontMappings::default();
     let system = wrap_text_system(Arc::new(NoopTextSystem), mappings.clone());
@@ -328,6 +361,7 @@ fn foreground_color_never_thickens_glyphs(
 #[rstest]
 #[case("Lilex-Regular", "MapleMono-NF-Regular")]
 #[case("Lilex-Regular", "Lilex-Bold")]
+#[case("Lilex-Regular", "SF Pro")]
 fn warm_terminal_atlas_changes_pixels_with_selected_font(
     native_system: Arc<dyn PlatformTextSystem>,
     #[case] first: &str,

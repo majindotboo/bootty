@@ -1,8 +1,36 @@
 //! Project navigation and tab lifecycle in the settings window.
 use super::*;
+use crate::gpui_workspace::project_settings::ProjectSettingsEvent;
 use bootty_control::{Caller, CommandInvocation, CommandTarget, ResourceKind};
+use bootty_mux::{controller::SpaceId, workspace::SpaceSummary};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::{AnyElement, SharedString, rems};
+
+/// One Space as the picker shows it.
+fn space_choice(icon: &str, name: &str, cx: &gpui_kit::App) -> gpui_kit::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(crate::gpui::sized_icon(
+            icon,
+            crate::gpui::IconSize::Small,
+            cx.theme().foreground,
+        ))
+        .child(name.to_owned())
+}
+
+/// The binding target of one Space, resolved the same way as the active Space's.
+fn space_binding_target(state: &crate::state::AppState, scope: SpaceId) -> Option<CommandTarget> {
+    let mux = state.workspace.binding(scope)?.mux();
+    let handle = state.binding_target_handle(scope, mux.binding_generation());
+    crate::commands::ExactMuxTarget::Binding(scope).command_target(
+        ResourceKind::Binding,
+        mux,
+        &handle,
+    )
+}
 
 impl GpuiSettingsWindow {
     pub(super) fn render_projects(&self, cx: &Context<Self>) -> AnyElement {
@@ -12,10 +40,23 @@ impl GpuiSettingsWindow {
                 .into_any_element();
         };
         let state = &workspace.read(cx).state;
-        let target = state.current_command_target(ResourceKind::Binding);
+        let spaces = state.space_summaries();
+        let scope = self.project_space.unwrap_or_else(|| state.mux_scope());
+        let space = spaces.iter().find(|space| space.id == scope);
+        let target = space.and_then(|_| space_binding_target(state, scope));
+        let unavailable = match space {
+            None => Some("This Space was removed. Choose another Space.".to_owned()),
+            Some(space) if target.is_none() => Some(
+                space
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "This Space's host is unavailable.".to_owned()),
+            ),
+            Some(_) => None,
+        };
         let projects: Vec<_> = state
             .workspace
-            .registered_projects(state.mux_scope())
+            .registered_projects(scope)
             .cloned()
             .collect();
         let add_target = target.clone();
@@ -39,24 +80,38 @@ impl GpuiSettingsWindow {
                             .child("Projects"),
                     )
                     .child(
-                        Button::new("settings-add-project")
-                            .outline()
-                            .label("Add project…")
-                            .disabled(target.is_none())
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                if let Some(target) = &add_target {
-                                    _ = this.workspace.update(cx, |_, cx| {
-                                        GpuiWorkspace::choose_project_directory(
-                                            target.clone(),
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }
-                            })),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(Self::project_space_picker(&spaces, space, cx))
+                            .child(
+                                Button::new("settings-add-project")
+                                    .outline()
+                                    .label("Add project…")
+                                    .disabled(target.is_none())
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        if let Some(target) = &add_target {
+                                            _ = this.workspace.update(cx, |_, cx| {
+                                                GpuiWorkspace::choose_project_directory(
+                                                    target.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                    })),
+                            ),
                     ),
             );
-        if projects.is_empty() {
+        if let Some(message) = unavailable {
+            page = page.child(
+                div()
+                    .py_6()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(message),
+            );
+        } else if projects.is_empty() {
             page = page.child(div().py_6().child("No projects"));
         }
         for project in projects {
@@ -76,6 +131,55 @@ impl GpuiSettingsWindow {
             .overflow_y_scroll()
             .child(page)
             .into_any_element()
+    }
+
+    /// Chooses the Space whose projects the page browses. It never switches the workspace.
+    fn project_space_picker(
+        spaces: &[SpaceSummary],
+        selected: Option<&SpaceSummary>,
+        cx: &Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let (icon, name) = selected.map_or(("", "Unavailable Space"), |space| {
+            (space.icon.as_str(), space.name.as_str())
+        });
+        let choices: Vec<_> = spaces
+            .iter()
+            .map(|space| (space.id, space.icon.clone(), space.name.clone()))
+            .collect();
+        let selected = selected.map(|space| space.id);
+        let owner = cx.weak_entity();
+        Button::new("settings-projects-space")
+            .outline()
+            .accessibility_label(format!("Space: {name}"))
+            .child(space_choice(icon, name, cx))
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                for (id, icon, name) in &choices {
+                    let (id, icon, name) = (*id, icon.clone(), name.clone());
+                    let owner = owner.clone();
+                    menu = menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            div()
+                                .id(SharedString::from(format!(
+                                    "settings-projects-space-{}",
+                                    id.persistence_value()
+                                )))
+                                .role(gpui_kit::Role::MenuItem)
+                                .aria_label(name.clone())
+                                .child(space_choice(&icon, &name, cx))
+                        })
+                        .checked(selected == Some(id))
+                        .on_click(move |_, _, cx| {
+                            _ = owner.update(cx, |this, cx| {
+                                this.project_space = Some(id);
+                                this.project_error = None;
+                                cx.notify();
+                            });
+                        }),
+                    );
+                }
+                menu
+            })
     }
 
     fn project_row(
@@ -224,7 +328,36 @@ impl GpuiSettingsWindow {
                     .map(|message| bootty_agents::native_error_message(&message))
             },
         );
+        // A removal asked for from a project tab reports there, where the user is looking.
+        if command == "project.remove"
+            && let Some(error) = self.project_error.clone()
+        {
+            for tab in &self.projects {
+                if tab.view.read(cx).cwd() == cwd && tab.view.read(cx).target() == target {
+                    let error = error.clone();
+                    tab.view.update(cx, |view, cx| view.set_error(error, cx));
+                }
+            }
+        }
         cx.notify();
+    }
+
+    /// A project tab asks to remove its project from the Space the tab was opened for.
+    pub(super) fn on_project_settings_event(
+        view: &Entity<crate::gpui_workspace::project_settings::ProjectSettingsView>,
+        event: &ProjectSettingsEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            ProjectSettingsEvent::Remove => {
+                let (cwd, target) = {
+                    let view = view.read(cx);
+                    (view.cwd().to_owned(), view.target().clone())
+                };
+                Self::request_remove_project(cwd, target, window, cx);
+            }
+        }
     }
 
     fn request_remove_project(
