@@ -1951,12 +1951,20 @@ fn resume_native_session(
             warnings.extend(restore_warnings);
             terminal
         }
-        Err(outcome) => return outcome,
+        Err(outcome) => {
+            if let Some(guard) = launch_guard {
+                guard.finish();
+            }
+            return outcome;
+        }
     };
     if cancellation.is_cancelled() {
         return CommandOutcome::cancelled();
     }
     if Instant::now() >= deadline {
+        if let Some(guard) = launch_guard {
+            guard.finish();
+        }
         return CommandOutcome::deadline_exceeded();
     }
     // Nested task restoration has its own mutation token. Claim this launch token before the

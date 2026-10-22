@@ -143,6 +143,11 @@ pub enum PendingCommandResult {
         target: CommandTarget,
         command: Box<PendingAppCommand>,
     },
+    /// Wait for a prior membership operation before admitting the restore.
+    SessionReopen {
+        scope: SpaceId,
+        identity: String,
+    },
     NativePanelClose {
         targets: Vec<CommandTarget>,
         result_target: Option<CommandTarget>,
@@ -580,6 +585,7 @@ impl AppState {
                 }
             }
             PendingCommandResult::Forward { .. }
+            | PendingCommandResult::SessionReopen { .. }
             | PendingCommandResult::Link { .. }
             | PendingCommandResult::Clipboard { .. }
             | PendingCommandResult::Outcome(_)
@@ -800,6 +806,22 @@ impl AppState {
             }
             return Poll::Ready(Some(outcome));
         }
+        if let PendingCommandResult::SessionReopen { scope, identity } = &pending.result {
+            match self.dispatch_session_reopen(
+                *scope,
+                identity,
+                Some((pending.deadline, pending.cancellation.clone())),
+            ) {
+                CommandDispatch::Complete(outcome) => return Poll::Ready(Some(outcome)),
+                CommandDispatch::Pending(PendingCommandResult::SessionReopen { .. }) => {
+                    return Poll::Pending;
+                }
+                CommandDispatch::Pending(result) => {
+                    pending.result = result;
+                    return self.poll_pending_app_command(pending, now, effects);
+                }
+            }
+        }
         if let PendingCommandResult::SessionCheckpointClose {
             target,
             identity,
@@ -904,6 +926,7 @@ impl AppState {
                 );
             }
             PendingCommandResult::SessionCheckpointClose { .. }
+            | PendingCommandResult::SessionReopen { .. }
             | PendingCommandResult::SessionStart { .. }
             | PendingCommandResult::SessionAgentAssociation { .. }
             | PendingCommandResult::SessionCheckpointCompletion { .. } => {

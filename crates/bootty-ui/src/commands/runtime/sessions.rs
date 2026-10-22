@@ -337,10 +337,6 @@ impl AppState {
         self.dispatch_session_command_after_checkpoint(action, arguments, exact_target, execution)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One match owns session operation preparation"
-    )]
     fn dispatch_session_command_after_checkpoint(
         &mut self,
         action: SessionAction,
@@ -357,7 +353,7 @@ impl AppState {
             return self.change_captured_session(action, exact_target, execution);
         }
         // Native panes whose processes end once their topology close succeeds.
-        let mut closed_native_panes = Vec::new();
+        let closed_native_panes;
         let prepared = match (action, exact_target) {
             (
                 SessionAction::ListSaved
@@ -386,9 +382,7 @@ impl AppState {
                         message: "session.reopen expects a saved identity".to_owned(),
                     });
                 };
-                self.workspace
-                    .begin_session_reopen(scope, identity)
-                    .map(|prepared| (scope, prepared))
+                return self.dispatch_session_reopen(scope, identity, execution);
             }
             (SessionAction::ListSpaces, _) => {
                 return self.list_spaces_command(execution);
@@ -449,12 +443,32 @@ impl AppState {
             (command, membership),
             &closed_native_panes,
             execution,
-            if action == SessionAction::Reopen {
-                CommandSelection::Follow
-            } else {
-                CommandSelection::Preserve
-            },
+            CommandSelection::Preserve,
         )
+    }
+
+    pub(super) fn dispatch_session_reopen(
+        &mut self,
+        scope: SpaceId,
+        identity: &str,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        match self.workspace.begin_session_reopen(scope, identity) {
+            Ok(prepared) => self.submit_prepared_session_command(
+                scope,
+                prepared,
+                &[],
+                execution,
+                CommandSelection::Follow,
+            ),
+            Err(SessionRequestError::Pending) => {
+                CommandDispatch::Pending(PendingCommandResult::SessionReopen {
+                    scope,
+                    identity: identity.to_owned(),
+                })
+            }
+            Err(error) => self.reject_command(session_request_outcome(error)),
+        }
     }
 
     fn inspect_space_command(
@@ -1489,6 +1503,9 @@ fn session_request_outcome(error: SessionRequestError) -> CommandOutcome {
         },
         SessionRequestError::Unsupported(message) => CommandOutcome::Unsupported { message },
         SessionRequestError::Unavailable(message) => CommandOutcome::Unavailable { message },
+        SessionRequestError::Pending => CommandOutcome::Unavailable {
+            message: "This session is finishing another terminal operation".into(),
+        },
         SessionRequestError::Persistence(error) => CommandOutcome::Failed {
             code: "persistence_failed".to_owned(),
             message: error.to_string(),

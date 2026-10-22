@@ -157,8 +157,9 @@ impl AppState {
             | PendingCommandResult::SurfaceRestore {
                 command: pending, ..
             } => self.pending_mux_command_matches(&pending.result, scope, command),
-            // Its create already landed; only its pane is still starting.
+            // These states have no direct mux command to match.
             PendingCommandResult::SessionStart { .. }
+            | PendingCommandResult::SessionReopen { .. }
             | PendingCommandResult::SessionAgentAssociation { .. }
             | PendingCommandResult::SessionCheckpointCompletion { .. }
             | PendingCommandResult::TerminalAgentRestore { .. }

@@ -447,6 +447,22 @@ impl Host {
         }
     }
 
+    fn close_task(&mut self, name: &str) -> TestResult<()> {
+        let spaces = self.spaces()?;
+        let session = spaces
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
+            .find(|session| session["name"] == name)
+            .ok_or("Created task missing")?;
+        let mut close = CommandInvocation::from_action("session.close", Caller::Internal);
+        close.target = Some(serde_json::from_value(session["target"].clone())?);
+        close.confirmation = Some(close.confirmation());
+        success(self.submit(close)?)?;
+        Ok(())
+    }
+
     fn spaces(&mut self) -> TestResult<Value> {
         success(self.submit(CommandInvocation::new(
             "spaces.list",
@@ -1195,6 +1211,76 @@ fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
             .effects
             .iter()
             .any(|effect| matches!(effect, AppEffect::OpenInEditor { .. }))
+    );
+    Ok(())
+}
+
+#[rstest]
+#[case(MultiplexerBackendConfig::Native)]
+#[case(MultiplexerBackendConfig::Tmux)]
+fn reopening_a_conversation_waits_for_terminal_membership_reconciliation(
+    #[case] backend: MultiplexerBackendConfig,
+) -> TestResult<()> {
+    let mut host = Host::new_with_backend(true, false, backend)?;
+    let binding = host.binding(false)?;
+    let identity = bootty_mux::snapshot::new_session_identity();
+    let name = format!("focus-{identity}");
+    let launched = host.start(&binding, &name, &identity, "")?;
+    let native = record(&launched)?;
+    host.close_task(&name)?;
+    host.restart()?;
+    let stopped = host
+        .state
+        .native_agent_service()
+        .ok_or("Native owner")?
+        .sessions()
+        .into_iter()
+        .find(|record| record.id == native.id)
+        .ok_or("Saved conversation")?;
+    let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
+    focus.target = Some(stopped.target());
+    let reopened: NativeSessionRecord = serde_json::from_value(success(host.submit(focus)?)?)?;
+    assert_eq!(reopened.id, native.id);
+    assert_eq!(reopened.config.session_id, stopped.config.session_id);
+    assert_ne!(reopened.generation, stopped.generation);
+    assert!(host.effects.iter().any(|effect| matches!(effect, AppEffect::NativeConversation(target) if target == &reopened.target())));
+    host.close_task(&name)?;
+    Ok(())
+}
+
+#[rstest]
+fn failed_native_reopen_preserves_its_cause_instead_of_cancelling_itself() -> TestResult<()> {
+    let mut host = Host::new(true)?;
+    let binding = host.binding(false)?;
+    let cwd = host.directory.path().join("removed-checkout");
+    fs::create_dir(&cwd)?;
+    let identity = bootty_mux::snapshot::new_session_identity();
+    let name = format!("missing-{identity}");
+    let mut start = CommandInvocation::new(
+        "agents.native.start",
+        vec![
+            "codex".into(),
+            cwd.to_string_lossy().into_owned(),
+            host.program.clone(),
+            "[]".into(),
+            name.clone(),
+            "captured".into(),
+            identity,
+            "Missing directory".into(),
+            String::new(),
+        ],
+        Caller::Internal,
+    );
+    start.target = Some(binding);
+    let native = record(&success(host.submit(start)?)?)?;
+    host.close_task(&name)?;
+    fs::remove_dir(&cwd)?;
+    let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
+    focus.target = Some(native.target());
+    let outcome = host.submit(focus)?;
+    assert!(
+        matches!(&outcome, CommandOutcome::Failed { code, message } if code == "invalid_arguments" && message.contains("directory")),
+        "{outcome:?}"
     );
     Ok(())
 }

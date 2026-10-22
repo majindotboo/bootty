@@ -82,6 +82,8 @@ pub enum SessionRequestError {
     Unsupported(String),
     /// The Space, the session, or the binding's backend is not available.
     Unavailable(String),
+    /// A prior durable operation must reconcile before this saved task can reopen.
+    Pending,
     /// The membership journal could not be written.
     Persistence(WorkspacePersistenceError),
 }
@@ -395,9 +397,7 @@ impl WorkspaceRuntime {
             .iter()
             .any(|operation| operation.mutation().identity() == identity)
         {
-            return Err(SessionRequestError::Unavailable(
-                "this saved session already has a pending operation".to_owned(),
-            ));
+            return Err(SessionRequestError::Pending);
         }
         if let Some(session) = binding.session_attachment(identity) {
             let window = session

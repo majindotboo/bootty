@@ -371,7 +371,7 @@ impl Drop for ToolSpawnGuard {
 pub struct ToolLaunchGuard {
     lease: ToolLease,
     request_id: u64,
-    cancellation: CommandCancellation,
+    cancellation: Option<CommandCancellation>,
 }
 
 impl ToolLaunchGuard {
@@ -383,14 +383,21 @@ impl ToolLaunchGuard {
         Self {
             lease,
             request_id,
-            cancellation,
+            cancellation: Some(cancellation),
         }
+    }
+
+    /// Release a completed launch attempt without turning its result into cancellation.
+    pub fn finish(mut self) {
+        self.cancellation = None;
     }
 }
 
 impl Drop for ToolLaunchGuard {
     fn drop(&mut self) {
-        _ = self.cancellation.cancel();
+        if let Some(cancellation) = &self.cancellation {
+            _ = cancellation.cancel();
+        }
         self.lease.finish_request(self.request_id);
     }
 }
@@ -638,7 +645,7 @@ impl ToolLease {
         Ok(ToolLaunchGuard {
             lease: self.clone(),
             request_id,
-            cancellation: cancellation.clone(),
+            cancellation: Some(cancellation.clone()),
         })
     }
 
