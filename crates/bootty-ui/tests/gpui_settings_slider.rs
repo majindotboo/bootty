@@ -3,6 +3,7 @@
 use settings_support::GpuiSettingsSnapshot;
 use std::ops::RangeInclusive;
 
+use bootty_config::settings_schema::{SettingKind, SettingsSchema};
 use bootty_ui::gpui::{
     NumberControl, ScalarValue, SettingsCategory, SettingsControl, SettingsIntent, SettingsPage,
     SettingsPageItem, SettingsRow, UiPalette, init_theme, update_ui_font,
@@ -37,6 +38,34 @@ fn number_snapshot(
     range: RangeInclusive<f32>,
     precision: usize,
 ) -> GpuiSettingsSnapshot {
+    let step = 10_f32.powi(
+        i32::try_from(precision)
+            .expect("test precision")
+            .saturating_neg(),
+    );
+    number_snapshot_with_control(
+        "text.font_size",
+        enabled,
+        value,
+        SettingsControl::Number {
+            range,
+            control: NumberControl::Slider,
+            precision,
+            step,
+            slider_step: step,
+            suffix: " px".to_owned(),
+            display_scale: 1.0,
+            optional: true,
+        },
+    )
+}
+
+fn number_snapshot_with_control(
+    id: &str,
+    enabled: bool,
+    value: f32,
+    control: SettingsControl,
+) -> GpuiSettingsSnapshot {
     GpuiSettingsSnapshot {
         category: SettingsCategory::Appearance,
         pages: vec![SettingsPage {
@@ -52,24 +81,113 @@ fn number_snapshot(
                             .to_owned(),
                 },
                 SettingsPageItem::Setting(SettingsRow::Value {
-                    id: "text.font_size".to_owned(),
+                    id: id.to_owned(),
                     label: "Font size".to_owned(),
                     help: "The terminal font size.".to_owned(),
                     value: ScalarValue::Number(value),
-                    control: SettingsControl::Number {
-                        range,
-                        control: NumberControl::Slider,
-                        precision,
-                        suffix: " px".to_owned(),
-                        display_scale: 1.0,
-                        optional: true,
-                    },
+                    control,
                     enabled,
                 }),
             ],
         }],
         search: String::new(),
         write_error: None,
+    }
+}
+
+#[gpui_kit::test]
+fn font_size_sliders_snap_to_quarters_and_buttons_step_by_halves(cx: &mut TestAppContext) {
+    init_zed_ui(cx);
+    for (id, input_selector, slider_selector) in [
+        (
+            "font.size",
+            "settings-number-input-font.size",
+            "settings-slider-font.size",
+        ),
+        (
+            "font.ui-size",
+            "settings-number-input-font.ui-size",
+            "settings-slider-font.ui-size",
+        ),
+    ] {
+        let schema = SettingsSchema::builtin();
+        let SettingKind::Number {
+            range,
+            control,
+            precision,
+            step,
+            slider_step,
+            suffix,
+            display_scale,
+        } = &schema.get(id).expect("font size setting").kind
+        else {
+            panic!("font size is numeric");
+        };
+        let snapshot = number_snapshot_with_control(
+            id,
+            true,
+            12.25,
+            SettingsControl::Number {
+                range: range.clone(),
+                control: *control,
+                precision: *precision,
+                step: *step,
+                slider_step: *slider_step,
+                suffix: suffix.to_string(),
+                display_scale: *display_scale,
+                optional: false,
+            },
+        );
+        let (probe, visual) = cx.add_window_view(|_, cx| NumberProbe::with_snapshot(snapshot, cx));
+        let input = visual
+            .debug_bounds(input_selector)
+            .expect("font size input");
+        visual.simulate_click(right_control(input), Modifiers::none());
+        visual.simulate_click(left_control(input), Modifiers::none());
+        probe.update(visual, |probe, _| {
+            let intents = probe.intents.take();
+            assert!(
+                matches!(
+                    intents.as_slice(),
+                    [
+                        SettingsIntent::SetValue {
+                            value: ScalarValue::Number(12.75),
+                            ..
+                        },
+                        SettingsIntent::SetValue {
+                            value: ScalarValue::Number(12.25),
+                            ..
+                        }
+                    ]
+                ),
+                "{id}: {intents:?}"
+            );
+        });
+        let slider = visual
+            .debug_bounds(slider_selector)
+            .expect("font size slider");
+        for fraction in [0.383, 0.616] {
+            visual.simulate_click(
+                point(
+                    px(f32::from(slider.size.width).mul_add(fraction, f32::from(slider.origin.x))),
+                    slider.center().y,
+                ),
+                Modifiers::none(),
+            );
+            probe.update(visual, |probe, _| {
+                let intents = probe.intents.take();
+                let [
+                    SettingsIntent::SetValue {
+                        value: ScalarValue::Number(value),
+                        ..
+                    },
+                ] = intents.as_slice()
+                else {
+                    panic!("{id}: {intents:?}");
+                };
+                assert!((value * 4.0).fract().abs() < f32::EPSILON, "{id}: {value}");
+            });
+        }
     }
 }
 

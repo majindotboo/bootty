@@ -147,6 +147,10 @@ pub enum SettingKind {
         control: NumberControl,
         /// Decimal places shown. A count reads wrong as `3.0`.
         precision: usize,
+        /// Increment/decrement button movement, in displayed units.
+        step: f32,
+        /// Slider movement, in displayed units, independent of decimal precision.
+        slider_step: f32,
         suffix: Cow<'static, str>,
         /// Multiplier applied for display only: a 0.0-1.0 fraction shown as a percentage uses 100.
         display_scale: f32,

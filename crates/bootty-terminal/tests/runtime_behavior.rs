@@ -760,39 +760,49 @@ fn streaming_rewrites_publish_coherent_frames() {
 #[cfg(unix)]
 #[test]
 fn continuous_plain_output_keeps_publishing_frames() {
-    let repaint_count = Arc::new(AtomicUsize::new(0));
-    let repaint_wakeup = {
-        let repaint_count = Arc::clone(&repaint_count);
-        Arc::new(move || {
-            repaint_count.fetch_add(1, Ordering::Relaxed);
-        })
-    };
+    let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
     let config = TerminalSessionConfig {
         launch: SessionLaunchConfig {
             shell: Some("/bin/sh".to_owned()),
             args: vec![
                 "-c".to_owned(),
-                "i=0; while [ $i -lt 40 ]; do printf 'frame-%s\\r' \"$i\"; i=$((i + 1)); sleep 0.002; done"
-                    .to_owned(),
+                "i=0; while :; do printf 'frame-%s\\r' \"$i\"; i=$((i + 1)); done".to_owned(),
             ],
             ..SessionLaunchConfig::default()
         },
         ..TerminalSessionConfig::default()
     };
-    let mut session = TerminalSession::new_with_config(geometry(20, 4), config, repaint_wakeup)
-        .expect("terminal starts");
-
-    for _ in 0..100 {
-        if session.child_exited().expect("child status reads") {
-            break;
+    let mut session = TerminalSession::new_with_config(
+        geometry(20, 4),
+        config,
+        Arc::new(move || {
+            let _ = repaint_tx.send(());
+        }),
+    )
+    .expect("terminal starts");
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(5))
+        .expect("test deadline");
+    let mut previous = None;
+    // Observe changing output while the writer stays busy; startup speed is irrelevant.
+    for _ in 0..4 {
+        loop {
+            repaint_rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("continuous output must keep publishing frames");
+            let row = session
+                .extract_frame()
+                .expect("frame reads")
+                .text_rows()
+                .into_iter()
+                .find(|row| row.starts_with("frame-"));
+            if row.is_some() && row != previous {
+                previous = row;
+                break;
+            }
         }
-        thread::sleep(Duration::from_millis(2));
+        assert!(!session.child_exited().expect("writer is still producing"));
     }
-
-    assert!(
-        repaint_count.load(Ordering::Relaxed) > 3,
-        "continuous output starved frame publication"
-    );
 }
 
 #[cfg(unix)]

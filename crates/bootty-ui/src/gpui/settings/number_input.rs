@@ -31,6 +31,8 @@ struct NumberControlConfig {
     id: String,
     range: std::ops::RangeInclusive<f32>,
     precision: usize,
+    step: f32,
+    slider_step: f32,
     display_scale: f32,
     optional: bool,
 }
@@ -61,8 +63,7 @@ impl NumberControlState {
     ) -> Self {
         let precision = config.precision;
         let display_scale = config.display_scale;
-        let display_step = precision_step(precision);
-        let value_step = (display_step / display_scale).max(f32::EPSILON);
+        let value_step = (config.slider_step / display_scale).max(f32::EPSILON);
         let range_start = *config.range.start();
         let range_end = *config.range.end();
         let input = cx.new(|cx| {
@@ -72,7 +73,7 @@ impl NumberControlState {
                     separator: None,
                     fraction: Some(precision),
                 })
-                .step(f64::from(display_step))
+                .step(f64::from(config.step))
                 .min(f64::from(range_start * display_scale))
                 .max(f64::from(range_end * display_scale))
         });
@@ -252,6 +253,8 @@ impl GpuiSettings {
         range: std::ops::RangeInclusive<f32>,
         control: NumberControl,
         precision: usize,
+        step: f32,
+        slider_step: f32,
         suffix: &str,
         display_scale: f32,
         optional: bool,
@@ -263,13 +266,15 @@ impl GpuiSettings {
         let range_start = *range.start();
         let range_end = *range.end();
         let state_key = SharedString::from(format!(
-            "settings-number-state-{id}-{control:?}-{range_start}-{range_end}-{precision}-{display_scale}-{suffix}"
+            "settings-number-state-{id}-{control:?}-{range_start}-{range_end}-{precision}-{step}-{slider_step}-{display_scale}-{suffix}"
         ));
         let owner = cx.entity();
         let config = NumberControlConfig {
             id: id.to_owned(),
             range,
             precision,
+            step,
+            slider_step,
             display_scale,
             optional,
         };
@@ -372,15 +377,6 @@ fn quantize_number(value: f32, precision: usize) -> f32 {
     let places = i32::try_from(precision).unwrap_or(8).min(8);
     let scale = 10_f32.powi(places);
     (value * scale).round() / scale
-}
-
-fn precision_step(precision: usize) -> f32 {
-    10_f32.powi(
-        i32::try_from(precision)
-            .unwrap_or(8)
-            .min(8)
-            .saturating_neg(),
-    )
 }
 
 fn valid_display_scale(display_scale: f32) -> f32 {

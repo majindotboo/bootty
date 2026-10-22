@@ -47,6 +47,20 @@ fn number(
         range,
         control,
         precision: 2,
+        step: 0.01,
+        slider_step: 0.01,
+        suffix: suffix.into(),
+        display_scale: 1.0,
+    }
+}
+
+fn font_size(suffix: &'static str) -> SettingKind {
+    SettingKind::Number {
+        range: 6.0..=48.0,
+        control: NumberControl::Slider,
+        precision: 2,
+        step: 0.5,
+        slider_step: 0.25,
         suffix: suffix.into(),
         display_scale: 1.0,
     }
@@ -65,6 +79,8 @@ fn fraction(control: NumberControl) -> SettingKind {
         range: 0.0..=1.0,
         control,
         precision: 2,
+        step: 0.01,
+        slider_step: 0.01,
         suffix: "%".into(),
         display_scale: 100.0,
     }
@@ -983,7 +999,7 @@ fn font_metrics_specs() -> [SettingSpec; 7] {
             "",
             "text",
             "TERMINAL METRICS",
-            number(6.0..=48.0, NumberControl::Slider, "pt"),
+            font_size("pt"),
             SettingDefault::Field(|config| SettingValue::Number(config.font.size)),
         ),
         spec(
@@ -992,7 +1008,7 @@ fn font_metrics_specs() -> [SettingSpec; 7] {
             "",
             "text",
             "FONT",
-            number(6.0..=48.0, NumberControl::Slider, "px"),
+            font_size("px"),
             SettingDefault::Field(|config| SettingValue::Number(config.font.ui_size)),
         ),
         spec(
@@ -1201,6 +1217,8 @@ fn notifications_specs() -> [SettingSpec; 4] {
                 range: 0.0..=86400.0,
                 control: NumberControl::Edit,
                 precision: 0,
+                step: 1.0,
+                slider_step: 1.0,
                 suffix: "s".into(),
                 display_scale: 1.0,
             },
@@ -1274,6 +1292,8 @@ fn terminal_environment_specs() -> [SettingSpec; 7] {
                 range: 0.0..=1000.0,
                 control: NumberControl::Edit,
                 precision: 0,
+                step: 1.0,
+                slider_step: 1.0,
                 suffix: "".into(),
                 display_scale: 1.0,
             },
@@ -1525,6 +1545,8 @@ fn sidebar_session_specs() -> [SettingSpec; 4] {
                 range: 0.0..=90.0,
                 control: NumberControl::Edit,
                 precision: 0,
+                step: 1.0,
+                slider_step: 1.0,
                 suffix: "days".into(),
                 display_scale: 1.0,
             },

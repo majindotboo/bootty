@@ -257,6 +257,8 @@ pub enum SettingsControl {
         range: std::ops::RangeInclusive<f32>,
         control: NumberControl,
         precision: usize,
+        step: f32,
+        slider_step: f32,
         suffix: String,
         display_scale: f32,
         optional: bool,

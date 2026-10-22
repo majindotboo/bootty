@@ -3524,39 +3524,45 @@ fn conversations_keep_messages_centered_within_their_pane(cx: &mut TestAppContex
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
     });
-    let record = saved_record("idle");
-    let (sender, _) = native_command_sender(&record);
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            let mut view = NativeAgentSessionView::new(
-                record,
-                sender.for_caller(Caller::Internal),
-                true,
-                window,
-                cx,
-            );
-            view.set_presentation_preferences(
-                (
-                    bootty_config::config::ResponseStreaming::default(),
+    for (preference, column) in [
+        (bootty_config::config::TranscriptWidth::Normal, 48.),
+        (bootty_config::config::TranscriptWidth::Wide, 64.),
+    ] {
+        let record = saved_record("idle");
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                let mut view = NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
                     true,
-                    bootty_config::config::TranscriptWidth::Normal,
-                ),
-                window,
-                cx,
-            );
-            view
+                    window,
+                    cx,
+                );
+                view.set_presentation_preferences(
+                    (
+                        bootty_config::config::ResponseStreaming::default(),
+                        true,
+                        preference,
+                    ),
+                    window,
+                    cx,
+                );
+                view
+            });
+            gpui_kit::component::Root::new(view, window, cx)
         });
-        gpui_kit::component::Root::new(view, window, cx)
-    });
-    let rem = visual.update(|window, _| f32::from(window.rem_size()));
-    for (width, centered) in [(rem * 90., true), (rem * 80., false)] {
-        visual.simulate_resize(size(px(width), px(800.)));
-        visual.run_until_parked();
-        visual.update(|window, cx| window.draw(cx).clear(cx));
-        visual.update(|window, cx| window.draw(cx).clear(cx));
-        let composer = visual.debug_bounds("native-composer").expect("composer");
-        let offset = (f32::from(composer.center().x) - width / 2.).abs();
-        assert_eq!(offset < 1., centered, "{width}px: off center by {offset}px");
+        let rem = visual.update(|window, _| f32::from(window.rem_size()));
+        for (width, centered) in [(rem * (column + 42.), true), (rem * (column + 32.), false)] {
+            visual.simulate_resize(size(px(width), px(800.)));
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            let composer = visual.debug_bounds("native-composer").expect("composer");
+            assert!(rem.mul_add(-column, f32::from(composer.size.width)).abs() < 1.);
+            let offset = (f32::from(composer.center().x) - width / 2.).abs();
+            assert_eq!(offset < 1., centered, "{width}px: off center by {offset}px");
+        }
     }
 }
 

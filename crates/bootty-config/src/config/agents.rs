@@ -217,7 +217,7 @@ impl TranscriptWidth {
     pub const fn rems(self) -> Option<f32> {
         match self {
             Self::Normal => Some(48.),
-            Self::Wide => Some(72.),
+            Self::Wide => Some(64.),
             Self::Full => None,
         }
     }

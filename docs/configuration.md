@@ -263,6 +263,8 @@ and native font fallbacks use that same size, including on scaled displays. Font
 names accept families, full face names (such as `Maple Mono NF Light`), and PostScript
 names. The settings editor exposes each stack entry as a family picker and a
 named style picker, saving the selected face name in the family array.
+Terminal and UI font-size sliders move in 0.25 increments; their +/− buttons move
+in 0.5 increments. The number fields also accept typed values with two decimal places.
 
 Automatic weights preserve their offset from the base: Bold requests 300 weight
 units above the selected base, then chooses the nearest available family style.
@@ -1228,7 +1230,7 @@ diagram in the theme's colors; one still streaming, or one Mermaid can't draw, s
 source, with the reason. An ```` ```html ```` block offers to open the page in your
 browser from a private file. Code blocks highlight the languages agents write most,
 SQL included.
-`agents.transcript-width` sets how wide messages run: `"wide"` (default, 72rem),
+`agents.transcript-width` sets how wide messages run: `"wide"` (default, 64rem),
 `"normal"` (48rem), or `"full"`. In a wide window the conversation details card
 sits beside the messages. Narrow conversations open it from the details button in
 the existing top bar. Context usage remains a read-only indicator in the composer.
