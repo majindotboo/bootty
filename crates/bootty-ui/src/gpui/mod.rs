@@ -21,7 +21,6 @@ mod terminal_zoom;
 mod text_menu;
 mod theme;
 mod theme_integration;
-mod tooltip;
 
 pub use crate::gpui_model_picker::{ModelPickerEvent, ModelPickerView};
 pub use changes::*;
@@ -42,4 +41,3 @@ pub use terminal_zoom::*;
 pub use text_menu::*;
 pub use theme::*;
 pub use theme_integration::*;
-pub use tooltip::*;

@@ -1,5 +1,5 @@
 //! Native conversation presentation; provider processes and transcripts belong to bootty-agents.
-use crate::gpui::{ElementTooltip as _, RowLabel as _};
+use crate::gpui::RowLabel as _;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
@@ -33,6 +33,11 @@ use gpui_kit::{
 };
 use image::{ImageFormat, ImageReader};
 use serde_json::Value;
+
+#[path = "gpui_agent_bubble.rs"]
+mod bubble;
+#[path = "gpui_agent_selection.rs"]
+mod selection;
 
 #[path = "gpui_agent_completion.rs"]
 mod completion;
@@ -329,6 +334,7 @@ pub struct NativeAgentSessionView {
     review_comments: Vec<bootty_agents::NativeReviewComment>,
     review_preview: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
     selected_response: Option<ResponseSelection>,
+    word_selection: selection::WordSelection,
     /// The link right-clicked in a message, and where.
     link_menu: Option<(String, gpui_kit::Point<gpui_kit::Pixels>)>,
     reaction_menu: Option<(Entity<gpui_kit::component::menu::PopupMenu>, Subscription)>,
@@ -551,6 +557,7 @@ impl NativeAgentSessionView {
             review_comments: Vec::new(),
             review_preview: None,
             selected_response: None,
+            word_selection: selection::WordSelection::default(),
             link_menu: None,
             reaction_menu: None,
             citation_editor,
@@ -1108,9 +1115,12 @@ impl NativeAgentSessionView {
             cx.on_focus_in(&focus, window, |_, _, cx| cx.notify()),
             cx.on_focus_out(&focus, window, |_, _, _, cx| cx.notify()),
             // An open find bar searches a message again once its new text renders.
-            cx.observe(&state, {
+            cx.observe_in(&state, window, {
                 let id = item.id.clone();
-                move |this, _, cx| this.find_observed(&id, cx)
+                move |this, _, window, cx| {
+                    this.find_observed(&id, cx);
+                    this.word_selection_observed(window, cx);
+                }
             }),
         ];
         if item.role == "assistant" {
@@ -2740,7 +2750,7 @@ impl NativeAgentSessionView {
                         .ghost()
                         .xsmall()
                         .loading(self.pending.contains("turn-diff"))
-                        .element_tooltip("Show every change in the Changes panel")
+                        .tooltip("Show every change in the Changes panel")
                         .on_click(move |_, window, cx| {
                             _ = owner.update(cx, |this, cx| {
                                 this.submit_command(
@@ -3026,7 +3036,7 @@ impl NativeAgentSessionView {
         item: &NativeTranscriptItem,
         owner: gpui_kit::WeakEntity<Self>,
         cx: &App,
-    ) -> gpui_kit::Div {
+    ) -> gpui_kit::AnyElement {
         let user = item.role == "user";
         let collapsible = collapsible_prompt(item);
         let expanded = self.expanded_messages.contains(&item.id);
@@ -3041,7 +3051,7 @@ impl NativeAgentSessionView {
             _ => "",
         };
         let id = item.id.clone();
-        div()
+        let body = div()
             .debug_selector({
                 let id = item.id.clone();
                 move || format!("native-message-body-{id}")
@@ -3050,9 +3060,7 @@ impl NativeAgentSessionView {
             .flex()
             .flex_col()
             .when(user, |row| {
-                // Rich-text lists have no intrinsic width. Give their wrapping
-                // layout the same bounded lane as other user message content.
-                row.w_full().max_w(gpui_kit::relative(0.8)).px_4().py_2p5().rounded_2xl()
+                row.w_full().px_4().py_2p5().rounded_2xl()
                     .bg(bubble_background)
             })
             .when(item.role == "notice", |row| {
@@ -3099,7 +3107,18 @@ impl NativeAgentSessionView {
                             cx.notify();
                         });
                     }))
-            })
+            });
+        if user && !collapsible {
+            bubble::PromptBubble {
+                id: gpui_kit::SharedString::from(format!("prompt-bubble:{}", item.id)).into(),
+                content: body.into_any_element(),
+            }
+            .into_any_element()
+        } else {
+            // Collapsed prompts need a definite width before their height is clipped.
+            body.when(user, |body| body.max_w(gpui_kit::relative(0.8)))
+                .into_any_element()
+        }
     }
     fn message_text(
         &self,
@@ -3319,7 +3338,7 @@ impl NativeAgentSessionView {
             .xsmall()
             .disabled(!empty)
             .accessibility_label("Edit and resend")
-            .element_tooltip(if empty {
+            .tooltip(if empty {
                 "Edit and resend"
             } else {
                 "Send or clear your draft first"
@@ -3423,7 +3442,7 @@ impl NativeAgentSessionView {
                                     .ghost()
                                     .xsmall()
                                     .accessibility_label("Start side chat")
-                                    .element_tooltip("Start side chat")
+                                    .tooltip("Start side chat")
                                     .on_click(move |_, window, cx| {
                                         _ = owner.update(cx, |this, cx| {
                                             this.command(
@@ -3465,7 +3484,7 @@ impl NativeAgentSessionView {
                     .xsmall()
                     .disabled(is_busy(self.record.snapshot.status))
                     .accessibility_label("Rewind to before this message")
-                    .element_tooltip("Rewind to before this message")
+                    .tooltip("Rewind to before this message")
                     .on_click(move |_, window, cx| {
                         _ = owner.update(cx, |this, cx| this.confirm_rewind(&id, window, cx));
                     })
@@ -3482,7 +3501,7 @@ impl NativeAgentSessionView {
                 .xsmall()
                 .loading(self.pending.contains("turn-diff"))
                 .accessibility_label("Show the files this turn changed")
-                .element_tooltip("Show the files this turn changed")
+                .tooltip("Show the files this turn changed")
                 .on_click(move |_, window, cx| {
                     _ = owner.update(cx, |this, cx| {
                         this.submit_command("turn-diff", vec![id.clone()], None, window, cx);
@@ -3662,7 +3681,7 @@ impl NativeAgentSessionView {
             .ghost()
             .xsmall()
             .accessibility_label(label)
-            .element_tooltip(label)
+            .tooltip(label)
             .on_click(move |_, window, cx| {
                 _ = owner.update(cx, |this, cx| this.copy_message(&id, window, cx));
             })
@@ -3693,7 +3712,7 @@ impl NativeAgentSessionView {
             .ghost()
             .xsmall()
             .accessibility_label(label)
-            .element_tooltip(label)
+            .tooltip(label)
             .on_click(move |_, window, cx| {
                 _ = owner.update(cx, |this, cx| this.copy_tables(&id, window, cx));
             })
@@ -3958,7 +3977,7 @@ impl NativeAgentSessionView {
                     },
                     annotation.note
                 ))
-                .element_tooltip(description)
+                .tooltip(description)
                 .when_some(preview, |button, image| {
                     button
                         .h_auto()
@@ -3989,7 +4008,7 @@ impl NativeAgentSessionView {
         .xsmall()
         .ghost()
         .accessibility_label("Remove annotation attachment")
-        .element_tooltip("Remove attachment; keep saved annotation")
+        .tooltip("Remove attachment; keep saved annotation")
         .on_click(cx.listener(move |this, _, _, cx| {
             cx.emit(OpenNativeSession::DetachAnnotation {
                 target: this.record.target(),
@@ -4290,7 +4309,7 @@ impl NativeAgentSessionView {
             .small()
             .label("Retry")
             .disabled(!draft_empty || !self.can_prompt())
-            .element_tooltip(if draft_empty {
+            .tooltip(if draft_empty {
                 "Send this turn's message again"
             } else {
                 "Send or clear your draft first"
@@ -4984,7 +5003,7 @@ impl NativeAgentSessionView {
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.command("interrupt", vec![], window, cx);
                                 }))
-                                .element_tooltip(if self.record.snapshot.stopping() {
+                                .tooltip(if self.record.snapshot.stopping() {
                                     format!(
                                         "Restart {} to stop now",
                                         self.record.config.provider.display_name()
@@ -5023,7 +5042,7 @@ impl NativeAgentSessionView {
                                 .primary()
                                 .rounded_full()
                                 .accessibility_label(send_blocker.unwrap_or(send_label))
-                                .element_tooltip(send_blocker.unwrap_or(send_label))
+                                .tooltip(send_blocker.unwrap_or(send_label))
                                 .loading(send_pending)
                                 .disabled(
                                     !self.provider_enabled()
@@ -5245,7 +5264,7 @@ impl NativeAgentSessionView {
                     }
                     cx.notify();
                 }))
-                .element_tooltip("Jump to latest"),
+                .tooltip("Jump to latest"),
         )
     }
 
@@ -5381,6 +5400,28 @@ impl Render for NativeAgentSessionView {
             )
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            .child(Self::render_word_selection_events(cx))
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, event, window, cx| {
+                    this.arm_word_selection(event, window, cx);
+                }),
+            )
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::Copy, window, cx| {
+                    this.copy_word_selection(window, cx);
+                },
+            ))
+            .capture_action(cx.listener(
+                |this, _: &gpui_kit::component::input::SelectAll, window, cx| {
+                    if this.word_selection_focused(window, cx) {
+                        this.clear_word_selection(cx);
+                        this.selected_response = None;
+                        cx.notify();
+                    }
+                    cx.propagate();
+                },
+            ))
             .on_scroll_wheel(cx.listener(|this, _, _, cx| {
                 // The selection toolbar closes; the comment editor follows its quote.
                 if this.selected_response.take().is_some() || this.editing_citation.is_some() {
@@ -5392,6 +5433,7 @@ impl Render for NativeAgentSessionView {
                     if this.handle_selection_key(event, window, cx)
                         || (event.keystroke.key == "escape"
                             && (this.dismiss_citation_controls(window, cx)
+                                || this.dismiss_word_selection(window, cx)
                                 || this.close_context_card(cx)))
                     {
                         cx.stop_propagation();
@@ -5480,7 +5522,7 @@ fn code_block_actions(
                             });
                         }
                     })
-                    .element_tooltip("Open in your browser"),
+                    .tooltip("Open in your browser"),
             )
         })
         // A check stands in for the copy icon for a moment after copying.

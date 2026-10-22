@@ -1,6 +1,5 @@
 //! PR metadata and comment controls use captured PR identity.
 use super::*;
-use crate::gpui::ElementTooltip as _;
 use bootty_git::github::{
     CandidateKind, CandidatePage, GitHubCandidate, MetadataRequest, Reaction, ReactionGroup,
 };
@@ -579,7 +578,7 @@ impl PullRequestView {
                     .xsmall()
                     .ghost()
                     .accessibility_label("React")
-                    .element_tooltip("Add reaction")
+                    .tooltip("Add reaction")
                     .disabled(self.pending)
                     .dropdown_menu(move |mut menu, _, _| {
                         for content in [

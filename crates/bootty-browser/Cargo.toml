@@ -22,6 +22,7 @@ objc2-foundation = { workspace = true, features = ["NSProcessInfo"] }
 security-framework = "3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+# These GTK types cross Wry and WebKitGTK APIs; update with those crates.
 gtk = "0.18"
 num-traits.workspace = true
 webkit2gtk = "2"

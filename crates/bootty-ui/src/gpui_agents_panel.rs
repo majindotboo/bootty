@@ -1,5 +1,4 @@
 //! Live projection of provider-owned sessions; every action uses the command catalog.
-use crate::gpui::ElementTooltip as _;
 use crate::{gpui::chrome::GpuiChrome, state::agent_attention::AgentOverview};
 use bootty_control::{BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation};
 use gpui_kit::component::{
@@ -328,7 +327,7 @@ impl AgentsPanel {
             .ghost()
             .small()
             .accessibility_label("Agent actions")
-            .element_tooltip("Agent actions")
+            .tooltip("Agent actions")
             .dropdown_menu(move |mut menu, _, _| {
                 for (action, label, enabled) in [
                     ("resume", "Resume", menu_entry.can_resume),

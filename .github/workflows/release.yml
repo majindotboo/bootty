@@ -58,7 +58,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up mise toolchain
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
 
       - name: Verify release tag
         shell: bash
@@ -130,7 +130,7 @@ jobs:
           ref: ${{ env.RELEASE_TAG }}
 
       - name: Set up mise toolchain
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
 
       - name: Download release assets
         uses: actions/download-artifact@v8

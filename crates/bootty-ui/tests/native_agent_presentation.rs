@@ -601,7 +601,7 @@ fn long_prompt_expands_in_place_and_copy_keeps_the_full_message(cx: &mut TestApp
     });
     let mut record = saved_record("idle");
     let text = (1..=12)
-        .map(|line| format!("Requirement {line}: keep the conversation readable."))
+        .map(|line| format!("- Requirement {line}: keep the conversation readable."))
         .collect::<Vec<_>>()
         .join("\n\n");
     record.snapshot.transcript.retain(|item| item.id == "user");
@@ -626,6 +626,10 @@ fn long_prompt_expands_in_place_and_copy_keeps_the_full_message(cx: &mut TestApp
         .debug_bounds("native-message-body-user")
         .expect("prompt");
     assert!(collapsed.size.height < px(250.), "long prompt is clipped");
+    assert!(
+        collapsed.size.width > px(300.),
+        "the clipped list has room to wrap"
+    );
     let copy = visual
         .debug_bounds("copy-message:user")
         .expect("copy control");
@@ -1455,83 +1459,6 @@ fn narrow_conversation_keeps_interrupt_and_send_inside_the_pane(cx: &mut TestApp
     pretty_assertions::assert_eq!(invocation.target, Some(target));
 }
 
-/// A control that leaves under a resting pointer takes its tooltip with it.
-#[gpui_kit::test]
-fn interrupt_tooltip_leaves_with_the_finished_turn(cx: &mut TestAppContext) {
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    let record = saved_record("working");
-    let mut idle = serde_json::to_value(&record.snapshot).unwrap();
-    idle["status"] = "idle".into();
-    idle["revision"] = 2.into();
-    let inbox = std::sync::Arc::new(std::sync::Mutex::new(
-        None::<bootty_control::AppCommandReceiver>,
-    ));
-    let queued = inbox.clone();
-    let (sender, receiver) = bootty_control::app_command_channel(
-        8,
-        std::sync::Arc::new(move || {
-            let inbox = queued.lock().unwrap();
-            while let Ok(request) = inbox.as_ref().unwrap().try_recv() {
-                // The queued follow-up's reply reports that the turn already ended.
-                let value = if request.invocation.command == "agents.native.queue" {
-                    idle.clone()
-                } else {
-                    serde_json::Value::Null
-                };
-                request
-                    .response
-                    .send(bootty_control::CommandOutcome::Success {
-                        value,
-                        warnings: Vec::new(),
-                    })
-                    .unwrap();
-            }
-        }),
-    );
-    *inbox.lock().unwrap() = Some(receiver);
-    let (_, visual) = cx.add_window_view(|window, cx| {
-        let view = cx.new(|cx| {
-            NativeAgentSessionView::new(
-                record,
-                sender.for_caller(Caller::Internal),
-                true,
-                window,
-                cx,
-            )
-        });
-        gpui_kit::component::Root::new(view, window, cx)
-    });
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    let editor = visual.debug_bounds("native-composer").expect("composer");
-    let interrupt = visual
-        .debug_bounds("native-interrupt")
-        .expect("a working turn offers Interrupt");
-    visual.simulate_mouse_move(interrupt.center(), None, Modifiers::none());
-    visual
-        .executor()
-        .advance_clock(std::time::Duration::from_secs(1));
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(visual.debug_bounds("tooltip:Interrupt").is_some());
-
-    visual.simulate_click(editor.center(), Modifiers::none());
-    visual.simulate_input("Wrap up");
-    redraw(visual);
-    assert!(visual.debug_bounds("native-send").is_some());
-    visual.simulate_keystrokes("enter");
-    visual.run_until_parked();
-    visual.update(|window, cx| window.draw(cx).clear(cx));
-    assert!(visual.debug_bounds("native-interrupt").is_none());
-    assert!(
-        visual.debug_bounds("tooltip:Interrupt").is_none(),
-        "the tooltip leaves with its button"
-    );
-}
-
 #[gpui_kit::test]
 fn disconnected_conversation_offers_an_exact_resume_without_submitting_its_draft(
     cx: &mut TestAppContext,
@@ -2016,6 +1943,324 @@ fn turn_rail_keeps_every_marker_in_the_available_height(cx: &mut TestAppContext)
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("native-message-turn-0").is_some());
+}
+
+#[gpui_kit::test]
+fn short_prompt_bubble_fits_its_text_as_the_window_grows(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    for text in [
+        "are we done here",
+        "**are we** done here",
+        "- are we done here",
+        "`cargo test`",
+    ] {
+        let mut record = saved_record("idle");
+        record.snapshot.transcript.retain(|item| item.id == "user");
+        record.snapshot.transcript[0].text = text.into();
+        let (sender, _) = native_command_sender(&record);
+        let (_, visual) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| {
+                NativeAgentSessionView::new(
+                    record,
+                    sender.for_caller(Caller::Internal),
+                    false,
+                    window,
+                    cx,
+                )
+            });
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let mut previous = None;
+        for width in [480., 1600.] {
+            visual.simulate_resize(size(px(width), px(600.)));
+            redraw(visual);
+            let bubble = visual.debug_bounds("native-message-body-user").unwrap();
+            assert!(
+                bubble.size.width < px(240.),
+                "short prompt fits its text: {bubble:?}"
+            );
+            assert!(
+                bubble.size.height < px(64.),
+                "short prompt stays on one line: {bubble:?}"
+            );
+            if let Some(previous) = previous {
+                assert_eq!(
+                    bubble.size.width, previous,
+                    "empty space does not widen the bubble"
+                );
+            }
+            previous = Some(bubble.size.width);
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn wrapped_prompt_bubble_grows_with_its_text(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut record = saved_record("idle");
+    record
+        .snapshot
+        .transcript
+        .retain(|item| item.id == "user" || item.id == "reply");
+    record.snapshot.transcript[0].text = "A short message should fit its content, including every line when the conversation pane gets narrow.".into();
+    record.snapshot.transcript[1].text = "Line.".into();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    let mut narrow = None;
+    for width in [480., 1600.] {
+        visual.simulate_resize(size(px(width), px(600.)));
+        redraw(visual);
+        let bubble = visual.debug_bounds("native-message-body-user").unwrap();
+        if let Some(narrow) = narrow {
+            assert!(
+                bubble.size.height < narrow,
+                "wrapping grows the whole bubble"
+            );
+        } else {
+            let line = visual
+                .debug_bounds("native-message-body-reply")
+                .unwrap()
+                .size
+                .height;
+            assert!(
+                bubble.size.height > line.add(line).add(line),
+                "the bubble encloses every wrapped line: {bubble:?}, line height {line:?}"
+            );
+            narrow = Some(bubble.size.height);
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn transcript_repeated_multi_clicks_select_words_and_lines(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut record = saved_record("idle");
+    record.snapshot.transcript.retain(|item| item.id == "reply");
+    record.snapshot.transcript[0].text = "alpha bravo charlie delta\n\nsecond paragraph".into();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(600.)));
+    redraw(visual);
+    let body = visual.debug_bounds("native-message-body-reply").unwrap();
+    let start = point(body.left().add(px(64.)), body.top().add(px(12.)));
+    for (click_count, expected) in [
+        (3, "alpha bravo charlie delta"),
+        (2, "bravo"),
+        (3, "alpha bravo charlie delta"),
+        (2, "bravo"),
+    ] {
+        visual.simulate_event(gpui_kit::MouseDownEvent {
+            position: start,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count,
+            first_mouse: false,
+        });
+        visual.simulate_event(MouseUpEvent {
+            position: start,
+            button: MouseButton::Left,
+            modifiers: Modifiers::none(),
+            click_count,
+        });
+        paint_selection(visual);
+        if let Some(toolbar) = visual.debug_bounds("response-selection-toolbar") {
+            assert!(
+                !toolbar.contains(&start),
+                "the toolbar leaves the next click on the text"
+            );
+        }
+        visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-c"
+        } else {
+            "ctrl-c"
+        });
+        let copied = visual
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        assert_eq!(copied.trim(), expected, "click count {click_count}");
+    }
+}
+
+#[gpui_kit::test]
+fn transcript_double_click_drag_selects_whole_words(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    for (markdown, expected) in [
+        ("alpha bravo charlie delta", "bravo charlie"),
+        (
+            "alpha **bravo** [charlie](https://example.com) delta",
+            "bravo charlie",
+        ),
+        (
+            "alpha **brávó** [chärlie](https://example.com) delta",
+            "brávó chärlie",
+        ),
+    ] {
+        for (id, selector, padding) in [
+            ("reply", "native-message-body-reply", 0.),
+            ("user", "native-message-body-user", 16.),
+        ] {
+            let mut record = saved_record("idle");
+            record.snapshot.transcript.retain(|item| item.id == id);
+            record.snapshot.transcript[0].text = markdown.into();
+            let (sender, _) = native_command_sender(&record);
+            let (_, visual) = cx.add_window_view(|window, cx| {
+                let view = cx.new(|cx| {
+                    NativeAgentSessionView::new(
+                        record,
+                        sender.for_caller(Caller::Internal),
+                        false,
+                        window,
+                        cx,
+                    )
+                });
+                gpui_kit::component::Root::new(view, window, cx)
+            });
+            visual.simulate_resize(size(px(1000.), px(600.)));
+            redraw(visual);
+            for (from, to) in [(64., 112.), (112., 64.)] {
+                let body = visual.debug_bounds(selector).unwrap();
+                let start = point(
+                    body.left().add(px(padding + from)),
+                    body.top()
+                        .add(px(12. + if id == "user" { 10. } else { 0. })),
+                );
+                let end = point(body.left().add(px(padding + to)), start.y);
+                visual.simulate_event(gpui_kit::MouseDownEvent {
+                    position: start,
+                    button: MouseButton::Left,
+                    modifiers: Modifiers::none(),
+                    click_count: 2,
+                    first_mouse: false,
+                });
+                visual.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+                for released in [false, true] {
+                    if released {
+                        visual.simulate_event(MouseUpEvent {
+                            position: end,
+                            button: MouseButton::Left,
+                            modifiers: Modifiers::none(),
+                            click_count: 2,
+                        });
+                    }
+                    paint_selection(visual);
+                    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+                        "cmd-c"
+                    } else {
+                        "ctrl-c"
+                    });
+                    let copied = visual
+                        .read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .unwrap_or_default();
+                    assert_eq!(
+                        copied, expected,
+                        "{id}: {from} to {to}, released {released}: {markdown}"
+                    );
+                    assert_eq!(
+                        visual.debug_bounds("response-selection-toolbar").is_some(),
+                        released && id == "reply"
+                    );
+                }
+                visual.simulate_keystrokes("escape");
+                visual.update(|_, cx| {
+                    cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("cleared".into()));
+                });
+                visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+                    "cmd-c"
+                } else {
+                    "ctrl-c"
+                });
+                assert_eq!(
+                    visual
+                        .read_from_clipboard()
+                        .and_then(|item| item.text())
+                        .as_deref(),
+                    Some("cleared")
+                );
+            }
+        }
+    }
+}
+
+#[gpui_kit::test]
+fn transcript_word_drag_crosses_message_boundaries(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut record = saved_record("idle");
+    record
+        .snapshot
+        .transcript
+        .retain(|item| item.id == "user" || item.id == "reply");
+    for item in &mut record.snapshot.transcript {
+        item.text = "alpha bravo charlie delta".into();
+    }
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                false,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(600.)));
+    redraw(visual);
+    let user = visual.debug_bounds("native-message-body-user").unwrap();
+    let reply = visual.debug_bounds("native-message-body-reply").unwrap();
+    let start = point(user.left().add(px(80.)), user.top().add(px(22.)));
+    let end = point(reply.left().add(px(112.)), reply.top().add(px(12.)));
+    visual.simulate_event(gpui_kit::MouseDownEvent {
+        position: start,
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+        first_mouse: false,
+    });
+    visual.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
+    visual.simulate_event(MouseUpEvent {
+        position: end,
+        button: MouseButton::Left,
+        modifiers: Modifiers::none(),
+        click_count: 2,
+    });
+    paint_selection(visual);
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-c"
+    } else {
+        "ctrl-c"
+    });
+    let copied = visual
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default();
+    assert_eq!(copied, "bravo charlie delta\nalpha bravo charlie");
+    assert!(visual.debug_bounds("response-selection-toolbar").is_none());
 }
 
 #[gpui_kit::test]

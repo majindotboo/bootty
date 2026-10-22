@@ -18,7 +18,6 @@ base64.workspace = true
 toml_edit.workspace = true
 fluent-bundle.workspace = true
 unic-langid.workspace = true
-notify-rust.workspace = true
 ab_glyph.workspace = true
 arboard.workspace = true
 async-channel.workspace = true
@@ -56,11 +55,14 @@ unicode-segmentation.workspace = true
 unicode-width.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(not(windows))'.dependencies]
+notify-rust.workspace = true
+
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 tray-icon.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_DirectWrite", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Foundation"] }
+windows = { version = "0.62", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_DirectWrite", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Foundation"] }
 # These types cross windows APIs; update together when windows adopts newer versions.
 windows-core = "0.62"
 windows-numerics = "0.3"

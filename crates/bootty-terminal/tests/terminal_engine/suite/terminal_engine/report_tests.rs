@@ -202,6 +202,7 @@ fn terminal_engine_reports_resizes_when_window_ops_are_enabled() {
     );
 
     engine.write_vt(b"\x1b[?2048h");
+    assert_eq!(take_pty_output(&output), b"\x1b[48;24;80;432;720t");
     engine
         .resize(TerminalGeometry {
             cols: 100,

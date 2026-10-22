@@ -379,7 +379,7 @@ impl NativeAgentSessionView {
             .icon(IconName::Minimize)
             .text_color(cx.theme().muted_foreground)
             .accessibility_label("Shrink the composer")
-            .element_tooltip("Shrink the composer")
+            .tooltip("Shrink the composer")
             .on_click(cx.listener(|this, _, window, cx| this.toggle_composer(window, cx)))
     }
 

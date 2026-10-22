@@ -583,13 +583,16 @@ fn terminal_engine_ports_kitty_storage_delete_by_cursor_column_and_row() {
     );
 
     engine.write_vt(b"\x1b_Ga=d,d=a\x1b\\");
-    for column in 0..3 {
+    engine.write_vt(b"\x1b[1;1H");
+    engine.write_vt(
+        raw_rgba_command(1, 1, 1, 1)
+            .expect("image fixture")
+            .as_bytes(),
+    );
+    // Reuse the image: retransmitting its ID removes all prior placements.
+    for column in 1..3 {
         engine.write_vt(format!("\x1b[1;{}H", column + 1).as_bytes());
-        engine.write_vt(
-            raw_rgba_command(1, column + 1, 1, 1)
-                .expect("image fixture")
-                .as_bytes(),
-        );
+        engine.write_vt(format!("\x1b_Ga=p,i=1,p={},q=1\x1b\\", column + 1).as_bytes());
     }
     engine.write_vt(b"\x1b_Ga=d,d=x,x=2\x1b\\");
     assert_eq!(
@@ -598,13 +601,16 @@ fn terminal_engine_ports_kitty_storage_delete_by_cursor_column_and_row() {
     );
 
     engine.write_vt(b"\x1b_Ga=d,d=a\x1b\\");
-    for row in 0..3 {
+    engine.write_vt(b"\x1b[1;1H");
+    engine.write_vt(
+        raw_rgba_command(1, 1, 1, 1)
+            .expect("image fixture")
+            .as_bytes(),
+    );
+    // Reuse the image: retransmitting its ID removes all prior placements.
+    for row in 1..3 {
         engine.write_vt(format!("\x1b[{};1H", row + 1).as_bytes());
-        engine.write_vt(
-            raw_rgba_command(1, row + 1, 1, 1)
-                .expect("image fixture")
-                .as_bytes(),
-        );
+        engine.write_vt(format!("\x1b_Ga=p,i=1,p={},q=1\x1b\\", row + 1).as_bytes());
     }
     engine.write_vt(b"\x1b_Ga=d,d=y,y=2\x1b\\");
     assert_eq!(

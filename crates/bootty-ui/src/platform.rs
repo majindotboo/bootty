@@ -110,6 +110,7 @@ pub fn write_clipboard_html(html: &str, plain_text: Option<&str>) -> Result<()> 
 ///
 /// # Errors
 /// Returns an error when notification initialization or delivery fails.
+#[cfg(not(windows))]
 pub fn show_desktop_notification(title: &str, body: &str) -> Result<()> {
     let identity = bootty_config::ApplicationIdentity::current();
     #[cfg(target_os = "macos")]
@@ -131,15 +132,36 @@ pub fn show_desktop_notification(title: &str, body: &str) -> Result<()> {
         // The system's notification settings decide whether the sound plays.
         .sound_name(if cfg!(target_os = "macos") {
             "NSUserNotificationDefaultSoundName"
-        } else if cfg!(windows) {
-            "Default"
         } else {
             "message-new-instant"
         });
-    #[cfg(windows)]
-    notification.app_id(identity.bundle_identifier());
     notification
         .show()
+        .context("deliver desktop notification")?;
+    Ok(())
+}
+
+/// Delivery runs on a worker. OS notification permissions remain authoritative.
+///
+/// # Errors
+/// Returns an error when notification initialization or delivery fails.
+#[cfg(windows)]
+pub fn show_desktop_notification(title: &str, body: &str) -> Result<()> {
+    use windows::UI::Notifications::{
+        ToastNotification, ToastNotificationManager, ToastTemplateType,
+    };
+    use windows::core::h;
+
+    let identity = bootty_config::ApplicationIdentity::current();
+    let document = ToastNotificationManager::GetTemplateContent(ToastTemplateType::ToastText02)?;
+    let text = document.GetElementsByTagName(h!("text"))?;
+    text.Item(0)?
+        .AppendChild(&document.CreateTextNode(&title.into())?)?;
+    text.Item(1)?
+        .AppendChild(&document.CreateTextNode(&body.into())?)?;
+    let toast = ToastNotification::CreateToastNotification(&document)?;
+    ToastNotificationManager::CreateToastNotifierWithId(&identity.bundle_identifier().into())?
+        .Show(&toast)
         .context("deliver desktop notification")?;
     Ok(())
 }

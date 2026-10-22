@@ -265,7 +265,7 @@ impl DialogView {
                     ))
                     .child(format!("+ {}", model.name))
                     .accessibility_label(label.clone())
-                    .element_tooltip(label)
+                    .tooltip(label)
                     .on_click(move |_, _, cx| {
                         _ = owner.update(cx, |_, cx| {
                             cx.emit(DialogIntent::FieldChanged {

@@ -1,4 +1,3 @@
-use crate::gpui::ElementTooltip as _;
 use num_traits::ToPrimitive as _;
 
 use gpui_kit::{Context, IntoElement, ParentElement, SharedString, Styled, div, prelude::*, px};
@@ -84,7 +83,7 @@ pub(super) fn render(
                         )
                         .ghost()
                         .accessibility_label("New Space")
-                        .element_tooltip("New Space"),
+                        .tooltip("New Space"),
                     move |_, app| {
                         _ = create_owner.update(app, |_, cx| cx.emit(ChromeIntent::CreateSpace));
                     },
@@ -172,7 +171,7 @@ fn space_button(
         .h(px(BUTTON_SIZE))
         .tab_index(0_isize)
         .accessibility_label(space.name.clone())
-        .element_tooltip(tooltip_error.map_or_else(
+        .tooltip(tooltip_error.map_or_else(
             || tooltip_name.clone(),
             |detail| format!("{tooltip_name}\n{detail}"),
         ))

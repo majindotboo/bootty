@@ -3,7 +3,6 @@
 mod projects;
 
 use super::{GpuiWorkspace, schedule_focus};
-use crate::gpui::ElementTooltip as _;
 use crate::gpui::{
     FileEditor, FileEditorEvent, GpuiKeymapEditor, GpuiSettings, GpuiThemeEditor,
     KeymapEditorIntent, SettingsTitleBar, setup_ui_font,
@@ -884,7 +883,7 @@ impl GpuiSettingsWindow {
             .xsmall()
             .icon(IconName::Close)
             .accessibility_label(format!("Close {file_name}"))
-            .element_tooltip(format!("Close {file_name}"))
+            .tooltip(format!("Close {file_name}"))
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.request_close_file_tab(kind, window, cx);

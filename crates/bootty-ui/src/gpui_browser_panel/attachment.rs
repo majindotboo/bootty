@@ -27,7 +27,7 @@ impl BrowserPanel {
             .disabled(self.attaching || !self.attachment.supported() || self.conversation_target.is_none()
                 || !attached && self.selected_tab().is_none_or(|tab| tab.view.is_none() || tab.loading))
             .accessibility_label(label)
-            .element_tooltip(if attached { "Remove this conversation's browser read access" }
+            .tooltip(if attached { "Remove this conversation's browser read access" }
                 else { "Allow this conversation to read this document; navigation and input remain unavailable" })
             .on_click(cx.listener(move |this, _, window, cx| {
                 if attached {

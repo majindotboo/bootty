@@ -1,4 +1,3 @@
-use crate::gpui::ElementTooltip as _;
 use num_traits::ToPrimitive as _;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -551,7 +550,7 @@ impl SidebarRows {
                     .icon(gpui_kit::assets::IconName::ListFilter)
                     .text_color(color(self.colors.subtext))
                     .accessibility_label("Filter and sort sessions")
-                    .element_tooltip("Filter and sort sessions")
+                    .tooltip("Filter and sort sessions")
                     .dropdown_menu(move |menu, window, cx| rows.options_menu(menu, window, cx)),
             )
             .child(
@@ -563,7 +562,7 @@ impl SidebarRows {
                     .icon(gpui_kit::assets::IconName::FolderPlus)
                     .text_color(color(self.colors.subtext))
                     .accessibility_label("Add project")
-                    .element_tooltip("Add project")
+                    .tooltip("Add project")
                     .on_click(move |_, _, cx| emit_sidebar_command(&add_owner, "add_project", cx)),
             )
             // Grouped sessions start from their project header instead.
@@ -577,7 +576,7 @@ impl SidebarRows {
                         .icon(gpui_kit::assets::IconName::SquarePen)
                         .text_color(color(self.colors.subtext))
                         .accessibility_label("New session")
-                        .element_tooltip("New session")
+                        .tooltip("New session")
                         .on_click(move |_, _, cx| {
                             emit_sidebar_command(&create_owner, "new_mux_session", cx);
                         }),
@@ -595,7 +594,7 @@ impl SidebarRows {
                     ))
                     .text_color(color(self.colors.subtext))
                     .accessibility_label("History")
-                    .element_tooltip("Browse conversation history")
+                    .tooltip("Browse conversation history")
                     .on_click(move |_, _, cx| {
                         emit_sidebar_command(&resume_owner, "agent_history", cx);
                     }),
@@ -1987,7 +1986,7 @@ impl SidebarRows {
                     .child(label),
             )
             .accessibility_label(format!("{label} {}", row.text))
-            .element_tooltip(format!("{label} this session"))
+            .tooltip(format!("{label} this session"))
             .disabled(task.pending);
         Some(super::button::activated_button(
             div()
@@ -2284,7 +2283,7 @@ impl SidebarRows {
             .ghost()
             .icon(gpui_kit::assets::IconName::SquarePen)
             .text_color(color(self.colors.muted))
-            .element_tooltip("New session in project")
+            .tooltip("New session in project")
             .accessibility_label(format!("New session in {}", row.text))
             .on_click(move |_, _, cx| {
                 _ = owner.update(cx, |_, cx| {
@@ -2981,7 +2980,7 @@ impl RenderOnce for ProjectActions {
             .opacity(if shown { 1. } else { 0. })
             .group_hover(self.group, |style| style.opacity(1.))
             .focus_visible(|style| style.opacity(1.))
-            .element_tooltip("Project actions")
+            .tooltip("Project actions")
             .accessibility_label(format!("Project actions for {}", self.name))
             .dropdown_menu(move |menu, _, _| {
                 rows.iter().cloned().fold(menu, |menu, row| {

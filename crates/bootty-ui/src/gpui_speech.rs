@@ -1,5 +1,4 @@
 //! One local recording owner shared by both composers; providers receive text through normal prompts.
-use crate::gpui::ElementTooltip as _;
 use bootty_host::speech::{SpeechCommand, SpeechEvent, SpeechSession};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable as _, WindowExt as _,
@@ -334,7 +333,7 @@ impl SpeechInput {
             .loading(status == SpeechStatus::Stopping)
             .disabled(self.voice_active() || !self.enabled && !status.is_active())
             .accessibility_label(label)
-            .element_tooltip(label)
+            .tooltip(label)
             .on_click(cx.listener(|_, _, _, cx| {
                 cx.emit(SpeechInputEvent::Toggle(SpeechMode::Dictation));
             }))
@@ -386,7 +385,7 @@ impl Render for SpeechInput {
                         } else {
                             "Start voice mode"
                         })
-                        .element_tooltip(if voice {
+                        .tooltip(if voice {
                             "End voice mode"
                         } else {
                             "Start voice mode"

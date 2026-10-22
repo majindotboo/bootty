@@ -5,7 +5,7 @@ mod pull_request;
 
 pub use diff::{DiffComment, GitDiffPanel};
 
-use crate::gpui::{ChangeKind, ElementTooltip as _, change_row, line_counts};
+use crate::gpui::{ChangeKind, change_row, line_counts};
 use std::time::{Duration, Instant};
 
 use bootty_control::{
@@ -1043,7 +1043,7 @@ impl GitChangesPanel {
                         .xsmall()
                         .disabled(pending)
                         .accessibility_label("Discard all changes")
-                        .element_tooltip("Discard all changes")
+                        .tooltip("Discard all changes")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.confirm_discard(None, window, cx);
                         })),
@@ -1065,7 +1065,7 @@ impl GitChangesPanel {
                             .xsmall()
                             .disabled(pending)
                             .accessibility_label(label)
-                            .element_tooltip(label)
+                            .tooltip(label)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.request(stage, Vec::new(), window, cx);
                             })),
@@ -1126,7 +1126,7 @@ impl GitChangesPanel {
                     .xsmall()
                     .disabled(pending)
                     .accessibility_label(if staged { "Unstage file" } else { "Stage file" })
-                    .element_tooltip(if staged {
+                    .tooltip(if staged {
                         "Unstage file (Space)"
                     } else {
                         "Stage file (Space)"
@@ -1233,7 +1233,7 @@ impl GitChangesPanel {
                         .ghost()
                         .xsmall()
                         .accessibility_label("Previous file")
-                        .element_tooltip("Previous file")
+                        .tooltip("Previous file")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.step_change(-1, window, cx)),
                         ),
@@ -1244,7 +1244,7 @@ impl GitChangesPanel {
                         .ghost()
                         .xsmall()
                         .accessibility_label("Next file")
-                        .element_tooltip("Next file")
+                        .tooltip("Next file")
                         .on_click(
                             cx.listener(|this, _, window, cx| this.step_change(1, window, cx)),
                         ),
@@ -1566,7 +1566,7 @@ impl GitChangesPanel {
                 Button::new(format!("checkout-branch:{}", branch.name))
                     .label(label)
                     .small()
-                    .element_tooltip(tooltip)
+                    .tooltip(tooltip)
                     .disabled(self.mutating || branch.current)
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.request(command, vec![name.clone()], window, cx);
@@ -1721,13 +1721,13 @@ impl GitChangesPanel {
             sync("git-fetch", "git.fetch")
                 .icon(Icon::default().path("icons/cloud-download.svg"))
                 .accessibility_label("Fetch")
-                .element_tooltip(format!("Fetch the remote of {}", upstream.name)),
+                .tooltip(format!("Fetch the remote of {}", upstream.name)),
         ];
         if upstream.behind > 0 {
             buttons.push(
                 sync("git-pull", "git.pull")
                     .label(format!("↓{}", upstream.behind))
-                    .element_tooltip(format!(
+                    .tooltip(format!(
                         "Pull {} {} from {}",
                         upstream.behind,
                         commits(upstream.behind),
@@ -1739,7 +1739,7 @@ impl GitChangesPanel {
             buttons.push(
                 sync("git-push", "git.push")
                     .label(format!("↑{}", upstream.ahead))
-                    .element_tooltip(format!(
+                    .tooltip(format!(
                         "Push {} {} to {}",
                         upstream.ahead,
                         commits(upstream.ahead),
@@ -1793,7 +1793,7 @@ impl GitChangesPanel {
                         .ghost()
                         .small()
                         .accessibility_label("Refresh changes")
-                        .element_tooltip("Refresh changes")
+                        .tooltip("Refresh changes")
                         .disabled(self.mutating)
                         .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),
                 )
@@ -1983,7 +1983,7 @@ impl GitChangesPanel {
                 .label(format!("#{number}"))
                 .ghost()
                 .small()
-                .element_tooltip(format!("Pull request #{number}: {state}{checks}"))
+                .tooltip(format!("Pull request #{number}: {state}{checks}"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.show_pull_requests(Some(number), window, cx);
                 })),

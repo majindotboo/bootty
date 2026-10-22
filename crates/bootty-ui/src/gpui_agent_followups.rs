@@ -1,7 +1,6 @@
 //! Queued prompts and the current plan sit in an inset drawer attached to the shared composer
 //! surface.
 use super::NativeAgentSessionView;
-use crate::gpui::ElementTooltip as _;
 use bootty_agents::{NativeQueuedMessage, NativeQueuedMessageStatus, NativeSessionStatus};
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _,
@@ -489,7 +488,7 @@ impl NativeAgentSessionView {
             .disabled(message.status == NativeQueuedMessageStatus::Sending)
             .loading(loading)
             .accessibility_label(label)
-            .element_tooltip(label)
+            .tooltip(label)
             .on_click(cx.listener(move |this, _, window, cx| {
                 // Resume names the conversation, not one message.
                 let arguments = if operation == "queue-resume" {

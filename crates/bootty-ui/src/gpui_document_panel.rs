@@ -1,6 +1,5 @@
 //! Host-bound documents. The host owns bytes; each editor owns a draft and its saved revision.
 
-use crate::gpui::ElementTooltip as _;
 use crate::{
     gpui::{FileEditor, FileEditorEvent},
     gpui_git_panel::GitPanelContext,
@@ -1120,7 +1119,7 @@ impl Panel for DocumentPanel {
                 .xsmall()
                 .size_4()
                 .accessibility_label(crate::i18n::t(cx, "common-close"))
-                .element_tooltip(crate::i18n::t(cx, "common-close"))
+                .tooltip(crate::i18n::t(cx, "common-close"))
                 .disabled(self.saving(cx))
                 .on_click(cx.listener(|this, _, window, cx| {
                     cx.stop_propagation();
@@ -1333,7 +1332,7 @@ impl DocumentPanel {
                             .ghost()
                             .small()
                             .disabled(!self.can_format())
-                            .element_tooltip(crate::i18n::t(cx, "document-format-shortcut"))
+                            .tooltip(crate::i18n::t(cx, "document-format-shortcut"))
                             .on_click(cx.listener(|this, _, window, cx| this.format(window, cx))),
                     )
                 },

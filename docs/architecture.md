@@ -901,8 +901,9 @@ other host-control effects remain discarded. `bootty-ui` owns transient command
 timers keyed by binding generation and pane, completion policy, bell rate limiting,
 and OS delivery. Finish consumes the timer; duplicate or orphan finishes cannot
 notify. GPUI owns the visual bell deadline and uses the pinned platform system-bell
-API for audio. Desktop delivery runs on a worker through the existing `notify-rust`
-dependency, using the current application identity.
+API for audio. Desktop delivery runs on a worker using the current application
+identity: Windows uses native toast APIs; macOS and Linux use `notify-rust`.
+Kit owns control tooltip presentation and dismissal when a trigger disappears.
 
 ### Interface language
 

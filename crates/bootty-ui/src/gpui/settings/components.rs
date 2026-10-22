@@ -4,7 +4,6 @@
 //! `1662f5f3f6` (`settings_ui.rs:1046-1452,2092-2186,2991-3286,3433-3646`).
 //! Bootty's DTOs are the narrow adapter at the control callbacks.
 
-use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
     Disableable as _, Icon, IconName, Sizable as _,
     button::{Button, ButtonVariants},
@@ -956,7 +955,7 @@ impl GpuiSettings {
             .small()
             .tab_index(0_isize)
             .accessibility_label(format!("{button} {label}"))
-            .element_tooltip(help.to_owned())
+            .tooltip(help.to_owned())
             .disabled(!enabled)
             .on_click(move |_, _, app| {
                 entity.update(app, |this, cx| {
@@ -1724,10 +1723,10 @@ impl GpuiSettings {
         div()
             .id(SharedString::from(selector.clone()))
             .debug_selector(move || debug_selector)
-            .element_tooltip(help.to_owned())
             .child(
                 ComponentSwitch::new(SharedString::from(format!("kit-{selector}")))
                     .checked(selected)
+                    .tooltip(help.to_owned())
                     // Switch exposes only an accessible name. Include the setting help
                     // there until gpui-component forwards a separate description.
                     .accessibility_label(format!("{label}. {help}"))
@@ -1984,7 +1983,7 @@ impl GpuiSettings {
             .icon(Icon::new(IconName::Plus).small())
             .small()
             .accessibility_label(add_label.to_owned())
-            .element_tooltip(add_label.to_owned())
+            .tooltip(add_label.to_owned())
             .when(is_font_stack, ButtonVariants::ghost)
             .when(!is_font_stack, |button| {
                 button.label(add_label.to_owned()).outline()
@@ -2121,7 +2120,7 @@ impl GpuiSettings {
                             "Remove SSH argument {}",
                             index.saturating_add(1)
                         ))
-                        .element_tooltip("Remove SSH argument")
+                        .tooltip("Remove SSH argument")
                         .on_click(move |_, _, app| {
                             remove_entity.update(app, |this, cx| {
                                 this.emit(SettingsIntent::Invoke(remove_id.clone()), cx);
@@ -2486,7 +2485,7 @@ pub(super) fn ordered_row_remove_button(
             .small()
             .icon(Icon::new(IconName::Delete))
             .accessibility_label(label)
-            .element_tooltip("Remove")
+            .tooltip("Remove")
             .disabled(!enabled)
             .on_click(move |_, _, app| {
                 app.stop_propagation();
@@ -2584,7 +2583,7 @@ fn render_setting_label(
                     .icon(Icon::default().path("icons/link.svg"))
                     .tab_stop(false)
                     .accessibility_label(format!("Copy setting link for {label}"))
-                    .element_tooltip("Copy setting link")
+                    .tooltip("Copy setting link")
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(link.clone()));
                     }),
@@ -2598,7 +2597,7 @@ fn render_setting_label(
                         .icon(Icon::new(IconName::Undo))
                         .tab_stop(false)
                         .accessibility_label(format!("Reset {label} to default"))
-                        .element_tooltip("Reset to default")
+                        .tooltip("Reset to default")
                         .on_click(move |_, _, cx| {
                             owner.update(cx, |settings, cx| {
                                 settings.emit(SettingsIntent::RemoveValue(reset_id.clone()), cx);

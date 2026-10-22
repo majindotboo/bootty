@@ -1,5 +1,4 @@
 //! Git and conversation patches use Kit's readonly diff surface and source-line selections.
-use crate::gpui::ElementTooltip as _;
 use bootty_control::CommandTarget;
 use bootty_git::{
     diff::{DiffAnchor, DiffSide, FileDiff},
@@ -332,7 +331,7 @@ impl GitDiffPanel {
                     .ghost()
                     .icon(gpui_kit::component::IconName::Settings)
                     .accessibility_label("Diff display")
-                    .element_tooltip("Diff display"),
+                    .tooltip("Diff display"),
             )
             .child(
                 div()
@@ -377,7 +376,7 @@ impl GitDiffPanel {
                     button.label(label).w_full().justify_start()
                 })
                 .accessibility_label(label)
-                .element_tooltip(label)
+                .tooltip(label)
         };
         let collapsed = !self.diff.read(cx).files().is_empty()
             && self
@@ -479,7 +478,7 @@ impl GitDiffPanel {
             })
             .debug_selector(|| "git-diff-files-toggle".into())
             .accessibility_label(label)
-            .element_tooltip(label)
+            .tooltip(label)
             .on_click(move |_, _, cx| {
                 _ = owner.update(cx, |this, cx| {
                     this.files_open = !this.files_open;

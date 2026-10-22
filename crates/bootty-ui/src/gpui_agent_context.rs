@@ -178,7 +178,7 @@ impl NativeAgentSessionView {
             .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
             .icon(IconName::Info)
             .accessibility_label("Conversation details")
-            .element_tooltip("Conversation details")
+            .tooltip("Conversation details")
             .selected(self.context_card_visible())
             .on_click(cx.listener(|this, _, _, cx| {
                 this.card_open = Some(!this.context_card_visible());
@@ -256,7 +256,7 @@ impl NativeAgentSessionView {
                     .xsmall()
                     .icon(IconName::Copy)
                     .accessibility_label("Copy path")
-                    .element_tooltip(path.clone())
+                    .tooltip(path.clone())
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(path.clone()));
                     }),
@@ -461,7 +461,7 @@ impl NativeAgentSessionView {
                         .small()
                         .w_full()
                         .accessibility_label(attachment.name.clone())
-                        .element_tooltip(attachment.name.clone())
+                        .tooltip(attachment.name.clone())
                         .child(
                             div()
                                 .flex_1()

@@ -1,6 +1,6 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
-use crate::gpui::{ElementTooltip as _, RowLabel as _};
+use crate::gpui::RowLabel as _;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -627,7 +627,7 @@ fn navigation_button(
         .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .rounded(cx.theme().radius)
         .disabled(!enabled)
-        .element_tooltip_with_action(
+        .tooltip_with_action(
             label,
             &crate::gpui_actions::InvokeCommand::new(
                 bootty_control::CommandInvocation::from_action(
@@ -680,7 +680,7 @@ fn panel_toggle(
         .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .rounded(cx.theme().radius)
         .selected(open)
-        .element_tooltip_with_action(
+        .tooltip_with_action(
             label,
             &crate::gpui_actions::dock_binding_action(action),
             Some(chrome.read(cx).keymap_context()),
@@ -964,7 +964,7 @@ fn close_panel_tab(
         )
         .xsmall()
         .size_4()
-        .element_tooltip("Close tab")
+        .tooltip("Close tab")
         .accessibility_label(format!("Close {label}"))
         .on_click(move |_, window, cx| {
             cx.stop_propagation();
@@ -1192,7 +1192,7 @@ fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>, cx: &App) -> impl IntoEl
         .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .accessibility_label("Open a tool")
         .disabled(all_open)
-        .element_tooltip(if all_open {
+        .tooltip(if all_open {
             "All tools are open"
         } else {
             "Open a tool"

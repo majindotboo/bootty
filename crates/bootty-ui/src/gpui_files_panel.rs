@@ -1,5 +1,4 @@
 //! Expandable host-scoped file tree, sharing Git decorations with the Changes panel.
-use crate::gpui::ElementTooltip as _;
 use crate::gpui_git_panel::{GitChangesPanel, GitPanelContext};
 use bootty_control::{
     BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
@@ -497,7 +496,7 @@ impl FilesPanel {
                                 .ghost()
                                 .small()
                                 .accessibility_label(crate::i18n::t(cx, "files-parent"))
-                                .element_tooltip(crate::i18n::t(cx, "files-parent"))
+                                .tooltip(crate::i18n::t(cx, "files-parent"))
                                 .disabled(pending)
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.browse(parent.clone(), window, cx);
@@ -510,7 +509,7 @@ impl FilesPanel {
                             .ghost()
                             .small()
                             .accessibility_label(crate::i18n::t(cx, "common-refresh"))
-                            .element_tooltip(crate::i18n::t(cx, "common-refresh"))
+                            .tooltip(crate::i18n::t(cx, "common-refresh"))
                             .loading(pending)
                             .disabled(pending)
                             .on_click(cx.listener(|this, _, window, cx| this.refresh(window, cx))),

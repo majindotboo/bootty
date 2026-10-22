@@ -32,7 +32,7 @@ as_conversions = "deny"
 anstyle-parse = "1"
 # Deliberate limit: code blocks highlight the languages agents write most. Each grammar compiles
 # into the app; add one when conversations need it.
-gpui-kit = { version = "0.7.3", features = [
+gpui-kit = { version = "0.8.0", features = [
     "tree-sitter-bash",
     "tree-sitter-c",
     "tree-sitter-cpp",
@@ -79,7 +79,7 @@ font-kit = { package = "zed-font-kit", version = "=0.14.1-zed" }
 image = { version = "0.25", default-features = false }
 markdown = "1.0"
 mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
-iconflow = { version = "1", features = [
+iconflow = { version = "2.1", features = [
   "pack-bootstrap",
   "pack-lucide",
   "pack-phosphor",
@@ -87,15 +87,15 @@ iconflow = { version = "1", features = [
 ] }
 indoc = "2"
 inventory = "0.3"
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "5988a0b78b4aa804d1c12e66bbfe662bd97d81c0", features = [
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "0ef80413de1326685743378efbfa06d849e041a7", features = [
   "png",
   "log",
 ] }
 memchr = "2.8"
 regex = "1"
 mslnk = "0.1.8"
-muda = "0.20"
-tray-icon = { version = "0.25", default-features = false }
+muda = "0.21"
+tray-icon = { version = "0.26", default-features = false }
 ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
 notify-rust = "4.18"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
@@ -130,11 +130,11 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
 ] }
 png = "0.18"
-portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "2658f629cd7251ce63a1698f238da2585676aa4e" }
-filedescriptor = { git = "https://github.com/wezterm/wezterm.git", rev = "2658f629cd7251ce63a1698f238da2585676aa4e" }
+portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "e2a98e1b8af156988ad0ac778658ac27b60a55fb" }
+filedescriptor = { git = "https://github.com/wezterm/wezterm.git", rev = "e2a98e1b8af156988ad0ac778658ac27b60a55fb" }
 pretty_assertions = "1.4.1"
 proptest = "1"
-proptest-derive = "0.8.0"
+proptest-derive = "0.9"
 # Keep Cargo.lock on rustix 1.1.4 until rmux-client stops importing rustix::runtime.
 # The v0.10.0 pipe subscriber drops overwritten bytes. Keep this bounded lossless
 # patch pinned until an upstream release preserves pipe output under backpressure.
@@ -145,7 +145,7 @@ rmux-ipc = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea
 rmux-os = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
 rmux-proto = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
 rmux-server = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6", default-features = false }
-rstest = "0.27"
+rstest = "0.28"
 rustybuzz = "0.20"
 rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.11"
@@ -153,7 +153,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 signal-hook = "0.4"
 smallvec = "1"
-starship-battery = "0.11"
+starship-battery = "0.12"
 static_assertions = "1.1.0"
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
@@ -176,7 +176,7 @@ ureq = "3"
 embed-resource = "3.0.11"
 winsafe = { version = "0.0.29", default-features = false, features = ["kernel"] }
 winreg = "0.56"
-zip = { version = "8", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [profile.dev]
 # Hundreds of test binaries multiply debug maps and incremental graphs. Keep the

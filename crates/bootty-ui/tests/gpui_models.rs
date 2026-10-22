@@ -98,6 +98,10 @@ fn terminal_colors_drive_the_shared_ui_palette() {
 #[case("phosphor:acorn", true)]
 #[case("phosphor:acorn-duotone", true)]
 #[case("phosphor:asclepius-duotone-caduceus-duotone", true)]
+#[case("phosphor:asclepius-duotone", true)]
+#[case("phosphor:folder-open-folder-notch-open", true)]
+#[case("phosphor:file-magnifying-glass-duotone-file-search-duotone", true)]
+#[case("phosphor:folder-simple-dashed-fill-folder-simple-dotted-fill", true)]
 #[case("phosphor:address-book", true)]
 #[case("not-a-real-bootty-icon", false)]
 fn icon_inventory_is_renderer_owned(#[case] slug: &str, #[case] expected: bool) {

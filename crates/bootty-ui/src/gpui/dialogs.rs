@@ -4,7 +4,6 @@
 //! values and translate emitted [`DialogIntent`] values back into domain events.
 
 use super::{OverlayPlacement, OverlayView};
-use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IndexPath, Selectable as _, Sizable as _, WindowExt as _,
     button::{Button, ButtonGroup, ButtonVariants as _},
@@ -2110,7 +2109,7 @@ impl DialogView {
                                 .child(format!("Start from {start_ref}")),
                         )
                         .accessibility_label("Worktree options")
-                        .element_tooltip("Starting branch, tag or commit"),
+                        .tooltip("Starting branch, tag or commit"),
                 )
                 .child(v_flex().w(rems(22.)).gap_3().children(fields)),
         )
@@ -2140,7 +2139,7 @@ impl DialogView {
             .loading(spec.busy)
             .disabled(!row.enabled || spec.busy)
             .accessibility_label(row.label.clone())
-            .element_tooltip(row.label.clone())
+            .tooltip(row.label.clone())
             .on_click(move |_, _, cx| {
                 _ = owner.update(cx, |this, cx| this.confirm(&submit, false, cx));
             })

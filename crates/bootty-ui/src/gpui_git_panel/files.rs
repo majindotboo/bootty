@@ -1,5 +1,4 @@
 //! Changed-file navigation uses Kit's keyboard-accessible tree, preserving expansion by path.
-use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
@@ -218,7 +217,12 @@ impl DiffFiles {
                     )
                     .child(div().flex_none().text_xs().text_color(color).child(mark)),
             )
-            .element_tooltip(path.to_string())
+            .tooltip({
+                let path = path.to_string();
+                move |window, cx| {
+                    gpui_kit::component::tooltip::Tooltip::new(path.clone()).build(window, cx)
+                }
+            })
             .on_click(move |_, _, cx| {
                 if !directory {
                     _ = owner.update(cx, |_, cx| cx.emit(SelectFile(path.clone())));
@@ -290,7 +294,7 @@ impl Render for DiffFiles {
                                 } else {
                                     "Expand all folders"
                                 })
-                                .element_tooltip(if expanded {
+                                .tooltip(if expanded {
                                     "Collapse all folders"
                                 } else {
                                     "Expand all folders"

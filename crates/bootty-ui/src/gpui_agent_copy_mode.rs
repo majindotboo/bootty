@@ -78,7 +78,13 @@ impl NativeAgentSessionView {
             let rendered = state.rendered_text();
             let shown = rendered.as_str().trim_end_matches('\n');
             let start = text.len();
-            if adopted.is_none()
+            if let Some(range) = self.word_selection.range_for(&id) {
+                let end = start.saturating_add(range.end.min(shown.len()));
+                adopted = Some(adopted.map_or_else(
+                    || start.saturating_add(range.start)..end,
+                    |range: Range<usize>| range.start..end,
+                ));
+            } else if adopted.is_none()
                 && !state.selected_text().is_empty()
                 && let Some(range) = state
                     .selected_source_range()
@@ -100,6 +106,7 @@ impl NativeAgentSessionView {
                 .map_or(range.end, |c| range.end.saturating_sub(c.len_utf8()));
             (end, Some((range.start, CopySelection::Character)))
         });
+        self.clear_word_selection(cx);
         self.copy_mode = Some(CopyMode {
             cursor: engine::cursor_at(&text, cursor),
             text,
@@ -490,7 +497,7 @@ fn plain_motion(key: &str, typed: Option<char>) -> Option<(CopyMotion, Option<us
 
 /// The source of `rendered` that renders `range`: from just past what renders before it to
 /// just past its last character.
-fn source_range(rendered: &RenderedText, range: Range<usize>) -> Option<Range<usize>> {
+pub(super) fn source_range(rendered: &RenderedText, range: Range<usize>) -> Option<Range<usize>> {
     let source = rendered.source();
     let boundaries = source
         .char_indices()

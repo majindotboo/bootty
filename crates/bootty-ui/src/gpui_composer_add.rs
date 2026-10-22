@@ -1,6 +1,5 @@
 //! The Add menu uses the same captured catalog and input owner as keyboard completions.
 use super::*;
-use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
     Disableable as _,
     button::{Button, ButtonVariants as _},
@@ -48,7 +47,7 @@ impl ComposerCompletion {
             .icon(IconName::Plus)
             .ghost()
             .accessibility_label("Add to message")
-            .element_tooltip("Add to message")
+            .tooltip("Add to message")
             .when(plan, |button| button.label("Plan"))
             .disabled(disabled);
         let Some(owner) = owner else {

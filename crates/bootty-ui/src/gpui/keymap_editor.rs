@@ -4,7 +4,6 @@
 //! snapshot. This view owns only transient search, filter, selection, and modal state. Durable
 //! edits leave through [`KeymapEditorIntent`]; this crate never reads or writes `keymap.json`.
 
-use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 
 use gpui_kit::component::{
@@ -1625,7 +1624,7 @@ impl GpuiKeymapEditor {
         Button::new("KeymapEditorFilterMenuButton")
             .icon(Icon::new(IconName::Settings2))
             .accessibility_label("Filter keybindings")
-            .element_tooltip("Filters")
+            .tooltip("Filters")
             .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, cx| {
                 let state = editor.read(cx);
                 let filters = [
@@ -1666,7 +1665,7 @@ impl GpuiKeymapEditor {
             .label("Use built-in defaults")
             .outline()
             .xsmall()
-            .element_tooltip("Contexts")
+            .tooltip("Contexts")
             .dropdown_menu_with_anchor(gpui_kit::Anchor::TopRight, move |menu, _, _| {
                 let mut menu = menu.label("Use built-in defaults");
                 for context in &contexts {
@@ -1708,7 +1707,7 @@ impl GpuiKeymapEditor {
                     } else {
                         "Record search keystrokes"
                     })
-                    .element_tooltip(if recording {
+                    .tooltip(if recording {
                         "Stop recording"
                     } else {
                         "Record keystrokes"
@@ -1729,7 +1728,7 @@ impl GpuiKeymapEditor {
                 Button::new("kit-keymap-search-exact")
                     .icon(Icon::new(IconName::CaseSensitive))
                     .accessibility_label("Exact keystrokes")
-                    .element_tooltip("Exact keystrokes")
+                    .tooltip("Exact keystrokes")
                     .selected(self.exact_keystroke_search)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.set_exact_keystroke_search(!this.exact_keystroke_search, cx);
@@ -1741,7 +1740,7 @@ impl GpuiKeymapEditor {
                     Button::new("kit-keymap-keystroke-clear")
                         .icon(Icon::new(IconName::Delete))
                         .accessibility_label("Clear search keystrokes")
-                        .element_tooltip("Clear search keystrokes")
+                        .tooltip("Clear search keystrokes")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.keystroke_query.clear();
                             this.reselect_first_visible();
@@ -1810,7 +1809,7 @@ impl GpuiKeymapEditor {
                                     .icon(Icon::default().path("icons/keyboard.svg"))
                                     .accessibility_label("Search by keystrokes")
                                     .selected(keystroke_selected)
-                                    .element_tooltip("Search by Keystrokes")
+                                    .tooltip("Search by Keystrokes")
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.set_search_mode(
                                             if this.search_mode == KeymapSearchMode::Keystroke {
@@ -1893,7 +1892,7 @@ impl GpuiKeymapEditor {
                         cx.stop_propagation();
                     }))
                     .accessibility_label(action_label.clone())
-                    .element_tooltip(if conflict_count > 0 {
+                    .tooltip(if conflict_count > 0 {
                         format!(
                             "This keybinding conflicts with {conflict_count} other {}",
                             if conflict_count == 1 {
@@ -2063,7 +2062,7 @@ impl GpuiKeymapEditor {
                     } else {
                         "Record a keybinding"
                     })
-                    .element_tooltip(if recording {
+                    .tooltip(if recording {
                         "Stop recording"
                     } else {
                         "Record keystrokes"
@@ -2089,7 +2088,7 @@ impl GpuiKeymapEditor {
                     Button::new("kit-keymap-modal-clear")
                         .icon(Icon::new(IconName::Delete))
                         .accessibility_label("Clear keybinding")
-                        .element_tooltip("Clear keybinding")
+                        .tooltip("Clear keybinding")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.clear_modal_keystrokes(cx);
                         })),

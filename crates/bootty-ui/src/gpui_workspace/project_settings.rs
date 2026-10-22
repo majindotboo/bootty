@@ -1,5 +1,4 @@
 //! The project page owns its controls; persistence stays on the shared command path.
-use crate::gpui::ElementTooltip as _;
 use crate::presentation::project_editor::ProjectSettingsEditor;
 use bootty_control::{BoundAppCommandSender, CommandCancellation, CommandOutcome};
 use bootty_mux::repository::{MAX_PROJECT_SCRIPTS, ProjectScript, ProjectSettings};
@@ -529,7 +528,7 @@ impl ProjectSettingsView {
                         .label("Setup")
                         .checked(script.setup)
                         .disabled(self.saving)
-                        .element_tooltip("Run it in each new worktree's session as it starts")
+                        .tooltip("Run it in each new worktree's session as it starts")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if let Some(script) = this.scripts.get_mut(index) {
                                 script.setup = !script.setup;
@@ -546,7 +545,7 @@ impl ProjectSettingsView {
                         .small()
                         .disabled(self.saving)
                         .accessibility_label("Remove script")
-                        .element_tooltip("Remove script")
+                        .tooltip("Remove script")
                         .on_click(cx.listener(move |this, _, _, cx| {
                             if index < this.scripts.len() {
                                 this.scripts.remove(index);

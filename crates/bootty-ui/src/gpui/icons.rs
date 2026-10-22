@@ -197,6 +197,33 @@ struct ResolvedIcon {
     bytes: &'static [u8],
 }
 
+// Iconflow 2 corrected concatenated Phosphor aliases. Preserve saved icon slugs.
+fn phosphor_slug(slug: &str) -> String {
+    let slug = slug.replace("-duotone", "");
+    match slug.as_str() {
+        "asclepius-caduceus" => "asclepius",
+        "box-arrow-down-archive-box" => "box-arrow-down",
+        "file-dashed-file-dotted" => "file-dashed",
+        "file-magnifying-glass-file-search" => "file-magnifying-glass",
+        "folder-dashed-folder-dotted" => "folder-dashed",
+        "folder-folder-notch" => "folder",
+        "folder-minus-folder-notch-minus" => "folder-minus",
+        "folder-open-folder-notch-open" => "folder-open",
+        "folder-plus-folder-notch-plus" => "folder-plus",
+        "folder-simple-dashed-fill-folder-simple-dotted-fill" => "folder-simple-dashed",
+        "infinity-lemniscate" => "infinity",
+        "pulse-activity" => "pulse",
+        "seal-check-circle-wavy-check" => "seal-check",
+        "seal-circle-wavy" => "seal",
+        "seal-question-circle-wavy-question" => "seal-question",
+        "seal-warning-circle-wavy-warning" => "seal-warning",
+        "text-b-text-bolder" => "text-b",
+        "tray-arrow-down-archive-tray" => "tray-arrow-down",
+        _ => &slug,
+    }
+    .to_owned()
+}
+
 fn resolve(slug: &str) -> Option<ResolvedIcon> {
     let (pack, slug) = if let Some((pack, slug)) = slug.split_once(':') {
         match pack {
@@ -204,7 +231,7 @@ fn resolve(slug: &str) -> Option<ResolvedIcon> {
             "lucide" => (Pack::Lucide, Cow::Borrowed(slug)),
             // Phosphor duotone needs two overlaid glyphs. Use the complete regular outline
             // while accepting the legacy suffix until iconflow exposes layered icons.
-            "phosphor" => (Pack::Phosphor, Cow::Owned(slug.replace("-duotone", ""))),
+            "phosphor" => (Pack::Phosphor, Cow::Owned(phosphor_slug(slug))),
             "tabler" => (Pack::Tabler, Cow::Borrowed(slug)),
             _ => return None,
         }

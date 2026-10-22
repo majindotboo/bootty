@@ -1,4 +1,3 @@
-use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent, PanelInfo, PanelState};
 use gpui_kit::component::{
     ElementExt as _, IconName, Sizable as _,
@@ -311,7 +310,7 @@ impl Panel for TerminalPanel {
                 .xsmall()
                 .size_4()
                 .accessibility_label("Close terminal pane")
-                .element_tooltip("Close terminal pane")
+                .tooltip("Close terminal pane")
                 .on_click(cx.listener(|this, _, _, cx| {
                     cx.stop_propagation();
                     let id = this.window_id.clone();

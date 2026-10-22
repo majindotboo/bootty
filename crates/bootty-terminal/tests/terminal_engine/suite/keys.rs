@@ -531,7 +531,7 @@ fn key_encoder_ports_legacy_extended_compatibility_batch() {
         KeyEncodeCase::press(key::Key::E, b"\x1be")
             .mods(key::Mods::ALT)
             .unshifted('e'),
-        KeyEncodeCase::press(key::Key::F, "ф".as_bytes())
+        KeyEncodeCase::press(key::Key::F, "\x1bф".as_bytes())
             .mods(key::Mods::ALT)
             .utf8("ф"),
         KeyEncodeCase::press(key::Key::I, b"\x1b[105;5u")

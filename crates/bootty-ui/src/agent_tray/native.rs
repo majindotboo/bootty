@@ -1,4 +1,5 @@
 use super::{Snapshot, artwork};
+#[cfg(target_os = "macos")]
 use bootty_config::config::TrayIconStyle;
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
@@ -15,16 +16,22 @@ impl Backend {
         tray_icon::menu::MenuEvent::set_event_handler(Some(|event: tray_icon::menu::MenuEvent| {
             super::dispatch(&event.id.0);
         }));
-        let tray = TrayIconBuilder::new()
-            .with_icon(
-                Icon::from_rgba(
-                    artwork::icon(snapshot.config.icon_style)?,
-                    artwork::SIZE,
-                    artwork::SIZE,
-                )
-                .map_err(|error| error.to_string())?,
-            )
-            .with_icon_as_template(snapshot.config.icon_style == TrayIconStyle::Monochrome)
+        let icon = Icon::from_rgba(
+            artwork::icon(snapshot.config.icon_style)?,
+            artwork::SIZE,
+            artwork::SIZE,
+        )
+        .map_err(|error| error.to_string())?;
+        let builder = TrayIconBuilder::new();
+        #[cfg(target_os = "macos")]
+        let builder = if snapshot.config.icon_style == TrayIconStyle::Monochrome {
+            builder.with_icon_templated(icon)
+        } else {
+            builder.with_icon(icon)
+        };
+        #[cfg(target_os = "windows")]
+        let builder = builder.with_icon(icon);
+        let tray = builder
             .with_tooltip(snapshot.title())
             .with_menu(Box::new(menu(&snapshot)?))
             .with_menu_on_left_click(true)
@@ -57,10 +64,15 @@ impl Backend {
                     .map_err(|error| error.to_string())
             }) {
                 Ok(icon) => {
-                    if let Err(error) = self.tray.set_icon_with_as_template(
-                        Some(icon),
-                        snapshot.config.icon_style == TrayIconStyle::Monochrome,
-                    ) {
+                    #[cfg(target_os = "macos")]
+                    let result = if snapshot.config.icon_style == TrayIconStyle::Monochrome {
+                        self.tray.set_icon_templated(Some(icon))
+                    } else {
+                        self.tray.set_icon(Some(icon))
+                    };
+                    #[cfg(target_os = "windows")]
+                    let result = self.tray.set_icon(Some(icon));
+                    if let Err(error) = result {
                         eprintln!("Agent tray icon unavailable: {error}");
                     }
                 }

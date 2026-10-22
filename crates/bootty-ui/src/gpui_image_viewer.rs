@@ -2,7 +2,6 @@
 //! pan. Rows keep small thumbnails; the viewer decodes an image at full size only while it shows
 //! it.
 
-use crate::gpui::ElementTooltip as _;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, IconName, Sizable as _, WindowExt as _,
     button::{Button, ButtonVariants as _},
@@ -149,7 +148,7 @@ fn controls(viewer: &Entity<ImageViewer>, cx: &App) -> gpui_kit::Div {
             .ghost()
             .icon(icon)
             .accessibility_label(label)
-            .element_tooltip(label)
+            .tooltip(label)
             .debug_selector(move || id.into())
     };
     let act = |apply: fn(&mut ImageViewer, &mut Context<ImageViewer>)| {

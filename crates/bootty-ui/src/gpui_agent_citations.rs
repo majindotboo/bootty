@@ -190,7 +190,7 @@ impl NativeAgentSessionView {
         window: &Window,
         cx: &mut Context<Self>,
     ) {
-        if self.editing_citation.is_some() {
+        if self.editing_citation.is_some() || self.word_selection.owns_selection() {
             return;
         }
         let state = state.read(cx);
@@ -610,6 +610,7 @@ impl NativeAgentSessionView {
             return true;
         }
         if let Some(selection) = self.selected_response.take() {
+            self.clear_word_selection(cx);
             self.reaction_menu = None;
             gpui_kit::base::TextSelection::clear(window, cx);
             if let Some(state) = self.transcript.get(&selection.citation.message_id) {
@@ -792,9 +793,10 @@ impl NativeAgentSessionView {
                 window.prevent_default();
                 cx.stop_propagation();
             })
-            .on_mouse_down_out(cx.listener(|this, _, window, cx| {
-                if this.reaction_menu.is_none() {
-                    this.dismiss_citation_controls(window, cx);
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                // Kit owns the new text gesture; closing this toolbar must not clear it.
+                if this.reaction_menu.is_none() && this.selected_response.take().is_some() {
+                    cx.notify();
                 }
             }))
             .child(
@@ -830,9 +832,13 @@ impl NativeAgentSessionView {
                     })),
             );
         gpui_kit::deferred(
-            gpui_kit::base::Positioner::corner(gpui_kit::Anchor::TopLeft, selection.position)
-                .occlude()
-                .child(surface),
+            gpui_kit::base::Positioner::side(gpui_kit::Bounds::new(
+                selection.position,
+                gpui_kit::Size::default(),
+            ))
+            .offset(gpui_kit::rems(0.5).to_pixels(window.rem_size()))
+            .occlude()
+            .child(surface),
         )
         .into_any_element()
     }

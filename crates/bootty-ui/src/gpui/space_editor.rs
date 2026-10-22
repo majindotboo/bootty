@@ -4,7 +4,6 @@
 //! receives an immutable projection and emits typed edits containing only primitive values and
 //! opaque IDs.
 
-use crate::gpui::ElementTooltip as _;
 use num_traits::ToPrimitive as _;
 
 use gpui_kit::component::{
@@ -726,7 +725,7 @@ impl GpuiSpaceEditor {
                             .w(rems(ICON_BUTTON_WIDTH_REMS))
                             .selected(icon.selected)
                             .accessibility_label(icon.label.clone())
-                            .element_tooltip(icon.label.clone())
+                            .tooltip(icon.label.clone())
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.emit(SpaceEditorIntent::SelectIcon(id.clone()), cx);
                             }))

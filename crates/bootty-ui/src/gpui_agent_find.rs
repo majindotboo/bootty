@@ -22,6 +22,7 @@ pub(super) struct TranscriptFind {
 impl NativeAgentSessionView {
     /// Opens the find bar, or returns to its query when it is open.
     pub(super) fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.clear_word_selection(cx);
         if let Some(find) = &self.find {
             find.input.focus_handle(cx).focus(window, cx);
             return;
@@ -295,7 +296,7 @@ impl NativeAgentSessionView {
                 .xsmall()
                 .disabled(order.is_empty())
                 .accessibility_label(label)
-                .element_tooltip(label)
+                .tooltip(label)
                 .debug_selector(move || id.into())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.step_find(forward, window, cx);
@@ -363,7 +364,7 @@ impl NativeAgentSessionView {
                         .ghost()
                         .xsmall()
                         .accessibility_label("Close find")
-                        .element_tooltip("Close find")
+                        .tooltip("Close find")
                         .on_click(cx.listener(|this, _, window, cx| this.close_find(window, cx))),
                 ),
         )

@@ -1,6 +1,5 @@
 //! Shared color picking for settings and theme authoring.
 
-use crate::gpui::ElementTooltip as _;
 use num_traits::ToPrimitive as _;
 
 use gpui_kit::component::ActiveTheme as _;
@@ -181,7 +180,7 @@ pub(super) fn render_color_picker(
                             .tab_stop(false)
                             .text_color(cx.theme().muted_foreground)
                             .accessibility_label(format!("Reset {label} to Default"))
-                            .element_tooltip("Reset to Default")
+                            .tooltip("Reset to Default")
                             .on_click(move |_, _, cx| {
                                 on_reset(ColorPickerUpdate::Reset, cx);
                             }),
