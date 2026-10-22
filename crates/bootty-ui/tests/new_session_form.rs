@@ -75,6 +75,164 @@ fn form() -> NewSessionForm {
 }
 
 #[rstest]
+fn linked_checkout_uses_its_project_identity_without_changing_the_directory(
+    mut form: NewSessionForm,
+) {
+    form.set_directory("/worktrees/arc/out-of-box-setup".into());
+    form.set_worktree_catalog(&[
+        bootty_git::WorktreePickerEntry {
+            label: "New worktree".into(),
+            is_new: true,
+            ..Default::default()
+        },
+        bootty_git::WorktreePickerEntry {
+            label: "arc".into(),
+            path: Some("/projects/arc".into()),
+            ..Default::default()
+        },
+        bootty_git::WorktreePickerEntry {
+            label: "out-of-box-setup".into(),
+            path: Some("/worktrees/arc/out-of-box-setup".into()),
+            ..Default::default()
+        },
+    ]);
+    let spec = form.spec(false);
+    assert_eq!(
+        spec.rows
+            .iter()
+            .find(|row| row.id.0 == "choose-project")
+            .unwrap()
+            .label,
+        "arc…"
+    );
+    assert_eq!(spec.selected_project.as_deref(), Some("/projects/arc"));
+    assert_eq!(form.draft.cwd, "/worktrees/arc/out-of-box-setup");
+}
+
+#[rstest]
+#[case("Current host", "HEAD", "feature/actual")]
+#[case("Another host", "HEAD", "feature/actual")]
+#[case("Current host", "configured/base", "configured/base")]
+fn base_branch_catalog_names_the_current_ref_and_respects_explicit_choices(
+    mut form: NewSessionForm,
+    #[case] host: &str,
+    #[case] initial: &str,
+    #[case] expected: &str,
+) {
+    form.change_field("host", host);
+    form.set_worktree_available(true);
+    form.change_field("isolation", "New worktree");
+    form.change_field("start-ref", initial);
+    let invocation = form.base_branch_invocation().unwrap();
+    assert_eq!(
+        invocation.target.as_ref(),
+        form.destination().map(|destination| &destination.target)
+    );
+    let overview = serde_json::from_value(serde_json::json!({
+        "root": form.draft.cwd, "history": [], "stashes": [],
+        "branches": [{"name": "feature/actual", "commit": "abc", "current": true, "upstream": null}]
+    }))
+    .unwrap();
+    form.set_base_branches_for(&invocation, Ok(overview));
+    assert_eq!(form.draft.start_ref, expected);
+    let spec = form.spec(false);
+    let base = spec
+        .fields
+        .iter()
+        .find(|field| field.id == "start-ref")
+        .unwrap();
+    assert!(
+        matches!(&base.kind, bootty_ui::gpui::DialogFieldKind::Choice(options) if options.iter().any(|option| option == "feature/actual"))
+    );
+    form.set_directory("/another/project".into());
+    form.set_base_branches_for(&invocation, Err("Stale response".into()));
+    assert!(
+        !form
+            .spec(false)
+            .hint
+            .is_some_and(|hint| hint.contains("Stale response"))
+    );
+}
+
+#[rstest]
+fn explicit_worktree_branch_has_a_known_destination_without_model_naming(mut form: NewSessionForm) {
+    form.set_worktree_available(true);
+    form.change_field("isolation", "New worktree");
+    form.change_text("Fix startup");
+    form.change_field("branch", "feature/fix-startup");
+    assert_eq!(form.naming_invocation(), Ok(None));
+    assert!(
+        form.spec(false)
+            .footer
+            .unwrap()
+            .ends_with("/current/feature-fix-startup")
+    );
+}
+
+#[rstest]
+fn creation_progress_keeps_the_checkout_and_explains_a_start_failure(form: NewSessionForm) {
+    use bootty_control::CommandOutcome;
+    use bootty_ui::gpui::DialogProgressState;
+    let mut dialog = ready_dialog(form).unwrap();
+    let (sender, reply) = std::sync::mpsc::channel();
+    dialog.worktree_started(reply);
+    assert_eq!(
+        dialog.spec().progress[0].state,
+        DialogProgressState::Running
+    );
+    sender
+        .send(CommandOutcome::Success {
+            value: serde_json::json!("/project/retained-checkout"),
+            warnings: vec![],
+        })
+        .unwrap();
+    assert!(matches!(
+        dialog.poll(),
+        Some(bootty_ui::presentation::dialogs::NewSessionPickerEvent::Submit(_))
+    ));
+    let (sender, reply) = std::sync::mpsc::channel();
+    dialog.started(reply);
+    let spec = dialog.spec();
+    assert_eq!(spec.progress[0].state, DialogProgressState::Complete);
+    assert_eq!(spec.progress[1].state, DialogProgressState::Running);
+    sender
+        .send(CommandOutcome::Failed {
+            code: "backend_failed".into(),
+            message: "launchctl: Permission denied".into(),
+        })
+        .unwrap();
+    assert_eq!(dialog.poll(), None);
+    let spec = dialog.spec();
+    assert_eq!(spec.progress[1].state, DialogProgressState::Failed);
+    assert_eq!(spec.footer.as_deref(), Some("/project/retained-checkout"));
+    assert_eq!(spec.selected_project.as_deref(), Some("/project/current"));
+    let error = spec.rows[0].detail.as_deref().unwrap();
+    assert!(error.contains("Permission denied"), "{error}");
+    assert!(
+        spec.hint
+            .as_deref()
+            .unwrap()
+            .contains("Retry uses this checkout")
+    );
+    dialog.apply(
+        &bootty_ui::gpui::DialogIntent::TextChanged {
+            dialog: bootty_ui::gpui::DialogId::new(
+                bootty_ui::presentation::dialogs::NEW_SESSION_ID,
+            ),
+            value: "Updated prompt for retry".into(),
+        },
+        &[],
+    );
+    assert!(
+        dialog.spec().rows[0]
+            .detail
+            .as_deref()
+            .unwrap()
+            .contains("Permission denied")
+    );
+}
+
+#[rstest]
 fn prompt_and_command_survive_mode_and_host_switches(form: NewSessionForm) {
     let form = std::cell::RefCell::new(form);
     let strategy = ("[^\\x00]{0,256}", "[^\\x00]{0,256}");
@@ -740,6 +898,34 @@ fn empty_enter_arms_visibly_and_edits_reset_shell_fallback(mut form: NewSessionF
         None,
         "accepted Start cannot duplicate creation"
     );
+}
+
+#[rstest]
+fn retry_after_an_empty_enter_failure_starts_the_requested_shell(form: NewSessionForm) {
+    use bootty_ui::presentation::dialogs::NewSessionPickerEvent;
+    let mut dialog = ready_dialog(form).expect("project discovery");
+    let enter = start_intent("enter-session");
+    assert_eq!(dialog.apply(&enter, &[]), None);
+    assert!(matches!(
+        dialog.apply(&enter, &[]),
+        Some(NewSessionPickerEvent::Submit(_))
+    ));
+    let (sender, reply) = std::sync::mpsc::channel();
+    dialog.started(reply);
+    sender
+        .send(bootty_control::CommandOutcome::Failed {
+            code: "backend_failed".into(),
+            message: "Permission denied".into(),
+        })
+        .unwrap();
+    assert_eq!(dialog.poll(), None);
+    let Some(NewSessionPickerEvent::Submit(invocation)) =
+        dialog.apply(&start_intent("start-session"), &[])
+    else {
+        panic!("Retry submits the failed shell request");
+    };
+    assert_eq!(invocation.command, "session.create");
+    assert_eq!(invocation.arguments[2], "[]");
 }
 
 #[rstest]

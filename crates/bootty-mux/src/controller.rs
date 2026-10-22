@@ -245,7 +245,7 @@ fn execute_backend_command(
     }
     match registry.execute_checked(config, scope, backend, command) {
         BindingOperationOutcome::Supported(result) => {
-            result.map_err(|error| MuxCommandError::Failed(error.to_string()))
+            result.map_err(|error| MuxCommandError::Failed(format!("{error:#}")))
         }
         BindingOperationOutcome::Unsupported => Err(MuxCommandError::Unsupported),
         BindingOperationOutcome::Unavailable => Err(MuxCommandError::Unavailable),
@@ -259,7 +259,7 @@ fn validate_restore_cleanup(
 ) -> Result<(), MuxCommandError> {
     let snapshot = backend
         .snapshot()
-        .map_err(|error| MuxCommandError::Failed(error.to_string()))?;
+        .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
     if !snapshot.disposition.is_authoritative() {
         return Err(MuxCommandError::Unavailable);
     }
@@ -1375,7 +1375,7 @@ impl MuxController {
         if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
             let mut backend = self
                 .build_backend(config)
-                .map_err(|error| MuxCommandError::Failed(error.to_string()))?;
+                .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
             execute_backend_command(
                 &self.registry,
                 backend.as_mut(),
@@ -1386,7 +1386,7 @@ impl MuxController {
             )?;
             let snapshot = backend
                 .snapshot()
-                .map_err(|error| MuxCommandError::Failed(error.to_string()))?;
+                .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
             if snapshot
                 .sessions
                 .iter()
@@ -1442,7 +1442,7 @@ impl MuxController {
     ) -> Result<MuxSnapshot, MuxCommandError> {
         let mut backend = self
             .build_backend(config)
-            .map_err(|error| MuxCommandError::Failed(error.to_string()))?;
+            .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
         execute_backend_command(
             &self.registry,
             backend.as_mut(),
@@ -1454,7 +1454,7 @@ impl MuxController {
         .and_then(|()| {
             backend
                 .snapshot()
-                .map_err(|error| MuxCommandError::Failed(error.to_string()))
+                .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))
         })
     }
 
@@ -1583,7 +1583,7 @@ impl MuxController {
                     drop(state);
                     registry
                         .build_backend(&job.config, workspace.as_deref())
-                        .map_err(|error| MuxCommandError::Failed(error.to_string()))
+                        .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))
                         .and_then(|mut backend| {
                             let reconcile_workspace_membership = matches!(
                                 job.command,
@@ -1609,7 +1609,9 @@ impl MuxController {
                                             job.completion
                                                 .with_snapshot(job.config.clone(), snapshot)
                                         })
-                                        .map_err(|error| MuxCommandError::Failed(error.to_string()))
+                                        .map_err(|error| {
+                                            MuxCommandError::Failed(format!("{error:#}"))
+                                        })
                                 } else {
                                     Ok(job.completion)
                                 }

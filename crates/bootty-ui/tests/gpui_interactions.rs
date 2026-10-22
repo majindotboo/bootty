@@ -1889,12 +1889,85 @@ fn dialog_window(
     })
 }
 
+fn embedded_dialog_window(
+    cx: &mut TestAppContext,
+    spec: DialogSpec,
+) -> (Entity<DialogProbe>, &mut VisualTestContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let slot = Rc::new(RefCell::new(None));
+    let opened = Rc::clone(&slot);
+    let (_, visual) = cx.add_window_view(move |window, cx| {
+        let probe = cx.new(|cx| DialogProbe::new(window, cx));
+        probe.read(cx).dialog.clone().update(cx, |dialog, cx| {
+            dialog.present(Some(spec), window, cx);
+        });
+        opened.replace(Some(probe.clone()));
+        Root::new(probe, window, cx)
+    });
+    let probe = slot.borrow_mut().take().expect("embedded dialog");
+    (probe, visual)
+}
+
 fn focus_dialog(probe: &Entity<DialogProbe>, cx: &mut VisualTestContext) {
     let focus = cx.update(|_, app| {
         let dialog = probe.read(app).dialog.clone();
         dialog.read(app).focus_handle(app)
     });
     cx.update(|window, app| focus.focus(window, app));
+}
+
+#[gpui_kit::test]
+fn failed_session_creation_shows_progress_and_offers_copy_and_retry(cx: &TestAppContext) {
+    let error = "launchctl: Permission denied";
+    let mut spec = DialogSpec::prompt(
+        bootty_ui::presentation::dialogs::NEW_SESSION_ID,
+        "New session",
+        "Keep this prompt",
+        "Prompt",
+        DialogAction::new("start-session"),
+    );
+    spec.multiline = true;
+    spec.footer = Some("/worktrees/arc/topic".into());
+    spec.hint = Some("Checkout created. Retry uses this checkout to start the session.".into());
+    spec.fields.push(bootty_gpui::DialogField {
+        id: "provider".into(),
+        label: "Provider".into(),
+        value: "Codex".into(),
+        placeholder: String::new(),
+        kind: bootty_gpui::DialogFieldKind::Choice(vec!["Codex".into()]),
+    });
+    spec.rows[0].detail = Some(error.into());
+    spec.progress.push(bootty_gpui::DialogProgressStep {
+        id: "session".into(),
+        label: "Create Codex session".into(),
+        detail: Some("/worktrees/arc/topic".into()),
+        state: bootty_gpui::DialogProgressState::Failed,
+    });
+    let (probe, mut visual) = rooted_dialog_window(cx, DialogRole::Prompt, spec);
+    draw_chrome(&mut visual);
+    assert!(
+        visual
+            .debug_bounds("dialog-creation-step-session")
+            .is_some()
+    );
+    let copy = visual
+        .debug_bounds("dialog-copy-creation-error")
+        .expect("copy diagnostic");
+    visual.simulate_click(copy.center(), Modifiers::none());
+    let copied = visual
+        .read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap();
+    assert!(copied.contains(error));
+    assert!(copied.contains("Directory:"));
+    let retry = visual
+        .debug_bounds("dialog-creation-retry")
+        .expect("retry start");
+    visual.simulate_click(retry.center(), Modifiers::none());
+    visual.run_until_parked();
+    probe.update(&mut visual, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent, DialogIntent::Activate { action, .. } if action.0 == "start-session")));
+    });
 }
 
 #[gpui_kit::test]
@@ -1922,7 +1995,12 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
             "New worktree",
             DialogFieldKind::Choice(vec!["Current checkout".into(), "New worktree".into()]),
         ),
-        ("start-ref", "Start from", "HEAD", DialogFieldKind::Text),
+        (
+            "start-ref",
+            "Base branch",
+            "main",
+            DialogFieldKind::Choice(vec!["main".into(), "baseline".into()]),
+        ),
         ("branch", "Branch", "", DialogFieldKind::Text),
         ("folder", "Folder", "", DialogFieldKind::Text),
     ]
@@ -1935,28 +2013,18 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
         kind,
     })
     .collect();
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let slot = Rc::new(RefCell::new(None));
-    let opened = Rc::clone(&slot);
-    let (_, cx) = cx.add_window_view(move |window, cx| {
-        let probe = cx.new(|cx| DialogProbe::new(window, cx));
-        probe.read(cx).dialog.clone().update(cx, |dialog, cx| {
-            dialog.present(Some(spec), window, cx);
-        });
-        opened.replace(Some(probe.clone()));
-        Root::new(probe, window, cx)
-    });
-    let probe = slot.borrow_mut().take().expect("creation view");
+    let (probe, cx) = embedded_dialog_window(cx, spec);
     draw_chrome(cx);
     let composer = cx.debug_bounds("dialog-prompt-input").expect("composer");
-    let trigger = cx
-        .debug_bounds("dialog-worktree-options-trigger")
-        .expect("worktree options");
-    cx.simulate_click(trigger.center(), Modifiers::none());
-    draw_chrome(cx);
-    assert_eq!(cx.debug_bounds("dialog-prompt-input"), Some(composer));
+    assert!(
+        cx.debug_bounds("dialog-field-choice-control-start-ref")
+            .is_none()
+    );
+    assert!(
+        cx.debug_bounds("dialog-worktree-base-branch").is_some(),
+        "worktree controls are visible without opening a popover"
+    );
     for (field, selector, value) in [
-        ("start-ref", "dialog-field-input-start-ref", "baseline"),
         ("branch", "dialog-field-input-branch", "feature/custom"),
         ("folder", "dialog-field-input-folder", "custom-checkout"),
     ] {
@@ -1973,13 +2041,24 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
             DialogIntent::FieldChanged { field: changed, value: accepted, .. } if changed == field && accepted == value
         ))));
     }
+    for chosen in ["baseline", "refs/tags/v1.2.3"] {
+        let base = cx.debug_bounds("dialog-worktree-base-branch").unwrap();
+        cx.simulate_click(base.center(), Modifiers::none());
+        cx.simulate_input(chosen);
+        draw_chrome(cx);
+        cx.simulate_keystrokes("enter");
+        draw_chrome(cx);
+        probe.update(cx, |probe, _| assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::FieldChanged { field, value, .. } if field == "start-ref" && value == chosen
+        ))));
+    }
+    assert!(cx.debug_bounds("dialog-worktree-base-branch").is_some());
+    assert_eq!(cx.debug_bounds("dialog-prompt-input"), Some(composer));
     cx.simulate_keystrokes("escape");
     draw_chrome(cx);
-    assert!(cx.debug_bounds("dialog-field-input-start-ref").is_none());
-    assert_eq!(cx.debug_bounds("dialog-prompt-input"), Some(composer));
     probe.update(cx, |probe, _| {
         assert!(
-            !probe
+            probe
                 .intents
                 .borrow()
                 .iter()
@@ -2079,6 +2158,7 @@ fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
         model_error: None,
         selected_model: None,
         busy: false,
+        progress: Vec::new(),
         multiline: false,
         text_hint: None,
         rows: vec![
@@ -2134,6 +2214,7 @@ fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppCo
         model_error: None,
         selected_model: None,
         busy: false,
+        progress: Vec::new(),
         multiline: false,
         text_hint: Some("find".to_owned()),
         rows: vec![
@@ -2181,6 +2262,7 @@ fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
         model_error: None,
         selected_model: None,
         busy: false,
+        progress: Vec::new(),
         multiline: false,
         text_hint: Some("filter".to_owned()),
         rows: vec![DialogRow::action("one", "One", DialogAction::new("one"))],

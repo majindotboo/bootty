@@ -482,6 +482,7 @@ impl<R: CommandRunner> TmuxBackend<R> {
             ));
         }
         self.run_disowned_owned(&invocation)
+            .with_context(|| format!("Could not create tmux session {session_id} in {cwd}"))
     }
 
     fn restore_session(

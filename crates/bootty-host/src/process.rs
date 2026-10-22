@@ -558,10 +558,7 @@ fn join_pipe(reader: thread::JoinHandle<io::Result<Vec<u8>>>) -> Result<Vec<u8>>
 static DISOWNED_COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(target_os = "macos")]
-const DISOWNED_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-
-#[cfg(target_os = "macos")]
-const LAUNCHD_START_GRACE: Duration = Duration::from_millis(50);
+const DISOWNED_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(target_os = "macos")]
 const LAUNCHD_SUBMIT_SCRIPT: &str = r#"program=$1
@@ -604,12 +601,17 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
         &label,
         DISOWNED_COMMAND_TIMEOUT,
         &[stdout.path(), stderr.path()],
-    )
-    .with_context(|| format!("wait for disowned {program}"));
+    );
     let _ = Command::new(&launchctl).args(["remove", &label]).output();
-    let status = status?;
     let stdout = read_disowned_output(&stdout)?;
     let stderr = read_disowned_output(&stderr)?;
+    let status = status.with_context(|| {
+        if stderr.trim().is_empty() {
+            format!("Could not finish starting {program}")
+        } else {
+            format!("Could not finish starting {program}: {}", stderr.trim())
+        }
+    })?;
     Ok(CommandOutput {
         success: status == 0,
         stdout,
@@ -692,7 +694,6 @@ fn wait_for_launchd_exit_with_capture(
     captures: &[&Path],
 ) -> Result<i32> {
     let start = Instant::now();
-    let mut observed_pid = false;
     while start.elapsed() < timeout {
         // launchd writes to private files, so stop an overflowing job while it is live.
         for path in captures {
@@ -701,27 +702,36 @@ fn wait_for_launchd_exit_with_capture(
             }
         }
         let output = Command::new(launchctl).args(["list", label]).output()?;
+        if !output.status.success() {
+            bail!(
+                "Could not inspect detached command {label} ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
         let text = String::from_utf8_lossy(&output.stdout);
-        if text.contains("\"PID\"") {
-            observed_pid = true;
-        } else if observed_pid || start.elapsed() >= LAUNCHD_START_GRACE {
-            return parse_launchd_exit_status(&text)
-                .with_context(|| format!("parse launchd status for {label}"));
+        // A submitted job can be queued without either a PID or an exit status.
+        // Only an explicitly reported exit is completion.
+        if !text.contains("\"PID\"")
+            && let Some(status) = parse_launchd_exit_status(&text)
+        {
+            return Ok(status);
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    bail!("disowned command did not exit before timeout")
+    bail!(
+        "The system launcher did not report completion of {label} within {} seconds. Retry after checking the host's session service.",
+        timeout.as_secs()
+    )
 }
 
 #[cfg(target_os = "macos")]
-fn parse_launchd_exit_status(text: &str) -> Result<i32> {
-    text.lines()
-        .find_map(|line| {
-            line.trim()
-                .strip_prefix("\"LastExitStatus\" = ")
-                .and_then(|value| value.trim_end_matches(';').parse().ok())
-        })
-        .context("missing LastExitStatus")
+fn parse_launchd_exit_status(text: &str) -> Option<i32> {
+    text.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("\"LastExitStatus\" = ")
+            .and_then(|value| value.trim_end_matches(';').parse().ok())
+    })
 }
 
 #[cfg(target_os = "macos")]

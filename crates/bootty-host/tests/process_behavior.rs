@@ -131,6 +131,47 @@ const HELPER_ENV: &str = "BOOTTY_MUX_PROCESS_HELPER";
 #[rstest::rstest]
 #[case(0)]
 #[case(7)]
+fn queued_launchd_jobs_wait_for_their_reported_exit_status(#[case] status: i32) {
+    let directory = TempDir::new().unwrap();
+    let launcher = directory.child("launchctl");
+    let counter = bootty_host::shell_quote(&directory.child("polls").path().to_string_lossy());
+    bootty_test_support::write_executable(launcher.path(), format!(
+        "#!/bin/sh\nn=$(cat {counter} 2>/dev/null || printf 0)\nn=$((n + 1))\nprintf '%s' \"$n\" > {counter}\nif [ \"$n\" -le 7 ]; then printf '{{\\n\"Label\" = \"queued\";\\n}}\\n'; else printf '{{\\n\"LastExitStatus\" = {status};\\n}}\\n'; fi\n"
+    )).unwrap();
+    let result = bootty_host::wait_for_launchd_exit(
+        launcher.path().to_str().unwrap(),
+        "queued",
+        Duration::from_secs(1),
+    )
+    .unwrap();
+    assert_eq!(result, status);
+}
+
+#[cfg(target_os = "macos")]
+#[rstest::rstest]
+fn launchd_inspection_errors_include_the_system_diagnostic() {
+    let directory = TempDir::new().unwrap();
+    let launcher = directory.child("launchctl");
+    bootty_test_support::write_executable(
+        launcher.path(),
+        "#!/bin/sh\nprintf 'Service not found in domain' >&2\nexit 3\n",
+    )
+    .unwrap();
+    let error = bootty_host::wait_for_launchd_exit(
+        launcher.path().to_str().unwrap(),
+        "missing-job",
+        Duration::from_secs(1),
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("Service not found in domain"), "{message}");
+    assert!(message.contains("missing-job"), "{message}");
+}
+
+#[cfg(target_os = "macos")]
+#[rstest::rstest]
+#[case(0)]
+#[case(7)]
 fn disowned_commands_return_their_output_and_exit_status(#[case] code: i32) {
     let output = SystemCommandRunner
         .run_disowned(

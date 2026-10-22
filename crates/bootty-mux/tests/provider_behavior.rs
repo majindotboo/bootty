@@ -38,6 +38,7 @@ struct Calls {
     snapshot: Mutex<MuxSnapshot>,
     snapshots: AtomicUsize,
     executes: AtomicUsize,
+    execute_failure: Mutex<Option<String>>,
     snapshot_queries: Option<mpsc::Sender<SnapshotQuery>>,
     command_queries: Option<mpsc::Sender<CommandQuery>>,
 }
@@ -85,6 +86,10 @@ impl MuxBackend for Backend {
     }
     fn execute(&mut self, command: MuxCommand) -> Result<()> {
         self.calls.executes.fetch_add(1, Ordering::SeqCst);
+        let failure = self.calls.execute_failure.lock().unwrap().clone();
+        if let Some(cause) = failure {
+            return Err(anyhow!(cause).context("Could not launch session"));
+        }
         if let Some(queries) = &self.calls.command_queries {
             let (response, receiver) = mpsc::channel();
             queries.send(CommandQuery { command, response })?;
@@ -270,6 +275,44 @@ fn split_command() -> MuxCommand {
         pane_id: None,
         direction: MuxSplitDirection::Right,
     }
+}
+
+#[rstest::rstest]
+#[case(MuxBackendKind::Native)]
+#[case(MuxBackendKind::Rmux)]
+#[case(MuxBackendKind::Tmux)]
+fn backend_failures_preserve_the_actionable_cause(
+    #[case] kind: MuxBackendKind,
+    #[values(false, true)] caller_thread: bool,
+) {
+    let provider = Provider::new(kind, usize::MAX);
+    provider
+        .caller_thread
+        .store(caller_thread, Ordering::SeqCst);
+    *provider.calls.execute_failure.lock().unwrap() =
+        Some("Permission denied while starting the system launcher".into());
+    let registry = Arc::new(MuxBackendRegistry::from_app_providers([provider], [kind]).unwrap());
+    let mut controller = MuxController::new(SpaceId::from_persistence(1), registry, None);
+    let config = MuxBindingConfig {
+        backend: kind,
+        ..Default::default()
+    };
+    let (wake, wakes) = mpsc::channel();
+    let repaint: RepaintHandle = Arc::new(move || {
+        let _ = wake.send(());
+    });
+    controller.execute_command(&repaint, &config, split_command());
+    if !caller_thread {
+        wakes.recv_timeout(Duration::from_secs(2)).unwrap();
+        controller.poll_command();
+    }
+    assert!(
+        controller
+            .last_error()
+            .is_some_and(|message| message.contains("Permission denied")),
+        "{:?}",
+        controller.last_error()
+    );
 }
 
 #[test]

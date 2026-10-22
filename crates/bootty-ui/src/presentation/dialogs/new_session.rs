@@ -1,7 +1,10 @@
 //! Directory, worktree, and branch creation states for the new-session workflow.
 
 use super::{NEW_SESSION_ID, normalized_name, parse_index};
-use crate::gpui::{DialogAction, DialogIntent, DialogRow, DialogSpec, RowId};
+use crate::gpui::{
+    DialogAction, DialogIntent, DialogProgressState, DialogProgressStep, DialogRow, DialogSpec,
+    RowId,
+};
 use crate::new_session::{NewSessionEffect, NewSessionOutcome, NewSessionWorker};
 use crate::product_dialogs::searchable::{SearchableEntry, SearchableIntent, SearchableList};
 use crate::strings::home_dir;
@@ -28,6 +31,8 @@ pub struct NewSessionDialog {
     catalog_pending: HashMap<String, PendingCatalog>,
     naming: Option<PendingNames>,
     starting: bool,
+    progress: Vec<DialogProgressStep>,
+    failure: Option<String>,
     launch_direction: LaunchDirection,
     empty_enter_armed: bool,
     shell_fallback: bool,
@@ -186,6 +191,8 @@ impl NewSessionDialog {
             catalog_pending: HashMap::new(),
             naming: None,
             starting: false,
+            progress: Vec::new(),
+            failure: None,
             launch_direction: LaunchDirection::Foreground,
             empty_enter_armed: false,
             shell_fallback: false,
@@ -241,6 +248,8 @@ impl NewSessionDialog {
             catalog_pending: HashMap::new(),
             naming: None,
             starting: false,
+            progress: Vec::new(),
+            failure: None,
             launch_direction: LaunchDirection::Foreground,
             empty_enter_armed: false,
             shell_fallback: false,
@@ -301,6 +310,24 @@ impl NewSessionDialog {
     }
 
     pub fn started(&mut self, launch: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>) {
+        let label = self
+            .form
+            .as_ref()
+            .filter(|form| {
+                form.draft.mode == crate::presentation::new_session_form::NewSessionMode::Agent
+                    && !self.shell_fallback
+            })
+            .and_then(|form| {
+                bootty_agents::AgentKind::ALL
+                    .into_iter()
+                    .find(|provider| provider.to_string() == form.draft.provider)
+            })
+            .map_or_else(
+                || "Start session".to_owned(),
+                |provider| format!("Create {} session", provider.display_name()),
+            );
+        let detail = self.form.as_ref().map(|form| form.draft.cwd.clone());
+        self.start_stage("session", label, detail);
         self.starting = false;
         self.launch = Some(PendingCreation {
             kind: CreationCommand::Session,
@@ -312,6 +339,8 @@ impl NewSessionDialog {
         &mut self,
         reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
     ) {
+        let detail = self.form.as_ref().and_then(|form| form.spec(false).footer);
+        self.start_stage("worktree", "Create worktree".to_owned(), detail);
         self.starting = false;
         self.launch = Some(PendingCreation {
             kind: CreationCommand::Worktree,
@@ -357,6 +386,7 @@ impl NewSessionDialog {
             return None;
         }
         let reply = self.launch.take()?.reply;
+        self.complete_stage("session");
         self.starting = false;
         Some((
             NewSessionPickerEvent::Started {
@@ -405,7 +435,11 @@ impl NewSessionDialog {
         invocation: &bootty_control::CommandInvocation,
         error: String,
     ) {
-        if invocation.command == "agents.native.catalog-info" {
+        if invocation.command == "git.overview" {
+            if let Some(form) = &mut self.form {
+                form.set_base_branches_for(invocation, Err(error));
+            }
+        } else if invocation.command == "agents.native.catalog-info" {
             if let Some(key) = catalog_identity_key(invocation) {
                 self.catalog_requested.remove(&key);
             }
@@ -423,6 +457,7 @@ impl NewSessionDialog {
         reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
         cancellation: bootty_control::CommandCancellation,
     ) {
+        self.start_stage("names", "Generate worktree names".to_owned(), None);
         self.naming = Some(PendingNames {
             action,
             reply,
@@ -459,6 +494,7 @@ impl NewSessionDialog {
             self.failed(error);
             return None;
         }
+        self.complete_stage("names");
         self.start_form(&action)
     }
 
@@ -492,6 +528,12 @@ impl NewSessionDialog {
         }
 
         let form = self.form.as_mut()?;
+        if let Some(invocation) = form.base_branch_invocation()
+            && let Some(key) = catalog_identity_key(&invocation)
+            && self.catalog_requested.insert(key)
+        {
+            self.catalog_queue.push_front(invocation);
+        }
         form.hydrate_model_catalog();
         for invocation in form.model_catalog_invocations() {
             let Some(key) = catalog_identity_key(&invocation) else {
@@ -534,6 +576,15 @@ impl NewSessionDialog {
         let Some(form) = &mut self.form else {
             return;
         };
+        if invocation.command == "git.overview" {
+            form.set_base_branches_for(
+                invocation,
+                result.and_then(|value| {
+                    serde_json::from_value(value).map_err(|error| error.to_string())
+                }),
+            );
+            return;
+        }
         if invocation.command == "agents.native.catalog-favorite" {
             let mut base = invocation.clone();
             "agents.native.catalog-info".clone_into(&mut base.command);
@@ -640,6 +691,7 @@ impl NewSessionDialog {
             self.fan_out = None;
             return None;
         };
+        self.progress.clear();
         let (branch, folder) = run
             .names
             .get_or_insert_with(|| (form.draft.branch.clone(), form.draft.folder.clone()))
@@ -699,10 +751,64 @@ impl NewSessionDialog {
         self.starting = false;
         // The models after a failed start wait for the user to try again.
         self.fan_out = None;
+        if let Some(step) = self
+            .progress
+            .iter_mut()
+            .find(|step| step.state == DialogProgressState::Running)
+        {
+            step.state = DialogProgressState::Failed;
+        } else {
+            self.progress.push(DialogProgressStep {
+                id: "preparation".into(),
+                label: "Prepare session".into(),
+                detail: self.form.as_ref().map(|form| form.draft.cwd.clone()),
+                state: DialogProgressState::Failed,
+            });
+        }
         if let NewSessionStep::BranchName(draft) = &mut self.step {
             draft.error = Some(error);
-        } else if let Some(form) = &mut self.form {
-            form.error = Some(error);
+        } else {
+            self.failure = Some(error);
+        }
+    }
+
+    fn start_stage(&mut self, id: &str, label: String, detail: Option<String>) {
+        let step = DialogProgressStep {
+            id: id.to_owned(),
+            label,
+            detail,
+            state: DialogProgressState::Running,
+        };
+        if let Some(pending) = self.progress.iter_mut().find(|step| step.id == id) {
+            *pending = step;
+        } else {
+            self.progress.push(step);
+        }
+        for (next, label) in [
+            ("worktree", "Create worktree"),
+            ("session", "Start session"),
+        ] {
+            if (id == "names" || (id == "worktree" && next == "session"))
+                && !self.progress.iter().any(|step| step.id == next)
+            {
+                self.progress.push(DialogProgressStep {
+                    id: next.to_owned(),
+                    label: label.to_owned(),
+                    detail: None,
+                    state: DialogProgressState::Pending,
+                });
+            }
+        }
+    }
+
+    fn complete_stage(&mut self, id: &str) {
+        if let Some(step) = self
+            .progress
+            .iter_mut()
+            .rev()
+            .find(|step| step.id == id && step.state == DialogProgressState::Running)
+        {
+            step.state = DialogProgressState::Complete;
         }
     }
 
@@ -824,6 +930,7 @@ impl NewSessionDialog {
             };
         }
         if let bootty_control::CommandOutcome::Success { value, warnings } = outcome {
+            self.complete_stage("session");
             return Some(NewSessionPickerEvent::Started {
                 value,
                 warnings,
@@ -831,23 +938,28 @@ impl NewSessionDialog {
                 setup: self.worktree_repository.take(),
             });
         }
-        if let Some(form) = &mut self.form {
-            form.error = crate::commands::command_outcome_message(&outcome);
-            if self.purpose == NewSessionPurpose::CreateSession {
-                form.draft.identity = bootty_mux::snapshot::new_session_identity();
-                form.draft.suffix.clone_from(&form.draft.identity);
-            }
+        self.failed(
+            crate::commands::command_outcome_message(&outcome)
+                .unwrap_or_else(|| "The session command stopped without a result".to_owned()),
+        );
+        if let Some(form) = &mut self.form
+            && self.purpose == NewSessionPurpose::CreateSession
+        {
+            form.draft.identity = bootty_mux::snapshot::new_session_identity();
+            form.draft.suffix.clone_from(&form.draft.identity);
         }
         None
     }
 
     fn created_worktree(&mut self, cwd: String) -> Option<NewSessionPickerEvent> {
+        self.complete_stage("worktree");
         let Some(form) = &mut self.form else {
             return Some(NewSessionPickerEvent::CreateSession { cwd });
         };
+        self.worktree_repository
+            .get_or_insert_with(|| form.project_path().to_owned());
         // Retain the successful checkout on later launch failure. Retry uses it.
-        form.set_directory(cwd.clone());
-        form.draft.isolated = false;
+        form.accept_worktree(cwd.clone());
         let invocation = if self.shell_fallback {
             form.shell_invocation(&cwd)
         } else {
@@ -856,7 +968,7 @@ impl NewSessionDialog {
         match invocation {
             Ok(invocation) => Some(NewSessionPickerEvent::Submit(invocation)),
             Err(error) => {
-                form.error = Some(error);
+                self.failed(error);
                 None
             }
         }
@@ -943,25 +1055,34 @@ impl NewSessionDialog {
             return DialogSpec::searchable(NEW_SESSION_ID, "Session unavailable", "", Vec::new());
         };
         let mut spec = form.spec(self.is_in_flight());
+        spec.progress.clone_from(&self.progress);
         spec.projects.clone_from(&self.projects);
-        spec.selected_project = Some(if form.draft.projectless {
-            String::new()
-        } else {
-            form.draft.cwd.clone()
-        });
+        if let Some(error) = &self.failure {
+            if let Some(submit) = spec.rows.first_mut() {
+                submit.detail = Some(error.clone());
+            }
+            spec.hint =
+                Some(
+                    if self.progress.iter().any(|step| {
+                        step.id == "worktree" && step.state == DialogProgressState::Complete
+                    }) && !form.draft.isolated
+                        && form.draft.fan_out.len() <= 1
+                    {
+                        "Checkout created. Retry uses this checkout to start the session."
+                    } else if self.progress.iter().any(|step| {
+                        step.id == "worktree" && step.state == DialogProgressState::Failed
+                    }) {
+                        "Review the branch, starting ref and destination above, then try again."
+                    } else {
+                        "Your prompt is saved. Resolve the reported issue, then try again."
+                    }
+                    .to_owned(),
+                );
+        }
         if self.purpose == NewSessionPurpose::NativeAgentTab {
             "Agent".clone_into(&mut spec.title);
             spec.fields.retain(|field| native_tab_field(&field.id));
             spec.rows.retain(|row| row.id.0 != "choose-project");
-            let project = form
-                .draft
-                .cwd
-                .trim_end_matches(['/', '\\'])
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or("project");
-            spec.footer = Some(project.to_owned());
         }
         if self.empty_enter_armed {
             spec.hint = Some("Press Enter again to open a terminal".to_owned());
@@ -1152,6 +1273,8 @@ impl NewSessionDialog {
                 self.empty_enter_armed = false;
                 let form = self.form.as_mut()?;
                 if form.change_field(field, value) {
+                    self.failure = None;
+                    self.progress.clear();
                     self.projects.clear();
                     self.worker.as_mut()?.retarget(
                         form.destination()
@@ -1238,6 +1361,7 @@ impl NewSessionDialog {
         ) {
             return None;
         }
+        let retry = self.reset_failed_attempt();
         let form = self.form.as_mut()?;
         let empty = match form.draft.mode {
             crate::presentation::new_session_form::NewSessionMode::Agent => &form.draft.prompt,
@@ -1247,9 +1371,10 @@ impl NewSessionDialog {
         .is_empty()
             && (form.draft.mode == crate::presentation::new_session_form::NewSessionMode::Terminal
                 || (form.draft.attachments.is_empty() && form.draft.applications.is_empty()));
-        let shell_fallback =
-            action == "enter-session" && empty && self.purpose != NewSessionPurpose::NativeAgentTab;
-        if shell_fallback && !self.empty_enter_armed {
+        let shell_fallback = (action == "enter-session" || (retry && self.shell_fallback))
+            && empty
+            && self.purpose != NewSessionPurpose::NativeAgentTab;
+        if shell_fallback && !self.empty_enter_armed && !retry {
             self.empty_enter_armed = true;
             return None;
         }
@@ -1329,6 +1454,22 @@ impl NewSessionDialog {
         }
     }
 
+    fn reset_failed_attempt(&mut self) -> bool {
+        let failed = self
+            .progress
+            .iter()
+            .any(|step| step.state == DialogProgressState::Failed);
+        if failed {
+            self.progress
+                .retain(|step| step.state == DialogProgressState::Complete);
+        }
+        self.failure = None;
+        if let Some(form) = &mut self.form {
+            form.error = None;
+        }
+        failed
+    }
+
     fn activate_project(
         &mut self,
         project: ProjectPickerEntry,
@@ -1336,6 +1477,9 @@ impl NewSessionDialog {
     ) -> Option<NewSessionPickerEvent> {
         if let Some(form) = &mut self.form {
             form.set_directory(project.path.clone());
+            self.worktree_repository = None;
+            self.progress.clear();
+            self.failure = None;
             self.step = NewSessionStep::Form;
             if let Some(worker) = &mut self.worker {
                 worker.start(NewSessionEffect::ListWorktrees(project.path, Vec::new()));
@@ -1422,7 +1566,13 @@ impl NewSessionDialog {
             .map(|destination| destination.target.clone())
             .or_else(|| self.registration_target.clone())
             .ok_or("The worktree host binding is unavailable")?;
-        self.worktree_repository = Some(repo.clone());
+        self.worktree_repository = Some(
+            self.form
+                .as_ref()
+                .filter(|form| form.draft.cwd == repo)
+                .map_or(repo.as_str(), |form| form.project_path())
+                .to_owned(),
+        );
         let mut invocation = bootty_control::CommandInvocation::new(
             "worktree.create",
             vec![

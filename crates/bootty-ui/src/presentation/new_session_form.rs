@@ -129,6 +129,8 @@ pub struct NewSessionForm {
     pub worktree_available: bool,
     worktree_repository: Option<String>,
     worktree_directory: Option<String>,
+    base_branches: Vec<String>,
+    base_branch_error: Option<String>,
     /// The configured `session.branch-prefix`, for projects without their own.
     branch_prefix: String,
     pub error: Option<String>,
@@ -156,6 +158,8 @@ impl NewSessionForm {
             worktree_available: false,
             worktree_repository: None,
             worktree_directory: None,
+            base_branches: Vec::new(),
+            base_branch_error: None,
             branch_prefix: bootty_config::config::DEFAULT_BRANCH_PREFIX.to_owned(),
             error: None,
             model_options: Vec::new(),
@@ -205,10 +209,9 @@ impl NewSessionForm {
             .iter()
             .find(|entry| !entry.is_new)
             .and_then(|entry| entry.path.as_deref())
-            .map(|path| {
-                let name = directory_name(path);
-                name.strip_suffix(".git").unwrap_or(name).to_owned()
-            });
+            .map(str::to_owned);
+        self.apply_project_defaults();
+        self.hydrate_model_catalog();
         self.set_worktree_available(
             self.destination()
                 .is_some_and(|destination| destination.worktrees)
@@ -223,9 +226,67 @@ impl NewSessionForm {
         }
     }
 
+    #[must_use]
+    pub fn base_branch_invocation(&self) -> Option<CommandInvocation> {
+        if !self.worktree_available || !self.draft.isolated {
+            return None;
+        }
+        let mut invocation = CommandInvocation::new(
+            "git.overview",
+            vec![self.draft.cwd.clone(), "1".into()],
+            Caller::Internal,
+        );
+        invocation.target = Some(self.destination()?.target.clone());
+        Some(invocation)
+    }
+
+    pub fn set_base_branches_for(
+        &mut self,
+        invocation: &CommandInvocation,
+        result: Result<bootty_git::changes::RepositoryOverview, String>,
+    ) {
+        if invocation.arguments.first() != Some(&self.draft.cwd)
+            || invocation.target.as_ref()
+                != self.destination().map(|destination| &destination.target)
+        {
+            return;
+        }
+        match result {
+            Ok(overview) => {
+                if matches!(self.draft.start_ref.as_str(), "" | "HEAD")
+                    && let Some(current) = overview.branches.iter().find(|branch| branch.current)
+                {
+                    self.draft.start_ref.clone_from(&current.name);
+                }
+                self.base_branches = overview
+                    .branches
+                    .into_iter()
+                    .map(|branch| branch.name)
+                    .collect();
+                self.base_branch_error = None;
+            }
+            Err(error) => self.base_branch_error = Some(error),
+        }
+    }
+
     pub fn set_directory(&mut self, cwd: String) {
         self.draft.projectless = false;
         self.update_directory(cwd);
+    }
+
+    /// Git's main checkout identifies the project; `draft.cwd` identifies where work runs.
+    #[must_use]
+    pub fn project_path(&self) -> &str {
+        self.worktree_repository
+            .as_deref()
+            .unwrap_or(&self.draft.cwd)
+    }
+
+    pub fn accept_worktree(&mut self, cwd: String) {
+        let project = self.project_path().to_owned();
+        self.set_directory(cwd);
+        self.worktree_repository = Some(project);
+        self.draft.isolated = false;
     }
 
     pub fn set_no_project(&mut self, cwd: String) {
@@ -236,6 +297,8 @@ impl NewSessionForm {
 
     fn update_directory(&mut self, cwd: String) {
         self.draft.cwd = cwd;
+        self.base_branches.clear();
+        self.base_branch_error = None;
         self.worktree_available = false;
         self.worktree_repository = None;
         self.error = None;
@@ -268,7 +331,7 @@ impl NewSessionForm {
         }
         self.project_defaults
             .iter()
-            .find(|project| project.scope == self.draft.scope && project.cwd == self.draft.cwd)
+            .find(|project| project.scope == self.draft.scope && project.cwd == self.project_path())
             .map(|project| &project.settings)
     }
 
@@ -327,6 +390,8 @@ impl NewSessionForm {
                     .unwrap_or_else(|| destination.cwd.clone());
                 self.worktree_available = false;
                 self.worktree_repository = None;
+                self.base_branches.clear();
+                self.base_branch_error = None;
                 if !destination.worktrees {
                     self.draft.isolated = false;
                 }
@@ -1155,7 +1220,10 @@ impl NewSessionForm {
             NewSessionMode::Agent => &self.draft.prompt,
             NewSessionMode::Terminal => &self.draft.command,
         };
-        if self.generated_names.is_some() || prompt.trim().is_empty() {
+        if self.generated_names.is_some()
+            || prompt.trim().is_empty()
+            || (self.draft.isolated && !self.draft.branch.trim().is_empty())
+        {
             return Ok(None);
         }
         let provider = &self.providers.codex;
@@ -1322,8 +1390,13 @@ impl NewSessionForm {
         );
         spec.completion = self.completion_scope();
         spec.project_labels = self.project_labels();
+        spec.selected_project = Some(if self.draft.projectless {
+            String::new()
+        } else {
+            self.project_path().to_owned()
+        });
         spec.multiline = true;
-        spec.hint = None;
+        spec.hint = self.worktree_hint();
         if self.draft.mode == NewSessionMode::Agent {
             spec.model_error = self.catalog_error();
         }
@@ -1386,18 +1459,42 @@ impl NewSessionForm {
                 && self.invocation(&self.draft.cwd).is_ok()
                 && (!self.draft.isolated || self.worktree_available);
         }
+        spec.rows.push(self.project_choice(busy));
+        spec
+    }
+
+    fn worktree_hint(&self) -> Option<String> {
+        if !self.draft.isolated {
+            return None;
+        }
+        Some(self.base_branch_error.as_ref().map_or_else(
+            || format!("Source checkout: {}", self.draft.cwd),
+            |error| {
+                format!(
+                    "Could not load base branches: {error}. Search for a ref to use it directly."
+                )
+            },
+        ))
+    }
+
+    fn project_choice(&self, busy: bool) -> DialogRow {
         let mut project = DialogRow::action(
             "choose-project",
             if self.draft.projectless {
                 "No project…".into()
             } else {
-                format!("{}…", directory_name(&self.draft.cwd))
+                format!(
+                    "{}…",
+                    self.project_settings()
+                        .map(|settings| settings.name.as_str())
+                        .filter(|name| !name.is_empty())
+                        .unwrap_or_else(|| directory_name(self.project_path()))
+                )
             },
             DialogAction::new("choose-project"),
         );
         project.enabled = !busy;
-        spec.rows.push(project);
-        spec
+        project
     }
     fn destination_path(&self) -> String {
         if self.draft.isolated {
@@ -1410,11 +1507,18 @@ impl NewSessionForm {
                     format!("~/.local/share/{namespace}/worktrees")
                 }
             });
-            let repository = self
-                .worktree_repository
-                .as_deref()
-                .unwrap_or_else(|| directory_name(&self.draft.cwd));
-            format!("{directory}/{repository}/{}", self.draft.folder)
+            let repository = directory_name(self.project_path());
+            let repository = repository.strip_suffix(".git").unwrap_or(repository);
+            let folder = if self.draft.folder.is_empty() {
+                if self.draft.branch.is_empty() {
+                    "<generated-name>".to_owned()
+                } else {
+                    self.draft.branch.replace('/', "-")
+                }
+            } else {
+                self.draft.folder.clone()
+            };
+            format!("{directory}/{repository}/{folder}")
         } else {
             self.draft.cwd.clone()
         }
@@ -1605,6 +1709,20 @@ impl NewSessionForm {
                 vec!["Current checkout".to_owned(), "New worktree".to_owned()],
             ));
             if self.draft.isolated {
+                let mut branches = self.base_branches.clone();
+                if !self.draft.start_ref.is_empty()
+                    && self.draft.start_ref != "HEAD"
+                    && !branches.contains(&self.draft.start_ref)
+                {
+                    branches.insert(0, self.draft.start_ref.clone());
+                }
+                fields.push(DialogField {
+                    id: "start-ref".into(),
+                    label: "Base branch".into(),
+                    value: self.draft.start_ref.clone(),
+                    placeholder: "Select a base branch…".into(),
+                    kind: DialogFieldKind::Choice(branches),
+                });
                 for (id, label, value, placeholder) in [
                     (
                         "branch",
@@ -1617,12 +1735,6 @@ impl NewSessionForm {
                         "Folder",
                         &self.draft.folder,
                         "Generated from prompt",
-                    ),
-                    (
-                        "start-ref",
-                        "Start from",
-                        &self.draft.start_ref,
-                        "HEAD, branch, tag or commit",
                     ),
                 ] {
                     fields.push(DialogField {

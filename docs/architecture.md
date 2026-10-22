@@ -151,6 +151,11 @@ form and `worktree.create` command share this policy. Remote daemon protocol 22
 carries the typed request, preventing older daemons from silently dropping options.
 Git facts report a linked worktree's main checkout, so the sidebar groups that
 session under its project rather than the checkout folder.
+The New Session form uses that same main-checkout identity for its project picker
+and defaults while retaining the selected working directory. Worktree branch,
+base ref, source checkout and destination are visible before creation. The dialog
+reports observed naming, checkout and session-creation stages; a failed start
+keeps the prompt, completed checkout and diagnostic available for retry.
 
 Worktree cleanup runs on the checkouts' host too: in the app for local checkouts
 and through remote daemon protocol 23 for a remote host. The UI sends every saved

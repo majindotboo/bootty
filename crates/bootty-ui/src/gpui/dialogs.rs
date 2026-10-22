@@ -12,7 +12,6 @@ use gpui_kit::component::{
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     kbd::Kbd,
     menu::{DropdownMenu as _, PopupMenuItem},
-    switch::Switch,
     tooltip::Tooltip,
     v_flex,
 };
@@ -25,9 +24,11 @@ use std::{cell::RefCell, rc::Rc};
 
 mod attachments;
 mod completion;
+mod creation;
 mod history;
 mod model_picker;
 mod project_picker;
+mod worktree;
 
 /// A themed confirmation. Answers retain their caller order; dismissing cancels the receiver.
 pub fn prompt(
@@ -473,6 +474,23 @@ pub struct DialogSpaceChoice {
     pub color: [u8; 3],
 }
 
+/// The observed state of one creation operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DialogProgressState {
+    Pending,
+    Running,
+    Complete,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DialogProgressStep {
+    pub id: String,
+    pub label: String,
+    pub detail: Option<String>,
+    pub state: DialogProgressState,
+}
+
 /// An owned, disposable projection of an app-owned dialog model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DialogSpec {
@@ -500,6 +518,7 @@ pub struct DialogSpec {
     pub model_error: Option<String>,
     pub selected_model: Option<String>,
     pub busy: bool,
+    pub progress: Vec<DialogProgressStep>,
     /// Multiline prompts use Enter for a newline and require the explicit submit button.
     pub multiline: bool,
     pub rows: Vec<DialogRow>,
@@ -540,6 +559,7 @@ impl DialogSpec {
             selected_model: None,
             available_efforts: Vec::new(),
             busy: false,
+            progress: Vec::new(),
             multiline: false,
             text_hint: Some("filter…".to_owned()),
             rows,
@@ -577,6 +597,7 @@ impl DialogSpec {
             selected_model: None,
             available_efforts: Vec::new(),
             busy: false,
+            progress: Vec::new(),
             multiline: false,
             text_hint: Some(value_hint.into()),
             hint: Some("Enter confirm   Esc close".to_owned()),
@@ -608,6 +629,7 @@ pub struct DialogView {
     model_picker: Option<model_picker::NewModelPicker>,
     model_error_expanded: bool,
     project_picker: Option<project_picker::NewProjectPicker>,
+    worktree_ref_picker: Option<worktree::WorktreeRefPicker>,
     completion_sender: Option<bootty_control::BoundAppCommandSender>,
     completion: Option<Entity<crate::gpui_composer_completion::ComposerCompletion>>,
     completion_subscriptions: Vec<Subscription>,
@@ -772,6 +794,7 @@ impl DialogView {
             model_picker: None,
             model_error_expanded: false,
             project_picker: None,
+            worktree_ref_picker: None,
             completion_sender: None,
             completion: None,
             completion_subscriptions: Vec::new(),
@@ -1272,6 +1295,7 @@ impl DialogView {
         self.sync_fields(window, cx);
         self.sync_new_model_picker(window, cx);
         self.sync_new_project_picker(window, cx);
+        self.sync_worktree_ref_picker(window, cx);
         self.sync_completion(window, cx);
         cx.notify();
     }
@@ -1625,7 +1649,7 @@ impl DialogView {
         let details = spec
             .fields
             .iter()
-            .filter(|field| matches!(field.kind, DialogFieldKind::Text))
+            .filter(|field| matches!(field.kind, DialogFieldKind::Text) || field.id == "start-ref")
             .filter_map(|field| self.prompt_field(spec, field, window, cx))
             .map(|control| div().flex_1().min_w(rems(8.0)).child(control))
             .collect::<Vec<_>>();
@@ -1678,13 +1702,11 @@ impl DialogView {
                         spec.fields.iter().any(|field| field.id == "provider"),
                         |row| row.child(self.new_session_attachment_picker(spec, cx)),
                     )
-                    .children(spec.fields.iter().filter_map(|field| {
-                        if field.id == "isolation" {
-                            Some(self.new_session_worktree(spec, field, cx))
-                        } else {
-                            self.new_session_choice(spec, field, false, cx)
-                        }
-                    })),
+                    .children(
+                        spec.fields
+                            .iter()
+                            .filter_map(|field| self.new_session_choice(spec, field, false, cx)),
+                    ),
             )
             .when(!details.is_empty(), |this| {
                 this.child(
@@ -1726,7 +1748,7 @@ impl DialogView {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
-        let prompt_border = if error.is_some() {
+        let prompt_border = if error.is_some() && spec.progress.is_empty() {
             cx.theme().danger
         } else if prompt_focused {
             cx.theme().ring
@@ -1955,18 +1977,38 @@ impl DialogView {
                 },
             )
             .when_some(project, |row, name| {
-                row.child(project_choice.map_or_else(
-                    || div().child(name.to_owned()).into_any_element(),
-                    |choice| self.render_new_project_picker(spec, choice, window, cx),
-                ))
-                .when(spec.selected_project.as_deref() != Some(""), |row| {
-                    row.child("?")
-                })
+                row.child(
+                    h_flex()
+                        .min_w_0()
+                        .items_center()
+                        .child(project_choice.map_or_else(
+                            || div().child(name.to_owned()).into_any_element(),
+                            |choice| self.render_new_project_picker(spec, choice, window, cx),
+                        ))
+                        .when(spec.selected_project.as_deref() != Some(""), |row| {
+                            row.child("?")
+                        }),
+                )
             })
             .into_any_element()
     }
 
     fn agent_project_name(spec: &DialogSpec) -> Option<&str> {
+        if let Some(path) = spec
+            .selected_project
+            .as_deref()
+            .filter(|path| !path.is_empty())
+        {
+            return spec
+                .project_labels
+                .get(path)
+                .map(String::as_str)
+                .or_else(|| {
+                    path.trim_end_matches(['/', '\\'])
+                        .rsplit(['/', '\\'])
+                        .next()
+                });
+        }
         let from_project_choice = spec
             .rows
             .iter()
@@ -1989,36 +2031,42 @@ impl DialogView {
         error: Option<String>,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let agent_session = Self::is_agent_session_spec(spec);
+        let creating = !spec.progress.is_empty();
         v_flex()
             .w_full()
             .gap_2()
-            .when_some(error, |this, error| {
-                this.child(public_selector(
+            .when(creating, |view| {
+                view.child(Self::creation_status(spec, submit, error.as_deref(), cx))
+            })
+            .when_some(error.filter(|_| !creating), |view, error| {
+                view.child(public_selector(
                     "dialog-prompt-validation",
                     div().text_sm().text_color(cx.theme().danger).child(error),
                 ))
             })
-            .when_some(spec.hint.clone(), |this, hint| {
-                this.child(
+            .when_some(spec.hint.clone().filter(|_| !creating), |view, hint| {
+                view.child(
                     div()
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(hint),
                 )
             })
-            .child(h_flex().w_full().justify_end().gap_2().flex_wrap().when(
-                !agent_session,
-                |row| {
-                    row.when_some(submit, |row, submit| {
-                        row.child(
-                            Self::new_session_start(spec, submit, cx).disabled(
-                                !submit.enabled || spec.busy || self.attachment_imports > 0,
-                            ),
-                        )
-                    })
-                },
-            ))
+            .when(!Self::is_agent_session_spec(spec) && !creating, |view| {
+                view.child(
+                    h_flex()
+                        .w_full()
+                        .justify_end()
+                        .when_some(submit, |row, submit| {
+                            row.child(
+                                Self::new_session_start(spec, submit, "dialog-prompt-submit", cx)
+                                    .disabled(
+                                        !submit.enabled || spec.busy || self.attachment_imports > 0,
+                                    ),
+                            )
+                        }),
+                )
+            })
             .into_any_element()
     }
 
@@ -2028,52 +2076,60 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        h_flex()
+        let checkout = spec.fields.iter().find(|field| field.id == "isolation");
+        v_flex()
             .id("dialog-prompt-footer")
             .min_w_0()
-            .items_center()
-            .justify_between()
             .mx_3()
             .px_2()
-            .py_1()
+            .py_2()
             .bg(cx.theme().muted.opacity(0.35))
             .border_1()
             .border_color(cx.theme().border)
             .rounded_b(cx.theme().radius)
             .gap_2()
-            .when_some(
-                spec.fields.iter().find(|field| field.id == "isolation"),
-                |row, field| {
-                    row.child(
-                        div()
-                            .when_some(self.control_focus.get("isolation"), |view, focus| {
-                                view.track_focus(focus)
-                            })
-                            .child(self.new_session_worktree(spec, field, cx)),
-                    )
-                },
-            )
-            .when(
-                !spec.fields.iter().any(|field| field.id == "isolation"),
-                |row| {
-                    row.child(
-                        h_flex()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(super::sized_icon(
-                                "folder",
-                                super::IconSize::Small,
-                                cx.theme().muted_foreground,
-                            ))
-                            .child("Current checkout"),
-                    )
-                },
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .when_some(checkout, |row, field| {
+                        row.child(
+                            div()
+                                .when_some(self.control_focus.get("isolation"), |view, focus| {
+                                    view.track_focus(focus)
+                                })
+                                .when_some(
+                                    self.new_session_choice(spec, field, false, cx),
+                                    ParentElement::child,
+                                ),
+                        )
+                    })
+                    .when(checkout.is_none(), |row| {
+                        row.child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("Current checkout"),
+                        )
+                    }),
             )
             .when_some(
                 self.new_session_worktree_options(spec, window, cx),
                 ParentElement::child,
             )
+            .when_some(spec.footer.clone(), |view, path| {
+                view.child(public_selector(
+                    "dialog-worktree-destination",
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("Directory: {path}")),
+                ))
+            })
             .into_any_element()
     }
 
@@ -2082,55 +2138,36 @@ impl DialogView {
         spec: &DialogSpec,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<gpui_kit::component::popover::Popover> {
-        let starting = spec.fields.iter().find(|field| field.id == "start-ref")?;
-        let (input, _) = self.fields.get(&starting.id)?;
-        let focus = input.read(cx).focus_handle(cx);
-        let start_ref = if starting.value.trim().is_empty() {
-            "HEAD"
-        } else {
-            starting.value.trim()
-        };
+    ) -> Option<gpui_kit::AnyElement> {
+        spec.fields.iter().find(|field| field.id == "start-ref")?;
         let fields = ["start-ref", "branch", "folder"]
             .into_iter()
             .filter_map(|id| {
-                let mut field = spec.fields.iter().find(|field| field.id == id)?.clone();
-                if id != "start-ref" {
-                    field.label.push_str(" (optional)");
-                }
-                self.prompt_field(spec, &field, window, cx)
+                let field = spec.fields.iter().find(|field| field.id == id)?;
+                self.prompt_field(spec, field, window, cx)
             })
-            .collect::<Vec<_>>();
+            .map(|field| div().min_w(rems(10.)).flex_1().child(field));
         Some(
-            gpui_kit::component::popover::Popover::new("dialog-worktree-options")
-                .anchor(gpui_kit::Anchor::BottomRight)
-                .track_focus(&focus)
-                .trigger(
-                    Button::new("dialog-worktree-options-trigger")
-                        .debug_selector(|| "dialog-worktree-options-trigger".into())
-                        .ghost()
-                        .small()
-                        .min_w_0()
-                        .max_w(rems(18.))
-                        .disabled(spec.busy)
-                        .dropdown_caret(true)
-                        .child(
-                            div()
-                                .min_w_0()
-                                .text_ellipsis()
-                                .child(format!("Start from {start_ref}")),
-                        )
-                        .accessibility_label("Worktree options")
-                        .tooltip("Starting branch, tag or commit"),
-                )
-                .child(v_flex().w(rems(22.)).gap_3().children(fields)),
+            h_flex()
+                .w_full()
+                .min_w_0()
+                .flex_wrap()
+                .gap_3()
+                .children(fields)
+                .into_any_element(),
         )
     }
 
-    fn new_session_start(spec: &DialogSpec, row: &DialogRow, cx: &Context<Self>) -> Button {
+    fn new_session_start(
+        spec: &DialogSpec,
+        row: &DialogRow,
+        id: &'static str,
+        cx: &Context<Self>,
+    ) -> Button {
         let owner = cx.weak_entity();
         let submit = row.clone();
-        Button::new("dialog-prompt-submit")
+        Button::new(id)
+            .debug_selector(move || id.to_owned())
             .primary()
             .loading(spec.busy)
             .disabled(!row.enabled || spec.busy)
@@ -2195,7 +2232,7 @@ impl DialogView {
         let DialogFieldKind::Choice(options) = &field.kind else {
             return None;
         };
-        if matches!(field.id.as_str(), "mode" | "plan-mode")
+        if matches!(field.id.as_str(), "mode" | "plan-mode" | "start-ref")
             || (field.id == "profile" && options.len() < 2)
         {
             return None;
@@ -2221,6 +2258,9 @@ impl DialogView {
             .min_w_0()
             .max_w(rems(16.0))
             .dropdown_caret(true)
+            .when(field.id == "isolation", |button| {
+                button.debug_selector(|| "dialog-checkout-picker".into())
+            })
             .disabled(spec.busy)
             .accessibility_label(format!("{}: {}", field.label, field.value))
             .child(Self::new_session_choice_content(
@@ -2274,48 +2314,6 @@ impl DialogView {
         )
     }
 
-    fn new_session_worktree(
-        &self,
-        spec: &DialogSpec,
-        field: &DialogField,
-        cx: &Context<Self>,
-    ) -> gpui_kit::AnyElement {
-        let owner = cx.weak_entity();
-        let dialog = spec.id.clone();
-        let switch = Switch::new("new-session-worktree")
-            .small()
-            .label("Worktree")
-            .checked(field.value == "New worktree")
-            .disabled(spec.busy)
-            .on_click(move |checked, _, cx| {
-                _ = owner.update(cx, |_, cx| {
-                    cx.emit(DialogIntent::FieldChanged {
-                        dialog: dialog.clone(),
-                        field: "isolation".to_owned(),
-                        value: if *checked {
-                            "New worktree"
-                        } else {
-                            "Current checkout"
-                        }
-                        .to_owned(),
-                    });
-                });
-            });
-        let actions = self
-            .control_focus
-            .get("isolation")
-            .cloned()
-            .map_or_else(Vec::new, |focus| {
-                vec![composer_focus_action(ComposerControl::Worktree, focus)]
-            });
-        with_composer_tooltip(
-            "new-session-worktree-tooltip",
-            switch,
-            "New worktree",
-            actions,
-        )
-    }
-
     fn new_session_choice_content(
         field: &str,
         value: &str,
@@ -2341,7 +2339,8 @@ impl DialogView {
             ("profile", _) => "circle-user",
             ("model", _) => "cpu",
             ("reasoning", _) => "brain",
-            ("isolation", _) => "git-branch",
+            ("isolation", "New worktree") => "folder-git-2",
+            ("isolation", _) => "folder",
             _ => "settings-2",
         };
         let tint = if field == "provider" {
@@ -2438,6 +2437,9 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
+        if field.id == "start-ref" {
+            return self.render_worktree_ref_picker(spec, field, cx);
+        }
         let control = match &field.kind {
             DialogFieldKind::Text => {
                 let (input, _) = self.fields.get(&field.id)?;
