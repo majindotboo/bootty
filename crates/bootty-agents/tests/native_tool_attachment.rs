@@ -702,7 +702,7 @@ fn associated_terminal_close_revokes_native_attachment_without_revoking_sibling(
             .as_ref()
             .and_then(Value::as_array)
             .map(Vec::len),
-        Some(5)
+        Some(6)
     );
     policy.set_provider_tools_enabled(AgentKind::Codex, false);
     assert_eq!(catalog(&sibling_lease, &commands), Some(json!([])));

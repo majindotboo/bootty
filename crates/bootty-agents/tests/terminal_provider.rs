@@ -109,7 +109,7 @@ fn update_retains_the_real_exit_status_until_acknowledged() {
     let directory = temporary.child("install ' ; $HOME");
     let package = "@openai/codex";
     let executable = directory.child(format!("install/global/node_modules/{package}/bin/cli.js"));
-    executable.write_str("fixture").unwrap();
+    bootty_test_support::write_executable(executable.path(), "#!/bin/sh\nexit 0\n").unwrap();
     directory
         .child(format!(
             "install/global/node_modules/{package}/package.json"

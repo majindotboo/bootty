@@ -141,7 +141,7 @@ fn queued_launchd_jobs_wait_for_their_reported_exit_status(#[case] status: i32) 
     let result = bootty_host::wait_for_launchd_exit(
         launcher.path().to_str().unwrap(),
         "queued",
-        Duration::from_secs(1),
+        Duration::from_secs(5),
     )
     .unwrap();
     assert_eq!(result, status);

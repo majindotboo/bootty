@@ -3891,11 +3891,20 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
             "print('\\x1b]0;{fixture_title}\\x07restored default shell ready', flush=True)\n"
         ))
         .expect("default shell startup fixture");
+    // A PATH entry may be a dispatcher shim whose symlink target is not Python.
+    let python = std::process::Command::new(python_program())
+        .args(["-c", "import sys; print(sys.executable)"])
+        .output()
+        .expect("fixture Python executable");
+    assert!(
+        python.status.success(),
+        "Python executable discovery failed"
+    );
     config.session.shell = Some(
-        bootty_host::find_executable(python_program())
-            .expect("fixture Python executable")
-            .to_string_lossy()
-            .into_owned(),
+        String::from_utf8(python.stdout)
+            .expect("Python executable path")
+            .trim()
+            .to_owned(),
     );
     config.session.shell_integration = false;
     config.session.env.extend([
