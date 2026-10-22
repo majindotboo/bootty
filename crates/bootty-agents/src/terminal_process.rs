@@ -1,21 +1,34 @@
+use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
+#[cfg(unix)]
+use std::process::Child;
 use std::{
     io::{self, Read},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
 
-/// Provider launchers may spawn a native child. Keep that tree in our own group.
-pub fn configure_group(command: &mut Command) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt as _;
-        command.process_group(0);
-    }
-    #[cfg(not(unix))]
-    let _ = command;
+pub fn spawn_query(mut command: Command) -> Result<ProcessTreeChild, String> {
+    configure_group(&mut command);
+    ProcessTreeChild::spawn_with_console_window(&mut command, ConsoleWindowBehavior::Suppress)
+        .map_err(|error| error.to_string())
 }
+
+pub fn terminate_query(child: &mut ProcessTreeChild) {
+    let _ = child.terminate();
+    let _ = child.wait();
+}
+
+/// Provider launchers may spawn a native child. Keep that tree in our own group.
+#[cfg(unix)]
+pub fn configure_group(command: &mut Command) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+pub const fn configure_group(_command: &mut Command) {}
 
 /// Private stdin is an owner lifetime pipe; the provider keeps its existing null stdin.
 /// EOF after owner death terminates only this supervisor's isolated process group.
@@ -45,6 +58,7 @@ exit "$result"
 }
 
 /// Worker-only cleanup; never signal the application's inherited process group.
+#[cfg(unix)]
 pub fn terminate_group(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -81,6 +95,8 @@ fn drain(mut pipe: impl Read) -> io::Result<Vec<u8>> {
 /// Provider queries run on workers; both pipes drain even if retained output is full.
 pub struct QueryOutput {
     pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: Option<i32>,
     pub successful: bool,
 }
 
@@ -98,7 +114,8 @@ pub fn query_output_in(
     environment: Option<(&str, &str)>,
     cancelled: impl Fn() -> bool,
 ) -> Result<QueryOutput, String> {
-    let mut command = Command::new(program);
+    let _provider_use = crate::ProviderUse::acquire(program)?;
+    let mut command = bootty_host::local_command(program);
     if let Some((name, value)) = environment {
         command.env(name, value);
     }
@@ -114,23 +131,23 @@ pub fn query_output_command(
     if cancelled() {
         return Err("Provider query cancelled".to_owned());
     }
-    configure_group(&mut command);
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| error.to_string())?;
+        .stderr(Stdio::piped());
+    let mut child = spawn_query(command)?;
     let mut terminated = false;
     let mut drainers = Vec::new();
     let mut completed = Vec::new();
     let (sender, receiver) = mpsc::sync_channel(2);
     let result = (|| {
         let stdout = child
+            .child_mut()
             .stdout
             .take()
             .ok_or("Provider stdout is unavailable")?;
         let stderr = child
+            .child_mut()
             .stderr
             .take()
             .ok_or("Provider stderr is unavailable")?;
@@ -152,7 +169,7 @@ pub fn query_output_command(
             .checked_add(timeout)
             .ok_or("Provider query deadline is invalid")?;
         let status = loop {
-            match child.try_wait() {
+            match child.child_mut().try_wait() {
                 Ok(Some(status)) => break status,
                 Ok(None) if cancelled() => return Err("Provider query cancelled".to_owned()),
                 Ok(None) if Instant::now() >= deadline => {
@@ -163,7 +180,7 @@ pub fn query_output_command(
             }
         };
         // A completed query cannot leave native launcher descendants holding its pipes.
-        terminate_group(&mut child);
+        terminate_query(&mut child);
         terminated = true;
         let mut bytes = Vec::new();
         let mut error_bytes = Vec::new();
@@ -183,11 +200,13 @@ pub fn query_output_command(
         }
         Ok(QueryOutput {
             stdout: bytes,
+            stderr: error_bytes,
+            exit_code: status.code(),
             successful: status.success(),
         })
     })();
     if !terminated {
-        terminate_group(&mut child);
+        terminate_query(&mut child);
     }
     join_query_drainers(drainers, &receiver, completed)?;
     result

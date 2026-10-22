@@ -1941,6 +1941,15 @@ fn agent_defaults_specs() -> Vec<SettingSpec> {
         },
         SettingDefault::Field(|config| SettingValue::Token(config.agents.default_provider.clone())),
     )];
+    specs.push(spec(
+        &["agents", "auto-update"],
+        "Automatically update providers",
+        "Update recognized local installations when no provider process is using them.",
+        "providers",
+        "UPDATES",
+        SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.agents.auto_update)),
+    ));
     macro_rules! defaults {
         ($provider:ident, $id:literal) => {
             specs.push(spec(

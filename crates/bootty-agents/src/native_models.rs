@@ -477,6 +477,11 @@ pub fn decode_claude(response: &Value) -> Result<Vec<NativeModelOption>, String>
         .filter(|model| field(model, "value") != "default" || default_alias.is_none())
         .map(|model| {
             let id = selector(field(model, "value"))?;
+            let display_name = selector(field(model, "displayName"))?;
+            let resolved = match model.get("resolvedModel") {
+                None | Some(Value::Null) => None,
+                Some(value) => Some(selector(value)?),
+            };
             let efforts = if field(model, "supportsEffort") == true {
                 field(model, "supportedEffortLevels")
                     .as_array()
@@ -497,8 +502,7 @@ pub fn decode_claude(response: &Value) -> Result<Vec<NativeModelOption>, String>
                 ),
                 display_name: field(model, "description")
                     .as_str()
-                    .filter(|_| id != "default")
-                    .and_then(|description| description.split('·').next())
+                    .and_then(|description| description.split_once('·').map(|(name, _)| name))
                     .map(str::trim)
                     .filter(|name| {
                         !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
@@ -506,13 +510,13 @@ pub fn decode_claude(response: &Value) -> Result<Vec<NativeModelOption>, String>
                     .map_or_else(
                         || {
                             if id == "default" {
-                                selector(field(model, "resolvedModel"))
+                                resolved.unwrap_or(display_name)
                             } else {
-                                selector(field(model, "displayName"))
+                                display_name
                             }
                         },
-                        |name| Ok(name.to_owned()),
-                    )?,
+                        str::to_owned,
+                    ),
                 id,
                 reasoning_efforts: efforts,
                 default_reasoning_effort: None,

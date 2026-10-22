@@ -301,6 +301,7 @@ pub fn install_integration(
             .ok_or_else(|| format!("{} has no parent", path.display()))?;
         fs::create_dir_all(parent).map_err(|error| format!("{}: {error}", parent.display()))?;
         write_bytes(&path, file.contents.as_bytes())?;
+        #[cfg(unix)]
         if file.executable {
             set_executable(&path)?;
         }
@@ -626,11 +627,6 @@ fn set_executable(path: &Path) -> Result<(), String> {
     fs::set_permissions(path, permissions).map_err(|error| format!("{}: {error}", path.display()))
 }
 
-#[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<(), String> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
@@ -638,6 +634,6 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable(_path: &Path) -> bool {
+const fn is_executable(_path: &Path) -> bool {
     true
 }

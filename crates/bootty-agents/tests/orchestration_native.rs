@@ -43,10 +43,22 @@ fn fixture() -> TestResult<Fixture> {
         Some("captured".into()),
         AgentLaunch {
             program: "codex".into(),
-            cwd: Some("/project".into()),
+            cwd: Some(
+                directory
+                    .path()
+                    .join("project")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             arguments: Vec::new(),
             ephemeral: false,
-            account_directory: Some("/account".into()),
+            account_directory: Some(
+                directory
+                    .path()
+                    .join("account")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
         },
         "existing-saved-task".into(),
     )?;

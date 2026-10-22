@@ -95,7 +95,11 @@ fn filenames_are_literal_and_renames_unstage_both_paths(repository: anyhow::Resu
     let repository = repository.expect("repository fixture");
     let git = Git::new();
     let root = repository.path().to_str().unwrap();
-    let special = "file [one]\nname.txt";
+    let special = if cfg!(windows) {
+        "file [one] & name.txt"
+    } else {
+        "file [one]\nname.txt"
+    };
     repository.child(special).write_str("content\n").unwrap();
     repository
         .child("unrelated.txt")

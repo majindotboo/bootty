@@ -137,6 +137,7 @@ pub struct NewSessionForm {
     pub models_loading: bool,
     pub provider_permissions: Option<bootty_agents::NativePermissionMode>,
     provider_catalogs: HashMap<String, Result<bootty_agents::NativeProviderCatalog, String>>,
+    unavailable_providers: std::collections::HashSet<String>,
     generated_names: Option<bootty_agents::GeneratedSessionNames>,
     project_defaults: Vec<bootty_mux::repository::RegisteredProject>,
 }
@@ -162,6 +163,7 @@ impl NewSessionForm {
             models_loading: false,
             provider_permissions: None,
             provider_catalogs: HashMap::new(),
+            unavailable_providers: std::collections::HashSet::new(),
             generated_names: None,
             project_defaults: Vec::new(),
         };
@@ -401,13 +403,15 @@ impl NewSessionForm {
             "Pi" => "pi",
             id => id,
         };
-        if bootty_agents::AgentKind::ALL.into_iter().any(|kind| {
-            kind.to_string() == provider
-                && bootty_agents::NativeSessionConfig::supports_provider(kind)
-        }) && self
-            .providers
-            .provider(provider)
-            .is_some_and(|provider| provider.enabled)
+        if !self.provider_unavailable(provider)
+            && bootty_agents::AgentKind::ALL.into_iter().any(|kind| {
+                kind.to_string() == provider
+                    && bootty_agents::NativeSessionConfig::supports_provider(kind)
+            })
+            && self
+                .providers
+                .provider(provider)
+                .is_some_and(|provider| provider.enabled)
         {
             if self.draft.provider != provider {
                 self.draft.model_selection = None;
@@ -616,6 +620,9 @@ impl NewSessionForm {
                 )
             }
             NewSessionMode::Agent => {
+                if self.provider_unavailable(&self.draft.provider) {
+                    return Err("Install a provider or choose an installed provider".to_owned());
+                }
                 if !bootty_agents::AgentKind::ALL.into_iter().any(|provider| {
                     bootty_agents::NativeSessionConfig::supports_provider(provider)
                         && provider.to_string() == self.draft.provider
@@ -842,6 +849,9 @@ impl NewSessionForm {
         catalog: Result<bootty_agents::NativeProviderCatalog, String>,
     ) {
         let key = catalog_invocation_key(invocation);
+        if let Some(key) = &key {
+            self.unavailable_providers.remove(key);
+        }
         if let Err(error) = &catalog
             && matches!(self.cached_provider_catalog(invocation), Some(Ok(_)))
         {
@@ -865,6 +875,66 @@ impl NewSessionForm {
         if current_key == key {
             self.apply_provider_catalog(catalog);
         }
+    }
+
+    /// A missing executable is different from an installed provider needing sign-in.
+    pub fn set_provider_unavailable_for(
+        &mut self,
+        invocation: &CommandInvocation,
+        message: String,
+    ) {
+        let Some(key) = catalog_invocation_key(invocation) else {
+            return;
+        };
+        self.provider_catalogs.remove(&key);
+        self.set_provider_catalog_for(invocation, Err(message));
+        self.unavailable_providers.insert(key);
+        if self.provider_unavailable(&self.draft.provider) {
+            let replacement = self
+                .model_catalog_invocations()
+                .into_iter()
+                .find_map(|candidate| {
+                    let provider = candidate.arguments.first()?;
+                    (!self.provider_unavailable(provider)).then(|| provider.clone())
+                });
+            if let Some(provider) = replacement {
+                self.change_provider(&provider);
+                self.hydrate_model_catalog();
+            }
+        }
+    }
+
+    fn provider_unavailable(&self, provider: &str) -> bool {
+        self.model_catalog_invocation_for(provider)
+            .and_then(|invocation| catalog_invocation_key(&invocation))
+            .is_some_and(|key| self.unavailable_providers.contains(&key))
+    }
+
+    /// Open the selected account's own login in the captured Space, preserving the draft.
+    #[must_use]
+    pub fn sign_in_invocation(&self) -> Option<CommandInvocation> {
+        if !self
+            .model_error
+            .as_deref()
+            .into_iter()
+            .chain(self.error.as_deref())
+            .any(crate::error_catalog::needs_sign_in)
+        {
+            return None;
+        }
+        let catalog = self.model_catalog_invocation()?;
+        let provider = catalog.arguments.first()?;
+        let mut invocation = CommandInvocation::new(
+            format!("agents.{provider}.account.login"),
+            vec![
+                catalog.arguments.get(1)?.clone(),
+                catalog.arguments.get(2)?.clone(),
+                catalog.arguments.get(5)?.clone(),
+            ],
+            Caller::Internal,
+        );
+        invocation.target = catalog.target;
+        Some(invocation)
     }
 
     pub fn set_favorite_models_for(
@@ -1211,6 +1281,25 @@ impl NewSessionForm {
             .collect()
     }
 
+    fn catalog_error(&self) -> Option<String> {
+        self.error
+            .as_ref()
+            .filter(|error| crate::error_catalog::needs_sign_in(error))
+            .cloned()
+            .or_else(|| self.model_error.clone())
+    }
+
+    fn submission_error(&self) -> Option<String> {
+        self.error
+            .as_ref()
+            .filter(|error| {
+                self.draft.mode != NewSessionMode::Agent
+                    || !crate::error_catalog::needs_sign_in(error)
+            })
+            .cloned()
+            .or_else(|| self.invocation(&self.draft.cwd).err())
+    }
+
     #[must_use]
     pub fn spec(&self, busy: bool) -> DialogSpec {
         let command =
@@ -1236,7 +1325,7 @@ impl NewSessionForm {
         spec.multiline = true;
         spec.hint = None;
         if self.draft.mode == NewSessionMode::Agent {
-            spec.model_error.clone_from(&self.model_error);
+            spec.model_error = self.catalog_error();
         }
         spec.text_label = Some(
             if self.draft.mode == NewSessionMode::Agent {
@@ -1292,10 +1381,7 @@ impl NewSessionForm {
         spec.footer = Some(self.destination_path());
         if let Some(row) = spec.rows.first_mut() {
             (if busy { "Starting…" } else { "Start" }).clone_into(&mut row.label);
-            row.detail = self
-                .error
-                .clone()
-                .or_else(|| self.invocation(&self.draft.cwd).err());
+            row.detail = self.submission_error();
             row.enabled = !busy
                 && self.invocation(&self.draft.cwd).is_ok()
                 && (!self.draft.isolated || self.worktree_available);
@@ -1339,7 +1425,11 @@ impl NewSessionForm {
             fields.push(choice(
                 "provider",
                 "Provider",
-                provider_label(&self.draft.provider),
+                if self.provider_unavailable(&self.draft.provider) {
+                    "Choose provider"
+                } else {
+                    provider_label(&self.draft.provider)
+                },
                 bootty_agents::AgentKind::ALL
                     .into_iter()
                     .filter(|provider| {
@@ -1351,6 +1441,7 @@ impl NewSessionForm {
                             .provider(id)
                             .is_some_and(|provider| provider.enabled)
                     })
+                    .filter(|id| !self.provider_unavailable(id))
                     .map(|id| provider_label(&id).to_owned())
                     .collect(),
             ));

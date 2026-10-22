@@ -144,9 +144,14 @@ fn create_child(
             (name, title.as_deref().unwrap_or(name))
         }
     };
-    let argv = prepared
+    let argv = match prepared
         .as_ref()
-        .map_or_else(Vec::new, bootty_agents::PreparedTerminalAgent::argv);
+        .map(bootty_agents::PreparedTerminalAgent::argv)
+        .transpose()
+    {
+        Ok(argv) => argv.unwrap_or_default(),
+        Err(error) => return failure(&error),
+    };
     let argv = match serde_json::to_string(&argv) {
         Ok(argv) => argv,
         Err(error) => return failure(&error.to_string()),

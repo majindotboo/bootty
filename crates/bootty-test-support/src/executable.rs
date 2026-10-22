@@ -67,6 +67,7 @@ fn kept_script(contents: &str) -> io::Result<PathBuf> {
             WRITES.fetch_add(1, Ordering::Relaxed)
         ));
         fs::write(&partial, contents)?;
+        #[cfg(unix)]
         set_executable(&partial)?;
         fs::rename(&partial, &script)?;
     }
@@ -101,9 +102,4 @@ fn set_executable(path: &Path) -> io::Result<()> {
 /// filesystems runs as a new file.
 fn link(script: &Path, path: &Path) -> io::Result<()> {
     fs::hard_link(script, path).or_else(|_| fs::copy(script, path).map(|_| ()))
-}
-
-#[cfg(not(unix))]
-fn set_executable(_: &Path) -> io::Result<()> {
-    Ok(())
 }

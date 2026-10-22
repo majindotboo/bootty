@@ -1,6 +1,6 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::Duration,
@@ -60,8 +60,8 @@ fn send(writer: &mut impl Write, message: &Value) -> Result<(), String> {
 }
 
 pub fn query(program: &str, directory: Option<&str>) -> Result<TerminalAccountStatus, String> {
-    let mut command = Command::new(program);
-    crate::terminal_process::configure_group(&mut command);
+    let _provider_use = crate::ProviderUse::acquire(program)?;
+    let mut command = bootty_host::local_command(program);
     command
         .args(["app-server", "--listen", "stdio://"])
         .stdin(Stdio::piped())
@@ -70,8 +70,12 @@ pub fn query(program: &str, directory: Option<&str>) -> Result<TerminalAccountSt
     if let Some(directory) = directory {
         command.env("CODEX_HOME", directory);
     }
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
-    let pipes = child.stdin.take().zip(child.stdout.take());
+    let mut child = crate::terminal_process::spawn_query(command)?;
+    let pipes = child
+        .child_mut()
+        .stdin
+        .take()
+        .zip(child.child_mut().stdout.take());
     let result = if let Some((mut writer, stdout)) = pipes {
         let (sender, receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
@@ -109,6 +113,6 @@ pub fn query(program: &str, directory: Option<&str>) -> Result<TerminalAccountSt
         Err("Codex account transport is unavailable".to_owned())
     };
     // The status query owns this server; it never adopts or alters a running session.
-    crate::terminal_process::terminate_group(&mut child);
+    crate::terminal_process::terminate_query(&mut child);
     result
 }

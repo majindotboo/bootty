@@ -37,8 +37,14 @@ pub struct ClaudeProtocol {
 }
 
 impl ClaudeProtocol {
-    pub fn new(session_id: String, cwd: PathBuf) -> Result<Self, String> {
-        if !valid_session_id(&session_id) || !cwd.is_absolute() {
+    pub fn new(
+        session_id: String,
+        cwd: PathBuf,
+        shell: crate::LaunchShell,
+    ) -> Result<Self, String> {
+        if !valid_session_id(&session_id)
+            || !cwd.to_str().is_some_and(|path| shell.absolute_path(path))
+        {
             return Err("Claude requires an exact session UUID and absolute directory".to_owned());
         }
         Ok(Self {

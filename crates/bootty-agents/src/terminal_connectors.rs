@@ -1,7 +1,7 @@
 //! A provider's MCP connectors. The provider owns them: Bootty lists them through the provider's
 //! own CLI, and adds them and signs in to them in a terminal the provider runs.
 
-use std::{process::Command, time::Duration};
+use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -56,13 +56,14 @@ pub fn terminal_connectors(
     program: &str,
     account_directory: Option<&str>,
 ) -> Result<Vec<ProviderConnector>, String> {
+    let _provider_use = crate::ProviderUse::acquire(program)?;
     let (arguments, timeout): (&[&str], _) = match provider {
         AgentKind::Codex => (&["mcp", "list", "--json"], Duration::from_secs(10)),
         // Claude connects to every server to report its health.
         AgentKind::Claude => (&["mcp", "list"], Duration::from_secs(45)),
         AgentKind::Pi => return Err("Pi's MCP servers come from its extensions".to_owned()),
     };
-    let mut command = Command::new(program);
+    let mut command = bootty_host::local_command(program);
     if let Some(directory) = account_directory {
         command.env(provider.account_directory_variable(), directory);
     }

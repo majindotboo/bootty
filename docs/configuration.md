@@ -50,22 +50,26 @@ grant. Changing these settings does not request or grant OS permission.
 Manual browser screenshot attachments use the existing Screen Recording grant
 independently of these agent-command switches.
 
-Agents in native conversations use local apps through `computer_snapshot` and
-`computer_input`, naming an app by bundle id or name. The first use of an app in
+Agents in native conversations use local apps through `computer_snapshot`,
+`computer_elements` and `computer_input`, naming an app by bundle id or name. The first use of an app in
 a conversation shows an approval card: **Allow for this session** grants it for
 the rest of the conversation, **Always allow** also adds its bundle id to
 `always-allowed-apps`, and **Deny** refuses. An `@` mention of an app window in
 the prompt grants it the same way. This consent replaces the switches above for
 agent app use; macOS Screen Recording and Accessibility grants still apply.
-Input targets the window from the app's latest capture, so an agent captures an
-app before clicking or typing. On macOS a capture also lists the window's accessibility
+Input targets the window from the app's latest observation. `computer_elements` reads
+controls without a screenshot or focus change. On macOS and Windows a capture also lists the window's accessibility
 elements in screen order, including disabled and unlabeled ones, and `computer_input`
 can press an element by its number: Bootty uses the element's own action, or clicks
-its center when it has none. Listing elements needs the Accessibility grant; Chromium
+its center when it has none. Set `allow_click: false` on a press to require an
+accessibility action and forbid pointer fallback. Listing elements on macOS needs the Accessibility grant; Chromium
 and Electron apps are asked to expose their web content, which may take one more
 capture to appear. Agents never use the Bootty instance they run
 in, terminals, or System Settings; another Bootty instance, such as a
 development build, is an ordinary app.
+Native provider conversations use Unix sockets on macOS and Linux and same-user
+named pipes on Windows. Provider stdin/stdout stay private to the conversation;
+stopping it terminates its owned process tree, including Windows descendants.
 
 Computer commands use an exact window token returned by `computer.targets`.
 Window or process changes invalidate the token, and input is never redirected
@@ -75,6 +79,16 @@ the capture switch and the input switch respectively. Computer use works on
 macOS, Windows and Linux on X11, including XWayland apps in a Wayland session;
 native Wayland windows are not listed. `computer.snapshot` writes a bounded PNG
 to the supplied absolute local path and never replaces an existing file.
+`computer.set-value <target> <element> <value>` replaces an editable control's value through macOS Accessibility or Windows UIA. The agent equivalent is `computer_input` with `action: "set_value"`, a numbered `element`, and `value`. An empty value clears the control. It does not focus the app, send keyboard/pointer events, submit a form, or navigate a browser. Unsupported and read-only controls fail without input fallback; Linux accessibility remains unsupported.
+
+The optional third argument to `computer.press`, `allow-click`, defaults to `true`;
+pass `false` for an accessibility-only action. Linux element discovery remains unsupported.
+
+Windows element discovery uses UI Automation on a background COM thread. It lists
+bounded control labels, values, identifiers, frames and states; password values are
+excluded. Presses use Invoke, Toggle or SelectionItem patterns with automatic focus
+disabled, so supported controls can work behind another app. Apps can still choose
+to activate themselves in response to an action. UIA failures are reported explicitly.
 
 On macOS, capture needs macOS 14 or later, and input goes straight to the target
 window without focusing it, so the window may sit behind other apps and the
@@ -85,7 +99,7 @@ window and lifts it behind the frontmost app without activating its app. Views
 that need their window active, such as web content, ignore clicks while their
 app is in the background, so a left click in an app that is not frontmost
 presses the accessibility element under the point when it has its own press
-action. Other clicks, and every click on the frontmost app, are sent as clicks. On Windows and Linux, input drives the real pointer,
+action. Other clicks, and every click on the frontmost app, are sent as clicks. On Windows and Linux, coordinate and keyboard input drive the shared pointer and keyboard,
 so the target must be the focused window and each point uncovered;
 `computer.focus` brings it to the front, and Command shortcuts are sent as
 Control.
@@ -1100,9 +1114,11 @@ directory = "/absolute/path/to/codex-work"
 arguments = ["--model", "gpt-6.1-sol"]
 ```
 
-The same keys apply to `agents.claude` and `agents.pi`. Account directories use `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `PI_CODING_AGENT_DIR`, respectively. Directory selection currently requires a local POSIX terminal; remote accounts belong to the remote host. It does not change provider permission or credential-store policies. Leaving the directory empty reuses the default account with different launch arguments.
+The same keys apply to `agents.claude` and `agents.pi`. Account directories use `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `PI_CODING_AGENT_DIR`, respectively. Directory selection works in local Unix and Windows terminals; remote accounts belong to the remote host. It does not change provider permission or credential-store policies. Leaving the directory empty reuses the default account with different launch arguments.
 
-Start and resume open terminal tabs in the selected session. Changes affect future launches. Sign-in opens the provider's own terminal flow; Pi uses `/login`. Refresh status runs bounded, read-only version and account queries on a worker. Codex reports its account type and plan through its app server; Claude reports its own login state and subscription type; Pi reports the selected provider's existing authentication without inferring a subscription. An older refresh cannot replace a newer account selection. Update runs the proven owning native, Bun-global or npm-global installer in a local POSIX terminal tab. Its exit result stays visible until Enter closes the tab. Unknown installations require a manual update; active agent tabs prevent updates. Bootty does not update agents automatically.
+The new-session provider picker removes providers whose executable is missing on the selected local host. An installed provider remains selectable when its account needs authentication or its model query fails. Authentication errors offer **Sign in** beside **Retry**, with the original error available under **Details**. Sign-in opens the provider's own flow inside Bootty, using the composer's selected account and Space, including when that Space has no sessions. The prompt draft is retained for after sign-in.
+
+Start and resume open terminal tabs in the selected session. Changes affect future launches. Sign-in opens the provider's own terminal flow; Pi uses `/login`. Refresh status runs bounded, read-only version and account queries on a worker. Codex reports its account type and plan through its app server; Claude reports its own login state and subscription type; Pi reports the selected provider's existing authentication without inferring a subscription. An older refresh cannot replace a newer account selection. Update runs the proven owning native, Bun-global, npm-global or WinGet installer on a background worker and reports failures. Unknown installations require a manual update; Bootty-owned provider processes prevent updates until they close. Automatic updates use the same command and follow `agents.auto-update` below.
 
 Codex's **Quick model** (`agents.quick-model`) names sessions and worktrees, and writes
 commit messages and pull request text. It defaults to `gpt-6-luna` and uses the selected
@@ -1151,6 +1167,13 @@ Stopping the agent pauses the queue so the next message doesn't go out at once, 
 so does a failed turn; Resume, or sending a message, lets it go again, moving on from
 a failure without restarting the agent. A message that couldn't be sent waits for
 Retry without holding the ones behind it.
+
+`agents.auto-update` defaults to `true`. Bootty checks recognized local provider
+installations after startup and then daily while no Bootty-owned process is using that executable.
+Busy installations are retried after a minute. Updates use the owning installer;
+unknown installations and remote providers remain manual. Turn this setting off
+to use only the explicit Update action. Successful updates invalidate cached
+model catalogs and refresh provider status.
 
 `agents.default-provider` selects the provider for a fresh composer. Each provider's
 `default-model` and `default-effort` prefer advertised selections; empty values resolve

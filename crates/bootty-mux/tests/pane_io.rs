@@ -218,10 +218,16 @@ fn fixture(topology: PaneTopology) -> Result<Fixture> {
     })
 }
 
-const fn placement(backend: MultiplexerBackendConfig) -> SpaceMuxOverride {
+fn placement(backend: MultiplexerBackendConfig) -> SpaceMuxOverride {
     SpaceMuxOverride {
         backend: Some(backend),
-        remote: SpaceRemoteOverride::Local,
+        remote: if backend == MultiplexerBackendConfig::Tmux {
+            SpaceRemoteOverride::Inline(
+                bootty_config::config::SshRemoteConfig::for_host("fixture").into(),
+            )
+        } else {
+            SpaceRemoteOverride::Local
+        },
     }
 }
 

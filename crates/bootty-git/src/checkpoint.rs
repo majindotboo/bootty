@@ -46,20 +46,20 @@ pub fn capture(
             &format!("bootty-{}.index", reference.replace('/', "-")),
         ],
     )?;
-    let index = if index.starts_with('/') {
+    let index = if index.starts_with('/') || std::path::Path::new(&index).is_absolute() {
         index
     } else {
         format!("{root}/{index}")
     };
     let scratch = |args: &[&str]| {
-        let mut command = vec![format!("GIT_INDEX_FILE={index}"), "git".to_owned()];
+        let mut command = Vec::new();
         command.extend(
             ["-C", &root]
                 .iter()
                 .chain(args)
                 .map(|arg| (*arg).to_owned()),
         );
-        output(runner.run("env", &command))
+        output(runner.run_with_env("git", &command, &[("GIT_INDEX_FILE", &index)]))
     };
     let head = git(runner, &root, &["rev-parse", "--verify", "-q", "HEAD"]).ok();
     let commit = (|| {
@@ -88,7 +88,7 @@ pub fn capture(
         }
         git(runner, &root, &commit)
     })();
-    _ = runner.run("rm", &["-f".to_owned(), index]);
+    _ = runner.remove_file(&index);
     let commit = commit?;
     git(runner, &root, &["update-ref", reference, &commit])?;
     Ok(Some(commit))

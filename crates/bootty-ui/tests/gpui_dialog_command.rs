@@ -983,6 +983,7 @@ fn agent_composer_shows_discovery_and_retries_without_replacing_the_prompt(cx: &
     cx.run_until_parked();
     assert!(cx.debug_bounds("new-session-model-loading").is_none());
     assert!(cx.debug_bounds("dialog-prompt-input").is_some());
+    assert!(cx.debug_bounds("new-session-provider-sign-in").is_none());
     click(&mut cx, "new-session-model-retry");
     probe.update(&mut cx, |probe, _| {
         assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
@@ -1702,7 +1703,11 @@ fn creation_composer_attaches_large_pastes_and_keeps_small_text_editable(cx: &Te
             full_surface_probe_with_viewport(cx, native_agent_form_spec(), 1200., 900., 16.);
         cx.simulate_input("Read ");
         cx.update(|_, cx| cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.clone())));
-        cx.simulate_keystrokes("cmd-v");
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-v"
+        } else {
+            "ctrl-v"
+        });
         cx.run_until_parked();
         cx.simulate_input(" please");
         cx.run_until_parked();
@@ -1733,5 +1738,97 @@ fn creation_composer_attaches_large_pastes_and_keeps_small_text_editable(cx: &Te
                 assert!(prompt.ends_with(".txt] please"));
             }
         });
+    }
+}
+
+#[gpui_kit::test]
+fn provider_auth_error_wraps_and_offers_sign_in_without_losing_details(cx: &TestAppContext) {
+    let mut spec = native_agent_form_spec();
+    spec.model_error = Some(format!(
+        "Agent process ended: Unable to verify organization for the current authentication token.\nThis machine requires one of these organizations: {}\nTry again, or run: claude auth login",
+        "5312fef9-f7d9-4b02-99ad-75e2e9f050ff, ".repeat(40)
+    ));
+    let (probe, mut visual) = full_surface_probe_with_viewport(cx, spec, 1000.0, 900.0, 16.0);
+    for width in [600., 1000.] {
+        visual.simulate_resize(gpui_kit::size(px(width), px(900.)));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let summary = visual
+            .debug_bounds("new-session-model-error")
+            .expect("bounded summary");
+        assert!(
+            summary.left() >= px(0.) && summary.right() <= px(width),
+            "{summary:?}"
+        );
+        let login = visual
+            .debug_bounds("new-session-provider-sign-in")
+            .expect("sign-in button");
+        assert!(login.left() >= px(0.) && login.right() <= px(width));
+    }
+    assert!(
+        visual
+            .debug_bounds("new-session-model-error-details")
+            .is_none()
+    );
+    click(&mut visual, "new-session-model-error-details-toggle");
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    let details = visual
+        .debug_bounds("new-session-model-error-details")
+        .expect("original error details");
+    assert!(details.size.height > px(0.) && details.size.height <= px(200.));
+    assert!(details.right() <= px(1000.));
+    click(&mut visual, "new-session-provider-sign-in");
+    probe.update(&mut visual, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::Activate { action, .. } if action == &ActionId::new("sign-in-provider")
+        )));
+    });
+}
+
+#[gpui_kit::test]
+fn loading_models_keeps_the_composer_and_picker_in_place(cx: &TestAppContext) {
+    for width in [600., 1200.] {
+        let mut spec = native_agent_form_spec();
+        spec.fields
+            .retain(|field| !matches!(field.id.as_str(), "model" | "reasoning"));
+        spec.models.clear();
+        spec.models_loading = true;
+        let (probe, mut visual) =
+            full_surface_probe_with_viewport(cx, spec.clone(), width, 900., 16.);
+        let before = visual.debug_bounds("model-picker-trigger").unwrap();
+        let composer = visual.debug_bounds("agent-session-composer").unwrap();
+        spec.models_loading = false;
+        spec.models.push(bootty_agents::NativeModelOption {
+            id: "current".into(),
+            display_name: "Current model".into(),
+            reasoning_efforts: vec!["high".into()],
+            default_reasoning_effort: Some("high".into()),
+            is_default: true,
+            is_legacy: false,
+            is_favorite: false,
+            supports_fast_mode: false,
+            fast_mode_detail: None,
+        });
+        spec.fields.push(bootty_gpui::DialogField {
+            id: "model".into(),
+            label: "Model".into(),
+            value: "Current model".into(),
+            placeholder: String::new(),
+            kind: bootty_gpui::DialogFieldKind::Choice(vec!["Current model".into()]),
+        });
+        probe.update_in(&mut visual, |probe, window, cx| {
+            probe
+                .dialog
+                .update(cx, |dialog, cx| dialog.present(Some(spec), window, cx));
+        });
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        let after = visual.debug_bounds("model-picker-trigger").unwrap();
+        assert_eq!(before.origin, after.origin, "picker moved at width {width}");
+        assert_eq!(
+            composer,
+            visual.debug_bounds("agent-session-composer").unwrap()
+        );
     }
 }

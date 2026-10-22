@@ -89,7 +89,24 @@ pub fn execute(
         ),
         ComputerAction::TypeText { text } => type_text(desktop, target, text),
         ComputerAction::Elements => elements(desktop, target),
-        ComputerAction::Press { element } => press(desktop, target, element),
+        ComputerAction::SetValue { element, value } => {
+            let window = validate(desktop, target, Need::Element)?;
+            let current = desktop
+                .element(&window, &element.path)?
+                .filter(|current| current.same_as(element))
+                .ok_or(ComputerError::StaleElement)?;
+            if current.states.contains(&ElementState::Disabled) {
+                return Err(ComputerError::InvalidAction(
+                    "the element is disabled".into(),
+                ));
+            }
+            desktop.set_value(&window, &element.path, value)?;
+            Ok(ComputerResult::Posted)
+        }
+        ComputerAction::Press {
+            element,
+            allow_click,
+        } => press(desktop, target, element, *allow_click),
         ComputerAction::Key { key, modifiers } => {
             let window = validate(desktop, target, Need::Keys)?;
             desktop.post(
@@ -279,6 +296,7 @@ fn press(
     desktop: &dyn Desktop,
     target: &ComputerTarget,
     element: &ComputerElement,
+    allow_click: bool,
 ) -> Result<ComputerResult, ComputerError> {
     let window = validate(desktop, target, Need::Element)?;
     let current = desktop
@@ -294,6 +312,12 @@ fn press(
         return Ok(ComputerResult::Pressed {
             method: PressMethod::Action,
         });
+    }
+    if !allow_click {
+        return Err(ComputerError::InvalidAction(
+            "the element has no supported accessibility action; pointer fallback is disabled"
+                .into(),
+        ));
     }
     let (x, y) = element.center();
     click(desktop, target, x, y, MouseButton::Left)?;

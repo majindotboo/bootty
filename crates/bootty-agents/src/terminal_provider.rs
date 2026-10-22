@@ -1,5 +1,5 @@
 use std::{
-    env, fs,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -20,22 +20,25 @@ pub struct TerminalProviderStatus {
 }
 
 fn executable(program: &str) -> Option<PathBuf> {
-    let path = Path::new(program);
-    if path.components().count() > 1 {
-        return path.canonicalize().ok();
-    }
-    env::var_os("PATH").and_then(|paths| {
-        env::split_paths(&paths).find_map(|directory| {
-            let path = directory.join(program);
-            path.is_file().then(|| path.canonicalize().ok()).flatten()
-        })
-    })
+    bootty_host::find_executable(program)
 }
 
 /// Recognize only the installation that owns the selected executable.
 /// Unknown installations remain manual until their owning installer can be proven.
 #[must_use]
 pub fn terminal_provider_installer(provider: AgentKind, executable: &Path) -> Option<Vec<String>> {
+    #[cfg(windows)]
+    {
+        windows_installer(provider, executable)
+    }
+    #[cfg(not(windows))]
+    {
+        unix_installer(provider, executable)
+    }
+}
+
+#[cfg(not(windows))]
+fn unix_installer(provider: AgentKind, executable: &Path) -> Option<Vec<String>> {
     if provider == AgentKind::Claude
         && executable.parent()?.file_name()? == "versions"
         && executable.parent()?.parent()?.file_name()? == "claude"
@@ -51,14 +54,9 @@ pub fn terminal_provider_installer(provider: AgentKind, executable: &Path) -> Op
         AgentKind::Claude => "@anthropic-ai/claude-code",
     };
     for directory in executable.ancestors() {
-        let manifest = directory.join("package.json");
-        let Ok(metadata) = fs::metadata(&manifest) else {
+        let Some(value) = read_package_manifest(&directory.join("package.json")) else {
             continue;
         };
-        if metadata.len() > 64 * 1024 {
-            continue;
-        }
-        let value: serde_json::Value = serde_json::from_slice(&fs::read(manifest).ok()?).ok()?;
         if value.get("name").and_then(serde_json::Value::as_str) != Some(package) {
             continue;
         }
@@ -101,6 +99,112 @@ pub fn terminal_provider_installer(provider: AgentKind, executable: &Path) -> Op
     None
 }
 
+#[cfg(windows)]
+fn windows_installer(provider: AgentKind, executable: &Path) -> Option<Vec<String>> {
+    // Resolve links for ownership, but retain the selected path when launching.
+    let resolved = executable.canonicalize().ok()?;
+    if provider == AgentKind::Claude {
+        if resolved.ends_with(
+            "AppData/Local/Microsoft/WinGet/Packages/Anthropic.ClaudeCode_Microsoft.Winget.Source_8wekyb3d8bbwe/claude.exe",
+        ) {
+            return Some(vec![
+                bootty_host::find_executable("winget")?.to_string_lossy().into_owned(),
+                "upgrade".into(),
+                "--id".into(),
+                "Anthropic.ClaudeCode".into(),
+                "--exact".into(),
+                "--source".into(),
+                "winget".into(),
+                "--scope".into(),
+                "user".into(),
+                "--silent".into(),
+                "--disable-interactivity".into(),
+                "--accept-source-agreements".into(),
+                "--accept-package-agreements".into(),
+            ]);
+        }
+        if resolved.ends_with(".local/bin/claude.exe")
+            || resolved.parent()?.file_name()? == "versions"
+                && resolved.parent()?.parent()?.file_name()? == "claude"
+        {
+            return Some(vec![
+                executable.to_string_lossy().into_owned(),
+                "update".into(),
+            ]);
+        }
+    }
+    windows_npm_installer(provider, executable)
+}
+
+fn read_package_manifest(path: &Path) -> Option<serde_json::Value> {
+    let metadata = fs::metadata(path).ok()?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 {
+        return None;
+    }
+    serde_json::from_slice(&fs::read(path).ok()?).ok()
+}
+
+#[cfg(windows)]
+fn windows_npm_installer(provider: AgentKind, executable: &Path) -> Option<Vec<String>> {
+    let (command, package) = match provider {
+        AgentKind::Codex => ("codex", "@openai/codex"),
+        AgentKind::Claude => ("claude", "@anthropic-ai/claude-code"),
+        AgentKind::Pi => ("pi", "@earendil-works/pi-coding-agent"),
+    };
+    if !executable
+        .file_name()?
+        .to_str()?
+        .eq_ignore_ascii_case(&format!("{command}.cmd"))
+    {
+        return None;
+    }
+    let prefix = executable.parent()?;
+    let directory = prefix.join("node_modules").join(package);
+    let manifest = read_package_manifest(&directory.join("package.json"))?;
+    if manifest.get("name")?.as_str()? != package {
+        return None;
+    }
+    let bin = manifest.get("bin")?;
+    let entry = bin.as_str().or_else(|| bin.get(command)?.as_str())?;
+    let entry = Path::new(entry);
+    if !entry.components().all(|part| {
+        matches!(
+            part,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    }) {
+        return None;
+    }
+    let entry: PathBuf = entry
+        .components()
+        .filter(|part| *part != std::path::Component::CurDir)
+        .collect();
+    if !directory.join(&entry).is_file() {
+        return None;
+    }
+    let metadata = fs::metadata(executable).ok()?;
+    if metadata.len() > 64 * 1024 {
+        return None;
+    }
+    let shim = fs::read_to_string(executable).ok()?;
+    let target = format!("node_modules/{package}/{}", entry.display()).replace('/', "\\");
+    if !shim.contains(&format!("\"%dp0%\\{target}\""))
+        && !shim.contains(&format!("\"%~dp0\\{target}\""))
+    {
+        return None;
+    }
+    let npm = bootty_host::find_executable(prefix.join("npm.cmd"))
+        .or_else(|| bootty_host::find_executable("npm"))?;
+    Some(vec![
+        npm.to_string_lossy().into_owned(),
+        "install".into(),
+        "--global".into(),
+        "--prefix".into(),
+        prefix.to_string_lossy().into_owned(),
+        format!("{package}@latest"),
+    ])
+}
+
 #[must_use]
 pub fn terminal_provider_status(
     provider: AgentKind,
@@ -128,18 +232,9 @@ pub fn terminal_provider_status_with_pi_selector(
             .and_then(|path| terminal_provider_installer(provider, path))
             .and_then(|argv| {
                 argv.iter()
-                    .find(|program| program.ends_with("/bun") || program.ends_with("/npm"))
+                    .find(|program| installer_name(program).is_some())
                     .or_else(|| argv.first())
-                    .map(|program| {
-                        if program.ends_with("/bun") {
-                            "Bun"
-                        } else if program.ends_with("/npm") {
-                            "npm"
-                        } else {
-                            "Native"
-                        }
-                        .to_owned()
-                    })
+                    .map(|program| installer_name(program).unwrap_or("Native").to_owned())
             }),
         authenticated: None,
         account: None,
@@ -180,16 +275,32 @@ pub fn terminal_provider_status_with_pi_selector(
     status
 }
 
+fn installer_name(program: &str) -> Option<&'static str> {
+    match Path::new(program).file_stem()?.to_str()? {
+        "bun" => Some("Bun"),
+        "npm" => Some("npm"),
+        "winget" => Some("WinGet"),
+        _ => None,
+    }
+}
+
 /// # Errors
 /// Rejects installation paths without a proven owning installer.
 pub fn terminal_provider_update(provider: AgentKind, program: &str) -> Result<AgentLaunch, String> {
     let path = executable(program).ok_or("Provider executable not found")?;
     let argv = terminal_provider_installer(provider, &path)
         .ok_or("Update this installation with its original installer")?;
-    if !cfg!(unix) {
-        return Err(
-            "Automatic provider updates currently require a local POSIX terminal".to_owned(),
-        );
+    if cfg!(windows) {
+        let (program, arguments) = argv
+            .split_first()
+            .ok_or("The installer has no executable")?;
+        return Ok(AgentLaunch {
+            program: program.clone(),
+            cwd: None,
+            arguments: arguments.to_vec(),
+            ephemeral: true,
+            account_directory: None,
+        });
     }
     // Keep a short-lived installer's outcome visible. All dynamic values remain argv.
     let mut arguments = vec![

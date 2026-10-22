@@ -82,6 +82,10 @@ fn shortcuts_use_one_typed_command_for_all_callers(
 #[case("computer.elements", vec!["extra".into()])]
 #[case("computer.press", vec!["{}".into()])]
 #[case("computer.press", vec![element_json(900.0)])]
+#[case("computer.press", vec![element_json(10.0), "maybe".into()])]
+#[case("computer.set-value", vec![element_json(10.0), "a".repeat(4097)])]
+#[case("computer.set-value", vec![element_json(10.0), "a\0b".into()])]
+#[case("computer.set-value", vec![element_json(900.0), "text".into()])]
 fn malformed_actions_are_refused_at_public_command_resolution(
     target: ComputerTarget,
     #[case] command: &str,
@@ -124,7 +128,10 @@ fn element_json(x: f64) -> String {
 
 #[rstest]
 #[case("computer.elements", vec![], MutationClass::Read)]
+#[case("computer.set-value", vec![element_json(10.0), "text".into()], MutationClass::Write)]
+#[case("computer.set-value", vec![element_json(10.0), String::new()], MutationClass::Write)]
 #[case("computer.press", vec![element_json(10.0)], MutationClass::Write)]
+#[case("computer.press", vec![element_json(10.0), "false".into()], MutationClass::Write)]
 fn element_commands_share_the_typed_computer_executor(
     target: ComputerTarget,
     #[case] id: &str,
@@ -141,8 +148,13 @@ fn element_commands_share_the_typed_computer_executor(
         return Err("element command did not resolve to the shared computer executor".into());
     };
     let action = match arguments.first() {
+        Some(element) if id == "computer.set-value" => ComputerAction::SetValue {
+            element: Box::new(serde_json::from_str(element)?),
+            value: arguments[1].clone(),
+        },
         Some(element) => ComputerAction::Press {
             element: Box::new(serde_json::from_str(element)?),
+            allow_click: arguments.get(1).map_or(Ok(true), |value| value.parse())?,
         },
         None => ComputerAction::Elements,
     };

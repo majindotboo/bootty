@@ -531,7 +531,7 @@ pub fn permission_choice_content(
         .role(gpui_kit::Role::MenuItem)
         .aria_label(format!("{}: {}", choice.label(), choice.description()))
         .flex()
-        .items_start()
+        .items_center()
         .gap_2()
         .child(crate::gpui::sized_icon(
             choice.icon(),

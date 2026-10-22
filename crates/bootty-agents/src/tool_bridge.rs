@@ -79,6 +79,7 @@ pub fn logical_pi_tool_name(server: &str, identifier: &str) -> Option<&'static s
         "list_terminals",
         "browser_snapshot",
         "computer_snapshot",
+        "computer_elements",
         "computer_input",
         "spawn_shell",
         "read_spawned_terminal",
@@ -238,7 +239,8 @@ impl ToolBridge {
             daemon,
             &name,
             files,
-            self.transport.directory.join("tools.sock"),
+            bootty_host::private_stdio::endpoint_path(&self.transport.directory)
+                .map_err(|error| error.to_string())?,
         )
         .map_err(|error| error.to_string())?;
         Ok((arguments, relay))

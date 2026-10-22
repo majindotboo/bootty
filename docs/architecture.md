@@ -47,13 +47,15 @@ This file describes the current production structure.
 | Clipboard image transfer | `bootty-host::clipboard_image` | The daemon verifies the complete byte count and SHA-256 digest before publishing a private temporary PNG path. |
 | Local control transport and instance ownership | `bootty-control` | The singleton lease publishes one owner-local endpoint. |
 | Terminal agent observation and launch metadata | `bootty-agents::TerminalAgentService` | Observers own exact terminal identity, bounded activity and retained provider session metadata. |
+| Local provider installation updates | `bootty-agents::provider_updates` | Process leases exclude updates from live provider executables. The GUI schedules the shared `agents.providers.update` invocation when idle; the selected installation's recognized package manager owns replacement. Model caches invalidate after successful updates. |
 | Seekable file and media reads | `bootty-host::file_reader` | Files are opened on their owning host with bounded ranges and revision checks; account-scoped history rejects paths outside its captured root. |
 | Private stdio framing and remote endpoint relays | `bootty-host::private_stdio` | Bounded bytes use the owning host's encrypted process stream; tool grants and command authority stay with `bootty-agents`. |
+| Local executable resolution | `bootty-host::find_executable` and `local_command` | Provider availability, metadata queries and native sessions share the host's search policy. Windows searches supported `PATHEXT` entries instead of selecting npm's POSIX text shim. Terminal launches pass structured argv through the owner's existing `remote-exec` relay; the shell only supplies environment values and an encoded payload. |
 | Native conversations and provider subprocesses | `bootty-agents::NativeAgentService` | Commit catalog snapshots before publication; resume only the captured task, account and provider conversation. The catalog index keeps its own state and the conversations' order; each conversation has its own file (`native_catalog`), written before the index names it, and only when it changed. |
 | Review comment context in native drafts, queued inputs and sent prompts | `bootty-agents::native_review_comments` | Source anchors, quotes, comments and exact inline chip ranges persist with the prompt; provider payloads expand them without replacing authored text. |
 | Dictation and voice | `bootty-agents::voice` | Speech uses the Codex sign-in on this machine, from the captured or selected Codex account. Without one, dictation uses the macOS on-device recognizer, and where that is unavailable composers show no speech buttons. Voice mode is a Codex realtime call on a Codex conversation's thread, started by that conversation's session. The pinned Pi audio host owns cross-platform microphone capture and playback. `bootty-host::speech` owns bounded helper framing and process lifetime. The GUI receives text and status; credentials stay provider-owned. |
 | Persisted agent runs and dispatch attempts | `bootty-agents::OrchestrationService` | Commit before publication; recovery interrupts outstanding attempts without replaying prompts. |
-| Desktop capture, accessibility elements and input | `bootty-computer` | Disabled, denied or stale targets fail before input, as do keys for a window its app has not focused. macOS addresses input to the exact window, even behind other apps, and presses the element under a left click in an app that is not frontmost when it has a press action; Windows and X11 drive the shared pointer, so their targets must also be focused and uncovered. The in-process platform adapter validates the exact observed process and window on macOS, Windows and X11. A press re-reads its element and refuses one that moved, changed or was disabled. Elements are listed on macOS only. |
+| Desktop capture, accessibility elements and input | `bootty-computer` | Disabled, denied or stale targets fail before input, as do keys for a window its app has not focused. macOS addresses input to the exact window, even behind other apps, and presses the element under a background left click when it has a press action. Windows UIA reads elements and invokes their actions on a worker MTA with automatic focus disabled. Windows and X11 coordinate input drives the shared pointer, requiring a focused, uncovered target. Platform adapters validate the exact observed process and window. A press re-reads its element and refuses one that moved, changed or was disabled; callers can forbid pointer fallback. Elements are listed on macOS and Windows. |
 | Native browser views and validated web content | `bootty-browser` | Native window systems report capability errors; navigation and bounded page events pass through the host adapter. |
 | Local browser annotations and credential origin checks | `bootty-browser` | Bounded annotations persist atomically. Retained credential library APIs validate the document and exact origin; platform-store records remain separate from browser-managed passwords. |
 | MCP app documents and their bridge | `bootty-agents::mcp_app` (bridge and provider requests), `bootty-browser` (page, content policy and native view), `bootty-ui::McpAppPanel` (tab and approvals) | The app reaches only its own server, through its conversation's Codex thread. Tools its server doesn't mark read-only wait for the user; app tabs end with the window. |
@@ -344,8 +346,13 @@ side chats retain their captured provider identity; missing history remains an e
 Remote native launches freeze the executable, account directory and canonical project
 on the captured host. Their provider pipes use the same encrypted process transport
 as terminal and control streams; resume never resolves an account on the desktop.
-Per-launch MCP files use a private remote socket relayed to the original local tool
-lease. Credentials stay on the provider host. Pi uses its public MCP registration
+Per-launch MCP files use a private remote Unix socket relayed to the original local
+tool lease. The desktop listener uses Unix sockets or same-user Windows named pipes,
+with the same bounded, token-authenticated framing and caller captured by the lease.
+Local Windows providers launch without a console window and belong to an owned Job
+Object; conversation teardown terminates their descendants as well as the direct child.
+Remote executable, account and project paths use the provider host's POSIX syntax,
+independently of the desktop OS. Credentials stay on the provider host. Pi uses its public MCP registration
 API, or its public tool registration API on versions predating that API. Native
 child spawning creates a real mux task on the same host and starts a fresh native
 provider identity with the parent's captured account, project and configuration.
@@ -541,10 +548,14 @@ only the UI answers a card. Revocation cancels pending application work. Grants 
 pixels are not persisted or inherited by subagents. Bootty itself, known terminals
 and System Settings are never granted. Screenshot, focus and input tools reenter the
 shared command path; `bootty-computer` still checks OS permissions, secure input and
-the exact window observed by the last snapshot. A snapshot also lists the window's
-accessibility elements, and the lease keeps them with that window, so a press names an
-element by its number in the latest snapshot. Input requires that window to be
-focused; the focus command raises only that window. On macOS, where input skips the
+the exact window in the last observation. `computer_elements` lists accessibility
+elements without an image; `computer_snapshot` includes both. The lease keeps the
+elements with that window, so a press names a number from the latest observation.
+Element actions need no focus; `allow_click: false` forbids a pointer fallback.
+`computer_input` with `set_value` resolves an element number from that same observation and replaces a writable value through macOS AXValue or Windows UIA ValuePattern, without input events. The CLI/socket counterpart is `computer.set-value`. Unsupported or read-only controls fail; setting a value does not submit or navigate.
+Windows UIA uses stable numeric control types rather than localized role names,
+and its COM objects are created and released on the same worker thread.
+Keyboard and shared-pointer input require focus; the focus command raises only that window. On macOS, where input skips the
 real pointer, the UI briefly shows its own cursor where delivered input landed.
 
 The native transcript keeps assistant progress messages and final responses visible

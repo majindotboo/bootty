@@ -4562,11 +4562,15 @@ fn new_session_composer_accepts_a_pasted_folder(cx: &mut TestAppContext) {
             )],
         });
     });
-    visual.simulate_keystrokes("cmd-v");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-v"
+    } else {
+        "ctrl-v"
+    });
     draw_chrome(visual);
     probe.update(visual, |probe, _| {
         assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-            DialogIntent::TextChanged { value, .. } if value.contains(directory.path().to_str().unwrap())
+            DialogIntent::TextChanged { value, .. } if value.contains(&serde_json::to_string(&format!("{}/", directory.path().display())).unwrap())
         )));
     });
 }

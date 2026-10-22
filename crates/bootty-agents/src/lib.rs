@@ -60,6 +60,8 @@ mod orchestration;
 mod persistence;
 mod pi_terminal;
 mod provider;
+mod provider_updates;
+pub use provider_updates::{ProviderUpdate, ProviderUse};
 mod service;
 mod terminal_account_response;
 mod terminal_accounts;

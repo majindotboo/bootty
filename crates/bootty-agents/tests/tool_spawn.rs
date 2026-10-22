@@ -1,11 +1,12 @@
 use std::{
-    path::Path,
     sync::{Arc, Mutex, PoisonError},
     time::Instant,
 };
 
+#[cfg(unix)]
+use bootty_agents::ToolBridge;
 use bootty_agents::{
-    AgentCommandExecutor, AgentKind, ToolBridge, ToolLease, ToolPolicy, ToolProtocol, ToolScope,
+    AgentCommandExecutor, AgentKind, ToolLease, ToolPolicy, ToolProtocol, ToolScope,
     ToolSpawnContext, ToolSpawnRequest,
 };
 use bootty_control::{
@@ -16,6 +17,8 @@ use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::{fixture, rstest};
 use serde_json::{Value, json};
+#[cfg(unix)]
+use std::path::Path;
 
 #[fixture]
 fn binding() -> CommandTarget {

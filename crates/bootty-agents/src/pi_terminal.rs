@@ -52,6 +52,13 @@ impl PiTerminalObserver {
         self.arguments.clone()
     }
 
+    #[cfg_attr(
+        not(unix),
+        expect(
+            clippy::missing_const_for_fn,
+            reason = "The shared lifecycle API remains available; non-Unix preparation returns Unsupported."
+        )
+    )]
     pub fn stop(&self) {
         #[cfg(unix)]
         self.runtime.stop();
@@ -60,6 +67,13 @@ impl PiTerminalObserver {
     /// Worker-only barrier for the private observation transport; no provider process is owned.
     /// # Errors
     /// Returns a transport worker panic after stopping its reads.
+    #[cfg_attr(
+        not(unix),
+        expect(
+            clippy::missing_const_for_fn,
+            reason = "The shared lifecycle API remains available; non-Unix preparation returns Unsupported."
+        )
+    )]
     pub fn stop_and_wait(&mut self) -> Result<(), String> {
         #[cfg(unix)]
         self.runtime.stop_and_wait()?;

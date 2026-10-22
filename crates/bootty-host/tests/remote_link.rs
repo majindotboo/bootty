@@ -1,8 +1,11 @@
+#[cfg(unix)]
+use bootty_host::remote_link::RemoteOutput;
 use bootty_host::remote_link::{
-    RemoteLink, RemoteLinkIdentity, RemoteLinkServer, RemoteOutput, RemoteProcessRequest,
-    RemoteTerminalSize,
+    RemoteLink, RemoteLinkIdentity, RemoteLinkServer, RemoteProcessRequest, RemoteTerminalSize,
 };
+#[cfg(unix)]
 use pretty_assertions::assert_eq;
+#[cfg(unix)]
 use proptest::{
     prelude::*,
     test_runner::{Config, TestRunner},
@@ -60,6 +63,7 @@ fn request(program: &str, args: &[&str]) -> RemoteProcessRequest {
     }
 }
 
+#[cfg(unix)]
 async fn output(
     process: &mut bootty_host::remote_link::RemoteProcess,
 ) -> anyhow::Result<(Vec<u8>, Vec<u8>, i32)> {

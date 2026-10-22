@@ -1,9 +1,19 @@
 [tools]
 rust = { version = "nightly", profile = "minimal", components = ["rustfmt", "clippy", "rust-analyzer"] }
-# libghostty-vt requires Zig 0.16.x.
-zig = "0.16.0"
+# The pinned official Ghostty source needs Zig 0.17 for native Windows builds.
+zig = "0.17.0"
 "cargo:cargo-xwin" = "0.23.1"
 "cargo:cargo-zigbuild" = "0.24.0"
+
+[tools."http:ghostty-source"]
+version = "3d07ef9e28c4af05065b9e2e546b8ac8f9b62df0"
+url = "https://github.com/ghostty-org/ghostty/archive/{{ version }}.tar.gz"
+checksum = "sha256:3949e4bf93f345c7729faecac6b9916aeb5a2b745de5671a7fe8d4725040046c"
+strip_components = 1
+
+[env]
+GHOSTTY_SOURCE_DIR = { value = "{{ tools['http:ghostty-source'].path }}", tools = true }
+ZIG = { value = "{{ tools.zig.path }}/zig", tools = true }
 
 [tasks.build]
 description = "Build the bootty app with dynamic local linkage; pass --static for distribution or --fast for fast-release"

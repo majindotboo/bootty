@@ -1,13 +1,11 @@
 #[cfg(unix)]
-use std::time::Instant;
-use std::{fs, time::Duration};
-#[cfg(unix)]
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::{
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    thread,
+    fs, thread,
+    time::{Duration, Instant},
 };
 
 use assert_fs::{TempDir, prelude::*};
@@ -24,8 +22,8 @@ use bootty_terminal::terminal_engine::{
 #[cfg(unix)]
 use bootty_terminal::terminal_input_model::{KeyInput, KeyMods, TerminalKey};
 use bootty_terminal::{
-    BenchmarkTrace, OutputBacklog, SessionLaunchConfig, TerminalSession, TerminalSessionConfig,
-    TraceValue, drain_output_backlog, drain_output_backlog_with_limits,
+    BenchmarkTrace, OutputBacklog, TraceValue, drain_output_backlog,
+    drain_output_backlog_with_limits,
     geometry::TerminalGeometry,
     perf::{guard_frame_path, record_subprocess},
     scheduler::{RepaintScheduler, RepaintSignal},
@@ -35,7 +33,11 @@ use bootty_terminal::{
         output_settling, should_publish_frame_after_work,
     },
 };
-use pretty_assertions::{assert_eq, assert_ne};
+#[cfg(unix)]
+use bootty_terminal::{SessionLaunchConfig, TerminalSession, TerminalSessionConfig};
+use pretty_assertions::assert_eq;
+#[cfg(unix)]
+use pretty_assertions::assert_ne;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 #[cfg(unix)]
@@ -412,6 +414,7 @@ const REDRAW_WRITER_ROWS: &str = "BOOTTY_TEST_REDRAW_ROWS";
 const REDRAW_WRITER_LEAD: &str = "BOOTTY_TEST_REDRAW_LEAD";
 const REDRAW_WRITER_INNER_END: &str = "BOOTTY_TEST_REDRAW_INNER_END";
 const REDRAW_WRITER_TRAIL: &str = "BOOTTY_TEST_REDRAW_TRAIL";
+#[cfg(unix)]
 const REDRAW_WRITER_DONE: &str = "BOOTTY_TEST_REDRAW_DONE";
 const REDRAW_WRITE_GAP: Duration = Duration::from_micros(150);
 

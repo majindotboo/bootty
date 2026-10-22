@@ -167,17 +167,19 @@ pub fn show_desktop_notification(title: &str, body: &str) -> Result<()> {
 }
 
 /// Shows how many agents wait on the person on the app's Dock icon; zero clears it.
+#[cfg(target_os = "macos")]
 pub fn set_dock_badge(count: usize) {
-    #[cfg(target_os = "macos")]
     if let Some(main) = objc2::MainThreadMarker::new() {
         let label = (count > 0).then(|| objc2_foundation::NSString::from_str(&count.to_string()));
         objc2_app_kit::NSApplication::sharedApplication(main)
             .dockTile()
             .setBadgeLabel(label.as_deref());
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = count;
 }
+
+/// Dock badges are provided only on macOS.
+#[cfg(not(target_os = "macos"))]
+pub const fn set_dock_badge(_: usize) {}
 
 #[must_use]
 pub const fn macos_handles_non_native_fullscreen_frame(window: &WindowConfig) -> bool {

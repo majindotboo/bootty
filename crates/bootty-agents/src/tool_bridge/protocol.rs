@@ -2,7 +2,9 @@
 
 use std::time::{Duration, Instant};
 
-use bootty_computer::{ComputerAction, ComputerResultSnapshot, ElementState};
+use bootty_computer::{
+    ComputerAction, ComputerElement, ComputerResult, ComputerResultSnapshot, ElementState,
+};
 
 use crate::{NativeApplicationAction, NativeApplicationSnapshot};
 use bootty_control::CommandOutcome;
@@ -132,8 +134,9 @@ impl ToolProtocol {
         if !self.lease.revoked() && self.lease.application_mentions_supported() {
             // Advertise before the first prompt so MCP clients can cache the catalog. Authority
             // comes from a user mention, an approval card or the user's always-allowed apps.
-            tools.push(json!({"name":"computer_snapshot","description":"Capture a PNG of a macOS app's front window and list its accessibility elements, numbered, with their roles, names and frames. application is the app's bundle id or name, such as dev.zed.Zed or Zed. The first use of an app in this conversation asks the user to allow it. Omit application to capture only the host-granted Bootty window.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
-            tools.push(json!({"name":"computer_input","description":"Focus, press an element, click, type, press a key, move or scroll in the window from the app's latest computer_snapshot. Take a snapshot first. press takes an element number from that snapshot; it uses the element's own action, or clicks its center when it has none. x and y are desktop points; the snapshot caption maps its pixels to them. On macOS input reaches the window behind other apps: a left click in an app that is not frontmost presses the element under the point when it has its own action, so web content responds too, and type_text and key go to the app's focused window, so focus the window first when the app has several. Elsewhere, focus the app first. After the window moves or resizes, take a new snapshot. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"computer_snapshot","description":"Capture a PNG of an app's front window and list its accessibility elements, numbered, with their roles, names and frames. application is the app's bundle id or name, such as dev.zed.Zed or Zed. The first use of an app in this conversation asks the user to allow it. Omit application to capture only the host-granted Bootty window.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"computer_elements","description":"Read an app window through accessibility only: no image capture or focus change. Returns numbered controls with roles, labels, values and states. Use those numbers with computer_input press or set_value. Supported on macOS and Windows. App approval is required just as for computer_snapshot.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256}},"required":["application"],"additionalProperties":false},"annotations":{"readOnlyHint":true,"destructiveHint":false,"openWorldHint":false}}));
+            tools.push(json!({"name":"computer_input","description":"Set an editable value, focus, press an element, click, type, press a key, move or scroll in the window from the app's latest computer_elements or computer_snapshot observation. Observe first. set_value takes an element number and a replacement value (empty clears), using accessibility on macOS and Windows without focus, pointer or keyboard events. It does not submit the value or navigate a browser; unsupported/read-only controls return an error, with no input fallback. press takes an element number from that observation; set allow_click to false to require accessibility without pointer input. Otherwise, it uses the element's own action, or clicks its center when it has none. x and y are desktop points; the snapshot caption maps its pixels to them. On macOS input reaches the window behind other apps: a left click in an app that is not frontmost presses the element under the point when it has its own action, so web content responds too, and type_text and key go to the app's focused window, so focus the window first when the app has several. On Windows, accessibility presses also work in the background; coordinate and keyboard input require foreground focus. Other platforms require focus for input. After the window moves or resizes, refresh the observation. OS input permission applies.","inputSchema":{"type":"object","properties":{"application":{"type":"string","minLength":1,"maxLength":256},"action":application_action_schema()},"required":["application","action"],"additionalProperties":false},"annotations":{"readOnlyHint":false,"destructiveHint":false,"openWorldHint":false}}));
         }
         if self.lease.spawn_enabled() {
             let providers = self
@@ -261,7 +264,7 @@ impl ToolProtocol {
                 false,
             );
         }
-        if call.name == "computer_input"
+        if matches!(call.name.as_str(), "computer_input" | "computer_elements")
             || call.name == "computer_snapshot" && call.arguments.get("application").is_some()
         {
             return self.application_call(&call.name, call.arguments, now, commands);
@@ -348,11 +351,15 @@ impl ToolProtocol {
             application: String,
             action: NativeApplicationAction,
         }
-        let parsed = if name == "computer_snapshot" {
+        let parsed = if matches!(name, "computer_snapshot" | "computer_elements") {
             serde_json::from_value::<Snapshot>(arguments).map(|input| {
                 (
                     input.application,
-                    NativeApplicationAction::Computer(ComputerAction::Snapshot),
+                    NativeApplicationAction::Computer(if name == "computer_elements" {
+                        ComputerAction::Elements
+                    } else {
+                        ComputerAction::Snapshot
+                    }),
                 )
             })
         } else {
@@ -365,8 +372,15 @@ impl ToolProtocol {
                 false,
             );
         };
-        if name == "computer_input" && action.is_capture() {
-            return (tool_error("Use computer_snapshot to capture an app"), false);
+        if name == "computer_input"
+            && matches!(&action, NativeApplicationAction::Computer(action) if action.observes())
+        {
+            return (
+                tool_error(
+                    "Use computer_elements to inspect controls or computer_snapshot to capture an app",
+                ),
+                false,
+            );
         }
         if reference.is_empty() || reference.len() > 256 {
             return (tool_error("Name an app by bundle id or name"), false);
@@ -379,6 +393,20 @@ impl ToolProtocol {
             .lease
             .invoke_application(&reference, &action, commands, deadline);
         match &outcome {
+            CommandOutcome::Success { value, .. } if name == "computer_elements" => {
+                match serde_json::from_value::<ComputerResult>(value.clone()) {
+                    Ok(ComputerResult::Elements {
+                        elements, omitted, ..
+                    }) => (
+                        json!({"content":[{"type":"text","text":elements_text(&elements, omitted)}],"isError":false}),
+                        false,
+                    ),
+                    _ => (
+                        tool_error("Computer observation returned invalid accessibility elements"),
+                        false,
+                    ),
+                }
+            }
             CommandOutcome::Success { value, .. } if action.is_capture() => {
                 serde_json::from_value::<NativeApplicationSnapshot>(value.clone()).map_or_else(
                     |_| {
@@ -789,7 +817,7 @@ fn image_result(snapshot: &ComputerResultSnapshot) -> Value {
 fn application_snapshot_result(snapshot: &NativeApplicationSnapshot) -> Value {
     let mut result = image_result(&snapshot.image);
     let text = snapshot.unavailable.as_ref().map_or_else(
-        || elements_text(snapshot),
+        || elements_text(&snapshot.elements, snapshot.omitted),
         |reason| format!("No accessibility elements: {reason}"),
     );
     if let Some(content) = result.get_mut("content").and_then(Value::as_array_mut) {
@@ -798,12 +826,12 @@ fn application_snapshot_result(snapshot: &NativeApplicationSnapshot) -> Value {
     result
 }
 
-fn elements_text(snapshot: &NativeApplicationSnapshot) -> String {
+fn elements_text(elements: &[ComputerElement], omitted: bool) -> String {
     use std::fmt::Write as _;
     let mut text = String::from(
-        "Accessibility elements in screen order: number, role, \"name\", = value, #identifier, frame (x,y width×height in desktop points), states. Unlabeled elements show only their role and frame; match them to the image. Press one with computer_input {\"action\":\"press\",\"element\":N}.\n",
+        "Accessibility elements in screen order: number, role, \"name\", = value, #identifier, frame (x,y width×height in desktop points), states. Press one with computer_input {\"action\":\"press\",\"element\":N,\"allow_click\":false} to require an accessibility action without pointer input.\n",
     );
-    for (number, element) in (1_usize..).zip(&snapshot.elements) {
+    for (number, element) in (1_usize..).zip(elements) {
         _ = write!(text, "{number} {}", element.role);
         if let Some(name) = &element.name {
             _ = write!(text, " {name:?}");
@@ -830,10 +858,10 @@ fn elements_text(snapshot: &NativeApplicationSnapshot) -> String {
         }
         text.push('\n');
     }
-    if snapshot.elements.is_empty() {
+    if elements.is_empty() {
         text.push_str("The app reported no elements in this window.\n");
     }
-    if snapshot.omitted {
+    if omitted {
         text.push_str("More elements were left out; scroll or use coordinates for the rest.\n");
     }
     text
@@ -865,6 +893,19 @@ fn application_action_schema() -> Value {
     let mut variants = Vec::new();
     for (name, fields) in [
         ("focus", vec![]),
+        (
+            "set_value",
+            vec![
+                (
+                    "element",
+                    json!({"type":"integer","minimum":1,"maximum":bootty_computer::MAX_ELEMENTS}),
+                ),
+                (
+                    "value",
+                    json!({"type":"string","maxLength":4096,"description":"Replacement value; empty clears. Does not submit or navigate."}),
+                ),
+            ],
+        ),
         (
             "press",
             vec![(
@@ -925,6 +966,9 @@ fn application_action_schema() -> Value {
         for (field, schema) in fields {
             required.push(field);
             properties.insert(field.into(), schema);
+        }
+        if name == "press" {
+            properties.insert("allow_click".into(), json!({"type":"boolean","default":true,"description":"Set false to require an accessibility action and forbid pointer fallback."}));
         }
         variants.push(json!({"type":"object","properties":properties,"required":required,"additionalProperties":false}));
     }

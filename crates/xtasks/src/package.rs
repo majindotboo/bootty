@@ -48,13 +48,11 @@ pub(crate) struct Layout {
     #[cfg(unix)]
     pub bundle_identifier: String,
     pub profile: &'static str,
-    #[cfg(unix)]
     pub daemon_profile: &'static str,
     pub linkage: Linkage,
     pub dist_dir: PathBuf,
     pub target_root: PathBuf,
     pub daemon_output_dir: PathBuf,
-    #[cfg(unix)]
     pub all_daemons: bool,
 }
 
@@ -104,7 +102,6 @@ impl Layout {
             #[cfg(unix)]
             bundle_identifier: names.bundle_identifier().to_owned(),
             profile,
-            #[cfg(unix)]
             daemon_profile: if args.fast {
                 "fast-release"
             } else {
@@ -114,7 +111,6 @@ impl Layout {
             dist_dir,
             target_root,
             daemon_output_dir,
-            #[cfg(unix)]
             all_daemons: args.all_daemons || env::var_os("BOOTTY_DAEMON_OUTPUT_DIR").is_some(),
         })
     }
@@ -127,7 +123,6 @@ impl Layout {
         }
     }
 
-    #[cfg(unix)]
     pub(crate) fn daemon_profile_args(&self) -> Vec<&'static str> {
         match self.daemon_profile {
             "release" => vec!["--release"],

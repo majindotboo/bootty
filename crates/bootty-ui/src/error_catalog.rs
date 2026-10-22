@@ -144,7 +144,17 @@ pub const fn command_send_message(error: bootty_control::AppCommandSendError) ->
 #[must_use]
 pub fn needs_sign_in(message: &str) -> bool {
     let lower = bootty_agents::native_error_message(message).to_ascii_lowercase();
-    lower.contains("not logged in") || lower.contains("sign in") || lower.contains("unauthorized")
+    [
+        "not logged in",
+        "sign in",
+        "unauthorized",
+        "not authenticated",
+        "authentication failed",
+        "auth login",
+        "unable to verify organization for the current authentication token",
+    ]
+    .iter()
+    .any(|cause| lower.contains(cause))
 }
 
 /// A provider rejected this model request; another explicit attempt can use the same process.
@@ -171,6 +181,11 @@ fn known_cause(message: &str) -> Option<&'static str> {
             .any(|subject| lower.contains(subject))
     {
         return Some("This conversation is archived. Unarchive it to continue.");
+    }
+    if lower.contains("unable to verify organization") {
+        return Some(
+            "Sign in with an account allowed by this machine's organization policy, then retry.",
+        );
     }
     if needs_sign_in(&message) {
         return Some("Sign in to the selected provider account, then retry.");

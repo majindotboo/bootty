@@ -811,11 +811,9 @@ fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<Se
             (
                 "provider.update",
                 "Update agent",
-                "Uses the detected installer. Close active tabs first.",
+                "Uses the detected installer when this provider has no active processes.",
                 "Update…",
-                cfg!(unix)
-                    && has_session
-                    && !remote
+                !remote
                     && status
                         .as_ref()
                         .is_some_and(|status| status.installer.is_some())

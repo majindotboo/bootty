@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 #[fixture]
 fn native_system() -> Arc<dyn PlatformTextSystem> {
-    let system = wrap_text_system(Arc::new(NoopTextSystem), FontMappings::default());
+    let system = wrap_text_system(Arc::new(NoopTextSystem), FontMappings::default()).unwrap();
     BoottyAssets
         .load_fonts(&TextSystem::new(system.clone()))
         .unwrap();
@@ -103,7 +103,7 @@ fn pixels(system: &dyn PlatformTextSystem, id: FontId, glyph: GlyphId) -> Vec<u8
 #[gpui_kit::test]
 fn sf_pro_is_selectable_and_renders_the_macos_system_face(cx: &TestAppContext) {
     let mappings = FontMappings::default();
-    let system = wrap_text_system(Arc::new(NoopTextSystem), mappings.clone());
+    let system = wrap_text_system(Arc::new(NoopTextSystem), mappings.clone()).unwrap();
     BoottyAssets
         .load_fonts(&TextSystem::new(system.clone()))
         .unwrap();
@@ -136,7 +136,7 @@ fn sf_pro_is_selectable_and_renders_the_macos_system_face(cx: &TestAppContext) {
 #[gpui_kit::test]
 fn accepted_ui_styles_reach_exact_native_faces_and_keep_old_snapshots(cx: &TestAppContext) {
     let mappings = FontMappings::default();
-    let system = wrap_text_system(Arc::new(NoopTextSystem), mappings.clone());
+    let system = wrap_text_system(Arc::new(NoopTextSystem), mappings.clone()).unwrap();
     BoottyAssets
         .load_fonts(&TextSystem::new(system.clone()))
         .unwrap();

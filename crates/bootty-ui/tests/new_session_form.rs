@@ -145,8 +145,17 @@ fn initial_attachments_are_separate_local_paths_and_survive_mode_switches(form: 
         ..Config::default()
     })
     .run(
-        &proptest::collection::vec("/tmp/[a-z]{1,24}\\.png", 1..17),
-        |paths| {
+        &proptest::collection::vec("[a-z]{1,24}\\.png", 1..17),
+        |names| {
+            let paths = names
+                .iter()
+                .map(|name| {
+                    std::env::temp_dir()
+                        .join(name)
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect::<Vec<_>>();
             let mut form = form.borrow_mut();
             form.draft.attachments = paths
                 .iter()
@@ -189,8 +198,12 @@ fn attachment_only_enter_starts_an_agent_without_shell_fallback(form: NewSession
         presentation::dialogs::{NEW_SESSION_ID, NewSessionPickerEvent},
     };
     let mut dialog = ready_dialog(form).expect("project discovery");
+    let path = std::env::temp_dir()
+        .join("screenshot.png")
+        .to_string_lossy()
+        .into_owned();
     let attachment = NewSessionAttachment {
-        path: "/tmp/screenshot.png".into(),
+        path: path.clone().into(),
         size_bytes: 10,
         prompt_ranges: Vec::new(),
         preview: None,
@@ -210,7 +223,10 @@ fn attachment_only_enter_starts_an_agent_without_shell_fallback(form: NewSession
         panic!("a file-only draft submits an agent without arming shell fallback");
     };
     assert_eq!(invocation.command, "agents.native.start");
-    assert_eq!(invocation.arguments[10], "[\"/tmp/screenshot.png\"]");
+    assert_eq!(
+        invocation.arguments[10],
+        serde_json::to_string(&[path]).unwrap()
+    );
     assert_eq!(
         dialog
             .draft()
@@ -1712,4 +1728,154 @@ fn add_menu_task_controls_reach_creation_and_native_tab_drafts(
             .map(|field| field.value.as_str()),
         Some("Improve the composer")
     );
+}
+
+fn provider_choices(form: &NewSessionForm) -> Vec<String> {
+    form.spec(false)
+        .fields
+        .into_iter()
+        .find(|field| field.id == "provider")
+        .and_then(|field| match field.kind {
+            bootty_ui::gpui::DialogFieldKind::Choice(choices) => Some(choices),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+#[rstest]
+fn missing_provider_is_hidden_but_auth_and_network_failures_remain_selectable(
+    mut form: NewSessionForm,
+) {
+    let requests = form.model_catalog_invocations();
+    let pi = requests
+        .iter()
+        .find(|request| request.arguments[0] == "pi")
+        .unwrap();
+    let claude = requests
+        .iter()
+        .find(|request| request.arguments[0] == "claude")
+        .unwrap();
+    form.set_provider_unavailable_for(pi, "Pi is not installed".into());
+    form.set_provider_catalog_for(claude, Err("Unable to verify organization for the current authentication token. Run claude auth login".into()));
+    assert_eq!(provider_choices(&form), ["Codex", "Claude"]);
+    form.change_field("provider", "Claude");
+    assert_eq!(form.draft.provider, "claude");
+    assert!(form.sign_in_invocation().is_some());
+    form.set_provider_catalog_for(claude, Err("Network unavailable".into()));
+    assert_eq!(provider_choices(&form), ["Codex", "Claude"]);
+    assert!(form.sign_in_invocation().is_none());
+}
+
+#[rstest]
+fn missing_selected_provider_preserves_draft_and_availability_is_host_scoped(
+    mut form: NewSessionForm,
+) {
+    form.change_text("Keep this prompt");
+    form.change_field("provider", "Pi");
+    let request = form.model_catalog_invocation().unwrap();
+    form.set_provider_unavailable_for(&request, "Pi is not installed".into());
+    assert_eq!(form.draft.provider, "codex");
+    assert_eq!(form.draft.prompt, "Keep this prompt");
+    form.change_field("provider", "Pi");
+    assert_eq!(
+        form.draft.provider, "codex",
+        "hidden providers cannot be selected through a stale event"
+    );
+    form.change_field("host", "Another host");
+    assert!(
+        provider_choices(&form).contains(&"Pi".into()),
+        "another host owns its availability"
+    );
+    form.change_field("host", "Current host");
+    assert!(!provider_choices(&form).contains(&"Pi".into()));
+    form.set_provider_catalog_for(&request, Err("Not logged in".into()));
+    assert!(
+        provider_choices(&form).contains(&"Pi".into()),
+        "a refreshed installed provider reappears"
+    );
+}
+
+#[rstest]
+fn sign_in_captures_selected_profile_program_directory_and_space(mut form: NewSessionForm) {
+    form.change_text("Keep this draft for after sign-in");
+    form.change_field("profile", "Work (work)");
+    let catalog = form.model_catalog_invocation().unwrap();
+    form.set_provider_catalog_for(&catalog, Err("Not logged in".into()));
+    let sign_in = form.sign_in_invocation().unwrap();
+    assert_eq!(sign_in.command, "agents.codex.account.login");
+    assert_eq!(sign_in.target, catalog.target);
+    assert_eq!(
+        sign_in.arguments,
+        ["/project/current", "/provider/custom-codex", "work"]
+    );
+    assert_eq!(form.draft.prompt, "Keep this draft for after sign-in");
+    let mut dialog = ready_dialog(form).unwrap();
+    let event = dialog
+        .apply(&start_intent("sign-in-provider"), &[])
+        .unwrap();
+    let bootty_ui::presentation::dialogs::NewSessionPickerEvent::Authenticate(invocation) = event
+    else {
+        panic!("sign-in must not submit the prompt");
+    };
+    assert_eq!(invocation, sign_in);
+    assert_eq!(
+        dialog.draft().unwrap().prompt,
+        "Keep this draft for after sign-in"
+    );
+}
+
+#[rstest]
+fn launch_auth_failure_uses_the_same_sign_in_surface_and_retains_prompt(mut form: NewSessionForm) {
+    form.change_text("Keep this failed prompt");
+    form.error = Some("Agent process ended: run claude auth login".into());
+    let spec = form.spec(false);
+    assert_eq!(spec.model_error, form.error);
+    assert!(
+        spec.rows[0].detail.is_none(),
+        "auth failure is shown once with its action"
+    );
+    assert!(form.sign_in_invocation().is_some());
+    assert_eq!(form.draft.prompt, "Keep this failed prompt");
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+fn catalog_failures_hide_only_confirmed_missing_executables(
+    form: NewSessionForm,
+    #[case] executable_missing: bool,
+) {
+    let invocation = form.model_catalog_invocation().unwrap();
+    let mut dialog = ready_dialog(form).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    dialog.catalog_started(invocation, receiver);
+    let outcome = if executable_missing {
+        bootty_control::CommandOutcome::Failed {
+            code: "provider_not_installed".into(),
+            message: "Codex is not installed".into(),
+        }
+    } else {
+        bootty_control::CommandOutcome::Unavailable {
+            message: "Native conversation storage is unavailable".into(),
+        }
+    };
+    sender.send(outcome).unwrap();
+    let _ = dialog.poll();
+    let spec = dialog.spec();
+    let field = spec
+        .fields
+        .iter()
+        .find(|field| field.id == "provider")
+        .unwrap();
+    let bootty_ui::gpui::DialogFieldKind::Choice(choices) = &field.kind else {
+        panic!("provider chooser");
+    };
+    assert_eq!(choices.contains(&"Codex".to_owned()), !executable_missing);
+    if !executable_missing {
+        assert_eq!(field.value, "Codex");
+        assert_eq!(
+            spec.model_error.as_deref(),
+            Some("Native conversation storage is unavailable")
+        );
+    }
 }

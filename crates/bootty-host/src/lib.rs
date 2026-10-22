@@ -1,5 +1,6 @@
 pub mod clipboard_image;
 mod exec;
+mod executable;
 pub mod file_reader;
 pub mod file_watch;
 pub mod files;
@@ -15,7 +16,9 @@ pub mod text_file;
 
 pub use exec::{
     REMOTE_DAEMON_PROGRAM, REMOTE_DAEMON_PROTOCOL_VERSION, remote_exec_program, run_remote_command,
+    windows_terminal_argv,
 };
+pub use executable::{find_executable, find_executable_in, local_command};
 pub use process::{
     CancellableCommandRunner, CommandBytes, CommandCancellation, CommandOutput, CommandRunner,
     SystemCommandRunner, require_success,

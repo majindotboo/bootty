@@ -454,7 +454,7 @@ fn captures_require_both_feature_policy_and_a_host_captured_command(binding: Com
         .as_array()
         .unwrap()
         .len(),
-        6
+        7
     );
     let grant = lease(binding.clone(), policy, captures).unwrap();
     grant.bind(&binding, terminal()).unwrap();
@@ -473,6 +473,7 @@ fn captures_require_both_feature_policy_and_a_host_captured_command(binding: Com
             "terminal_read",
             "browser_snapshot",
             "computer_snapshot",
+            "computer_elements",
             "computer_input"
         ]
     );
@@ -1189,6 +1190,24 @@ fn app_snapshots_number_elements_that_presses_name(binding: CommandTarget) {
         calls.lock().unwrap().last(),
         Some(&json!({"action":"press","element":2}))
     );
+    let action_only = json!({"name":"computer_input","arguments":{"application":"Test","action":{"action":"press","element":2,"allow_click":false}}});
+    assert_eq!(
+        request(&protocol, &action_only, &commands).unwrap()["result"]["isError"],
+        false
+    );
+    assert_eq!(
+        calls.lock().unwrap().last(),
+        Some(&json!({"action":"press","element":2,"allow_click":false}))
+    );
+    let set = json!({"name":"computer_input","arguments":{"application":"Test","action":{"action":"set_value","element":2,"value":"background value"}}});
+    assert_eq!(
+        request(&protocol, &set, &commands).unwrap()["result"]["isError"],
+        false
+    );
+    assert_eq!(
+        calls.lock().unwrap().last(),
+        Some(&json!({"action":"set_value","element":2,"value":"background value"}))
+    );
     let zero = json!({"name":"computer_input","arguments":{"application":"Test","action":{"action":"press","element":0}}});
     assert_eq!(
         request(&protocol, &zero, &commands).unwrap()["result"]["isError"],
@@ -1223,4 +1242,35 @@ fn element_numbers_follow_the_latest_snapshot(binding: CommandTarget) {
     access.observe(app_mention().target, vec![inbox.clone()]);
     assert_eq!(access.element(number(1)), Some(inbox));
     assert_eq!(access.element(number(2)), None);
+}
+
+#[rstest]
+fn app_elements_observe_without_capturing_an_image(binding: CommandTarget) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
+    grant.grant_applications(&conversation(), &[]).unwrap();
+    let protocol = ToolProtocol::new(grant);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let received = calls.clone();
+    let commands = move |invocation: CommandInvocation, _: Instant, _: CommandCancellation| {
+        let action: Value = serde_json::from_str(&invocation.arguments[3]).unwrap();
+        received.lock().unwrap().push(action.clone());
+        assert_eq!(action, json!({"action":"elements"}));
+        CommandOutcome::Success {
+            value: json!({"result":"elements", "target":app_mention().target,
+                "elements":[element(1, "Button", Some("Seven"), &json!([]))], "omitted":false}),
+            warnings: Vec::new(),
+        }
+    };
+    let call = json!({"name":"computer_elements","arguments":{"application":"Test"}});
+    let result = request(&protocol, &call, &commands).unwrap()["result"].clone();
+    assert_eq!(result["isError"], false);
+    let content = result["content"].as_array().unwrap();
+    assert!(content.iter().all(|item| item["type"] == "text"));
+    assert!(content.iter().any(|item| {
+        item["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("1 Button \"Seven\""))
+    }));
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }

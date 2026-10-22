@@ -228,6 +228,7 @@ struct Fake {
     posted: Mutex<Vec<InputEvent>>,
     raised: Mutex<Vec<u32>>,
     pressed: Mutex<Vec<Vec<u16>>>,
+    values: Mutex<Vec<(Vec<u16>, String)>>,
 }
 
 impl Fake {
@@ -282,6 +283,7 @@ fn button() -> ComputerElement {
 fn press() -> ComputerAction {
     ComputerAction::Press {
         element: Box::new(button()),
+        allow_click: true,
     }
 }
 
@@ -408,6 +410,14 @@ impl Desktop for Fake {
                 .push(path.to_vec());
         }
         Ok(self.pressable)
+    }
+
+    fn set_value(&self, _: &NativeWindow, path: &[u16], value: &str) -> Result<(), ComputerError> {
+        self.values
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push((path.to_vec(), value.to_owned()));
+        Ok(())
     }
 
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image> {
@@ -700,6 +710,33 @@ async fn element_actions_need_no_focus(
     assert_eq!(fake.posted(), []);
 }
 
+#[rstest]
+#[tokio::test]
+async fn action_only_press_never_falls_back_to_pointer_input(
+    target: ComputerTarget,
+    #[values(false, true)] pressable: bool,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.pressable = pressable;
+    let fake = Arc::new(fake);
+    let action: ComputerAction = serde_json::from_value(serde_json::json!({
+        "action": "press", "element": button(), "allow_click": false,
+    }))
+    .unwrap();
+    let result = run(&fake, &target, &action).await;
+    if pressable {
+        assert_eq!(
+            result.unwrap(),
+            ComputerResult::Pressed {
+                method: PressMethod::Action
+            }
+        );
+    } else {
+        assert!(matches!(result, Err(ComputerError::InvalidAction(_))));
+    }
+    assert_eq!(fake.posted(), []);
+}
+
 /// Apps that draw their own controls often have no press action; those elements get a click at
 /// their center instead, and the result says which happened.
 #[rstest]
@@ -736,6 +773,9 @@ const fn move_element(element: &mut ComputerElement) {
 fn rename_element(element: &mut ComputerElement) {
     element.name = Some("Forward".into());
 }
+fn change_element_identifier(element: &mut ComputerElement) {
+    element.identifier = Some("different-control".into());
+}
 fn replace_element(element: &mut ComputerElement) {
     element.path = vec![0, 3];
 }
@@ -747,6 +787,7 @@ fn disable_element(element: &mut ComputerElement) {
 #[rstest]
 #[case::moved(move_element)]
 #[case::renamed(rename_element)]
+#[case::reidentified(change_element_identifier)]
 #[case::gone(replace_element)]
 #[case::disabled(disable_element)]
 #[tokio::test]
@@ -933,4 +974,80 @@ async fn icons_return_pngs_only_for_known_apps(target: ComputerTarget) {
         .map(|index| format!("com.example.app{index}"))
         .collect();
     assert!(fake.computer().icons(&too_many).await.is_err());
+}
+
+#[rstest]
+#[case(InputRoute::Shared, "hello")]
+#[case(InputRoute::Window, "")]
+#[tokio::test]
+async fn set_value_reaches_background_element_without_focus_or_events(
+    target: ComputerTarget,
+    #[case] route: InputRoute,
+    #[case] value: &str,
+) {
+    let fake = Arc::new(Fake {
+        windows: vec![window(&target)],
+        route: Some(route),
+        frontmost: Some(999),
+        elements: vec![button()],
+        ..Fake::default()
+    });
+    let result = fake
+        .computer()
+        .execute(
+            &ComputerAccess::from_user_setting(true),
+            &target,
+            &ComputerAction::SetValue {
+                element: Box::new(button()),
+                value: value.into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(result, ComputerResult::Posted);
+    assert_eq!(
+        *fake.values.lock().unwrap(),
+        vec![(button().path, value.to_owned())]
+    );
+    assert_eq!(fake.posted(), Vec::<InputEvent>::new());
+    assert!(fake.raised.lock().unwrap().is_empty());
+}
+
+#[rstest]
+#[case(false)]
+#[case(true)]
+#[tokio::test]
+async fn set_value_refuses_stale_or_disabled_elements(
+    target: ComputerTarget,
+    #[case] disabled: bool,
+) {
+    let mut current = button();
+    if disabled {
+        current.states.push(ElementState::Disabled);
+    } else {
+        current.identifier = Some("replacement".into());
+    }
+    let fake = Arc::new(Fake {
+        windows: vec![window(&target)],
+        elements: vec![current],
+        ..Fake::default()
+    });
+    let result = fake
+        .computer()
+        .execute(
+            &ComputerAccess::from_user_setting(true),
+            &target,
+            &ComputerAction::SetValue {
+                element: Box::new(button()),
+                value: "text".into(),
+            },
+        )
+        .await;
+    if disabled {
+        assert!(matches!(result, Err(ComputerError::InvalidAction(_))));
+    } else {
+        assert!(matches!(result, Err(ComputerError::StaleElement)));
+    }
+    assert!(fake.values.lock().unwrap().is_empty());
+    assert_eq!(fake.posted(), Vec::<InputEvent>::new());
 }

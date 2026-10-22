@@ -148,8 +148,15 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
         (
             "computer.press",
             "Press Computer Element",
-            "Press an element from computer.elements in the exact selected window: its own action, or a click at its center.",
-            &["target", "element"][..],
+            "Press a listed element. Set allow-click to false to require its accessibility action without pointer input.",
+            &["target", "element", "allow-click"][..],
+            MutationClass::Write,
+        ),
+        (
+            "computer.set-value",
+            "Set Computer Element Value",
+            "Replace a listed editable element's value through accessibility, without focus, clicks or key events. An empty value clears it. This does not submit the value.",
+            &["target", "element", "value"][..],
             MutationClass::Write,
         ),
     ] {
@@ -164,10 +171,13 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
                         _ => ValueType::String,
                     },
                 );
-                argument.required =
-                    !matches!(*name, "button" | "modifiers") && id != "computer.snapshot";
+                argument.required = !matches!(*name, "button" | "modifiers" | "allow-click")
+                    && id != "computer.snapshot";
                 if *name == "button" {
                     argument.choices = ["left", "right", "middle"].map(str::to_owned).to_vec();
+                }
+                if *name == "allow-click" {
+                    argument.choices = ["true", "false"].map(str::to_owned).to_vec();
                 }
                 if matches!(*name, "delta-x" | "delta-y") {
                     argument.minimum = Some(-10_000);
@@ -284,9 +294,8 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
         )
         .map_err(|()| invalid())?,
         "computer.elements" if invocation.arguments.len() == 1 => ComputerAction::Elements,
-        "computer.press" => ComputerAction::Press {
-            element: Box::new(serde_json::from_str(argument(1)?).map_err(|_| invalid())?),
-        },
+        "computer.press" => resolve_press(&invocation.arguments).ok_or_else(invalid)?,
+        "computer.set-value" => resolve_set_value(&invocation.arguments).ok_or_else(invalid)?,
         _ => return Err(invalid()),
     };
     target.validate_action(&action).map_err(|_| invalid())?;
@@ -294,6 +303,27 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
         target,
         action,
         destination,
+    })
+}
+
+fn resolve_set_value(arguments: &[String]) -> Option<ComputerAction> {
+    let [_, element, value] = arguments else {
+        return None;
+    };
+    Some(ComputerAction::SetValue {
+        element: Box::new(serde_json::from_str(element).ok()?),
+        value: value.clone(),
+    })
+}
+
+fn resolve_press(arguments: &[String]) -> Option<ComputerAction> {
+    let element = serde_json::from_str(arguments.get(1)?).ok()?;
+    let allow_click = arguments
+        .get(2)
+        .map_or(Some(true), |value| value.parse().ok())?;
+    Some(ComputerAction::Press {
+        element: Box::new(element),
+        allow_click,
     })
 }
 

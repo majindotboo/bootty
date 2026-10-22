@@ -909,6 +909,17 @@ impl NativeAgentService {
         self.cache_provider_catalog(config, &catalog)
     }
 
+    /// Discard discovery results after an installation changes; favorites remain intact.
+    /// # Errors
+    /// Returns a storage error without publishing a partially invalidated catalog.
+    pub fn invalidate_provider_catalogs(&self) -> Result<(), String> {
+        let _mutation = lock(&self.mutation);
+        let mut candidate = lock(&self.store).clone();
+        candidate.model_catalogs.clear();
+        candidate.model_catalog_aliases.clear();
+        self.commit(candidate)
+    }
+
     /// Retain a complete provider catalog under its captured account and project identity.
     /// # Errors
     /// Returns an invalid captured launch identity.

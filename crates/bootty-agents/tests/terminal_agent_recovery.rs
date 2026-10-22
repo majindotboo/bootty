@@ -6,6 +6,7 @@ use bootty_control::{CommandTarget, ResourceKind};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
+mod support;
 
 fn record(provider: AgentKind, prompt: &str) -> TerminalAgentRecord {
     TerminalAgentRecord {
@@ -15,8 +16,16 @@ fn record(provider: AgentKind, prompt: &str) -> TerminalAgentRecord {
         location: None,
         launch: AgentLaunch {
             program: provider.default_program().to_owned(),
-            cwd: Some("/project".to_owned()),
-            account_directory: Some("/captured-account".to_owned()),
+            cwd: Some(
+                support::synthetic_path("project")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            account_directory: Some(
+                support::synthetic_path("captured-account")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             arguments: vec![
                 "--model".to_owned(),
                 "captured-model".to_owned(),
@@ -26,8 +35,11 @@ fn record(provider: AgentKind, prompt: &str) -> TerminalAgentRecord {
         },
         observation: AgentObservation {
             session_id: Some("66812ac6-48bc-4e7f-a982-7997a82d28bc".to_owned()),
-            session_file: (provider == AgentKind::Pi)
-                .then(|| "/captured-account/session.jsonl".to_owned()),
+            session_file: (provider == AgentKind::Pi).then(|| {
+                support::synthetic_path("captured-account/session.jsonl")
+                    .to_string_lossy()
+                    .into_owned()
+            }),
             status: TerminalAgentStatus::Unavailable,
             detail: None,
         },
@@ -154,7 +166,11 @@ fn changed_source_is_not_replaced_by_stale_preparation(#[case] change: &str) {
     } else {
         let mut launch = source.launch.clone();
         if change == "account" {
-            launch.account_directory = Some("/other-account".to_owned());
+            launch.account_directory = Some(
+                support::synthetic_path("other-account")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
         } else {
             launch.arguments = vec!["--model".to_owned(), "other-model".to_owned()];
         }

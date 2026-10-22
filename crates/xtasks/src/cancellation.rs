@@ -58,6 +58,6 @@ fn signal_exit_code(status: ExitStatus) -> i32 {
 }
 
 #[cfg(not(unix))]
-fn signal_exit_code(_status: ExitStatus) -> i32 {
+const fn signal_exit_code(_status: ExitStatus) -> i32 {
     1
 }

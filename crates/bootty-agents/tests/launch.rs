@@ -1,5 +1,6 @@
 use bootty_agents::{AgentKind, AgentLaunch, LaunchShell};
 use pretty_assertions::assert_eq;
+#[cfg(unix)]
 use proptest::prelude::*;
 use rstest::rstest;
 
@@ -19,6 +20,24 @@ fn launch(args: &[&str]) -> AgentLaunch {
 #[case("bounded", true)]
 fn literal_argument_validation_preserves_text(#[case] argument: &str, #[case] valid: bool) {
     assert_eq!(launch(&[argument]).validate().is_ok(), valid);
+}
+
+#[rstest]
+#[case(LaunchShell::Posix, "/home/user/.codex", true)]
+#[case(LaunchShell::Posix, "relative/.codex", false)]
+#[case(LaunchShell::Posix, r"C:\Users\user\.codex", false)]
+#[case(LaunchShell::Windows, r"C:\Users\user\.codex", true)]
+#[case(LaunchShell::Windows, r"\\server\share\.codex", true)]
+#[case(LaunchShell::Windows, r"C:relative", false)]
+#[case(LaunchShell::Windows, r"\relative", false)]
+fn account_paths_follow_the_provider_host_shell(
+    #[case] shell: LaunchShell,
+    #[case] account: &str,
+    #[case] valid: bool,
+) {
+    let mut launch = launch(&[]);
+    launch.account_directory = Some(account.into());
+    assert_eq!(launch.shell_command(AgentKind::Codex, shell).is_ok(), valid);
 }
 
 #[rstest]
@@ -136,6 +155,21 @@ fn windows_launch_uses_encoded_arguments_instead_of_cmd_interpolation() {
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
         .collect::<Vec<_>>();
     let script = String::from_utf16(&utf16).unwrap();
-    assert!(script.contains("& 'agent' 'a&b' 'x''y' '$HOME' '%PATH%'"));
+    let payload = script
+        .split("'remote-exec','")
+        .nth(1)
+        .unwrap()
+        .split('\'')
+        .next()
+        .unwrap();
+    let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+    assert_eq!(payload["program"], "agent");
+    assert_eq!(
+        payload["args"],
+        serde_json::json!(["a&b", "x'y", "$HOME", "%PATH%"])
+    );
     assert!(!command.contains("%PATH%"));
 }

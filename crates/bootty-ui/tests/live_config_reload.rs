@@ -8,14 +8,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use assert_fs::{TempDir, fixture::ChildPath, prelude::*};
+#[cfg(unix)]
+use bootty_config::config::MultiplexerBackendConfig;
 use bootty_config::{
     color::Color,
     config::{
-        BoottyConfig, CursorStyleConfig, MultiplexerBackendConfig, WindowFullscreen,
-        commit_config_document, load_config_from_path, load_or_create_config_document,
+        BoottyConfig, CursorStyleConfig, WindowFullscreen, commit_config_document,
+        load_config_from_path, load_or_create_config_document,
     },
     settings_schema::{SettingValue, SettingsSchema},
 };
+#[cfg(unix)]
 use bootty_mux::snapshot::MuxPaneAnchor;
 use bootty_ui::settings_session::{
     AcceptedSettings, Catalogs, SettingsEffect, SettingsOutcome, SettingsSession,

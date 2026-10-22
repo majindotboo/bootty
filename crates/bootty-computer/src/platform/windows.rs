@@ -1,5 +1,5 @@
-//! Windows: top-level window enumeration, `PrintWindow` capture and `SendInput`. Windows has no
-//! per-process input delivery, so input drives the real pointer and needs the window in front.
+//! Windows: window enumeration, `PrintWindow` capture, UIA element actions and `SendInput`.
+//! UIA actions leave automatic focus disabled. Pointer and key input need the window in front.
 //!
 //! Deliberate limit: window messages such as `WM_LBUTTONDOWN` reach background windows, but apps
 //! that read raw input or the real key state ignore them. Address input to the window that way if
@@ -11,6 +11,8 @@
 )]
 
 use std::{ffi::c_void, sync::Arc};
+
+mod accessibility;
 
 use windows::{
     Win32::{
@@ -57,8 +59,8 @@ use windows::{
 };
 
 use crate::{
-    ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier, MouseButton,
-    PermissionStatus,
+    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier,
+    MouseButton, PermissionStatus,
     desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count},
 };
 
@@ -74,6 +76,35 @@ pub fn native() -> Arc<dyn Desktop> {
 struct WindowsDesktop;
 
 impl Desktop for WindowsDesktop {
+    fn elements(
+        &self,
+        window: &NativeWindow,
+        limit: usize,
+    ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        accessibility::elements(window, limit)
+    }
+
+    fn element(
+        &self,
+        window: &NativeWindow,
+        path: &[u16],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
+        accessibility::element(window, path)
+    }
+
+    fn press(&self, window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
+        accessibility::press(window, path)
+    }
+
+    fn set_value(
+        &self,
+        window: &NativeWindow,
+        path: &[u16],
+        value: &str,
+    ) -> Result<(), ComputerError> {
+        accessibility::set_value(window, path, value)
+    }
+
     fn status(&self) -> ComputerStatus {
         // Windows has no capture or input permission for desktop apps.
         ComputerStatus {

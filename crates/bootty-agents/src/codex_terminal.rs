@@ -117,6 +117,8 @@ impl CodexTerminalObserver {
         let directory =
             std::env::temp_dir().join(format!("codex-{:016x}", u64::from_ne_bytes(random)));
         let arguments = provider_arguments(&launch.arguments).map_err(io::Error::other)?;
+        let provider_use =
+            crate::ProviderUse::acquire(&launch.program).map_err(io::Error::other)?;
         std::fs::DirBuilder::new().mode(0o700).create(&directory)?;
         let endpoint = directory.join("tui.sock");
         let provider_endpoint = directory.join("provider.sock");
@@ -150,6 +152,7 @@ impl CodexTerminalObserver {
             child,
             directory,
             terminated: false,
+            _provider_use: provider_use,
         };
         let mut arguments = vec![
             "--remote".to_owned(),
@@ -300,6 +303,7 @@ struct OwnedProvider {
     child: Child,
     directory: PathBuf,
     terminated: bool,
+    _provider_use: Option<crate::ProviderUse>,
 }
 
 #[cfg(unix)]

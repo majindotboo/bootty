@@ -3,6 +3,34 @@ use bootty_config::{config::load_config_from_path, settings_schema::SettingsSche
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
+#[test]
+fn automatic_provider_updates_default_on_and_can_be_disabled() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let file = directory.child("config.toml");
+    file.write_str("").unwrap();
+    assert!(
+        load_config_from_path(file.path())
+            .unwrap()
+            .agents
+            .auto_update
+    );
+    file.write_str("[agents]\nauto-update = false\n").unwrap();
+    assert!(
+        !load_config_from_path(file.path())
+            .unwrap()
+            .agents
+            .auto_update
+    );
+    assert_eq!(
+        SettingsSchema::builtin()
+            .get("agents.auto-update")
+            .unwrap()
+            .page
+            .as_ref(),
+        "providers"
+    );
+}
+
 #[rstest]
 #[case(false)]
 #[case(true)]
@@ -40,14 +68,26 @@ fn agent_spawning_is_an_explicit_scalar_permission(#[case] enabled: bool) {
 fn account_and_launch_preferences_round_trip(#[case] provider: &str) {
     let directory = assert_fs::TempDir::new().unwrap();
     let file = directory.child("config.toml");
-    file.write_str(&format!("[agents.{provider}]\nenabled = false\nprogram = '/bin/provider'\nselected = 'work'\n[agents.{provider}.profiles.work]\nname = 'Work'\ndirectory = '/account/store'\narguments = ['--model', 'literal; $HOME']\n")).unwrap();
+    let program = directory
+        .path()
+        .join("bin/provider")
+        .to_string_lossy()
+        .into_owned();
+    let account = directory
+        .path()
+        .join("account/store")
+        .to_string_lossy()
+        .into_owned();
+    let program_toml = toml_edit::value(program.as_str());
+    let account_toml = toml_edit::value(account.as_str());
+    file.write_str(&format!("[agents.{provider}]\nenabled = false\nprogram = {program_toml}\nselected = 'work'\n[agents.{provider}.profiles.work]\nname = 'Work'\ndirectory = {account_toml}\narguments = ['--model', 'literal; $HOME']\n")).unwrap();
     let config = load_config_from_path(file.path()).unwrap();
     let preferences = config.agents.provider(provider).unwrap();
     assert!(!preferences.enabled);
-    assert_eq!(preferences.program, "/bin/provider");
+    assert_eq!(preferences.program, program);
     let selected = preferences.selected_profile().unwrap();
     assert_eq!(selected.name, "Work");
-    assert_eq!(selected.directory.as_deref(), Some("/account/store"));
+    assert_eq!(selected.directory.as_deref(), Some(account.as_str()));
     assert_eq!(selected.arguments, ["--model", "literal; $HOME"]);
     let schema = SettingsSchema::builtin();
     for field in ["name", "directory", "arguments"] {

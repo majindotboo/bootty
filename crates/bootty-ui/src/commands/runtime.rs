@@ -1,5 +1,6 @@
 mod agents;
 mod native_agents;
+mod provider_updates;
 mod targets;
 mod terminal_agents;
 
@@ -301,6 +302,7 @@ pub struct CommandRuntime {
     catalog: Arc<CommandCatalog>,
     agent_service: Option<Arc<AgentService>>,
     terminal_agents: Option<Arc<TerminalAgentService>>,
+    provider_updates: provider_updates::ProviderUpdates,
     native_agents: Option<Arc<NativeAgentService>>,
     native_agent_error: Option<String>,
     native_panes: HashMap<String, (SpaceId, CommandTarget)>,
@@ -447,6 +449,7 @@ impl CommandRuntime {
             )),
             agent_service: agents,
             terminal_agents: None,
+            provider_updates: provider_updates::ProviderUpdates::default(),
             native_agents: None,
             native_agent_error: None,
             native_panes: HashMap::new(),

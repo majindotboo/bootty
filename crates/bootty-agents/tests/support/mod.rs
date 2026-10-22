@@ -4,6 +4,13 @@ use std::{error::Error, fs, path::Path};
 
 use serde_json::Value;
 
+/// Host-absolute metadata for fixtures that never create their captured project or account.
+pub fn synthetic_path(relative: &str) -> std::path::PathBuf {
+    std::env::temp_dir()
+        .join("bootty-agent-fixtures")
+        .join(relative)
+}
+
 /// The catalog at `path` with its conversations inline under `records`, the way older catalogs
 /// kept them. Writing this back is a catalog the service opens.
 pub fn stored_catalog(path: &Path) -> Result<Value, Box<dyn Error>> {

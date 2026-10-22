@@ -1,40 +1,33 @@
-//! Private Unix transport; no caller identity crosses this endpoint.
+//! Private local transport; no caller identity crosses this endpoint.
 
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::{
     fs,
-    io::{self, BufReader, Write},
+    io::{self, Write},
     path::PathBuf,
-    sync::Arc,
-    time::Instant,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
-use super::protocol::{MAX_TOOL_MESSAGE_BYTES, ToolProtocol};
+use super::protocol::{MAX_TOOL_IMAGE_RESPONSE_BYTES, MAX_TOOL_MESSAGE_BYTES, ToolProtocol};
 use crate::{AgentCommandExecutor, tool_policy::ToolLease};
-use bootty_host::private_stdio::read_message;
 pub use bootty_host::private_stdio::tool_stdio;
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Connection {
-    socket: PathBuf,
-    token: String,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Envelope {
-    token: String,
-    request: Value,
-}
+use bootty_host::private_stdio::{Connection, Envelope, endpoint_path};
+use rmux_ipc::{LocalEndpoint, LocalListener, LocalStream};
+use rmux_os::identity::IdentityResolver;
+use tokio::{
+    io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _},
+    sync::Notify,
+};
 
 pub(super) struct PrivateTransport {
     pub directory: PathBuf,
     pub connection: PathBuf,
     pub name: String,
-    #[cfg(unix)]
-    stopped: Arc<std::sync::atomic::AtomicBool>,
+    stopped: Arc<AtomicBool>,
+    wake: Arc<Notify>,
     lease: ToolLease,
 }
 
@@ -44,28 +37,7 @@ impl PrivateTransport {
         commands: Arc<dyn AgentCommandExecutor>,
     ) -> io::Result<Self> {
         #[cfg(unix)]
-        {
-            Self::prepare_unix(lease, commands)
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = (lease, commands);
-            Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "Agent tools require a private Unix transport",
-            ))
-        }
-    }
-
-    #[cfg(unix)]
-    fn prepare_unix(lease: ToolLease, commands: Arc<dyn AgentCommandExecutor>) -> io::Result<Self> {
-        use std::{
-            os::unix::{
-                fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _},
-                net::UnixListener,
-            },
-            sync::atomic::{AtomicBool, Ordering},
-        };
+        use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
         let name = format!("bootty_{}", nonce()?);
         // macOS Unix sockets have a short path limit; identity/config paths can be much longer.
         let parent = if cfg!(target_os = "macos") {
@@ -74,41 +46,80 @@ impl PrivateTransport {
             std::env::temp_dir()
         };
         let directory = parent.join(format!("bt-tool-{}", name.trim_start_matches("bootty_")));
-        fs::DirBuilder::new().mode(0o700).create(&directory)?;
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            let mut builder = builder;
+            builder.mode(0o700);
+            builder
+        };
+        builder.create(&directory)?;
         let cleanup = DirectoryCleanup(directory.clone());
-        let socket = directory.join("tools.sock");
-        let listener = UnixListener::bind(&socket)?;
+        let socket = endpoint_path(&directory)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let listener = {
+            let _entered = runtime.enter();
+            LocalListener::bind(&LocalEndpoint::from_path(socket.clone()))?
+        };
+        #[cfg(unix)]
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         let connection = directory.join("connection.json");
         let secret = Connection {
             socket,
             token: nonce()?,
         };
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&connection)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&connection)?;
         serde_json::to_writer(&mut file, &secret).map_err(io::Error::other)?;
         file.flush()?;
         let stopped = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(Notify::new());
         let worker_stop = stopped.clone();
+        let worker_wake = wake.clone();
         let worker_lease = lease.clone();
-        std::thread::spawn(move || {
-            let _cleanup = cleanup;
-            let protocol = ToolProtocol::new(worker_lease);
-            while let Ok((mut stream, _)) = listener.accept() {
-                if worker_stop.load(Ordering::Acquire) {
-                    break;
+        let user = IdentityResolver::current()?;
+        std::thread::Builder::new()
+            .name("agent-tools".into())
+            .spawn(move || {
+                let _cleanup = cleanup;
+                let protocol = ToolProtocol::new(worker_lease);
+                while !worker_stop.load(Ordering::Acquire) {
+                    let accepted = runtime.block_on(async {
+                        tokio::select! {
+                            biased;
+                            () = worker_wake.notified() => Ok(None),
+                            connection = listener.accept() => connection.map(Some),
+                        }
+                    });
+                    let Ok(Some((mut stream, peer))) = accepted else {
+                        break;
+                    };
+                    if worker_stop.load(Ordering::Acquire) {
+                        break;
+                    }
+                    if peer.user != user {
+                        continue;
+                    }
+                    let _ = serve_connection(
+                        &runtime,
+                        &mut stream,
+                        &secret,
+                        &protocol,
+                        commands.as_ref(),
+                    );
                 }
-                let _ = serve_connection(&mut stream, &secret, &protocol, commands.as_ref());
-            }
-        });
+            })?;
         Ok(Self {
             directory,
             connection,
             name,
             stopped,
+            wake,
             lease,
         })
     }
@@ -123,13 +134,9 @@ impl PrivateTransport {
 
     pub(super) fn stop(&self) {
         self.lease.revoke();
-        #[cfg(unix)]
-        {
-            self.stopped
-                .store(true, std::sync::atomic::Ordering::Release);
-            // Wake accept without waiting on a command or joining a worker on the UI thread.
-            let _ = std::os::unix::net::UnixStream::connect(self.directory.join("tools.sock"));
-        }
+        self.stopped.store(true, Ordering::Release);
+        // Waking the listener performs no blocking pipe connection on the UI thread.
+        self.wake.notify_one();
     }
 }
 
@@ -146,29 +153,52 @@ impl Drop for DirectoryCleanup {
     }
 }
 
-#[cfg(unix)]
 fn serve_connection(
-    stream: &mut std::os::unix::net::UnixStream,
+    runtime: &tokio::runtime::Runtime,
+    stream: &mut LocalStream,
     secret: &Connection,
     protocol: &ToolProtocol,
     commands: &dyn AgentCommandExecutor,
 ) -> io::Result<()> {
-    let timeout = Some(std::time::Duration::from_secs(5));
-    stream.set_read_timeout(timeout)?;
-    stream.set_write_timeout(timeout)?;
-    let bytes = read_message(
-        &mut BufReader::new(&mut *stream),
-        MAX_TOOL_MESSAGE_BYTES.saturating_add(1024),
-    )?
-    .ok_or_else(invalid_connection)?;
+    let limit = MAX_TOOL_MESSAGE_BYTES.saturating_add(1024);
+    let bytes = runtime.block_on(async {
+        let mut bytes = Vec::new();
+        let bounded =
+            (&mut *stream).take(u64::try_from(limit.saturating_add(1)).map_err(io::Error::other)?);
+        let mut reader = tokio::io::BufReader::new(bounded);
+        tokio::time::timeout(Duration::from_secs(5), reader.read_until(b'\n', &mut bytes))
+            .await
+            .map_err(io::Error::other)??;
+        if bytes.len() > limit || !bytes.ends_with(b"\n") {
+            return Err(invalid_connection());
+        }
+        Ok(bytes)
+    })?;
     let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| invalid_connection())?;
     if !same_secret(&envelope.token, &secret.token) {
         return Err(invalid_connection());
     }
     let bytes = serde_json::to_vec(&envelope.request).map_err(|_| invalid_connection())?;
+    // Command execution may wait for a UI approval or use its own runtime. Keep it outside
+    // this transport runtime; only socket I/O enters the reactor.
     if let Some(response) = protocol.handle(&bytes, Instant::now(), commands) {
-        serde_json::to_writer(&mut *stream, &response).map_err(io::Error::other)?;
-        stream.write_all(b"\n")?;
+        let mut bytes = serde_json::to_vec(&response).map_err(io::Error::other)?;
+        bytes.push(b'\n');
+        if bytes.len() > MAX_TOOL_IMAGE_RESPONSE_BYTES {
+            return Err(io::Error::other("Tool response exceeds its bound"));
+        }
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), stream.write_all(&bytes))
+                .await
+                .map_err(io::Error::other)??;
+            // A named-pipe server must retain its handle until the client consumes the reply.
+            let _ = tokio::time::timeout(
+                Duration::from_secs(5),
+                rmux_ipc::wait_for_peer_close(stream),
+            )
+            .await;
+            Ok::<_, io::Error>(())
+        })?;
     }
     Ok(())
 }

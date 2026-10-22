@@ -467,7 +467,8 @@ fn font_stack_rows_fit_wide_weight_names_on_one_line() {
     use std::sync::Arc;
 
     let mappings = FontMappings::default();
-    let text_system = wrap_text_system(Arc::new(gpui_kit::NoopTextSystem), mappings.clone());
+    let text_system =
+        wrap_text_system(Arc::new(gpui_kit::NoopTextSystem), mappings.clone()).unwrap();
     BoottyAssets
         .load_fonts(&gpui_kit::TextSystem::new(text_system.clone()))
         .unwrap();

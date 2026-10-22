@@ -38,7 +38,7 @@ fn discovery_includes_visible_project_roots_and_excludes_hidden_entries(
     assert!(
         actual
             .iter()
-            .any(|entry| entry.path.ends_with("src/project"))
+            .any(|entry| std::path::Path::new(&entry.path).ends_with("src/project"))
             && actual.iter().any(|entry| entry.path.ends_with("dotfiles"))
             && !actual.iter().any(|entry| entry.path.ends_with(".hidden")),
         "{actual:#?}"
@@ -165,7 +165,11 @@ fn adding_a_project_preserves_spaces_and_quotes_in_absolute_paths(
     home: Result<TempDir, assert_fs::fixture::FixtureError>,
 ) {
     let home = home.expect("home fixture");
-    let project = home.child("projects/project with \"quotes\"");
+    let project = home.child(if cfg!(windows) {
+        "projects/project with 'quotes'"
+    } else {
+        "projects/project with \"quotes\""
+    });
     project.create_dir_all().expect("project");
     let path = project.path().to_string_lossy().into_owned();
 

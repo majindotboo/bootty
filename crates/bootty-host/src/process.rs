@@ -47,6 +47,42 @@ impl From<Output> for CommandBytes {
 const MAX_CAPTURE_BYTES: u64 = 16 * 1024 * 1024;
 
 pub trait CommandRunner {
+    /// Run with environment values owned by this invocation.
+    /// # Errors
+    /// Returns setup, execution, cancellation or decoding errors.
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(&str, &str)],
+    ) -> Result<CommandOutput> {
+        let args = env
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .chain(std::iter::once(program.to_owned()))
+            .chain(args.iter().cloned())
+            .collect::<Vec<_>>();
+        self.run("env", &args)
+    }
+
+    /// Execute a host shell command in its captured directory.
+    /// # Errors
+    /// Returns setup, execution or cancellation errors.
+    fn run_shell_in(&self, cwd: &str, command: &str) -> Result<CommandOutput> {
+        self.run_in(cwd, "/bin/sh", &["-lc".to_owned(), command.to_owned()])
+    }
+
+    /// Remove an invocation's scratch file on the execution host.
+    /// # Errors
+    /// Returns filesystem or remote execution errors.
+    fn remove_file(&self, path: &str) -> Result<()> {
+        let output = self.run("rm", &["-f".to_owned(), path.to_owned()])?;
+        if !output.success {
+            bail!("{}", output.stderr);
+        }
+        Ok(())
+    }
+
     /// Run in the captured host directory without changing the application's directory.
     /// # Errors
     /// Returns unsupported operation, setup, cancellation, execution or decoding errors.
@@ -87,6 +123,28 @@ pub trait CommandRunner {
 pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(&str, &str)],
+    ) -> Result<CommandOutput> {
+        CancellableCommandRunner::new(CommandCancellation::default())
+            .run_with_env(program, args, env)
+    }
+
+    fn run_shell_in(&self, cwd: &str, command: &str) -> Result<CommandOutput> {
+        CancellableCommandRunner::new(CommandCancellation::default()).run_shell_in(cwd, command)
+    }
+
+    fn remove_file(&self, path: &str) -> Result<()> {
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     fn run_in(&self, cwd: &str, program: &str, args: &[String]) -> Result<CommandOutput> {
         cancellable_command_output(
             program,
@@ -211,6 +269,42 @@ impl CancellableCommandRunner {
 }
 
 impl CommandRunner for CancellableCommandRunner {
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(&str, &str)],
+    ) -> Result<CommandOutput> {
+        let mut command = Command::new(program);
+        command.args(args).envs(env.iter().copied());
+        let output = capture_command(
+            program,
+            &mut command,
+            &self.cancellation,
+            self.deadline,
+            self.cancellation_check.as_deref(),
+            None,
+        );
+        command_output(program, Ok(output?))
+    }
+
+    fn run_shell_in(&self, cwd: &str, command: &str) -> Result<CommandOutput> {
+        let (program, mut command) = local_shell_command(cwd, command);
+        let output = capture_command(
+            program,
+            &mut command,
+            &self.cancellation,
+            self.deadline,
+            self.cancellation_check.as_deref(),
+            None,
+        )?;
+        command_output(program, Ok(output))
+    }
+
+    fn remove_file(&self, path: &str) -> Result<()> {
+        SystemCommandRunner.remove_file(path)
+    }
+
     fn run_in(&self, cwd: &str, program: &str, args: &[String]) -> Result<CommandOutput> {
         cancellable_command_output(
             program,
@@ -295,15 +389,53 @@ fn cancellable_command_bytes(
     input: Option<Vec<u8>>,
     cwd: Option<&str>,
 ) -> Result<Output> {
-    if is_cancelled(cancellation, deadline, cancellation_check) {
-        bail!("command canceled")
-    }
     let mut command = Command::new(program);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
+    command.args(args);
+    capture_command(
+        program,
+        &mut command,
+        cancellation,
+        deadline,
+        cancellation_check,
+        input,
+    )
+}
+
+fn local_shell_command(cwd: &str, script: &str) -> (&'static str, Command) {
+    #[cfg(windows)]
+    let program = "cmd.exe";
+    #[cfg(not(windows))]
+    let program = "/bin/sh";
+    let mut command = Command::new(program);
+    command.current_dir(cwd);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // cmd parses shell syntax, not the C runtime's backslash-escaped argv format.
+        command
+            .args(["/d", "/s", "/c"])
+            .raw_arg(format!("\"{script}\""));
+    }
+    #[cfg(not(windows))]
+    command.args(["-lc", script]);
+    (program, command)
+}
+
+fn capture_command(
+    program: &str,
+    command: &mut Command,
+    cancellation: &CommandCancellation,
+    deadline: Option<Instant>,
+    cancellation_check: Option<&(dyn Fn() -> bool + Send + Sync)>,
+    input: Option<Vec<u8>>,
+) -> Result<Output> {
+    if is_cancelled(cancellation, deadline, cancellation_check) {
+        bail!("command canceled")
+    }
     command
-        .args(args)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -312,7 +444,7 @@ fn cancellable_command_bytes(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child =
-        ProcessTreeChild::spawn_with_console_window(&mut command, ConsoleWindowBehavior::Suppress)
+        ProcessTreeChild::spawn_with_console_window(command, ConsoleWindowBehavior::Suppress)
             .with_context(|| format!("run {program}"))?;
     let waiter = thread::current();
     let writer = input

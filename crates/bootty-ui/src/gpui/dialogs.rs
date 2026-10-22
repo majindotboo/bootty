@@ -606,6 +606,7 @@ pub struct DialogView {
     _prompt_textarea_subscription: Subscription,
     fields: std::collections::HashMap<String, (Entity<InputState>, Subscription)>,
     model_picker: Option<model_picker::NewModelPicker>,
+    model_error_expanded: bool,
     project_picker: Option<project_picker::NewProjectPicker>,
     completion_sender: Option<bootty_control::BoundAppCommandSender>,
     completion: Option<Entity<crate::gpui_composer_completion::ComposerCompletion>>,
@@ -769,6 +770,7 @@ impl DialogView {
             prompt_input,
             fields: std::collections::HashMap::new(),
             model_picker: None,
+            model_error_expanded: false,
             project_picker: None,
             completion_sender: None,
             completion: None,
@@ -1186,6 +1188,15 @@ impl DialogView {
             return;
         }
         let changed = self.spec.as_ref().map(|spec| &spec.id) != spec.as_ref().map(|spec| &spec.id);
+        if changed
+            || self
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.model_error.as_ref())
+                != spec.as_ref().and_then(|spec| spec.model_error.as_ref())
+        {
+            self.model_error_expanded = false;
+        }
         let same_query = self
             .spec
             .as_ref()
@@ -1775,7 +1786,7 @@ impl DialogView {
                     )
                     .child(self.agent_session_project_footer(spec, window, cx)),
             )
-            .children(Self::new_model_error(spec, cx))
+            .children(self.new_model_error(spec, cx))
             .child(self.new_session_footer(spec, submit, error, cx))
             .into_any_element()
     }
@@ -1791,11 +1802,10 @@ impl DialogView {
         spec.fields
             .iter()
             .filter(|field| {
-                !(matches!(
+                !matches!(
                     field.id.as_str(),
-                    "isolation" | "mode" | "reasoning" | "fast-mode" | "plan-mode"
-                ) || field.id == "provider"
-                    && spec.fields.iter().any(|candidate| candidate.id == "model"))
+                    "isolation" | "mode" | "model" | "reasoning" | "fast-mode" | "plan-mode"
+                )
             })
             .filter_map(|field| {
                 // Keep the access policy readable after combining provider and model.
@@ -1806,7 +1816,12 @@ impl DialogView {
                             "permissions" => 32.,
                             _ => 40.,
                         };
-                let choice = self.new_session_choice(spec, field, compact, cx)?;
+                // The retained provider/model picker stays in one slot as its catalog arrives.
+                let choice = if field.id == "provider" {
+                    self.render_new_model_picker(spec, field, cx)?
+                } else {
+                    self.new_session_choice(spec, field, compact, cx)?
+                };
                 let control = div()
                     .flex_shrink_0()
                     .min_w_0()
@@ -1817,7 +1832,7 @@ impl DialogView {
                         format!("dialog-field-choice-control-{}", field.id),
                         choice,
                     ));
-                if field.id == "model" {
+                if field.id == "provider" {
                     return Some((field.id.clone(), control.into_any_element()));
                 }
                 let (description, focus_controls) = match field.id.as_str() {
@@ -1863,8 +1878,6 @@ impl DialogView {
         submit: Option<&DialogRow>,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let (model, choices): (Vec<_>, Vec<_>) =
-            choices.into_iter().partition(|(id, _)| id == "model");
         h_flex()
             .id("dialog-prompt-fields")
             .w_full()
@@ -1906,7 +1919,6 @@ impl DialogView {
                         )
                     }),
             )
-            .children(model.into_iter().map(|(_, control)| control))
             .child(self.speech.clone())
             .when_some(submit, |row, submit| {
                 row.child(

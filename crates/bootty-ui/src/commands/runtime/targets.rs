@@ -20,6 +20,18 @@ impl AppState {
                 })
             };
         };
+        // Sign-in also works before a Space has its first session. Existing Session targets
+        // remain valid; an exact Binding carries the empty form's destination authority.
+        let expected = if command.starts_with("agents.")
+            && command.ends_with(".account.login")
+            && (supplied.is_some_and(|target| target.kind == ResourceKind::Binding)
+                || supplied.is_none()
+                    && self.current_command_target_for(command, expected).is_none())
+        {
+            ResourceKind::Binding
+        } else {
+            expected
+        };
         if supplied.is_some_and(|target| {
             target.kind != expected
                 && !(command == "new_tab" && target.kind == ResourceKind::Binding)

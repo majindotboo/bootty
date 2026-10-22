@@ -187,11 +187,34 @@ pub enum ComputerAction {
     },
     /// List the window's accessibility elements.
     Elements,
+    /// Replace an editable element's value through accessibility, without focus or input events.
+    SetValue {
+        element: Box<ComputerElement>,
+        value: String,
+    },
     /// Press an element from an earlier listing: its accessibility action when it has one,
     /// otherwise a click at its center.
     Press {
         element: Box<ComputerElement>,
+        /// Refuse controls without an accessibility action when false.
+        #[serde(
+            default = "default_allow_click",
+            skip_serializing_if = "allow_click_enabled"
+        )]
+        allow_click: bool,
     },
+}
+
+const fn default_allow_click() -> bool {
+    true
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "Serde skip predicates borrow their field."
+)]
+const fn allow_click_enabled(value: &bool) -> bool {
+    *value
 }
 
 impl ComputerAction {
@@ -234,7 +257,12 @@ impl ComputerAction {
             } if delta_x.unsigned_abs() > 10_000 || delta_y.unsigned_abs() > 10_000 => Err(
                 ComputerError::InvalidAction("scroll delta exceeds 10000 pixels".into()),
             ),
-            Self::Press { element } => element.validate(),
+            Self::SetValue { value, .. } if value.len() > 4096 || value.contains('\0') => {
+                Err(ComputerError::InvalidAction(
+                    "value must contain at most 4096 bytes and no NUL".into(),
+                ))
+            }
+            Self::Press { element, .. } | Self::SetValue { element, .. } => element.validate(),
             _ => Ok(()),
         }
     }
@@ -321,12 +349,13 @@ impl ComputerElement {
         )
     }
 
-    /// The same element after a fresh read: its role, name and frame are unchanged.
+    /// The same element after a fresh read: its identity, role, name and frame are unchanged.
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
         self.path == other.path
             && self.role == other.role
             && self.name == other.name
+            && self.identifier == other.identifier
             && self.frame == other.frame
     }
 
@@ -477,7 +506,7 @@ impl ComputerTarget {
                     "coordinates are outside the target".into(),
                 ))
             }
-            ComputerAction::Press { element } => {
+            ComputerAction::Press { element, .. } | ComputerAction::SetValue { element, .. } => {
                 let (x, y) = element.center();
                 if self.contains(x, y) {
                     Ok(())
@@ -502,7 +531,7 @@ impl ComputerTarget {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ComputerResult {
-    /// Input was posted to the OS. Application acceptance is observed by a subsequent snapshot.
+    /// The OS accepted the operation. Read elements or capture again to observe application state.
     Posted,
     Snapshot {
         png_base64: String,
@@ -541,6 +570,7 @@ impl ComputerResult {
                 | ComputerAction::Click { .. }
                 | ComputerAction::Move { .. }
                 | ComputerAction::TypeText { .. }
+                | ComputerAction::SetValue { .. }
                 | ComputerAction::Key { .. }
                 | ComputerAction::Scroll { .. },
             )

@@ -19,6 +19,7 @@ mod writeback;
 
 pub use defaults::{
     DEFAULT_BRANCH_PREFIX, config_path_from_env, default_config_path, default_working_directory,
+    default_working_directory_from,
 };
 pub use keybind_presets::split_keybind_entry;
 pub use load::{

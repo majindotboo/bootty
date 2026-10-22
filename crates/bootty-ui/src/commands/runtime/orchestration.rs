@@ -158,7 +158,8 @@ impl AppState {
             let result = match command {
                 RunCommand::Create { nodes } => (|| {
                     let destination = invocation.target.as_ref().and_then(|target| host.destinations.iter().find(|destination| &destination.binding == target)).ok_or("Choose an exact live Binding")?;
-                    if destination.remote || !cfg!(unix) { return Err("Runs require their supported local Unix host".to_owned()); }
+                    if destination.remote { return Err("Runs require their supported local host".to_owned()); }
+                    if !cfg!(unix) && nodes.iter().any(|node| node.task_identity.is_none()) { return Err("Terminal runs require their supported local Unix host".to_owned()); }
                     let cwd = destination.cwd.as_deref().ok_or("The Binding has no project directory")?;
                     let plan = capture_run_plan(nodes, cwd, &destination.tasks, &providers, |provider, profile| effective_account_directory(provider, profile).map(|path| path.to_string_lossy().into_owned()))?;
                     let context = OrchestrationContext::capture_destination(destination.binding.clone(), invocation.caller, destination.window.clone(), destination.binding_id.clone())?;
@@ -277,8 +278,8 @@ impl Host {
             .iter()
             .find(|destination| destination.binding_id == record.binding_id)
             .ok_or("The parent Binding is unavailable")?;
-        if destination.remote || !cfg!(unix) {
-            return Err("Session tasks require their supported local Unix host".to_owned());
+        if destination.remote {
+            return Err("Session tasks require their supported local host".to_owned());
         }
         let cwd = destination
             .tasks
@@ -437,14 +438,17 @@ impl Host {
             .iter()
             .find(|destination| &destination.binding == dispatch.context.binding())
             .ok_or("The captured Binding is stale")?;
-        if destination.remote || !cfg!(unix) {
-            return Err("Runs require their supported local Unix host".to_owned());
+        if destination.remote {
+            return Err("Runs require their supported local host".to_owned());
         }
         if let Some(task) = dispatch.launch.task_identity() {
             if !destination.tasks.contains_key(task) {
                 return Err("The captured saved task is unavailable".to_owned());
             }
             return self.start_native(dispatch, destination, &guard);
+        }
+        if !cfg!(unix) {
+            return Err("Terminal runs require their supported local Unix host".to_owned());
         }
         self.start_terminal(dispatch, destination, &guard)
     }
@@ -493,7 +497,7 @@ impl Host {
                     .cwd
                     .clone()
                     .ok_or("The captured task has no project directory")?,
-                serde_json::to_string(&prepared.argv())
+                serde_json::to_string(&prepared.argv()?)
                     .map_err(|_| "Task argv could not be encoded")?,
                 identity,
                 dispatch.title.clone(),

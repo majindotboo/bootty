@@ -56,7 +56,9 @@ fn windows_keeps_remote_tmux_and_replaces_only_local_tmux() {
     };
     let remote = MuxBindingConfig {
         backend: MuxBackendKind::Tmux,
-        remote: Some(bootty_mux::SshTarget::for_host("host")),
+        remote: Some(bootty_mux::RemoteTarget::Ssh(
+            bootty_mux::SshTarget::for_host("host"),
+        )),
         ..Default::default()
     };
 
@@ -109,6 +111,9 @@ fn built_backends_publish_the_exact_capability_matrix(#[case] backend: MuxBacken
         .capabilities(
             &MuxBindingConfig {
                 backend,
+                remote: (backend == MuxBackendKind::Tmux).then(|| {
+                    bootty_mux::RemoteTarget::Ssh(bootty_mux::SshTarget::for_host("fixture"))
+                }),
                 ..Default::default()
             },
             scope,

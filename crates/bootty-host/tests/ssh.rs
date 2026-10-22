@@ -43,12 +43,21 @@ fn direct_remote_commands_quote_login_shell_arguments() {
 
 #[test]
 fn proxied_commands_preserve_hostile_arguments_without_remote_shell_parsing() {
-    let (_, argv) = remote()
-        .proxy_command(
-            "sh",
-            &args(&["-c", "test \"$1\" = \"it's remote\"", "sh", "it's remote"]),
-        )
-        .unwrap();
+    #[cfg(windows)]
+    let (program, arguments) = (
+        "python",
+        args(&[
+            "-c",
+            "import sys; sys.exit(0 if sys.argv[1] == \"it's remote\" else 1)",
+            "it's remote",
+        ]),
+    );
+    #[cfg(not(windows))]
+    let (program, arguments) = (
+        "sh",
+        args(&["-c", "test \"$1\" = \"it's remote\"", "sh", "it's remote"]),
+    );
+    let (_, argv) = remote().proxy_command(program, &arguments).unwrap();
     let fields = argv
         .last()
         .expect("remote command")

@@ -1,5 +1,6 @@
 //! A remote private endpoint relayed over the owning host's encrypted process stream.
-use super::{MAX_TOOL_IMAGE_RESPONSE_BYTES, MAX_TOOL_MESSAGE_BYTES, read_message};
+use super::MAX_TOOL_IMAGE_RESPONSE_BYTES;
+use super::{MAX_TOOL_MESSAGE_BYTES, read_message};
 use crate::remote::RemoteHost;
 use anyhow::{Context as _, Result};
 use rmux_os::process_tree::ProcessTreeChild;
@@ -45,7 +46,6 @@ impl RemoteStdioRelay {
         files: Vec<PrivateFile>,
         local_socket: PathBuf,
     ) -> Result<Self> {
-        anyhow::ensure!(cfg!(unix), "Private tool relay requires Unix sockets");
         let request = DirectoryRequest {
             name: name.into(),
             files,
@@ -151,18 +151,20 @@ impl Drop for RemoteStdioRelay {
     }
 }
 
-#[cfg(unix)]
 fn pump(
     socket: &Path,
     output: &mut impl std::io::BufRead,
     input: &mut impl Write,
 ) -> std::io::Result<()> {
-    use std::os::unix::net::UnixStream;
     while let Some(request) = read_message(output, MAX_TOOL_MESSAGE_BYTES.saturating_add(1024))? {
-        let mut stream = UnixStream::connect(socket)?;
-        let timeout = Some(Duration::from_secs(6));
-        stream.set_read_timeout(timeout)?;
-        stream.set_write_timeout(timeout)?;
+        let mut stream = rmux_ipc::connect_blocking(
+            &rmux_ipc::LocalEndpoint::from_path(socket.to_path_buf()),
+            Duration::from_secs(5),
+        )?;
+        stream.set_read_timeout(Some(
+            super::TOOL_CALL_TIMEOUT.saturating_add(Duration::from_secs(5)),
+        ))?;
+        stream.set_write_timeout(Some(Duration::from_secs(6)))?;
         stream.write_all(&request)?;
         let response = read_message(&mut BufReader::new(stream), MAX_TOOL_IMAGE_RESPONSE_BYTES)?;
         // MCP notifications have no response; the relay still needs a framing acknowledgement.
@@ -170,13 +172,6 @@ fn pump(
         input.flush()?;
     }
     Ok(())
-}
-
-#[cfg(not(unix))]
-fn pump(_: &Path, _: &mut impl std::io::BufRead, _: &mut impl Write) -> std::io::Result<()> {
-    Err(std::io::Error::other(
-        "Private tool relay requires Unix sockets",
-    ))
 }
 
 fn validate(request: &DirectoryRequest) -> Result<()> {
@@ -262,6 +257,8 @@ pub fn serve(input: &mut impl std::io::BufRead, output: &mut impl Write) -> Resu
 }
 
 #[cfg(not(unix))]
+/// # Errors
+/// Remote relay endpoints currently require a Unix host.
 pub fn serve(_: &mut impl std::io::BufRead, _: &mut impl Write) -> Result<()> {
     anyhow::bail!("Private tool relay requires Unix sockets")
 }
@@ -323,6 +320,8 @@ pub fn cleanup(name: &str) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+/// # Errors
+/// Remote relay cleanup currently requires a Unix host.
 pub fn cleanup(_: &str) -> Result<()> {
     anyhow::bail!("Private tool relay requires Unix sockets")
 }

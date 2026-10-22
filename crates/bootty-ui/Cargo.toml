@@ -41,7 +41,6 @@ libghostty-vt.workspace = true
 markdown.workspace = true
 keepawake.workspace = true
 fontdb.workspace = true
-font-kit.workspace = true
 png.workspace = true
 tempfile.workspace = true
 rustybuzz.workspace = true
@@ -77,6 +76,7 @@ swash = "0.2.6"
 sys-locale = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+font-kit.workspace = true
 avplayer = "=0.8.0"
 # These Core Video types cross GPUI's video surface API.
 objc2-core-foundation = "0.3.2"
@@ -92,6 +92,7 @@ objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 
 [dev-dependencies]
+font-kit.workspace = true
 bootty-test-support = { path = "../bootty-test-support" }
 gpui-kit = { workspace = true, features = ["test-support"] }
 # The facade exposes renderer benchmarks; enable their underlying implementation.

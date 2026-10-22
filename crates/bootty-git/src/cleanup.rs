@@ -228,7 +228,7 @@ impl<R: CommandRunner> Git<R> {
     fn run_teardown(&self, path: &str, command: &str) -> Result<(), String> {
         let output = self
             .runner
-            .run_in(path, "/bin/sh", &["-lc".to_owned(), command.to_owned()])
+            .run_shell_in(path, command)
             .map_err(|error| format!("Its teardown couldn't run: {error}"))?;
         if output.success {
             return Ok(());

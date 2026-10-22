@@ -2,27 +2,33 @@ use assert_fs::prelude::*;
 use bootty_agents::{AgentKind, AgentLaunch, TerminalAgentService, terminal_provider_installer};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
+mod support;
 
 #[rstest]
 #[case(AgentKind::Codex, "CODEX_HOME")]
 #[case(AgentKind::Claude, "CLAUDE_CONFIG_DIR")]
 #[case(AgentKind::Pi, "PI_CODING_AGENT_DIR")]
 fn account_store_and_arguments_are_literal(#[case] provider: AgentKind, #[case] variable: &str) {
+    let account = support::synthetic_path("private/account ' ; $HOME")
+        .to_string_lossy()
+        .into_owned();
     let launch = AgentLaunch {
         program: "provider".to_owned(),
         cwd: None,
         arguments: vec!["a; $HOME".to_owned()],
         ephemeral: false,
-        account_directory: Some("/private/account ' ; $HOME".to_owned()),
+        account_directory: Some(account.clone()),
     };
     let prepared =
         TerminalAgentService::prepare_unobserved(provider, launch.clone(), "test host".to_owned())
             .unwrap();
     assert_eq!(
-        prepared.argv(),
+        prepared
+            .argv_for_shell(bootty_agents::LaunchShell::Posix)
+            .unwrap(),
         [
             "env",
-            &format!("{variable}=/private/account ' ; $HOME"),
+            &format!("{variable}={account}"),
             "provider",
             "a; $HOME"
         ]
@@ -36,7 +42,10 @@ fn account_store_and_arguments_are_literal(#[case] provider: AgentKind, #[case] 
 #[rstest]
 #[case(AgentKind::Codex, "@openai/codex")]
 #[case(AgentKind::Pi, "@earendil-works/pi-coding-agent")]
-fn updates_use_the_proven_global_installation(#[case] provider: AgentKind, #[case] package: &str) {
+fn updates_respect_supported_installer_and_proven_global_installation(
+    #[case] provider: AgentKind,
+    #[case] package: &str,
+) {
     let directory = assert_fs::TempDir::new().unwrap();
     let executable = directory.child(format!("install/global/node_modules/{package}/bin/cli.js"));
     executable.write_str("fixture").unwrap();
@@ -49,8 +58,8 @@ fn updates_use_the_proven_global_installation(#[case] provider: AgentKind, #[cas
     let bun = directory.child("bin/bun");
     bun.write_str("fixture").unwrap();
     assert_eq!(
-        terminal_provider_installer(provider, executable.path()).unwrap(),
-        vec![
+        terminal_provider_installer(provider, executable.path()),
+        cfg!(unix).then(|| vec![
             "env".to_owned(),
             format!(
                 "BUN_INSTALL_GLOBAL_DIR={}",
@@ -62,7 +71,7 @@ fn updates_use_the_proven_global_installation(#[case] provider: AgentKind, #[cas
             "--global".to_owned(),
             "--latest".to_owned(),
             package.to_owned()
-        ]
+        ])
     );
     assert_eq!(
         terminal_provider_installer(provider, directory.child("manual/provider").path()),
@@ -71,6 +80,20 @@ fn updates_use_the_proven_global_installation(#[case] provider: AgentKind, #[cas
     assert_eq!(
         terminal_provider_installer(AgentKind::Claude, executable.path()),
         None
+    );
+}
+
+#[test]
+fn native_claude_installation_uses_its_own_updater() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let executable = directory.child("claude/versions/1.0.0.exe");
+    executable.write_str("fixture").unwrap();
+    assert_eq!(
+        terminal_provider_installer(AgentKind::Claude, executable.path()),
+        Some(vec![
+            executable.path().to_string_lossy().into_owned(),
+            "update".into()
+        ])
     );
 }
 

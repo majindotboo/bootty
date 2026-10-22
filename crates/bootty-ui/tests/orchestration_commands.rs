@@ -4,7 +4,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bootty_agents::{AgentKind, OrchestrationNodeState};
+use bootty_agents::AgentKind;
+use bootty_agents::OrchestrationNodeState;
 use bootty_config::config::{AgentProfileConfig, AgentProvidersConfig, MultiplexerBackendConfig};
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget,
@@ -13,7 +14,9 @@ use bootty_ui::{
     AppEffect, AppState,
     commands::{RunCommand, RunNodeRequest, capture_run_plan},
 };
-use pretty_assertions::{assert_eq, assert_ne};
+use pretty_assertions::assert_eq;
+#[cfg(unix)]
+use pretty_assertions::assert_ne;
 use rstest::{fixture, rstest};
 use serde_json::json;
 
@@ -23,6 +26,9 @@ const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[path = "support/idle_frames.rs"]
 mod frames;
+#[cfg(windows)]
+#[path = "support/naming_backend.rs"]
+mod naming_backend;
 #[allow(
     clippy::expect_used,
     reason = "Shared desktop backend fixture follows existing test module convention"
@@ -74,6 +80,15 @@ fn capture_freezes_exact_profile_launch_and_account(
     #[case] selected: Option<&str>,
     #[case] expected: Option<&str>,
 ) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let project = directory.join("project").to_string_lossy().into_owned();
+    let account = |id: &str| {
+        directory
+            .join("accounts")
+            .join(id)
+            .to_string_lossy()
+            .into_owned()
+    };
     let mut providers = AgentProvidersConfig::default();
     providers.claude.program = "/host/claude".to_owned();
     providers.claude.selected = "work".to_owned();
@@ -84,7 +99,7 @@ fn capture_freezes_exact_profile_launch_and_account(
                 id.to_owned(),
                 AgentProfileConfig {
                     name: id.to_owned(),
-                    directory: Some(format!("/accounts/{id}")),
+                    directory: Some(account(id)),
                     arguments: vec!["--model".to_owned(), id.to_owned()],
                 },
             )
@@ -93,13 +108,13 @@ fn capture_freezes_exact_profile_launch_and_account(
     node.profile = selected.map(str::to_owned);
     let plan = capture_run_plan(
         vec![node.clone()],
-        "/project",
+        &project,
         &BTreeMap::new(),
         &providers,
         |_, profile| {
             Ok(profile
                 .and_then(|profile| profile.directory.clone())
-                .unwrap_or_else(|| "/accounts/default".to_owned()))
+                .unwrap_or_else(|| account("default")))
         },
     )
     .unwrap();
@@ -108,15 +123,15 @@ fn capture_freezes_exact_profile_launch_and_account(
     let captured = &plan.nodes()[0];
     assert_eq!(captured.launch.profile(), expected);
     assert_eq!(captured.launch.launch().program, "/host/claude");
-    assert_eq!(captured.launch.launch().cwd.as_deref(), Some("/project"));
+    assert_eq!(
+        captured.launch.launch().cwd.as_deref(),
+        Some(project.as_str())
+    );
     assert_eq!(
         captured.launch.launch().account_directory.as_deref(),
         Some(
             expected
-                .map_or_else(
-                    || "/accounts/default".to_owned(),
-                    |id| format!("/accounts/{id}")
-                )
+                .map_or_else(|| account("default"), account)
                 .as_str()
         )
     );
@@ -129,23 +144,26 @@ fn capture_freezes_exact_profile_launch_and_account(
 #[case("--continue")]
 #[case("--session")]
 fn previous_session_profiles_require_turn_identity(node: RunNodeRequest, #[case] selector: &str) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let project = directory.join("project").to_string_lossy().into_owned();
+    let account = directory.join("account").to_string_lossy().into_owned();
     let mut providers = AgentProvidersConfig::default();
     providers.claude.selected = "work".to_owned();
     providers.claude.profiles.insert(
         "work".to_owned(),
         AgentProfileConfig {
             name: "Work".to_owned(),
-            directory: Some("/account".to_owned()),
+            directory: Some(account.clone()),
             arguments: vec![selector.to_owned()],
         },
     );
     assert!(
         capture_run_plan(
             vec![node],
-            "/project",
+            &project,
             &BTreeMap::new(),
             &providers,
-            |_, _| Ok("/account".to_owned())
+            |_, _| Ok(account.clone())
         )
         .is_err()
     );
@@ -175,11 +193,12 @@ impl HostFixture {
                 );
                 stop.target = Some(record.target);
                 stop.confirmation = Some(stop.confirmation());
-                if !matches!(
-                    submit(&mut self.state, &self.wakes, stop)?,
-                    CommandOutcome::Success { .. }
-                ) {
-                    return Err("Fixture terminal did not close through its shared owner".into());
+                let outcome = submit(&mut self.state, &self.wakes, stop)?;
+                if !matches!(outcome, CommandOutcome::Success { .. }) {
+                    return Err(format!(
+                        "Fixture terminal did not close through its shared owner: {outcome:?}"
+                    )
+                    .into());
                 }
             }
         }
@@ -286,12 +305,20 @@ fn reopen_host(
     directory: Arc<assert_fs::TempDir>,
     config: bootty_config::config::BoottyConfig,
 ) -> Result<HostFixture, Box<dyn std::error::Error>> {
+    reopen_host_with_backends(directory, config, support::backends())
+}
+
+fn reopen_host_with_backends(
+    directory: Arc<assert_fs::TempDir>,
+    config: bootty_config::config::BoottyConfig,
+    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
+) -> Result<HostFixture, Box<dyn std::error::Error>> {
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
     let mut state = AppState::new_for_window_with_agents(
         config,
         "runs-fixture".to_owned(),
-        support::backends(),
+        backends,
         Arc::new(move || {
             let _ = wake.send(());
         }),
@@ -366,6 +393,7 @@ fn create(
         .ok_or_else(|| "Run ID absent".into())
 }
 
+#[cfg(unix)]
 #[rstest]
 fn shared_creation_cancel_retry_and_recovery_are_durable(
     host: Result<HostFixture, Box<dyn std::error::Error>>,
@@ -454,6 +482,7 @@ fn shared_creation_cancel_retry_and_recovery_are_durable(
     reopened.shutdown().unwrap();
 }
 
+#[cfg(unix)]
 #[rstest]
 fn read_omits_launch_prompt_and_account_metadata(
     host: Result<HostFixture, Box<dyn std::error::Error>>,
@@ -478,6 +507,7 @@ fn read_omits_launch_prompt_and_account_metadata(
     host.shutdown().unwrap();
 }
 
+#[cfg(unix)]
 #[rstest]
 fn queued_creation_cancelled_before_owner_acceptance_creates_no_terminal(
     host: Result<HostFixture, Box<dyn std::error::Error>>,
@@ -511,6 +541,32 @@ fn queued_creation_cancelled_before_owner_acceptance_creates_no_terminal(
     service.cancel(&run).unwrap();
     host.state.update_frame(frames::idle_frame(Instant::now()));
     assert_eq!(response.try_recv().unwrap(), CommandOutcome::cancelled());
+    assert_eq!(host.state.mux().all_sessions(), []);
+    host.shutdown().unwrap();
+}
+
+#[cfg(windows)]
+#[rstest]
+fn terminal_runs_are_rejected_without_publishing_work(
+    host: Result<HostFixture, Box<dyn std::error::Error>>,
+    node: RunNodeRequest,
+) {
+    let mut host = host.unwrap();
+    let invocation = bound(
+        CommandInvocation::new(
+            "runs.create",
+            vec![serde_json::to_string(&vec![node]).unwrap()],
+            Caller::Socket,
+        ),
+        &host.binding,
+    );
+    let outcome = submit(&mut host.state, &host.wakes, invocation).unwrap();
+    assert!(matches!(outcome, CommandOutcome::Failed { code, message }
+        if code == "run_failed" && message.contains("Unix")));
+    assert_eq!(
+        host.state.orchestration_service().unwrap().snapshot().runs,
+        Vec::<bootty_agents::OrchestrationRun>::new()
+    );
     assert_eq!(host.state.mux().all_sessions(), []);
     host.shutdown().unwrap();
 }
@@ -979,5 +1035,184 @@ fn session_work_rejects_stale_parent_or_configuration_drift_without_creating_wor
     assert_eq!(native.activities(), records);
     assert_eq!(host.state.mux().all_sessions().len(), sessions);
     assert!(!host.directory.path().join("order").exists());
+    host.shutdown().unwrap();
+}
+
+/// A native run on Windows reaches its provider and reports an actual launch failure while
+/// retaining the existing saved task; terminal observers remain a separate capability.
+#[cfg(windows)]
+#[rstest]
+fn native_runs_use_saved_tasks_and_report_the_provider_launch_error(
+    host: Result<HostFixture, Box<dyn std::error::Error>>,
+    mut node: RunNodeRequest,
+) {
+    let mut host = host.unwrap();
+    let identity = bootty_mux::snapshot::new_session_identity();
+    let binding = host.binding.clone();
+    let cwd = host
+        .directory
+        .path()
+        .join("project")
+        .to_string_lossy()
+        .into_owned();
+    let created = run_mutation(
+        &mut host,
+        "session.create",
+        vec![
+            "existing-task".into(),
+            cwd,
+            "[]".into(),
+            identity.clone(),
+            "Existing task".into(),
+        ],
+        &binding,
+    )
+    .unwrap();
+    assert!(
+        matches!(created, CommandOutcome::Success { .. }),
+        "{created:?}"
+    );
+    node.task_identity = Some(identity.clone());
+    let run = create(&mut host, node).unwrap();
+    let service = host.state.orchestration_service().unwrap();
+    let captured = service.snapshot();
+    assert_eq!(
+        captured.runs[0].nodes[0].spec.launch.task_identity(),
+        Some(identity.as_str())
+    );
+    assert_eq!(captured.runs[0].context.binding(), &binding);
+    let outcome = run_mutation(&mut host, "runs.dispatch", vec![run], &binding).unwrap();
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let completed = service.snapshot();
+    let OrchestrationNodeState::Failed { message, .. } = &completed.runs[0].nodes[0].state else {
+        panic!("missing provider must fail the native attempt: {completed:?}");
+    };
+    assert_eq!(message, "Task creation failed or was cancelled");
+    let records = host.state.native_agent_service().unwrap().sessions();
+    assert_eq!(
+        records.len(),
+        1,
+        "native dispatch reserves its conversation"
+    );
+    assert_eq!(records[0].task_identity.as_deref(), Some(identity.as_str()));
+    assert_eq!(
+        records[0].snapshot.status,
+        bootty_agents::NativeSessionStatus::Error
+    );
+    let error = records[0]
+        .snapshot
+        .error
+        .as_deref()
+        .expect("provider launch error");
+    assert!(error.contains("Cannot start claude"), "{error}");
+    assert_eq!(host.state.mux().all_sessions().len(), 1);
+    host.shutdown().unwrap();
+}
+
+/// Sign in can create its own terminal before the first session, using the form's selected
+/// account rather than silently authenticating the Settings default.
+#[cfg(windows)]
+#[rstest]
+fn provider_sign_in_from_an_empty_binding_captures_the_requested_account() {
+    let directory = Arc::new(assert_fs::TempDir::new().unwrap());
+    let program = directory.path().join("claude fixture.cmd");
+    bootty_test_support::write_executable(&program, "@echo off\r\nif not \"%~1\"==\"auth\" exit /b 3\r\nif not \"%~2\"==\"login\" exit /b 4\r\n>\"%CLAUDE_CONFIG_DIR%\\signed-in.txt\" echo fixture-login\r\n").unwrap();
+    let account = directory.path().join("selected account");
+    let default_account = directory.path().join("default account");
+    std::fs::create_dir(&account).unwrap();
+    std::fs::create_dir(&default_account).unwrap();
+    let mut config = test_config::config(
+        directory.path().join("config.toml"),
+        MultiplexerBackendConfig::Native,
+    );
+    config.session.working_directory = Some(directory.path().to_owned());
+    config.agents.claude.program = program.to_string_lossy().into_owned();
+    config.agents.claude.selected = "default".into();
+    for (id, path) in [("default", &default_account), ("selected", &account)] {
+        config.agents.claude.profiles.insert(
+            id.into(),
+            AgentProfileConfig {
+                name: id.into(),
+                directory: Some(path.to_string_lossy().into_owned()),
+                arguments: Vec::new(),
+            },
+        );
+    }
+    let mut host = reopen_host_with_backends(
+        Arc::clone(&directory),
+        config,
+        naming_backend::backends().unwrap(),
+    )
+    .unwrap();
+    assert_eq!(host.state.mux().all_sessions(), []);
+    let binding = host.binding.clone();
+    let outcome = run_mutation(
+        &mut host,
+        "agents.claude.account.login",
+        vec![
+            directory.path().to_string_lossy().into_owned(),
+            program.to_string_lossy().into_owned(),
+            "selected".into(),
+        ],
+        &binding,
+    )
+    .unwrap();
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    let records = host.state.terminal_agent_service().unwrap().records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].provider, AgentKind::Claude);
+    assert_eq!(
+        records[0].launch.account_directory.as_deref(),
+        account.to_str()
+    );
+    assert_eq!(host.state.mux().all_sessions().len(), 1);
+    host.shutdown().unwrap();
+}
+
+#[rstest]
+fn missing_provider_catalog_reports_missing_executable_without_starting_a_conversation(
+    host: Result<HostFixture, Box<dyn std::error::Error>>,
+) {
+    let mut host = host.unwrap();
+    let binding = host.binding.clone();
+    let cwd = host.directory.path().to_string_lossy().into_owned();
+    let program = host
+        .directory
+        .path()
+        .join("missing-pi")
+        .to_string_lossy()
+        .into_owned();
+    let outcome = run_mutation(
+        &mut host,
+        "agents.native.catalog-info",
+        vec![
+            "pi".into(),
+            cwd,
+            program,
+            "[]".into(),
+            String::new(),
+            String::new(),
+        ],
+        &binding,
+    )
+    .unwrap();
+    assert!(
+        matches!(&outcome, CommandOutcome::Failed { code, .. } if code == "provider_not_installed"),
+        "{outcome:?}"
+    );
+    assert!(
+        host.state
+            .native_agent_service()
+            .unwrap()
+            .sessions()
+            .is_empty()
+    );
+    assert_eq!(host.state.mux().all_sessions(), []);
     host.shutdown().unwrap();
 }

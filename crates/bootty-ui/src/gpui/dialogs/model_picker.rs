@@ -178,41 +178,113 @@ impl DialogView {
     }
 
     pub(super) fn new_model_error(
+        &self,
         spec: &DialogSpec,
         cx: &Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         let message = spec.model_error.clone()?;
-        let dialog = spec.id.clone();
+        let sign_in = crate::error_catalog::needs_sign_in(&message);
+        let action = if sign_in {
+            "Could not authenticate"
+        } else {
+            "Could not load models"
+        };
+        let summary = crate::error_catalog::ErrorNotice::failed(action, &message).to_string();
         Some(
-            h_flex()
+            v_flex()
                 .w_full()
-                .items_center()
+                .min_w_0()
                 .gap_2()
                 .child(
                     div()
-                        .flex_1()
+                        .debug_selector(|| "new-session-model-error".into())
+                        .w_full()
+                        .min_w_0()
+                        .whitespace_normal()
                         .text_sm()
                         .text_color(cx.theme().danger)
-                        .child(message),
+                        .child(summary),
                 )
                 .child(
-                    Button::new("reload-models")
-                        .debug_selector(|| "new-session-model-retry".to_owned())
-                        .ghost()
-                        .small()
-                        .label("Retry")
-                        .accessibility_label("Retry loading models")
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(DialogIntent::Activate {
-                                dialog: dialog.clone(),
-                                row: RowId::new("reload-models"),
-                                action: ActionId::new("reload-models"),
-                                payload: DialogPayload::default(),
-                            });
-                        })),
+                    h_flex()
+                        .gap_2()
+                        .flex_wrap()
+                        .when(sign_in, |row| {
+                            row.child(
+                                Self::model_error_action(
+                                    spec.id.clone(),
+                                    "sign-in-provider",
+                                    "new-session-provider-sign-in",
+                                    "Sign in",
+                                    cx,
+                                )
+                                .primary(),
+                            )
+                        })
+                        .child(
+                            Self::model_error_action(
+                                spec.id.clone(),
+                                "reload-models",
+                                "new-session-model-retry",
+                                "Retry",
+                                cx,
+                            )
+                            .ghost()
+                            .accessibility_label("Retry loading models"),
+                        )
+                        .child(
+                            Button::new("model-error-details")
+                                .debug_selector(|| "new-session-model-error-details-toggle".into())
+                                .ghost()
+                                .small()
+                                .label(if self.model_error_expanded {
+                                    "Hide details"
+                                } else {
+                                    "Details"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.model_error_expanded ^= true;
+                                    cx.notify();
+                                })),
+                        ),
                 )
+                .when(self.model_error_expanded, |column| {
+                    column.child(
+                        div()
+                            .id("model-error-details-body")
+                            .debug_selector(|| "new-session-model-error-details".into())
+                            .w_full()
+                            .min_w_0()
+                            .max_h(rems(10.))
+                            .overflow_y_scroll()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(div().w_full().min_w_0().whitespace_normal().child(message)),
+                    )
+                })
                 .into_any_element(),
         )
+    }
+
+    fn model_error_action(
+        dialog: DialogId,
+        action: &'static str,
+        selector: &'static str,
+        label: &'static str,
+        cx: &Context<Self>,
+    ) -> Button {
+        Button::new(action)
+            .debug_selector(move || selector.into())
+            .small()
+            .label(label)
+            .on_click(cx.listener(move |_, _, _, cx| {
+                cx.emit(DialogIntent::Activate {
+                    dialog: dialog.clone(),
+                    row: RowId::new(action),
+                    action: ActionId::new(action),
+                    payload: DialogPayload::default(),
+                });
+            }))
     }
 
     /// The model picker, then a chip for each other model the prompt also goes to, which

@@ -63,8 +63,9 @@ Use `mise run build --fast` or `mise run install --fast` for the
 Local packages include only the host daemon unless `--all-daemons` is passed.
 CI and release packages include all five daemon targets owned by `xtasks`.
 On non-macOS hosts, Apple targets require an Apple SDK in `SDKROOT`. Windows
-packaging uses `mise run package:windows` and requires a complete staged daemon
-set in `BOOTTY_DAEMON_OUTPUT_DIR`; CI stages it on target-capable runners.
+local installs build the host daemon. For Windows release packaging, use
+`mise run package:windows` with a complete staged daemon set in
+`BOOTTY_DAEMON_OUTPUT_DIR`; CI stages it on target-capable runners.
 
 On macOS, local packages use a self-signed `Bootty Dev` identity so Accessibility
 and Screen Recording grants survive reinstalls. Packaging creates it on first
@@ -80,6 +81,9 @@ Read [AGENTS.md](AGENTS.md) and the [architecture](docs/architecture.md) before
 changing ownership or adding a feature. Each durable fact and live mutation has
 one owner; terminals publish immutable frames, and every command uses one typed
 invocation path.
+
+Tests and benchmark validators require Python 3 on `PATH` (`python` on Windows,
+`python3` on Unix).
 
 Run the local validation gate:
 

@@ -1,8 +1,7 @@
 [env]
-# Zig's Debug optimize mode miscompiles libghostty-vt on aarch64-windows
-# (pervasive access violations in FFI calls). ReleaseSafe keeps runtime safety
-# checks while producing a working library on every platform.
-LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseSafe"
+# Use Ghostty's minimal release panic path: Zig's Windows ARM64 debug-stack
+# reader fails to compile in ReleaseSafe.
+LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"
 
 # On the first CoreText call in a process, macOS registers the fonts bundled with
 # the running executable, and for a bare binary that means enumerating the entire

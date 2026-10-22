@@ -386,15 +386,15 @@ fn run_application(
         Ok(action) => action,
         Err(outcome) => return Ok(outcome),
     };
-    // Captures always see the app's current front window; input targets the captured one so
+    // Observations see the app's current front window; input targets the observed one so
     // coordinates and element numbers keep meaning what the agent saw.
-    let target = if action.is_capture() {
+    let target = if action.observes() {
         window.clone()
     } else if let Some(observed) = access.observed() {
         observed
     } else {
         return denied(format!(
-            "Take a computer_snapshot of {} before sending input",
+            "Use computer_elements or computer_snapshot on {} before sending input",
             application.name
         ));
     };
@@ -406,7 +406,7 @@ fn run_application(
         Err(ComputerError::StaleTarget) => {
             return Ok(CommandOutcome::StaleTarget {
                 message: format!(
-                    "{}'s window moved, resized or closed. Take a new computer_snapshot.",
+                    "{}'s window moved, resized or closed. Refresh with computer_elements or computer_snapshot.",
                     application.name
                 ),
             });
@@ -414,7 +414,7 @@ fn run_application(
         Err(ComputerError::StaleElement) => {
             return Ok(CommandOutcome::StaleTarget {
                 message: format!(
-                    "That element of {} moved, changed or closed. Take a new computer_snapshot.",
+                    "That element of {} moved, changed or closed. Refresh with computer_elements or computer_snapshot.",
                     application.name
                 ),
             });
@@ -427,6 +427,15 @@ fn run_application(
         });
     }
     let outcome = match result {
+        result @ ComputerResult::Elements { .. } => {
+            if let ComputerResult::Elements {
+                target, elements, ..
+            } = &result
+            {
+                access.observe((**target).clone(), elements.clone());
+            }
+            super::serialized_command_outcome(serde_json::to_value(result)?)
+        }
         snapshot @ ComputerResult::Snapshot { .. } => {
             snapshot_with_elements(snapshot, &access, |target| {
                 runtime.block_on(computer.execute(
@@ -443,28 +452,38 @@ fn run_application(
 }
 
 /// The platform action for an agent's request. A press names an element by its number in the
-/// app's latest capture; agents never list or press elements any other way.
+/// app's latest observation; agents never supply their own element identities.
 fn agent_action(
     action: &bootty_agents::NativeApplicationAction,
     access: &bootty_agents::NativeApplicationAccess,
     application: &bootty_agents::NativeApplication,
 ) -> Result<ComputerAction, CommandOutcome> {
     match action {
+        bootty_agents::NativeApplicationAction::SetValue(set) => access
+            .element(set.element)
+            .map(|element| ComputerAction::SetValue {
+                element: Box::new(element),
+                value: set.value.clone(),
+            })
+            .ok_or_else(|| CommandOutcome::StaleTarget {
+                message: format!("{}'s latest observation has no element {}. Refresh with computer_elements.", application.name, set.element),
+            }),
         bootty_agents::NativeApplicationAction::Press(press) => access
             .element(press.element)
             .map(|element| ComputerAction::Press {
                 element: Box::new(element),
+                allow_click: press.allow_click,
             })
             .ok_or_else(|| CommandOutcome::StaleTarget {
                 message: format!(
-                    "{}'s latest computer_snapshot has no element {}. Take a new snapshot.",
+                    "{}'s latest observation has no element {}. Refresh with computer_elements or computer_snapshot.",
                     application.name, press.element
                 ),
             }),
         bootty_agents::NativeApplicationAction::Computer(
-            ComputerAction::Elements | ComputerAction::Press { .. },
+            ComputerAction::Press { .. } | ComputerAction::SetValue { .. },
         ) => Err(CommandOutcome::Denied {
-            message: "computer_snapshot lists elements; press one by its number".to_owned(),
+            message: "computer_elements and computer_snapshot list elements; press one by its number".to_owned(),
         }),
         bootty_agents::NativeApplicationAction::Computer(action) => Ok(action.clone()),
     }

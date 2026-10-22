@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use crate::{
     AppCommandSendError, BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation,
     CommandOutcome, ControlCatalog,
-    lease::{ControlInstanceLease, InstanceDescriptor, same_user, set_owner_only_file},
+    lease::{ControlInstanceLease, InstanceDescriptor, same_user},
     plane::ControlPlane,
     protocol::{
         COMMAND_COMPLETED_TOPIC, COMMAND_TIMEOUT, EVENT_QUEUE_LIMIT, EVENT_TOPIC_LIMIT, IO_TIMEOUT,
@@ -30,6 +30,13 @@ pub struct ControlServer {
     thread: Option<thread::JoinHandle<()>>,
     lease: Option<ControlInstanceLease>,
     state: SharedControlState,
+}
+
+fn bind_listener(endpoint: &LocalEndpoint) -> io::Result<LocalListener> {
+    let listener = LocalListener::bind(endpoint)?;
+    #[cfg(unix)]
+    crate::lease::set_owner_only_file(endpoint.as_path())?;
+    Ok(listener)
 }
 
 impl ControlServer {
@@ -66,10 +73,7 @@ impl ControlServer {
                     }
                 };
                 runtime.block_on(async move {
-                    let listener = match LocalListener::bind(&endpoint).and_then(|listener| {
-                        set_owner_only_file(endpoint.as_path())?;
-                        Ok(listener)
-                    }) {
+                    let listener = match bind_listener(&endpoint) {
                         Ok(listener) => {
                             let _ = ready_tx.send(Ok::<(), String>(()));
                             listener

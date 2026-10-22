@@ -1,7 +1,7 @@
-use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
@@ -17,13 +17,9 @@ pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
     if args.dev {
         bail!("Windows packaging does not support --dev");
     }
-    if env::var_os("BOOTTY_DAEMON_OUTPUT_DIR").is_none_or(|value| value.is_empty()) {
-        bail!("Windows packaging requires BOOTTY_DAEMON_OUTPUT_DIR with all daemon targets staged");
-    }
+    let host_daemon = build_daemon(layout)?;
 
-    crate::daemon::verify(&layout.daemon_output_dir)?;
-
-    let architecture = if env::var("PROCESSOR_ARCHITECTURE").is_ok_and(|value| value == "ARM64") {
+    let architecture = if cfg!(target_arch = "aarch64") {
         "arm64"
     } else {
         "x64"
@@ -48,19 +44,18 @@ pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
     )?;
     crate::voice_runtime::bundle(&layout.target_root, &bundle_root)?;
 
-    let host_daemon = layout
-        .daemon_output_dir
-        .join(DaemonTarget::X86_64PcWindowsMsvc.artifact_name());
     copy_file(&host_daemon, &bundle_root.join("bootty-daemon.exe"))?;
-    let bundled_daemons = bundle_root.join("daemons");
-    fs::create_dir_all(&bundled_daemons)
-        .with_context(|| format!("failed to create {}", bundled_daemons.display()))?;
-    for target in TARGETS {
-        let name = target.artifact_name();
-        copy_file(
-            &layout.daemon_output_dir.join(&name),
-            &bundled_daemons.join(name),
-        )?;
+    if layout.all_daemons {
+        let bundled_daemons = bundle_root.join("daemons");
+        fs::create_dir_all(&bundled_daemons)
+            .with_context(|| format!("failed to create {}", bundled_daemons.display()))?;
+        for target in TARGETS {
+            let name = target.artifact_name();
+            copy_file(
+                &layout.daemon_output_dir.join(&name),
+                &bundled_daemons.join(name),
+            )?;
+        }
     }
 
     if layout.linkage == Linkage::Dynamic {
@@ -71,6 +66,27 @@ pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
     let archive = layout.dist_dir.join(format!("{bundle_name}.zip"));
     write_zip(&bundle_root, &archive, &bundle_name)?;
     print_dist_files(layout)
+}
+
+fn build_daemon(layout: &Layout) -> Result<PathBuf> {
+    if layout.all_daemons {
+        crate::daemon::build_all()?;
+        Ok(layout
+            .daemon_output_dir
+            .join(DaemonTarget::X86_64PcWindowsMsvc.artifact_name()))
+    } else {
+        command::run(
+            Command::new("cargo")
+                .arg("build")
+                .args(layout.daemon_profile_args())
+                .args(["-p", "bootty-daemon", "--bin", "bootty-daemon"])
+                .env("RUSTFLAGS", ""),
+        )?;
+        Ok(layout
+            .target_root
+            .join(layout.daemon_profile)
+            .join("bootty-daemon.exe"))
+    }
 }
 
 fn build_bootty(layout: &Layout) -> Result<()> {

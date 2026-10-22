@@ -126,6 +126,11 @@ unsafe extern "C" {
         attribute: *const c_void,
         value: *const c_void,
     ) -> i32;
+    fn AXUIElementIsAttributeSettable(
+        element: *const c_void,
+        attribute: *const c_void,
+        settable: *mut u8,
+    ) -> i32;
     fn AXUIElementGetTypeID() -> usize;
     fn AXValueGetTypeID() -> usize;
     fn AXValueGetValue(value: *const c_void, kind: u32, out: *mut c_void) -> bool;
@@ -511,6 +516,32 @@ impl Desktop for MacDesktop {
                 _ => None,
             })
             .collect())
+    }
+
+    fn set_value(
+        &self,
+        window: &NativeWindow,
+        path: &[u16],
+        value: &str,
+    ) -> Result<(), ComputerError> {
+        let element = element_at(window, path).ok_or(ComputerError::StaleElement)?;
+        let attribute = CFString::from_static_str("AXValue");
+        let mut settable = 0_u8;
+        let code = unsafe {
+            AXUIElementIsAttributeSettable(cf(&element), cf(&attribute), &raw mut settable)
+        };
+        if code != 0 || settable == 0 {
+            return Err(ComputerError::InvalidAction(
+                "the element has no writable accessibility value".into(),
+            ));
+        }
+        let value = CFString::from_str(value);
+        match unsafe { AXUIElementSetAttributeValue(cf(&element), cf(&attribute), cf(&value)) } {
+            0 => Ok(()),
+            code => Err(ComputerError::Platform(format!(
+                "the app did not confirm setting the value ({code})"
+            ))),
+        }
     }
 
     fn press(&self, window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {

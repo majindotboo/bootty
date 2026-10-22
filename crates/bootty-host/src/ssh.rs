@@ -186,6 +186,7 @@ impl SshRemote {
             ssh_args.push(port.to_string());
         }
         ssh_args.extend(Self::keepalive_args());
+        #[cfg(unix)]
         ssh_args.extend(self.multiplexing_args());
         (self.config.program.clone(), ssh_args)
     }
@@ -225,11 +226,6 @@ impl SshRemote {
             "-o".to_owned(),
             "ControlPersist=60".to_owned(),
         ]
-    }
-
-    #[cfg(not(unix))]
-    fn multiplexing_args(&self) -> Vec<String> {
-        Vec::new()
     }
 }
 

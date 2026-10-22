@@ -36,6 +36,8 @@ fn run_daemon(
         .env_remove(bootty_config::APPLICATION_IDENTITY_ENV)
         .env("XDG_CONFIG_HOME", config_root)
         .env("XDG_STATE_HOME", state_root)
+        .env("LOCALAPPDATA", state_root)
+        .env("APPDATA", state_root)
         .env("HOME", config_root)
         .env("USERPROFILE", config_root);
     if let Some(identity) = identity {
@@ -317,6 +319,8 @@ fn inherited_local_identity_does_not_change_a_remote_command() {
         )
         .env("XDG_CONFIG_HOME", &config)
         .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("APPDATA", &state)
         .args([
             "remote-space",
             "create",
@@ -350,6 +354,8 @@ fn explicit_development_identity_uses_the_inherited_worktree_namespace() {
         .env(bootty_config::DEVELOPMENT_NAMESPACE_ENV, namespace)
         .env("XDG_CONFIG_HOME", &config)
         .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("APPDATA", &state)
         .args([
             "--application-identity",
             "bootty-dev",
@@ -380,6 +386,8 @@ fn explicit_daemon_state_override_is_exact_and_ignores_identity_namespace() {
         .env("BOOTTY_DAEMON_STATE", &override_path)
         .env("XDG_CONFIG_HOME", &config)
         .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("APPDATA", &state)
         .args([
             "--application-identity",
             "bootty-dev",
@@ -405,6 +413,8 @@ fn explicit_daemon_state_override_is_exact_and_ignores_identity_namespace() {
         .env("BOOTTY_DAEMON_STATE", &override_path)
         .env("XDG_CONFIG_HOME", &config)
         .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("APPDATA", &state)
         .args([
             "--application-identity",
             "bootty-dev",
@@ -421,6 +431,8 @@ fn explicit_daemon_state_override_is_exact_and_ignores_identity_namespace() {
         .env("BOOTTY_DAEMON_STATE", &override_path)
         .env("XDG_CONFIG_HOME", &config)
         .env("XDG_STATE_HOME", &state)
+        .env("LOCALAPPDATA", &state)
+        .env("APPDATA", &state)
         .args(["remote-space", "list"])
         .output()
         .expect("list override with default Production identity");
@@ -762,7 +774,7 @@ fn daemon_discovers_remote_projects_with_the_shared_heuristics() {
     assert!(
         projects
             .iter()
-            .any(|project| project.path.ends_with("src/project"))
+            .any(|project| std::path::Path::new(&project.path).ends_with("src/project"))
     );
     assert!(
         projects
@@ -1024,7 +1036,7 @@ fn remote_worktree_clean_runs_on_the_daemon_host() {
     let project = directory.child("repo");
     project.create_dir_all().unwrap();
     let host_home = directory.child("home");
-    let checkout = host_home.path().join("worktrees/repo/old");
+    let checkout = host_home.path().join("worktrees").join("repo").join("old");
     for args in [
         vec!["init", "-q"],
         vec![

@@ -13,7 +13,7 @@ pub fn configure_group(command: &mut Command) {
 }
 
 #[cfg(not(unix))]
-pub fn configure_group(_command: &mut Command) {}
+pub const fn configure_group(_command: &mut Command) {}
 
 pub fn terminate_group(child: &mut Child) {
     #[cfg(unix)]

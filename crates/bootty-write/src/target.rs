@@ -260,6 +260,7 @@ impl LockedWriteTarget {
         let mut temporary = builder
             .tempfile_in(parent)
             .map_err(|error| CommitError::new("prepare", error))?;
+        #[cfg(unix)]
         set_replacement_permissions(temporary.as_file(), existing.as_ref())
             .map_err(|error| CommitError::new("prepare permissions", error))?;
         temporary
@@ -331,11 +332,6 @@ fn set_replacement_permissions(file: &File, existing: Option<&fs::Metadata>) -> 
     Ok(())
 }
 
-#[cfg(not(unix))]
-fn set_replacement_permissions(_file: &File, _existing: Option<&fs::Metadata>) -> io::Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn replace_file(temporary: &Path, target: &Path, _target_exists: bool) -> io::Result<()> {
     fs::rename(temporary, target)
@@ -362,7 +358,7 @@ fn replace_file(temporary: &Path, target: &Path, target_exists: bool) -> io::Res
     } else {
         w::MoveFileEx(temporary, Some(target), co::MOVEFILE::WRITE_THROUGH)
     };
-    result.map_err(|error| io::Error::from_raw_os_error(error.raw() as i32))
+    result.map_err(|error| io::Error::from_raw_os_error(error.raw().cast_signed()))
 }
 
 #[cfg(not(any(unix, windows)))]

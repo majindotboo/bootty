@@ -87,7 +87,7 @@ pub fn run(
     let platform = gpui_kit::platform::current_platform(false);
     let mappings = crate::font_mapping::FontMappings::default();
     let text_system =
-        crate::font_mapping::wrap_text_system(platform.text_system(), mappings.clone());
+        crate::font_mapping::wrap_text_system(platform.text_system(), mappings.clone())?;
     let terminal_text_system = crate::gpui::TerminalPlatformTextSystem(text_system.clone());
     let platform = Rc::new(crate::native_platform::BoottyPlatform::new(
         platform,

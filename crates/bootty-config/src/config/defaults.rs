@@ -145,7 +145,9 @@ pub fn default_working_directory() -> Option<PathBuf> {
     default_working_directory_from(|name| env::var_os(name))
 }
 
-fn default_working_directory_from(
+/// Resolve the default working directory from a captured host environment.
+#[must_use]
+pub fn default_working_directory_from(
     mut var: impl FnMut(&str) -> Option<OsString>,
 ) -> Option<PathBuf> {
     #[cfg(windows)]

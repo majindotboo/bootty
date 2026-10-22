@@ -360,6 +360,8 @@ fn restored_attachment_accepts_a_large_valid_encoded_preview(cx: &mut TestAppCon
     cx.update(|cx| {
         gpui_kit::component::init(cx);
         init_theme(UiPalette::default(), cx);
+        // The geometry assertions compare successive draws, not the dialog's entrance motion.
+        cx.set_reduce_motion(true);
     });
     let mut seed = 17_u32;
     let pixels = image::RgbaImage::from_fn(500, 500, |_, _| {
@@ -468,7 +470,11 @@ fn verify_draft_image_removal(visual: &mut gpui_kit::VisualTestContext, png: &[u
             )],
         });
     });
-    visual.simulate_keystrokes("cmd-v");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-v"
+    } else {
+        "ctrl-v"
+    });
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let remove = visual
@@ -1703,14 +1709,22 @@ fn composer_accepts_folders_from_paste_and_platform_drop(cx: &mut TestAppContext
             )],
         });
     });
-    visual.simulate_keystrokes("cmd-v");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-v"
+    } else {
+        "ctrl-v"
+    });
     visual.run_until_parked();
-    visual.simulate_keystrokes("cmd-a cmd-c");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a cmd-c"
+    } else {
+        "ctrl-a ctrl-c"
+    });
     let text = visual
         .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
         .unwrap();
     assert!(
-        text.contains(path.to_str().unwrap()),
+        text.contains(&serde_json::to_string(&format!("{}/", path.display())).unwrap()),
         "pasted folder becomes prompt context: {text}"
     );
     visual.simulate_keystrokes("backspace");
@@ -1729,12 +1743,17 @@ fn composer_accepts_folders_from_paste_and_platform_drop(cx: &mut TestAppContext
         visual.update(|window, cx| window.draw(cx).clear(cx));
         visual.simulate_event(gpui_kit::FileDropEvent::Submit { position });
         visual.run_until_parked();
-        visual.simulate_keystrokes("cmd-a cmd-c");
+        visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+            "cmd-a cmd-c"
+        } else {
+            "ctrl-a ctrl-c"
+        });
         let text = visual
             .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
             .unwrap();
         pretty_assertions::assert_eq!(
-            text.matches(path.to_str().unwrap()).count(),
+            text.matches(&serde_json::to_string(&format!("{}/", path.display())).unwrap())
+                .count(),
             1,
             "a drop adds the folder once, including over the transcript"
         );
@@ -1798,11 +1817,15 @@ fn a_file_drop_on_the_collapsed_composer_restores_the_draft(cx: &mut TestAppCont
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds("native-composer").is_some());
-    visual.simulate_keystrokes("cmd-a cmd-c");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a cmd-c"
+    } else {
+        "ctrl-a ctrl-c"
+    });
     let text = visual
         .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
         .unwrap();
-    assert!(text.contains(path.to_str().unwrap()));
+    assert!(text.contains(&serde_json::to_string(&format!("{}/", path.display())).unwrap()));
 }
 
 #[gpui_kit::test]
@@ -3179,7 +3202,11 @@ fn pasted_images_stop_at_the_prompt_image_limit(cx: &mut TestAppContext) {
                 .collect(),
         });
     });
-    visual.simulate_keystrokes("cmd-v");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-v"
+    } else {
+        "ctrl-v"
+    });
     visual.run_until_parked();
     let imports = commands
         .lock()
@@ -3820,6 +3847,13 @@ fn file_links_offer_their_file_actions(cx: &mut TestAppContext) {
         init_theme(UiPalette::default(), cx);
     });
     let mut record = saved_record("idle");
+    let directory = assert_fs::TempDir::new().unwrap();
+    record.config.cwd = directory.path().to_path_buf();
+    let expected_path = directory
+        .path()
+        .join("notes.md")
+        .to_string_lossy()
+        .into_owned();
     record.snapshot.transcript[4].text = "[notes](notes.md:2)".to_owned();
     let (sender, commands) = native_command_sender(&record);
     let (_, visual) = cx.add_window_view(|window, cx| {
@@ -3860,7 +3894,7 @@ fn file_links_offer_their_file_actions(cx: &mut TestAppContext) {
     let copy = visual.debug_bounds("native-link-copy").expect("copy path");
     visual.simulate_click(copy.center(), Modifiers::none());
     let copied = visual.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
-    assert_eq!(copied.as_deref(), Some("/tmp/project/notes.md"));
+    assert_eq!(copied.as_deref(), Some(expected_path.as_str()));
     visual.simulate_mouse_down(link, MouseButton::Right, Modifiers::none());
     visual.simulate_mouse_up(link, MouseButton::Right, Modifiers::none());
     visual.run_until_parked();
@@ -4697,7 +4731,11 @@ fn working_composer_queues_by_default_and_command_enter_steers(cx: &mut TestAppC
             .any(|command| command == "agents.native.queue")
     );
     visual.simulate_input("Steer this turn");
-    visual.simulate_keystrokes("cmd-enter");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    });
     visual.run_until_parked();
     assert!(
         commands
@@ -5320,7 +5358,11 @@ fn large_conversation_paste_uses_attachment_import(cx: &mut TestAppContext) {
     visual.update(|_, cx| {
         cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("🥟".repeat(8192)));
     });
-    visual.simulate_keystrokes("cmd-v");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-v"
+    } else {
+        "ctrl-v"
+    });
     visual.run_until_parked();
     let calls = calls.lock().unwrap();
     let import = calls
@@ -5339,7 +5381,11 @@ fn large_conversation_paste_uses_attachment_import(cx: &mut TestAppContext) {
     );
     drop(calls);
     // A rejected import keeps existing text, so the user can retry it.
-    visual.simulate_keystrokes("cmd-a cmd-c");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a cmd-c"
+    } else {
+        "ctrl-a ctrl-c"
+    });
     let draft = visual
         .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
         .unwrap();
@@ -5389,7 +5435,11 @@ fn add_menu_inserts_provider_commands_as_editable_slash_text(cx: &mut TestAppCon
         .expect("provider command submenu");
     visual.simulate_click(command.center(), Modifiers::none());
     visual.run_until_parked();
-    visual.simulate_keystrokes("cmd-a cmd-c");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-a cmd-c"
+    } else {
+        "ctrl-a ctrl-c"
+    });
     let text = visual
         .update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
         .unwrap();
@@ -6434,7 +6484,11 @@ fn steering_preserves_the_transcript_reading_position(cx: &mut TestAppContext) {
     visual.simulate_input("Steer this turn");
     redraw(visual);
     let before = visual.debug_bounds("native-message-answer").unwrap();
-    visual.simulate_keystrokes("cmd-enter");
+    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-enter"
+    } else {
+        "ctrl-enter"
+    });
     redraw(visual);
     let after = visual
         .debug_bounds("native-message-answer")

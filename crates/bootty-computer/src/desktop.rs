@@ -171,8 +171,7 @@ pub trait Desktop: Send + Sync {
     /// A square icon for an application, `side` pixels wide, when the OS has one.
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image>;
 
-    // Deliberate limit: only macOS reads accessibility elements. Implement the four methods
-    // below with UI Automation on Windows and AT-SPI on Linux when agents need elements there.
+    // Linux needs an AT-SPI adapter before it can expose accessibility elements.
 
     /// The window's accessibility elements in screen order: at most `limit`, and whether any were
     /// left out.
@@ -216,6 +215,19 @@ pub trait Desktop: Send + Sync {
     /// # Errors
     /// Returns unsupported, availability or platform errors; a press is never retried.
     fn press(&self, _window: &NativeWindow, _path: &[u16]) -> Result<bool, ComputerError> {
+        Err(ComputerError::Unsupported)
+    }
+
+    /// Replace an editable value without focusing or synthesizing input. Never falls back to keys.
+    ///
+    /// # Errors
+    /// Returns unsupported, availability or platform errors; delivery is never retried.
+    fn set_value(
+        &self,
+        _window: &NativeWindow,
+        _path: &[u16],
+        _value: &str,
+    ) -> Result<(), ComputerError> {
         Err(ComputerError::Unsupported)
     }
 }

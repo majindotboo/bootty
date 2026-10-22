@@ -153,11 +153,17 @@ fn unobserved_launch_preserves_literal_tui_arguments_without_starting_a_provider
         .collect::<Vec<_>>();
     let prepared = TerminalAgentService::prepare_unobserved(
         AgentKind::Codex,
-        launch,
+        launch.clone(),
         "App-owned observation is unavailable for persistent terminals".to_owned(),
     )
     .unwrap();
-    assert_eq!(prepared.argv(), original);
+    assert_eq!(prepared.launch, launch);
+    assert_eq!(
+        prepared
+            .argv_for_shell(bootty_agents::LaunchShell::Posix)
+            .unwrap(),
+        original
+    );
     let record = service
         .register(prepared, target(1), "persistent-binding".to_owned())
         .unwrap();

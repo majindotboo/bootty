@@ -1,4 +1,3 @@
-use base64::Engine as _;
 use bootty_control::CommandTarget;
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +8,37 @@ pub enum LaunchShell {
     #[default]
     Posix,
     Windows,
+}
+
+impl LaunchShell {
+    pub(crate) fn absolute_path(self, value: &str) -> bool {
+        match self {
+            Self::Posix => value.starts_with('/'),
+            Self::Windows => {
+                if matches!(value.as_bytes(), [drive, b':', b'\\' | b'/', ..] if drive.is_ascii_alphabetic())
+                {
+                    return true;
+                }
+                let Some(unc) = value
+                    .strip_prefix(r"\\")
+                    .or_else(|| value.strip_prefix("//"))
+                else {
+                    return false;
+                };
+                let mut parts = unc.split(['\\', '/']);
+                parts.next().is_some_and(|part| !part.is_empty())
+                    && parts.next().is_some_and(|part| !part.is_empty())
+            }
+        }
+    }
+
+    pub(crate) const fn local() -> Self {
+        if cfg!(windows) {
+            Self::Windows
+        } else {
+            Self::Posix
+        }
+    }
 }
 
 /// Facts captured by the host before an asynchronous agent command starts.
@@ -58,13 +88,17 @@ impl AgentLaunch {
     /// # Errors
     /// Returns invalid program/cwd controls, oversized values, or NUL in literal arguments.
     pub fn validate(&self) -> Result<(), String> {
+        self.validate_for_shell(LaunchShell::local())
+    }
+
+    pub(crate) fn validate_for_shell(&self, shell: LaunchShell) -> Result<(), String> {
         if self.program.is_empty() || self.program.starts_with('-') {
             return Err("Agent program must be an executable name or path".to_owned());
         }
         if self
             .account_directory
             .as_ref()
-            .is_some_and(|directory| !std::path::Path::new(directory).is_absolute())
+            .is_some_and(|directory| !shell.absolute_path(directory))
         {
             return Err("Agent account directory must be an absolute path".to_owned());
         }
@@ -216,7 +250,7 @@ impl AgentLaunch {
     /// # Errors
     /// Returns an error for invalid launch values, failed context serialization, or a Windows command line exceeding its limit.
     pub fn shell_command(&self, provider: AgentKind, shell: LaunchShell) -> Result<String, String> {
-        self.validate()?;
+        self.validate_for_shell(shell)?;
         let context =
             serde_json::to_string(&self.retained(provider)).map_err(|error| error.to_string())?;
         match shell {
@@ -248,47 +282,43 @@ impl AgentLaunch {
                 ))
             }
             LaunchShell::Windows => {
-                let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
-                let argv = std::iter::once(&self.program)
-                    .chain(&self.arguments)
-                    .map(|value| quote(value))
-                    .collect::<Vec<_>>()
+                let owner = std::env::current_exe().map_err(|error| error.to_string())?;
+                let command = self
+                    .windows_argv(&owner, provider, &self.arguments, Some(&context))?
                     .join(" ");
-                let cwd = self
-                    .cwd
-                    .as_ref()
-                    .filter(|cwd| !cwd.is_empty())
-                    .map_or_else(String::new, |cwd| {
-                        format!("Set-Location -LiteralPath {}; ", quote(cwd))
-                    });
-                let account =
-                    self.account_directory
-                        .as_ref()
-                        .map_or_else(String::new, |directory| {
-                            format!(
-                                "$env:{}={}; ",
-                                provider.account_directory_variable(),
-                                quote(directory)
-                            )
-                        });
-                let script = format!(
-                    "$ErrorActionPreference='Stop'; {cwd}{account}$env:BOOTTY_AGENT_LAUNCH_CONTEXT={}; & {argv}; exit $LASTEXITCODE",
-                    quote(&context)
-                );
-                let bytes = script
-                    .encode_utf16()
-                    .flat_map(u16::to_le_bytes)
-                    .collect::<Vec<_>>();
-                let command = format!(
-                    "powershell.exe -NoProfile -EncodedCommand {}",
-                    base64::engine::general_purpose::STANDARD.encode(bytes)
-                );
                 if command.len() > 30_000 {
                     return Err("Agent launch exceeds the Windows command-line limit".to_owned());
                 }
                 Ok(command)
             }
         }
+    }
+
+    pub(crate) fn windows_argv(
+        &self,
+        owner: &std::path::Path,
+        provider: AgentKind,
+        arguments: &[String],
+        context: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        let mut environment = Vec::new();
+        if let Some(account) = &self.account_directory {
+            environment.push((
+                provider.account_directory_variable().to_owned(),
+                account.clone(),
+            ));
+        }
+        if let Some(context) = context {
+            environment.push(("BOOTTY_AGENT_LAUNCH_CONTEXT".to_owned(), context.to_owned()));
+        }
+        bootty_host::windows_terminal_argv(
+            owner,
+            &self.program,
+            arguments,
+            self.cwd.as_deref().filter(|cwd| !cwd.is_empty()),
+            &environment,
+        )
+        .map_err(|error| error.to_string())
     }
 }
 

@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{ChildStdin, Command, Stdio},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,6 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -133,7 +134,7 @@ impl NativeSessionConfig {
         }
         let mut candidate = self.clone();
         if self.provider == AgentKind::Pi {
-            if !crate::terminal_history::valid_path(Path::new(&entry.resume_id)) {
+            if !self.path_is_absolute(Path::new(&entry.resume_id)) {
                 return Err("Pi requires its exact saved session file".into());
             }
             candidate.session_file = Some(entry.resume_id.clone());
@@ -161,15 +162,15 @@ impl NativeSessionConfig {
             .ok()
             .filter(|value| !value.is_empty())
             .or_else(|| {
-                std::env::var("HOME").ok().map(|home| {
-                    format!(
-                        "{home}/{}",
-                        match provider {
-                            AgentKind::Pi => ".pi/agent",
-                            AgentKind::Claude => ".claude",
-                            AgentKind::Codex => ".codex",
-                        }
-                    )
+                std::env::home_dir().and_then(|home| {
+                    home.join(match provider {
+                        AgentKind::Pi => ".pi/agent",
+                        AgentKind::Claude => ".claude",
+                        AgentKind::Codex => ".codex",
+                    })
+                    .into_os_string()
+                    .into_string()
+                    .ok()
                 })
             });
         Self {
@@ -195,7 +196,19 @@ impl NativeSessionConfig {
     /// # Errors
     /// Returns unsupported providers, missing/relative directories, or invalid launch options.
     pub fn from_launch(provider: AgentKind, launch: AgentLaunch) -> Result<Self, String> {
-        launch.validate()?;
+        Self::from_launch_on(provider, launch, None)
+    }
+
+    fn from_launch_on(
+        provider: AgentKind,
+        launch: AgentLaunch,
+        remote: Option<NativeRemote>,
+    ) -> Result<Self, String> {
+        launch.validate_for_shell(if remote.is_some() {
+            crate::LaunchShell::Posix
+        } else {
+            crate::LaunchShell::local()
+        })?;
         if launch.ephemeral {
             return Err("Native conversations require provider session persistence".to_owned());
         }
@@ -204,6 +217,7 @@ impl NativeSessionConfig {
             .cwd
             .ok_or("Native conversation requires a captured directory")?;
         let mut config = Self::new(provider, cwd);
+        config.remote = remote;
         if retained.ephemeral {
             return Err("Native conversations require provider session persistence".to_owned());
         }
@@ -226,7 +240,7 @@ impl NativeSessionConfig {
         host: bootty_config::config::RemoteConfig,
     ) -> Result<Self, String> {
         use bootty_host::CommandRunner as _;
-        launch.validate()?;
+        launch.validate_for_shell(crate::LaunchShell::Posix)?;
         let remote = bootty_host::remote::RemoteHost::new(host.clone());
         let runner =
             bootty_host::remote::RemoteCommandRunner::new(remote, bootty_host::SystemCommandRunner);
@@ -257,16 +271,14 @@ impl NativeSessionConfig {
         launch.program = (*program).into();
         launch.cwd = Some((*cwd).into());
         launch.account_directory = Some((*account).into());
-        let mut config = Self::from_launch(provider, launch)?;
-        config.remote = Some(NativeRemote {
+        let remote = NativeRemote {
             host,
             daemon: format!(
                 "{home}/{}",
                 bootty_host::remote_exec_program().trim_start_matches("./")
             ),
-        });
-        config.validate()?;
-        Ok(config)
+        };
+        Self::from_launch_on(provider, launch, Some(remote))
     }
 
     pub(crate) fn validate(&self) -> Result<(), String> {
@@ -290,8 +302,8 @@ impl NativeSessionConfig {
             return Err("Captured profile requires a simple bounded ID".into());
         }
         if self.remote.as_ref().is_some_and(|remote| {
-            !Path::new(&remote.daemon).is_absolute()
-                || !Path::new(&self.program).is_absolute()
+            !crate::LaunchShell::Posix.absolute_path(&remote.daemon)
+                || !crate::LaunchShell::Posix.absolute_path(&self.program)
                 || remote.daemon.len() > 8192
                 || remote.daemon.chars().any(char::is_control)
         }) {
@@ -310,14 +322,14 @@ impl NativeSessionConfig {
             ephemeral: false,
             account_directory: self.account_directory.clone(),
         }
-        .validate()?;
-        if !self.cwd.is_absolute() {
+        .validate_for_shell(self.launch_shell())?;
+        if !self.path_is_absolute(&self.cwd) {
             return Err("Native agent directory must be absolute".to_owned());
         }
         if self
             .account_directory
             .as_deref()
-            .is_some_and(|directory| !std::path::Path::new(directory).is_absolute())
+            .is_some_and(|directory| !self.launch_shell().absolute_path(directory))
         {
             return Err(
                 "Native conversation requires a captured absolute account directory".to_owned(),
@@ -343,7 +355,7 @@ impl NativeSessionConfig {
             if self
                 .session_file
                 .as_ref()
-                .is_some_and(|file| !std::path::Path::new(file).is_absolute())
+                .is_some_and(|file| !self.launch_shell().absolute_path(file))
             {
                 return Err("Pi resume requires its exact absolute session file".to_owned());
             }
@@ -379,6 +391,19 @@ impl NativeSessionConfig {
         Ok(())
     }
 
+    const fn launch_shell(&self) -> crate::LaunchShell {
+        if self.remote.is_some() {
+            crate::LaunchShell::Posix
+        } else {
+            crate::LaunchShell::local()
+        }
+    }
+
+    fn path_is_absolute(&self, path: &Path) -> bool {
+        path.to_str()
+            .is_some_and(|value| self.launch_shell().absolute_path(value))
+    }
+
     pub(crate) fn capture_session(&mut self, snapshot: &NativeSessionSnapshot) {
         // Readiness can precede the provider's identity event; absence cannot erase a resume selector.
         if snapshot.session_id.is_some() {
@@ -393,8 +418,9 @@ impl NativeSessionConfig {
 /// A bidirectional provider child. Spawn and requests run on a host worker; snapshots never wait
 /// for provider I/O. Dropping this owner terminates and reaps its process tree.
 pub struct NativeAgentSession {
+    _provider_use: Option<crate::ProviderUse>,
     pub(crate) config: NativeSessionConfig,
-    child: Arc<Mutex<Child>>,
+    child: Arc<Mutex<ProcessTreeChild>>,
     stdin: Arc<Mutex<Option<ChildStdin>>>,
     pub(crate) snapshot: Arc<Mutex<NativeSessionSnapshot>>,
     pending: PendingReplies,
@@ -445,12 +471,29 @@ impl NativeAgentSession {
         tools: Option<Arc<crate::ToolBridge>>,
         attachment_directory: Option<&Path>,
     ) -> Result<Self, String> {
+        let provider_use = if config.remote.is_none() {
+            crate::ProviderUse::acquire(&config.program)?
+        } else {
+            None
+        };
         let claude = claude_protocol(&config)?;
         let (mut child, launch_resources) =
             spawn_native_child(&config, tools.as_deref(), attachment_directory)?;
-        let stdin = child.stdin.take().ok_or("Agent stdin was not opened")?;
-        let stdout = child.stdout.take().ok_or("Agent stdout was not opened")?;
-        let stderr = child.stderr.take().ok_or("Agent stderr was not opened")?;
+        let stdin = child
+            .child_mut()
+            .stdin
+            .take()
+            .ok_or("Agent stdin was not opened")?;
+        let stdout = child
+            .child_mut()
+            .stdout
+            .take()
+            .ok_or("Agent stdout was not opened")?;
+        let stderr = child
+            .child_mut()
+            .stderr
+            .take()
+            .ok_or("Agent stderr was not opened")?;
         let child = Arc::new(Mutex::new(child));
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let next_request = Arc::new(AtomicU64::new(1));
@@ -541,6 +584,7 @@ impl NativeAgentSession {
         lock(&workers).push(reader_worker);
         Ok(Self {
             child,
+            _provider_use: provider_use,
             stdin,
             snapshot,
             pending,
@@ -1733,7 +1777,7 @@ fn join_workers(workers: &Mutex<Vec<NativeWorker>>) -> Result<(), String> {
 fn start_stderr_worker(
     reader: impl Read + Send + 'static,
     tail: Arc<Mutex<Vec<u8>>>,
-    child: &Mutex<Child>,
+    child: &Mutex<ProcessTreeChild>,
 ) -> Result<NativeWorker, String> {
     spawn_worker("native-agent-stderr", move || drain_stderr(reader, &tail))
         .inspect_err(|_| terminate(child))
@@ -1794,8 +1838,10 @@ fn route_reply(value: &Value, pending: &PendingReplies, provider: AgentKind) {
     }
 }
 
-fn terminate(child: &Mutex<Child>) {
-    crate::terminal_process::terminate_group(&mut lock(child));
+fn terminate(child: &Mutex<ProcessTreeChild>) {
+    let mut child = lock(child);
+    let _ = child.terminate();
+    let _ = child.wait();
 }
 
 fn ingest_claude_frame(
@@ -2748,7 +2794,7 @@ fn claude_protocol(
             .map_err(|error| error.to_string())?
     };
     Ok(Some(Arc::new(Mutex::new(
-        crate::native_claude::ClaudeProtocol::new(identity, cwd)?,
+        crate::native_claude::ClaudeProtocol::new(identity, cwd, config.launch_shell())?,
     ))))
 }
 
@@ -2756,7 +2802,7 @@ fn spawn_native_child(
     config: &NativeSessionConfig,
     tools: Option<&crate::ToolBridge>,
     attachment_directory: Option<&std::path::Path>,
-) -> Result<(Child, NativeLaunchResources), String> {
+) -> Result<(ProcessTreeChild, NativeLaunchResources), String> {
     if tools.is_some_and(|tools| {
         tools.lease().scope().provider != config.provider
             || tools.lease().terminal_target().is_none()
@@ -2777,8 +2823,8 @@ fn spawn_native_child(
             None,
         )
     };
-    native_command(config, &tool_arguments, attachment_directory)?
-        .spawn()
+    let mut command = native_command(config, &tool_arguments, attachment_directory)?;
+    ProcessTreeChild::spawn_with_console_window(&mut command, ConsoleWindowBehavior::Suppress)
         .map(|child| {
             (
                 child,
@@ -2796,96 +2842,96 @@ fn native_command(
     attachment_directory: Option<&std::path::Path>,
 ) -> Result<Command, String> {
     config.validate()?;
-    #[cfg(not(unix))]
-    return Err("Native conversations currently require a Unix provider transport".to_owned());
-    #[cfg(unix)]
-    {
-        let mut command = Command::new(&config.program);
-        crate::terminal_process::configure_group(&mut command);
-        if config.provider == AgentKind::Pi {
-            command.args(tool_arguments).args(&config.arguments);
-            command.args(["--mode", "rpc"]);
-            if let Some(file) = &config.session_file {
-                command.args(["--session", file]);
-            }
-            if let Some(model) = &config.model {
-                command.args(["--model", model]);
-            }
-        } else if config.provider == AgentKind::Claude {
-            let identity = config
-                .session_id
-                .as_deref()
-                .or(config.fresh_session_id.as_deref())
-                .ok_or("Missing captured Claude UUID")?;
-            command.args(tool_arguments).args(&config.arguments);
-            let mode = if config.plan_mode == Some(true) {
-                Some("plan")
-            } else {
-                config.permissions.claude()
-            };
-            if let Some(mode) = mode {
-                command.args(["--permission-mode", mode]);
-            }
-            // Leaving Plan mode returns to full access, which Claude only allows when asked.
-            if config.permissions == crate::NativePermissionMode::FullAccess {
-                command.arg("--allow-dangerously-skip-permissions");
-            }
-            if let Some(directory) = attachment_directory {
-                if !directory.is_absolute() {
-                    return Err("Native Claude attachment directory must be absolute".to_owned());
-                }
-                command.arg("--add-dir").arg(directory);
-            }
-            command.args(crate::native_claude::launch_arguments(
-                identity,
-                config.session_id.is_some(),
-            )?);
-            if let Some(model) = &config.model {
-                command.args(["--model", model]);
-            }
-            if config.fast_mode {
-                command.args(["--settings", r#"{"fastMode":true}"#]);
-            }
-            if let Some(effort) = &config.reasoning_effort {
-                command.args(["--effort", effort]);
-            }
-        } else {
-            command
-                .args(["app-server", "--listen", "stdio://"])
-                // A scoped override lets older SDKs ignore the unknown question feature.
-                .args(["--config", "features.default_mode_request_user_input=true"])
-                .args(tool_arguments)
-                .args(crate::codex_terminal::provider_arguments(
-                    &config.arguments,
-                )?);
+
+    let mut command = if config.remote.is_some() {
+        Command::new(&config.program)
+    } else {
+        bootty_host::local_command(&config.program)
+    };
+
+    if config.provider == AgentKind::Pi {
+        command.args(tool_arguments).args(&config.arguments);
+        command.args(["--mode", "rpc"]);
+        if let Some(file) = &config.session_file {
+            command.args(["--session", file]);
         }
-        if let Some(remote) = &config.remote {
-            command = remote_native_command(config, remote, &command)?;
-        } else {
-            command.current_dir(&config.cwd);
+        if let Some(model) = &config.model {
+            command.args(["--model", model]);
         }
-        command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env_remove("BOOTTY_AGENT_LAUNCH_CONTEXT")
-            .env_remove("BOOTTY_CONTROL_ENDPOINT")
-            .env("BOOTTY_NATIVE_AGENT", "1");
-        let account = config
-            .account_directory
+    } else if config.provider == AgentKind::Claude {
+        let identity = config
+            .session_id
             .as_deref()
-            .ok_or("Missing captured account directory")?;
-        // Preserve Claude's normal CLI environment for its default account.
-        let default_claude = config.remote.is_none()
-            && config.provider == AgentKind::Claude
-            && std::env::var("HOME").is_ok_and(|home| account == format!("{home}/.claude"));
-        if default_claude {
-            command.env_remove(config.provider.account_directory_variable());
+            .or(config.fresh_session_id.as_deref())
+            .ok_or("Missing captured Claude UUID")?;
+        command.args(tool_arguments).args(&config.arguments);
+        let mode = if config.plan_mode == Some(true) {
+            Some("plan")
         } else {
-            command.env(config.provider.account_directory_variable(), account);
+            config.permissions.claude()
+        };
+        if let Some(mode) = mode {
+            command.args(["--permission-mode", mode]);
         }
-        Ok(command)
+        // Leaving Plan mode returns to full access, which Claude only allows when asked.
+        if config.permissions == crate::NativePermissionMode::FullAccess {
+            command.arg("--allow-dangerously-skip-permissions");
+        }
+        if let Some(directory) = attachment_directory {
+            if !config.path_is_absolute(directory) {
+                return Err("Native Claude attachment directory must be absolute".to_owned());
+            }
+            command.arg("--add-dir").arg(directory);
+        }
+        command.args(crate::native_claude::launch_arguments(
+            identity,
+            config.session_id.is_some(),
+        )?);
+        if let Some(model) = &config.model {
+            command.args(["--model", model]);
+        }
+        if config.fast_mode {
+            command.args(["--settings", r#"{"fastMode":true}"#]);
+        }
+        if let Some(effort) = &config.reasoning_effort {
+            command.args(["--effort", effort]);
+        }
+    } else {
+        command
+            .args(["app-server", "--listen", "stdio://"])
+            // A scoped override lets older SDKs ignore the unknown question feature.
+            .args(["--config", "features.default_mode_request_user_input=true"])
+            .args(tool_arguments)
+            .args(crate::codex_terminal::provider_arguments(
+                &config.arguments,
+            )?);
     }
+    if let Some(remote) = &config.remote {
+        command = remote_native_command(config, remote, &command)?;
+    } else {
+        command.current_dir(&config.cwd);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env_remove("BOOTTY_AGENT_LAUNCH_CONTEXT")
+        .env_remove("BOOTTY_CONTROL_ENDPOINT")
+        .env("BOOTTY_NATIVE_AGENT", "1");
+    let account = config
+        .account_directory
+        .as_deref()
+        .ok_or("Missing captured account directory")?;
+    // Preserve Claude's normal CLI environment for its default account.
+    let default_claude = config.remote.is_none()
+        && config.provider == AgentKind::Claude
+        && std::env::home_dir().is_some_and(|home| Path::new(account) == home.join(".claude"));
+    if default_claude {
+        command.env_remove(config.provider.account_directory_variable());
+    } else {
+        command.env(config.provider.account_directory_variable(), account);
+    }
+    Ok(command)
 }
 
 impl NativeAgentSession {
@@ -3037,7 +3083,6 @@ fn initial_snapshot(
     initial
 }
 
-#[cfg(unix)]
 fn remote_native_command(
     config: &NativeSessionConfig,
     remote: &NativeRemote,
@@ -3073,7 +3118,6 @@ fn remote_native_command(
         .proxy_command_in(cwd, "/usr/bin/env", &arguments)
         .map_err(|error| error.to_string())?;
     let mut command = Command::new(program);
-    crate::terminal_process::configure_group(&mut command);
     command.args(arguments);
     Ok(command)
 }

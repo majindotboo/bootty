@@ -1774,6 +1774,7 @@ impl AppState {
         let workspace_frame = self.advance_workspace_frame(now, window_focused);
         self.restore_terminal_agents(now);
         self.reconcile_agent_ownership();
+        self.poll_provider_updates(now, &mut effects);
         self.poll_session_settlement(now, &mut effects);
         self.poll_worktree_cleanup(now);
         if let Some(after) = workspace_frame.next_wake {

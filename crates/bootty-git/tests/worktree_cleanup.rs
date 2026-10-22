@@ -184,6 +184,12 @@ fn orphaned_checkouts_go_unless_they_hold_unsaved_work(
 fn teardown_runs_before_a_checkout_goes(#[case] command: &str, #[case] kept: Option<&str>) {
     let host = Host::new();
     let path = host.checkout("orphan", false);
+    #[cfg(windows)]
+    let command = if kept.is_some() {
+        "echo services still running>&2&exit /b 1"
+    } else {
+        command
+    };
     let mut request = host.request(10, Vec::new());
     request.teardown.insert(
         host.main().to_string_lossy().into_owned(),

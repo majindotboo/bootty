@@ -128,8 +128,15 @@ fn spawn_terminal(
     }
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
-    let control = Arc::new(TerminalControl::new(&*child)?);
+    #[cfg(unix)]
+    let control = TerminalControl::new(&*child)?;
+    #[cfg(not(unix))]
+    let control = TerminalControl::new(&*child);
+    let control = Arc::new(control);
+    #[cfg(unix)]
     let cancellation = control.clone();
+    #[cfg(not(unix))]
+    let cancellation = control;
     let cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
         cancellation.terminate();
     });
@@ -163,8 +170,11 @@ fn spawn_terminal(
     });
     thread::spawn(move || {
         let complete = reader.join().unwrap_or(false);
-        let code = control
-            .wait(&mut *child)
+        #[cfg(unix)]
+        let status = control.wait(&mut *child);
+        #[cfg(not(unix))]
+        let status = child.wait();
+        let code = status
             .ok()
             .and_then(|status| i32::try_from(status.exit_code()).ok())
             .unwrap_or(1);
@@ -226,23 +236,22 @@ struct TerminalControl {
 }
 
 impl TerminalControl {
+    #[cfg(unix)]
     fn new(child: &dyn portable_pty::Child) -> Result<Self> {
-        #[cfg(unix)]
-        {
-            let pid = child
-                .process_id()
-                .context("remote terminal process identity")?;
-            let pid = rustix::process::Pid::from_raw(i32::try_from(pid)?)
-                .context("remote terminal process identity")?;
-            Ok(Self {
-                pid: Mutex::new(Some(pid)),
-            })
-        }
-        #[cfg(not(unix))]
-        {
-            Ok(Self {
-                killer: Mutex::new(child.clone_killer()),
-            })
+        let pid = child
+            .process_id()
+            .context("remote terminal process identity")?;
+        let pid = rustix::process::Pid::from_raw(i32::try_from(pid)?)
+            .context("remote terminal process identity")?;
+        Ok(Self {
+            pid: Mutex::new(Some(pid)),
+        })
+    }
+
+    #[cfg(not(unix))]
+    fn new(child: &dyn portable_pty::Child) -> Self {
+        Self {
+            killer: Mutex::new(child.clone_killer()),
         }
     }
 
@@ -259,11 +268,11 @@ impl TerminalControl {
         }
     }
 
+    #[cfg(unix)]
     fn wait(
         &self,
         child: &mut dyn portable_pty::Child,
     ) -> std::io::Result<portable_pty::ExitStatus> {
-        #[cfg(unix)]
         loop {
             use rustix::process::{WaitId, WaitIdOptions, waitid};
             let mut guard = self
@@ -295,10 +304,6 @@ impl TerminalControl {
             // Usually already exited when its output closes; poll only a child that closed
             // all terminal descriptors while continuing to work. Cancellation stays available.
             std::thread::park_timeout(std::time::Duration::from_millis(10));
-        }
-        #[cfg(not(unix))]
-        {
-            child.wait()
         }
     }
 }

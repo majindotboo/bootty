@@ -516,6 +516,15 @@ impl NewSessionDialog {
         invocation: &bootty_control::CommandInvocation,
         outcome: Result<bootty_control::CommandOutcome, String>,
     ) {
+        if invocation.command == "agents.native.catalog-info"
+            && let Ok(bootty_control::CommandOutcome::Failed { code, message }) = &outcome
+            && code == "provider_not_installed"
+        {
+            if let Some(form) = &mut self.form {
+                form.set_provider_unavailable_for(invocation, message.clone());
+            }
+            return;
+        }
         let result = match outcome {
             Ok(bootty_control::CommandOutcome::Success { value, .. }) => Ok(value),
             Ok(outcome) => Err(crate::commands::command_outcome_message(&outcome)
@@ -559,6 +568,11 @@ impl NewSessionDialog {
         let catalog = result
             .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
         form.set_provider_catalog_for(invocation, catalog);
+    }
+
+    pub(crate) fn refresh_provider_catalogs(&mut self) {
+        self.catalog_requested.clear();
+        self.reload_model_catalog();
     }
 
     fn reload_model_catalog(&mut self) {
@@ -1182,6 +1196,13 @@ impl NewSessionDialog {
                     self.reload_model_catalog();
                     return None;
                 }
+                if action.0 == "sign-in-provider" {
+                    return self
+                        .form
+                        .as_ref()?
+                        .sign_in_invocation()
+                        .map(NewSessionPickerEvent::Authenticate);
+                }
                 self.start_form(&action.0)
             }
             _ => None,
@@ -1605,6 +1626,7 @@ pub enum NewSessionPickerEvent {
     Close,
     Submit(bootty_control::CommandInvocation),
     Catalog(bootty_control::CommandInvocation),
+    Authenticate(bootty_control::CommandInvocation),
     Names {
         invocation: bootty_control::CommandInvocation,
         action: String,
@@ -1645,6 +1667,13 @@ fn project_entries(
                 SearchableEntry::new(project.clone(), display_project_path(&project.path, remote));
             // Display paths may abbreviate home; absolute path input must still find the project.
             entry.keywords.push(project.path.clone());
+            if cfg!(windows) && !remote {
+                // Windows accepts either separator, including when home is abbreviated.
+                entry.keywords.push(project.path.replace('\\', "/"));
+                entry
+                    .keywords
+                    .push(display_project_path(&project.path, false).replace('\\', "/"));
+            }
             entry
         })
         .collect()

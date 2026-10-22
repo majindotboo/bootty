@@ -18,24 +18,25 @@ mod directwrite;
 
 /// Use Bootty's font selections for both GPUI text and terminal glyph rendering.
 /// Install the same mappings as a GPUI global before initializing Bootty's theme.
+/// # Errors
+/// Returns native font-backend initialization errors.
 pub fn wrap_text_system(
     native: Arc<dyn PlatformTextSystem>,
     mappings: FontMappings,
-) -> Arc<dyn PlatformTextSystem> {
+) -> anyhow::Result<Arc<dyn PlatformTextSystem>> {
     #[cfg(target_os = "macos")]
     {
-        Arc::new(coretext::CoreTextSystem::new(native, mappings))
+        Ok(Arc::new(coretext::CoreTextSystem::new(native, mappings)))
     }
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     {
-        Arc::new(cosmic::CosmicFontSystem::new(native, mappings))
+        Ok(Arc::new(cosmic::CosmicFontSystem::new(native, mappings)))
     }
     #[cfg(target_os = "windows")]
     {
-        Arc::new(
-            directwrite::WindowsFontSystem::new(native, mappings)
-                .expect("Bootty could not initialize DirectWrite fonts"),
-        )
+        Ok(Arc::new(directwrite::WindowsFontSystem::new(
+            native, mappings,
+        )?))
     }
 }
 

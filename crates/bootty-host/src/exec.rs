@@ -1,5 +1,9 @@
 use bootty_config::ApplicationIdentity;
-use std::{borrow::Cow, path::PathBuf, process::Command};
+use std::{
+    borrow::Cow,
+    fmt::Write as _,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -21,6 +25,69 @@ pub fn remote_exec_program() -> &'static str {
 pub const REMOTE_EXEC_SUBCOMMAND: &str = "remote-exec";
 pub const REMOTE_PING_SUBCOMMAND: &str = "remote-ping";
 const MAX_REMOTE_COMMAND_PAYLOAD: usize = 1024 * 1024;
+
+/// Start a Windows terminal command through the owning executable's typed relay.
+///
+/// PowerShell only assigns environment values and passes a bounded base64 payload;
+/// the Rust relay retains responsibility for native and batch argument escaping.
+/// # Errors
+/// Returns invalid environment names, an unrepresentable owner path, or an oversized command.
+pub fn windows_terminal_argv(
+    owner: &Path,
+    program: &str,
+    args: &[String],
+    cwd: Option<&str>,
+    environment: &[(String, String)],
+) -> Result<Vec<String>> {
+    if !owner.is_absolute() {
+        bail!("terminal owner executable must be an absolute path");
+    }
+    let owner = owner
+        .to_str()
+        .context("terminal owner executable is not UTF-8")?;
+    let quote = |value: &str| format!("'{}'", value.replace('\'', "''"));
+    let payload = serde_json::to_vec(&RemoteCommand {
+        program: program.to_owned(),
+        args: args.to_vec(),
+        terminal: true,
+        cwd: cwd.map(str::to_owned),
+    })
+    .context("encode terminal command")?;
+    let mut script =
+        "$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; ".to_owned();
+    for (name, value) in environment {
+        let mut chars = name.chars();
+        if !chars
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic() || ch == '_')
+            || !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+            || value.contains('\0')
+        {
+            bail!("invalid terminal environment entry");
+        }
+        write!(script, "$env:{name}={}; ", quote(value))?;
+    }
+    write!(
+        script,
+        "$child=Start-Process -FilePath {} -ArgumentList @('remote-exec','{}') -NoNewWindow -Wait -PassThru; exit $child.ExitCode",
+        quote(owner),
+        URL_SAFE_NO_PAD.encode(payload),
+    )?;
+    let bytes = script
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    if encoded.len() > 29_000 {
+        bail!("Agent launch exceeds the Windows command-line limit");
+    }
+    Ok(vec![
+        "powershell.exe".into(),
+        "-NoProfile".into(),
+        "-EncodedCommand".into(),
+        encoded,
+    ])
+}
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RemoteCommand {
@@ -85,7 +152,7 @@ pub fn run_remote_command(payload: &str) -> Result<i32> {
     } else {
         PathBuf::from(&command.program)
     };
-    let mut child = Command::new(program);
+    let mut child = crate::local_command(program);
     child.args(
         daemon_program_args(
             &command.program,

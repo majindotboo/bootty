@@ -138,7 +138,7 @@ fn install_windows(layout: &package::Layout) -> Result<()> {
         || PathBuf::from(local_app_data).join("Programs/Bootty"),
         PathBuf::from,
     );
-    let arch = if env::var("PROCESSOR_ARCHITECTURE").is_ok_and(|arch| arch == "ARM64") {
+    let arch = if cfg!(target_arch = "aarch64") {
         "arm64"
     } else {
         "x64"

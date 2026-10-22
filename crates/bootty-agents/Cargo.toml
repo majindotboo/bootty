@@ -10,6 +10,9 @@ anstyle-parse.workspace = true
 base64.workspace = true
 chrono.workspace = true
 getrandom.workspace = true
+rmux-ipc.workspace = true
+rmux-os.workspace = true
+tokio = { workspace = true, features = ["rt", "net", "io-util", "sync", "time", "macros"] }
 png.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 markdown.workspace = true

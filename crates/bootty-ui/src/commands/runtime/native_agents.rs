@@ -3391,6 +3391,9 @@ fn query_launch_metadata(
     if Instant::now() >= deadline {
         return CommandOutcome::deadline_exceeded();
     }
+    if invocation.command == "agents.native.catalog-info" {
+        return query_provider_catalog(service, invocation, captured);
+    }
     let result = (|| {
         if invocation.command == "agents.native.names" {
             let config = discover_launch_config(invocation, captured)?;
@@ -3401,26 +3404,6 @@ fn query_launch_metadata(
                 || cancellation.is_cancelled() || Instant::now() >= deadline,
             )?;
             serde_json::to_value(names).map_err(|error| error.to_string())
-        } else if invocation.command == "agents.native.catalog-info" {
-            let config = discover_launch_config(invocation, captured)?;
-            let mut catalog = match invocation
-                .arguments
-                .get(6)
-                .filter(|value| value.as_str() == "refresh")
-                .map_or_else(|| service.cached_provider_catalog(&config), |_| None)
-            {
-                Some(catalog) => catalog,
-                None => bootty_agents::NativeAgentSession::discover_catalog(config.clone())?,
-            };
-            service.mark_model_favorites(&config, &mut catalog.models);
-            service.cache_provider_catalog_for_invocation(
-                &config,
-                invocation,
-                &captured.context.preferences,
-                captured.remote.as_ref(),
-                &catalog,
-            )?;
-            serde_json::to_value(catalog).map_err(|error| error.to_string())
         } else if invocation.command == "agents.native.catalog-completions" {
             discover_launch_config(invocation, captured)
                 .and_then(bootty_agents::NativeAgentSession::discover_completions)
@@ -3429,6 +3412,47 @@ fn query_launch_metadata(
             discover_launch_models(service, invocation, captured)
                 .and_then(|models| serde_json::to_value(models).map_err(|e| e.to_string()))
         }
+    })();
+    result.map_or_else(failure, serialized_command_outcome)
+}
+
+fn query_provider_catalog(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    captured: &NativeLaunch,
+) -> CommandOutcome {
+    let config = match discover_launch_config(invocation, captured) {
+        Ok(config) => config,
+        Err(error) => return failure(error),
+    };
+    if config.remote.is_none() && bootty_host::find_executable(&config.program).is_none() {
+        return CommandOutcome::Failed {
+            code: "provider_not_installed".to_owned(),
+            message: format!(
+                "{} is not installed on this host. Install it or choose another provider.",
+                config.provider.display_name()
+            ),
+        };
+    }
+    let result = (|| {
+        let mut catalog = match invocation
+            .arguments
+            .get(6)
+            .filter(|value| value.as_str() == "refresh")
+            .map_or_else(|| service.cached_provider_catalog(&config), |_| None)
+        {
+            Some(catalog) => catalog,
+            None => bootty_agents::NativeAgentSession::discover_catalog(config.clone())?,
+        };
+        service.mark_model_favorites(&config, &mut catalog.models);
+        service.cache_provider_catalog_for_invocation(
+            &config,
+            invocation,
+            &captured.context.preferences,
+            captured.remote.as_ref(),
+            &catalog,
+        )?;
+        serde_json::to_value(catalog).map_err(|error| error.to_string())
     })();
     result.map_or_else(failure, serialized_command_outcome)
 }

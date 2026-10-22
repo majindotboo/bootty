@@ -5,10 +5,13 @@ use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
 use serde_json::{Value, json};
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
+#[cfg(unix)]
+use std::time::Duration;
 
 /// Bounds waits on real child processes and command replies. Passing tests advance on events;
 /// only a broken fixture reaches this, so it is generous enough for a loaded machine.
+#[cfg(unix)]
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 fn frame(value: &Value, masked: bool) -> Vec<u8> {
@@ -460,12 +463,13 @@ fn invalid_upgrade_cannot_publish_provider_activity(#[case] client: bool, #[case
     );
 }
 
-/// Codex's app server has no profiles, so a launch that asks for one says what to do instead.
+/// Supported observers explain invalid profile flags; other platforms report their missing
+/// observation transport without starting a provider.
 #[rstest]
 #[case::flag(&["--profile", "work"][..])]
 #[case::short(&["-p", "work"][..])]
 #[case::inline(&["--profile=work"][..])]
-fn a_codex_profile_flag_is_refused_with_what_works(#[case] arguments: &[&str]) {
+fn codex_profile_flags_are_rejected_before_observation_starts(#[case] arguments: &[&str]) {
     let directory = assert_fs::TempDir::new().unwrap();
     let launch = AgentLaunch {
         program: "codex".to_owned(),
@@ -480,11 +484,14 @@ fn a_codex_profile_flag_is_refused_with_what_works(#[case] arguments: &[&str]) {
     let error = CodexTerminalObserver::prepare(&launch, directory.path(), Arc::new(|_| {}))
         .err()
         .unwrap();
-    assert_eq!(
-        error.to_string(),
+    let expected = if cfg!(unix) {
         "Codex's app server takes no --profile. Point this profile's directory at a Codex home \
          with its own config.toml instead."
-    );
+    } else {
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        "Codex terminal observation requires a private Unix transport"
+    };
+    assert_eq!(error.to_string(), expected);
 }
 
 #[rstest]

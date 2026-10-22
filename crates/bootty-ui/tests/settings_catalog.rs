@@ -51,18 +51,17 @@ fn advanced_configuration_keeps_locations_and_write_errors_visible(
     #[case] write_error: Option<&str>,
     #[values(None, Some("/tmp"), Some("/tmp/boot"))] home: Option<&str>,
 ) {
-    let rows = advanced_configuration_rows(
-        std::path::Path::new("/tmp/bootty/config.toml"),
-        home.map(std::path::Path::new),
-        write_error,
-    );
+    let root = std::path::PathBuf::from("/tmp");
+    let config = root.join("bootty").join("config.toml");
+    let rows = advanced_configuration_rows(&config, home.map(std::path::Path::new), write_error);
     let directory = if home == Some("/tmp") {
-        "~/bootty"
+        std::path::PathBuf::from("~").join("bootty")
     } else {
-        "/tmp/bootty"
+        root.join("bootty")
     };
-    let file = format!("{directory}/config.toml");
-    let themes = format!("{directory}/themes");
+    let file = directory.join("config.toml").to_string_lossy().into_owned();
+    let themes = directory.join("themes").to_string_lossy().into_owned();
+    let directory = directory.to_string_lossy().into_owned();
 
     let paths = rows
         .iter()
@@ -82,7 +81,7 @@ fn advanced_configuration_keeps_locations_and_write_errors_visible(
         paths,
         vec![
             ("config.path", "Config file", file.as_str()),
-            ("config.directory", "Config directory", directory),
+            ("config.directory", "Config directory", directory.as_str()),
             (
                 "config.themes-directory",
                 "Themes directory",

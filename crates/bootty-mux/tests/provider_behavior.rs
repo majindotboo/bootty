@@ -94,9 +94,10 @@ impl MuxBackend for Backend {
     }
 }
 
+#[derive(Clone)]
 struct Provider {
     kind: MuxBackendKind,
-    caller_thread: AtomicBool,
+    caller_thread: Arc<AtomicBool>,
     calls: Arc<Calls>,
     fail_snapshot_at: usize,
 }
@@ -105,7 +106,7 @@ impl Provider {
     fn new(kind: MuxBackendKind, fail_snapshot_at: usize) -> Arc<Self> {
         Arc::new(Self {
             kind,
-            caller_thread: AtomicBool::new(false),
+            caller_thread: Arc::new(AtomicBool::new(false)),
             calls: Arc::default(),
             fail_snapshot_at,
         })
@@ -174,9 +175,16 @@ fn config() -> MuxBindingConfig {
 }
 
 fn registry(provider: Arc<Provider>) -> Result<Arc<MuxBackendRegistry>> {
+    let kind = provider.kind;
+    // Windows selects Native for local tmux bindings; keep both entries on the same test state.
+    let native = (cfg!(windows) && kind == MuxBackendKind::Tmux).then(|| {
+        let mut native = provider.as_ref().clone();
+        native.kind = MuxBackendKind::Native;
+        Arc::new(native)
+    });
     Ok(Arc::new(MuxBackendRegistry::from_app_providers(
-        [provider],
-        [MuxBackendKind::Tmux],
+        std::iter::once(provider).chain(native),
+        [kind],
     )?))
 }
 
@@ -192,10 +200,11 @@ fn controller(provider: Arc<Provider>, scope: i64) -> Result<MuxController> {
 #[case::missing_backend(false)]
 #[case::core_only(true)]
 fn unavailable_provider_never_executes_a_command(#[case] core_only: bool) -> Result<()> {
-    let provider = Provider::new(MuxBackendKind::Tmux, usize::MAX);
+    let kind = bootty_mux::provider::selected_backend(&config());
+    let provider = Provider::new(kind, usize::MAX);
     let registry = if core_only {
         let core: Arc<dyn MuxBackendProvider> = provider.clone();
-        MuxBackendRegistry::from_core_providers([core], [MuxBackendKind::Tmux])?
+        MuxBackendRegistry::from_core_providers([core], [kind])?
     } else {
         MuxBackendRegistry::from_app_providers::<Provider>([], [])?
     };
@@ -374,7 +383,7 @@ fn controlled_refresh() -> ControlledRefresh {
     let (queries, requests) = mpsc::channel();
     let provider = Arc::new(Provider {
         kind: MuxBackendKind::Tmux,
-        caller_thread: AtomicBool::new(false),
+        caller_thread: Arc::new(AtomicBool::new(false)),
         calls: Arc::new(Calls {
             snapshot_queries: Some(queries),
             ..Calls::default()
@@ -667,8 +676,7 @@ fn session_switch_selects_its_known_window_before_refresh(#[case] kind: MuxBacke
         active_session_id: Some("one".into()),
         ..Default::default()
     };
-    let registry =
-        Arc::new(MuxBackendRegistry::from_app_providers([provider.clone()], [kind]).unwrap());
+    let registry = registry(provider.clone()).unwrap();
     let mut controller = MuxController::new(SpaceId::from_persistence(42), registry, None);
     let config = MuxBindingConfig {
         backend: kind,
@@ -695,7 +703,7 @@ fn rapid_tab_selection_survives_older_commands_and_refreshes(#[case] kind: MuxBa
     let (snapshot_tx, snapshots) = mpsc::channel();
     let provider = Arc::new(Provider {
         kind,
-        caller_thread: AtomicBool::new(false),
+        caller_thread: Arc::new(AtomicBool::new(false)),
         calls: Arc::new(Calls {
             command_queries: Some(command_tx),
             snapshot_queries: Some(snapshot_tx),
@@ -703,7 +711,7 @@ fn rapid_tab_selection_survives_older_commands_and_refreshes(#[case] kind: MuxBa
         }),
         fail_snapshot_at: usize::MAX,
     });
-    let registry = Arc::new(MuxBackendRegistry::from_app_providers([provider], [kind]).unwrap());
+    let registry = registry(provider).unwrap();
     let mut controller = MuxController::new(SpaceId::from_persistence(42), registry, None);
     let config = MuxBindingConfig {
         backend: kind,

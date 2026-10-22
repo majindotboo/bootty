@@ -559,6 +559,7 @@ fn native_mcp_attachment_preserves_exact_authority_and_resume_configuration(
             json!("inspect_provider"),
             json!("terminal_read"),
             json!("computer_snapshot"),
+            json!("computer_elements"),
             json!("computer_input")
         ]
     );

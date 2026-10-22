@@ -34,6 +34,7 @@ pub fn terminal_command_descriptors() -> Vec<CommandDescriptor> {
         target: Some(ResourceKind::Terminal),
         palette: false,
     }];
+    descriptors.push(provider_update_descriptor());
     for provider in AgentKind::ALL {
         let label = match provider {
             AgentKind::Codex => "Codex",
@@ -354,7 +355,7 @@ fn history_account_specs(label: &str) -> [TerminalCommandSpec; 7] {
         (
             "account.login",
             format!("Sign in to {label}"),
-            vec!["cwd", "program"],
+            vec!["cwd", "program", "profile"],
             0,
             Some(ResourceKind::Session),
             MutationClass::Write,
@@ -370,4 +371,28 @@ fn history_account_specs(label: &str) -> [TerminalCommandSpec; 7] {
             false,
         ),
     ]
+}
+
+fn provider_update_descriptor() -> CommandDescriptor {
+    CommandDescriptor {
+        id: "agents.providers.update".into(),
+        title: "Update a local provider".into(),
+        description: "Update a recognized installation when it has no active processes.".into(),
+        mutation: MutationClass::Write,
+        arguments: CompactSchema {
+            arguments: vec![ArgumentSchema {
+                name: "provider".into(),
+                value_type: ValueType::String,
+                required: true,
+                choices: AgentKind::ALL
+                    .into_iter()
+                    .map(|provider| provider.to_string())
+                    .collect(),
+                minimum: None,
+                maximum: None,
+            }],
+        },
+        target: None,
+        palette: false,
+    }
 }

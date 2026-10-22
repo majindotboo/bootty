@@ -492,6 +492,13 @@ impl AppState {
                 "The private recovery preparation is no longer available",
             ));
         };
+        let argv = match restore.prepared.argv() {
+            Ok(argv) => argv,
+            Err(error) => {
+                std::thread::spawn(move || drop(restore));
+                return CommandDispatch::Complete(failure(&error));
+            }
+        };
         let valid = service
             .record(&restore.source.target)
             .filter(|current| {
@@ -537,7 +544,7 @@ impl AppState {
         let repaint = self.repaint.clone();
         self.workspace.respawn_pane_command(
             exact,
-            restore.prepared.argv(),
+            argv,
             restore.prepared.launch.cwd.clone(),
             Arc::clone(&history),
             Some(execution),
@@ -586,7 +593,9 @@ fn prepare_restore(
         "Codex runs directly in this persistent terminal; app-owned observation is unavailable"
             .to_owned()
     });
-    let prepared = if let Some(tools) = tools {
+    let prepared = if context.remote {
+        TerminalAgentService::prepare_remote(provider, launch)
+    } else if let Some(tools) = tools {
         service.prepare_with_tools(provider, launch, tools, unobserved)
     } else if let Some(detail) = unobserved {
         TerminalAgentService::prepare_unobserved(provider, launch, detail)

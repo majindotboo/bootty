@@ -1,7 +1,11 @@
-use std::{fs, io, path::Path};
+#[cfg(unix)]
+use std::path::Path;
+use std::{fs, io};
 
 use assert_fs::{TempDir, prelude::*};
-use bootty_write::{CommitOutcome, NewFileMode, ResolveTargetError, WriteTarget};
+#[cfg(unix)]
+use bootty_write::ResolveTargetError;
+use bootty_write::{CommitOutcome, NewFileMode, WriteTarget};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;

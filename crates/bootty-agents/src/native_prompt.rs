@@ -849,7 +849,7 @@ impl NativePrompt {
                     serde_json::json!({"application": application.bundle_id, "name": application.name, "window": mention.target.title})
                 })
                 .collect::<Vec<_>>();
-            message.push_str("\n\n<application_mentions>\nThe user allowed these apps for this conversation. Pass the bundle id as application to computer_snapshot or computer_input. OS permissions still apply.\n");
+            message.push_str("\n\n<application_mentions>\nThe user allowed these apps for this conversation. Pass the bundle id as application to computer_elements, computer_snapshot or computer_input. computer_elements observes controls without an image; press with allow_click false to require an accessibility action; set_value replaces a writable control value without focus or key events and does not submit it. OS permissions still apply.\n");
             message
                 .push_str(&serde_json::to_string(&references).map_err(|error| error.to_string())?);
             message.push_str("\n</application_mentions>");

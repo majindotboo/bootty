@@ -283,8 +283,13 @@ fn history_filters_project_metadata_and_applies_latest_name_and_recency_limit() 
 #[case(json!({"type":"session","version":3,"id":"../outside","cwd":"/workspace"}))]
 #[case(json!({"type":"session","version":3,"id":"saved-id","cwd":"relative"}))]
 #[case(json!({"type":"message","message":{"content":"private malformed metadata"}}))]
-fn unsupported_or_invalid_session_metadata_is_a_bounded_error(#[case] header: Value) {
+fn unsupported_or_invalid_session_metadata_is_a_bounded_error(#[case] mut header: Value) {
     let directory = assert_fs::TempDir::new().unwrap();
+    if let Some(cwd) = header.get_mut("cwd")
+        && cwd == "/workspace"
+    {
+        *cwd = json!(project(directory.path(), "workspace").unwrap());
+    }
     saved(directory.path(), AgentKind::Pi, "saved-id", &[header], 10).unwrap();
     let error =
         terminal_provider_history(&query(AgentKind::Pi, directory.path(), None)).unwrap_err();
@@ -294,13 +299,14 @@ fn unsupported_or_invalid_session_metadata_is_a_bounded_error(#[case] header: Va
 #[rstest]
 fn claude_generated_title_relocation_and_sidechain_metadata_follow_provider_identity() {
     let directory = assert_fs::TempDir::new().unwrap();
+    let original = project(directory.path(), "original").unwrap();
     let relocated = project(directory.path(), "relocated").unwrap();
     saved(
         directory.path(),
         AgentKind::Claude,
         "saved-id",
         &[
-            json!({"type":"user","sessionId":"saved-id","cwd":"/original","timestamp":"2026-01-01T00:00:00Z"}),
+            json!({"type":"user","sessionId":"saved-id","cwd":original,"timestamp":"2026-01-01T00:00:00Z"}),
             json!({"type":"ai-title","sessionId":"saved-id","aiTitle":"Generated saved title"}),
             json!({"type":"relocated","sessionId":"saved-id","relocatedCwd":relocated}),
         ],
@@ -324,12 +330,8 @@ fn claude_generated_title_relocation_and_sidechain_metadata_follow_provider_iden
     assert_eq!(entries[0].title.as_deref(), Some("Generated saved title"));
     assert_eq!(entries[0].cwd, relocated);
     assert_eq!(
-        terminal_provider_history(&query(
-            AgentKind::Claude,
-            directory.path(),
-            Some(Path::new("/original"))
-        ))
-        .unwrap(),
+        terminal_provider_history(&query(AgentKind::Claude, directory.path(), Some(&original)))
+            .unwrap(),
         Vec::new()
     );
 }
@@ -413,8 +415,9 @@ proptest! {
     fn another_account_cannot_supply_selected_account_history(id in "[a-z][a-z0-9-]{1,20}") {
         let selected = assert_fs::TempDir::new().unwrap();
         let other = assert_fs::TempDir::new().unwrap();
-        saved(other.path(), AgentKind::Pi, &id, &[json!({"type":"session","version":3,"id":id,"cwd":"/workspace"})], 20).unwrap();
-        prop_assert!(terminal_provider_history(&query(AgentKind::Pi, selected.path(), Some(Path::new("/workspace")))).unwrap().is_empty());
+        let cwd = project(selected.path(), "workspace").unwrap();
+        saved(other.path(), AgentKind::Pi, &id, &[json!({"type":"session","version":3,"id":id,"cwd":cwd})], 20).unwrap();
+        prop_assert!(terminal_provider_history(&query(AgentKind::Pi, selected.path(), Some(&cwd))).unwrap().is_empty());
     }
 }
 
@@ -573,6 +576,7 @@ fn codex_malformed_history_reaps_the_owned_process_and_redacts_provider_errors()
 #[rstest]
 fn claude_bookkeeping_files_do_not_block_resumable_conversations() {
     let directory = assert_fs::TempDir::new().unwrap();
+    let cwd = project(directory.path(), "workspace").unwrap();
     saved(
         directory.path(),
         AgentKind::Claude,
@@ -581,12 +585,17 @@ fn claude_bookkeeping_files_do_not_block_resumable_conversations() {
         20,
     )
     .unwrap();
-    saved(directory.path(), AgentKind::Claude, "saved-id", &[
-        json!({"type":"user", "sessionId":"saved-id", "cwd":"/workspace", "message":{"content":"Hello"}}),
-    ], 10).unwrap();
+    saved(
+        directory.path(),
+        AgentKind::Claude,
+        "saved-id",
+        &[json!({"type":"user", "sessionId":"saved-id", "cwd":cwd, "message":{"content":"Hello"}})],
+        10,
+    )
+    .unwrap();
     let entries =
         terminal_provider_history(&query(AgentKind::Claude, directory.path(), None)).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].session_id, "saved-id");
-    assert_eq!(entries[0].cwd, PathBuf::from("/workspace"));
+    assert_eq!(entries[0].cwd, cwd);
 }

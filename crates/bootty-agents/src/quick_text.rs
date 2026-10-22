@@ -158,7 +158,8 @@ pub fn quick_json(
     let schema_path = temporary.path().join("schema.json");
     let output = temporary.path().join("output.json");
     std::fs::write(&schema_path, schema).map_err(|error| error.to_string())?;
-    let mut command = Command::new(&config.program);
+    let _provider_use = crate::ProviderUse::acquire(&config.program)?;
+    let mut command = bootty_host::local_command(&config.program);
     command
         .current_dir(temporary.path())
         .args(quick_arguments(config, model)?)

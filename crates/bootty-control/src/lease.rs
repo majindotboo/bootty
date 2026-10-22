@@ -83,6 +83,7 @@ impl ControlInstanceLease {
             serde_json::to_writer(&mut file, &self.descriptor)?;
             file.flush()?;
             file.sync_all()?;
+            #[cfg(unix)]
             set_owner_only_file(&temporary)?;
             fs::rename(&temporary, &self.descriptor_path).context("publish control descriptor")?;
             Ok(())
@@ -160,6 +161,7 @@ impl Drop for ControlInstanceLease {
 fn prepare_instance_directory() -> Result<PathBuf> {
     let directory = instance_directory()?;
     fs::create_dir_all(&directory)?;
+    #[cfg(unix)]
     set_owner_only_directory(&directory)?;
     Ok(directory)
 }
@@ -173,6 +175,7 @@ fn lock_instance(directory: &Path) -> Result<File> {
         .write(true)
         .open(&path)
         .context("open control instance lease")?;
+    #[cfg(unix)]
     set_owner_only_file(&path)?;
     file.lock().context("lock control instance lease")?;
     Ok(file)
@@ -207,6 +210,7 @@ fn endpoint_for_generation(generation: u64) -> Result<LocalEndpoint> {
 fn prepare_endpoint_parent(endpoint: &LocalEndpoint) -> Result<()> {
     if let Some(parent) = endpoint.as_path().parent() {
         fs::create_dir_all(parent)?;
+        #[cfg(unix)]
         set_owner_only_directory(parent)?;
     }
     Ok(())
@@ -224,7 +228,7 @@ fn remove_endpoint(path: &Path) {
 }
 
 #[cfg(windows)]
-fn remove_endpoint(_path: &Path) {}
+const fn remove_endpoint(_path: &Path) {}
 
 fn instance_directory() -> Result<PathBuf> {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
@@ -252,7 +256,7 @@ pub fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
 }
 
 #[cfg(windows)]
-pub(crate) fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
+pub fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
     rmux_os::identity::IdentityResolver::current().is_ok_and(|identity| identity == peer.user)
 }
 
@@ -262,18 +266,8 @@ pub fn set_owner_only_directory(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, fs::Permissions::from_mode(0o700))
 }
 
-#[cfg(windows)]
-pub(crate) fn set_owner_only_directory(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 pub fn set_owner_only_file(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-}
-
-#[cfg(windows)]
-pub(crate) fn set_owner_only_file(_path: &Path) -> io::Result<()> {
-    Ok(())
 }

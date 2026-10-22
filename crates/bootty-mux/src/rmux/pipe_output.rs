@@ -179,6 +179,7 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(endpoint.as_path(), std::fs::Permissions::from_mode(0o600))?;
     }
+    #[cfg(unix)]
     let _cleanup = EndpointCleanup(endpoint);
     let mut readers: Vec<(u64, WriteHalf<LocalStream>)> = Vec::new();
     let (closed_tx, mut closed_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -220,11 +221,12 @@ async fn relay(endpoint: LocalEndpoint) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 struct EndpointCleanup(LocalEndpoint);
 
+#[cfg(unix)]
 impl Drop for EndpointCleanup {
     fn drop(&mut self) {
-        #[cfg(unix)]
         let _ = std::fs::remove_file(self.0.as_path());
     }
 }

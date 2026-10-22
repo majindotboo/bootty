@@ -19,7 +19,16 @@ fn normalize_terminal_cwd(cwd: &str) -> Option<String> {
     if let Some(path) = cwd.strip_prefix("file://") {
         let path_start = path.find('/')?;
         let path = path.get(path_start..)?;
-        return percent_decode(path);
+        let path = percent_decode(path)?;
+        // A file URI encodes a Windows drive as /C:/..., while the destination path
+        // starts at C:/. Recognize that URI spelling independently of this host OS.
+        let bytes = path.as_bytes();
+        let drive = matches!(bytes, [b'/', letter, b':', b'/', ..] if letter.is_ascii_alphabetic());
+        return Some(if drive {
+            path.get(1..)?.to_owned()
+        } else {
+            path
+        });
     }
     Some(cwd.to_owned())
 }

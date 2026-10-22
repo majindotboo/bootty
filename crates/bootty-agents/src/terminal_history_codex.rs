@@ -1,7 +1,7 @@
 use std::{
     io::{BufRead, BufReader, Read, Write},
     path::PathBuf,
-    process::{Command, Stdio},
+    process::Stdio,
     sync::mpsc,
     thread,
     time::Duration,
@@ -184,8 +184,8 @@ fn list(
 }
 
 pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntry>, String> {
-    let mut command = Command::new(query.program);
-    terminal_process::configure_group(&mut command);
+    let _provider_use = crate::ProviderUse::acquire(query.program)?;
+    let mut command = bootty_host::local_command(query.program);
     command
         .args(["app-server", "--listen", "stdio://"])
         .env("CODEX_HOME", query.account_directory)
@@ -195,10 +195,13 @@ pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntr
     if let Some(cwd) = query.cwd {
         command.current_dir(cwd);
     }
-    let mut child = command
-        .spawn()
+    let mut child = terminal_process::spawn_query(command)
         .map_err(|_| "Codex history executable could not be started")?;
-    let pipes = child.stdin.take().zip(child.stdout.take());
+    let pipes = child
+        .child_mut()
+        .stdin
+        .take()
+        .zip(child.child_mut().stdout.take());
     let result = if let Some((mut writer, stdout)) = pipes {
         let provider = query.provider;
         let account_directory = query.account_directory.to_owned();
@@ -225,6 +228,6 @@ pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntr
     } else {
         Err("Codex history transport is unavailable".to_owned())
     };
-    terminal_process::terminate_group(&mut child);
+    terminal_process::terminate_query(&mut child);
     result
 }

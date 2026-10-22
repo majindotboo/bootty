@@ -262,7 +262,7 @@ fn native_text_system() -> Result<Arc<dyn gpui_kit::PlatformTextSystem>> {
     let text_system = bootty_ui::font_mapping::wrap_text_system(
         gpui_kit::platform::current_platform(true).text_system(),
         bootty_ui::font_mapping::FontMappings::default(),
-    );
+    )?;
     text_system
         .add_fonts(vec![
             Cow::Borrowed(bootty_ui::assets::LILEX_REGULAR),

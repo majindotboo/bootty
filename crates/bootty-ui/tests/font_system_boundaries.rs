@@ -1,5 +1,10 @@
 #![cfg(test)]
-#![cfg(any(target_os = "macos", target_os = "linux", target_os = "freebsd"))]
+#![cfg(any(
+    target_os = "macos",
+    target_os = "linux",
+    target_os = "freebsd",
+    target_os = "windows"
+))]
 
 use bootty_ui::{
     assets::BoottyAssets,
@@ -15,7 +20,7 @@ use std::sync::Arc;
 
 #[fixture]
 fn native_system() -> Arc<dyn PlatformTextSystem> {
-    let system = wrap_text_system(Arc::new(NoopTextSystem), FontMappings::default());
+    let system = wrap_text_system(Arc::new(NoopTextSystem), FontMappings::default()).unwrap();
     BoottyAssets
         .load_fonts(&TextSystem::new(system.clone()))
         .unwrap();
@@ -63,4 +68,28 @@ fn unknown_native_font_has_no_glyphs_or_raster(native_system: Arc<dyn PlatformTe
         dilation: 0,
     };
     assert!(native_system.glyph_raster_bounds(&params).is_err());
+}
+
+#[rstest]
+fn native_shaping_keeps_utf8_cluster_boundaries(native_system: Arc<dyn PlatformTextSystem>) {
+    let font_id = native_system.font_id(&gpui_kit::font("Lilex")).unwrap();
+    let text = "A🦀B";
+    let layout = native_system.layout_line(
+        text,
+        px(16.0),
+        &[
+            FontRun { len: 1, font_id },
+            FontRun {
+                len: text.len().saturating_sub(1),
+                font_id,
+            },
+        ],
+    );
+    assert!(layout.width > px(0.0));
+    assert!(!layout.runs.is_empty());
+    assert_eq!(layout.len, text.len());
+    for glyph in layout.runs.iter().flat_map(|run| &run.glyphs) {
+        assert!(glyph.index < text.len());
+        assert!(text.is_char_boundary(glyph.index));
+    }
 }

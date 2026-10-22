@@ -591,7 +591,8 @@ impl<R: CommandRunner> TmuxBackend<R> {
         let shell = require_success(&self.program, &args, self.run_recovering(&args)?)?;
         let shell = shell.trim();
         anyhow::ensure!(
-            std::path::Path::new(shell).is_absolute(),
+            // The shell belongs to tmux's Unix host, including when the client runs on Windows.
+            shell.starts_with('/'),
             "tmux default shell is unavailable"
         );
         Ok(shell.to_owned())
@@ -1426,7 +1427,7 @@ pub fn local_socket_path(
 /// No unix socket names a Windows tmux server.
 #[cfg(all(not(unix), feature = "terminal-runtime"))]
 #[must_use]
-pub fn local_socket_path(
+pub const fn local_socket_path(
     _identity: bootty_config::ApplicationIdentity,
 ) -> Option<std::path::PathBuf> {
     None
@@ -1450,7 +1451,7 @@ fn socket_path(label: &str) -> Option<std::path::PathBuf> {
 
 /// Windows has no unix socket to clear, and no crashed-server state to recover from this way.
 #[cfg(not(unix))]
-fn clear_stale_local_socket() -> bool {
+const fn clear_stale_local_socket() -> bool {
     false
 }
 

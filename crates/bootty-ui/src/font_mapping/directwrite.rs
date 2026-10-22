@@ -14,6 +14,7 @@ use gpui_kit::{
     LineLayout, Pixels, PlatformTextSystem, RenderGlyphParams, ShapedGlyph, ShapedRun, Size,
     TextRenderingMode, point, px, size,
 };
+use num_traits::ToPrimitive as _;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -28,7 +29,7 @@ use windows::{
         DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME, DWRITE_LINE_METRICS, DWRITE_TEXT_METRICS,
         DWRITE_TEXT_RANGE, DWriteCreateFactory, IDWriteFactory5, IDWriteFontCollection1,
         IDWriteFontFace3, IDWriteFontFile, IDWriteInMemoryFontFileLoader, IDWriteLocalizedStrings,
-        IDWriteTextRenderer, IDWriteTypography,
+        IDWriteTextLayout, IDWriteTextRenderer, IDWriteTypography,
     },
     core::{HSTRING, IUnknown, Interface},
 };
@@ -105,15 +106,26 @@ impl WindowsFontSystem {
             }),
         })
     }
+
+    fn face(&self, id: FontId) -> Option<IDWriteFontFace3> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .faces
+            .get(id.0)
+            .map(|face| face.native.clone())
+    }
 }
 
 fn localized_name(names: &IDWriteLocalizedStrings) -> Result<String> {
-    let count = unsafe { names.GetStringLength(0)? } as usize;
-    let mut buffer = vec![0; count + 1];
+    let count = usize::try_from(unsafe { names.GetStringLength(0)? })?;
+    let mut buffer = vec![0; count.checked_add(1).context("Font name length overflow")?];
     unsafe {
         names.GetString(0, &mut buffer)?;
     }
-    Ok(String::from_utf16(&buffer[..count])?)
+    Ok(String::from_utf16(
+        buffer.get(..count).context("Font name length changed")?,
+    )?)
 }
 
 fn system_ui_family() -> String {
@@ -124,10 +136,13 @@ fn system_ui_family() -> String {
         },
     };
     let mut font = LOGFONTW::default();
+    let Ok(font_bytes) = u32::try_from(std::mem::size_of::<LOGFONTW>()) else {
+        return "Segoe UI".into();
+    };
     let read = unsafe {
         SystemParametersInfoW(
             SPI_GETICONTITLELOGFONT,
-            std::mem::size_of::<LOGFONTW>() as u32,
+            font_bytes,
             Some((&raw mut font).cast()),
             SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
         )
@@ -141,6 +156,10 @@ fn system_ui_family() -> String {
 }
 
 impl Fonts {
+    fn face(&self, id: FontId) -> Result<&Face> {
+        self.faces.get(id.0).context("Unknown DirectWrite font ID")
+    }
+
     fn select(&mut self, descriptor: &Font, platform: &dyn PlatformTextSystem) -> Result<FontId> {
         if let Some(id) = self.selections.get(descriptor) {
             return Ok(*id);
@@ -155,7 +174,14 @@ impl Fonts {
                 gpui_kit::font_name_with_fallbacks(&descriptor.family, &self.system_family);
             self.catalog.query(&fontdb::Query {
                 families: &[fontdb::Family::Name(family)],
-                weight: fontdb::Weight(descriptor.weight.0.clamp(1.0, 1000.0) as u16),
+                weight: fontdb::Weight(
+                    descriptor
+                        .weight
+                        .0
+                        .clamp(1.0, 1000.0)
+                        .to_u16()
+                        .context("Invalid font weight")?,
+                ),
                 style: match descriptor.style {
                     FontStyle::Normal => fontdb::Style::Normal,
                     FontStyle::Italic => fontdb::Style::Italic,
@@ -242,7 +268,7 @@ impl Fonts {
         let style = unsafe { native.GetStyle() };
         let descriptor = Font {
             family: family.clone().into(),
-            weight: FontWeight(weight as f32),
+            weight: FontWeight(weight.to_f32().context("Invalid native font weight")?),
             style: match style {
                 DWRITE_FONT_STYLE_ITALIC => FontStyle::Italic,
                 DWRITE_FONT_STYLE_OBLIQUE => FontStyle::Oblique,
@@ -270,8 +296,8 @@ impl Fonts {
         unsafe {
             native.GetInformationalStrings(
                 DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME,
-                &mut names,
-                &mut exists,
+                &raw mut names,
+                &raw mut exists,
             )?;
         }
         let postscript = names.as_ref().map(localized_name).transpose()?;
@@ -310,20 +336,170 @@ impl Fonts {
         let characters = text
             .chars()
             .filter(|&ch| {
-                ch != '\u{200d}' && !matches!(ch as u32, 0xfe00..=0xfe0f | 0xe0100..=0xe01ef)
+                ch != '\u{200d}' && !matches!(u32::from(ch), 0xfe00..=0xfe0f | 0xe0100..=0xe01ef)
             })
             .map(u32::from)
             .collect::<Vec<_>>();
         let mut glyphs = vec![0; characters.len()];
+        let Ok(face) = self.face(id) else {
+            return false;
+        };
+        let Ok(count) = u32::try_from(characters.len()) else {
+            return false;
+        };
         unsafe {
-            self.faces[id.0].native.GetGlyphIndices(
-                characters.as_ptr(),
-                characters.len() as u32,
-                glyphs.as_mut_ptr(),
-            )
+            face.native
+                .GetGlyphIndices(characters.as_ptr(), count, glyphs.as_mut_ptr())
         }
         .is_ok()
             && glyphs.iter().all(|&id| id != 0)
+    }
+
+    fn spans(&self, run: &FontRun, content: &str) -> Result<Vec<(usize, FontId)>> {
+        let face = self.face(run.font_id)?;
+        if face.fallbacks.is_empty() {
+            return Ok(vec![(content.encode_utf16().count(), run.font_id)]);
+        }
+        let mut spans: Vec<(usize, FontId)> = Vec::new();
+        for grapheme in content.graphemes(true) {
+            let id = if self.covers(run.font_id, grapheme) {
+                run.font_id
+            } else {
+                face.fallbacks
+                    .iter()
+                    .copied()
+                    .find(|&id| self.covers(id, grapheme))
+                    .unwrap_or(run.font_id)
+            };
+            let length = grapheme.encode_utf16().count();
+            if let Some((previous_length, previous_id)) = spans.last_mut()
+                && *previous_id == id
+            {
+                *previous_length = previous_length
+                    .checked_add(length)
+                    .context("Font span length overflow")?;
+            } else {
+                spans.push((length, id));
+            }
+        }
+        Ok(spans)
+    }
+
+    fn assign_runs(
+        &self,
+        layout: &IDWriteTextLayout,
+        text: &str,
+        font_size: Pixels,
+        runs: &[FontRun],
+    ) -> Result<Vec<(std::ops::Range<u32>, FontId)>> {
+        let mut byte_start = 0_usize;
+        let mut utf16_start = 0_u32;
+        let mut assigned = Vec::new();
+        for (run_index, run) in runs.iter().enumerate() {
+            let byte_end = byte_start
+                .checked_add(run.len)
+                .context("Font run byte range overflow")?;
+            let content = text
+                .get(byte_start..byte_end)
+                .context("Invalid UTF-8 font run boundary")?;
+            for (length, id) in self.spans(run, content)? {
+                let face = self.face(id)?;
+                let length = u32::try_from(length)?;
+                let utf16_end = utf16_start
+                    .checked_add(length)
+                    .context("Font run UTF-16 range overflow")?;
+                let range = DWRITE_TEXT_RANGE {
+                    startPosition: utf16_start,
+                    length,
+                };
+                unsafe {
+                    layout.SetFontCollection(&face.collection, range)?;
+                    layout.SetFontFamilyName(&face.family, range)?;
+                    layout.SetFontWeight(face.native.GetWeight(), range)?;
+                    layout.SetFontStyle(face.native.GetStyle(), range)?;
+                    layout.SetFontStretch(face.native.GetStretch(), range)?;
+                    layout.SetTypography(&face.typography, range)?;
+                    // Preserve adjacent GPUI runs that DirectWrite would otherwise merge.
+                    let run_size = if run_index % 2 == 1 {
+                        f32::from(font_size).next_up()
+                    } else {
+                        font_size.into()
+                    };
+                    layout.SetFontSize(run_size, range)?;
+                }
+                assigned.push((utf16_start..utf16_end, id));
+                utf16_start = utf16_end;
+            }
+            byte_start = byte_end;
+        }
+        Ok(assigned)
+    }
+
+    fn append_runs(
+        &mut self,
+        output: Vec<renderer::NativeRun>,
+        result: &mut LineLayout,
+        assigned: &[(std::ops::Range<u32>, FontId)],
+        bytes: &[usize],
+        platform: &dyn PlatformTextSystem,
+    ) -> Result<()> {
+        let baseline = f32::from(result.ascent);
+        for run in output {
+            let key = run.face.cast::<IUnknown>()?.as_raw().addr();
+            let configured = assigned
+                .iter()
+                .find(|(range, _)| range.contains(&run.text_start))
+                .map(|(_, id)| *id);
+            // DirectWrite may return a new interface for the same face; retain its GPUI ID,
+            // features and explicit fallbacks when the native references still match.
+            let configured = if let Some(id) = configured {
+                let requested = unsafe { self.face(id)?.native.GetFontFaceReference()? };
+                let actual = unsafe { run.face.GetFontFaceReference()? };
+                unsafe { requested.Equals(&actual).as_bool() }.then_some(id)
+            } else {
+                None
+            };
+            let id = if let Some(id) = configured {
+                id
+            } else if let Some(id) = self.native_ids.get(&key) {
+                *id
+            } else {
+                let typography = unsafe { self.factory.CreateTypography()? };
+                self.insert(run.face.clone(), typography, Vec::new(), platform)?
+            };
+            let color = unsafe { run.face.IsColorFont().as_bool() };
+            let mut pen = run.x;
+            anyhow::ensure!(
+                run.glyphs.len() == run.indices.len(),
+                "DirectWrite glyph cluster count changed"
+            );
+            let mut shaped = Vec::with_capacity(run.glyphs.len());
+            for (glyph, index) in run.glyphs.iter().zip(&run.indices) {
+                if run.rtl {
+                    pen -= glyph.advance;
+                }
+                let direction: f32 = if run.rtl { -1.0 } else { 1.0 };
+                shaped.push(ShapedGlyph {
+                    id: GlyphId(u32::from(glyph.id)),
+                    position: point(
+                        px(direction.mul_add(glyph.offset.advanceOffset, pen)),
+                        px(run.y - baseline - glyph.offset.ascenderOffset),
+                    ),
+                    index: *bytes
+                        .get(*index)
+                        .context("DirectWrite cluster lies outside the text")?,
+                    is_emoji: color,
+                });
+                if !run.rtl {
+                    pen += glyph.advance;
+                }
+            }
+            result.runs.push(ShapedRun {
+                font_id: id,
+                glyphs: shaped,
+            });
+        }
+        Ok(())
     }
 
     fn layout(
@@ -340,7 +516,7 @@ impl Fonts {
                 ..LineLayout::default()
             });
         };
-        let first = &self.faces[first.font_id.0];
+        let first = self.face(first.font_id)?;
         let format = unsafe {
             self.factory.CreateTextFormat(
                 &first.family,
@@ -357,64 +533,7 @@ impl Fonts {
             self.factory
                 .CreateTextLayout(&wide, &format, f32::INFINITY, f32::INFINITY)?
         };
-        let mut byte_start = 0;
-        let mut utf16_start = 0;
-        let mut assigned = Vec::new();
-        for (run_index, run) in runs.iter().enumerate() {
-            let content = &text[byte_start..byte_start + run.len];
-            let mut spans: Vec<(usize, FontId)> = Vec::new();
-            if self.faces[run.font_id.0].fallbacks.is_empty() {
-                spans.push((content.encode_utf16().count(), run.font_id));
-            } else {
-                for grapheme in content.graphemes(true) {
-                    let id = if self.covers(run.font_id, grapheme) {
-                        run.font_id
-                    } else {
-                        self.faces[run.font_id.0]
-                            .fallbacks
-                            .iter()
-                            .copied()
-                            .find(|&id| self.covers(id, grapheme))
-                            .unwrap_or(run.font_id)
-                    };
-                    let length = grapheme.encode_utf16().count();
-                    if let Some((previous_length, previous_id)) = spans.last_mut()
-                        && *previous_id == id
-                    {
-                        *previous_length += length;
-                    } else {
-                        spans.push((length, id));
-                    }
-                }
-            }
-            for (length, id) in spans {
-                let face = &self.faces[id.0];
-                let length = u32::try_from(length)?;
-                let range = DWRITE_TEXT_RANGE {
-                    startPosition: utf16_start,
-                    length,
-                };
-                unsafe {
-                    layout.SetFontCollection(&face.collection, range)?;
-                    layout.SetFontFamilyName(&face.family, range)?;
-                    layout.SetFontWeight(face.native.GetWeight(), range)?;
-                    layout.SetFontStyle(face.native.GetStyle(), range)?;
-                    layout.SetFontStretch(face.native.GetStretch(), range)?;
-                    layout.SetTypography(&face.typography, range)?;
-                    layout.SetFontSize(
-                        if run_index % 2 == 1 {
-                            f32::from(font_size).next_up()
-                        } else {
-                            font_size.into()
-                        },
-                        range,
-                    )?;
-                }
-                assigned.push((utf16_start..utf16_start + length, id));
-                utf16_start += length;
-            }
-            byte_start += run.len;
-        }
+        let assigned = self.assign_runs(&layout, text, font_size, runs)?;
         let output = Arc::new(Mutex::new(Vec::new()));
         let renderer: IDWriteTextRenderer = renderer::LayoutRenderer(output.clone()).into();
         unsafe {
@@ -422,80 +541,39 @@ impl Fonts {
         }
         let mut metrics = DWRITE_TEXT_METRICS::default();
         unsafe {
-            layout.GetMetrics(&mut metrics)?;
+            layout.GetMetrics(&raw mut metrics)?;
         }
         let mut count = 0;
         let mut line_metrics = vec![DWRITE_LINE_METRICS::default(); wide.len().max(1)];
         unsafe {
-            layout.GetLineMetrics(Some(&mut line_metrics), &mut count)?;
+            layout.GetLineMetrics(Some(&mut line_metrics), &raw mut count)?;
         }
-        let baseline = line_metrics[0].baseline;
+        let first_line = line_metrics
+            .first()
+            .context("DirectWrite returned no line metrics")?;
         let mut result = LineLayout {
             font_size,
             len: text.len(),
             width: px(metrics.widthIncludingTrailingWhitespace),
-            ascent: px(baseline),
-            descent: px(line_metrics[0].height - baseline),
+            ascent: px(first_line.baseline),
+            descent: px(first_line.height - first_line.baseline),
             runs: Vec::new(),
         };
-        let mut bytes = Vec::with_capacity(wide.len() + 1);
+        let mut bytes = Vec::with_capacity(
+            wide.len()
+                .checked_add(1)
+                .context("Text index size overflow")?,
+        );
         for (offset, ch) in text.char_indices() {
             bytes.extend(std::iter::repeat_n(offset, ch.len_utf16()));
         }
         bytes.push(text.len());
-        for run in output
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .drain(..)
-        {
-            let key = run.face.cast::<IUnknown>()?.as_raw().addr();
-            let configured = assigned
-                .iter()
-                .find(|(range, _)| range.contains(&run.text_start))
-                .map(|(_, id)| *id);
-            // DirectWrite can return a new interface for the same face. Keep the original
-            // font ID when it matches, including that ID's features and explicit fallbacks.
-            let configured = if let Some(id) = configured {
-                let requested = unsafe { self.faces[id.0].native.GetFontFaceReference()? };
-                let actual = unsafe { run.face.GetFontFaceReference()? };
-                unsafe { requested.Equals(&actual).as_bool() }.then_some(id)
-            } else {
-                None
-            };
-            let id = if let Some(id) = configured {
-                id
-            } else if let Some(id) = self.native_ids.get(&key) {
-                *id
-            } else {
-                let typography = unsafe { self.factory.CreateTypography()? };
-                self.insert(run.face.clone(), typography, Vec::new(), platform)?
-            };
-            let color = unsafe { run.face.IsColorFont().as_bool() };
-            let mut pen = run.x;
-            let mut shaped = Vec::with_capacity(run.glyphs.len());
-            for (index, glyph) in run.glyphs.iter().enumerate() {
-                if run.rtl {
-                    pen -= glyph.advance;
-                }
-                let direction = if run.rtl { -1.0 } else { 1.0 };
-                shaped.push(ShapedGlyph {
-                    id: GlyphId(u32::from(glyph.id)),
-                    position: point(
-                        px(pen + direction * glyph.offset.advanceOffset),
-                        px(run.y - baseline - glyph.offset.ascenderOffset),
-                    ),
-                    index: bytes[run.indices[index]],
-                    is_emoji: color,
-                });
-                if !run.rtl {
-                    pen += glyph.advance;
-                }
-            }
-            result.runs.push(ShapedRun {
-                font_id: id,
-                glyphs: shaped,
-            });
-        }
+        let output = std::mem::take(
+            &mut *output
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        self.append_runs(output, &mut result, &assigned, &bytes, platform)?;
         Ok(result)
     }
 }
@@ -510,6 +588,7 @@ impl PlatformTextSystem for WindowsFontSystem {
         for bytes in fonts {
             state.catalog.load_font_data(bytes.into_owned());
         }
+        drop(state);
         Ok(())
     }
     fn all_font_names(&self) -> Vec<String> {
@@ -526,13 +605,22 @@ impl PlatformTextSystem for WindowsFontSystem {
             .select(&resolved, self.native.as_ref())
     }
     fn font_metrics(&self, id: FontId) -> FontMetrics {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(face) = self.face(id) else {
+            return FontMetrics {
+                units_per_em: 1,
+                ascent: 0.0,
+                descent: 0.0,
+                line_gap: 0.0,
+                underline_position: 0.0,
+                underline_thickness: 0.0,
+                cap_height: 0.0,
+                x_height: 0.0,
+                bounding_box: Bounds::new(point(0.0, 0.0), size(0.0, 0.0)),
+            };
+        };
         let mut metrics = DWRITE_FONT_METRICS1::default();
         unsafe {
-            state.faces[id.0].native.GetMetrics(&mut metrics);
+            face.GetMetrics(&raw mut metrics);
         }
         let base = metrics.Base;
         FontMetrics {
@@ -557,51 +645,52 @@ impl PlatformTextSystem for WindowsFontSystem {
         }
     }
     fn typographic_bounds(&self, id: FontId, glyph: GlyphId) -> Result<Bounds<f32>> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let metric = glyph_metrics(&state.faces[id.0].native, glyph)?;
+        let face = self.face(id).context("Unknown DirectWrite font ID")?;
+        let metric = glyph_metrics(&face, glyph)?;
         Ok(Bounds::new(
             point(
-                metric.leftSideBearing as f32,
-                (i64::from(metric.verticalOriginY) + i64::from(metric.bottomSideBearing)
-                    - i64::from(metric.advanceHeight)) as f32,
+                metric
+                    .leftSideBearing
+                    .to_f32()
+                    .context("Invalid glyph bearing")?,
+                (f64::from(metric.verticalOriginY) + f64::from(metric.bottomSideBearing)
+                    - f64::from(metric.advanceHeight))
+                .to_f32()
+                .context("Invalid glyph origin")?,
             ),
             size(
-                (i64::from(metric.advanceWidth)
-                    - i64::from(metric.leftSideBearing)
-                    - i64::from(metric.rightSideBearing)) as f32,
-                (i64::from(metric.advanceHeight)
-                    - i64::from(metric.topSideBearing)
-                    - i64::from(metric.bottomSideBearing)) as f32,
+                (f64::from(metric.advanceWidth)
+                    - f64::from(metric.leftSideBearing)
+                    - f64::from(metric.rightSideBearing))
+                .to_f32()
+                .context("Invalid glyph width")?,
+                (f64::from(metric.advanceHeight)
+                    - f64::from(metric.topSideBearing)
+                    - f64::from(metric.bottomSideBearing))
+                .to_f32()
+                .context("Invalid glyph height")?,
             ),
         ))
     }
     fn advance(&self, id: FontId, glyph: GlyphId) -> Result<Size<f32>> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let metric = glyph_metrics(&state.faces[id.0].native, glyph)?;
+        let face = self.face(id).context("Unknown DirectWrite font ID")?;
+        let metric = glyph_metrics(&face, glyph)?;
         Ok(size(
-            metric.advanceWidth as f32,
-            metric.advanceHeight as f32,
+            metric
+                .advanceWidth
+                .to_f32()
+                .context("Invalid glyph advance")?,
+            metric
+                .advanceHeight
+                .to_f32()
+                .context("Invalid glyph advance")?,
         ))
     }
     fn glyph_for_char(&self, id: FontId, ch: char) -> Option<GlyphId> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let face = self.face(id)?;
         let character = u32::from(ch);
         let mut glyph = 0;
-        unsafe {
-            state.faces[id.0]
-                .native
-                .GetGlyphIndices(&character, 1, &mut glyph)
-        }
-        .ok()?;
+        unsafe { face.GetGlyphIndices(&raw const character, 1, &raw mut glyph) }.ok()?;
         (glyph != 0).then_some(GlyphId(u32::from(glyph)))
     }
     fn glyph_raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
@@ -609,7 +698,8 @@ impl PlatformTextSystem for WindowsFontSystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(id) = state.faces[params.font_id.0].delegate {
+        if let Some(id) = state.face(params.font_id)?.delegate {
+            drop(state);
             return self.native.glyph_raster_bounds(&RenderGlyphParams {
                 font_id: id,
                 ..params.clone()
@@ -626,7 +716,8 @@ impl PlatformTextSystem for WindowsFontSystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(id) = state.faces[params.font_id.0].delegate {
+        if let Some(id) = state.face(params.font_id)?.delegate {
+            drop(state);
             return self.native.rasterize_glyph(
                 &RenderGlyphParams {
                     font_id: id,
@@ -638,11 +729,19 @@ impl PlatformTextSystem for WindowsFontSystem {
         state.raster(params, bounds)
     }
     fn layout_line(&self, text: &str, font_size: Pixels, runs: &[FontRun]) -> LineLayout {
-        self.state
+        let layout = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .layout(text, font_size, runs, self.native.as_ref())
-            .expect("DirectWrite failed to shape a font-resolved line")
+            .layout(text, font_size, runs, self.native.as_ref());
+        layout.unwrap_or_else(|error| {
+            eprintln!("DirectWrite could not shape the line: {error:#}");
+            LineLayout {
+                font_size,
+                len: text.len(),
+                ..LineLayout::default()
+            }
+        })
     }
     fn recommended_rendering_mode(&self, _id: FontId, font_size: Pixels) -> TextRenderingMode {
         // Windows's recommendation is the system ClearType preference, independent of face.
@@ -658,7 +757,7 @@ fn glyph_metrics(face: &IDWriteFontFace3, glyph: GlyphId) -> Result<DWRITE_GLYPH
     let glyph = u16::try_from(glyph.0)?;
     let mut metrics = DWRITE_GLYPH_METRICS::default();
     unsafe {
-        face.GetDesignGlyphMetrics(&glyph, 1, &mut metrics, false)?;
+        face.GetDesignGlyphMetrics(&raw const glyph, 1, &raw mut metrics, false)?;
     }
     Ok(metrics)
 }

@@ -373,8 +373,8 @@ fn linked_checkout_of_bare_repository_can_be_removed(repository: anyhow::Result<
     assert_eq!(
         bootty_git::main_worktree(linked.to_str().unwrap())
             .as_deref()
-            .map(Path::new),
-        Some(bare.canonicalize().unwrap().as_path())
+            .map(|path| Path::new(path).canonicalize().unwrap()),
+        Some(bare.canonicalize().unwrap())
     );
     remove_worktree(linked.to_str().unwrap(), false).expect("remove bare repository checkout");
     assert!(!linked.exists());
@@ -404,7 +404,10 @@ fn only_a_linked_checkout_belongs_to_another_project(repository: anyhow::Result<
     let nested = repository.worktree.join("nested");
     fs::create_dir(&nested).unwrap();
     let git = bootty_git::Git::new();
-    let project = |path: &Path| git.linked_worktree_project(path.to_str().unwrap());
+    let project = |path: &Path| {
+        git.linked_worktree_project(path.to_str().unwrap())
+            .map(|path| Path::new(&path).canonicalize().unwrap())
+    };
     assert_eq!(
         [
             project(&repository.worktree),
@@ -413,13 +416,7 @@ fn only_a_linked_checkout_belongs_to_another_project(repository: anyhow::Result<
             project(&bare_checkout),
             project(repository.root.path()),
         ],
-        [
-            main.to_str().map(str::to_owned),
-            main.to_str().map(str::to_owned),
-            None,
-            None,
-            None,
-        ]
+        [Some(main.clone()), Some(main), None, None, None,]
     );
 }
 

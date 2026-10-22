@@ -4,9 +4,11 @@ use bootty_ui::gpui as bootty_gpui;
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
+#[cfg(unix)]
+use std::path::PathBuf;
 use std::{
     fs,
-    path::{Path, PathBuf},
+    path::Path,
     process::Command,
     sync::{Arc, mpsc},
     time::{Duration, Instant},
@@ -32,6 +34,8 @@ const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[path = "support/idle_frames.rs"]
 mod frames;
+#[path = "support/naming_backend.rs"]
+mod naming_backend;
 mod support;
 #[path = "support/config.rs"]
 mod test_config;
@@ -309,7 +313,19 @@ fn directory_picker_generates_valid_unique_names_without_changing_cwd(
     let cwd = directory.path().join(directory_name);
     fs::create_dir(&cwd).expect("project directory");
     let canonical_cwd = cwd.canonicalize().expect("canonical project directory");
-    let mut state = native_state(directory.path());
+    let mut config = test_config::config(
+        directory.path().join("config.toml"),
+        MultiplexerBackendConfig::Native,
+    );
+    config.session.working_directory = Some(directory.path().to_owned());
+    let mut state = AppState::new(
+        config,
+        naming_backend::backends().unwrap(),
+        Arc::new(|| {}),
+        None,
+        None,
+    )
+    .expect("session naming fixture");
     for expected in [first, second] {
         open_native_session(&mut state, &cwd, Instant::now());
         assert_eq!(state.mux().selected_session(), Some(expected.as_str()));
@@ -1527,28 +1543,24 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
         None,
     )
     .unwrap();
-    let started = Instant::now();
     let mut run = |command: &str, arguments: Vec<String>| {
+        let deadline = Instant::now()
+            .checked_add(FIXTURE_DEADLINE)
+            .expect("fixture deadline");
         let mut invocation = CommandInvocation::from_action(command, caller);
         invocation.arguments = arguments;
         let response = state
             .app_command_sender(caller)
-            .submit(
-                invocation,
-                started
-                    .checked_add(Duration::from_secs(5))
-                    .expect("test timestamp fits"),
-                CommandCancellation::new(),
-            )
+            .submit(invocation, deadline, CommandCancellation::new())
             .unwrap();
         loop {
-            state.update_frame(frames::idle_frame(started));
+            state.update_frame(frames::idle_frame(Instant::now()));
             if let Ok(outcome) = response.try_recv() {
                 break outcome;
             }
             wakes
-                .recv_timeout(Duration::from_secs(5))
-                .expect("worker publishes completion");
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| panic!("{command} worker completion: {error}"));
         }
     };
     assert!(matches!(
@@ -1594,7 +1606,7 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
         "{}-checkout",
         directory.path().file_name().unwrap().to_str().unwrap()
     );
-    let CommandOutcome::Success { value, .. } = run(
+    let outcome = run(
         "worktree.create",
         vec![
             root.clone(),
@@ -1602,8 +1614,9 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
             name,
             "HEAD".to_owned(),
         ],
-    ) else {
-        panic!("worktree creation failed");
+    );
+    let CommandOutcome::Success { value, .. } = outcome else {
+        panic!("worktree creation failed: {outcome:?}");
     };
     let checkout = value.as_str().unwrap();
     assert!(
@@ -1719,7 +1732,11 @@ fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] 
     };
     assert_eq!(
         decode_document(&content_base64).unwrap(),
-        "fn main() {\n    println!(\"hi\");\n}\n"
+        ["fn main() {", "    println!(\"hi\");", "}", ""].join(if cfg!(windows) {
+            "\r\n"
+        } else {
+            "\n"
+        })
     );
     assert_eq!(fs::read_to_string(&path).unwrap(), "original");
     let arguments = vec![name, snapshot.digest, encode_document("saved").unwrap()];

@@ -105,10 +105,12 @@ fn terminal_engine_answers_kitty_graphics_probes() {
     let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=s,f=24;AAAA\x1b\\");
-    assert_eq!(
-        take_pty_output(&output),
-        b"\x1b_Gi=31;EINVAL: invalid data\x1b\\"
-    );
+    let shared_memory_error = if cfg!(windows) {
+        b"\x1b_Gi=31;EINVAL: unsupported medium\x1b\\".as_slice()
+    } else {
+        b"\x1b_Gi=31;EINVAL: invalid data\x1b\\".as_slice()
+    };
+    assert_eq!(take_pty_output(&output), shared_memory_error);
 
     engine.write_vt(b"\x1b_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\");
     assert_eq!(take_pty_output(&output), b"\x1b_Gi=31;OK\x1b\\");
@@ -257,7 +259,7 @@ fn terminal_engine_answers_status_queries() {
             b"\x1b[5;20r\x1b[?6h\x1b[3;5H\x1b[6n".as_slice(),
             b"\x1b[3;5R".as_slice(),
         ),
-        (b"\x1b[19t".as_slice(), b"".as_slice()),
+        (b"\x1b[19t".as_slice(), b"\x1b[9;24;80t".as_slice()),
     ] {
         engine.write_vt(input);
         assert_eq!(take_pty_output(&output), expected);

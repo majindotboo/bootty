@@ -994,7 +994,7 @@ fn terminal_engine_replaces_partially_invalid_utf8_bytes() {
 fn terminal_engine_decodes_text_and_character_sets() {
     assert_render_cases(&[
         (16, 1, b"Hello, World!", &["Hello, World!"]),
-        (16, 1, "\x1b(A#\x1b(B#\x1b(0`qx😄".as_bytes(), &["£#◆─│ "]),
+        (16, 1, "\x1b(A#\x1b(B#\x1b(0`qx😄".as_bytes(), &["£#◆─│😄"]),
         (16, 1, b"`\x1b)0\x0e``\x0f`\x1b*0\x1bN``", &["`◆◆`◆`"]),
     ])
     .expect("terminal behavior matches cases");

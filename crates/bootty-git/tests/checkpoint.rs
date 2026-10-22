@@ -45,7 +45,12 @@ struct VanishingFile {
 }
 
 impl CommandRunner for VanishingFile {
-    fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
+    fn run_with_env(
+        &self,
+        program: &str,
+        args: &[String],
+        env: &[(&str, &str)],
+    ) -> anyhow::Result<CommandOutput> {
         if !self.lost.get() && args.ends_with(&["add".to_owned(), "-A".to_owned()]) {
             self.lost.set(true);
             return Ok(CommandOutput {
@@ -55,7 +60,15 @@ impl CommandRunner for VanishingFile {
                     .to_owned(),
             });
         }
+        SystemCommandRunner.run_with_env(program, args, env)
+    }
+
+    fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
         SystemCommandRunner.run(program, args)
+    }
+
+    fn remove_file(&self, path: &str) -> anyhow::Result<()> {
+        SystemCommandRunner.remove_file(path)
     }
 }
 
@@ -100,6 +113,18 @@ fn snapshots_show_a_turns_changes_and_put_files_back() {
     assert_eq!(run(&dir, &["diff", "--cached", "--name-only"]), "");
     checkpoint::prune(&runner, root, &space).unwrap();
     assert_eq!(run(&dir, &["for-each-ref", "refs/bootty/"]), "");
+    assert!(
+        std::fs::read_dir(dir.path().join(".git"))
+            .unwrap()
+            .all(|entry| {
+                !entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("bootty-")
+            }),
+        "snapshot scratch indexes are removed on their execution host"
+    );
 }
 
 /// Outside Git there is nothing to snapshot.

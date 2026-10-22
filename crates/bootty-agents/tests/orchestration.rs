@@ -1,4 +1,5 @@
 use std::{fs, path::PathBuf};
+mod support;
 
 use bootty_agents::{
     AgentKind, AgentLaunch, AgentPrompt, MAX_RUN_FILE_BYTES, OrchestrationContext,
@@ -44,14 +45,24 @@ fn node(id: &str, dependencies: Vec<String>) -> FixtureResult<OrchestrationNodeS
             AgentKind::Pi,
             Some("captured profile".to_owned()),
             AgentLaunch {
-                program: "/captured/provider".to_owned(),
-                cwd: Some("/captured/project".to_owned()),
+                program: support::synthetic_path("captured/provider")
+                    .to_string_lossy()
+                    .into_owned(),
+                cwd: Some(
+                    support::synthetic_path("captured/project")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
                 arguments: vec![
                     "--provider".to_owned(),
                     "captured-model-provider".to_owned(),
                 ],
                 ephemeral: false,
-                account_directory: Some("/captured/account".to_owned()),
+                account_directory: Some(
+                    support::synthetic_path("captured/account")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
             },
         )?,
     })

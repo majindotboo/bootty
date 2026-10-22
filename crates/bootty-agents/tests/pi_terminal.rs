@@ -310,7 +310,7 @@ fn working_duration_tracks_live_transitions_without_restarting_on_updates(
 ) {
     let (directory, service, seconds) = timed_service.unwrap();
     let prepared = service.prepare(AgentKind::Pi, launch()).unwrap();
-    let argv = prepared.argv();
+    let argv = prepared.argv().unwrap();
     let extension = argv
         .windows(2)
         .find(|pair| {
@@ -421,7 +421,7 @@ fn exact_retirement_preserves_observed_identity_and_commits_before_publication(
     let path = directory.path().join("terminals.json");
     let service = Arc::new(TerminalAgentService::open(&path).unwrap());
     let prepared = service.prepare(AgentKind::Pi, launch()).unwrap();
-    let connection = connection(&prepared.argv()).unwrap();
+    let connection = connection(&prepared.argv().unwrap()).unwrap();
     service
         .register(prepared, retirement_target(1), "binding".to_owned())
         .unwrap();

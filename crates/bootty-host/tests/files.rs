@@ -124,7 +124,9 @@ fn formatting_changes_only_the_returned_draft() {
         panic!("formatted document");
     };
     assert_eq!(
-        decode_document(&content_base64).unwrap(),
+        decode_document(&content_base64)
+            .unwrap()
+            .replace("\r\n", "\n"),
         "fn main() {\n    println!(\"hi\");\n}\n"
     );
     file.assert("fn main() {}\n");
@@ -381,7 +383,12 @@ fn remote_reads_and_saves_never_touch_a_local_namesake() {
     .unwrap() else {
         panic!("formatted remote draft");
     };
-    assert_eq!(decode_document(&content_base64).unwrap(), "fn main() {}\n");
+    assert_eq!(
+        decode_document(&content_base64)
+            .unwrap()
+            .replace("\r\n", "\n"),
+        "fn main() {}\n"
+    );
     local.assert("local contents");
     remote.assert("remote replacement");
     let identity = bootty_host::files::host_identity(Some(&config.clone().into()))

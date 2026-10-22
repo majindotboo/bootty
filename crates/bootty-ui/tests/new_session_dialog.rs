@@ -612,4 +612,19 @@ fn directory_search_accepts_both_home_path_spellings(#[case] abbreviated: bool) 
         &[],
     );
     assert!(project_row(&dialog.spec(), &path).action.is_some());
+    if cfg!(windows) {
+        let alternate = if abbreviated {
+            r"~\bootty-picker-project".to_owned()
+        } else {
+            path.replace('\\', "/")
+        };
+        dialog.apply(
+            &DialogIntent::TextChanged {
+                dialog: dialog.spec().id,
+                value: alternate,
+            },
+            &[],
+        );
+        assert!(project_row(&dialog.spec(), &path).action.is_some());
+    }
 }

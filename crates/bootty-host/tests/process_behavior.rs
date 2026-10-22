@@ -12,6 +12,51 @@ use bootty_host::SystemCommandRunner;
 use bootty_host::{CancellableCommandRunner, CommandCancellation, CommandRunner};
 use pretty_assertions::assert_eq;
 
+#[rstest::rstest]
+#[case(false)]
+#[case(true)]
+fn local_shell_commands_preserve_quoted_paths(#[case] cancellable: bool) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let original = std::env::current_dir().unwrap();
+    let command = if cfg!(windows) {
+        "echo ready>\"result with spaces.txt\""
+    } else {
+        "printf ready > 'result with spaces.txt'"
+    };
+    let runner: Box<dyn CommandRunner> = if cancellable {
+        Box::new(CancellableCommandRunner::new(CommandCancellation::default()))
+    } else {
+        Box::new(bootty_host::SystemCommandRunner)
+    };
+    let output = runner
+        .run_shell_in(directory.path().to_str().unwrap(), command)
+        .unwrap();
+    assert!(output.success, "{output:?}");
+    let result = directory.path().join("result with spaces.txt");
+    assert_eq!(std::fs::read_to_string(&result).unwrap().trim(), "ready");
+    runner.remove_file(result.to_str().unwrap()).unwrap();
+    assert!(!result.exists());
+    assert_eq!(std::env::current_dir().unwrap(), original);
+}
+
+#[test]
+fn commands_with_environment_honor_cancellation_before_start() {
+    let cancellation = CommandCancellation::default();
+    cancellation.cancel();
+    let runner = CancellableCommandRunner::new(cancellation);
+    assert_eq!(
+        runner
+            .run_with_env(
+                "nonexistent-cancelled-command",
+                &[],
+                &[("BOOTTY_PROBE", "value")]
+            )
+            .unwrap_err()
+            .to_string(),
+        "command canceled"
+    );
+}
+
 #[cfg(unix)]
 #[rstest::rstest]
 fn command_input_is_streamed_without_changing_argv() {

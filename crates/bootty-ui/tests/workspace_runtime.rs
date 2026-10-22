@@ -53,6 +53,18 @@ mod support;
 #[path = "support/config.rs"]
 mod test_config;
 
+const fn python_program() -> &'static str {
+    if cfg!(windows) { "python" } else { "python3" }
+}
+
+fn python_argv(script: &str, arguments: &[&str]) -> Vec<String> {
+    [python_program(), "-u", "-c", script]
+        .into_iter()
+        .chain(arguments.iter().copied())
+        .map(str::to_owned)
+        .collect()
+}
+
 fn create_space(
     repository: &mut WorkspaceRepository,
     name: &str,
@@ -238,6 +250,7 @@ impl MuxBackend for RestoreBackend {
     }
 }
 
+#[derive(Clone)]
 struct RestoreProvider {
     kind: MuxBackendKind,
     dispatch: MuxCommandDispatch,
@@ -294,6 +307,19 @@ fn registry<const N: usize>(
     providers: [Arc<RestoreProvider>; N],
     fallbacks: [MuxBackendKind; N],
 ) -> Arc<MuxBackendRegistry> {
+    let mut providers = Vec::from(providers);
+    if cfg!(windows)
+        && !providers
+            .iter()
+            .any(|provider| provider.kind == MuxBackendKind::Native)
+        && let Some(provider) = providers
+            .iter()
+            .find(|provider| provider.kind == MuxBackendKind::Tmux)
+    {
+        let mut native = provider.as_ref().clone();
+        native.kind = MuxBackendKind::Native;
+        providers.push(Arc::new(native));
+    }
     Arc::new(
         MuxBackendRegistry::from_app_providers(providers, fallbacks)
             .expect("test backend registry"),
@@ -2511,14 +2537,10 @@ fn a_native_session_command_starts_at_once_and_is_the_process_shown_later(
 
     let marker = directory.path().join("started");
     let received = directory.path().join("received");
-    let argv = [
-        "/bin/sh",
-        "-c",
-        "printf '%s|%s\\n' \"$BOOTTY_PANE\" \"$(pwd -P)\" >> \"$1\"; printf eager-token; exec cat >> \"$2\"",
-        "agent",
-        &marker.to_string_lossy(),
-        &received.to_string_lossy(),
-    ];
+    let argv = python_argv(
+        "import os,sys; open(sys.argv[1], 'a').write(os.environ['BOOTTY_PANE'] + '|' + os.getcwd() + '\\n'); print('eager-token', end='', flush=True)\nwith open(sys.argv[2], 'a', buffering=1) as output:\n for line in sys.stdin: output.write(line)",
+        &[&marker.to_string_lossy(), &received.to_string_lossy()],
+    );
     let target = if created_in == TargetSpace::Inactive {
         space_target(&mut state, "Scripts")
     } else {
@@ -2620,13 +2642,14 @@ fn a_native_session_command_starts_at_once_and_is_the_process_shown_later(
         .backend_session_by_id_or_name("agent")
         .and_then(|session| session.windows.first()?.panes.first()?.pane_id.clone())
         .expect("the session's pane");
+    let marker = std::fs::read_to_string(&marker).expect("marker");
+    let lines = marker.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1, "the command ran once");
+    let (started_pane, cwd) = lines[0].split_once('|').expect("pane and cwd");
+    assert_eq!(started_pane, pane, "the pane Bootty shows owns the process");
     assert_eq!(
-        std::fs::read_to_string(&marker).expect("marker"),
-        format!(
-            "{pane}|{}\n",
-            project.canonicalize().expect("canonical cwd").display()
-        ),
-        "the command ran once, in its cwd, as the pane Bootty shows"
+        Path::new(cwd).canonicalize().unwrap(),
+        project.canonicalize().unwrap()
     );
 }
 
@@ -2668,13 +2691,10 @@ fn closing_ends_a_hidden_native_pane_without_moving_selection(
         ("shown", None),
         (
             "agent",
-            Some(serde_json::json!([
-                "/bin/sh",
-                "-c",
-                "echo $$ > \"$1\"; exec sleep 60",
-                "agent",
-                pid_file.to_string_lossy()
-            ])),
+            Some(serde_json::json!(python_argv(
+                "import os,sys,time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)",
+                &[&pid_file.to_string_lossy()]
+            ))),
         ),
     ] {
         let mut arguments = vec![name.to_owned(), cwd.clone()];
@@ -2695,6 +2715,13 @@ fn closing_ends_a_hidden_native_pane_without_moving_selection(
                     .and_then(|text| text.trim().parse::<u32>().ok())
             });
             let selected = state.mux().selected_session().map(str::to_owned);
+            let pid = sysinfo::Pid::from_u32(pid);
+            let mut processes = sysinfo::System::new();
+            processes.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+            assert!(
+                processes.process(pid).is_some(),
+                "created pane owns a live process"
+            );
 
             let close_target = if close_command == "pane.close" {
                 terminal.clone()
@@ -2713,11 +2740,8 @@ fn closing_ends_a_hidden_native_pane_without_moving_selection(
                 "{outcome:?}"
             );
             wait_until(&mut state, "the closed pane's process exits", |_| {
-                let alive = std::process::Command::new("kill")
-                    .args(["-0", &pid.to_string()])
-                    .status()
-                    .is_ok_and(|status| status.success());
-                (!alive).then_some(())
+                processes.refresh_processes(sysinfo::ProcessesToUpdate::Some(&[pid]), true);
+                processes.process(pid).is_none().then_some(())
             });
             let pane = terminal["handle"]
                 .as_str()
@@ -3183,7 +3207,7 @@ fn a_native_session_that_cannot_start_fails_its_create_and_frees_its_name(
         &mut state,
         create(
             &not_a_directory.to_string_lossy(),
-            serde_json::json!(["/bin/sh", "-c", "exit 0"]),
+            serde_json::json!(python_argv("pass", &[])),
         ),
     );
     assert!(
@@ -3194,7 +3218,10 @@ fn a_native_session_that_cannot_start_fails_its_create_and_frees_its_name(
 
     let started = submit_and_wait(
         &mut state,
-        create(&cwd, serde_json::json!(["/bin/sh", "-c", "exec sleep 60"])),
+        create(
+            &cwd,
+            serde_json::json!(python_argv("import time; time.sleep(60)", &[])),
+        ),
     );
     assert!(
         matches!(started, CommandOutcome::Success { .. }),
@@ -3266,11 +3293,10 @@ fn a_starting_native_create_never_answers_for_or_closes_a_recreated_session(
         "--flag"
     ])));
     let closed = queue(close);
-    let second = queue(create(serde_json::json!([
-        "/bin/sh",
-        "-c",
-        "exec sleep 60"
-    ])));
+    let second = queue(create(serde_json::json!(python_argv(
+        "import time; time.sleep(60)",
+        &[]
+    ))));
 
     let first = wait_until(&mut state, "the first create answers", |_| {
         first.try_recv().ok()
@@ -3669,6 +3695,8 @@ fn wait_for_restored_pane_history(
     wakes: &mpsc::Receiver<()>,
     identity: &str,
     pane_count: usize,
+    ready: &str,
+    title: &str,
 ) -> std::collections::BTreeMap<String, bootty_terminal::terminal_capture::TerminalCapture> {
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(5))
@@ -3713,7 +3741,18 @@ fn wait_for_restored_pane_history(
                     .expect("history captured"),
             );
         }
-        if captured.len() == pane_count {
+        if captured.len() == pane_count
+            && captured
+                .values()
+                .all(|capture| capture.text.contains(ready))
+            && state
+                .mux()
+                .all_sessions()
+                .iter()
+                .filter(|session| session.tag.identity.as_deref() == Some(identity))
+                .flat_map(|session| &session.windows)
+                .all(|window| window.name == title)
+        {
             return captured;
         }
         wakes
@@ -3843,6 +3882,29 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
         MultiplexerBackendConfig::Native,
     );
     config.session.output_archives = false;
+    // Fresh panes run a controlled default process, not the user's shell/profile.
+    // Its startup marker is absent from every original -c command's history.
+    let fixture_title = "Checkpoint fixture terminal";
+    let shell_startup = directory.child("restored-shell.py");
+    shell_startup
+        .write_str(&format!(
+            "print('\\x1b]0;{fixture_title}\\x07restored default shell ready', flush=True)\n"
+        ))
+        .expect("default shell startup fixture");
+    config.session.shell = Some(
+        bootty_host::find_executable(python_program())
+            .expect("fixture Python executable")
+            .to_string_lossy()
+            .into_owned(),
+    );
+    config.session.shell_integration = false;
+    config.session.env.extend([
+        (
+            "PYTHONSTARTUP".to_owned(),
+            shell_startup.path().to_string_lossy().into_owned(),
+        ),
+        ("PYTHON_BASIC_REPL".to_owned(), "1".to_owned()),
+    ]);
     let window_key = format!("cold-checkpoint:{}", directory.path().display());
     let (wake, wakes) = mpsc::channel();
     let mut state = AppState::new_for_window(
@@ -3875,17 +3937,21 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
     let binding = spaces[0]["target"].clone();
     let cwd = directory.path().to_string_lossy().into_owned();
     let marker = directory.path().join("original-command-count");
-    let changed_cwd = directory.child("changed cwd % # ?");
+    let changed_cwd = directory.child(if cfg!(windows) {
+        "changed cwd % # ü"
+    } else {
+        "changed cwd % # ?"
+    });
     changed_cwd
         .create_dir_all()
         .expect("current working directory");
     let changed_uri =
         url::Url::from_file_path(changed_cwd.path()).expect("encoded OSC 7 directory");
     let original = checkpoint_host_command(&mut state, &wakes, targeted("session.create", vec![
-        "selected".to_owned(), cwd.clone(), serde_json::json!([
-            "/bin/sh", "-c", "printf x >> \"$1\"; cd \"$2\"; printf '\\033]7;%s\\007' \"$3\"; printf 'retained cold history\\n'; exec sleep 60",
-            "original", marker.to_string_lossy(), changed_cwd.path().to_string_lossy(), changed_uri.as_str(),
-        ]).to_string(), "selected-task".to_owned(), "Retained task title".to_owned(),
+        "selected".to_owned(), cwd.clone(), serde_json::json!(python_argv(
+            "import os,sys,time; open(sys.argv[1], 'a').write('x'); os.chdir(sys.argv[2]); input(); print('\\x1b]0;' + sys.argv[4] + '\\x07\\x1b]7;' + sys.argv[3] + '\\x07retained cold history', flush=True); time.sleep(60)",
+            &[&marker.to_string_lossy(), &changed_cwd.path().to_string_lossy(), changed_uri.as_str(), fixture_title],
+        )).to_string(), "selected-task".to_owned(), "Retained task title".to_owned(),
     ], binding.clone()));
     let initial = saved_terminal_checkpoint(&config, "selected-task");
     assert_eq!(initial.windows.len(), 1);
@@ -3895,14 +3961,23 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
         "first creation receipt is already durable"
     );
     // The original command's real PTY output must be in the frame before it is checkpointed.
+    checkpoint_host_command(
+        &mut state,
+        &wakes,
+        targeted("terminal.submit", Vec::new(), original["terminal"].clone()),
+    );
     wait_for_checkpoint_output(
         &mut state,
         &wakes,
         &original["terminal"],
         "retained cold history",
     );
-    let idle_argv = serde_json::json!(["/bin/sh", "-c", "exec sleep 60"]).to_string();
-    checkpoint_host_command(
+    let idle_argv = serde_json::json!(python_argv(
+        "import sys,time; input(); print('\\x1b]0;' + sys.argv[1] + '\\x07original idle pane ready', flush=True); time.sleep(60)",
+        &[fixture_title],
+    ))
+    .to_string();
+    let split = checkpoint_host_command(
         &mut state,
         &wakes,
         targeted(
@@ -3921,11 +3996,33 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
     checkpoint_host_command(
         &mut state,
         &wakes,
+        targeted("terminal.submit", Vec::new(), split["created"].clone()),
+    );
+    wait_for_checkpoint_output(
+        &mut state,
+        &wakes,
+        &split["created"],
+        "original idle pane ready",
+    );
+    let tab = checkpoint_host_command(
+        &mut state,
+        &wakes,
         targeted(
             "terminal.create_tab",
             vec![idle_argv.clone(), cwd.clone()],
             original["created"].clone(),
         ),
+    );
+    checkpoint_host_command(
+        &mut state,
+        &wakes,
+        targeted("terminal.submit", Vec::new(), tab["created"].clone()),
+    );
+    wait_for_checkpoint_output(
+        &mut state,
+        &wakes,
+        &tab["created"],
+        "original idle pane ready",
     );
     checkpoint_host_command(
         &mut state,
@@ -3943,6 +4040,34 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
         ),
     );
     state.activate_session_from_ui("selected");
+    wait_until(&mut state, "original pane titles are published", |state| {
+        state
+            .mux()
+            .all_sessions()
+            .iter()
+            .find(|session| session.tag.identity.as_deref() == Some("selected-task"))
+            .is_some_and(|session| {
+                session
+                    .windows
+                    .iter()
+                    .all(|window| window.name == fixture_title)
+            })
+            .then_some(())
+    });
+    state.update_frame(frames::idle_frame(Instant::now()));
+    while state.session_checkpoint_pending() {
+        wakes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("prior creation receipt wakes host");
+        state.update_frame(frames::idle_frame(Instant::now()));
+    }
+    state.checkpoint_sessions(bootty_ui::clock::ClockSnapshot::now().epoch);
+    while state.session_checkpoint_pending() {
+        wakes
+            .recv_timeout(Duration::from_secs(5))
+            .expect("ready pane checkpoint wakes host");
+        state.update_frame(frames::idle_frame(Instant::now()));
+    }
     let (_, saved) = WorkspaceRepository::open(&config.config_path).expect("durable checkpoint");
     let chosen = saved.spaces()[0]
         .binding()
@@ -3956,6 +4081,12 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
             .expect("checkpoint committed by tab creation"),
     );
     assert_eq!(retained.windows.len(), 2);
+    assert!(
+        retained
+            .windows
+            .iter()
+            .all(|window| window.title == fixture_title)
+    );
     assert_eq!(
         retained
             .windows
@@ -4047,7 +4178,14 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
             ),
         );
     }
-    let captured = wait_for_restored_pane_history(&mut restored, &wakes, "selected-task", 3);
+    let captured = wait_for_restored_pane_history(
+        &mut restored,
+        &wakes,
+        "selected-task",
+        3,
+        "restored default shell ready",
+        fixture_title,
+    );
     assert!(
         !restored
             .mux()
@@ -4195,11 +4333,10 @@ fn unsupported_osc7_directory_preserves_the_checkpoint_and_live_process(
     let cwd = directory.path().to_string_lossy().into_owned();
     let valid_uri = url::Url::from_file_path(directory.path()).expect("local directory URI");
     let created = checkpoint_host_command(&mut state, &wakes, targeted("session.create", vec![
-        "retained".to_owned(), cwd.clone(), serde_json::json!([
-            "/bin/sh", "-c",
-            "read -r trigger; printf '\\033]7;%s\\007' \"$1\"; printf 'unsupported directory received\\n'; read -r trigger; printf '\\033]7;%s\\007' \"$2\"; printf 'local directory restored\\n'; exec sleep 60",
-            "original", reported_uri, valid_uri.as_str(),
-        ]).to_string(), "retained-task".to_owned(), "Retained".to_owned(),
+        "retained".to_owned(), cwd.clone(), serde_json::json!(python_argv(
+            "import sys,time; input(); print('\\x1b]7;' + sys.argv[1] + '\\x07unsupported directory received', flush=True); input(); print('\\x1b]7;' + sys.argv[2] + '\\x07local directory restored', flush=True); time.sleep(60)",
+            &[reported_uri, valid_uri.as_str()],
+        )).to_string(), "retained-task".to_owned(), "Retained".to_owned(),
     ], spaces[0]["target"].clone()));
     let before = saved_terminal_checkpoint(&config, "retained-task");
     checkpoint_host_command(
@@ -4207,9 +4344,14 @@ fn unsupported_osc7_directory_preserves_the_checkpoint_and_live_process(
         &wakes,
         targeted(
             "terminal.write",
-            vec!["go\n".to_owned()],
+            vec!["go".to_owned()],
             created["terminal"].clone(),
         ),
+    );
+    checkpoint_host_command(
+        &mut state,
+        &wakes,
+        targeted("terminal.submit", Vec::new(), created["terminal"].clone()),
     );
     wait_for_checkpoint_output(
         &mut state,
@@ -4240,9 +4382,14 @@ fn unsupported_osc7_directory_preserves_the_checkpoint_and_live_process(
         &wakes,
         targeted(
             "terminal.write",
-            vec!["repair\n".to_owned()],
+            vec!["repair".to_owned()],
             created["terminal"].clone(),
         ),
+    );
+    checkpoint_host_command(
+        &mut state,
+        &wakes,
+        targeted("terminal.submit", Vec::new(), created["terminal"].clone()),
     );
     wait_for_checkpoint_output(
         &mut state,
@@ -4941,7 +5088,7 @@ fn failed_native_launch_retries_one_saved_identity_and_preserves_its_content(
             &home,
             &identity,
             &cwd,
-            &serde_json::json!(["/bin/sh", "-c", "exec sleep 60"]),
+            &serde_json::json!(python_argv("import time; time.sleep(60)", &[])),
             "Ignored replacement title",
         ),
     );
@@ -5702,7 +5849,7 @@ fn worktree_cleanup_removes_checkouts_only_when_nothing_needs_them(directory: as
         panic!("removing worktrees asks first");
     };
     clean.confirmation = Some(*confirmation);
-    let outcome = submit_and_wait(&mut state, clean);
+    let outcome = submit_and_wait(&mut state, clean.clone());
     let CommandOutcome::Success { value, warnings } = outcome else {
         panic!("worktrees.clean failed: {outcome:?}");
     };
@@ -5735,5 +5882,14 @@ fn worktree_cleanup_removes_checkouts_only_when_nothing_needs_them(directory: as
         "deleting the session frees its checkout",
         |_| (!Path::new(&used).exists()).then_some(()),
     );
+    // The checkout disappears before branch deletion finishes. A subsequent
+    // serialized pass must complete before this test drops its host/process.
+    let completed = submit_and_wait(&mut state, clean);
+    let CommandOutcome::Success { value, warnings } = completed else {
+        panic!("final cleanup failed: {completed:?}");
+    };
+    assert_eq!(warnings, []);
+    assert_eq!(value["hosts"][0]["remaining"], 1);
+    assert_eq!(value["hosts"][0]["removed"], serde_json::json!([]));
     assert!(Path::new(&unpushed).exists());
 }

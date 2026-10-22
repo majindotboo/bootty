@@ -4,6 +4,7 @@ use gpui_kit::{
     Bounds, DevicePixels, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, Size, point,
     size,
 };
+use num_traits::ToPrimitive as _;
 use std::mem::ManuallyDrop;
 use windows::{
     Win32::{
@@ -17,7 +18,8 @@ use windows::{
                 D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1,
                 D2D1_COLOR_BITMAP_GLYPH_SNAP_OPTION_DEFAULT, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
                 D2D1_MAP_OPTIONS_READ, D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE, D2D1CreateDevice,
-                ID2D1DeviceContext4, ID2D1Image, ID2D1SvgGlyphStyle,
+                ID2D1Bitmap1, ID2D1DeviceContext4, ID2D1Image, ID2D1SolidColorBrush,
+                ID2D1SvgGlyphStyle,
             },
             Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP},
             Direct3D11::{
@@ -25,17 +27,17 @@ use windows::{
                 ID3D11Device,
             },
             DirectWrite::{
-                DWRITE_GLYPH_IMAGE_FORMATS_CFF, DWRITE_GLYPH_IMAGE_FORMATS_COLR,
-                DWRITE_GLYPH_IMAGE_FORMATS_JPEG, DWRITE_GLYPH_IMAGE_FORMATS_PNG,
-                DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8, DWRITE_GLYPH_IMAGE_FORMATS_SVG,
-                DWRITE_GLYPH_IMAGE_FORMATS_TIFF, DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE,
-                DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN, DWRITE_GRID_FIT_MODE, DWRITE_MATRIX,
-                DWRITE_MEASURING_MODE_NATURAL, DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
-                DWRITE_RENDERING_MODE1, DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC,
-                DWRITE_RENDERING_MODE1_OUTLINE, DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE,
-                DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE, DWRITE_TEXTURE_ALIASED_1x1,
-                DWRITE_TEXTURE_CLEARTYPE_3x1, DWRITE_TEXTURE_TYPE, IDWriteFactory4,
-                IDWriteFontFace3, IDWriteGlyphRunAnalysis,
+                DWRITE_COLOR_GLYPH_RUN1, DWRITE_GLYPH_IMAGE_FORMATS_CFF,
+                DWRITE_GLYPH_IMAGE_FORMATS_COLR, DWRITE_GLYPH_IMAGE_FORMATS_JPEG,
+                DWRITE_GLYPH_IMAGE_FORMATS_PNG, DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8,
+                DWRITE_GLYPH_IMAGE_FORMATS_SVG, DWRITE_GLYPH_IMAGE_FORMATS_TIFF,
+                DWRITE_GLYPH_IMAGE_FORMATS_TRUETYPE, DWRITE_GLYPH_OFFSET, DWRITE_GLYPH_RUN,
+                DWRITE_GRID_FIT_MODE, DWRITE_MATRIX, DWRITE_MEASURING_MODE_NATURAL,
+                DWRITE_OUTLINE_THRESHOLD_ANTIALIASED, DWRITE_RENDERING_MODE1,
+                DWRITE_RENDERING_MODE1_NATURAL_SYMMETRIC, DWRITE_RENDERING_MODE1_OUTLINE,
+                DWRITE_TEXT_ANTIALIAS_MODE_CLEARTYPE, DWRITE_TEXT_ANTIALIAS_MODE_GRAYSCALE,
+                DWRITE_TEXTURE_ALIASED_1x1, DWRITE_TEXTURE_CLEARTYPE_3x1, DWRITE_TEXTURE_TYPE,
+                IDWriteFactory4, IDWriteFontFace3, IDWriteGlyphRunAnalysis,
             },
             Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
             Dxgi::{IDXGIAdapter, IDXGIDevice},
@@ -66,9 +68,9 @@ fn with_run<T>(
         fontFace: ManuallyDrop::new(Some(face.cast()?)),
         fontEmSize: params.font_size.into(),
         glyphCount: 1,
-        glyphIndices: &glyph,
-        glyphAdvances: &advance,
-        glyphOffsets: &offset,
+        glyphIndices: &raw const glyph,
+        glyphAdvances: &raw const advance,
+        glyphOffsets: &raw const offset,
         isSideways: false.into(),
         bidiLevel: 0,
     });
@@ -103,13 +105,13 @@ fn analysis(
             params.font_size.into(),
             96.0,
             96.0,
-            Some(&matrix),
+            Some(&raw const matrix),
             false,
             DWRITE_OUTLINE_THRESHOLD_ANTIALIASED,
             DWRITE_MEASURING_MODE_NATURAL,
             None,
-            &mut mode,
-            &mut fitting,
+            &raw mut mode,
+            &raw mut fitting,
         )?;
     }
     if mode == DWRITE_RENDERING_MODE1_OUTLINE {
@@ -120,7 +122,7 @@ fn analysis(
         Ok(unsafe {
             factory.CreateGlyphRunAnalysis(
                 run,
-                Some(&matrix),
+                Some(&raw const matrix),
                 mode,
                 DWRITE_MEASURING_MODE_NATURAL,
                 fitting,
@@ -136,7 +138,7 @@ fn analysis(
     })
 }
 
-fn texture(params: &RenderGlyphParams) -> DWRITE_TEXTURE_TYPE {
+const fn texture(params: &RenderGlyphParams) -> DWRITE_TEXTURE_TYPE {
     if params.subpixel_rendering {
         DWRITE_TEXTURE_CLEARTYPE_3x1
     } else {
@@ -149,11 +151,13 @@ impl Fonts {
         if self.color.is_none() {
             self.color = Some(ColorRaster::new()?);
         }
-        Ok(self.color.as_ref().expect("initialized color raster"))
+        self.color
+            .as_ref()
+            .context("Color raster was not initialized")
     }
 
     pub(super) fn bounds(&mut self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        let face = self.faces[params.font_id.0].native.clone();
+        let face = self.face(params.font_id)?.native.clone();
         if params.is_emoji {
             return self.color_raster()?.bounds(&face, params);
         }
@@ -163,8 +167,18 @@ impl Fonts {
         Ok(Bounds::new(
             point(DevicePixels(rect.left), DevicePixels(rect.top)),
             size(
-                DevicePixels((rect.right - rect.left).max(0)),
-                DevicePixels((rect.bottom - rect.top).max(0)),
+                DevicePixels(
+                    rect.right
+                        .checked_sub(rect.left)
+                        .context("Glyph width overflow")?
+                        .max(0),
+                ),
+                DevicePixels(
+                    rect.bottom
+                        .checked_sub(rect.top)
+                        .context("Glyph height overflow")?
+                        .max(0),
+                ),
             ),
         ))
     }
@@ -174,7 +188,7 @@ impl Fonts {
         params: &RenderGlyphParams,
         bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
-        let face = self.faces[params.font_id.0].native.clone();
+        let face = self.face(params.font_id)?.native.clone();
         if params.is_emoji {
             let factory = self.factory.clone();
             let result = self.color_raster()?.draw(&factory, &face, params, bounds);
@@ -199,13 +213,23 @@ impl Fonts {
         let rect = RECT {
             left: bounds.origin.x.0,
             top: bounds.origin.y.0,
-            right: bounds.origin.x.0 + bounds.size.width.0,
-            bottom: bounds.origin.y.0 + bounds.size.height.0,
+            right: bounds
+                .origin
+                .x
+                .0
+                .checked_add(bounds.size.width.0)
+                .context("Glyph right edge overflow")?,
+            bottom: bounds
+                .origin
+                .y
+                .0
+                .checked_add(bounds.size.height.0)
+                .context("Glyph bottom edge overflow")?,
         };
         unsafe {
             analysis(&self.factory, &face, params)?.CreateAlphaTexture(
                 texture(params),
-                &rect,
+                &raw const rect,
                 &mut bitmap,
             )?;
         }
@@ -214,7 +238,7 @@ impl Fonts {
                 .as_chunks::<3>()
                 .0
                 .iter()
-                .flat_map(|pixel| [pixel[0], pixel[1], pixel[2], 0])
+                .flat_map(|&[red, green, blue]| [red, green, blue, 0])
                 .collect();
         }
         Ok((bounds.size, bitmap))
@@ -271,13 +295,35 @@ impl ColorRaster {
                 )?
             })
         })?;
-        let left = rect.left.floor() as i32 - 1;
-        let top = rect.top.floor() as i32 - 1;
+        let left = rect
+            .left
+            .floor()
+            .to_i32()
+            .and_then(|edge| edge.checked_sub(1))
+            .context("Glyph left edge overflow")?;
+        let top = rect
+            .top
+            .floor()
+            .to_i32()
+            .and_then(|edge| edge.checked_sub(1))
+            .context("Glyph top edge overflow")?;
+        let right = rect
+            .right
+            .ceil()
+            .to_i32()
+            .and_then(|edge| edge.checked_add(1))
+            .context("Glyph right edge overflow")?;
+        let bottom = rect
+            .bottom
+            .ceil()
+            .to_i32()
+            .and_then(|edge| edge.checked_add(1))
+            .context("Glyph bottom edge overflow")?;
         Ok(Bounds::new(
             point(DevicePixels(left), DevicePixels(top)),
             size(
-                DevicePixels(rect.right.ceil() as i32 + 1 - left),
-                DevicePixels(rect.bottom.ceil() as i32 + 1 - top),
+                DevicePixels(right.checked_sub(left).context("Glyph width overflow")?),
+                DevicePixels(bottom.checked_sub(top).context("Glyph height overflow")?),
             ),
         ))
     }
@@ -324,8 +370,18 @@ impl ColorRaster {
             self.context.SetTransform(&Matrix3x2 {
                 M11: params.scale_factor,
                 M22: params.scale_factor,
-                M31: -(bounds.origin.x.0 as f32),
-                M32: -(bounds.origin.y.0 as f32),
+                M31: -bounds
+                    .origin
+                    .x
+                    .0
+                    .to_f32()
+                    .context("Invalid glyph x coordinate")?,
+                M32: -bounds
+                    .origin
+                    .y
+                    .0
+                    .to_f32()
+                    .context("Invalid glyph y coordinate")?,
                 ..Matrix3x2::default()
             });
             self.context
@@ -345,38 +401,7 @@ impl ColorRaster {
         unsafe {
             staging.CopyFromBitmap(None, &target, None)?;
         }
-        let stride = usize::try_from(dimensions.width)?
-            .checked_mul(4)
-            .context("Glyph row overflow")?;
-        let count = stride
-            .checked_mul(usize::try_from(dimensions.height)?)
-            .context("Glyph bitmap overflow")?;
-        let mut pixels = Vec::with_capacity(count);
-        let mapped = unsafe { staging.Map(D2D1_MAP_OPTIONS_READ)? };
-        if mapped.bits.is_null() || (mapped.pitch as usize) < stride {
-            unsafe {
-                staging.Unmap()?;
-            }
-            anyhow::bail!("Direct2D returned an invalid glyph bitmap");
-        }
-        for row in 0..dimensions.height as usize {
-            // SAFETY: Direct2D owns the mapped image until Unmap. Each copy fits one row.
-            pixels.extend_from_slice(unsafe {
-                std::slice::from_raw_parts(mapped.bits.add(row * mapped.pitch as usize), stride)
-            });
-        }
-        unsafe {
-            staging.Unmap()?;
-        }
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            if pixel[3] > 0 {
-                let alpha = f32::from(pixel[3]) / 255.0;
-                for channel in &mut pixel[..3] {
-                    *channel = (f32::from(*channel) / alpha) as u8;
-                }
-            }
-        }
-        Ok(pixels)
+        bitmap_pixels(&staging, dimensions)
     }
 
     fn draw_layers(
@@ -433,59 +458,116 @@ impl ColorRaster {
         while unsafe { layers.MoveNext()?.as_bool() } {
             let layer = unsafe { layers.GetCurrentRun()?.as_ref() }
                 .context("DirectWrite returned a null color layer")?;
-            let glyphs = &layer.Base.glyphRun;
-            let origin = Vector2 {
-                X: layer.Base.baselineOriginX,
-                Y: layer.Base.baselineOriginY,
-            };
-            unsafe {
-                match layer.glyphImageFormat {
-                    DWRITE_GLYPH_IMAGE_FORMATS_SVG => self.context.DrawSvgGlyphRun(
+            self.draw_layer(layer, &default)?;
+        }
+        Ok(())
+    }
+
+    fn draw_layer(
+        &self,
+        layer: &DWRITE_COLOR_GLYPH_RUN1,
+        default: &ID2D1SolidColorBrush,
+    ) -> Result<()> {
+        let glyphs = &layer.Base.glyphRun;
+        let origin = Vector2 {
+            X: layer.Base.baselineOriginX,
+            Y: layer.Base.baselineOriginY,
+        };
+        unsafe {
+            match layer.glyphImageFormat {
+                DWRITE_GLYPH_IMAGE_FORMATS_SVG => self.context.DrawSvgGlyphRun(
+                    origin,
+                    glyphs,
+                    default,
+                    None::<&ID2D1SvgGlyphStyle>,
+                    0,
+                    layer.measuringMode,
+                ),
+                DWRITE_GLYPH_IMAGE_FORMATS_PNG
+                | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
+                | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
+                | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8 => {
+                    self.context.DrawColorBitmapGlyphRun(
+                        layer.glyphImageFormat,
                         origin,
                         glyphs,
-                        &default,
-                        None::<&ID2D1SvgGlyphStyle>,
-                        0,
                         layer.measuringMode,
-                    ),
-                    DWRITE_GLYPH_IMAGE_FORMATS_PNG
-                    | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
-                    | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
-                    | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8 => {
-                        self.context.DrawColorBitmapGlyphRun(
-                            layer.glyphImageFormat,
-                            origin,
-                            glyphs,
-                            layer.measuringMode,
-                            D2D1_COLOR_BITMAP_GLYPH_SNAP_OPTION_DEFAULT,
-                        )
-                    }
-                    _ => {
-                        let color = layer.Base.runColor;
-                        let brush = if layer.Base.paletteIndex == 0xffff {
-                            default.clone()
-                        } else {
-                            self.context.CreateSolidColorBrush(
-                                &D2D1_COLOR_F {
-                                    r: color.r,
-                                    g: color.g,
-                                    b: color.b,
-                                    a: color.a,
-                                },
-                                None,
-                            )?
-                        };
-                        self.context.DrawGlyphRun(
-                            origin,
-                            glyphs,
+                        D2D1_COLOR_BITMAP_GLYPH_SNAP_OPTION_DEFAULT,
+                    );
+                }
+                _ => {
+                    let color = layer.Base.runColor;
+                    let brush = if layer.Base.paletteIndex == 0xffff {
+                        default.clone()
+                    } else {
+                        self.context.CreateSolidColorBrush(
+                            &D2D1_COLOR_F {
+                                r: color.r,
+                                g: color.g,
+                                b: color.b,
+                                a: color.a,
+                            },
                             None,
-                            &brush,
-                            layer.measuringMode,
-                        );
-                    }
+                        )?
+                    };
+                    self.context
+                        .DrawGlyphRun(origin, glyphs, None, &brush, layer.measuringMode);
                 }
             }
         }
         Ok(())
     }
+}
+
+fn bitmap_pixels(staging: &ID2D1Bitmap1, dimensions: D2D_SIZE_U) -> Result<Vec<u8>> {
+    let height = usize::try_from(dimensions.height)?;
+    let stride = usize::try_from(dimensions.width)?
+        .checked_mul(4)
+        .context("Glyph row overflow")?;
+    let count = stride
+        .checked_mul(height)
+        .context("Glyph bitmap overflow")?;
+    let mapped = unsafe { staging.Map(D2D1_MAP_OPTIONS_READ)? };
+    let copied = (|| -> Result<Vec<u8>> {
+        let pitch = usize::try_from(mapped.pitch)?;
+        anyhow::ensure!(
+            !mapped.bits.is_null() && pitch >= stride,
+            "Direct2D returned an invalid glyph bitmap"
+        );
+        let span = height
+            .saturating_sub(1)
+            .checked_mul(pitch)
+            .and_then(|offset| offset.checked_add(stride))
+            .context("Glyph mapped span overflow")?;
+        anyhow::ensure!(
+            isize::try_from(span).is_ok(),
+            "Glyph mapped span exceeds pointer bounds"
+        );
+        let mut pixels = Vec::with_capacity(count);
+        for row in 0..height {
+            let offset = row
+                .checked_mul(pitch)
+                .context("Glyph row offset overflow")?;
+            // Direct2D owns this mapped allocation until Unmap; each copy stays in one row.
+            pixels.extend_from_slice(unsafe {
+                std::slice::from_raw_parts(mapped.bits.add(offset), stride)
+            });
+        }
+        Ok(pixels)
+    })();
+    let unmapped = unsafe { staging.Unmap() };
+    let mut pixels = copied?;
+    unmapped?;
+    for [blue, green, red, alpha] in pixels.as_chunks_mut::<4>().0 {
+        if *alpha > 0 {
+            let alpha = f32::from(*alpha) / 255.0;
+            for channel in [blue, green, red] {
+                *channel = (f32::from(*channel) / alpha)
+                    .clamp(0.0, 255.0)
+                    .to_u8()
+                    .context("Invalid unpremultiplied glyph channel")?;
+            }
+        }
+    }
+    Ok(pixels)
 }

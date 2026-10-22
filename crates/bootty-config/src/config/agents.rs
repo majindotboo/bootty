@@ -372,6 +372,8 @@ impl AgentProviderConfig {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgentProvidersConfig {
+    #[serde(rename = "auto-update")]
+    pub auto_update: bool,
     #[serde(rename = "allow-spawn")]
     pub allow_spawn: bool,
     #[serde(rename = "default-provider")]
@@ -397,6 +399,7 @@ impl Default for AgentProvidersConfig {
     fn default() -> Self {
         Self {
             allow_spawn: false,
+            auto_update: true,
             default_provider: "codex".to_owned(),
             quick_model: "gpt-6-luna".to_owned(),
             follow_up_behavior: FollowUpBehavior::default(),

@@ -1,15 +1,11 @@
-//! Bounded stdio forwarding into a private Unix endpoint.
-#[cfg(unix)]
+//! Bounded stdio forwarding into a private local endpoint.
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
 use serde_json::Value;
 use std::{
-    io::{self, BufRead, Write},
-    path::Path,
+    fs,
+    io::{self, BufRead, BufReader, Write},
+    path::{Path, PathBuf},
 };
-
-#[cfg(unix)]
-use std::{fs, io::BufReader, path::PathBuf};
 
 pub const MAX_TOOL_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Response budget includes a validated PNG up to 8 MiB.
@@ -18,20 +14,42 @@ pub const MAX_TOOL_IMAGE_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
 /// commonly time tools out after 60 seconds.
 pub const TOOL_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(55);
 
-#[cfg(unix)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Connection {
-    socket: PathBuf,
-    token: String,
+pub struct Connection {
+    pub socket: PathBuf,
+    pub token: String,
 }
 
-#[cfg(unix)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct Envelope {
-    token: String,
-    request: Value,
+pub struct Envelope {
+    pub token: String,
+    pub request: Value,
+}
+
+/// The transport for one private tool directory. Windows pipe names are local and unguessable;
+/// rmux-ipc restricts both endpoints to the same Windows account.
+/// # Errors
+/// Rejects malformed directory names on Windows.
+pub fn endpoint_path(directory: &Path) -> io::Result<PathBuf> {
+    #[cfg(windows)]
+    {
+        let nonce = directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("bt-tool-"))
+            .filter(|nonce| {
+                nonce.len() == 64
+                    && nonce
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            })
+            .ok_or_else(invalid_connection)?;
+        Ok(PathBuf::from(format!(r"\\.\pipe\bootty-tool-{nonce}")))
+    }
+    #[cfg(not(windows))]
+    Ok(directory.join("tools.sock"))
 }
 
 /// Forward MCP stdio from the hidden executable mode. The private connection contains the secret;
@@ -43,61 +61,65 @@ pub fn tool_stdio(
     input: &mut impl BufRead,
     output: &mut impl Write,
 ) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(connection)?;
+    let parent = connection.parent().ok_or_else(invalid_connection)?;
+    let directory = fs::symlink_metadata(parent)?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() > 4096
+        || !directory.is_dir()
+        || directory.file_type().is_symlink()
+    {
+        return Err(invalid_connection());
+    }
     #[cfg(unix)]
     {
-        use std::os::unix::{fs::PermissionsExt as _, net::UnixStream};
-        let metadata = fs::symlink_metadata(connection)?;
-        let parent = connection.parent().ok_or_else(invalid_connection)?;
-        let directory = fs::symlink_metadata(parent)?;
-        if !metadata.is_file()
-            || metadata.permissions().mode() & 0o077 != 0
-            || metadata.len() > 4096
-            || !directory.is_dir()
-            || directory.permissions().mode() & 0o077 != 0
+        use std::os::unix::fs::PermissionsExt as _;
+        if metadata.permissions().mode() & 0o077 != 0 || directory.permissions().mode() & 0o077 != 0
         {
             return Err(invalid_connection());
         }
-        let secret: Connection =
-            serde_json::from_slice(&fs::read(connection)?).map_err(|_| invalid_connection())?;
-        if secret.socket != parent.join("tools.sock") || secret.token.len() != 64 {
-            return Err(invalid_connection());
-        }
-        while let Some(bytes) = read_message(input, MAX_TOOL_MESSAGE_BYTES)? {
-            let request: Value =
-                serde_json::from_slice(&bytes).map_err(|_| invalid_connection())?;
-            let mut stream = UnixStream::connect(&secret.socket)?;
-            // The host answers within its own call deadline; the margin lets that answer, not
-            // this read timeout, end a slow call.
-            stream.set_read_timeout(Some(
-                TOOL_CALL_TIMEOUT.saturating_add(std::time::Duration::from_secs(5)),
-            ))?;
-            stream.set_write_timeout(Some(std::time::Duration::from_secs(6)))?;
-            serde_json::to_writer(
-                &mut stream,
-                &Envelope {
-                    token: secret.token.clone(),
-                    request,
-                },
-            )
-            .map_err(io::Error::other)?;
-            stream.write_all(b"\n")?;
-            if let Some(response) =
-                read_message(&mut BufReader::new(stream), MAX_TOOL_IMAGE_RESPONSE_BYTES)?
-            {
-                output.write_all(&response)?;
-                output.flush()?;
-            }
-        }
-        Ok(())
     }
-    #[cfg(not(unix))]
+    let secret: Connection =
+        serde_json::from_slice(&fs::read(connection)?).map_err(|_| invalid_connection())?;
+    if secret.socket != endpoint_path(parent)?
+        || secret.token.len() != 64
+        || !secret
+            .token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        let _ = (connection, input, output);
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "Agent tools require a private Unix transport",
-        ))
+        return Err(invalid_connection());
     }
+    while let Some(bytes) = read_message(input, MAX_TOOL_MESSAGE_BYTES)? {
+        let request: Value = serde_json::from_slice(&bytes).map_err(|_| invalid_connection())?;
+        let mut stream = rmux_ipc::connect_blocking(
+            &rmux_ipc::LocalEndpoint::from_path(secret.socket.clone()),
+            std::time::Duration::from_secs(5),
+        )?;
+        // The host answers within its own call deadline; the margin lets that answer, not
+        // this read timeout, end a slow call.
+        stream.set_read_timeout(Some(
+            TOOL_CALL_TIMEOUT.saturating_add(std::time::Duration::from_secs(5)),
+        ))?;
+        stream.set_write_timeout(Some(std::time::Duration::from_secs(6)))?;
+        serde_json::to_writer(
+            &mut stream,
+            &Envelope {
+                token: secret.token.clone(),
+                request,
+            },
+        )
+        .map_err(io::Error::other)?;
+        stream.write_all(b"\n")?;
+        if let Some(response) =
+            read_message(&mut BufReader::new(stream), MAX_TOOL_IMAGE_RESPONSE_BYTES)?
+        {
+            output.write_all(&response)?;
+            output.flush()?;
+        }
+    }
+    Ok(())
 }
 
 /// Read one bounded newline-terminated message.

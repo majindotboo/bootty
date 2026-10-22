@@ -460,7 +460,12 @@ fn terminal_engine_ports_kitty_image_png_file_and_media_limits() {
     let (mut shared_memory, shared_memory_output) =
         captured_pty_engine().expect("test operation succeeds");
     shared_memory.write_vt(b"\x1b_Ga=t,f=24,t=s,i=71,s=1,v=1;c2htLW5hbWU=\x1b\\");
-    assert_kitty_response(&shared_memory_output, 71, "EINVAL: invalid data");
+    let shared_memory_error = if cfg!(windows) {
+        "EINVAL: unsupported medium"
+    } else {
+        "EINVAL: invalid data"
+    };
+    assert_kitty_response(&shared_memory_output, 71, shared_memory_error);
 }
 
 #[test]
@@ -594,6 +599,10 @@ fn terminal_engine_ports_kitty_storage_delete_by_cursor_column_and_row() {
         engine.write_vt(format!("\x1b[1;{}H", column + 1).as_bytes());
         engine.write_vt(format!("\x1b_Ga=p,i=1,p={},q=1\x1b\\", column + 1).as_bytes());
     }
+    assert_eq!(
+        image_placement_ids(engine.extract_frame().expect("test operation succeeds")),
+        [(1, 1), (1, 2), (1, 3)]
+    );
     engine.write_vt(b"\x1b_Ga=d,d=x,x=2\x1b\\");
     assert_eq!(
         image_placement_ids(engine.extract_frame().expect("test operation succeeds")),
@@ -612,6 +621,10 @@ fn terminal_engine_ports_kitty_storage_delete_by_cursor_column_and_row() {
         engine.write_vt(format!("\x1b[{};1H", row + 1).as_bytes());
         engine.write_vt(format!("\x1b_Ga=p,i=1,p={},q=1\x1b\\", row + 1).as_bytes());
     }
+    assert_eq!(
+        image_placement_ids(engine.extract_frame().expect("test operation succeeds")),
+        [(1, 1), (1, 2), (1, 3)]
+    );
     engine.write_vt(b"\x1b_Ga=d,d=y,y=2\x1b\\");
     assert_eq!(
         image_placement_ids(engine.extract_frame().expect("test operation succeeds")),

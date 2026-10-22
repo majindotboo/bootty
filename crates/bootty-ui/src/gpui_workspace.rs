@@ -1569,7 +1569,7 @@ impl GpuiWorkspace {
         let prior_providers = self.state.config().agents.clone();
         let provider_terminal = match &intent {
             SettingsIntent::Invoke(id) => bootty_agents::AgentKind::ALL.iter().any(|provider| {
-                ["account.login", "tab", "history.open", "provider.update"]
+                ["account.login", "tab", "history.open"]
                     .iter()
                     .any(|operation| id == &format!("agents.{provider}.{operation}"))
             }),
@@ -1589,7 +1589,18 @@ impl GpuiWorkspace {
             if provider_terminal || id.ends_with(".provider.status") {
                 let mut invocation =
                     CommandInvocation::new(id, Vec::new(), bootty_control::Caller::Internal);
-                if provider_terminal {
+                if let Some(provider) = bootty_agents::AgentKind::ALL
+                    .into_iter()
+                    .find(|provider| id == &format!("agents.{provider}.provider.update"))
+                {
+                    let mut invocation = bootty_control::CommandInvocation::from_action(
+                        "agents.providers.update",
+                        bootty_control::Caller::Internal,
+                    );
+                    invocation.arguments = vec![provider.to_string()];
+                    self.state.commands.queue(invocation);
+                    (self.repaint)();
+                } else if provider_terminal {
                     invocation.target = self
                         .state
                         .current_command_target_for(id, bootty_control::ResourceKind::Session);

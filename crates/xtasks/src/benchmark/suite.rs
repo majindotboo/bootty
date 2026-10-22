@@ -88,6 +88,18 @@ impl PlannedCommand {
     }
 
     fn command(&self) -> Command {
+        #[cfg(windows)]
+        let mut command = if Path::new(self.program)
+            .extension()
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("py"))
+        {
+            let mut command = Command::new("python");
+            command.arg(self.program);
+            command
+        } else {
+            Command::new(self.program)
+        };
+        #[cfg(not(windows))]
         let mut command = Command::new(self.program);
         command.args(&self.args);
         command

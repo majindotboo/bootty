@@ -360,7 +360,7 @@ fn attached_runtime_options_precede_prompt_and_never_enter_retained_configuratio
         )
         .unwrap_or_else(|error| panic!("{error}"));
     assert_eq!(prepared.launch, launch);
-    let argv = prepared.argv();
+    let argv = prepared.argv().unwrap();
     let expected = std::iter::once(launch.program)
         .chain(injected)
         .chain(launch.arguments)

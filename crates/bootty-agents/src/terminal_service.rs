@@ -134,6 +134,8 @@ pub struct PreparedTerminalAgent {
     lease: Arc<Mutex<ObservationLease>>,
     observer: TerminalObserver,
     tools: Option<Arc<crate::ToolBridge>>,
+    // Release installation use only after observer processes and tool attachments.
+    provider_use: Option<crate::ProviderUse>,
 }
 
 impl PreparedTerminalAgent {
@@ -145,8 +147,42 @@ impl PreparedTerminalAgent {
             .is_none_or(|tools| tools.lease().enabled(None))
     }
 
-    #[must_use]
-    pub fn argv(&self) -> Vec<String> {
+    /// # Errors
+    /// Returns a missing owner executable or invalid terminal relay payload.
+    pub fn argv(&self) -> Result<Vec<String>, String> {
+        self.argv_for_shell(crate::LaunchShell::local())
+    }
+
+    /// # Errors
+    /// Returns a missing owner executable or invalid terminal relay payload.
+    pub fn argv_for_shell(&self, shell: crate::LaunchShell) -> Result<Vec<String>, String> {
+        if shell == crate::LaunchShell::Windows {
+            let owner = std::env::current_exe().map_err(|error| error.to_string())?;
+            return self.argv_for_host(shell, &owner);
+        }
+        Ok(self.posix_argv())
+    }
+
+    /// Build terminal argv for the executable that owns the receiving command plane.
+    /// # Errors
+    /// Returns an invalid Windows relay payload.
+    pub fn argv_for_host(
+        &self,
+        shell: crate::LaunchShell,
+        owner: &std::path::Path,
+    ) -> Result<Vec<String>, String> {
+        if shell == crate::LaunchShell::Windows {
+            return self.launch.windows_argv(
+                owner,
+                self.provider,
+                &self.observer.arguments(),
+                None,
+            );
+        }
+        Ok(self.posix_argv())
+    }
+
+    fn posix_argv(&self) -> Vec<String> {
         let mut argv = Vec::new();
         if let Some(directory) = &self.launch.account_directory {
             argv.extend([
@@ -172,6 +208,7 @@ struct LiveObservation {
     lease: Arc<Mutex<ObservationLease>>,
     observer: TerminalObserver,
     tools: Option<Arc<crate::ToolBridge>>,
+    _provider_use: Option<crate::ProviderUse>,
 }
 
 impl LiveObservation {
@@ -726,6 +763,7 @@ impl TerminalAgentService {
         launch: AgentLaunch,
     ) -> Result<PreparedTerminalAgent, String> {
         launch.validate()?;
+        let provider_use = crate::ProviderUse::acquire(&launch.program)?;
         let lease = Arc::new(Mutex::new(ObservationLease {
             target: None,
             latest: AgentObservation::default(),
@@ -757,6 +795,7 @@ impl TerminalAgentService {
             ),
         };
         Ok(PreparedTerminalAgent {
+            provider_use,
             launch,
             provider,
             lease,
@@ -928,6 +967,31 @@ impl TerminalAgentService {
         launch: AgentLaunch,
         detail: String,
     ) -> Result<PreparedTerminalAgent, String> {
+        let provider_use = crate::ProviderUse::acquire(&launch.program)?;
+        Self::prepare_unobserved_with_use(provider, launch, detail, provider_use)
+    }
+
+    /// Remote provider executables are owned by their host, not the local installer.
+    /// # Errors
+    /// Returns an invalid provider launch.
+    pub fn prepare_remote(
+        provider: AgentKind,
+        launch: AgentLaunch,
+    ) -> Result<PreparedTerminalAgent, String> {
+        Self::prepare_unobserved_with_use(
+            provider,
+            launch,
+            "Native activity observation needs a supported remote host bridge".into(),
+            None,
+        )
+    }
+
+    fn prepare_unobserved_with_use(
+        provider: AgentKind,
+        launch: AgentLaunch,
+        detail: String,
+        provider_use: Option<crate::ProviderUse>,
+    ) -> Result<PreparedTerminalAgent, String> {
         launch.validate()?;
         let observer = TerminalObserver::Unobserved(launch.arguments.clone());
         let lease = Arc::new(Mutex::new(ObservationLease {
@@ -941,6 +1005,7 @@ impl TerminalAgentService {
             .bounded(),
         }));
         Ok(PreparedTerminalAgent {
+            provider_use,
             launch,
             provider,
             lease,
@@ -1047,6 +1112,7 @@ impl TerminalAgentService {
                 }
             }
             live.push(LiveObservation {
+                _provider_use: prepared.provider_use,
                 target,
                 lease: prepared.lease,
                 observer: prepared.observer,

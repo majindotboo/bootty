@@ -37,7 +37,7 @@ pub fn pointing<T, E>(
         ComputerAction::Click { x, y, .. }
         | ComputerAction::Move { x, y }
         | ComputerAction::Scroll { x, y, .. } => (*x, *y),
-        ComputerAction::Press { element } => element.center(),
+        ComputerAction::Press { element, .. } => element.center(),
         _ => return act(),
     };
     if !cfg!(target_os = "macos") {

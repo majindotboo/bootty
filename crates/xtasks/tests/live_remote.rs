@@ -16,6 +16,9 @@ fn live_remote_records_unavailable_probes_as_skipped() {
         .arg(output.path())
         .env_clear()
         .env("PATH", temp.path())
+        .env("TMP", temp.path())
+        .env("TEMP", temp.path())
+        .env("TMPDIR", temp.path())
         .status()
         .unwrap();
 

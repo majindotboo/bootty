@@ -6,6 +6,14 @@ use bootty_mux::repository::SpaceMuxOverride;
 
 use super::dialog_runtime::ModalDialog;
 use super::{AppEffect, AppState};
+
+impl AppState {
+    pub(crate) fn refresh_updated_provider_catalogs(&mut self) {
+        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
+            dialog.refresh_provider_catalogs();
+        }
+    }
+}
 use crate::commands::command_invocation_from_catalog;
 use crate::input::focus::InputFocus;
 use crate::presentation::dialogs::{
@@ -689,6 +697,11 @@ impl AppState {
             }
             NewSessionPickerEvent::Catalog(invocation) => {
                 self.request_new_session_catalog(invocation);
+            }
+            NewSessionPickerEvent::Authenticate(invocation) => {
+                self.dismiss_modal_dialog();
+                self.commands.queue(invocation);
+                (self.repaint)();
             }
             NewSessionPickerEvent::Submit(invocation) => {
                 let existing_native_ids = self.native_creation_baseline();

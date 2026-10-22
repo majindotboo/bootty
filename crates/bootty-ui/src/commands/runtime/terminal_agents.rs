@@ -32,7 +32,7 @@ pub(super) struct LaunchContext {
     pub(super) cwd: Option<String>,
     pub(super) preferences: bootty_config::config::AgentProviderConfig,
     pub(super) providers: Vec<(AgentKind, bootty_config::config::AgentProviderConfig)>,
-    remote: bool,
+    pub(super) remote: bool,
     process_local: bool,
     pub(super) allow_spawn: bool,
     pub(super) computer_capture: Option<bootty_agents::ToolCapturedCommand>,
@@ -99,6 +99,16 @@ impl AppState {
                 message: "Terminal agent owner is not composed".to_owned(),
             });
         };
+        if invocation.command == "agents.providers.update"
+            && let Some(provider) = AgentKind::ALL
+                .into_iter()
+                .find(|provider| invocation.arguments.first() == Some(&provider.to_string()))
+        {
+            return self.dispatch_provider_update(provider, &invocation, exact, execution);
+        }
+        if let Some((provider, "provider.update")) = parse_command(&invocation.command) {
+            return self.dispatch_provider_update(provider, &invocation, exact, execution);
+        }
         if let Some((provider, "associate")) = parse_command(&invocation.command) {
             return self
                 .dispatch_terminal_agent_association(invocation, exact, execution, provider);
@@ -332,7 +342,7 @@ fn execute(
         }
         "connectors" => list_connectors(service, provider, &context),
         "start" | "tab" | "pane" | "resume" | "fork" | "account.login" | "account.logout"
-        | "provider.update" | "connector.add" | "connector.login" => {
+        | "connector.add" | "connector.login" => {
             if !context.preferences.enabled
                 && matches!(operation, "start" | "tab" | "pane" | "resume" | "fork")
             {
@@ -752,17 +762,14 @@ pub(super) fn prepare_launch(
             .ok()
             .map(|path| path.to_string_lossy().into_owned())
     });
-    if operation == "provider.update" {
-        let mut launch = bootty_agents::terminal_provider_update(provider, &program)?;
-        launch.cwd = cwd;
-        return Ok(launch);
-    }
     let profile = selected_profile(
         preferences,
         if matches!(operation, "start" | "pane" | "resume" | "fork") {
             invocation.arguments.get(4).map(String::as_str)
         } else if operation == "tab" {
             invocation.arguments.get(3).map(String::as_str)
+        } else if operation == "account.login" {
+            invocation.arguments.get(2).map(String::as_str)
         } else {
             None
         },
@@ -964,21 +971,9 @@ fn start_terminal(
     {
         return failure("Named agent creation requires an explicit host destination");
     }
-    let account = operation.starts_with("account.")
-        || operation.starts_with("connector.")
-        || operation == "provider.update";
-    if (context.remote || cfg!(windows)) && launch.account_directory.is_some() {
-        return CommandOutcome::Unsupported { message: "Account directory selection requires a local POSIX terminal; remote accounts remain owned by their host".to_owned() };
-    }
-    if operation == "provider.update" && context.remote {
-        return CommandOutcome::Unsupported {
-            message: "Update providers on their owning host".to_owned(),
-        };
-    }
-    if operation == "provider.update" && service.has_live_provider(provider) {
-        return failure(
-            "Close this provider's active terminal tabs before updating its executable",
-        );
+    let account = operation.starts_with("account.") || operation.starts_with("connector.");
+    if context.remote && launch.account_directory.is_some() {
+        return CommandOutcome::Unsupported { message: "Account directory selection requires a local terminal; remote accounts remain owned by their host".to_owned() };
     }
     if operation == "resume"
         && let Some(session) = invocation.arguments.first()
@@ -1019,7 +1014,9 @@ fn start_terminal(
         }
         .to_owned()
     });
-    let prepared = if let Some(tools) = tools {
+    let prepared = if context.remote {
+        TerminalAgentService::prepare_remote(provider, launch)
+    } else if let Some(tools) = tools {
         service.prepare_with_tools(provider, launch, tools, unobserved)
     } else if let Some(detail) = unobserved {
         TerminalAgentService::prepare_unobserved(provider, launch, detail)
@@ -1030,11 +1027,32 @@ fn start_terminal(
         Ok(prepared) => prepared,
         Err(error) => return failure(&error),
     };
-    let argv = match serde_json::to_string(&prepared.argv()) {
-        Ok(argv) => argv,
-        Err(error) => return failure(&error.to_string()),
+    let prepared_argv = if context.remote {
+        prepared.argv_for_shell(bootty_agents::LaunchShell::Posix)
+    } else {
+        prepared.argv()
     };
-    let mut create = if operation == "pane" {
+    let argv = match prepared_argv
+        .and_then(|argv| serde_json::to_string(&argv).map_err(|error| error.to_string()))
+    {
+        Ok(argv) => argv,
+        Err(error) => return failure(&error),
+    };
+    let login_session = operation == "account.login" && context.session.is_none();
+    let mut create = if login_session {
+        let identity = bootty_mux::snapshot::new_session_identity();
+        CommandInvocation::new(
+            "session.create",
+            vec![
+                format!("sign-in-{identity}"),
+                prepared.launch.cwd.clone().unwrap_or_default(),
+                argv,
+                identity,
+                format!("Sign in to {}", provider.display_name()),
+            ],
+            invocation.caller,
+        )
+    } else if operation == "pane" {
         pane::create_invocation(invocation, &context, argv, prepared.launch.cwd.clone())
     } else if let Some(name) = name {
         let mut arguments = vec![
@@ -1053,7 +1071,9 @@ fn start_terminal(
     };
     // A named request keeps the caller's captured host through preparation and backend creation.
     if operation != "pane" {
-        create.target = if name.is_some() {
+        create.target = if login_session {
+            context.binding.clone()
+        } else if name.is_some() {
             invocation.target.clone()
         } else {
             context.session

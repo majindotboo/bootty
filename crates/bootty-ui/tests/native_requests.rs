@@ -726,6 +726,9 @@ fn claude_plans_can_go_to_a_new_conversation(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn dropped_files_go_with_a_questions_answer(cx: &mut TestAppContext) {
     let (visual, commands) = open(codex_questions(), cx);
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().join("shot.png");
+    let answer = format!("Blue\nAttached file \"shot.png\": {path:?}");
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let files = visual.debug_bounds("question-files:ask:color").unwrap();
     let position = files.center();
@@ -733,7 +736,7 @@ fn dropped_files_go_with_a_questions_answer(cx: &mut TestAppContext) {
         for event in [
             gpui_kit::FileDropEvent::Entered {
                 position,
-                paths: gpui_kit::ExternalPaths(vec!["/tmp/shot.png".into()].into()),
+                paths: gpui_kit::ExternalPaths(vec![path.clone()].into()),
             },
             gpui_kit::FileDropEvent::Submit { position },
             gpui_kit::FileDropEvent::Ended,
@@ -747,7 +750,7 @@ fn dropped_files_go_with_a_questions_answer(cx: &mut TestAppContext) {
     assert_eq!(
         responses(&commands),
         [serde_json::json!({"answers": {
-            "color": {"answers": ["Blue\nAttached file \"shot.png\": \"/tmp/shot.png\""]},
+            "color": {"answers": [answer]},
             "size": {"answers": ["Small"]}
         }})]
     );

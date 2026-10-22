@@ -130,7 +130,13 @@ fn remote_reader_is_authoritative_even_when_a_local_path_has_the_same_name() -> 
     let cwd = directory.path().to_str().context("UTF-8 fixture")?;
     let absent_on_remote = discover_project_artwork(cwd, |_| None);
     assert_eq!(absent_on_remote, None);
-    let remote = HashMap::from([(format!("{cwd}/public/favicon.png"), png(8, 8)?)]);
+    let remote_path = directory
+        .path()
+        .join("public")
+        .join("favicon.png")
+        .to_string_lossy()
+        .into_owned();
+    let remote = HashMap::from([(remote_path, png(8, 8)?)]);
     let observed_on_remote = discover_project_artwork(cwd, |path| remote.get(path).cloned());
     observed_on_remote.context("artwork supplied by the captured remote reader")?;
     Ok(())

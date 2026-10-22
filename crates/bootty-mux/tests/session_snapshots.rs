@@ -125,6 +125,8 @@ fn tmux_reopen_retains_history_for_the_backend_owner(
         ..BoottyConfig::default()
     };
     config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
+    config.multiplexer.remote =
+        Some(bootty_config::config::SshRemoteConfig::for_host("fixture").into());
     let (mut repository, saved) = WorkspaceRepository::open(&config.config_path)?;
     let scope = saved.spaces().first().unwrap().id();
     repository.commit_binding_state(
@@ -170,6 +172,8 @@ fn tmux_restore_leaves_the_tab_to_the_attached_client(
         ..BoottyConfig::default()
     };
     config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
+    config.multiplexer.remote =
+        Some(bootty_config::config::SshRemoteConfig::for_host("fixture").into());
     let (mut repository, saved) = WorkspaceRepository::open(&config.config_path)?;
     let scope = saved.spaces().first().unwrap().id();
     repository.commit_binding_state(
