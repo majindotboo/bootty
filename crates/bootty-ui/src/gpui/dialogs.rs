@@ -1649,7 +1649,10 @@ impl DialogView {
         let details = spec
             .fields
             .iter()
-            .filter(|field| matches!(field.kind, DialogFieldKind::Text) || field.id == "start-ref")
+            .filter(|field| {
+                matches!(field.kind, DialogFieldKind::Text)
+                    || matches!(field.id.as_str(), "start-ref" | "checkout-branch")
+            })
             .filter_map(|field| self.prompt_field(spec, field, window, cx))
             .map(|control| div().flex_1().min_w(rems(8.0)).child(control))
             .collect::<Vec<_>>();
@@ -2047,6 +2050,9 @@ impl DialogView {
             .when_some(spec.hint.clone().filter(|_| !creating), |view, hint| {
                 view.child(
                     div()
+                        .id("dialog-prompt-hint")
+                        .role(gpui_kit::Role::Status)
+                        .aria_label(hint.clone())
                         .text_xs()
                         .text_color(cx.theme().muted_foreground)
                         .child(hint),
@@ -2113,7 +2119,14 @@ impl DialogView {
                                 .text_color(cx.theme().muted_foreground)
                                 .child("Current checkout"),
                         )
-                    }),
+                    })
+                    .when_some(
+                        spec.fields
+                            .iter()
+                            .find(|field| field.id == "checkout-branch")
+                            .and_then(|field| self.render_worktree_ref_picker(spec, field, cx)),
+                        |row, picker| row.child(div().min_w_0().max_w(rems(24.)).child(picker)),
+                    ),
             )
             .when_some(
                 self.new_session_worktree_options(spec, window, cx),
@@ -2232,8 +2245,10 @@ impl DialogView {
         let DialogFieldKind::Choice(options) = &field.kind else {
             return None;
         };
-        if matches!(field.id.as_str(), "mode" | "plan-mode" | "start-ref")
-            || (field.id == "profile" && options.len() < 2)
+        if matches!(
+            field.id.as_str(),
+            "mode" | "plan-mode" | "start-ref" | "checkout-branch"
+        ) || (field.id == "profile" && options.len() < 2)
         {
             return None;
         }
@@ -2437,7 +2452,7 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        if field.id == "start-ref" {
+        if matches!(field.id.as_str(), "start-ref" | "checkout-branch") {
             return self.render_worktree_ref_picker(spec, field, cx);
         }
         let control = match &field.kind {

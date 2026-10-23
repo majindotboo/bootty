@@ -129,8 +129,8 @@ pub struct NewSessionForm {
     pub worktree_available: bool,
     worktree_repository: Option<String>,
     worktree_directory: Option<String>,
-    base_branches: Vec<String>,
-    base_branch_error: Option<String>,
+    branches: Vec<bootty_git::changes::GitBranch>,
+    branch_error: Option<String>,
     /// The configured `session.branch-prefix`, for projects without their own.
     branch_prefix: String,
     pub error: Option<String>,
@@ -158,8 +158,8 @@ impl NewSessionForm {
             worktree_available: false,
             worktree_repository: None,
             worktree_directory: None,
-            base_branches: Vec::new(),
-            base_branch_error: None,
+            branches: Vec::new(),
+            branch_error: None,
             branch_prefix: bootty_config::config::DEFAULT_BRANCH_PREFIX.to_owned(),
             error: None,
             model_options: Vec::new(),
@@ -227,8 +227,8 @@ impl NewSessionForm {
     }
 
     #[must_use]
-    pub fn base_branch_invocation(&self) -> Option<CommandInvocation> {
-        if !self.worktree_available || !self.draft.isolated {
+    pub fn branch_catalog_invocation(&self) -> Option<CommandInvocation> {
+        if !self.worktree_available {
             return None;
         }
         let mut invocation = CommandInvocation::new(
@@ -240,7 +240,7 @@ impl NewSessionForm {
         Some(invocation)
     }
 
-    pub fn set_base_branches_for(
+    pub fn set_branches_for(
         &mut self,
         invocation: &CommandInvocation,
         result: Result<bootty_git::changes::RepositoryOverview, String>,
@@ -258,15 +258,61 @@ impl NewSessionForm {
                 {
                     self.draft.start_ref.clone_from(&current.name);
                 }
-                self.base_branches = overview
-                    .branches
-                    .into_iter()
-                    .map(|branch| branch.name)
-                    .collect();
-                self.base_branch_error = None;
+                self.branches = overview.branches;
+                self.branch_error = None;
             }
-            Err(error) => self.base_branch_error = Some(error),
+            Err(error) => self.branch_error = Some(format!("Could not load branches: {error}")),
         }
+    }
+
+    /// Reuse a branch's checkout, or request a switch through the binding's Git owner.
+    /// # Errors
+    /// Rejects choices outside the loaded local branch catalog.
+    pub fn select_checkout_branch(
+        &mut self,
+        name: &str,
+    ) -> Result<Option<CommandInvocation>, String> {
+        let branch = self
+            .branches
+            .iter()
+            .find(|branch| branch.name == name)
+            .ok_or("Select an existing branch")?;
+        self.branch_error = None;
+        if branch.current {
+            return Ok(None);
+        }
+        if let Some(cwd) = branch.worktree_path.clone() {
+            let project = self.project_path().to_owned();
+            self.set_directory(cwd);
+            self.worktree_repository = Some(project);
+            self.set_worktree_available(true);
+            return Ok(None);
+        }
+        let mut invocation = CommandInvocation::new(
+            "git.branch-checkout",
+            vec![self.draft.cwd.clone(), name.to_owned()],
+            Caller::Internal,
+        );
+        invocation.target = Some(self.destination().ok_or("Select a host")?.target.clone());
+        Ok(Some(invocation))
+    }
+
+    pub fn branch_checked_out(&mut self, name: &str) {
+        for branch in &mut self.branches {
+            if branch.current {
+                branch.worktree_path = None;
+            }
+            branch.current = branch.name == name;
+            if branch.current {
+                branch.worktree_path = Some(self.draft.cwd.clone());
+            }
+        }
+        self.branch_error = None;
+        self.error = None;
+    }
+
+    pub fn branch_checkout_failed(&mut self, name: &str, error: &str) {
+        self.branch_error = Some(format!("Could not switch to “{name}”: {error}"));
     }
 
     pub fn set_directory(&mut self, cwd: String) {
@@ -297,8 +343,8 @@ impl NewSessionForm {
 
     fn update_directory(&mut self, cwd: String) {
         self.draft.cwd = cwd;
-        self.base_branches.clear();
-        self.base_branch_error = None;
+        self.branches.clear();
+        self.branch_error = None;
         self.worktree_available = false;
         self.worktree_repository = None;
         self.error = None;
@@ -390,8 +436,8 @@ impl NewSessionForm {
                     .unwrap_or_else(|| destination.cwd.clone());
                 self.worktree_available = false;
                 self.worktree_repository = None;
-                self.base_branches.clear();
-                self.base_branch_error = None;
+                self.branches.clear();
+                self.branch_error = None;
                 if !destination.worktrees {
                     self.draft.isolated = false;
                 }
@@ -1465,15 +1511,11 @@ impl NewSessionForm {
 
     fn worktree_hint(&self) -> Option<String> {
         if !self.draft.isolated {
-            return None;
+            return self.branch_error.clone();
         }
-        Some(self.base_branch_error.as_ref().map_or_else(
+        Some(self.branch_error.as_ref().map_or_else(
             || format!("Source checkout: {}", self.draft.cwd),
-            |error| {
-                format!(
-                    "Could not load base branches: {error}. Search for a ref to use it directly."
-                )
-            },
+            |error| format!("{error}. Search for a ref to use it directly."),
         ))
     }
 
@@ -1709,7 +1751,11 @@ impl NewSessionForm {
                 vec!["Current checkout".to_owned(), "New worktree".to_owned()],
             ));
             if self.draft.isolated {
-                let mut branches = self.base_branches.clone();
+                let mut branches = self
+                    .branches
+                    .iter()
+                    .map(|branch| branch.name.clone())
+                    .collect::<Vec<_>>();
                 if !self.draft.start_ref.is_empty()
                     && self.draft.start_ref != "HEAD"
                     && !branches.contains(&self.draft.start_ref)
@@ -1745,6 +1791,23 @@ impl NewSessionForm {
                         kind: DialogFieldKind::Text,
                     });
                 }
+            } else {
+                fields.push(DialogField {
+                    id: "checkout-branch".into(),
+                    label: "Branch".into(),
+                    value: self
+                        .branches
+                        .iter()
+                        .find(|branch| branch.current)
+                        .map_or_else(String::new, |branch| branch.name.clone()),
+                    placeholder: "Select branch…".into(),
+                    kind: DialogFieldKind::Choice(
+                        self.branches
+                            .iter()
+                            .map(|branch| branch.name.clone())
+                            .collect(),
+                    ),
+                });
             }
         }
         fields

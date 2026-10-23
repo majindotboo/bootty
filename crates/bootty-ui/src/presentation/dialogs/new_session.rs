@@ -29,6 +29,7 @@ pub struct NewSessionDialog {
     catalog_requested: HashSet<String>,
     catalog_refresh_after: HashSet<String>,
     catalog_pending: HashMap<String, PendingCatalog>,
+    checkout: Option<PendingCatalog>,
     naming: Option<PendingNames>,
     starting: bool,
     progress: Vec<DialogProgressStep>,
@@ -189,6 +190,7 @@ impl NewSessionDialog {
             catalog_requested: HashSet::new(),
             catalog_refresh_after: HashSet::new(),
             catalog_pending: HashMap::new(),
+            checkout: None,
             naming: None,
             starting: false,
             progress: Vec::new(),
@@ -246,6 +248,7 @@ impl NewSessionDialog {
             catalog_requested: HashSet::new(),
             catalog_refresh_after: HashSet::new(),
             catalog_pending: HashMap::new(),
+            checkout: None,
             naming: None,
             starting: false,
             progress: Vec::new(),
@@ -301,7 +304,71 @@ impl NewSessionDialog {
     }
 
     pub(crate) const fn is_in_flight(&self) -> bool {
-        self.starting || self.launch.is_some()
+        self.starting || self.launch.is_some() || self.checkout.is_some()
+    }
+
+    pub fn checkout_started(
+        &mut self,
+        invocation: bootty_control::CommandInvocation,
+        reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
+    ) {
+        self.checkout = Some(PendingCatalog { invocation, reply });
+    }
+
+    pub fn checkout_failed(&mut self, invocation: &bootty_control::CommandInvocation, error: &str) {
+        if let Some(form) = &mut self.form {
+            form.branch_checkout_failed(
+                invocation
+                    .arguments
+                    .get(1)
+                    .map_or("selected branch", String::as_str),
+                error,
+            );
+        }
+    }
+
+    fn poll_checkout(&mut self) {
+        let Some(pending) = &self.checkout else {
+            return;
+        };
+        let outcome = match pending.reply.try_recv() {
+            Ok(outcome) => outcome,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                bootty_control::CommandOutcome::Failed {
+                    code: "shutdown".into(),
+                    message: "The Git command host stopped".into(),
+                }
+            }
+        };
+        let Some(pending) = self.checkout.take() else {
+            return;
+        };
+        if matches!(outcome, bootty_control::CommandOutcome::Success { .. }) {
+            if let Some(form) = &mut self.form
+                && let Some(branch) = pending.invocation.arguments.get(1)
+            {
+                form.branch_checked_out(branch);
+            }
+            self.invalidate_branch_catalog();
+        } else {
+            self.checkout_failed(
+                &pending.invocation,
+                &crate::commands::command_outcome_message(&outcome)
+                    .unwrap_or_else(|| "The branch command stopped without a result".into()),
+            );
+        }
+    }
+
+    fn invalidate_branch_catalog(&mut self) {
+        if let Some(form) = &self.form
+            && let Some(invocation) = form.branch_catalog_invocation()
+            && let Some(key) = catalog_identity_key(&invocation)
+        {
+            self.catalog_requested.remove(&key);
+            self.catalog_pending.remove(&key);
+            self.catalog_queue.retain(|queued| queued != &invocation);
+        }
     }
 
     #[must_use]
@@ -437,7 +504,7 @@ impl NewSessionDialog {
     ) {
         if invocation.command == "git.overview" {
             if let Some(form) = &mut self.form {
-                form.set_base_branches_for(invocation, Err(error));
+                form.set_branches_for(invocation, Err(error));
             }
         } else if invocation.command == "agents.native.catalog-info" {
             if let Some(key) = catalog_identity_key(invocation) {
@@ -528,7 +595,8 @@ impl NewSessionDialog {
         }
 
         let form = self.form.as_mut()?;
-        if let Some(invocation) = form.base_branch_invocation()
+        if self.purpose == NewSessionPurpose::CreateSession
+            && let Some(invocation) = form.branch_catalog_invocation()
             && let Some(key) = catalog_identity_key(&invocation)
             && self.catalog_requested.insert(key)
         {
@@ -577,7 +645,7 @@ impl NewSessionDialog {
             return;
         };
         if invocation.command == "git.overview" {
-            form.set_base_branches_for(
+            form.set_branches_for(
                 invocation,
                 result.and_then(|value| {
                     serde_json::from_value(value).map_err(|error| error.to_string())
@@ -819,6 +887,10 @@ impl NewSessionDialog {
     }
 
     pub fn poll(&mut self) -> Option<NewSessionPickerEvent> {
+        if self.checkout.is_some() {
+            self.poll_checkout();
+            return None;
+        }
         if self.naming.is_some() {
             return self.poll_names();
         }
@@ -1055,6 +1127,16 @@ impl NewSessionDialog {
             return DialogSpec::searchable(NEW_SESSION_ID, "Session unavailable", "", Vec::new());
         };
         let mut spec = form.spec(self.is_in_flight());
+        if let Some(pending) = &self.checkout {
+            spec.hint = Some(format!(
+                "Switching to “{}”…",
+                pending
+                    .invocation
+                    .arguments
+                    .get(1)
+                    .map_or("selected branch", String::as_str),
+            ));
+        }
         spec.progress.clone_from(&self.progress);
         spec.projects.clone_from(&self.projects);
         if let Some(error) = &self.failure {
@@ -1109,7 +1191,7 @@ impl NewSessionDialog {
             return None;
         }
         // Accepted Start owns its destination until the observed result. Keep the form open.
-        if self.launch.is_some() || self.starting {
+        if self.is_in_flight() {
             return None;
         }
         if matches!(self.step, NewSessionStep::Form) {
@@ -1231,6 +1313,60 @@ impl NewSessionDialog {
         }
     }
 
+    fn change_form_field(&mut self, field: &str, value: &str) -> Option<NewSessionPickerEvent> {
+        if field == "project" {
+            return self.change_project(value);
+        }
+        if field == "checkout-branch" && self.purpose == NewSessionPurpose::CreateSession {
+            let previous = self.form.as_ref()?.draft.cwd.clone();
+            let result = self.form.as_mut()?.select_checkout_branch(value);
+            return match result {
+                Ok(Some(invocation)) => Some(NewSessionPickerEvent::CheckoutBranch(invocation)),
+                Ok(None) => {
+                    if self.form.as_ref()?.draft.cwd != previous {
+                        self.invalidate_branch_catalog();
+                    }
+                    None
+                }
+                Err(error) => {
+                    self.form.as_mut()?.branch_checkout_failed(value, &error);
+                    None
+                }
+            };
+        }
+        if field == "model-favorite" {
+            let form = self.form.as_ref()?;
+            if self
+                .catalog_pending
+                .values()
+                .any(|pending| pending.invocation.command == "agents.native.catalog-favorite")
+                || !form.model_options.iter().any(|model| model.id == value)
+            {
+                return None;
+            }
+            let mut invocation = form.model_catalog_invocation()?;
+            "agents.native.catalog-favorite".clone_into(&mut invocation.command);
+            invocation.arguments.push(value.to_owned());
+            return Some(NewSessionPickerEvent::Catalog(invocation));
+        }
+        if self.purpose == NewSessionPurpose::NativeAgentTab && !native_tab_field(field) {
+            return None;
+        }
+        self.empty_enter_armed = false;
+        let form = self.form.as_mut()?;
+        if form.change_field(field, value) {
+            self.failure = None;
+            self.progress.clear();
+            self.projects.clear();
+            self.worker.as_mut()?.retarget(
+                form.destination()
+                    .and_then(|destination| destination.remote.clone()),
+                form.draft.scope,
+            );
+        }
+        None
+    }
+
     fn apply_form(&mut self, intent: &DialogIntent) -> Option<NewSessionPickerEvent> {
         match intent {
             DialogIntent::Dismiss { .. } => Some(NewSessionPickerEvent::Close),
@@ -1251,38 +1387,7 @@ impl NewSessionDialog {
                 None
             }
             DialogIntent::FieldChanged { field, value, .. } if !self.is_in_flight() => {
-                if field == "project" {
-                    return self.change_project(value);
-                }
-                if field == "model-favorite" {
-                    let form = self.form.as_ref()?;
-                    if self.catalog_pending.values().any(|pending| {
-                        pending.invocation.command == "agents.native.catalog-favorite"
-                    }) || !form.model_options.iter().any(|model| model.id == *value)
-                    {
-                        return None;
-                    }
-                    let mut invocation = form.model_catalog_invocation()?;
-                    "agents.native.catalog-favorite".clone_into(&mut invocation.command);
-                    invocation.arguments.push(value.clone());
-                    return Some(NewSessionPickerEvent::Catalog(invocation));
-                }
-                if self.purpose == NewSessionPurpose::NativeAgentTab && !native_tab_field(field) {
-                    return None;
-                }
-                self.empty_enter_armed = false;
-                let form = self.form.as_mut()?;
-                if form.change_field(field, value) {
-                    self.failure = None;
-                    self.progress.clear();
-                    self.projects.clear();
-                    self.worker.as_mut()?.retarget(
-                        form.destination()
-                            .and_then(|destination| destination.remote.clone()),
-                        form.draft.scope,
-                    );
-                }
-                None
+                self.change_form_field(field, value)
             }
             DialogIntent::ProviderMentionsChanged { mentions, .. } if !self.is_in_flight() => {
                 let form = self.form.as_mut()?;
@@ -1776,6 +1881,7 @@ pub enum NewSessionPickerEvent {
     Close,
     Submit(bootty_control::CommandInvocation),
     Catalog(bootty_control::CommandInvocation),
+    CheckoutBranch(bootty_control::CommandInvocation),
     Authenticate(bootty_control::CommandInvocation),
     Names {
         invocation: bootty_control::CommandInvocation,

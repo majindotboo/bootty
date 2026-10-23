@@ -123,7 +123,7 @@ fn base_branch_catalog_names_the_current_ref_and_respects_explicit_choices(
     form.set_worktree_available(true);
     form.change_field("isolation", "New worktree");
     form.change_field("start-ref", initial);
-    let invocation = form.base_branch_invocation().unwrap();
+    let invocation = form.branch_catalog_invocation().unwrap();
     assert_eq!(
         invocation.target.as_ref(),
         form.destination().map(|destination| &destination.target)
@@ -133,7 +133,7 @@ fn base_branch_catalog_names_the_current_ref_and_respects_explicit_choices(
         "branches": [{"name": "feature/actual", "commit": "abc", "current": true, "upstream": null}]
     }))
     .unwrap();
-    form.set_base_branches_for(&invocation, Ok(overview));
+    form.set_branches_for(&invocation, Ok(overview));
     assert_eq!(form.draft.start_ref, expected);
     let spec = form.spec(false);
     let base = spec
@@ -145,13 +145,131 @@ fn base_branch_catalog_names_the_current_ref_and_respects_explicit_choices(
         matches!(&base.kind, bootty_ui::gpui::DialogFieldKind::Choice(options) if options.iter().any(|option| option == "feature/actual"))
     );
     form.set_directory("/another/project".into());
-    form.set_base_branches_for(&invocation, Err("Stale response".into()));
+    form.set_branches_for(&invocation, Err("Stale response".into()));
     assert!(
         !form
             .spec(false)
             .hint
             .is_some_and(|hint| hint.contains("Stale response"))
     );
+}
+
+fn load_checkout_branches(form: &mut NewSessionForm) -> anyhow::Result<()> {
+    form.set_worktree_available(true);
+    let invocation = form
+        .branch_catalog_invocation()
+        .ok_or_else(|| anyhow::anyhow!("current checkout loads branches"))?;
+    let overview = serde_json::from_value(serde_json::json!({
+        "root": form.draft.cwd, "history": [], "stashes": [],
+        "branches": [
+            {"name": "main", "commit": "abc", "current": true, "upstream": null},
+            {"name": "feature/existing", "commit": "abc", "current": false, "upstream": null},
+            {"name": "topic/linked", "commit": "abc", "current": false, "upstream": null,
+             "worktree_path": "/worktrees/project/linked"}
+        ]
+    }))?;
+    form.set_branches_for(&invocation, Ok(overview));
+    Ok(())
+}
+
+#[rstest]
+#[case("Current host")]
+#[case("Another host")]
+fn existing_branch_selection_waits_for_git_and_preserves_failed_drafts(
+    mut form: NewSessionForm,
+    #[case] host: &str,
+    #[values(false, true)] succeeds: bool,
+) {
+    use bootty_control::CommandOutcome;
+    use bootty_ui::{
+        gpui::{DialogId, DialogIntent},
+        presentation::dialogs::{NEW_SESSION_ID, NewSessionDialog, NewSessionPickerEvent},
+    };
+    form.change_field("host", host);
+    form.change_text("Keep this prompt");
+    load_checkout_branches(&mut form).expect("branch catalog");
+    let target = form.destination().unwrap().target.clone();
+    let cwd = form.draft.cwd.clone();
+    let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
+    let mut dialog = NewSessionDialog::open_form(form, &repaint);
+    let Some(NewSessionPickerEvent::CheckoutBranch(invocation)) = dialog.apply(
+        &DialogIntent::FieldChanged {
+            dialog: DialogId::new(NEW_SESSION_ID),
+            field: "checkout-branch".into(),
+            value: "feature/existing".into(),
+        },
+        &[],
+    ) else {
+        panic!("an unused existing branch requests a Git checkout")
+    };
+    assert_eq!(invocation.command, "git.branch-checkout");
+    assert_eq!(invocation.target, Some(target));
+    assert_eq!(
+        invocation.arguments,
+        [cwd.clone(), "feature/existing".into()]
+    );
+    let (sender, reply) = std::sync::mpsc::channel();
+    dialog.checkout_started(invocation, reply);
+    let selection = |dialog: &NewSessionDialog| {
+        dialog
+            .spec()
+            .fields
+            .into_iter()
+            .find(|field| field.id == "checkout-branch")
+            .unwrap()
+            .value
+    };
+    assert_eq!(selection(&dialog), "main");
+    assert_eq!(dialog.apply(&start_intent("start-session"), &[]), None);
+    sender
+        .send(if succeeds {
+            CommandOutcome::Success {
+                value: serde_json::Value::Null,
+                warnings: Vec::new(),
+            }
+        } else {
+            CommandOutcome::Failed {
+                code: "git_failed".into(),
+                message: "Commit or stash your changes".into(),
+            }
+        })
+        .unwrap();
+    assert_eq!(
+        dialog.poll(),
+        None,
+        "choosing a branch does not start a session"
+    );
+    assert_eq!(
+        selection(&dialog),
+        if succeeds { "feature/existing" } else { "main" }
+    );
+    assert_eq!(dialog.draft().unwrap().prompt, "Keep this prompt");
+    assert_eq!(dialog.draft().unwrap().cwd, cwd);
+    if !succeeds {
+        assert!(
+            dialog
+                .spec()
+                .hint
+                .unwrap()
+                .contains("Commit or stash your changes")
+        );
+    }
+}
+
+#[rstest]
+fn selecting_a_checked_out_branch_reuses_its_directory(
+    mut form: NewSessionForm,
+    #[values(NewSessionMode::Agent, NewSessionMode::Terminal)] mode: NewSessionMode,
+) {
+    form.draft.mode = mode;
+    load_checkout_branches(&mut form).expect("branch catalog");
+    let project = form.project_path().to_owned();
+    assert_eq!(form.select_checkout_branch("topic/linked"), Ok(None));
+    assert_eq!(form.draft.cwd, "/worktrees/project/linked");
+    assert_eq!(form.project_path(), project);
+    assert!(!form.draft.isolated);
+    let invocation = form.invocation(&form.draft.cwd).unwrap();
+    assert_eq!(invocation.arguments[1], "/worktrees/project/linked");
 }
 
 #[rstest]

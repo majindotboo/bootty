@@ -58,6 +58,44 @@ fn overview_branch_history_diff_and_clean_switch_are_consistent() {
             .contains("must be clean")
     );
 }
+
+#[rstest]
+fn branch_catalog_identifies_existing_worktree_checkouts() {
+    let root = fixture().expect("repository fixture");
+    let linked = root.path().join("linked checkout");
+    git(
+        root.path(),
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feature/existing",
+            linked.to_str().unwrap(),
+        ],
+    )
+    .expect("linked checkout");
+    let overview = Git::new()
+        .overview(root.path().to_str().unwrap(), 1)
+        .unwrap();
+    for (name, expected, current) in [
+        ("main", root.path(), true),
+        ("feature/existing", linked.as_path(), false),
+    ] {
+        let branch = overview
+            .branches
+            .iter()
+            .find(|branch| branch.name == name)
+            .unwrap();
+        assert_eq!(branch.current, current);
+        assert_eq!(
+            std::path::Path::new(branch.worktree_path.as_deref().unwrap())
+                .canonicalize()
+                .unwrap(),
+            expected.canonicalize().unwrap(),
+        );
+    }
+}
 #[rstest]
 fn stash_apply_keeps_record_until_explicit_drop_and_includes_untracked() {
     let root = fixture().expect("repository fixture");

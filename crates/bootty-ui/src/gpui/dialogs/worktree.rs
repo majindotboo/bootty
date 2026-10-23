@@ -1,4 +1,4 @@
-//! Searchable base-ref selection using Kit's retained select behavior.
+//! Searchable checkout and base-ref selection using Kit's retained select behavior.
 use super::*;
 use gpui_kit::component::{
     searchable_list::{SearchableListDelegate, SearchableListItem},
@@ -37,6 +37,9 @@ impl SearchableListItem for RefChoice {
     }
     fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         h_flex()
+            .id(SharedString::from(format!("branch-choice-{}", self.value)))
+            .role(gpui_kit::Role::Label)
+            .aria_label(self.title())
             .w_full()
             .min_w_0()
             .gap_2()
@@ -55,10 +58,11 @@ impl SearchableListItem for RefChoice {
 pub(super) struct RefChoices {
     all: Vec<RefChoice>,
     matches: Vec<RefChoice>,
+    custom_refs: bool,
 }
 
 impl RefChoices {
-    fn new(values: &[String]) -> Self {
+    fn new(values: &[String], custom_refs: bool) -> Self {
         let all = values
             .iter()
             .map(|value| RefChoice {
@@ -69,6 +73,7 @@ impl RefChoices {
         Self {
             matches: all.clone(),
             all,
+            custom_refs,
         }
     }
 }
@@ -99,7 +104,8 @@ impl SearchableListDelegate for RefChoices {
             .cloned()
             .collect();
         let query = query.trim();
-        if !query.is_empty() && !self.all.iter().any(|item| item.value == query) {
+        if self.custom_refs && !query.is_empty() && !self.all.iter().any(|item| item.value == query)
+        {
             self.matches.push(RefChoice {
                 value: query.to_owned(),
                 custom: true,
@@ -113,16 +119,17 @@ pub(super) struct WorktreeRefPicker {
     state: Entity<SelectState<RefChoices>>,
     values: Vec<String>,
     value: String,
+    field: String,
     _subscription: Subscription,
 }
 
 impl DialogView {
     pub(super) fn sync_worktree_ref_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(field) = self
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.fields.iter().find(|field| field.id == "start-ref"))
-        else {
+        let Some(field) = self.spec.as_ref().and_then(|spec| {
+            spec.fields
+                .iter()
+                .find(|field| matches!(field.id.as_str(), "start-ref" | "checkout-branch"))
+        }) else {
             self.worktree_ref_picker = None;
             return;
         };
@@ -130,13 +137,21 @@ impl DialogView {
             return;
         };
         let mut values = options.clone();
+        let custom_refs = field.id == "start-ref";
+        if self
+            .worktree_ref_picker
+            .as_ref()
+            .is_some_and(|picker| picker.field != field.id)
+        {
+            self.worktree_ref_picker = None;
+        }
         if !field.value.is_empty() && !values.contains(&field.value) {
             values.insert(0, field.value.clone());
         }
         if let Some(picker) = &mut self.worktree_ref_picker {
             if picker.values != values || picker.value != field.value {
                 picker.state.update(cx, |state, cx| {
-                    state.set_items(RefChoices::new(&values), window, cx);
+                    state.set_items(RefChoices::new(&values, custom_refs), window, cx);
                     state.set_selected_value(&field.value, window, cx);
                 });
                 picker.values = values;
@@ -149,15 +164,21 @@ impl DialogView {
             .position(|value| value == &field.value)
             .map(IndexPath::new);
         let state = cx.new(|cx| {
-            SelectState::new(RefChoices::new(&values), selected, window, cx).searchable(true)
+            SelectState::new(RefChoices::new(&values, custom_refs), selected, window, cx)
+                .searchable(true)
         });
-        let subscription = cx.subscribe(&state, |this, _, event, cx| {
+        let field_id = field.id.clone();
+        let subscription = cx.subscribe(&state, move |this, _, event, cx| {
             if let SelectEvent::Confirm(Some(value)) = event
                 && let Some(spec) = &this.spec
             {
+                // Kit has applied the request locally; the next owner snapshot may reject it.
+                if let Some(picker) = &mut this.worktree_ref_picker {
+                    picker.value.clone_from(value);
+                }
                 cx.emit(DialogIntent::FieldChanged {
                     dialog: spec.id.clone(),
-                    field: "start-ref".into(),
+                    field: field_id.clone(),
                     value: value.clone(),
                 });
             }
@@ -166,6 +187,7 @@ impl DialogView {
             state,
             values,
             value: field.value.clone(),
+            field: field.id.clone(),
             _subscription: subscription,
         });
     }
@@ -177,17 +199,30 @@ impl DialogView {
         _cx: &Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         let picker = self.worktree_ref_picker.as_ref()?;
+        let checkout = field.id == "checkout-branch";
         let control = public_selector(
-            "dialog-worktree-base-branch",
+            if checkout {
+                "dialog-checkout-branch"
+            } else {
+                "dialog-worktree-base-branch"
+            },
             Select::new(&picker.state)
                 .w_full()
                 .placeholder(field.placeholder.clone())
-                .accessibility_label("Base branch")
-                .search_placeholder("Search branches, tags or commits…")
+                .accessibility_label(field.label.clone())
+                .search_placeholder(if checkout {
+                    "Search branches…"
+                } else {
+                    "Search branches, tags or commits…"
+                })
                 .menu_width(rems(24.))
                 .menu_max_h(rems(18.))
+                .when(checkout, |select| select.small().appearance(false))
                 .disabled(spec.busy),
         );
+        if checkout {
+            return Some(control);
+        }
         Some(Self::prompt_control_row(
             spec,
             "dialog-field-start-ref",

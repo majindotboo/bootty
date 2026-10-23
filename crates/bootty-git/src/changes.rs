@@ -551,6 +551,9 @@ pub struct GitBranch {
     pub name: String,
     pub commit: String,
     pub current: bool,
+    /// The checkout that already owns this branch, if any.
+    #[serde(default)]
+    pub worktree_path: Option<String>,
     pub upstream: Option<String>,
     /// Commits the branch has that its upstream lacks.
     #[serde(default)]
@@ -615,9 +618,8 @@ impl<R: CommandRunner> Git<R> {
             &root,
             &[
                 "for-each-ref",
-                "--count=500",
                 "--sort=-committerdate",
-                "--format=%(HEAD)%00%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00",
+                "--format=%(HEAD)%00%(refname:short)%00%(objectname)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(worktreepath)%00",
                 "refs/heads",
             ],
         )?;
@@ -628,6 +630,7 @@ impl<R: CommandRunner> Git<R> {
             let commit = fields.next().ok_or("invalid Git branch list")?;
             let upstream = fields.next().ok_or("invalid Git branch list")?;
             let track = fields.next().ok_or("invalid Git branch list")?;
+            let worktree_path = fields.next().ok_or("invalid Git branch worktree")?;
             // Like "ahead 2, behind 1"; empty when even, and "gone" when the upstream is.
             let count = |word: &str| {
                 track
@@ -639,6 +642,7 @@ impl<R: CommandRunner> Git<R> {
                 name: name.trim_start_matches('\n').into(),
                 commit: commit.into(),
                 current: current.trim_start_matches('\n') == "*",
+                worktree_path: (!worktree_path.is_empty()).then(|| worktree_path.into()),
                 upstream: (!upstream.is_empty()).then(|| upstream.into()),
                 ahead: count("ahead"),
                 behind: count("behind"),
@@ -809,7 +813,7 @@ impl<R: CommandRunner> Git<R> {
     pub(crate) fn require_clean(&self, root: &str) -> Result<String, String> {
         let changes = self.changes(root)?;
         if !changes.files.is_empty() {
-            return Err("working tree must be clean before switching branches".into());
+            return Err("working tree must be clean before switching branches; commit or stash your changes first".into());
         }
         Ok(changes.root)
     }

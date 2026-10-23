@@ -2068,6 +2068,77 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
+fn rejected_checkout_selection_restores_the_branch_shown_by_the_owner(cx: &mut TestAppContext) {
+    use bootty_gpui::{DialogField, DialogFieldKind};
+    let mut spec = DialogSpec::prompt(
+        bootty_ui::presentation::dialogs::NEW_SESSION_ID,
+        "New session",
+        "Keep the draft",
+        "Prompt",
+        DialogAction::new("start-session"),
+    );
+    spec.multiline = true;
+    spec.fields = [
+        ("provider", "Provider", "Codex", vec!["Codex".into()]),
+        (
+            "isolation",
+            "Checkout",
+            "Current checkout",
+            vec!["Current checkout".into(), "New worktree".into()],
+        ),
+        (
+            "checkout-branch",
+            "Branch",
+            "main",
+            vec!["main".into(), "feature/existing".into()],
+        ),
+    ]
+    .into_iter()
+    .map(|(id, label, value, options)| DialogField {
+        id: id.into(),
+        label: label.into(),
+        value: value.into(),
+        placeholder: String::new(),
+        kind: DialogFieldKind::Choice(options),
+    })
+    .collect();
+    let (probe, cx) = embedded_dialog_window(cx, spec.clone());
+    draw_chrome(cx);
+    let branch = cx
+        .debug_bounds("dialog-checkout-branch")
+        .expect("branch picker");
+    cx.simulate_click(branch.center(), Modifiers::none());
+    cx.simulate_input("feature/existing");
+    draw_chrome(cx);
+    cx.simulate_keystrokes("enter");
+    draw_chrome(cx);
+    probe.update(cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::FieldChanged { field, value, .. }
+                if field == "checkout-branch" && value == "feature/existing"
+        )));
+        probe.intents.borrow_mut().clear();
+    });
+    spec.hint = Some("Commit or stash your changes".into());
+    cx.update(|window, cx| {
+        probe.read(cx).dialog.clone().update(cx, |dialog, cx| {
+            dialog.present(Some(spec), window, cx);
+        });
+    });
+    draw_chrome(cx);
+    cx.simulate_click(branch.center(), Modifiers::none());
+    draw_chrome(cx);
+    cx.simulate_keystrokes("enter");
+    draw_chrome(cx);
+    probe.update(cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            DialogIntent::FieldChanged { field, value, .. }
+                if field == "checkout-branch" && value == "main"
+        )));
+    });
+}
+
+#[gpui_kit::test]
 fn new_session_composer_routes_start_keys_and_preserves_shift_enter(cx: &mut TestAppContext) {
     let mut spec = DialogSpec::prompt(
         bootty_ui::presentation::dialogs::NEW_SESSION_ID,

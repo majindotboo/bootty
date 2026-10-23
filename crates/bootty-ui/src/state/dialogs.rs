@@ -698,6 +698,21 @@ impl AppState {
             NewSessionPickerEvent::Catalog(invocation) => {
                 self.request_new_session_catalog(invocation);
             }
+            NewSessionPickerEvent::CheckoutBranch(invocation) => {
+                let now = std::time::Instant::now();
+                let result = self.app_command_sender(Caller::Internal).submit(
+                    invocation.clone(),
+                    now.checked_add(std::time::Duration::from_secs(30))
+                        .unwrap_or(now),
+                    bootty_control::CommandCancellation::new(),
+                );
+                if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
+                    match result {
+                        Ok(receiver) => dialog.checkout_started(invocation, receiver),
+                        Err(error) => dialog.checkout_failed(&invocation, &format!("{error:?}")),
+                    }
+                }
+            }
             NewSessionPickerEvent::Authenticate(invocation) => {
                 self.dismiss_modal_dialog();
                 self.commands.queue(invocation);

@@ -156,6 +156,10 @@ and defaults while retaining the selected working directory. Worktree branch,
 base ref, source checkout and destination are visible before creation. The dialog
 reports observed naming, checkout and session-creation stages; a failed start
 keeps the prompt, completed checkout and diagnostic available for retry.
+Current checkout exposes a searchable local-branch picker. Git's branch catalog
+reports which checkout owns each branch, so choosing one with a worktree reuses
+that directory. Other selections submit `git.branch-checkout` against the
+captured Binding; the displayed branch changes only after Git confirms success.
 
 Worktree cleanup runs on the checkouts' host too: in the app for local checkouts
 and through remote daemon protocol 23 for a remote host. The UI sends every saved
