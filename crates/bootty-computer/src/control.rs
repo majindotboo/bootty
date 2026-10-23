@@ -30,7 +30,7 @@ const FOCUS_WAIT: Duration = Duration::from_millis(20);
 /// input in a smaller window.
 const MIN_TARGET_EDGE: f64 = 48.0;
 
-/// Windows an agent can work in, front to back.
+/// Windows an agent can work in, in platform observation order.
 pub fn targets(desktop: &dyn Desktop) -> Vec<ComputerTarget> {
     desktop
         .windows()
@@ -144,7 +144,13 @@ fn validate(
     let windows = desktop.windows();
     let window = windows
         .iter()
-        .find(|window| window.id == expected.window_id)
+        .find(|window| {
+            window.id == expected.window_id
+                && window
+                    .app
+                    .as_ref()
+                    .is_some_and(|app| app.native_id == expected.native_id)
+        })
         .ok_or(ComputerError::TargetUnavailable)?;
     let current = window
         .app
@@ -166,6 +172,9 @@ fn validate(
     }
     match (need, desktop.route()) {
         (Need::Read | Need::Element, _) => {}
+        (Need::Keys | Need::Pointer(_, _), _) if current.is_semantic_only() => {
+            return Err(ComputerError::Unsupported);
+        }
         (Need::Keys, _) => receives_keys(desktop, &windows, current)?,
         (Need::Pointer(x, y), route) => {
             if !contains(&window.bounds, x, y) {
@@ -203,7 +212,9 @@ fn same_frame_windows(windows: &[NativeWindow], target: &ComputerTarget) -> usiz
         .iter()
         .filter(|window| {
             window.app.as_ref().is_some_and(|app| {
-                app.process_id == target.process_id && app.bounds == target.bounds
+                !app.is_semantic_only()
+                    && app.process_id == target.process_id
+                    && app.bounds == target.bounds
             })
         })
         .count()
@@ -366,6 +377,9 @@ pub fn text_pieces(text: &str) -> Vec<String> {
 /// Make the window the one its process sends keys to. Pointer input addressed to a window needs
 /// no focus, so this matters for keys, or where input drives the shared pointer.
 fn focus(desktop: &dyn Desktop, target: &ComputerTarget) -> Result<ComputerResult, ComputerError> {
+    if target.is_semantic_only() {
+        return Err(ComputerError::Unsupported);
+    }
     require(desktop.status().accessibility, Permission::Accessibility)?;
     let window = validate(desktop, target, Need::Read)?;
     let app = window
@@ -391,6 +405,9 @@ fn snapshot(
     target: &ComputerTarget,
     action: &ComputerAction,
 ) -> Result<ComputerResult, ComputerError> {
+    if target.is_semantic_only() {
+        return Err(ComputerError::Unsupported);
+    }
     require(
         desktop.status().screen_recording,
         Permission::ScreenRecording,

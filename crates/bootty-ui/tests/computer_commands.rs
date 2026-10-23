@@ -15,6 +15,7 @@ use rstest::{fixture, rstest};
 fn target() -> ComputerTarget {
     ComputerTarget {
         window_id: 42,
+        native_id: None,
         process_id: 123,
         bundle_id: "dev.bootty.test-target".into(),
         application_name: None,
@@ -441,6 +442,9 @@ fn inline_capture_cannot_select_a_path_or_native_target(
 #[case::another_bootty(123, "dev.bootty.desktop.dev.0123456789abcdef", true)]
 #[case::terminal(123, "com.mitchellh.ghostty", false)]
 #[case::system_settings(123, "com.apple.systempreferences", false)]
+#[case::linux_terminal(123, "org.kde.konsole", false)]
+#[case::linux_terminal_executable(123, "konsole", false)]
+#[case::linux_settings(123, "org.gnome.Settings", false)]
 #[case::editor(123, "dev.zed.Zed", true)]
 fn agents_use_any_app_except_their_host_and_shells(
     target: ComputerTarget,

@@ -291,7 +291,7 @@ fn write_snapshot(path: &Path, bytes: &[u8]) -> Result<Option<CommandWarning>, C
 pub fn computer_error_outcome(error: ComputerError) -> CommandOutcome {
     match error {
         ComputerError::Unsupported => CommandOutcome::Unsupported {
-            message: "Computer use needs macOS, Windows, or Linux with an X11 display".into(),
+            message: "The desktop does not support this operation for the selected window".into(),
         },
         error @ (ComputerError::Disabled
         | ComputerError::PermissionDenied(_)
@@ -358,7 +358,13 @@ fn run_application(
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
-    let targets = runtime.block_on(computer.targets())?;
+    let mut targets = runtime.block_on(computer.targets())?;
+    if matches!(&command.action, bootty_agents::NativeApplicationAction::Computer(action) if action.is_capture())
+    {
+        targets.retain(|target| !target.is_semantic_only());
+    } else {
+        targets.sort_by_key(|target| !target.is_semantic_only());
+    }
     let Some(window) = frontmost_window(&targets, &command.application) else {
         return Ok(CommandOutcome::Unavailable {
             message: format!(
@@ -569,7 +575,8 @@ fn grant(
     }
 }
 
-/// Window lists run front to back, so the first match is the app's front window.
+/// Choose the first matching window in the adapter's observation order. Semantic-only providers
+/// may not expose stacking order; the exact chosen window is retained for subsequent input.
 fn frontmost_window<'a>(
     targets: &'a [bootty_computer::ComputerTarget],
     application: &str,

@@ -56,7 +56,8 @@ fn select_host_window(
     bundle: &str,
 ) -> Result<ComputerTarget, ComputerError> {
     let mut matching = observed.iter().filter(|target| {
-        target.window_id == native_id.get()
+        !target.is_semantic_only()
+            && target.window_id == native_id.get()
             && target.process_id == process
             && target.bundle_id == bundle
     });

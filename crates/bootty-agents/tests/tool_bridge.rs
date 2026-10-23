@@ -991,6 +991,7 @@ fn app_mention() -> bootty_agents::NativeApplicationMention {
         id: "mentioned-app".into(),
         target: bootty_computer::ComputerTarget {
             window_id: 42,
+            native_id: None,
             process_id: 19,
             bundle_id: "test.App".into(),
             application_name: None,

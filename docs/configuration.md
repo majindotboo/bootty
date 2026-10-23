@@ -76,13 +76,37 @@ Window or process changes invalidate the token, and input is never redirected
 to another window. `computer.elements` lists the window's accessibility elements
 and `computer.press` presses one of them by the element it returned; it follows
 the capture switch and the input switch respectively. Computer use works on
-macOS, Windows and Linux on X11, including XWayland apps in a Wayland session;
-native Wayland windows are not listed. `computer.snapshot` writes a bounded PNG
+macOS, Windows and Linux. Linux lists AT-SPI accessibility windows, including
+native Wayland apps exposed by the desktop, alongside EWMH X11/XWayland windows. `computer.snapshot` writes a bounded PNG
 to the supplied absolute local path and never replaces an existing file.
-`computer.set-value <target> <element> <value>` replaces an editable control's value through macOS Accessibility or Windows UIA. The agent equivalent is `computer_input` with `action: "set_value"`, a numbered `element`, and `value`. An empty value clears the control. It does not focus the app, send keyboard/pointer events, submit a form, or navigate a browser. Unsupported and read-only controls fail without input fallback; Linux accessibility remains unsupported.
+`computer.set-value <target> <element> <value>` replaces an editable control's value through macOS Accessibility, Windows UIA, or Linux AT-SPI EditableText. The agent equivalent is `computer_input` with `action: "set_value"`, a numbered `element`, and `value`. An empty value clears the control. It does not focus the app, send keyboard/pointer events, submit a form, or navigate a browser. Unsupported and read-only controls fail without input fallback.
 
 The optional third argument to `computer.press`, `allow-click`, defaults to `true`;
-pass `false` for an accessibility-only action. Linux element discovery remains unsupported.
+pass `false` for an accessibility-only action.
+
+Linux element discovery and semantic actions use the installed AT-SPI accessibility
+bus, with bounded reads and no focus or input events. Presses invoke named activation
+actions; setting a value uses EditableText, and password values are excluded.
+An app must expose its controls through AT-SPI. Numeric Value controls and controls
+without a supported press action or writable EditableText remain unsupported.
+Apps may choose to activate themselves in response to an action.
+
+Linux accessibility targets carry a full `native_id` (bus GUID, owner and object path),
+plus the bus owner's PID and process start time. They are semantic-only: capture,
+focus, keys, coordinate input, and pointer fallback are unsupported for these tokens.
+Their frames are toolkit-reported; native Wayland toolkits may report window-relative
+coordinates or no usable frame. Only visible windows and controls with usable frames
+are listed, and native Wayland moves cannot be detected when the toolkit hides its
+screen origin. Such frames never authorize pointer input or pixel capture.
+
+AT-SPI does not expose an X11 window ID. Bootty keeps accessibility and X11 window
+tokens separate, even when their app, title and geometry match. `computer_elements`
+prefers accessibility targets; `computer_snapshot` selects an X11 target and cannot
+attach AT-SPI elements to that observation. Use a fresh element observation before
+semantic input. The CLI/socket can select either exact token from `computer.targets`.
+X11 capture and XTest input remain available through X11 tokens. Native Wayland
+capture/input need a desktop portal sharing session bound to the exact selected
+window; Bootty does not create that session or capture a whole screen as a fallback.
 
 Windows element discovery uses UI Automation on a background COM thread. It lists
 bounded control labels, values, identifiers, frames and states; password values are

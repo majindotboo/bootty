@@ -484,6 +484,7 @@ fn application(window: HWND, id: u32, bounds: &DisplayBounds) -> Option<Computer
         / 10_000_000.0;
     Some(ComputerTarget {
         window_id: id,
+        native_id: None,
         process_id: i32::try_from(process_id).ok()?,
         bundle_id,
         application_name,

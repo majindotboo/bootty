@@ -622,6 +622,7 @@ fn application(
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(process_id)?;
     Some(ComputerTarget {
         window_id,
+        native_id: None,
         process_id,
         bundle_id: app.bundleIdentifier()?.to_string(),
         application_name: app

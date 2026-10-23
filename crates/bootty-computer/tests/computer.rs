@@ -19,6 +19,7 @@ use rstest::{fixture, rstest};
 fn target() -> ComputerTarget {
     ComputerTarget {
         window_id: 42,
+        native_id: None,
         process_id: 123,
         bundle_id: "dev.bootty.test-target".into(),
         application_name: None,
@@ -34,6 +35,20 @@ fn target() -> ComputerTarget {
 }
 
 proptest! {
+    #[test]
+    fn numeric_window_ids_never_substitute_for_the_full_native_identity(suffix in "[a-z]{1,100}") {
+        let mut observed = target();
+        observed.native_id = Some(format!("atspi::1.1/{suffix}"));
+        let fake = Fake::focused(&observed);
+        let mut replaced = observed.clone();
+        replaced.native_id = Some(format!("atspi::1.2/{suffix}"));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let result = runtime.block_on(run(&fake, &replaced, &ComputerAction::Elements));
+        prop_assert!(matches!(result, Err(ComputerError::TargetUnavailable)));
+        let decoded: ComputerTarget = serde_json::from_str(&serde_json::to_string(&observed)?)?;
+        prop_assert_eq!(observed, decoded);
+    }
+
     #[test]
     fn disabled_access_never_reaches_the_desktop(x in any::<f64>(), y in any::<f64>()) {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;

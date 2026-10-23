@@ -1,12 +1,12 @@
-//! Linux on X11, including `XWayland` apps in a Wayland session: EWMH window lists, `GetImage`
-//! capture and `XTest` input. `XTest` drives the real pointer, so input needs the window in front.
+//! Linux: AT-SPI semantic actions, plus EWMH capture and `XTest` input for X11 windows.
 //!
 //! Deliberate limit: `SendEvent` reaches background windows, but marks events as synthetic and
 //! many toolkits ignore them. Address input to the window that way if those toolkits accept it.
 //!
-//! Deliberate limit: native Wayland windows are not listed, because Wayland exposes no window
-//! list or input injection to other clients. Support them through the desktop portals'
-//! `ScreenCast` and `RemoteDesktop` sessions when users need it.
+//! Native Wayland targets are semantic-only. Their toolkit may not know the global origin.
+//! Deliberate limit: portal capture/input need a user-selected sharing session, which cannot yet
+//! be bound to our exact window token. Add that binding before enabling them for these targets.
+mod accessibility;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use x11rb::{
@@ -24,8 +24,8 @@ use x11rb::{
 };
 
 use crate::{
-    ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier, MouseButton,
-    PermissionStatus,
+    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier,
+    MouseButton, PermissionStatus,
     desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count},
 };
 
@@ -38,7 +38,7 @@ const KEYSYM_CONTROL: u32 = 0xffe3;
 const KEYSYM_ALT: u32 = 0xffe9;
 
 pub fn native() -> Arc<dyn Desktop> {
-    Arc::new(X11Desktop {
+    Arc::new(LinuxDesktop {
         display: x11rb::connect(None).ok().and_then(|(connection, screen)| {
             let root = connection.setup().roots.get(screen)?.root;
             Some(Mutex::new(Display { connection, root }))
@@ -46,7 +46,7 @@ pub fn native() -> Arc<dyn Desktop> {
     })
 }
 
-struct X11Desktop {
+struct LinuxDesktop {
     display: Option<Mutex<Display>>,
 }
 
@@ -55,7 +55,7 @@ struct Display {
     root: Window,
 }
 
-impl X11Desktop {
+impl LinuxDesktop {
     fn with<T>(&self, work: impl FnOnce(&Display) -> Option<T>) -> Option<T> {
         let display = self.display.as_ref()?;
         let display = display.lock().unwrap_or_else(PoisonError::into_inner);
@@ -63,34 +63,45 @@ impl X11Desktop {
     }
 }
 
-impl Desktop for X11Desktop {
+impl Desktop for LinuxDesktop {
     fn status(&self) -> ComputerStatus {
-        // X11 has no capture or input permission; without an X display nothing is reachable.
+        // X11 has no capture/input permission. AT-SPI can also work without an X display.
         let status = if self.display.is_some() {
             PermissionStatus::Granted
         } else {
             PermissionStatus::Unsupported
         };
         ComputerStatus {
-            accessibility: status,
+            accessibility: if accessibility::available() {
+                PermissionStatus::Granted
+            } else {
+                status
+            },
             screen_recording: status,
             secure_input: false,
         }
     }
 
     fn windows(&self) -> Vec<NativeWindow> {
-        self.with(|display| {
-            let stacking = display.cardinals(display.root, "_NET_CLIENT_LIST_STACKING")?;
-            // The stacking list runs bottom to top.
-            Some(
-                stacking
-                    .into_iter()
-                    .rev()
-                    .filter_map(|window| display.native_window(window))
-                    .collect(),
-            )
-        })
-        .unwrap_or_default()
+        let windows: Vec<NativeWindow> = self
+            .with(|display| {
+                let stacking = display.cardinals(display.root, "_NET_CLIENT_LIST_STACKING")?;
+                // The stacking list runs bottom to top.
+                Some(
+                    stacking
+                        .into_iter()
+                        .rev()
+                        .filter_map(|window| display.native_window(window))
+                        .collect(),
+                )
+            })
+            .unwrap_or_default();
+        // AT-SPI does not provide an XID. Keep the two identities separate instead of guessing
+        // that windows with the same PID, title or geometry are the same native window.
+        windows
+            .into_iter()
+            .chain(accessibility::windows())
+            .collect()
     }
 
     fn route(&self) -> InputRoute {
@@ -122,6 +133,7 @@ impl Desktop for X11Desktop {
         height: u32,
         _cursor: bool,
     ) -> Result<Image, ComputerError> {
+        require_x11(window)?;
         self.with(|display| {
             let (native_width, native_height) = (
                 u16::try_from(pixel_count(window.bounds.width)).ok()?,
@@ -165,12 +177,14 @@ impl Desktop for X11Desktop {
         .ok_or_else(|| ComputerError::Platform("window capture failed".into()))
     }
 
-    fn post(&self, _window: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError> {
+    fn post(&self, window: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError> {
+        require_x11(window)?;
         self.with(|display| display.post(event).ok())
             .ok_or_else(|| ComputerError::Platform("X11 rejected the input".into()))
     }
 
     fn raise(&self, window: &NativeWindow) -> Result<(), ComputerError> {
+        require_x11(window)?;
         self.with(|display| {
             let active = display.atom("_NET_ACTIVE_WINDOW")?;
             // Source 2 marks a pager-style request, which window managers honor.
@@ -197,6 +211,47 @@ impl Desktop for X11Desktop {
                 .find(|window| display.class(*window).as_deref() == Some(bundle_id))?;
             icon(&display.cardinals(window, "_NET_WM_ICON")?, side)
         })
+    }
+
+    fn elements(
+        &self,
+        window: &NativeWindow,
+        limit: usize,
+    ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        accessibility::elements(window, limit)
+    }
+
+    fn element(
+        &self,
+        window: &NativeWindow,
+        path: &[u16],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
+        accessibility::element(window, path)
+    }
+
+    fn press(&self, window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
+        accessibility::press(window, path)
+    }
+
+    fn set_value(
+        &self,
+        window: &NativeWindow,
+        path: &[u16],
+        value: &str,
+    ) -> Result<(), ComputerError> {
+        accessibility::set_value(window, path, value)
+    }
+}
+
+fn require_x11(window: &NativeWindow) -> Result<(), ComputerError> {
+    if window
+        .app
+        .as_ref()
+        .is_some_and(|app| app.native_id.is_some())
+    {
+        Err(ComputerError::Unsupported)
+    } else {
+        Ok(())
     }
 }
 
@@ -297,6 +352,7 @@ impl Display {
             .map(|title| String::from_utf8_lossy(&title).chars().take(512).collect());
         Some(ComputerTarget {
             window_id: window,
+            native_id: None,
             process_id,
             application_name: Some(bundle_id.chars().take(256).collect()),
             bundle_id,

@@ -39,6 +39,8 @@ windows = { version = "0.62", features = [
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+atspi-proxies = "0.13"
+zbus = "5.19"
 x11rb = { version = "0.14", features = ["xtest"] }
 
 [dev-dependencies]

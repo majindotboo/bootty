@@ -5,8 +5,10 @@ use crate::{
     MouseButton,
 };
 
-/// One on-screen window, front to back. `app` is present only for an ordinary application window
-/// an agent may target; other windows still count when deciding whether a point is covered.
+/// One observed window.
+///
+/// Input-addressable windows come first, front to back; semantic-only windows follow in provider
+/// order. `app` names a targetable app; other windows still count when checking covered points.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeWindow {
     pub id: u32,
@@ -138,7 +140,7 @@ impl Image {
 pub trait Desktop: Send + Sync {
     /// Current OS permission state, without prompting.
     fn status(&self) -> ComputerStatus;
-    /// On-screen windows, front to back.
+    /// Observed windows; input-addressable ones are first, in front-to-back order.
     fn windows(&self) -> Vec<NativeWindow>;
     fn route(&self) -> InputRoute;
     /// The process whose windows receive the user's input, when the OS reports one.
@@ -170,8 +172,6 @@ pub trait Desktop: Send + Sync {
     fn raise(&self, window: &NativeWindow) -> Result<(), ComputerError>;
     /// A square icon for an application, `side` pixels wide, when the OS has one.
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image>;
-
-    // Linux needs an AT-SPI adapter before it can expose accessibility elements.
 
     /// The window's accessibility elements in screen order: at most `limit`, and whether any were
     /// left out.

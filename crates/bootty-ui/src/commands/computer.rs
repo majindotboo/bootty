@@ -39,8 +39,8 @@ pub struct ApplicationCommand {
 #[must_use]
 pub fn agent_may_use(target: &ComputerTarget) -> bool {
     // Deliberate limit: a fixed list of well-known terminals. Extend it when users report
-    // another terminal, or replace it with an OS-level category check if macOS offers one.
-    const BLOCKED: [&str; 9] = [
+    // another terminal, or replace it with an OS-level category check when available.
+    const BLOCKED: &[&str] = &[
         "com.apple.Terminal",
         "com.googlecode.iterm2",
         "com.mitchellh.ghostty",
@@ -50,6 +50,29 @@ pub fn agent_may_use(target: &ComputerTarget) -> bool {
         "com.github.wez.wezterm",
         "com.apple.systempreferences",
         "com.apple.SecurityAgent",
+        "org.kde.konsole",
+        "konsole",
+        "org.gnome.Terminal",
+        "gnome-terminal-server",
+        "org.gnome.Ptyxis",
+        "ptyxis",
+        "org.gnome.Console",
+        "kgx",
+        "org.wezfurlong.wezterm",
+        "wezterm-gui",
+        "Alacritty",
+        "alacritty",
+        "kitty",
+        "Ghostty",
+        "ghostty",
+        "xterm",
+        "XTerm",
+        "foot",
+        "footclient",
+        "org.kde.systemsettings",
+        "systemsettings",
+        "org.gnome.Settings",
+        "gnome-control-center",
     ];
     i32::try_from(std::process::id()).ok() != Some(target.process_id)
         && !BLOCKED.contains(&target.bundle_id.as_str())

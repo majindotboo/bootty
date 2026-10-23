@@ -447,6 +447,10 @@ impl HostCaptureRegion {
 #[serde(deny_unknown_fields)]
 pub struct ComputerTarget {
     pub window_id: u32,
+    /// Exact identity of a semantic-only accessibility window. Such windows cannot capture pixels
+    /// or receive synthesized input. Their frames are toolkit-reported, possibly window-relative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_id: Option<String>,
     pub process_id: i32,
     pub bundle_id: String,
     /// Presentation metadata; it does not authorize or identify a window.
@@ -458,6 +462,12 @@ pub struct ComputerTarget {
 }
 
 impl ComputerTarget {
+    /// Whether this token supports only accessibility reads and semantic actions.
+    #[must_use]
+    pub const fn is_semantic_only(&self) -> bool {
+        self.native_id.is_some()
+    }
+
     /// Validate the shape of an observed window token without touching the OS.
     ///
     /// # Errors
@@ -465,6 +475,10 @@ impl ComputerTarget {
     pub fn validate(&self) -> Result<(), ComputerError> {
         let bounds = &self.bounds;
         if self.window_id == 0
+            || self
+                .native_id
+                .as_ref()
+                .is_some_and(|id| id.is_empty() || id.len() > 1024)
             || self.process_id <= 0
             || self.bundle_id.is_empty()
             || self.bundle_id.len() > 255
@@ -665,6 +679,7 @@ impl ComputerResult {
 /// The same observed window token, compared exactly.
 fn same_window(observed: &ComputerTarget, target: &ComputerTarget) -> bool {
     observed.window_id == target.window_id
+        && observed.native_id == target.native_id
         && observed.process_id == target.process_id
         && observed.bundle_id == target.bundle_id
         && observed.launch_time.to_bits() == target.launch_time.to_bits()

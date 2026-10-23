@@ -1008,6 +1008,7 @@ dependencies = [
 name = "bootty-computer"
 version = "0.7.1"
 dependencies = [
+ "atspi-proxies",
  "base64 0.23.1",
  "block2 0.6.2",
  "objc2 0.6.5",
@@ -1026,6 +1027,7 @@ dependencies = [
  "tokio",
  "windows 0.62.2",
  "x11rb 0.14.0",
+ "zbus",
 ]
 
 [[package]]
