@@ -2463,6 +2463,8 @@ fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     record.snapshot.transcript = serde_json::from_value(serde_json::json!([
         {"id": "prompt", "role": "user", "text": "Fix it", "complete": true},
         edit("first", "src/main.rs", "@@ -1 +1,2 @@\n-old\n+new\n+more\n"),
+        {"id":"check", "role":"tool", "text":"", "complete":true,
+         "tool":{"name":"Bash", "input":"{\"command\":\"cargo check\"}", "status":"completed"}},
         edit("second", "src/lib.rs", "@@ -1 +1 @@\n-a\n+b\n"),
         edit("third", "src/main.rs", "@@ -3 +3 @@\n-x\n+y\n"),
         {"id": "done", "role": "assistant", "text": "Fixed.", "complete": true}
@@ -2484,6 +2486,18 @@ fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     visual.simulate_resize(size(px(1000.), px(900.)));
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(
+        visual
+            .debug_bounds("native-work-summary:Changed 2 files and ran 1 command")
+            .is_some()
+    );
+    for selector in [
+        "native-tool-heading-first",
+        "native-tool-heading-second",
+        "native-tool-heading-third",
+    ] {
+        assert!(visual.debug_bounds(selector).is_none());
+    }
     assert!(visual.debug_bounds("native-turn-changes:+4:-3").is_some());
     let main = visual
         .debug_bounds("native-turn-change:src/main.rs")
@@ -2511,7 +2525,7 @@ fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     assert!(visual.debug_bounds(diff).is_none());
 }
 
-/// Progress messages and changed files remain visible after a turn settles or another begins.
+/// Commentary stays visible; command and edit details share an expandable work group.
 #[gpui_kit::test]
 fn turns_keep_progress_and_changed_files_visible(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -2579,6 +2593,10 @@ fn turns_keep_progress_and_changed_files_visible(cx: &mut TestAppContext) {
         // Commentary between tools carries no timestamp or actions; the prompt keeps them.
         assert!(visual.debug_bounds("copy-message:status").is_none());
         assert!(visual.debug_bounds("copy-message:prompt").is_some());
+        assert!(visual.debug_bounds("native-tool-heading-edit").is_none());
+        visual.simulate_click(between.center(), Modifiers::none());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(visual.debug_bounds("native-tool-heading-edit").is_some());
         assert!(
             visual
@@ -2782,7 +2800,7 @@ fn work_folds_summarize_what_their_tools_did(cx: &mut TestAppContext) {
         (
             "idle",
             settled,
-            "native-work-summary:Ran 2 commands · Read 1 file · 1 failed",
+            "native-work-summary:Read 1 file and ran 2 commands · 1 failed",
         ),
         ("working", live, "native-work-summary:Running cargo"),
     ] {
@@ -2856,7 +2874,7 @@ fn tool_rows_name_what_each_tool_did(cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let fold = visual
-        .debug_bounds("native-work-summary:Ran 1 command · Used 4 tools · 1 failed")
+        .debug_bounds("native-work-summary:Used 4 tools and ran 1 command · 1 failed")
         .expect("work fold");
     visual.simulate_click(fold.center(), Modifiers::none());
     visual.run_until_parked();
@@ -3037,7 +3055,7 @@ fn thoughts_in_work_rows_open_one_at_a_time(cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     let fold = visual
-        .debug_bounds("native-work-summary:Thought once · Ran 1 command")
+        .debug_bounds("native-work-summary:Ran 1 command")
         .expect("work fold");
     visual.simulate_click(fold.center(), Modifiers::none());
     visual.run_until_parked();
@@ -5475,6 +5493,12 @@ fn parsed_file_changes_keep_the_providers_failure_output(cx: &mut TestAppContext
         });
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
+        let group = visual
+            .debug_bounds("native-work-group-edit")
+            .expect("edits fold with other work");
+        visual.simulate_click(group.center(), Modifiers::none());
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
         assert!(
             visual
                 .debug_bounds("native-file-change:src/main.rs:+1:-1")
@@ -5499,7 +5523,7 @@ fn settled_replies_without_work_folds_show_elapsed_time(cx: &mut TestAppContext)
     });
     for (status, tool, duration) in [
         ("idle", None, true),
-        ("idle", Some("fileChange"), true),
+        ("idle", Some("fileChange"), false),
         ("idle", Some("Bash"), false),
         ("working", None, false),
     ] {

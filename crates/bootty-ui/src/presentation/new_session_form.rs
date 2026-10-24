@@ -131,6 +131,7 @@ pub struct NewSessionForm {
     worktree_repository: Option<String>,
     worktree_directory: Option<String>,
     branches: Vec<bootty_git::changes::GitBranch>,
+    checkout_root: Option<String>,
     branch_error: Option<String>,
     /// The configured `session.branch-prefix`, for projects without their own.
     branch_prefix: String,
@@ -161,6 +162,7 @@ impl NewSessionForm {
             worktree_repository: None,
             worktree_directory: None,
             branches: Vec::new(),
+            checkout_root: None,
             branch_error: None,
             branch_prefix: bootty_config::config::DEFAULT_BRANCH_PREFIX.to_owned(),
             error: None,
@@ -255,12 +257,13 @@ impl NewSessionForm {
         }
         match result {
             Ok(overview) => {
-                if matches!(self.draft.start_ref.as_str(), "" | "HEAD")
+                if (!self.draft.isolated || matches!(self.draft.start_ref.as_str(), "" | "HEAD"))
                     && let Some(current) = overview.branches.iter().find(|branch| branch.current)
                 {
                     self.draft.start_ref.clone_from(&current.name);
                 }
                 self.branches = overview.branches;
+                self.checkout_root = Some(overview.root);
                 self.branch_error = None;
             }
             Err(error) => self.branch_error = Some(format!("Could not load branches: {error}")),
@@ -285,8 +288,15 @@ impl NewSessionForm {
         }
         if let Some(cwd) = branch.worktree_path.clone() {
             let project = self.project_path().to_owned();
-            self.update_directory(cwd);
+            let mut branches = std::mem::take(&mut self.branches);
+            for branch in &mut branches {
+                branch.current = branch.name == name;
+            }
+            self.update_directory(cwd.clone());
             self.worktree_repository = Some(project);
+            self.checkout_root = Some(cwd);
+            self.branches = branches;
+            name.clone_into(&mut self.draft.start_ref);
             self.set_worktree_available(true);
             return Ok(None);
         }
@@ -300,6 +310,7 @@ impl NewSessionForm {
     }
 
     pub fn branch_checked_out(&mut self, name: &str) {
+        name.clone_into(&mut self.draft.start_ref);
         for branch in &mut self.branches {
             if branch.current {
                 branch.worktree_path = None;
@@ -352,6 +363,7 @@ impl NewSessionForm {
     fn update_directory(&mut self, cwd: String) {
         self.draft.cwd = cwd;
         self.branches.clear();
+        self.checkout_root = None;
         self.branch_error = None;
         self.worktree_available = false;
         self.worktree_repository = None;
@@ -1447,6 +1459,7 @@ impl NewSessionForm {
             DialogAction::new("start-session"),
         );
         spec.completion = self.completion_scope();
+        spec.branches.clone_from(&self.branches);
         spec.project_labels = self.project_labels();
         spec.selected_project = Some(if self.draft.projectless {
             String::new()
@@ -1752,15 +1765,24 @@ impl NewSessionForm {
     fn worktree_fields(&self) -> Vec<DialogField> {
         let mut fields = Vec::new();
         if self.worktree_available {
+            let current = if self
+                .checkout_root
+                .as_deref()
+                .is_some_and(|root| root != self.project_path())
+            {
+                "Current worktree"
+            } else {
+                "Current checkout"
+            };
             fields.push(choice(
                 "isolation",
                 "Checkout",
                 if self.draft.isolated {
                     "New worktree"
                 } else {
-                    "Current checkout"
+                    current
                 },
-                vec!["Current checkout".to_owned(), "New worktree".to_owned()],
+                vec![current.to_owned(), "New worktree".to_owned()],
             ));
             if self.draft.isolated {
                 let mut branches = self

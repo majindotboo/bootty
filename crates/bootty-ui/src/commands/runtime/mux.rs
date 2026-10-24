@@ -169,7 +169,8 @@ impl AppState {
             | PendingCommandResult::NativeResume { .. }
             | PendingCommandResult::Forward { .. }
             | PendingCommandResult::Clipboard { .. }
-            | PendingCommandResult::Link { .. } => false,
+            | PendingCommandResult::Link { .. }
+            | PendingCommandResult::NativeTitle { .. } => false,
         }
     }
 

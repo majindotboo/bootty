@@ -451,6 +451,15 @@ impl AppState {
         invocation: &CommandInvocation,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
+        if invocation
+            .target
+            .as_ref()
+            .is_some_and(|target| self.native_title_pending(target))
+        {
+            return CommandDispatch::Complete(CommandOutcome::Unavailable {
+                message: "The title is already being regenerated".into(),
+            });
+        }
         let Some(record) = service
             .sessions()
             .into_iter()
@@ -479,6 +488,7 @@ impl AppState {
         let repaint = self.repaint.clone();
         let commands = self.app_command_sender(Caller::Internal);
         let saved = self.generated_title_invocation(&record);
+        let target = record.target();
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = (|| {
@@ -530,7 +540,10 @@ impl AppState {
             _ = sender.send(outcome);
             repaint();
         });
-        CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+        CommandDispatch::Pending(PendingCommandResult::NativeTitle {
+            target,
+            result: receiver,
+        })
     }
 
     fn generated_title_invocation(

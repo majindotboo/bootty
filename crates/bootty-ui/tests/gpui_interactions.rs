@@ -129,6 +129,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 secondary: None,
                 project: None,
                 project_path: None,
+                cwd: None,
                 host: None,
                 branch: None,
                 agents: Vec::new(),
@@ -170,6 +171,7 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 secondary: None,
                 project: None,
                 project_path: None,
+                cwd: None,
                 host: None,
                 branch: None,
                 agents: Vec::new(),
@@ -377,6 +379,9 @@ fn draft_sidebar_rows_open_without_a_backend_session_target(cx: &mut TestAppCont
     row.context = None;
     row.reorder_anchor = None;
     row.trailing = Some("Draft".into());
+    row.cwd = Some("/tmp/worktrees/draft".into());
+    row.project_path = Some("/tmp/project".into());
+    row.branch = Some("topic/draft".into());
     row.selectable = true;
     sidebar.rows = vec![row];
     let (probe, cx) =
@@ -393,6 +398,32 @@ fn draft_sidebar_rows_open_without_a_backend_session_target(cx: &mut TestAppCont
                 && invocation.arguments == ["draft-identity"] && invocation.target.as_ref() == Some(&binding)
         )));
     });
+    let mut settings = bootty_control::CommandInvocation::new(
+        "project.edit",
+        vec!["/tmp/project".into()],
+        bootty_control::Caller::Internal,
+    );
+    settings.target = Some(binding.clone());
+    for (keys, expected) in [
+        (
+            "down right enter",
+            ChromeIntent::CopyText("/tmp/worktrees/draft".into()),
+        ),
+        (
+            "down right down enter",
+            ChromeIntent::CopyText("topic/draft".into()),
+        ),
+        ("down down enter", ChromeIntent::Command(settings)),
+    ] {
+        probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
+        cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
+        draw_chrome(cx);
+        cx.simulate_keystrokes(keys);
+        draw_chrome(cx);
+        probe.update(cx, |probe, _| {
+            assert_eq!(probe.intents.borrow().as_slice(), [expected]);
+        });
+    }
 }
 
 fn fill_sidebar_sessions(sidebar: &mut SidebarSnapshot) {
@@ -1438,36 +1469,38 @@ fn context_menu_escape_and_action_restore_focus_and_emit(cx: &mut TestAppContext
 #[gpui_kit::test]
 fn session_menus_offer_the_sessions_place(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
+    let mut snapshot = saved_task_snapshot(bootty_mux::session_membership::SessionState::default());
+    snapshot.sidebar.as_mut().unwrap().rows[0].kind = SidebarRowKind::Session;
     let row = &mut snapshot.sidebar.as_mut().expect("sidebar").rows[0];
     row.project_path = Some("/tmp/project".to_owned());
     row.branch = Some("feature/rail".to_owned());
+    row.cwd = Some("/tmp/worktrees/feature".into());
     row.host = None;
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     let row = center(cx.debug_bounds("sidebar-row-session").expect("session row"));
-    // Project tools and copy actions stay in their own submenus.
+    // New work uses this branch's checkout; copying and settings are directly reachable.
     for (keys, expected) in [
         (
-            "down down right enter",
-            ChromeIntent::NewSessionInProject {
+            "down enter",
+            ChromeIntent::NewSessionOnBranch {
                 scope: target().scope,
-                path: "/tmp/project".to_owned(),
+                path: "/tmp/worktrees/feature".to_owned(),
             },
         ),
         (
-            "down down right down enter",
+            "down down down down down down down down down down right down enter",
             ChromeIntent::RevealPath {
                 scope: target().scope,
-                path: "/tmp/project".to_owned(),
+                path: "/tmp/worktrees/feature".to_owned(),
             },
         ),
         (
-            "down down right down down right enter",
-            ChromeIntent::CopyText("/tmp/project".to_owned()),
+            "down down down down down down down down right enter",
+            ChromeIntent::CopyText("/tmp/worktrees/feature".to_owned()),
         ),
         (
-            "down down right down down right down enter",
+            "down down down down down down down down right down enter",
             ChromeIntent::CopyText("feature/rail".to_owned()),
         ),
     ] {
@@ -2106,7 +2139,7 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn rejected_checkout_selection_restores_the_branch_shown_by_the_owner(cx: &mut TestAppContext) {
+fn branch_picker_tracks_worktree_owners_and_rejected_selection(cx: &mut TestAppContext) {
     use bootty_gpui::{DialogField, DialogFieldKind};
     let mut spec = DialogSpec::prompt(
         bootty_ui::presentation::dialogs::NEW_SESSION_ID,
@@ -2128,7 +2161,11 @@ fn rejected_checkout_selection_restores_the_branch_shown_by_the_owner(cx: &mut T
             "checkout-branch",
             "Branch",
             "main",
-            vec!["main".into(), "feature/existing".into()],
+            vec![
+                "main".into(),
+                "feature/existing".into(),
+                "topic/linked".into(),
+            ],
         ),
     ]
     .into_iter()
@@ -2140,12 +2177,33 @@ fn rejected_checkout_selection_restores_the_branch_shown_by_the_owner(cx: &mut T
         kind: DialogFieldKind::Choice(options),
     })
     .collect();
+    spec.selected_project = Some("/project".into());
+    spec.branches = serde_json::from_value(serde_json::json!([
+        {"name":"main", "commit":"abc", "upstream":null, "current":true, "worktree_path":"/project"},
+        {"name":"feature/existing", "commit":"abc", "upstream":null, "current":false},
+        {"name":"topic/linked", "commit":"abc", "upstream":null, "current":false, "worktree_path":"/worktrees/linked"}
+    ])).unwrap();
     let (probe, cx) = embedded_dialog_window(cx, spec.clone());
     draw_chrome(cx);
     let branch = cx
         .debug_bounds("dialog-checkout-branch")
         .expect("branch picker");
     cx.simulate_click(branch.center(), Modifiers::none());
+    draw_chrome(cx);
+    assert!(cx.debug_bounds("branch-badge-main-current").is_some());
+    assert!(
+        cx.debug_bounds("branch-badge-topic/linked-worktree")
+            .is_some()
+    );
+    assert_eq!(
+        cx.debug_bounds("branch-badge-main-current")
+            .unwrap()
+            .right(),
+        cx.debug_bounds("branch-badge-topic/linked-worktree")
+            .unwrap()
+            .right(),
+        "branch state labels share the trailing edge",
+    );
     cx.simulate_input("feature/existing");
     draw_chrome(cx);
     cx.simulate_keystrokes("enter");
@@ -2158,6 +2216,7 @@ fn rejected_checkout_selection_restores_the_branch_shown_by_the_owner(cx: &mut T
         probe.intents.borrow_mut().clear();
     });
     spec.hint = Some("Commit or stash your changes".into());
+    spec.branches[2].worktree_path = None;
     cx.update(|window, cx| {
         probe.read(cx).dialog.clone().update(cx, |dialog, cx| {
             dialog.present(Some(spec), window, cx);
@@ -2166,6 +2225,11 @@ fn rejected_checkout_selection_restores_the_branch_shown_by_the_owner(cx: &mut T
     draw_chrome(cx);
     cx.simulate_click(branch.center(), Modifiers::none());
     draw_chrome(cx);
+    assert!(cx.debug_bounds("branch-badge-main-current").is_some());
+    assert!(
+        cx.debug_bounds("branch-badge-topic/linked-worktree")
+            .is_none()
+    );
     cx.simulate_keystrokes("enter");
     draw_chrome(cx);
     probe.update(cx, |probe, _| {
@@ -2254,6 +2318,7 @@ fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
         text: None,
         text_label: None,
         fields: Vec::new(),
+        branches: Vec::new(),
         spaces: Vec::new(),
         attachments: Vec::new(),
         applications: Vec::new(),
@@ -2311,6 +2376,7 @@ fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppCo
         text: Some("needle".to_owned()),
         text_label: None,
         fields: Vec::new(),
+        branches: Vec::new(),
         spaces: Vec::new(),
         attachments: Vec::new(),
         applications: Vec::new(),
@@ -2360,6 +2426,7 @@ fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
         text: Some(String::new()),
         text_label: None,
         fields: Vec::new(),
+        branches: Vec::new(),
         spaces: Vec::new(),
         attachments: Vec::new(),
         applications: Vec::new(),
@@ -3178,7 +3245,7 @@ fn saved_sessions_rename_in_their_sidebar_row(cx: &mut TestAppContext) {
     // The menu's Rename edits in place too, and Escape keeps the old title.
     cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
     draw_chrome(cx);
-    cx.simulate_keystrokes("down enter");
+    cx.simulate_keystrokes("down down down down enter");
     draw_chrome(cx);
     assert!(cx.debug_bounds("sidebar-rename-session").is_some());
     cx.simulate_input("Discarded");
@@ -3230,6 +3297,7 @@ fn saved_task(state: bootty_mux::session_membership::SessionState) -> SidebarTas
         name: "bootty-7c".to_owned(),
         title: String::new(),
         native_conversation: None,
+        title_regenerating: false,
         identity: "saved-identity".to_owned(),
         state,
         binding: Some(bootty_control::CommandTarget {
@@ -3672,11 +3740,11 @@ fn saved_task_keyboard_menu_captures_binding_identity_and_absolute_snooze(cx: &m
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     let row = cx.debug_bounds("sidebar-row-session").expect("saved row");
     for (position, preset, command, deadline) in [
-        (2, None, "session.pin", None),
-        (3, None, "session.settle", None),
-        (6, None, "session.archive", None),
-        (4, Some(0), "session.snooze", Some("4600")),
-        (4, Some(1), "session.snooze", Some("11800")),
+        (1, None, "session.pin", None),
+        (2, None, "session.settle", None),
+        (8, None, "session.archive", None),
+        (3, Some(0), "session.snooze", Some("4600")),
+        (3, Some(1), "session.snooze", Some("11800")),
     ] {
         cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
         draw_chrome(cx);
@@ -3725,21 +3793,36 @@ fn native_task_menu_captures_the_conversation_generation(cx: &mut TestAppContext
         bootty_control::Caller::Internal,
     );
     regenerate.target = Some(target.clone());
+    let mut unread = regenerate.clone();
+    "agents.native.mark-unread".clone_into(&mut unread.command);
     for kind in [SidebarRowKind::Session, SidebarRowKind::DetachedSession] {
-        for (keys, expected) in [
+        for (keys, regenerating, expected) in [
             (
-                "down down down down down right down enter",
-                ChromeIntent::Command(regenerate.clone()),
+                "down down down down down enter",
+                false,
+                Some(ChromeIntent::Command(regenerate.clone())),
             ),
             (
-                "down down down down down right down down down enter",
-                ChromeIntent::ForkConversation(target.clone()),
+                "down down down down down down down down down right down enter",
+                false,
+                Some(ChromeIntent::ForkConversation(target.clone())),
+            ),
+            (
+                "down down down down down down enter",
+                false,
+                Some(ChromeIntent::Command(unread.clone())),
+            ),
+            (
+                "down down down down down enter",
+                true,
+                Some(ChromeIntent::Command(unread.clone())),
             ),
         ] {
             let mut snapshot = saved_task_snapshot(SessionState::default());
             let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
             row.kind = kind.clone();
             row.task.as_mut().unwrap().native_conversation = Some(target.clone());
+            row.task.as_mut().unwrap().title_regenerating = regenerating;
             let (probe, cx) =
                 cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
             let bounds = cx.debug_bounds("sidebar-row-session").unwrap();
@@ -3748,7 +3831,7 @@ fn native_task_menu_captures_the_conversation_generation(cx: &mut TestAppContext
             cx.simulate_keystrokes(keys);
             draw_chrome(cx);
             probe.update(cx, |probe, _| {
-                assert_eq!(probe.intents.borrow().as_slice(), [expected]);
+                assert_eq!(probe.intents.borrow().as_slice(), expected.as_slice());
             });
         }
     }
@@ -3791,7 +3874,7 @@ fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
                 ..SessionState::default()
             },
             0,
-            3,
+            2,
             "session.activate",
         ),
         (
@@ -3800,7 +3883,7 @@ fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
                 ..SessionState::default()
             },
             2,
-            3,
+            5,
             "session.unarchive",
         ),
         (
@@ -3809,7 +3892,7 @@ fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
                 ..SessionState::default()
             },
             3,
-            4,
+            3,
             "session.unsnooze",
         ),
     ] {
@@ -4660,10 +4743,7 @@ fn permanent_session_deletion_requires_the_visible_confirmation(cx: &mut TestApp
     let row = visual.debug_bounds("sidebar-row-session").unwrap();
     visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
     draw_chrome(visual);
-    for _ in 0..7 {
-        visual.simulate_keystrokes("down");
-    }
-    visual.simulate_keystrokes("enter");
+    visual.simulate_keystrokes("down down down down down down down down down enter");
     draw_chrome(visual);
     probe.update(visual, |probe, _| {
         assert!(probe.intents.borrow().is_empty());
@@ -4701,10 +4781,7 @@ fn archiving_a_working_session_asks_first(cx: &mut TestAppContext) {
         let row = visual.debug_bounds("sidebar-row-session").unwrap();
         visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
         draw_chrome(visual);
-        for _ in 0..6 {
-            visual.simulate_keystrokes("down");
-        }
-        visual.simulate_keystrokes("enter");
+        visual.simulate_keystrokes("down down down down down down down down enter");
         draw_chrome(visual);
         if working {
             probe.update(visual, |probe, _| {

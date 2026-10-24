@@ -77,6 +77,7 @@ pub(super) enum ContextMenu {
     Draft {
         identity: String,
         binding: bootty_control::CommandTarget,
+        place: SessionPlace,
     },
     Session {
         target: SessionTarget,
@@ -115,6 +116,8 @@ pub(super) struct SidebarRename {
 #[derive(Clone, Default)]
 pub(super) struct SessionPlace {
     pub project: Option<String>,
+    pub project_name: Option<String>,
+    pub cwd: Option<String>,
     pub branch: Option<String>,
     pub local: bool,
     /// The session, and its project's scripts it can run in a new tab.
@@ -133,6 +136,16 @@ fn current_sidebar_session(snapshot: &ChromeSnapshot) -> Option<&SessionTarget> 
 }
 
 impl GpuiChrome {
+    pub(super) fn filter_sidebar_project(
+        &mut self,
+        project: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar_project = project;
+        self.sidebar_reveal_current.set(false);
+        cx.notify();
+    }
+
     #[must_use]
     pub fn new(snapshot: ChromeSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
@@ -474,28 +487,24 @@ impl GpuiChrome {
 
     fn menu_rows(menu: &ContextMenu) -> Vec<MenuRow> {
         match menu {
-            ContextMenu::Draft { identity, binding } => [
-                ("Open draft", "session.draft.open"),
-                ("Discard draft", "session.draft.discard"),
-            ]
-            .into_iter()
-            .map(|(label, command)| {
+            ContextMenu::Draft {
+                identity, binding, ..
+            } => {
                 let mut invocation = bootty_control::CommandInvocation::new(
-                    command,
+                    "session.draft.discard",
                     vec![identity.clone()],
                     bootty_control::Caller::Internal,
                 );
                 invocation.target = Some(binding.clone());
-                MenuRow {
-                    label: label.into(),
+                vec![MenuRow {
+                    label: "Discard draft".into(),
                     enabled: true,
-                    destructive: command == "session.draft.discard",
+                    destructive: true,
                     starts_group: false,
                     confirm: None,
                     intent: ChromeIntent::Command(invocation),
-                }
-            })
-            .collect(),
+                }]
+            }
             ContextMenu::Session {
                 target,
                 options,
@@ -1023,6 +1032,67 @@ pub(super) fn popup_menu(
         .fold(menu, |menu, row| append_menu_row(menu, row, owner))
 }
 
+#[derive(Default)]
+struct SessionMenuRows {
+    start: Vec<MenuRow>,
+    state: Vec<MenuRow>,
+    rename: Vec<MenuRow>,
+    conversation: Vec<MenuRow>,
+    copy: Vec<MenuRow>,
+    more: Vec<MenuRow>,
+    destructive: Vec<MenuRow>,
+}
+
+impl SessionMenuRows {
+    fn from_context(context: &ContextMenu) -> Self {
+        let mut rows = Self::default();
+        for row in GpuiChrome::menu_rows(context) {
+            match &row.intent {
+                ChromeIntent::NewSessionOnBranch { .. } => rows.start.push(row),
+                ChromeIntent::CopyText(_) => rows.copy.push(row),
+                ChromeIntent::RenameSavedSession(_)
+                | ChromeIntent::SessionContext {
+                    action: super::SessionContextAction::Rename,
+                    ..
+                } => rows.rename.push(row),
+                ChromeIntent::Command(invocation)
+                    if invocation.command.starts_with("agents.native.") =>
+                {
+                    rows.conversation.push(row);
+                }
+                ChromeIntent::Commands(invocations)
+                    if invocations.first().is_some_and(|invocation| {
+                        invocation.command.starts_with("agents.native.")
+                    }) =>
+                {
+                    rows.conversation.push(row);
+                }
+                ChromeIntent::Command(invocation)
+                    if matches!(
+                        invocation.command.as_str(),
+                        "session.archive" | "session.unarchive" | "session.delete"
+                    ) =>
+                {
+                    rows.destructive.push(row);
+                }
+                ChromeIntent::Commands(invocations)
+                    if invocations.first().is_some_and(|invocation| {
+                        matches!(
+                            invocation.command.as_str(),
+                            "session.archive" | "session.delete"
+                        )
+                    }) =>
+                {
+                    rows.destructive.push(row);
+                }
+                ChromeIntent::Command(_) | ChromeIntent::Commands(_) => rows.state.push(row),
+                _ => rows.more.push(row),
+            }
+        }
+        rows
+    }
+}
+
 pub(super) fn popup_session_menu(
     mut menu: PopupMenu,
     context: &ContextMenu,
@@ -1031,61 +1101,39 @@ pub(super) fn popup_session_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     menu = popup_focus_context(menu, owner, cx);
-    let (task, snooze) = match context {
-        ContextMenu::Session { task, now, .. } | ContextMenu::DetachedSession { task, now, .. } => {
-            (
-                task.as_ref(),
-                task.as_ref().map_or_else(Vec::new, |task| {
-                    sidebar::snooze_menu(std::slice::from_ref(task), *now)
-                }),
-            )
+    if let ContextMenu::Draft { binding, place, .. } = context {
+        return popup_draft_menu(menu, context, binding, place, owner, window, cx);
+    }
+    let (task, place, snooze) = match context {
+        ContextMenu::Session {
+            task, place, now, ..
         }
+        | ContextMenu::DetachedSession {
+            task, place, now, ..
+        } => (
+            task.as_ref(),
+            Some(place),
+            task.as_ref().map_or_else(Vec::new, |task| {
+                sidebar::snooze_menu(std::slice::from_ref(task), *now)
+            }),
+        ),
         ContextMenu::Sessions { tasks, now } => {
             let tasks: Vec<SidebarTask> = tasks.iter().map(|(task, _)| task.clone()).collect();
-            (None, sidebar::snooze_menu(&tasks, *now))
+            (None, None, sidebar::snooze_menu(&tasks, *now))
         }
         _ => return popup_menu(menu, context, owner),
     };
-    let mut project = Vec::new();
-    let mut more = Vec::new();
-    let mut destructive = Vec::new();
-    for row in GpuiChrome::menu_rows(context) {
-        match &row.intent {
-            ChromeIntent::NewSessionInProject { .. }
-            | ChromeIntent::RevealPath { .. }
-            | ChromeIntent::CopyText(_)
-            | ChromeIntent::RunProjectScript { .. } => project.push(row),
-            ChromeIntent::SessionContext {
-                action: super::SessionContextAction::MoveToSpace,
-                ..
-            }
-            | ChromeIntent::ForkConversation(_) => more.push(row),
-            ChromeIntent::Command(invocation)
-                if invocation.command.starts_with("agents.native.") =>
-            {
-                more.push(row);
-            }
-            ChromeIntent::Command(invocation)
-                if matches!(
-                    invocation.command.as_str(),
-                    "session.archive" | "session.unarchive" | "session.delete"
-                ) =>
-            {
-                destructive.push(row);
-            }
-            ChromeIntent::Commands(invocations)
-                if invocations.first().is_some_and(|invocation| {
-                    matches!(
-                        invocation.command.as_str(),
-                        "session.archive" | "session.delete"
-                    )
-                }) =>
-            {
-                destructive.push(row);
-            }
-            _ => menu = append_menu_row(menu, row, owner),
-        }
-    }
+    let SessionMenuRows {
+        start,
+        state,
+        rename,
+        conversation,
+        mut copy,
+        more,
+        destructive,
+    } = SessionMenuRows::from_context(context);
+    menu = append_menu_rows(menu, &start, owner);
+    menu = append_menu_rows(menu, &state, owner);
     if !snooze.is_empty() {
         let owner = owner.clone();
         menu = menu.submenu_with_icon(
@@ -1098,27 +1146,109 @@ pub(super) fn popup_session_menu(
             move |menu, _, _| append_menu_rows(menu, &snooze, &owner),
         );
     }
-    if !project.is_empty() {
+    if !rename.is_empty() || !conversation.is_empty() {
+        if !start.is_empty() || !state.is_empty() {
+            menu = menu.separator();
+        }
+        menu = append_menu_rows(menu, &rename, owner);
+        menu = append_menu_rows(menu, &conversation, owner);
+    }
+    if let Some(place) = place {
+        menu = popup_project_filter(menu, place, owner, cx);
+    }
+    if let Some(task) = task.filter(|task| !task.state.deleted) {
+        menu = popup_auto_settle(menu, task, owner, window, cx);
+        copy.push(MenuRow {
+            label: "Session ID".into(),
+            enabled: true,
+            destructive: false,
+            starts_group: false,
+            confirm: None,
+            intent: ChromeIntent::CopyText(task.identity.clone()),
+        });
+    }
+    if !copy.is_empty() {
         let owner = owner.clone();
         menu = menu
             .separator()
-            .submenu("Project", window, cx, move |menu, window, cx| {
-                popup_project_actions(menu, &project, &owner, window, cx)
+            .submenu("Copy", window, cx, move |menu, _, _| {
+                append_menu_rows(menu, &copy, &owner)
             });
     }
-    let auto_settle = task.filter(|task| !task.state.deleted).cloned();
-    if !more.is_empty() || auto_settle.is_some() {
+    if let (Some(task), Some(place)) = (task, place)
+        && let (Some(binding), Some(project)) = (&task.binding, &place.project)
+    {
+        menu = append_menu_row(menu, sidebar::project_settings_row(project, binding), owner);
+    }
+    if !more.is_empty() {
         let owner = owner.clone();
-        menu = menu.submenu("More", window, cx, move |menu, window, cx| {
-            let menu = append_menu_rows(menu, &more, &owner);
-            let Some(task) = &auto_settle else {
-                return menu;
-            };
-            popup_auto_settle(menu.separator(), task, &owner, window, cx)
+        menu = menu.submenu("More", window, cx, move |menu, _, _| {
+            append_menu_rows(menu, &more, &owner)
         });
     }
-    for row in destructive {
-        menu = append_menu_row(menu, row, owner);
+    append_menu_rows(menu.separator(), &destructive, owner)
+}
+
+fn popup_project_filter(
+    menu: PopupMenu,
+    place: &SessionPlace,
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+    cx: &App,
+) -> PopupMenu {
+    let Some(project) = place.project.clone() else {
+        return menu;
+    };
+    let active = owner
+        .upgrade()
+        .is_some_and(|owner| owner.read(cx).sidebar_project.as_ref() == Some(&project));
+    let label = if active {
+        "Show all projects".to_owned()
+    } else {
+        format!(
+            "Filter by {}",
+            place
+                .project_name
+                .as_deref()
+                .unwrap_or_else(|| sidebar::project_name(&project))
+        )
+    };
+    let owner = owner.clone();
+    menu.item(
+        PopupMenuItem::new(label)
+            .icon(gpui_kit::assets::IconName::FolderTree)
+            .on_click(move |_, _, cx| {
+                _ = owner.update(cx, |chrome, cx| {
+                    chrome.filter_sidebar_project((!active).then(|| project.clone()), cx);
+                });
+            }),
+    )
+}
+
+fn popup_draft_menu(
+    menu: PopupMenu,
+    context: &ContextMenu,
+    binding: &bootty_control::CommandTarget,
+    place: &SessionPlace,
+    owner: &gpui_kit::WeakEntity<GpuiChrome>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let copy: Vec<_> = sidebar::place_copy_menu(place);
+    let mut menu = menu;
+    if !copy.is_empty() {
+        let owner = owner.clone();
+        menu = menu.submenu("Copy", window, cx, move |menu, _, _| {
+            append_menu_rows(menu, &copy, &owner)
+        });
+    }
+    if let Some(project) = &place.project {
+        menu = append_menu_row(menu, sidebar::project_settings_row(project, binding), owner);
+    }
+    for row in GpuiChrome::menu_rows(context)
+        .into_iter()
+        .filter(|row| row.destructive)
+    {
+        menu = append_menu_row(menu.separator(), row, owner);
     }
     menu
 }
@@ -1132,28 +1262,36 @@ fn popup_auto_settle(
 ) -> PopupMenu {
     let owner = owner.clone();
     let task = task.clone();
-    menu.submenu("Auto-settle behavior", window, cx, move |mut menu, _, _| {
-        for (label, enabled) in [("Use inactivity setting", true), ("Keep active", false)] {
-            let mut invocation = bootty_control::CommandInvocation::new(
-                "session.auto_settle",
-                vec![task.identity.clone(), enabled.to_string()],
-                bootty_control::Caller::Internal,
-            );
-            invocation.target.clone_from(&task.binding);
-            let owner = owner.clone();
-            menu = menu.item(
-                PopupMenuItem::new(label)
-                    .checked(enabled != task.state.auto_settle_disabled)
-                    .disabled(task.pending)
-                    .on_click(move |_, _, cx| {
-                        _ = owner.update(cx, |_, cx| {
-                            cx.emit(ChromeIntent::Command(invocation.clone()));
-                        });
-                    }),
-            );
-        }
-        menu
-    })
+    menu.submenu_with_icon(
+        Some(gpui_kit::component::Icon::new(
+            gpui_kit::assets::IconName::Timer,
+        )),
+        "Auto-settle behavior",
+        window,
+        cx,
+        move |mut menu, _, _| {
+            for (label, enabled) in [("Enabled", true), ("Disabled", false)] {
+                let mut invocation = bootty_control::CommandInvocation::new(
+                    "session.auto_settle",
+                    vec![task.identity.clone(), enabled.to_string()],
+                    bootty_control::Caller::Internal,
+                );
+                invocation.target.clone_from(&task.binding);
+                let owner = owner.clone();
+                menu = menu.item(
+                    PopupMenuItem::new(label)
+                        .checked(enabled != task.state.auto_settle_disabled)
+                        .disabled(task.pending)
+                        .on_click(move |_, _, cx| {
+                            _ = owner.update(cx, |_, cx| {
+                                cx.emit(ChromeIntent::Command(invocation.clone()));
+                            });
+                        }),
+                );
+            }
+            menu
+        },
+    )
 }
 
 fn append_menu_rows(
@@ -1168,31 +1306,6 @@ fn append_menu_rows(
             row.starts_group &= index != 0;
             append_menu_row(menu, row, owner)
         })
-}
-
-fn popup_project_actions(
-    mut menu: PopupMenu,
-    rows: &[MenuRow],
-    owner: &gpui_kit::WeakEntity<GpuiChrome>,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let mut copy = Vec::new();
-    for mut row in rows.iter().cloned() {
-        if matches!(row.intent, ChromeIntent::CopyText(_)) {
-            copy.push(row);
-        } else {
-            row.starts_group = false;
-            menu = append_menu_row(menu, row, owner);
-        }
-    }
-    if !copy.is_empty() {
-        let owner = owner.clone();
-        menu = menu.submenu("Copy", window, cx, move |menu, _, _| {
-            append_menu_rows(menu, &copy, &owner)
-        });
-    }
-    menu
 }
 
 pub(super) fn popup_focus_context(
@@ -1308,6 +1421,8 @@ fn menu_icon(intent: &ChromeIntent) -> Option<gpui_kit::assets::IconName> {
             ..
         } => Some(I::FolderInput),
         ChromeIntent::ForkConversation(_) => Some(I::GitFork),
+        ChromeIntent::NewSessionOnBranch { .. } => Some(I::MessageSquarePlus),
+        ChromeIntent::CopyText(_) => Some(I::Copy),
         ChromeIntent::Command(invocation) => command_icon(&invocation.command),
         ChromeIntent::Commands(invocations) => command_icon(&invocations.first()?.command),
         _ => None,
@@ -1325,6 +1440,9 @@ fn command_icon(command: &str) -> Option<gpui_kit::assets::IconName> {
         "session.unarchive" => Some(I::ArchiveRestore),
         "session.delete" => Some(I::Trash),
         "session.restore" => Some(I::Undo2),
+        "agents.native.regenerate-title" => Some(I::RefreshCw),
+        "agents.native.mark-unread" => Some(I::MailOpen),
+        "project.edit" => Some(I::Settings2),
         _ => None,
     }
 }

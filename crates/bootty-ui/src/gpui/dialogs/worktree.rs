@@ -5,11 +5,12 @@ use gpui_kit::component::{
     select::{Select, SelectEvent, SelectState},
 };
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub(super) struct RefChoice {
     value: String,
     custom: bool,
     base_ref: bool,
+    badge: Option<&'static str>,
 }
 
 impl SearchableListItem for RefChoice {
@@ -44,11 +45,28 @@ impl SearchableListItem for RefChoice {
         h_flex()
             .id(SharedString::from(format!("branch-choice-{}", self.value)))
             .role(gpui_kit::Role::Label)
-            .aria_label(self.title())
+            .aria_label(self.badge.map_or_else(
+                || self.title(),
+                |badge| format!("{}, {badge}", self.title()).into(),
+            ))
             .w_full()
+            .flex_1()
             .min_w_0()
             .gap_2()
             .child(div().flex_1().min_w_0().text_ellipsis().child(self.title()))
+            .when_some(self.badge, |row, badge| {
+                row.child(
+                    div()
+                        .debug_selector({
+                            let name = self.value.clone();
+                            move || format!("branch-badge-{name}-{badge}")
+                        })
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(badge),
+                )
+            })
             .when(self.custom, |row| {
                 row.child(
                     div()
@@ -67,13 +85,35 @@ pub(super) struct RefChoices {
 }
 
 impl RefChoices {
-    fn new(values: &[String], custom_refs: bool) -> Self {
+    fn new(
+        values: &[String],
+        custom_refs: bool,
+        branches: &[bootty_git::changes::GitBranch],
+        project: Option<&str>,
+    ) -> Self {
         let all = values
             .iter()
             .map(|value| RefChoice {
                 value: value.clone(),
                 custom: false,
                 base_ref: custom_refs,
+                badge: branches
+                    .iter()
+                    .find(|branch| branch.name == *value)
+                    .and_then(|branch| {
+                        if branch.current {
+                            Some("current")
+                        } else if branch
+                            .worktree_path
+                            .as_deref()
+                            .zip(project)
+                            .is_some_and(|(path, project)| path != project)
+                        {
+                            Some("worktree")
+                        } else {
+                            None
+                        }
+                    }),
             })
             .collect::<Vec<_>>();
         Self {
@@ -86,6 +126,16 @@ impl RefChoices {
 
 impl SearchableListDelegate for RefChoices {
     type Item = RefChoice;
+    fn render_item(
+        &self,
+        _: IndexPath,
+        item: &RefChoice,
+        _: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<gpui_kit::AnyElement> {
+        Some(item.render(window, cx).into_any_element())
+    }
     fn items_count(&self, _: usize) -> usize {
         self.matches.len()
     }
@@ -116,6 +166,7 @@ impl SearchableListDelegate for RefChoices {
                 value: query.to_owned(),
                 custom: true,
                 base_ref: true,
+                badge: None,
             });
         }
         gpui_kit::Task::ready(())
@@ -124,7 +175,7 @@ impl SearchableListDelegate for RefChoices {
 
 pub(super) struct WorktreeRefPicker {
     state: Entity<SelectState<RefChoices>>,
-    values: Vec<String>,
+    choices: Vec<RefChoice>,
     value: String,
     field: String,
     _subscription: Subscription,
@@ -132,11 +183,15 @@ pub(super) struct WorktreeRefPicker {
 
 impl DialogView {
     pub(super) fn sync_worktree_ref_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(field) = self.spec.as_ref().and_then(|spec| {
-            spec.fields
-                .iter()
-                .find(|field| matches!(field.id.as_str(), "start-ref" | "checkout-branch"))
-        }) else {
+        let Some(spec) = self.spec.as_ref() else {
+            self.worktree_ref_picker = None;
+            return;
+        };
+        let Some(field) = spec
+            .fields
+            .iter()
+            .find(|field| matches!(field.id.as_str(), "start-ref" | "checkout-branch"))
+        else {
             self.worktree_ref_picker = None;
             return;
         };
@@ -155,13 +210,20 @@ impl DialogView {
         if !field.value.is_empty() && !values.contains(&field.value) {
             values.insert(0, field.value.clone());
         }
+        let items = RefChoices::new(
+            &values,
+            custom_refs,
+            &spec.branches,
+            spec.selected_project.as_deref(),
+        );
+        let choices = items.all.clone();
         if let Some(picker) = &mut self.worktree_ref_picker {
-            if picker.values != values || picker.value != field.value {
+            if picker.choices != choices || picker.value != field.value {
                 picker.state.update(cx, |state, cx| {
-                    state.set_items(RefChoices::new(&values, custom_refs), window, cx);
+                    state.set_items(items, window, cx);
                     state.set_selected_value(&field.value, window, cx);
                 });
-                picker.values = values;
+                picker.choices = choices;
                 picker.value.clone_from(&field.value);
             }
             return;
@@ -170,10 +232,7 @@ impl DialogView {
             .iter()
             .position(|value| value == &field.value)
             .map(IndexPath::new);
-        let state = cx.new(|cx| {
-            SelectState::new(RefChoices::new(&values, custom_refs), selected, window, cx)
-                .searchable(true)
-        });
+        let state = cx.new(|cx| SelectState::new(items, selected, window, cx).searchable(true));
         let field_id = field.id.clone();
         let subscription = cx.subscribe(&state, move |this, _, event, cx| {
             if let SelectEvent::Confirm(Some(value)) = event
@@ -192,7 +251,7 @@ impl DialogView {
         });
         self.worktree_ref_picker = Some(WorktreeRefPicker {
             state,
-            values,
+            choices,
             value: field.value.clone(),
             field: field.id.clone(),
             _subscription: subscription,

@@ -791,8 +791,9 @@ fn append_creation_drafts(state: &AppState, rows: &mut Vec<SidebarRow>, palette:
                 artwork: None,
             }),
             project_path: draft.project.clone(),
+            cwd: Some(draft.cwd.clone()),
             host: None,
-            branch: None,
+            branch: draft.branch,
             agents: vec![SidebarAgent {
                 key: format!("draft-provider:{}", draft.identity),
                 icon: provider
@@ -920,6 +921,7 @@ fn empty_project_row(
         secondary: None,
         project: None,
         project_path: Some(project.cwd.clone()),
+        cwd: Some(project.cwd.clone()),
         host: None,
         branch: None,
         agents: Vec::new(),
@@ -961,6 +963,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             secondary: None,
             project: None,
             project_path: None,
+            cwd: None,
             host: state
                 .active_multiplexer()
                 .remote
@@ -1000,6 +1003,7 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                 secondary: None,
                 project: None,
                 project_path: None,
+                cwd: None,
                 host: state
                     .active_multiplexer()
                     .remote
@@ -1174,6 +1178,12 @@ fn sidebar_rows(
             terminal_priority,
             state.ui_theme().palette,
         );
+        if let Some(task) = &mut row.task {
+            task.title_regenerating = task
+                .native_conversation
+                .as_ref()
+                .is_some_and(|target| state.native_title_pending(target));
+        }
         rows.push(row);
         last_group = Some(group);
     }
@@ -1553,6 +1563,7 @@ fn sidebar_session_base(
         secondary: None,
         project: None,
         project_path: session.cwd.clone(),
+        cwd: session.cwd.clone(),
         host: state
             .active_multiplexer()
             .remote
@@ -1604,6 +1615,7 @@ fn sidebar_session_base(
                     })
                     .flatten(),
                 state: saved.state,
+                title_regenerating: false,
                 binding: state
                     .saved_session_invocation(binding.scope(), "session.saved", Vec::new())
                     .and_then(|invocation| invocation.target),
@@ -2108,6 +2120,7 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
         intent @ (ChromeIntent::CopyText(_)
         | ChromeIntent::RevealPath { .. }
         | ChromeIntent::OpenInEditor { .. }
+        | ChromeIntent::NewSessionOnBranch { .. }
         | ChromeIntent::NewSessionInProject { .. }) => apply_place(state, intent, &mut effects),
         ChromeIntent::ReorderSession { source, before } => {
             state.reorder_session_before(&source, before.as_deref())
@@ -2237,6 +2250,9 @@ fn apply_place(state: &mut AppState, intent: ChromeIntent, effects: &mut Vec<App
         ),
         ChromeIntent::NewSessionInProject { scope, path } => {
             state.open_new_session_dialog_in(id(scope), path)
+        }
+        ChromeIntent::NewSessionOnBranch { scope, path } => {
+            state.open_new_session_on_branch(id(scope), path)
         }
         _ => false,
     }

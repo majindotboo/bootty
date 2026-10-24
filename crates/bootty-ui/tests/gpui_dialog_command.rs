@@ -1213,6 +1213,7 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
         text: None,
         text_label: None,
         fields: Vec::new(),
+        branches: Vec::new(),
         spaces: Vec::new(),
         applications: Vec::new(),
         provider_mentions: Vec::new(),

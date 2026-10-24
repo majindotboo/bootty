@@ -344,6 +344,7 @@ pub struct SidebarRow {
     pub secondary: Option<String>,
     pub project: Option<SidebarProject>,
     pub project_path: Option<String>,
+    pub cwd: Option<String>,
     pub host: Option<String>,
     pub branch: Option<String>,
     pub agents: Vec<SidebarAgent>,
@@ -385,6 +386,7 @@ pub struct SidebarTask {
     /// The row's title, for confirmations that name the session.
     pub title: String,
     pub native_conversation: Option<bootty_control::CommandTarget>,
+    pub title_regenerating: bool,
     pub state: bootty_mux::session_membership::SessionState,
     pub binding: Option<bootty_control::CommandTarget>,
     pub pending: bool,
@@ -608,6 +610,10 @@ pub enum ChromeIntent {
     },
     /// Start a new session in a session's project.
     NewSessionInProject {
+        scope: SpaceKey,
+        path: String,
+    },
+    NewSessionOnBranch {
         scope: SpaceKey,
         path: String,
     },

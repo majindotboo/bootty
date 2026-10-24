@@ -159,8 +159,15 @@ reports observed naming, checkout and session-creation stages; a failed start
 keeps the prompt, completed checkout and diagnostic available for retry.
 Current checkout exposes a searchable local-branch picker. Git's branch catalog
 reports which checkout owns each branch, so choosing one with a worktree reuses
-that directory. Other selections submit `git.branch-checkout` against the
+that directory. The picker marks the current branch and branches in other
+worktrees; a reused linked checkout displays “Current worktree”. Moving between
+existing checkouts preserves their branch ownership and the draft's contents.
+Other selections submit `git.branch-checkout` against the
 captured Binding; the displayed branch changes only after Git confirms success.
+Session menus expose lifecycle, unread, title regeneration, project filtering and
+project settings directly. Copy groups the checkout path, branch and saved session
+identity; starting another session on the branch reuses that checkout. Draft menus
+offer their context and project settings without starting a provider.
 
 Worktree cleanup runs on the checkouts' host too: in the app for local checkouts
 and through remote daemon protocol 23 for a remote host. The UI sends every saved
@@ -581,10 +588,11 @@ Keyboard and shared-pointer input require focus; the focus command raises only t
 real pointer, the UI briefly shows its own cursor where delivered input landed.
 
 The native transcript keeps assistant progress messages and final responses visible
-after a turn settles. Thinking and command output between messages fold into work
-summaries; a settled turn's duration reads on its last fold. File changes stay visible
-with file paths and line counts, and their diffs expand through the existing
-disclosure. Codex reports them as `fileChange`; Claude's Edit, MultiEdit and Write
+after a turn settles. Thinking, commands and file edits between messages fold into
+work summaries; a settled turn's duration reads on its last fold. Summaries name
+two primary activities and count repeated edits to one file once. Expanding work
+shows file paths, line counts and diff disclosures. A settled reply also keeps its
+combined list of changed files. Codex reports edits as `fileChange`; Claude's Edit, MultiEdit and Write
 results and Pi's edit results become the same `fileChange` from the provider's own
 patch, live and in history. A patch too large for a provider message is left out
 whole, so its file shows without a diff instead of a cut one. Live work retains its elapsed timer independently of the fold. Selected

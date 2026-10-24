@@ -39,6 +39,7 @@ pub struct DraftSummary {
     pub cwd: String,
     pub project: Option<String>,
     pub provider: String,
+    pub branch: Option<String>,
 }
 
 /// What of a draft survives a restart. Pasted files live in temporary files that end with the
@@ -295,6 +296,8 @@ impl CreationDraftStore {
             title: record.title.clone(),
             cwd: record.draft.cwd.clone(),
             project: record.project.clone(),
+            branch: (!matches!(record.draft.start_ref.as_str(), "" | "HEAD"))
+                .then(|| record.draft.start_ref.clone()),
             provider: if record.draft.mode == NewSessionMode::Terminal {
                 "terminal".into()
             } else {

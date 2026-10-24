@@ -737,9 +737,7 @@ impl SidebarRows {
                 .checked(self.project_filter.is_none())
                 .on_click(move |_, _, cx| {
                     _ = all_owner.update(cx, |chrome, cx| {
-                        chrome.sidebar_project = None;
-                        chrome.sidebar_reveal_current.set(false);
-                        cx.notify();
+                        chrome.filter_sidebar_project(None, cx);
                     });
                 }),
         );
@@ -755,9 +753,7 @@ impl SidebarRows {
                 .checked(self.project_filter.as_deref() == Some(&path))
                 .on_click(move |_, _, cx| {
                     _ = owner.update(cx, |chrome, cx| {
-                        chrome.sidebar_project = Some(path.clone());
-                        chrome.sidebar_reveal_current.set(false);
-                        cx.notify();
+                        chrome.filter_sidebar_project(Some(path.clone()), cx);
                     });
                 }),
             )
@@ -2311,26 +2307,20 @@ impl SidebarRows {
                 scope,
                 &super::view::SessionPlace {
                     project: Some(path.to_owned()),
+                    project_name: Some(row.text.clone()),
+                    cwd: Some(path.to_owned()),
                     branch: None,
                     local: row.host.is_none(),
                     scripts: None,
                 },
             )
         });
-        let mut settings = bootty_control::CommandInvocation::new(
-            "project.edit",
-            vec![path.to_owned()],
-            bootty_control::Caller::Internal,
-        );
-        settings.target = Some(target.clone());
-        rows.push(MenuRow {
-            confirm: None,
-            label: "Project settings…".to_owned(),
-            enabled: true,
-            destructive: false,
-            starts_group: true,
-            intent: ChromeIntent::Command(settings),
-        });
+        for row in &mut rows {
+            if matches!(row.intent, ChromeIntent::CopyText(_)) {
+                row.label = format!("Copy {}", row.label);
+            }
+        }
+        rows.push(project_settings_row(path, target));
         ProjectActions {
             key: row.key.clone(),
             name: row.text.clone(),
@@ -2346,6 +2336,13 @@ impl SidebarRows {
             return Some(ContextMenu::Draft {
                 identity: identity.clone(),
                 binding: binding.clone(),
+                place: super::view::SessionPlace {
+                    project: row.project_path.clone(),
+                    project_name: row.project.as_ref().map(|project| project.name.clone()),
+                    cwd: row.cwd.clone(),
+                    branch: row.branch.clone(),
+                    ..Default::default()
+                },
             });
         }
         if row.task.as_ref().is_some_and(|task| task.pending) {
@@ -2375,6 +2372,8 @@ impl SidebarRows {
         let options = row.context?;
         let place = super::view::SessionPlace {
             project: row.project_path.clone(),
+            project_name: row.project.as_ref().map(|project| project.name.clone()),
+            cwd: row.cwd.clone(),
             branch: row.branch.clone(),
             local: row.host.is_none(),
             scripts: Some((target.clone(), row.scripts.clone())),
@@ -2850,7 +2849,19 @@ pub(super) fn place_menu(scope: SpaceKey, place: &super::view::SessionPlace) -> 
         intent,
     };
     let mut rows = Vec::new();
-    if let Some(path) = &place.project {
+    if let (Some(path), Some(branch)) = (&place.cwd, &place.branch) {
+        rows.push(row(
+            &format!("New session on {branch}"),
+            false,
+            ChromeIntent::NewSessionOnBranch {
+                scope,
+                path: path.clone(),
+            },
+        ));
+    }
+    if let Some(path) = &place.project
+        && place.branch.is_none()
+    {
         rows.push(row(
             "New Session in Project",
             true,
@@ -2859,29 +2870,20 @@ pub(super) fn place_menu(scope: SpaceKey, place: &super::view::SessionPlace) -> 
                 path: path.clone(),
             },
         ));
-        if place.local {
-            rows.push(row(
-                crate::commands::reveal_label(),
-                false,
-                ChromeIntent::RevealPath {
-                    scope,
-                    path: path.clone(),
-                },
-            ));
-        }
+    }
+    if let Some(path) = place.cwd.as_ref()
+        && place.local
+    {
         rows.push(row(
-            "Copy Path",
+            crate::commands::reveal_label(),
             false,
-            ChromeIntent::CopyText(path.clone()),
+            ChromeIntent::RevealPath {
+                scope,
+                path: path.clone(),
+            },
         ));
     }
-    if let Some(branch) = &place.branch {
-        rows.push(row(
-            "Copy Branch",
-            place.project.is_none(),
-            ChromeIntent::CopyText(branch.clone()),
-        ));
-    }
+    rows.extend(place_copy_menu(place));
     if let (Some(project), Some((session, scripts))) = (&place.project, &place.scripts) {
         rows.extend(scripts.iter().enumerate().map(|(index, name)| {
             row(
@@ -2897,6 +2899,42 @@ pub(super) fn place_menu(scope: SpaceKey, place: &super::view::SessionPlace) -> 
     }
 
     rows
+}
+
+pub(super) fn place_copy_menu(place: &super::view::SessionPlace) -> Vec<MenuRow> {
+    [
+        ("Path", place.cwd.as_ref()),
+        ("Branch", place.branch.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(label, value)| {
+        value.map(|value| MenuRow {
+            label: label.into(),
+            enabled: true,
+            destructive: false,
+            starts_group: false,
+            confirm: None,
+            intent: ChromeIntent::CopyText(value.clone()),
+        })
+    })
+    .collect()
+}
+
+pub(super) fn project_settings_row(path: &str, binding: &bootty_control::CommandTarget) -> MenuRow {
+    let mut settings = bootty_control::CommandInvocation::new(
+        "project.edit",
+        vec![path.to_owned()],
+        bootty_control::Caller::Internal,
+    );
+    settings.target = Some(binding.clone());
+    MenuRow {
+        label: "Project settings…".into(),
+        enabled: true,
+        destructive: false,
+        starts_group: false,
+        confirm: None,
+        intent: ChromeIntent::Command(settings),
+    }
 }
 
 pub(super) fn session_menu(
@@ -3014,7 +3052,7 @@ impl RenderOnce for ProjectActions {
     }
 }
 
-fn project_name(path: &str) -> &str {
+pub(super) fn project_name(path: &str) -> &str {
     path.trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
         .next()
@@ -3151,7 +3189,9 @@ pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, working: bool) ->
     let mut rows = task
         .native_conversation
         .as_ref()
-        .map_or_else(Vec::new, |target| conversation_menu(target, task.pending));
+        .map_or_else(Vec::new, |target| {
+            conversation_menu(target, task.pending, task.title_regenerating)
+        });
     if !task.state.archived {
         rows.extend(row(
             if task.state.pinned { "Unpin" } else { "Pin" },
@@ -3250,21 +3290,24 @@ pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)], now: i64) -> Vec<Menu
             false,
         ),
     ];
-    let unread = tasks
-        .iter()
-        .filter_map(|(task, _)| task.native_conversation.as_ref())
-        .map(|target| {
-            let mut invocation = bootty_control::CommandInvocation::new(
-                "agents.native.mark-unread",
-                vec![target.handle.clone(), target.generation.to_string()],
-                bootty_control::Caller::Internal,
-            );
-            invocation.target = Some(target.clone());
-            invocation
-        })
-        .collect::<Vec<_>>();
+    let unread = conversation_invocations(tasks, "agents.native.mark-unread");
     if !unread.is_empty() {
-        rows.push(row(format!("Mark {count} unread"), unread, false));
+        rows.push(row(format!("Mark {} unread", unread.len()), unread, false));
+    }
+    let regenerate = conversation_invocations(tasks, "agents.native.regenerate-title");
+    if !regenerate.is_empty() {
+        let busy = tasks.iter().any(|(task, _)| task.title_regenerating);
+        let mut regenerate = row(
+            if busy {
+                "Regenerating…".into()
+            } else {
+                format!("Regenerate {} titles", regenerate.len())
+            },
+            regenerate,
+            false,
+        );
+        regenerate.enabled &= !busy;
+        rows.push(regenerate);
     }
     rows.push(row(
         format!("Archive {count} sessions"),
@@ -3283,8 +3326,31 @@ pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)], now: i64) -> Vec<Menu
     rows
 }
 
+fn conversation_invocations(
+    tasks: &[(SidebarTask, bool)],
+    command: &str,
+) -> Vec<bootty_control::CommandInvocation> {
+    tasks
+        .iter()
+        .filter_map(|(task, _)| task.native_conversation.as_ref())
+        .map(|target| {
+            let mut invocation = bootty_control::CommandInvocation::new(
+                command,
+                vec![target.handle.clone(), target.generation.to_string()],
+                bootty_control::Caller::Internal,
+            );
+            invocation.target = Some(target.clone());
+            invocation
+        })
+        .collect()
+}
+
 /// What a session's conversation offers: a new title, marking it unread, and a side chat.
-fn conversation_menu(target: &bootty_control::CommandTarget, pending: bool) -> Vec<MenuRow> {
+fn conversation_menu(
+    target: &bootty_control::CommandTarget,
+    pending: bool,
+    title_regenerating: bool,
+) -> Vec<MenuRow> {
     let mut rows = Vec::new();
     for (label, command) in [
         ("Regenerate title", "agents.native.regenerate-title"),
@@ -3298,8 +3364,13 @@ fn conversation_menu(target: &bootty_control::CommandTarget, pending: bool) -> V
         invocation.target = Some(target.clone());
         rows.push(MenuRow {
             confirm: None,
-            label: label.to_owned(),
-            enabled: !pending,
+            label: if command == "agents.native.regenerate-title" && title_regenerating {
+                "Regenerating…".into()
+            } else {
+                label.to_owned()
+            },
+            enabled: !(pending
+                || command == "agents.native.regenerate-title" && title_regenerating),
             destructive: false,
             starts_group: false,
             intent: ChromeIntent::Command(invocation),

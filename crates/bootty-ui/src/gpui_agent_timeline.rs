@@ -9,7 +9,7 @@ use gpui_kit::{
     App, Context, IntoElement as _, ParentElement as _, SharedString, Styled as _, Window, div,
     list, prelude::*,
 };
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, fmt::Write as _, time::Duration};
 
 /// How long a work group's rows take to slide open or shut.
 const WORK_MOTION: Duration = Duration::from_millis(160);
@@ -140,8 +140,7 @@ fn append_turn(
                 .get(*ix)
                 .is_some_and(|item| matches!(item.role.as_str(), "assistant" | "plan"))
     });
-    // Progress messages and file changes stay readable when a turn settles.
-    // Only the runs of thinking and command output between them fold.
+    // Commentary separates work runs; edits fold with commands and reasoning.
     let mut run = Vec::new();
     for index in indices {
         let Some(item) = transcript.get(index) else {
@@ -184,7 +183,7 @@ fn running_tool(transcript: &[NativeTranscriptItem], members: &[usize]) -> bool 
 fn is_work(item: &NativeTranscriptItem) -> bool {
     item.tool
         .as_ref()
-        .is_none_or(|tool| !matches!(tool.name.as_str(), "fileChange" | "contextCompaction"))
+        .is_none_or(|tool| tool.name != "contextCompaction")
         && (matches!(item.role.as_str(), "thinking" | "reasoning" | "tool") || item.tool.is_some())
 }
 
@@ -847,7 +846,7 @@ impl NativeAgentSessionView {
         let summary = if tools.is_empty() && thoughts == 1 {
             "Thought process".to_owned()
         } else {
-            activity_summary(thoughts, &tools)
+            activity_summary(thoughts, &tools, self.edited_file_count(members))
         };
         // A turn can fold several runs; its duration reads once, on the last.
         match members
@@ -861,6 +860,30 @@ impl NativeAgentSessionView {
             ),
             _ => summary,
         }
+    }
+
+    fn edited_file_count(&self, members: &[usize]) -> usize {
+        let mut paths = std::collections::BTreeSet::new();
+        let mut unspecified = 0_usize;
+        for item in members
+            .iter()
+            .filter_map(|index| self.record.snapshot.transcript.get(*index))
+        {
+            if item
+                .tool
+                .as_ref()
+                .is_none_or(|tool| tool_activity(tool) != ToolActivity::Edit)
+            {
+                continue;
+            }
+            match self.tool_diffs.get(&item.id) {
+                Some(super::ToolDiffs::Ready(files)) if !files.is_empty() => {
+                    paths.extend(files.iter().map(|file| file.source_path.as_str()));
+                }
+                _ => unspecified = unspecified.saturating_add(1),
+            }
+        }
+        paths.len().saturating_add(unspecified)
     }
 
     /// Whether no work follows `members` before the next prompt.
@@ -1091,43 +1114,77 @@ fn tool_activity(tool: &bootty_agents::NativeToolCall) -> ToolActivity {
     }
 }
 
-/// "Thought 2 times · Ran 3 commands · Read 2 files · 1 failed": what a run of work did, in a
-/// fixed order.
-fn activity_summary(thoughts: usize, tools: &[&bootty_agents::NativeToolCall]) -> String {
-    let mut counts = BTreeMap::new();
-    for tool in tools {
-        let count = counts.entry(tool_activity(tool)).or_insert(0_usize);
-        *count = count.saturating_add(1);
-    }
-    let plural = |count: usize| if count == 1 { "" } else { "s" };
-    let thought = (thoughts > 0).then(|| {
-        if thoughts == 1 {
-            "Thought once".to_owned()
+/// Two primary activities summarize a run; individual calls stay behind its disclosure.
+fn activity_summary(
+    thoughts: usize,
+    tools: &[&bootty_agents::NativeToolCall],
+    edited_files: usize,
+) -> String {
+    if tools.is_empty() {
+        return if thoughts == 1 {
+            "Thought".into()
         } else {
-            format!("Thought {thoughts} times")
+            format!("Thought (×{thoughts})")
+        };
+    }
+    let mut counts = Vec::<(ToolActivity, usize)>::new();
+    for tool in tools {
+        let activity = tool_activity(tool);
+        if let Some((_, count)) = counts.iter_mut().find(|(kind, _)| *kind == activity) {
+            *count = count.saturating_add(1);
+        } else {
+            counts.push((activity, 1));
         }
+    }
+    let mut selected = counts.iter().copied().enumerate().collect::<Vec<_>>();
+    selected.sort_by_key(|(_, (activity, _))| match activity {
+        ToolActivity::Command | ToolActivity::Edit => 0,
+        ToolActivity::Read | ToolActivity::Search => 1,
+        ToolActivity::Other => 2,
     });
-    thought
-        .into_iter()
-        .chain(counts.into_iter().map(|(activity, count)| match activity {
-            ToolActivity::Command => format!("Ran {count} command{}", plural(count)),
-            ToolActivity::Read => format!("Read {count} file{}", plural(count)),
-            ToolActivity::Edit => format!("Edited {count} file{}", plural(count)),
-            ToolActivity::Search => format!("Searched {count} time{}", plural(count)),
-            ToolActivity::Other => format!("Used {count} tool{}", plural(count)),
-        }))
-        .chain(
-            Some(
-                tools
-                    .iter()
-                    .filter(|tool| tool.status == NativeToolStatus::Failed)
-                    .count(),
-            )
-            .filter(|failed| *failed > 0)
-            .map(|failed| format!("{failed} failed")),
-        )
-        .collect::<Vec<_>>()
-        .join(" · ")
+    selected.truncate(2);
+    selected.sort_by_key(|(index, _)| *index);
+    let plural = |count: usize| if count == 1 { "" } else { "s" };
+    let mut labels = selected
+        .iter()
+        .map(|(_, (activity, count))| {
+            let count = *count;
+            match activity {
+                ToolActivity::Command => format!("Ran {count} command{}", plural(count)),
+                ToolActivity::Read => format!("Read {count} file{}", plural(count)),
+                ToolActivity::Edit => {
+                    format!("Changed {edited_files} file{}", plural(edited_files))
+                }
+                ToolActivity::Search => format!("Searched {count} time{}", plural(count)),
+                ToolActivity::Other => format!("Used {count} tool{}", plural(count)),
+            }
+        })
+        .collect::<Vec<_>>();
+    let other = tools
+        .len()
+        .saturating_sub(selected.iter().map(|(_, (_, count))| *count).sum::<usize>());
+    if other > 0 {
+        labels.push(format!("Performed {other} other action{}", plural(other)));
+    }
+    for label in labels.iter_mut().skip(1) {
+        if let Some(first) = label.get_mut(..1) {
+            first.make_ascii_lowercase();
+        }
+    }
+    let mut summary = match labels.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, [first])) => format!("{first} and {last}"),
+        Some((last, rest)) => format!("{}, and {last}", rest.join(", ")),
+        None => String::new(),
+    };
+    let failed = tools
+        .iter()
+        .filter(|tool| tool.status == NativeToolStatus::Failed)
+        .count();
+    if failed > 0 {
+        _ = write!(summary, " · {failed} failed");
+    }
+    summary
 }
 
 /// A running command reads "Running cargo"; the full command stays in the expanded row.

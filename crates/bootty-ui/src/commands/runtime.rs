@@ -226,6 +226,10 @@ pub enum PendingCommandResult {
         target: CommandTarget,
         result: mpsc::Receiver<CommandOutcome>,
     },
+    NativeTitle {
+        target: CommandTarget,
+        result: mpsc::Receiver<CommandOutcome>,
+    },
     /// An explicit create that succeeded, held until the first pane Bootty started for it runs.
     SessionStart {
         starting: StartingSession,
@@ -591,7 +595,8 @@ impl AppState {
             | PendingCommandResult::Clipboard { .. }
             | PendingCommandResult::Outcome(_)
             | PendingCommandResult::WorktreeCleanup { .. }
-            | PendingCommandResult::NativeResume { .. } => {}
+            | PendingCommandResult::NativeResume { .. }
+            | PendingCommandResult::NativeTitle { .. } => {}
         }
     }
 
@@ -599,6 +604,12 @@ impl AppState {
         self.commands.pending.iter().any(|pending| {
             matches!(&pending.result,
             PendingCommandResult::Mux { scope, layout: Some(_), .. } if *scope == self.mux_scope())
+        })
+    }
+
+    pub(crate) fn native_title_pending(&self, target: &CommandTarget) -> bool {
+        self.commands.pending.iter().any(|pending| {
+            matches!(&pending.result, PendingCommandResult::NativeTitle { target: pending, .. } if pending == target)
         })
     }
 
@@ -1024,7 +1035,8 @@ impl AppState {
                 }
             },
             PendingCommandResult::Outcome(result)
-            | PendingCommandResult::NativeResume { result, .. } => {
+            | PendingCommandResult::NativeResume { result, .. }
+            | PendingCommandResult::NativeTitle { result, .. } => {
                 match ready!(poll_command_result(result)) {
                     Ok(outcome) => outcome,
                     Err(mpsc::RecvError) => CommandOutcome::Failed {

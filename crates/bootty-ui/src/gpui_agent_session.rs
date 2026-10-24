@@ -212,6 +212,7 @@ enum ToolDiffs {
 
 struct ToolDiff {
     path: String,
+    source_path: String,
     view: Entity<crate::gpui_git_panel::GitDiffPanel>,
     rows: f32,
     counts: Option<(usize, usize)>,
@@ -6072,6 +6073,7 @@ fn tool_diff(
     });
     let path = std::path::Path::new(path);
     ToolDiff {
+        source_path: path.to_string_lossy().into_owned(),
         path: path
             .strip_prefix(cwd)
             .unwrap_or(path)

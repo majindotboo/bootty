@@ -162,7 +162,8 @@ fn load_checkout_branches(form: &mut NewSessionForm) -> anyhow::Result<()> {
     let overview = serde_json::from_value(serde_json::json!({
         "root": form.draft.cwd, "history": [], "stashes": [],
         "branches": [
-            {"name": "main", "commit": "abc", "current": true, "upstream": null},
+            {"name": "main", "commit": "abc", "current": true, "upstream": null,
+             "worktree_path": form.draft.cwd},
             {"name": "feature/existing", "commit": "abc", "current": false, "upstream": null},
             {"name": "topic/linked", "commit": "abc", "current": false, "upstream": null,
              "worktree_path": "/worktrees/project/linked"}
@@ -260,16 +261,48 @@ fn existing_branch_selection_waits_for_git_and_preserves_failed_drafts(
 fn selecting_a_checked_out_branch_reuses_its_directory(
     mut form: NewSessionForm,
     #[values(NewSessionMode::Agent, NewSessionMode::Terminal)] mode: NewSessionMode,
+    #[values("Current host", "Another host")] host: &str,
 ) {
+    form.change_field("host", host);
     form.draft.mode = mode;
+    form.change_text("Keep this draft");
     load_checkout_branches(&mut form).expect("branch catalog");
     let project = form.project_path().to_owned();
     assert_eq!(form.select_checkout_branch("topic/linked"), Ok(None));
     assert_eq!(form.draft.cwd, "/worktrees/project/linked");
     assert_eq!(form.project_path(), project);
     assert!(!form.draft.isolated);
+    assert_eq!(form.worktree_request(), Ok(None));
+    let selection = |form: &NewSessionForm, field: &str| {
+        form.spec(false)
+            .fields
+            .into_iter()
+            .find(|entry| entry.id == field)
+            .unwrap()
+            .value
+    };
+    assert_eq!(selection(&form, "isolation"), "Current worktree");
+    assert_eq!(selection(&form, "checkout-branch"), "topic/linked");
+    assert!(
+        form.spec(false)
+            .branches
+            .iter()
+            .any(|branch| branch.name == "topic/linked" && branch.current)
+    );
     let invocation = form.invocation(&form.draft.cwd).unwrap();
     assert_eq!(invocation.arguments[1], "/worktrees/project/linked");
+    assert_eq!(form.select_checkout_branch("main"), Ok(None));
+    assert_eq!(form.draft.cwd, project);
+    assert_eq!(selection(&form, "isolation"), "Current checkout");
+    assert_eq!(selection(&form, "checkout-branch"), "main");
+    assert_eq!(form.select_checkout_branch("topic/linked"), Ok(None));
+    assert_eq!(form.draft.cwd, "/worktrees/project/linked");
+    let text = if mode == NewSessionMode::Agent {
+        &form.draft.prompt
+    } else {
+        &form.draft.command
+    };
+    assert_eq!(text, "Keep this draft");
 }
 
 #[rstest]

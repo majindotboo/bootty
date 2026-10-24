@@ -1128,6 +1128,18 @@ impl AppState {
         self.open_session_creation_dialog_for(false, None, Some((scope, cwd)), None);
         true
     }
+    pub(crate) fn open_new_session_on_branch(&mut self, scope: SpaceId, cwd: String) -> bool {
+        self.open_new_session_dialog_in(scope, cwd);
+        self.apply_dialog_intent(
+            &DialogIntent::FieldChanged {
+                dialog: crate::gpui::DialogId::new(crate::presentation::dialogs::NEW_SESSION_ID),
+                field: "isolation".into(),
+                value: "Current checkout".into(),
+            },
+            &mut Vec::new(),
+        );
+        true
+    }
     pub(crate) fn open_creation_draft(
         &mut self,
         scope: SpaceId,
