@@ -371,6 +371,10 @@ impl AgentProviderConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Agent preferences are independent policies, not mutually exclusive states"
+)]
 pub struct AgentProvidersConfig {
     #[serde(rename = "auto-update")]
     pub auto_update: bool,
@@ -390,6 +394,8 @@ pub struct AgentProvidersConfig {
     pub transcript_width: TranscriptWidth,
     #[serde(rename = "collapse-composer-on-scroll")]
     pub collapse_composer_on_scroll: bool,
+    #[serde(rename = "continue-after-restart")]
+    pub continue_after_restart: bool,
     pub codex: AgentProviderConfig,
     pub claude: AgentProviderConfig,
     pub pi: AgentProviderConfig,
@@ -407,6 +413,7 @@ impl Default for AgentProvidersConfig {
             response_streaming: ResponseStreaming::default(),
             transcript_width: TranscriptWidth::default(),
             collapse_composer_on_scroll: true,
+            continue_after_restart: true,
             codex: AgentProviderConfig::default(),
             claude: AgentProviderConfig::default(),
             pi: AgentProviderConfig::default(),

@@ -494,6 +494,7 @@ pub struct DialogProgressStep {
 /// An owned, disposable projection of an app-owned dialog model.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DialogSpec {
+    pub composer_width: bootty_config::config::TranscriptWidth,
     pub id: DialogId,
     pub role: DialogRole,
     pub title: String,
@@ -537,6 +538,7 @@ impl DialogSpec {
     ) -> Self {
         Self {
             id: DialogId::new(id),
+            composer_width: bootty_config::config::TranscriptWidth::default(),
             role: DialogRole::SearchableList,
             title: title.into(),
             icon: None,
@@ -578,6 +580,7 @@ impl DialogSpec {
         let id = DialogId::new(id);
         Self {
             rows: vec![DialogRow::action("submit", "Confirm", submit)],
+            composer_width: bootty_config::config::TranscriptWidth::default(),
             role: DialogRole::Prompt,
             title: title.into(),
             text: Some(value.into()),
@@ -1744,27 +1747,20 @@ impl DialogView {
         submit: Option<&DialogRow>,
         error: Option<String>,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let prompt_focused = self
             .prompt_textarea
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
-        let prompt_border = if error.is_some() && spec.progress.is_empty() {
-            cx.theme().danger
-        } else if prompt_focused {
-            cx.theme().ring
-        } else {
-            cx.theme().border
-        };
         let choices = self.agent_session_choices(spec, window, cx);
 
         v_flex()
             .id("dialog-prompt-panel")
             .debug_selector(|| "dialog-prompt-panel".to_owned())
             .w_full()
-            .max_w(rems(48.0))
+            .max_w(super::composer::column_width(spec.composer_width))
             .min_w_0()
             .items_center()
             .gap_4()
@@ -1774,42 +1770,37 @@ impl DialogView {
                     .w_full()
                     .min_w_0()
                     .child(
-                        v_flex()
-                            .id("agent-session-composer")
-                            .debug_selector(|| "agent-session-composer".into())
-                            .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
-                                style.border_color(cx.theme().ring).bg(cx.theme().accent)
-                            })
-                            .on_drop(cx.listener(Self::drop_new_session_attachments))
-                            .relative()
-                            .when(self.completion_active(window, cx), |view| {
-                                view.key_context("ComposerCompletion")
-                            })
-                            .w_full()
-                            .min_w_0()
-                            .gap_2()
-                            .p_3()
-                            .pb_2()
-                            .rounded_xl()
-                            .bg(cx.theme().muted.opacity(0.35))
-                            .border_1()
-                            .border_color(prompt_border)
-                            .when(
-                                !spec.attachments.is_empty()
-                                    || self.attachment_imports > 0
-                                    || self.attachment_error.is_some(),
-                                |row| row.child(self.render_new_session_attachments(spec, cx)),
-                            )
-                            .child(public_selector(
-                                "dialog-prompt-input",
-                                self.attachment_textarea(spec, cx)
-                                    .appearance(false)
-                                    .bordered(false),
-                            ))
-                            .child(self.agent_session_controls(spec, choices, submit, cx))
-                            .children(self.completion.clone()),
+                        super::composer::surface(
+                            cx,
+                            prompt_focused,
+                            error.is_some() && spec.progress.is_empty(),
+                        )
+                        .id("agent-session-composer")
+                        .debug_selector(|| "agent-session-composer".into())
+                        .drag_over::<gpui_kit::ExternalPaths>(|style, _, _, cx| {
+                            style.border_color(cx.theme().ring).bg(cx.theme().accent)
+                        })
+                        .on_drop(cx.listener(Self::drop_new_session_attachments))
+                        .relative()
+                        .when(self.completion_active(window, cx), |view| {
+                            view.key_context("ComposerCompletion")
+                        })
+                        .when(
+                            !spec.attachments.is_empty()
+                                || self.attachment_imports > 0
+                                || self.attachment_error.is_some(),
+                            |row| row.child(self.render_new_session_attachments(spec, cx)),
+                        )
+                        .child(public_selector(
+                            "dialog-prompt-input",
+                            self.attachment_textarea(spec, cx)
+                                .appearance(false)
+                                .bordered(false),
+                        ))
+                        .child(self.agent_session_controls(spec, choices, submit, cx))
+                        .children(self.completion.clone()),
                     )
-                    .child(self.agent_session_project_footer(spec, window, cx)),
+                    .child(self.agent_session_project_footer(spec, cx)),
             )
             .children(self.new_model_error(spec, cx))
             .child(self.new_session_footer(spec, submit, error, cx))
@@ -1829,7 +1820,13 @@ impl DialogView {
             .filter(|field| {
                 !matches!(
                     field.id.as_str(),
-                    "isolation" | "mode" | "model" | "reasoning" | "fast-mode" | "plan-mode"
+                    "isolation"
+                        | "host"
+                        | "mode"
+                        | "model"
+                        | "reasoning"
+                        | "fast-mode"
+                        | "plan-mode"
                 )
             })
             .filter_map(|field| {
@@ -1903,12 +1900,11 @@ impl DialogView {
         submit: Option<&DialogRow>,
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
-        h_flex()
+        let (model, options): (Vec<_>, Vec<_>) = choices
+            .into_iter()
+            .partition(|(id, _)| matches!(id.as_str(), "provider" | "model"));
+        super::composer::controls()
             .id("dialog-prompt-fields")
-            .w_full()
-            .items_center()
-            .justify_between()
-            .gap_2()
             .child(public_selector(
                 "dialog-prompt-attach",
                 self.new_session_attachment_picker(spec, cx),
@@ -1919,38 +1915,37 @@ impl DialogView {
                     .flex_1()
                     .min_w_0()
                     .items_center()
-                    .text_sm()
-                    .whitespace_nowrap()
-                    .overflow_x_scroll()
+                    .overflow_hidden()
                     .gap_2()
                     .when_some(
                         spec.fields.iter().find(|field| field.id == "mode"),
                         |row, mode| row.child(Self::new_session_mode(spec, mode, cx)),
                     )
-                    .children(choices.into_iter().map(|(_, control)| control))
+                    .children(options.into_iter().map(|(_, control)| control)),
+            )
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_2()
                     .when(spec.models_loading, |row| {
                         row.child(
-                            h_flex()
-                                .debug_selector(|| "new-session-model-loading".to_owned())
-                                .items_center()
-                                .gap_2()
-                                .child(gpui_kit::component::spinner::Spinner::new().small())
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child("Loading models…"),
-                                ),
+                            div()
+                                .id("new-session-model-loading")
+                                .debug_selector(|| "new-session-model-loading".into())
+                                .aria_label("Loading models")
+                                .child(gpui_kit::component::spinner::Spinner::new().small()),
+                        )
+                    })
+                    .children(model.into_iter().map(|(_, control)| control))
+                    .child(self.speech.clone())
+                    .when_some(submit, |row, submit| {
+                        row.child(
+                            Self::new_agent_session_start(spec, submit, cx).disabled(
+                                !submit.enabled || spec.busy || self.attachment_imports > 0,
+                            ),
                         )
                     }),
             )
-            .child(self.speech.clone())
-            .when_some(submit, |row, submit| {
-                row.child(
-                    Self::new_agent_session_start(spec, submit, cx)
-                        .disabled(!submit.enabled || spec.busy || self.attachment_imports > 0),
-                )
-            })
             .into_any_element()
     }
 
@@ -2079,96 +2074,47 @@ impl DialogView {
     fn agent_session_project_footer(
         &self,
         spec: &DialogSpec,
-        window: &mut Window,
-        cx: &mut Context<Self>,
+        cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
-        let checkout = spec.fields.iter().find(|field| field.id == "isolation");
-        v_flex()
+        h_flex()
             .id("dialog-prompt-footer")
             .min_w_0()
             .mx_3()
             .px_2()
-            .py_2()
+            .py_1()
             .bg(cx.theme().muted.opacity(0.35))
             .border_1()
             .border_color(cx.theme().border)
             .rounded_b(cx.theme().radius)
+            .items_center()
+            .justify_between()
             .gap_2()
             .child(
-                h_flex()
-                    .w_full()
-                    .min_w_0()
-                    .items_center()
-                    .gap_2()
-                    .when_some(checkout, |row, field| {
-                        row.child(
-                            div()
-                                .when_some(self.control_focus.get("isolation"), |view, focus| {
-                                    view.track_focus(focus)
-                                })
-                                .when_some(
-                                    self.new_session_choice(spec, field, false, cx),
-                                    ParentElement::child,
-                                ),
-                        )
-                    })
-                    .when(checkout.is_none(), |row| {
-                        row.child(
-                            div()
-                                .text_xs()
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Current checkout"),
-                        )
-                    })
-                    .when_some(
-                        spec.fields
-                            .iter()
-                            .find(|field| field.id == "checkout-branch")
-                            .and_then(|field| self.render_worktree_ref_picker(spec, field, cx)),
-                        |row, picker| row.child(div().min_w_0().max_w(rems(24.)).child(picker)),
-                    ),
+                h_flex().flex_1().min_w_0().gap_2().children(
+                    spec.fields
+                        .iter()
+                        .filter(|field| matches!(field.id.as_str(), "isolation" | "host"))
+                        .filter_map(|field| {
+                            let choice = self.new_session_choice(spec, field, false, cx)?;
+                            Some(
+                                div()
+                                    .when_some(
+                                        self.control_focus.get(field.id.as_str()),
+                                        gpui_kit::InteractiveElement::track_focus,
+                                    )
+                                    .child(choice),
+                            )
+                        }),
+                ),
             )
             .when_some(
-                self.new_session_worktree_options(spec, window, cx),
-                ParentElement::child,
+                spec.fields
+                    .iter()
+                    .find(|field| matches!(field.id.as_str(), "start-ref" | "checkout-branch"))
+                    .and_then(|field| self.render_worktree_ref_picker(spec, field, true, cx)),
+                |row, picker| row.child(div().min_w_0().max_w(rems(24.)).child(picker)),
             )
-            .when_some(spec.footer.clone(), |view, path| {
-                view.child(public_selector(
-                    "dialog-worktree-destination",
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format!("Directory: {path}")),
-                ))
-            })
             .into_any_element()
-    }
-
-    fn new_session_worktree_options(
-        &self,
-        spec: &DialogSpec,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui_kit::AnyElement> {
-        spec.fields.iter().find(|field| field.id == "start-ref")?;
-        let fields = ["start-ref", "branch", "folder"]
-            .into_iter()
-            .filter_map(|id| {
-                let field = spec.fields.iter().find(|field| field.id == id)?;
-                self.prompt_field(spec, field, window, cx)
-            })
-            .map(|field| div().min_w(rems(10.)).flex_1().child(field));
-        Some(
-            h_flex()
-                .w_full()
-                .min_w_0()
-                .flex_wrap()
-                .gap_3()
-                .children(fields)
-                .into_any_element(),
-        )
     }
 
     fn new_session_start(
@@ -2195,7 +2141,6 @@ impl DialogView {
         let submit = row.clone();
         Button::new("dialog-prompt-submit")
             .icon(gpui_kit::component::IconName::ArrowUp)
-            .small()
             .primary()
             .rounded_full()
             .loading(spec.busy)
@@ -2453,7 +2398,7 @@ impl DialogView {
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         if matches!(field.id.as_str(), "start-ref" | "checkout-branch") {
-            return self.render_worktree_ref_picker(spec, field, cx);
+            return self.render_worktree_ref_picker(spec, field, false, cx);
         }
         let control = match &field.kind {
             DialogFieldKind::Text => {
@@ -3355,7 +3300,10 @@ impl Render for DialogView {
                 this.size_full().min_h_0()
             })
             .when(Self::is_agent_session_spec(&spec), |this| {
-                this.w_full().max_w(rems(44.0)).max_h_full().min_h_0()
+                this.w_full()
+                    .max_w(super::composer::column_width(spec.composer_width))
+                    .max_h_full()
+                    .min_h_0()
             })
             .when(spec.role == DialogRole::ThemePicker, |this| {
                 this.key_context("Command BoottyThemePicker")

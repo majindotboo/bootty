@@ -2,6 +2,8 @@
 mod followups;
 #[path = "native_fork.rs"]
 pub mod fork;
+#[path = "native_restart.rs"]
+pub mod restart;
 #[path = "native_search.rs"]
 pub mod search;
 #[path = "native_tool_activity.rs"]
@@ -38,6 +40,8 @@ use crate::{
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct NativeSessionRecord {
+    #[serde(default)]
+    pub restart: restart::NativeRestart,
     pub id: String,
     pub binding_id: String,
     /// Captured Bootty task membership; never reconstructed from the selected mux session.
@@ -115,6 +119,7 @@ impl NativeSessionRecord {
     }
 
     fn restore_stopped(&mut self) {
+        self.remember_restart();
         if let Some(error) = &self.snapshot.error {
             if self.config.provider == crate::AgentKind::Codex
                 && crate::native_protocol::codex_session_archived(
@@ -145,6 +150,17 @@ impl NativeSessionRecord {
         self.snapshot.requests.clear();
         self.snapshot.turn_id = None;
         self.snapshot.working_since = None;
+    }
+
+    fn remember_restart(&mut self) {
+        self.restart.observe(
+            &self.snapshot,
+            self.config.session_id.is_some()
+                && self.config.account_directory.is_some()
+                && self.pending_initial_message.is_none()
+                && !self.snapshot.provider_archived()
+                && !self.snapshot.provider_writer_blocked(),
+        );
     }
 
     #[must_use]
@@ -1543,6 +1559,7 @@ impl NativeAgentService {
         }
         let generation = next_generation(&mut candidate)?;
         let mut record = NativeSessionRecord {
+            restart: restart::NativeRestart::default(),
             id: format!("native:{}:{generation}", config.provider.default_program()),
             binding_id: binding_id.to_owned(),
             task_identity: task_identity.map(str::to_owned),
@@ -1876,6 +1893,7 @@ impl NativeAgentService {
         record.snapshot.stop_requested_at = None;
         record.snapshot.first_turn = None;
         record.snapshot.interrupt_unfinished_work();
+        followups::prepare_restart(&mut candidate, &target.handle)?;
         self.commit(candidate)?;
         self.launch(&target.handle, tools, unarchive)
     }
@@ -2079,6 +2097,7 @@ impl NativeAgentService {
             record.snapshot = session.snapshot();
             record.config.capture_session(&record.snapshot);
         }
+        followups::cancel_restart(&mut candidate, &target.handle);
         self.commit(candidate)?;
         lock(&self.live).remove(&target.handle);
         Ok(())
@@ -2320,6 +2339,35 @@ impl NativeAgentService {
         self.shutdown.store(true, Ordering::Release);
         self.followup_wake.notify();
         let sessions = std::mem::take(&mut *lock(&self.live));
+        // Release the catalog lock before reading process snapshots.
+        let before = {
+            let store = lock(&self.store);
+            store
+                .records
+                .iter()
+                .filter(|record| sessions.contains_key(&record.id))
+                .map(|record| {
+                    (
+                        record.id.clone(),
+                        record.restart.clone(),
+                        record.config.session_id.is_some()
+                            && record.config.account_directory.is_some()
+                            && record.pending_initial_message.is_none()
+                            && !record.snapshot.provider_archived()
+                            && !record.snapshot.provider_writer_blocked(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let restarts = before
+            .into_iter()
+            .map(|(id, mut restart, established)| {
+                if let Some(session) = sessions.get(&id) {
+                    restart.observe(&session.snapshot(), established);
+                }
+                (id, restart)
+            })
+            .collect::<BTreeMap<_, _>>();
         for session in sessions.values() {
             session.stop();
         }
@@ -2329,6 +2377,10 @@ impl NativeAgentService {
             if let Some(session) = sessions.get(&record.id) {
                 record.snapshot = session.snapshot();
                 record.config.capture_session(&record.snapshot);
+                if let Some(restart) = restarts.get(&record.id) {
+                    record.restart = restart.clone();
+                    record.restart.completed(record.snapshot.completed_turns);
+                }
             }
         }
         self.commit(candidate)?;

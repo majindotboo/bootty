@@ -225,6 +225,48 @@ impl AppState {
         exact_target: Option<ExactMuxTarget>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
+        if matches!(
+            action,
+            SessionAction::ListDrafts | SessionAction::OpenDraft | SessionAction::DiscardDraft
+        ) {
+            let Some(ExactMuxTarget::Binding(scope)) = exact_target else {
+                return CommandDispatch::Complete(CommandOutcome::StaleTarget {
+                    message: "The draft's Space is no longer available".into(),
+                });
+            };
+            if let Err(error) = executor::begin_synchronous_command(execution) {
+                return CommandDispatch::Complete(command_outcome_for_mux_error(error));
+            }
+            if action == SessionAction::ListDrafts {
+                return CommandDispatch::Complete(serialized_command_outcome(
+                    self.creation_draft_summaries()
+                        .filter(|draft| draft.scope == scope)
+                        .collect::<Vec<_>>(),
+                ));
+            }
+            let Some(identity) = arguments.first() else {
+                return CommandDispatch::Complete(CommandOutcome::Failed {
+                    code: "invalid_arguments".into(),
+                    message: "A draft identity is required".into(),
+                });
+            };
+            if action == SessionAction::DiscardDraft {
+                return match self.discard_creation_draft(scope, identity) {
+                    Ok(reply) => CommandDispatch::Pending(PendingCommandResult::Outcome(reply)),
+                    Err(message) => CommandDispatch::Complete(CommandOutcome::Failed {
+                        code: "draft_unavailable".into(),
+                        message,
+                    }),
+                };
+            }
+            return CommandDispatch::Complete(match self.open_creation_draft(scope, identity) {
+                Ok(()) => CommandOutcome::success(),
+                Err(message) => CommandOutcome::Failed {
+                    code: "draft_unavailable".into(),
+                    message,
+                },
+            });
+        }
         if action == SessionAction::Delete
             && let Some(ExactMuxTarget::Binding(scope)) = &exact_target
             && let [identity] = arguments
@@ -376,13 +418,7 @@ impl AppState {
                 return self.saved_session_metadata(action, scope, arguments, execution);
             }
             (SessionAction::Reopen, Some(ExactMuxTarget::Binding(scope))) => {
-                let [identity] = arguments else {
-                    return self.reject_command(CommandOutcome::Failed {
-                        code: "invalid_arguments".to_owned(),
-                        message: "session.reopen expects a saved identity".to_owned(),
-                    });
-                };
-                return self.dispatch_session_reopen(scope, identity, execution);
+                return self.dispatch_session_reopen_request(scope, arguments, execution);
             }
             (SessionAction::ListSpaces, _) => {
                 return self.list_spaces_command(execution);
@@ -447,24 +483,42 @@ impl AppState {
         )
     }
 
+    fn dispatch_session_reopen_request(
+        &mut self,
+        scope: SpaceId,
+        arguments: &[String],
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(identity) = arguments.first() else {
+            return self.reject_command(CommandOutcome::Failed {
+                code: "invalid_arguments".to_owned(),
+                message: "session.reopen expects a saved identity".to_owned(),
+            });
+        };
+        let selection = if arguments.get(1).is_some_and(|value| value == "preserve") {
+            CommandSelection::Preserve
+        } else {
+            CommandSelection::Follow
+        };
+        self.dispatch_session_reopen(scope, identity, execution, selection)
+    }
+
     pub(super) fn dispatch_session_reopen(
         &mut self,
         scope: SpaceId,
         identity: &str,
         execution: Option<(Instant, CommandCancellation)>,
+        selection: CommandSelection,
     ) -> CommandDispatch {
         match self.workspace.begin_session_reopen(scope, identity) {
-            Ok(prepared) => self.submit_prepared_session_command(
-                scope,
-                prepared,
-                &[],
-                execution,
-                CommandSelection::Follow,
-            ),
+            Ok(prepared) => {
+                self.submit_prepared_session_command(scope, prepared, &[], execution, selection)
+            }
             Err(SessionRequestError::Pending) => {
                 CommandDispatch::Pending(PendingCommandResult::SessionReopen {
                     scope,
                     identity: identity.to_owned(),
+                    selection,
                 })
             }
             Err(error) => self.reject_command(session_request_outcome(error)),

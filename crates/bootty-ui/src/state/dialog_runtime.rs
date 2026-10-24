@@ -35,26 +35,126 @@ pub(super) struct DialogRuntime {
     pub project_settings: Option<crate::presentation::project_editor::ProjectSettingsEditor>,
     pub session_names: Vec<PendingSessionName>,
     pub creation_replies: Vec<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>,
-    pub(super) new_session_draft: Option<crate::presentation::new_session_form::NewSessionDraft>,
+    pub(super) creation_drafts:
+        std::collections::BTreeMap<String, super::creation_draft::CreationDraft>,
+    pub(super) restore_creation: Option<String>,
+    pub(super) automatic_creation: bool,
+    pub(super) creation_revision: u64,
     pub(super) new_session_isolated: bool,
     pub(super) command_palette_native_parent: Option<bootty_control::CommandTarget>,
 }
 
 impl DialogRuntime {
-    /// Starts with the New Session draft kept from an earlier run.
-    pub(super) fn with_creation_draft(
-        draft: Option<crate::presentation::new_session_form::NewSessionDraft>,
+    pub(super) fn with_creation_drafts(
+        drafts: Vec<super::creation_draft::CreationDraft>,
+        selected: Option<String>,
     ) -> Self {
+        let drafts = drafts
+            .into_iter()
+            .map(|record| (record.draft.identity.clone(), record))
+            .collect::<std::collections::BTreeMap<_, _>>();
         Self {
-            new_session_isolated: draft
+            new_session_isolated: selected
                 .as_ref()
-                .is_some_and(|draft| draft.isolation_preference),
-            new_session_draft: draft,
+                .and_then(|id| drafts.get(id))
+                .is_some_and(|record| record.draft.isolation_preference),
+            creation_drafts: drafts,
+            restore_creation: selected,
             ..Self::default()
         }
     }
 
+    pub(super) fn remember_creation(&mut self) {
+        let record = match self.modal.as_deref() {
+            Some(ModalDialog::NewSession(dialog)) => dialog.retained_draft(),
+            _ => None,
+        };
+        if let Some(record) = record {
+            self.new_session_isolated = record.draft.isolation_preference;
+            if record.has_content() {
+                if self.creation_drafts.get(&record.draft.identity) != Some(&record) {
+                    self.creation_drafts
+                        .insert(record.draft.identity.clone(), record);
+                    self.creation_revision = self.creation_revision.wrapping_add(1);
+                }
+            } else if self
+                .creation_drafts
+                .remove(&record.draft.identity)
+                .is_some()
+            {
+                self.creation_revision = self.creation_revision.wrapping_add(1);
+            }
+        }
+    }
+
+    pub(super) fn creation_snapshot(
+        &self,
+    ) -> (
+        std::collections::BTreeMap<String, super::creation_draft::CreationDraft>,
+        Option<String>,
+    ) {
+        let mut records = self.creation_drafts.clone();
+        let mut selected = None;
+        for dialog in [self.creation.as_deref(), self.modal.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            if let ModalDialog::NewSession(dialog) = dialog
+                && let Some(record) = dialog.retained_draft()
+            {
+                if record.has_content() {
+                    selected = Some(record.draft.identity.clone());
+                    records.insert(record.draft.identity.clone(), record);
+                } else {
+                    records.remove(&record.draft.identity);
+                }
+            }
+        }
+        (records, selected)
+    }
+
+    pub(super) fn active_creation_identity(&self) -> Option<&str> {
+        [self.modal.as_deref(), self.creation.as_deref()]
+            .into_iter()
+            .flatten()
+            .find_map(|dialog| {
+                if let ModalDialog::NewSession(dialog) = dialog {
+                    dialog
+                        .draft()
+                        .filter(|draft| {
+                            dialog.retains_creation_draft()
+                                && (!self.automatic_creation
+                                    || !draft.prompt.trim().is_empty()
+                                    || !draft.command.trim().is_empty()
+                                    || !draft.attachments.is_empty())
+                        })
+                        .map(|draft| draft.identity.as_str())
+                } else {
+                    None
+                }
+            })
+    }
+
+    pub(super) fn remove_creation_draft(&mut self, identity: &str) {
+        let visible = self.modal.as_deref().is_some_and(|dialog| match dialog {
+            ModalDialog::NewSession(dialog) => dialog
+                .draft()
+                .is_some_and(|draft| draft.identity == identity),
+            _ => false,
+        });
+        if visible {
+            self.clear();
+        }
+        if self.creation_drafts.remove(identity).is_some() {
+            self.creation_revision = self.creation_revision.wrapping_add(1);
+        }
+        if self.restore_creation.as_deref() == Some(identity) {
+            self.restore_creation = None;
+        }
+    }
+
     pub(super) fn open(&mut self, dialog: ModalDialog) {
+        self.remember_creation();
         let overlays_creation = !matches!(dialog, ModalDialog::NewSession(_))
             && matches!(self.modal.as_deref(), Some(ModalDialog::NewSession(_)));
         if !self.is_dismissible() && !overlays_creation {
@@ -73,31 +173,10 @@ impl DialogRuntime {
         if !self.is_dismissible() {
             return;
         }
-        if let Some(ModalDialog::NewSession(dialog)) = self.modal.as_deref()
-            && dialog.retains_creation_draft()
-            && let Some(draft) = dialog.draft()
-        {
-            self.new_session_isolated = draft.isolation_preference;
-            self.new_session_draft = Some(draft.clone());
-        }
+        self.remember_creation();
+        self.automatic_creation = false;
         self.modal = self.creation.take();
         self.command_palette_native_parent = None;
-    }
-
-    /// The New Session draft as it stands: the open form's, or the one kept when it closed.
-    pub(super) fn creation_draft(
-        &self,
-    ) -> Option<&crate::presentation::new_session_form::NewSessionDraft> {
-        [self.modal.as_deref(), self.creation.as_deref()]
-            .into_iter()
-            .flatten()
-            .find_map(|dialog| match dialog {
-                ModalDialog::NewSession(dialog) if dialog.retains_creation_draft() => {
-                    dialog.draft()
-                }
-                _ => None,
-            })
-            .or(self.new_session_draft.as_ref())
     }
 
     pub(super) fn creation_spec(&self) -> Option<crate::gpui::DialogSpec> {

@@ -1451,7 +1451,15 @@ fn queued_followups_wait_for_idle_and_survive_a_conversation_owner_restart() {
         .filter(|item| item.role == "user")
         .map(|item| item.text.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(messages, vec!["hold", "Queued first", "Queued second"]);
+    assert_eq!(
+        messages,
+        vec![
+            "hold",
+            "Bootty restarted. Continue the interrupted work from where you left off.",
+            "Queued first",
+            "Queued second",
+        ]
+    );
     let sent: Value =
         serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
     assert!(

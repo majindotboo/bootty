@@ -687,6 +687,9 @@ fn sidebar_snapshot(
         }
     }
     rows.extend(unclaimed_rows(state, palette));
+    if sidebar_config.modules.iter().any(|name| name == "sessions") {
+        append_creation_drafts(state, &mut rows, palette);
+    }
     apply_project_settings(state, native, &mut rows);
     let sidebar_background = if black_notch_chrome {
         Rgba::rgb(0, 0, 0)
@@ -746,6 +749,106 @@ fn sidebar_snapshot(
         border: sidebar_config
             .border
             .map_or(palette.border_variant, crate::theme::config_rgba),
+    }
+}
+
+fn append_creation_drafts(state: &AppState, rows: &mut Vec<SidebarRow>, palette: ChromePalette) {
+    let selected = state.selected_creation_draft();
+    if selected.is_some() {
+        for row in rows.iter_mut().filter(|row| row.kind.is_session()) {
+            row.current = false;
+            row.active = false;
+        }
+    }
+    let scope = state.mux_scope();
+    let Some(binding) = state
+        .saved_session_invocation(scope, "session.saved", Vec::new())
+        .and_then(|invocation| invocation.target)
+    else {
+        return;
+    };
+    for draft in state
+        .creation_draft_summaries()
+        .filter(|draft| draft.scope == scope)
+    {
+        if rows.iter().any(|row| {
+            row.task
+                .as_ref()
+                .is_some_and(|task| task.identity == draft.identity)
+        }) {
+            continue;
+        }
+        let project = project_name(draft.project.as_deref()).to_owned();
+        let provider = bootty_agents::AgentKind::ALL
+            .into_iter()
+            .find(|provider| provider.to_string() == draft.provider);
+        let row = SidebarRow {
+            key: format!("draft:{}", draft.identity),
+            text: draft.title,
+            secondary: None,
+            project: Some(SidebarProject {
+                name: project.clone(),
+                artwork: None,
+            }),
+            project_path: draft.project.clone(),
+            host: None,
+            branch: None,
+            agents: vec![SidebarAgent {
+                key: format!("draft-provider:{}", draft.identity),
+                icon: provider
+                    .map_or("terminal", bootty_agents::AgentKind::icon)
+                    .to_owned(),
+                description: format!(
+                    "{} draft",
+                    provider.map_or("Terminal", bootty_agents::AgentKind::display_name)
+                ),
+                model: None,
+            }],
+            trailing: Some("Draft".into()),
+            trailing_icon: None,
+            trailing_color: None,
+            working: false,
+            needs_attention: false,
+            number: None,
+            indent: 0,
+            tree: None,
+            artwork: None,
+            icon: Some("pencil".into()),
+            diff: None,
+            pull_request: None,
+            worktree: false,
+            scripts: Vec::new(),
+            color: palette.text,
+            dim_color: palette.muted,
+            kind: SidebarRowKind::Draft {
+                identity: draft.identity.clone(),
+                binding: binding.clone(),
+            },
+            active: selected.as_deref() == Some(&draft.identity),
+            current: selected.as_deref() == Some(&draft.identity),
+            selectable: true,
+            target: None,
+            reorder_anchor: None,
+            context: None,
+            task: None,
+        };
+        if state.config().sidebar.group_by_project {
+            if let Some(group) = rows.iter().position(|row| {
+                row.kind == SidebarRowKind::Group && row.project_path == draft.project
+            }) {
+                rows.insert(group.saturating_add(1), row);
+            } else {
+                let key = format!(
+                    "project:{}:{}",
+                    scope.persistence_value(),
+                    draft.project.as_deref().unwrap_or("")
+                );
+                rows.push(project_row(&row, key, &project, None, palette));
+                rows.push(row);
+            }
+        } else {
+            rows.push(row);
+        }
     }
 }
 

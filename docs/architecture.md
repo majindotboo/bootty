@@ -52,6 +52,7 @@ This file describes the current production structure.
 | Private stdio framing and remote endpoint relays | `bootty-host::private_stdio` | Bounded bytes use the owning host's encrypted process stream; tool grants and command authority stay with `bootty-agents`. |
 | Local executable resolution | `bootty-host::find_executable` and `local_command` | Provider availability, metadata queries and native sessions share the host's search policy. Windows searches supported `PATHEXT` entries instead of selecting npm's POSIX text shim. Terminal launches pass structured argv through the owner's existing `remote-exec` relay; the shell only supplies environment values and an encoded payload. |
 | Native conversations and provider subprocesses | `bootty-agents::NativeAgentService` | Commit catalog snapshots before publication; resume only the captured task, account and provider conversation. The catalog index keeps its own state and the conversations' order; each conversation has its own file (`native_catalog`), written before the index names it, and only when it changed. |
+| Unstarted session drafts and their selected view | `bootty-ui::state::creation_draft` and `DialogRuntime` | Per-window catalogs keep separate draft identities without creating backend sessions. Saves run off the UI thread; sidebar entries follow committed snapshots. Failed writes preserve accepted drafts, and closing flushes the latest text. |
 | Review comment context in native drafts, queued inputs and sent prompts | `bootty-agents::native_review_comments` | Source anchors, quotes, comments and exact inline chip ranges persist with the prompt; provider payloads expand them without replacing authored text. |
 | Dictation and voice | `bootty-agents::voice` | Speech uses the Codex sign-in on this machine, from the captured or selected Codex account. Without one, dictation uses the macOS on-device recognizer, and where that is unavailable composers show no speech buttons. Voice mode is a Codex realtime call on a Codex conversation's thread, started by that conversation's session. The pinned Pi audio host owns cross-platform microphone capture and playback. `bootty-host::speech` owns bounded helper framing and process lifetime. The GUI receives text and status; credentials stay provider-owned. |
 | Persisted agent runs and dispatch attempts | `bootty-agents::OrchestrationService` | Commit before publication; recovery interrupts outstanding attempts without replaying prompts. |
@@ -62,7 +63,7 @@ This file describes the current production structure.
 | Browser page identity, selection and saved placement | `bootty-ui::BrowserPanel` and `gpui_dock` | A stale page ID fails rather than navigating another page; page content and placement persist in `native-panels.json`. |
 | Terminal pane topology, ratios, and focus | `bootty-mux::BindingRuntime` | Providers remain authoritative. Hosts consume `MuxPaneLayout` and submit typed pane operations; they never persist a competing terminal tree. |
 | Workspace composition | `bootty-ui::workspace_composition` | Projects real backend windows and pane layouts. A pane carrying a native conversation identity renders its agent view in that pane's rectangle. Numbered tabs, navigation, splits and close operations use the same backend targets for terminals and agents. Documents live in the right sidebar; the center has no inner tab strip. |
-| Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock composes Sessions on the left, the selected backend window in the center, and tools/documents on the right. `native-panels.json` stores sidebar sizes, visibility and documents; each session keeps its own right dock. Conversation tabs and details controls belong to the center header; tool tabs and view controls belong to the right header. Dock dividers span the full window height. Window navigation has one stable overlay while the dock columns animate. Center projections retain logical task/window keys and resolve through the current binding mapping. Agent placement belongs to real mux panes, never a separate Dock conversation tab or split tree. Transient creation choosers are not saved. |
+| Native panel placement | `bootty-ui::gpui_dock` | The GPUI Kit Dock composes Sessions on the left, the selected backend window in the center, and tools/documents on the right. `native-panels.json` stores sidebar sizes, visibility and documents; each session keeps its own right dock. Conversation tabs and details controls belong to the center header; tool tabs and view controls belong to the right header. Dock dividers span the full window height. Window navigation has one stable overlay while the dock columns animate. Center projections retain logical task/window keys and resolve through the current binding mapping. Agent placement belongs to real mux panes, never a separate Dock conversation tab or split tree. Empty creation choosers are not saved; unfinished prompts use the per-window draft catalog. |
 | Per-window coordination and GPUI projections | `bootty-ui::{AppState, GpuiWorkspace}` | Views consume snapshots and emit typed intents; they do not become domain owners. |
 | Saved workspace window size, position, display and fullscreen state | `bootty-ui::window_state` | Closing or quitting saves to identity-scoped `windows.json` atomically; restore keeps windows within an available display. |
 | Preserved custom script diagnostics | `bootty-ui` | Existing Lua and Luau files remain on disk and are reported as unsupported. |
@@ -152,8 +153,8 @@ carries the typed request, preventing older daemons from silently dropping optio
 Git facts report a linked worktree's main checkout, so the sidebar groups that
 session under its project rather than the checkout folder.
 The New Session form uses that same main-checkout identity for its project picker
-and defaults while retaining the selected working directory. Worktree branch,
-base ref, source checkout and destination are visible before creation. The dialog
+and defaults while retaining the selected working directory. The context strip
+shows checkout mode and the selected ref. The dialog
 reports observed naming, checkout and session-creation stages; a failed start
 keeps the prompt, completed checkout and diagnostic available for retry.
 Current checkout exposes a searchable local-branch picker. Git's branch catalog
@@ -382,6 +383,12 @@ the provider; desktop paths are never sent. These copies remain alongside the pr
 durable history across disconnects, restarts, and deletion of the local conversation.
 Established foreground and background conversations reconnect through the shared resume
 command with bounded backoff. Recovery preserves provider identity and never replays input.
+The native catalog captures running turns before shutdown and recognizes interrupted turns
+after a crash. With `agents.continue-after-restart`, recovery resumes the exact saved task,
+account and conversation, then submits one continuation through the durable follow-up queue.
+Manual stops cancel that intent. Ambiguous input stays available for explicit Retry; three
+restart attempts without a completed turn stop automatic recovery. The last selected task
+or unfinished draft returns on startup, and draft selection never starts a provider process.
 Stopping a conversation or disabling its provider cancels pending recovery. Failed creation
 returns its exact durable reservation target, so the error remains in its own mux pane.
 
@@ -397,8 +404,12 @@ creates a distinct conversation in a real backend window. Native forks create a 
 An Agent created in a split belongs to that backend window and has no duplicate global tab. Cmd+T from an Agent creates a new outer chooser; cancelling restores
 the previous tab. Completing it replaces that chooser in the same destination.
 
-The composer's worktree options edit the starting ref and optional branch/folder
-overrides without leaving the draft. Worktree creation submits `worktree.create`
+New and established conversations share composer geometry and control placement.
+The new-session context strip shows checkout mode on the left and the ref on the
+right, using “From <branch>” for a new worktree's base. Directory paths belong in
+diagnostics, rather than a persistent composer row. Terminal forms and the shared
+worktree command also accept explicit branch and folder overrides.
+Worktree creation submits `worktree.create`
 against that draft's captured Binding. After Git confirms the checkout, the
 chooser submits session creation in it; failed provider startup retains the
 checkout for retry. Project discovery workers never perform Git mutations.

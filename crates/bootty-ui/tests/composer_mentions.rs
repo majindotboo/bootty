@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 
 fn idle_record() -> NativeSessionRecord {
     NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "mentions".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),

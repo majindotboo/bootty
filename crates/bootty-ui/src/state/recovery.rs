@@ -260,9 +260,11 @@ impl AppState {
             return;
         };
         let identity = saved.identity.clone();
-        let Some(invocation) =
-            self.saved_session_invocation(scope, "session.reopen", vec![identity])
-        else {
+        let Some(invocation) = self.saved_session_invocation(
+            scope,
+            "session.reopen",
+            vec![identity, "preserve".into()],
+        ) else {
             return;
         };
         let Some(deadline) = now.checked_add(Duration::from_secs(30)) else {

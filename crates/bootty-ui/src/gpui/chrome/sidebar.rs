@@ -2342,6 +2342,12 @@ impl SidebarRows {
     }
 
     fn row_menu(&self, row: &SidebarRow) -> Option<ContextMenu> {
+        if let SidebarRowKind::Draft { identity, binding } = &row.kind {
+            return Some(ContextMenu::Draft {
+                identity: identity.clone(),
+                binding: binding.clone(),
+            });
+        }
         if row.task.as_ref().is_some_and(|task| task.pending) {
             return None;
         }
@@ -2465,7 +2471,15 @@ impl SidebarRows {
                     return;
                 }
                 _ = owner.update(app, |_, cx| {
-                    if let Some(target) = native_conversation.clone() {
+                    if let SidebarRowKind::Draft { identity, binding } = &activation_kind {
+                        let mut invocation = bootty_control::CommandInvocation::new(
+                            "session.draft.open",
+                            vec![identity.clone()],
+                            bootty_control::Caller::Internal,
+                        );
+                        invocation.target = Some(binding.clone());
+                        cx.emit(ChromeIntent::Command(invocation));
+                    } else if let Some(target) = native_conversation.clone() {
                         let mut invocation = bootty_control::CommandInvocation::from_action(
                             "agents.native.focus",
                             bootty_control::Caller::Internal,
@@ -2522,7 +2536,9 @@ impl SidebarRows {
         let snapshot = &self.snapshot;
         let row_height = match row.kind {
             SidebarRowKind::Group => GROUP_ROW_HEIGHT,
-            SidebarRowKind::Session | SidebarRowKind::DetachedSession => {
+            SidebarRowKind::Session
+            | SidebarRowKind::DetachedSession
+            | SidebarRowKind::Draft { .. } => {
                 if self.section(row) == SessionSection::Settled {
                     ROW_HEIGHT
                 } else if self.snapshot.group_by_project {

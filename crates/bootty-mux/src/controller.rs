@@ -117,6 +117,11 @@ pub struct MuxCommandCompletion {
 
 impl MuxCommandCompletion {
     #[must_use]
+    pub const fn preserves_selection(&self) -> bool {
+        self.preserve_selection
+    }
+
+    #[must_use]
     pub fn matches_config(&self, config: &MuxBindingConfig) -> bool {
         self.snapshot
             .as_ref()

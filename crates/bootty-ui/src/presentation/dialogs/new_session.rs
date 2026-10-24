@@ -376,6 +376,16 @@ impl NewSessionDialog {
         self.form.as_ref().map(|form| &form.draft)
     }
 
+    pub(crate) fn retained_draft(&self) -> Option<crate::state::creation_draft::CreationDraft> {
+        let form = self.form.as_ref()?;
+        self.retains_creation_draft()
+            .then(|| crate::state::creation_draft::CreationDraft {
+                draft: form.draft.clone(),
+                project: (!form.draft.projectless).then(|| form.project_path().to_owned()),
+                title: form.title(),
+            })
+    }
+
     pub fn started(&mut self, launch: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>) {
         let label = self
             .form

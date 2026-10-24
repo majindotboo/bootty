@@ -41,7 +41,7 @@ use bootty_terminal::{
     terminal_session::DrainStats,
 };
 
-mod creation_draft;
+pub mod creation_draft;
 mod dialog_runtime;
 mod dialogs;
 mod input;
@@ -456,10 +456,20 @@ impl AppState {
         agent_events: Option<ControlEventSender>,
     ) -> Result<Self> {
         let config_runtime = AppConfigRuntime::new(config)?;
-        let (creation_drafts, creation_draft) =
-            creation_draft::CreationDraftStore::open(&config_runtime.current().config_path);
         let agent_state =
             agent_state_path(&config_runtime.current().config_path, &window_state_key);
+        let legacy_draft = (window_state_key == "main").then(|| {
+            config_runtime
+                .current()
+                .config_path
+                .with_file_name("new-session-draft.json")
+        });
+        let (creation_drafts, saved_drafts, selected_draft) =
+            creation_draft::CreationDraftStore::open(
+                agent_state.with_extension("drafts.json"),
+                legacy_draft.as_deref(),
+                repaint.clone(),
+            )?;
         let commands = agent_events.map_or_else(
             || CommandRuntime::new(repaint.clone()),
             |events| CommandRuntime::new_with_agents(repaint.clone(), events, &agent_state),
@@ -524,7 +534,7 @@ impl AppState {
             terminal_cursor_icon: CursorIcon::Text,
             mouse_pointer_hidden_while_typing: false,
             last_mouse_hover_pos: None,
-            dialogs: DialogRuntime::with_creation_draft(creation_draft),
+            dialogs: DialogRuntime::with_creation_drafts(saved_drafts, selected_draft),
             creation_drafts,
             sidebar_hovered_session: None,
             navigation: navigation::NavHistory::default(),
@@ -927,14 +937,54 @@ impl AppState {
     pub(crate) fn record_notice(&mut self, notice: ErrorNotice) {
         self.last_error = Some(notice);
     }
-    /// Keeps typed text in the New Session form across restarts; an empty form keeps nothing.
     fn keep_creation_draft(&mut self, now: Instant) {
-        let draft = self.dialogs.creation_draft().filter(|draft| {
-            !draft.prompt.trim().is_empty()
-                || !draft.command.trim().is_empty()
-                || !draft.attachments.is_empty()
-        });
-        self.creation_drafts.observe(draft, now);
+        if let Err(error) = self.save_creation_drafts(now, false) {
+            self.record_error("Could not save session drafts", error);
+        }
+    }
+
+    pub(crate) fn save_creation_drafts(
+        &mut self,
+        now: Instant,
+        force: bool,
+    ) -> Result<bool, String> {
+        for identity in self.creation_drafts.take_discarded() {
+            self.dialogs.remove_creation_draft(&identity);
+        }
+        self.dialogs.remember_creation();
+        let selected = self
+            .dialogs
+            .active_creation_identity()
+            .map(str::to_owned)
+            .or_else(|| self.dialogs.restore_creation.clone());
+        self.creation_drafts.observe(
+            &self.dialogs.creation_drafts,
+            selected,
+            self.dialogs.creation_revision,
+            now,
+            force,
+        )
+    }
+
+    pub(crate) fn creation_draft_summaries(
+        &self,
+    ) -> impl Iterator<Item = creation_draft::DraftSummary> + '_ {
+        self.creation_drafts.summaries()
+    }
+
+    pub(crate) fn discard_creation_draft(
+        &mut self,
+        scope: SpaceId,
+        identity: &str,
+    ) -> Result<mpsc::Receiver<bootty_control::CommandOutcome>, String> {
+        self.creation_drafts.discard(scope, identity)
+    }
+
+    pub(crate) fn selected_creation_draft(&self) -> Option<String> {
+        self.dialogs
+            .active_creation_identity()
+            .map(str::to_owned)
+            .or_else(|| self.dialogs.restore_creation.clone())
     }
 
     /// The reversible change to offer, taken once so it is offered once.

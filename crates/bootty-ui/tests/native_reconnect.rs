@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 #[fixture]
 fn record() -> NativeSessionRecord {
     let mut record = NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "captured-conversation".into(),
         binding_id: "captured-binding".into(),
         task_identity: Some("captured-task".into()),

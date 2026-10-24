@@ -154,6 +154,37 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
     ]
 }
 
+fn restart_spec() -> SettingSpec {
+    spec(
+        &["agents", "continue-after-restart"],
+        "Continue conversations after restarts",
+        "Resume interrupted work after an update, crash or app restart, using its captured provider conversation and account.",
+        "general",
+        "BEHAVIOR",
+        SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.agents.continue_after_restart)),
+    )
+}
+
+fn conversation_specs() -> Vec<SettingSpec> {
+    vec![
+        response_streaming_spec(),
+        spec(
+            &["agents", "collapse-composer-on-scroll"],
+            "Collapse composer on scroll",
+            "Fold an empty conversation composer to one line while reading earlier messages. Click it to write a message.",
+            "general",
+            "BEHAVIOR",
+            SettingKind::Bool,
+            SettingDefault::Field(|config| {
+                SettingValue::Bool(config.agents.collapse_composer_on_scroll)
+            }),
+        ),
+        transcript_width_spec(),
+        restart_spec(),
+    ]
+}
+
 pub(super) fn specs() -> Vec<SettingSpec> {
     let mut specs = Vec::new();
     specs.extend(dock_header_specs());
@@ -184,14 +215,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(ssh_profiles_specs());
     specs.extend(agent_provider_specs());
     specs.extend(agent_defaults_specs());
-    specs.push(response_streaming_spec());
-    specs.push(spec(
-        &["agents", "collapse-composer-on-scroll"], "Collapse composer on scroll",
-        "Fold an empty conversation composer to one line while reading earlier messages. Click it to write a message.",
-        "general", "BEHAVIOR", SettingKind::Bool,
-        SettingDefault::Field(|config| SettingValue::Bool(config.agents.collapse_composer_on_scroll)),
-    ));
-    specs.push(transcript_width_spec());
+    specs.extend(conversation_specs());
     specs.push(spec(
         &["agents", "send-shortcut"],
         "Send shortcut",

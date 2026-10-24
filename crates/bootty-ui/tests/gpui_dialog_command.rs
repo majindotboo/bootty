@@ -1203,6 +1203,7 @@ fn prompt_submit_button_emits_supplied_action(cx: &TestAppContext) {
 #[gpui_kit::test]
 fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppContext) {
     let spec = DialogSpec {
+        composer_width: bootty_config::config::TranscriptWidth::default(),
         id: DialogId::new("confirm"),
         role: DialogRole::Confirm,
         title: "Delete session".to_owned(),
@@ -1826,7 +1827,12 @@ fn loading_models_keeps_the_composer_and_picker_in_place(cx: &TestAppContext) {
         visual.run_until_parked();
         visual.update(|window, cx| window.draw(cx).clear(cx));
         let after = visual.debug_bounds("model-picker-trigger").unwrap();
-        assert_eq!(before.origin, after.origin, "picker moved at width {width}");
+        assert_eq!(before.top(), after.top(), "picker moved at width {width}");
+        assert_eq!(
+            before.right(),
+            after.right(),
+            "picker moved at width {width}"
+        );
         assert_eq!(
             composer,
             visual.debug_bounds("agent-session-composer").unwrap()

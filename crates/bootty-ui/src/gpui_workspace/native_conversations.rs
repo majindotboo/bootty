@@ -29,6 +29,13 @@ pub(super) struct NativeConversations {
 }
 
 impl NativeConversations {
+    pub(super) fn draft_views(&self) -> Vec<Entity<NativeAgentSessionView>> {
+        self.records
+            .iter()
+            .filter_map(|record| self.views.get(&record.id).cloned())
+            .collect()
+    }
+
     pub(super) fn subagent_parents(&self) -> Vec<Entity<NativeAgentSessionView>> {
         self.records
             .iter()
@@ -508,6 +515,9 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if self.state.selected_creation_draft().is_some() {
+            return false;
+        }
         let Some(record) = self.selected_mux_native_record() else {
             // A pending explicit focus is published only after its backend command completes.
             if !self.native_conversations.focus_requested {
@@ -529,6 +539,9 @@ impl GpuiWorkspace {
             self.sync_browser_configuration(window, cx);
             if changed_session
                 && !self.state.native_resume_pending(&target)
+                && (!record.restart.has_pending()
+                    || (self.state.config().agents.continue_after_restart
+                        && record.restart.needs_resume()))
                 && !record.snapshot.provider_archived()
                 && !record.snapshot.provider_writer_blocked()
                 && !record.snapshot.transport_lost
@@ -572,7 +585,12 @@ impl GpuiWorkspace {
                 .agents
                 .provider(&record.config.provider.to_string())
                 .is_some_and(|provider| provider.enabled);
-            if !enabled || record.snapshot.status == bootty_agents::NativeSessionStatus::Stopped {
+            let restarting = record.restart.has_pending();
+            if !enabled
+                || (restarting && !self.state.config().agents.continue_after_restart)
+                || (record.snapshot.status == bootty_agents::NativeSessionStatus::Stopped
+                    && !record.restart.needs_resume())
+            {
                 self.native_conversations
                     .reconnect_pending
                     .remove(&record.id);
@@ -838,6 +856,12 @@ impl GpuiWorkspace {
     }
 
     fn restore_selected_agent_center(&mut self, cx: &mut Context<Self>) {
+        if self.state.selected_creation_draft().is_some() {
+            if let Some(dock) = &self.tools {
+                dock.update(cx, |dock, _| dock.take_restored_agent_destination());
+            }
+            return;
+        }
         if self.native_conversations.revision == 0 {
             return;
         }
@@ -1537,6 +1561,9 @@ impl GpuiWorkspace {
         snapshot: &mut crate::gpui::chrome::ChromeSnapshot,
         cx: &App,
     ) {
+        if self.state.selected_creation_draft().is_some() {
+            return;
+        }
         if let Some(target) = self.selected_native_conversation_target(cx)
             && let Some(task) = self
                 .native_conversations

@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 /// A working Codex conversation with one queued message and one already marked to steer.
 fn working_record() -> NativeSessionRecord {
     NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "queue".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),

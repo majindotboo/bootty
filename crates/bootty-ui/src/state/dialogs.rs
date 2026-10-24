@@ -94,7 +94,11 @@ impl AppState {
             .unwrap_or_default();
         let dialog = self.dialogs.current_mut()?;
         Some(match dialog {
-            ModalDialog::NewSession(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
+            ModalDialog::NewSession(dialog) => {
+                let mut spec = dialog.spec();
+                spec.composer_width = self.config().agents.transcript_width;
+                DialogProjection::Dialog(Box::new(spec))
+            }
             ModalDialog::TerminalHistory(dialog) => {
                 DialogProjection::Dialog(Box::new(dialog.spec()))
             }
@@ -153,15 +157,22 @@ impl AppState {
     }
 
     fn clear_delivered_initial_draft(&mut self) {
-        if let Some(draft) = &self.dialogs.new_session_draft
-            && self.native_agent_service().is_some_and(|service| {
-                service.initial_message_pending(
-                    &draft.scope.persistence_value().to_string(),
-                    &draft.identity,
-                ) == Some(false)
+        let delivered = self
+            .dialogs
+            .creation_drafts
+            .values()
+            .filter(|record| {
+                self.native_agent_service().is_some_and(|service| {
+                    service.initial_message_pending(
+                        &record.draft.scope.persistence_value().to_string(),
+                        &record.draft.identity,
+                    ) == Some(false)
+                })
             })
-        {
-            self.dialogs.new_session_draft = None;
+            .map(|record| record.draft.identity.clone())
+            .collect::<Vec<_>>();
+        for identity in delivered {
+            self.dialogs.remove_creation_draft(&identity);
         }
     }
 
@@ -190,7 +201,10 @@ impl AppState {
     }
 
     pub(crate) fn creation_underlay(&self) -> Option<crate::gpui::DialogSpec> {
-        self.dialogs.creation_spec()
+        self.dialogs.creation_spec().map(|mut spec| {
+            spec.composer_width = self.config().agents.transcript_width;
+            spec
+        })
     }
 
     /// Applies an intent emitted by the generic GPUI dialog view.
@@ -630,16 +644,20 @@ impl AppState {
     }
 
     fn complete_creation(&mut self, value: &serde_json::Value) {
-        let retained = value
+        let identity = match self.dialogs.current() {
+            Some(ModalDialog::NewSession(dialog)) => {
+                dialog.draft().map(|draft| draft.identity.clone())
+            }
+            _ => None,
+        };
+        self.dialogs.clear();
+        let pending = value
             .get("native")
             .and_then(|native| native.get("pending_initial_message"))
-            .filter(|message| message.is_string())
-            .and_then(|_| match self.dialogs.current() {
-                Some(ModalDialog::NewSession(dialog)) => dialog.draft().cloned(),
-                _ => None,
-            });
-        self.dialogs.clear();
-        self.dialogs.new_session_draft = retained;
+            .is_some_and(serde_json::Value::is_string);
+        if !pending && let Some(identity) = identity {
+            self.dialogs.remove_creation_draft(&identity);
+        }
     }
 
     fn native_creation_baseline(&self) -> std::collections::HashSet<String> {
@@ -1051,9 +1069,22 @@ impl AppState {
         self.open_session_creation_dialog(false);
     }
     pub(crate) fn show_creation_for_empty_workspace(&mut self) {
+        if let Some(identity) = self.dialogs.restore_creation.take()
+            && let Some(record) = self.dialogs.creation_drafts.get(&identity)
+        {
+            let scope = record.draft.scope;
+            if let Err(error) = self.open_creation_draft(scope, &identity) {
+                self.record_error("Could not restore the session draft", error);
+            }
+            return;
+        }
         let binding = &self.workspace.active.binding;
         if !binding.member_sessions().is_empty() {
             self.dialogs.empty_creation_scope = None;
+            if self.dialogs.automatic_creation && self.dialogs.active_creation_identity().is_none()
+            {
+                self.dismiss_session_creation();
+            }
             return;
         }
         let scope = binding.scope();
@@ -1064,6 +1095,7 @@ impl AppState {
         {
             self.dialogs.empty_creation_scope = Some(scope);
             self.open_session_creation_dialog(false);
+            self.dialogs.automatic_creation = true;
         }
     }
     pub(super) fn open_native_agent_tab_dialog(&mut self) {
@@ -1086,24 +1118,74 @@ impl AppState {
             }
             return;
         }
-        self.open_session_creation_dialog_for(true, Some(request), None);
+        self.open_session_creation_dialog_for(true, Some(request), None, None);
     }
     fn open_session_creation_dialog(&mut self, native_agent: bool) {
-        self.open_session_creation_dialog_for(native_agent, None, None);
+        self.open_session_creation_dialog_for(native_agent, None, None, None);
     }
     /// Opens the new-session form in a Space's directory, such as a session's project.
     pub fn open_new_session_dialog_in(&mut self, scope: SpaceId, cwd: String) -> bool {
-        self.open_session_creation_dialog_for(false, None, Some((scope, cwd)));
+        self.open_session_creation_dialog_for(false, None, Some((scope, cwd)), None);
         true
     }
+    pub(crate) fn open_creation_draft(
+        &mut self,
+        scope: SpaceId,
+        identity: &str,
+    ) -> Result<(), String> {
+        let (records, _) = self.dialogs.creation_snapshot();
+        let record = records
+            .get(identity)
+            .filter(|record| record.draft.scope == scope)
+            .cloned()
+            .ok_or("This draft is no longer available in this Space")?;
+        if let Some(activity) = self.native_agent_service().and_then(|service| {
+            service.activities().into_iter().find(|activity| {
+                activity.binding_id == scope.persistence_value().to_string()
+                    && activity.task_identity.as_deref() == Some(identity)
+            })
+        }) {
+            let mut invocation = bootty_control::CommandInvocation::from_action(
+                "agents.native.focus",
+                Caller::Internal,
+            );
+            invocation.target = Some(bootty_control::CommandTarget {
+                kind: bootty_control::ResourceKind::Session,
+                handle: activity.id,
+                generation: activity.generation,
+            });
+            self.commands.queue(invocation);
+            return Ok(());
+        }
+        if self
+            .workspace
+            .binding(scope)
+            .and_then(|binding| binding.sessions().get(identity))
+            .is_some_and(|saved| saved.terminal_snapshot.is_some())
+            && let Some(invocation) =
+                self.saved_session_invocation(scope, "session.reopen", vec![identity.to_owned()])
+        {
+            self.commands.queue(invocation);
+            return Ok(());
+        }
+        if scope != self.mux_scope() && !self.activate_space_from_ui(scope) {
+            return Err("The draft's Space could not be opened; the draft is still saved".into());
+        }
+        let place = Some((scope, record.draft.cwd.clone()));
+        self.open_session_creation_dialog_for(false, None, place, Some(record));
+        Ok(())
+    }
+
     fn open_session_creation_dialog_for(
         &mut self,
         native_agent: bool,
         request: Option<&crate::surface_creation::PendingNewSurface>,
         place: Option<(SpaceId, String)>,
+        retained: Option<super::creation_draft::CreationDraft>,
     ) {
         use crate::presentation::new_session_form::NewSessionForm;
         self.close_overlay_dialogs();
+        self.dialogs.automatic_creation = false;
         let mut destinations = self.new_session_destinations();
         let current = if let Some(request) = request {
             let Some(destination) = destinations
@@ -1138,7 +1220,10 @@ impl AppState {
             self.record_message("The current host cannot create a session");
             return;
         };
-        let mut draft = self.session_creation_draft(destination);
+        let mut draft = retained.as_ref().map_or_else(
+            || self.session_creation_draft(destination),
+            |record| record.draft.clone(),
+        );
         if self.native_agent_service().is_some_and(|service| {
             service
                 .activities()
@@ -1175,15 +1260,10 @@ impl AppState {
             draft.isolated = false;
         }
         let mut form = NewSessionForm::new(draft, destinations, self.config().agents.clone());
-        form.set_worktree_directory(self.config().session.worktree_directory.clone());
-        form.set_branch_prefix(self.config().session.branch_prefix.clone());
-        form.set_project_defaults(
-            self.workspace
-                .spaces()
-                .flat_map(|space| self.workspace.registered_projects(space.id).cloned())
-                .collect(),
-        );
-        self.seed_cached_provider_catalogs(&mut form);
+        if let Some(record) = retained {
+            form.set_project_path(record.project);
+        }
+        self.prepare_session_form(&mut form);
         let dialog = if native_agent {
             let dialog = NewSessionDialog::open_native_form(form, &self.repaint);
             if let Some(request) = request {
@@ -1200,10 +1280,18 @@ impl AppState {
         };
         self.show_overlay(ModalDialog::NewSession(Box::new(dialog)));
     }
-    fn seed_cached_provider_catalogs(
+    fn prepare_session_form(
         &self,
         form: &mut crate::presentation::new_session_form::NewSessionForm,
     ) {
+        form.set_worktree_directory(self.config().session.worktree_directory.clone());
+        form.set_branch_prefix(self.config().session.branch_prefix.clone());
+        form.set_project_defaults(
+            self.workspace
+                .spaces()
+                .flat_map(|space| self.workspace.registered_projects(space.id).cloned())
+                .collect(),
+        );
         let Some(service) = self.native_agent_service() else {
             return;
         };
@@ -1231,60 +1319,54 @@ impl AppState {
         destination: &crate::presentation::new_session_form::SessionDestination,
     ) -> crate::presentation::new_session_form::NewSessionDraft {
         use crate::presentation::new_session_form::{NewSessionDraft, NewSessionMode};
-        self.dialogs
-            .new_session_draft
-            .clone()
-            .filter(|draft| draft.scope == destination.scope && draft.cwd == destination.cwd)
-            .unwrap_or_else(|| {
-                let suffix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |duration| duration.as_nanos());
-                let provider = [
-                    self.config().agents.default_provider.as_str(),
-                    "codex",
-                    "claude",
-                    "pi",
-                ]
-                .into_iter()
-                .find(|id| {
-                    self.config()
-                        .agents
-                        .provider(id)
-                        .is_some_and(|provider| provider.enabled)
-                })
-                .unwrap_or("codex");
-                let mut profiles = std::collections::BTreeMap::new();
-                if destination.remote.is_some() {
-                    for id in ["codex", "claude", "pi"] {
-                        profiles.insert(id.to_owned(), String::new());
-                    }
-                }
-                NewSessionDraft {
-                    scope: destination.scope,
-                    cwd: destination.cwd.clone(),
-                    mode: NewSessionMode::Agent,
-                    projectless: false,
-                    prompt: String::new(),
-                    applications: Vec::new(),
-                    provider_mentions: Vec::new(),
-                    goal: String::new(),
-                    attachments: Vec::new(),
-                    command: String::new(),
-                    provider: provider.to_owned(),
-                    profiles,
-                    model_selection: None,
-                    permissions: bootty_agents::NativePermissionMode::ProviderDefault,
-                    isolated: self.dialogs.new_session_isolated,
-                    isolation_preference: self.dialogs.new_session_isolated,
-                    branch: String::new(),
-                    folder: String::new(),
-                    start_ref: String::new(),
-                    suffix: format!("{suffix:x}"),
-                    identity: bootty_mux::snapshot::new_session_identity(),
-                    directories: std::collections::HashMap::new(),
-                    fan_out: Vec::new(),
-                }
-            })
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let provider = [
+            self.config().agents.default_provider.as_str(),
+            "codex",
+            "claude",
+            "pi",
+        ]
+        .into_iter()
+        .find(|id| {
+            self.config()
+                .agents
+                .provider(id)
+                .is_some_and(|provider| provider.enabled)
+        })
+        .unwrap_or("codex");
+        let mut profiles = std::collections::BTreeMap::new();
+        if destination.remote.is_some() {
+            for id in ["codex", "claude", "pi"] {
+                profiles.insert(id.to_owned(), String::new());
+            }
+        }
+        NewSessionDraft {
+            scope: destination.scope,
+            cwd: destination.cwd.clone(),
+            mode: NewSessionMode::Agent,
+            projectless: false,
+            prompt: String::new(),
+            applications: Vec::new(),
+            provider_mentions: Vec::new(),
+            goal: String::new(),
+            attachments: Vec::new(),
+            command: String::new(),
+            provider: provider.to_owned(),
+            profiles,
+            model_selection: None,
+            permissions: bootty_agents::NativePermissionMode::ProviderDefault,
+            isolated: self.dialogs.new_session_isolated,
+            isolation_preference: self.dialogs.new_session_isolated,
+            branch: String::new(),
+            folder: String::new(),
+            start_ref: String::new(),
+            suffix: format!("{suffix:x}"),
+            identity: bootty_mux::snapshot::new_session_identity(),
+            directories: std::collections::HashMap::new(),
+            fan_out: Vec::new(),
+        }
     }
     fn new_session_destinations(
         &self,

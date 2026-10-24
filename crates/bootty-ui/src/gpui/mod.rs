@@ -3,6 +3,7 @@
 mod changes;
 pub mod chrome;
 mod color_picker;
+pub(crate) mod composer;
 mod config_editor;
 mod dialogs;
 pub mod direct_input;

@@ -9,6 +9,7 @@ use gpui_kit::component::{
 pub(super) struct RefChoice {
     value: String,
     custom: bool,
+    base_ref: bool,
 }
 
 impl SearchableListItem for RefChoice {
@@ -31,7 +32,11 @@ impl SearchableListItem for RefChoice {
                 .child(
                     gpui_kit::component::Icon::new(gpui_kit::assets::IconName::GitBranch).small(),
                 )
-                .child(div().min_w_0().text_ellipsis().child(self.title()))
+                .child(div().min_w_0().text_ellipsis().child(if self.base_ref {
+                    SharedString::from(format!("From {}", self.title()))
+                } else {
+                    self.title()
+                }))
                 .into_any_element(),
         )
     }
@@ -68,6 +73,7 @@ impl RefChoices {
             .map(|value| RefChoice {
                 value: value.clone(),
                 custom: false,
+                base_ref: custom_refs,
             })
             .collect::<Vec<_>>();
         Self {
@@ -109,6 +115,7 @@ impl SearchableListDelegate for RefChoices {
             self.matches.push(RefChoice {
                 value: query.to_owned(),
                 custom: true,
+                base_ref: true,
             });
         }
         gpui_kit::Task::ready(())
@@ -196,6 +203,7 @@ impl DialogView {
         &self,
         spec: &DialogSpec,
         field: &DialogField,
+        compact: bool,
         _cx: &Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         let picker = self.worktree_ref_picker.as_ref()?;
@@ -217,10 +225,12 @@ impl DialogView {
                 })
                 .menu_width(rems(24.))
                 .menu_max_h(rems(18.))
-                .when(checkout, |select| select.small().appearance(false))
+                .when(compact || checkout, |select| {
+                    select.small().appearance(false)
+                })
                 .disabled(spec.busy),
         );
-        if checkout {
+        if checkout || compact {
             return Some(control);
         }
         Some(Self::prompt_control_row(

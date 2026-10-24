@@ -2042,7 +2042,11 @@ fn restore_native_terminal(
             .task_identity
             .as_ref()
             .ok_or_else(|| failure("Conversation has no captured task".into()))?;
-        let mut restore = CommandInvocation::new("session.reopen", vec![identity.clone()], caller);
+        let mut restore = CommandInvocation::new(
+            "session.reopen",
+            vec![identity.clone(), "preserve".into()],
+            caller,
+        );
         restore.target.clone_from(&captured.context.binding);
         match commands.execute(restore, deadline, cancellation.clone()) {
             CommandOutcome::Success {

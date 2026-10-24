@@ -407,6 +407,10 @@ pub struct SidebarAgent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRowKind {
     Group,
+    Draft {
+        identity: String,
+        binding: bootty_control::CommandTarget,
+    },
     Session,
     DetachedSession,
     Detail,
@@ -421,7 +425,10 @@ pub enum SidebarRowKind {
 impl SidebarRowKind {
     #[must_use]
     pub const fn is_session(&self) -> bool {
-        matches!(self, Self::Session | Self::DetachedSession)
+        matches!(
+            self,
+            Self::Session | Self::DetachedSession | Self::Draft { .. }
+        )
     }
 }
 

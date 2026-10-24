@@ -43,6 +43,7 @@ fn saved_conversation_skips_empty_rows_and_keeps_a_readable_responsive_lane(
 
 fn saved_record(status: &str) -> NativeSessionRecord {
     NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "saved-pi".to_owned(),
         binding_id: "captured-binding".to_owned(),
         task_identity: Some("saved-task".to_owned()),

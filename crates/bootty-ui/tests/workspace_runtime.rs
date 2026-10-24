@@ -5633,6 +5633,10 @@ fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
         },
         &mut Vec::new(),
     );
+    let identity = match state.modal_dialog() {
+        Some(ModalDialog::NewSession(dialog)) => dialog.draft().expect("draft").identity.clone(),
+        _ => panic!("creation form"),
+    };
     if current_tab_binding {
         let mut frame = frames::idle_frame(Instant::now());
         frame.input.events.push(bootty_ui::gpui::InputEvent::Key {
@@ -5673,7 +5677,16 @@ fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
         );
     }
     assert!(state.modal_dialog().is_none(), "{:?}", state.last_error());
-    open(&mut state);
+    let binding = listed_spaces(&mut state)[0].2.clone();
+    let outcome = submit_command(
+        &mut state,
+        targeted("session.draft.open", vec![identity], binding),
+        Instant::now(),
+    );
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
     let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
         panic!("creation form reopened");
     };

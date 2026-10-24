@@ -62,7 +62,7 @@ impl PartialEq for NewSessionAttachment {
 impl Eq for NewSessionAttachment {}
 
 /// Kept by the window after cancellation; successful Start consumes its contents.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct NewSessionDraft {
     pub scope: SpaceId,
     pub cwd: String,
@@ -91,7 +91,7 @@ pub struct NewSessionDraft {
 }
 
 /// A model a new session's prompt also goes to.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct FanOutModel {
     pub provider: String,
     pub model: String,
@@ -123,6 +123,7 @@ impl FanOutModel {
 }
 
 pub struct NewSessionForm {
+    restored: bool,
     pub draft: NewSessionDraft,
     destinations: Vec<SessionDestination>,
     providers: AgentProvidersConfig,
@@ -152,6 +153,7 @@ impl NewSessionForm {
         providers: AgentProvidersConfig,
     ) -> Self {
         let mut form = Self {
+            restored: false,
             draft,
             destinations,
             providers,
@@ -283,7 +285,7 @@ impl NewSessionForm {
         }
         if let Some(cwd) = branch.worktree_path.clone() {
             let project = self.project_path().to_owned();
-            self.set_directory(cwd);
+            self.update_directory(cwd);
             self.worktree_repository = Some(project);
             self.set_worktree_available(true);
             return Ok(None);
@@ -316,8 +318,14 @@ impl NewSessionForm {
     }
 
     pub fn set_directory(&mut self, cwd: String) {
+        self.restored = false;
         self.draft.projectless = false;
         self.update_directory(cwd);
+    }
+
+    pub(crate) fn set_project_path(&mut self, project: Option<String>) {
+        self.restored = true;
+        self.worktree_repository = project;
     }
 
     /// Git's main checkout identifies the project; `draft.cwd` identifies where work runs.
@@ -330,7 +338,7 @@ impl NewSessionForm {
 
     pub fn accept_worktree(&mut self, cwd: String) {
         let project = self.project_path().to_owned();
-        self.set_directory(cwd);
+        self.update_directory(cwd);
         self.worktree_repository = Some(project);
         self.draft.isolated = false;
     }
@@ -382,6 +390,9 @@ impl NewSessionForm {
     }
 
     fn apply_project_defaults(&mut self) {
+        if self.restored {
+            return;
+        }
         let Some(settings) = self.project_settings().cloned() else {
             return;
         };
@@ -414,6 +425,7 @@ impl NewSessionForm {
         self.error = None;
         match field {
             "host" => {
+                self.restored = false;
                 let Some(destination) = self
                     .destinations
                     .iter()
@@ -1510,13 +1522,13 @@ impl NewSessionForm {
     }
 
     fn worktree_hint(&self) -> Option<String> {
-        if !self.draft.isolated {
-            return self.branch_error.clone();
-        }
-        Some(self.branch_error.as_ref().map_or_else(
-            || format!("Source checkout: {}", self.draft.cwd),
-            |error| format!("{error}. Search for a ref to use it directly."),
-        ))
+        self.branch_error.as_ref().map(|error| {
+            if self.draft.isolated {
+                format!("{error}. Search for a ref to use it directly.")
+            } else {
+                error.clone()
+            }
+        })
     }
 
     fn project_choice(&self, busy: bool) -> DialogRow {

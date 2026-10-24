@@ -45,6 +45,7 @@ pub use native_subagents::{NativeSubagent, NativeSubagentDetail};
 pub use native_turn_usage::NativeTurnUsage;
 mod native_service;
 pub use native_service::fork::NativeSideChat;
+pub use native_service::restart::NativeRestart;
 pub use native_service::search::{MAX_MENTIONED_CONVERSATIONS, NativeSearchMatch};
 pub use native_service::tool_activity::{
     MAX_NATIVE_ACTIVITY_ITEMS, NativeActivityItem, NativeActivityPage, NativeActivityTool,

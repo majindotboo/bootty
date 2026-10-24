@@ -5,6 +5,9 @@ use bootty_mux::workspace::{
 
 command_actions! {
     SessionAction {
+        ListDrafts => ("session.drafts", "List session drafts", [], Read),
+        OpenDraft => ("session.draft.open", "Open session draft", ["identity"], Write),
+        DiscardDraft => ("session.draft.discard", "Discard session draft", ["identity"], Destructive),
         ListProjects => ("project.list", "List registered projects", [], Read),
         RemoveProject => ("project.remove", "Remove project registration", ["cwd"], Write),
         RegisterProject => ("project.register", "Register project", ["cwd"], Write),
@@ -31,7 +34,7 @@ command_actions! {
         AutoSettle => ("session.auto_settle", "Set auto-settle behavior", ["identity", "enabled"], Write),
         Delete => ("session.delete", "Delete saved session", ["identity"], Destructive),
         Restore => ("session.restore", "Restore deleted session", ["identity"], Write),
-        Reopen => ("session.reopen", "Reopen saved session", ["identity"], Write),
+        Reopen => ("session.reopen", "Reopen saved session", ["identity", "selection"], Write),
         Create => ("session.create", "Create Session", ["name", "cwd", "argv", "identity", "title", "projectless"], Write),
         CreateTab => ("terminal.create_tab", "Create Terminal Tab", ["argv", "cwd"], Write),
         CreatePane => ("terminal.create_pane", "Create Terminal Pane", ["direction", "argv", "cwd"], Write),
@@ -44,15 +47,15 @@ command_actions! {
 }
 
 impl SessionAction {
-    #[must_use]
-    pub fn descriptor(self) -> CommandDescriptor {
-        let (id, title, names, mutation) = self.metadata();
-        let arguments = names
+    fn argument_schema(self, names: &[&str]) -> Vec<bootty_control::ArgumentSchema> {
+        names
             .iter()
             .copied()
             .map(|name| {
                 let mut argument = super::argument(name, ValueType::String);
-                argument.required = if self == Self::SetTitle {
+                argument.required = if self == Self::Reopen {
+                    name == "identity"
+                } else if self == Self::SetTitle {
                     name != "expected_title"
                 } else if self == Self::CreatePane {
                     name != "cwd"
@@ -66,10 +69,23 @@ impl SessionAction {
                 if self == Self::CreatePane && name == "direction" {
                     argument.choices = vec!["right".to_owned(), "down".to_owned()];
                 }
+                if self == Self::Reopen && name == "selection" {
+                    argument.choices = vec!["follow".into(), "preserve".into()];
+                }
                 argument
             })
-            .collect();
+            .collect()
+    }
+
+    #[must_use]
+    pub fn descriptor(self) -> CommandDescriptor {
+        let (id, title, names, mutation) = self.metadata();
+        let arguments = self.argument_schema(names);
         let (description, target) = match self {
+            Self::ListDrafts | Self::OpenDraft | Self::DiscardDraft => (
+                "Read, open or discard an unfinished session in the captured Space, without starting a provider or terminal.".to_owned(),
+                Some(ResourceKind::Binding),
+            ),
             Self::ListProjects => ("List projects registered on the exact Space's host, including empty projects.".to_owned(), Some(ResourceKind::Binding)),
             Self::RemoveProject => ("Remove registration and project defaults from the exact Space, preserving files and saved sessions.".to_owned(), Some(ResourceKind::Binding)),
             Self::RegisterProject => ("Register an absolute project path on the exact Space's host without starting a session.".to_owned(), Some(ResourceKind::Binding)),

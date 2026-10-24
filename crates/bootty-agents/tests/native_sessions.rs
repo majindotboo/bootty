@@ -318,6 +318,136 @@ fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
 }
 
 #[rstest]
+#[case::clean_restart(false, false)]
+#[case::crash_catalog(true, false)]
+#[case::explicit_stop(false, true)]
+fn interrupted_work_resumes_once_without_replaying_the_original_prompt(
+    #[case] crash: bool,
+    #[case] stopped: bool,
+) {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service
+        .create(
+            "captured-binding",
+            "Interrupted work",
+            config(root.path()).unwrap(),
+        )
+        .unwrap();
+    service.prompt(&record.target(), "active").unwrap();
+    assert_eq!(
+        service.resolve(&record.target()).unwrap().snapshot().status,
+        NativeSessionStatus::Working
+    );
+    if stopped {
+        service.stop(&record.target()).unwrap();
+    }
+    service.shutdown().unwrap();
+    drop(service);
+    if crash {
+        let mut catalog = support::stored_catalog(&path).unwrap();
+        catalog["records"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("restart");
+        catalog["records"][0]["snapshot"]["status"] = json!("working");
+        catalog["records"][0]["snapshot"]["turn_id"] = json!("interrupted-turn");
+        fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
+    }
+    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let saved = service.sessions().remove(0);
+    assert_eq!(saved.restart.needs_resume(), !stopped);
+    let resumed = service.resume(&saved.target()).unwrap();
+    assert_eq!(resumed.id, record.id);
+    assert_eq!(resumed.binding_id, record.binding_id);
+    assert_eq!(resumed.config.session_id, record.config.session_id);
+    assert_eq!(
+        resumed.config.account_directory,
+        record.config.account_directory
+    );
+    assert_eq!(
+        service.sessions()[0].queued_messages.len(),
+        usize::from(!stopped)
+    );
+    if stopped {
+        let policy: Value =
+            serde_json::from_slice(&fs::read(root.path().join("turn-policy.json")).unwrap())
+                .unwrap();
+        assert_eq!(policy["input"][0]["text"], "active");
+    } else {
+        let (wake, wakes) = mpsc::channel();
+        service.set_change_handler(Arc::new(move || {
+            let _ = wake.send(());
+        }));
+        service.start_followups().unwrap();
+        let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
+        loop {
+            let saved = service.sessions().remove(0);
+            if saved.queued_messages.is_empty()
+                && !saved.restart.has_pending()
+                && saved.snapshot.status == NativeSessionStatus::Idle
+            {
+                let note =
+                    "Bootty restarted. Continue the interrupted work from where you left off.";
+                assert_eq!(
+                    saved
+                        .snapshot
+                        .transcript
+                        .iter()
+                        .filter(|item| item.text == note)
+                        .count(),
+                    1
+                );
+                let policy: Value = serde_json::from_slice(
+                    &fs::read(root.path().join("turn-policy.json")).unwrap(),
+                )
+                .unwrap();
+                assert_eq!(policy["input"][0]["text"], note);
+                break;
+            }
+            wakes
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+        }
+    }
+    service.shutdown().unwrap();
+}
+
+#[rstest]
+fn repeated_restart_failures_stop_automatic_retries_but_allow_a_manual_resume() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("native.json");
+    let service = NativeAgentService::open(&path).unwrap();
+    let record = service
+        .create("binding", "Interrupted", config(root.path()).unwrap())
+        .unwrap();
+    service.prompt(&record.target(), "active").unwrap();
+    service.shutdown().unwrap();
+    drop(service);
+    fs::write(root.path().join("fail-launch"), "").unwrap();
+    let service = NativeAgentService::open(&path).unwrap();
+    for attempt in 0..3 {
+        let record = service.sessions().remove(0);
+        assert!(record.restart.needs_resume());
+        assert!(service.resume(&record.target()).is_err());
+        let record = service.sessions().remove(0);
+        assert_eq!(record.restart.needs_resume(), attempt < 2);
+        assert_eq!(
+            record.queued_messages.len(),
+            1,
+            "retries cannot enqueue duplicate continuations"
+        );
+    }
+    fs::remove_file(root.path().join("fail-launch")).unwrap();
+    let saved = service.sessions().remove(0);
+    let resumed = service.resume(&saved.target()).unwrap();
+    assert_eq!(resumed.id, record.id);
+    assert_eq!(service.sessions()[0].queued_messages.len(), 1);
+    service.shutdown().unwrap();
+}
+
+#[rstest]
 #[case::success(false, false)]
 #[case::retry_after_failure(true, false)]
 #[case::legacy_catalog(false, true)]

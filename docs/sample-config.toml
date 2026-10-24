@@ -449,6 +449,7 @@ auto-update = true
 allow-spawn = false
 quick-model = "gpt-6-luna" # names sessions, writes commit messages and PR text
 follow-up-behavior = "queue" # queue | steer | interrupt
+continue-after-restart = true
 send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
 response-streaming = "live" # live | paragraph | complete
 transcript-width = "wide" # normal | wide | full

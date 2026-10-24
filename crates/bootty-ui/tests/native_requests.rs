@@ -20,6 +20,7 @@ fn claude_approvals_offer_the_choices_claude_suggested(cx: &mut TestAppContext) 
         init_theme(UiPalette::default(), cx);
     });
     let record = NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "approvals".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),
@@ -165,6 +166,7 @@ fn open(
 
 fn record(provider: AgentKind, snapshot: serde_json::Value) -> NativeSessionRecord {
     NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "approvals".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),
@@ -633,6 +635,7 @@ fn claude_plans_can_go_to_a_new_conversation(cx: &mut TestAppContext) {
         init_theme(UiPalette::default(), cx);
     });
     let record = NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "plan".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),

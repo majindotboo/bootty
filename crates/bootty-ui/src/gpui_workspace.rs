@@ -1386,7 +1386,23 @@ impl GpuiWorkspace {
         cx.spawn_in(window, async move |weak, cx| {
             placement.await;
             for checkpoint in checkpoints {
-                checkpoint.await;
+                if !checkpoint.await {
+                    _ = weak.update(cx, |this, cx| {
+                        this.exit_pending = false;
+                        let workspaces = cx
+                            .windows()
+                            .into_iter()
+                            .filter_map(|handle| handle.downcast::<gpui_kit::component::Root>())
+                            .filter_map(|handle| handle.read(cx).ok())
+                            .filter_map(|root| root.view().clone().downcast::<Self>().ok())
+                            .filter(|workspace| workspace.entity_id() != cx.entity_id())
+                            .collect::<Vec<_>>();
+                        for workspace in workspaces {
+                            workspace.update(cx, |workspace, _| workspace.exit_pending = false);
+                        }
+                    });
+                    return;
+                }
             }
             cleanup.await;
             _ = weak.update_in(cx, |_, window, cx| {
@@ -1400,35 +1416,64 @@ impl GpuiWorkspace {
         .detach();
     }
 
-    fn checkpoint_before_exit(cx: &Context<Self>) -> gpui_kit::Task<()> {
+    fn checkpoint_before_exit(cx: &Context<Self>) -> gpui_kit::Task<bool> {
         let owner = cx.entity();
         let timer = cx.background_executor().clone();
         cx.spawn(async move |weak, cx| {
+            let drafts = weak.update(cx, |this, cx| {
+                this.native_conversations.draft_views().into_iter().filter_map(|view| {
+                    match view.update(cx, |view, cx| view.flush_draft(cx)) {
+                        Ok(Some(reply)) => Some(Ok(reply)),
+                        Ok(None) => None,
+                        Err(error) => Some(Err(error)),
+                    }
+                }).collect::<Result<Vec<_>, String>>()
+            });
+            let drafts = match drafts {
+                Ok(Ok(drafts)) => drafts,
+                Ok(Err(error)) => {
+                    _ = weak.update(cx, |this, _| this.state.record_error("Could not save conversation drafts", error));
+                    return false;
+                }
+                Err(_) => return false,
+            };
+            for reply in drafts {
+                let outcome = cx.background_executor().spawn(async move { reply.recv_timeout(Duration::from_secs(5)) }).await;
+                if !matches!(outcome, Ok(bootty_control::CommandOutcome::Success { .. })) {
+                    _ = weak.update(cx, |this, _| this.state.record_message("Conversation draft saving did not finish. Nothing was closed; try again."));
+                    return false;
+                }
+            }
             let deadline = Instant::now().checked_add(Duration::from_secs(5));
             let mut captured = false;
             loop {
                 let pending = weak.update(cx, |this, _| {
+                    let drafts = this.state.save_creation_drafts(Instant::now(), true)?;
                     this.state.poll_session_checkpoints();
                     if !captured && !this.state.session_checkpoint_pending() {
-                        this.state
-                            .checkpoint_sessions(crate::clock::ClockSnapshot::now().epoch);
+                        this.state.checkpoint_sessions(crate::clock::ClockSnapshot::now().epoch);
                         captured = true;
                     }
-                    this.state.session_checkpoint_pending()
+                    Ok::<_, String>((this.state.session_checkpoint_pending(), drafts))
                 });
-                if !matches!(pending, Ok(true)) {
-                    break;
-                }
+                let (sessions, drafts) = match pending {
+                    Ok(Ok(pending)) => pending,
+                    Ok(Err(error)) => {
+                        _ = weak.update(cx, |this, _| this.state.record_error("Could not save session drafts", error));
+                        return false;
+                    }
+                    Err(_) => return false,
+                };
+                if !sessions && !drafts { break; }
                 if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
-                    _ = weak.update(cx, |this, _| {
-                        this.state
-                            .record_message("Session checkpoint did not finish before closing");
-                    });
+                    _ = weak.update(cx, |this, _| this.state.record_message("Session saving did not finish before closing"));
+                    if drafts { return false; }
                     break;
                 }
                 timer.timer(Duration::from_millis(1)).await;
             }
             drop(owner);
+            true
         })
     }
 
@@ -4121,7 +4166,9 @@ impl GpuiWorkspace {
         if self.new_session_surface(cx).is_some() {
             if let Some(sidebar) = &mut chrome_snapshot.sidebar {
                 for row in &mut sidebar.rows {
-                    if row.kind.is_session() {
+                    if row.kind.is_session()
+                        && !matches!(row.kind, crate::gpui::SidebarRowKind::Draft { .. })
+                    {
                         row.active = false;
                         row.current = false;
                     }

@@ -74,6 +74,10 @@ pub(super) type TabBounds = Rc<RefCell<HashMap<String, Bounds<Pixels>>>>;
 
 #[derive(Clone)]
 pub(super) enum ContextMenu {
+    Draft {
+        identity: String,
+        binding: bootty_control::CommandTarget,
+    },
     Session {
         target: SessionTarget,
         options: SessionContextSnapshot,
@@ -470,6 +474,28 @@ impl GpuiChrome {
 
     fn menu_rows(menu: &ContextMenu) -> Vec<MenuRow> {
         match menu {
+            ContextMenu::Draft { identity, binding } => [
+                ("Open draft", "session.draft.open"),
+                ("Discard draft", "session.draft.discard"),
+            ]
+            .into_iter()
+            .map(|(label, command)| {
+                let mut invocation = bootty_control::CommandInvocation::new(
+                    command,
+                    vec![identity.clone()],
+                    bootty_control::Caller::Internal,
+                );
+                invocation.target = Some(binding.clone());
+                MenuRow {
+                    label: label.into(),
+                    enabled: true,
+                    destructive: command == "session.draft.discard",
+                    starts_group: false,
+                    confirm: None,
+                    intent: ChromeIntent::Command(invocation),
+                }
+            })
+            .collect(),
             ContextMenu::Session {
                 target,
                 options,

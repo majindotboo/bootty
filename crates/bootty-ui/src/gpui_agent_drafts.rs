@@ -4,8 +4,7 @@ use bootty_control::{Caller, CommandCancellation, CommandInvocation};
 use gpui_kit::{App, Context, Window};
 use std::time::{Duration, Instant};
 
-/// Deliberate limit: a draft saves this long after typing stops, so text typed in the moment
-/// before quitting is lost. Save on window close too if that matters.
+/// Typing coalesces writes; closing flushes the current draft before the host exits.
 const DRAFT_SAVE_DELAY: Duration = Duration::from_millis(750);
 
 impl NativeAgentSessionView {
@@ -39,7 +38,7 @@ impl NativeAgentSessionView {
     }
 
     /// Saves are sent in order and the newest wins, so none waits for the one before.
-    fn save_draft(&self, cx: &App) {
+    fn current_draft(&self, cx: &App) -> bootty_agents::NativeDraft {
         let composer = self.composer.read(cx);
         let mut attachments = Vec::<bootty_agents::NativeAttachmentReference>::new();
         for span in composer.tokens() {
@@ -59,14 +58,34 @@ impl NativeAgentSessionView {
                 attachments.push(reference);
             }
         }
-        let draft = bootty_agents::NativeDraft {
+        bootty_agents::NativeDraft {
             text: composer.value().to_string(),
             attachments,
             review_comments: self.active_review_comments(cx),
-        };
-        let Ok(draft) = serde_json::to_string(&draft) else {
-            return;
-        };
+        }
+    }
+
+    pub(crate) fn flush_draft(
+        &mut self,
+        cx: &Context<Self>,
+    ) -> Result<Option<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>, String> {
+        self.draft_save = None;
+        let draft = self.current_draft(cx);
+        if draft == self.record.draft.clone().unwrap_or_default() {
+            return Ok(None);
+        }
+        self.send_draft(&draft).map(Some)
+    }
+
+    fn save_draft(&self, cx: &App) {
+        _ = self.send_draft(&self.current_draft(cx));
+    }
+
+    fn send_draft(
+        &self,
+        draft: &bootty_agents::NativeDraft,
+    ) -> Result<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>, String> {
+        let draft = serde_json::to_string(draft).map_err(|error| error.to_string())?;
         let mut invocation = CommandInvocation::new(
             "agents.native.draft",
             vec![
@@ -77,12 +96,14 @@ impl NativeAgentSessionView {
             Caller::Internal,
         );
         invocation.target = Some(self.record.target());
-        _ = self.sender.submit(
-            invocation,
-            Instant::now()
-                .checked_add(Duration::from_secs(60))
-                .unwrap_or_else(Instant::now),
-            CommandCancellation::new(),
-        );
+        self.sender
+            .submit(
+                invocation,
+                Instant::now()
+                    .checked_add(Duration::from_secs(60))
+                    .unwrap_or_else(Instant::now),
+                CommandCancellation::new(),
+            )
+            .map_err(|error| format!("Could not submit the draft save: {error:?}"))
     }
 }

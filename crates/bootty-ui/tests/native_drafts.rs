@@ -17,6 +17,7 @@ use std::{
 
 fn saved_draft() -> NativeSessionRecord {
     NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "drafts".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),

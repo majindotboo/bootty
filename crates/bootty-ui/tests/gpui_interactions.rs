@@ -355,6 +355,46 @@ fn sidebar_tab_space_and_status_clicks_emit_their_typed_actions(cx: &mut TestApp
     });
 }
 
+#[gpui_kit::test]
+fn draft_sidebar_rows_open_without_a_backend_session_target(cx: &mut TestAppContext) {
+    cx.update(|cx| init_theme(UiPalette::default(), cx));
+    let mut snapshot = chrome_snapshot();
+    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
+    let binding = bootty_control::CommandTarget {
+        kind: bootty_control::ResourceKind::Binding,
+        handle: "captured-binding".into(),
+        generation: 7,
+    };
+    let mut row = sidebar.rows[0].clone();
+    row.key = "draft-idea".into();
+    row.text = "Unfinished idea".into();
+    row.kind = SidebarRowKind::Draft {
+        identity: "draft-identity".into(),
+        binding: binding.clone(),
+    };
+    row.target = None;
+    row.task = None;
+    row.context = None;
+    row.reorder_anchor = None;
+    row.trailing = Some("Draft".into());
+    row.selectable = true;
+    sidebar.rows = vec![row];
+    let (probe, cx) =
+        cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
+    draw_chrome(cx);
+    let bounds = cx
+        .debug_bounds("sidebar-row-hitbox-draft-idea")
+        .expect("draft navigation row");
+    cx.simulate_click(bounds.center(), Modifiers::none());
+    draw_chrome(cx);
+    probe.update(cx, |probe, _| {
+        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
+            ChromeIntent::Command(invocation) if invocation.command == "session.draft.open"
+                && invocation.arguments == ["draft-identity"] && invocation.target.as_ref() == Some(&binding)
+        )));
+    });
+}
+
 fn fill_sidebar_sessions(sidebar: &mut SidebarSnapshot) {
     let template = sidebar.rows.first().expect("session row").clone();
     let detail_template = sidebar.rows.get(1).expect("session detail row").clone();
@@ -2024,23 +2064,21 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
         cx.debug_bounds("dialog-worktree-base-branch").is_some(),
         "worktree controls are visible without opening a popover"
     );
-    for (field, selector, value) in [
-        ("branch", "dialog-field-input-branch", "feature/custom"),
-        ("folder", "dialog-field-input-folder", "custom-checkout"),
-    ] {
-        let input = cx.debug_bounds(selector).expect("editable worktree field");
-        cx.simulate_click(input.center(), Modifiers::none());
-        cx.simulate_keystrokes(if cfg!(target_os = "macos") {
-            "cmd-a"
-        } else {
-            "ctrl-a"
-        });
-        cx.simulate_input(value);
-        draw_chrome(cx);
-        probe.update(cx, |probe, _| assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-            DialogIntent::FieldChanged { field: changed, value: accepted, .. } if changed == field && accepted == value
-        ))));
-    }
+    let base = cx
+        .debug_bounds("dialog-worktree-base-branch")
+        .expect("base branch");
+    let mode = cx
+        .debug_bounds("dialog-checkout-picker")
+        .expect("checkout mode");
+    assert!(
+        base.center().x > composer.center().x,
+        "branch control belongs on the right"
+    );
+    assert!(
+        mode.center().x < composer.center().x,
+        "checkout mode belongs on the left"
+    );
+    assert_eq!(base.center().y, mode.center().y);
     for chosen in ["baseline", "refs/tags/v1.2.3"] {
         let base = cx.debug_bounds("dialog-worktree-base-branch").unwrap();
         cx.simulate_click(base.center(), Modifiers::none());
@@ -2206,6 +2244,7 @@ fn prompt_confirm_and_close_buttons_emit_dialog_intents(cx: &TestAppContext) {
 #[gpui_kit::test]
 fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
     let spec = DialogSpec {
+        composer_width: bootty_config::config::TranscriptWidth::default(),
         id: DialogId::new("confirm"),
         role: DialogRole::Confirm,
         title: "Delete session?".to_owned(),
@@ -2262,6 +2301,7 @@ fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppContext) {
     let spec = DialogSpec {
+        composer_width: bootty_config::config::TranscriptWidth::default(),
         id: DialogId::new("find"),
         role: DialogRole::TerminalFind,
         title: "Find".to_owned(),
@@ -2310,6 +2350,7 @@ fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppCo
 #[gpui_kit::test]
 fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
     let spec = DialogSpec {
+        composer_width: bootty_config::config::TranscriptWidth::default(),
         id: DialogId::new("themes"),
         role: DialogRole::ThemePicker,
         title: "Themes".to_owned(),
@@ -3871,6 +3912,7 @@ fn native_tab_keeps_its_exact_target_across_selection_updates(cx: &mut TestAppCo
     use bootty_agents::{AgentKind, NativeSessionConfig, NativeSessionRecord};
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let record = NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "native:codex:owned-thread".into(),
         binding_id: "binding-one".into(),
         task_identity: Some("task-one".into()),

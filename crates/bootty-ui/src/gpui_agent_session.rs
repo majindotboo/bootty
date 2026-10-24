@@ -1774,10 +1774,7 @@ impl NativeAgentSessionView {
 
     /// The width messages run to.
     fn column_width(&self) -> gpui_kit::Length {
-        self.presentation.width.rems().map_or_else(
-            || gpui_kit::relative(1.).into(),
-            |column| gpui_kit::rems(column).into(),
-        )
+        crate::gpui::composer::column_width(self.presentation.width)
     }
 
     pub(crate) fn set_animate_working(&mut self, animate: bool, cx: &mut Context<Self>) {
@@ -4675,88 +4672,74 @@ impl NativeAgentSessionView {
         {
             return self.render_collapsed_composer(cx);
         }
-        let composer = div()
-            .id("native-composer")
-            .debug_selector(|| "native-composer".into())
-            // An open completion menu takes the keys the composer otherwise edits with.
-            .key_context(if self.completion_active(window, cx) {
-                "ComposerCompletion"
-            } else {
-                "BoottyComposer"
-            })
-            // Escape the text area had nothing to dismiss shrinks an expanded composer, then
-            // interrupts a running turn.
-            .on_action(
-                cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
-                    if this.composer_expanded {
-                        this.set_composer_expanded(false, window, cx);
-                    } else if is_busy(this.record.snapshot.status)
-                        && !this.record.snapshot.stopping()
-                        && !this.pending.contains("interrupt")
-                    {
-                        this.command("interrupt", Vec::new(), window, cx);
-                    } else {
-                        cx.propagate();
-                    }
-                }),
-            )
-            // The text area binds the arrows itself, so recall takes its actions first.
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::MoveUp, window, cx| {
-                    if this.recall_prompt(true, window, cx) {
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
-                    if this.recall_prompt(false, window, cx) {
-                        cx.stop_propagation();
-                    }
-                },
-            ))
-            // A press anywhere in the box writes in it, not only on the text's own line. A press
-            // the text area already took is prevented; this one is, so the conversation's own
-            // focus doesn't take it next.
-            .on_mouse_down(
-                gpui_kit::MouseButton::Left,
-                cx.listener(|this, _, window, cx| {
-                    if !window.default_prevented() {
-                        this.composer.read(cx).focus_handle(cx).focus(window, cx);
-                        window.prevent_default();
-                    }
-                }),
-            )
-            .relative()
-            .w_full()
-            .max_w(self.column_width())
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .p_3()
-            .pb_2()
-            .rounded_xl()
-            .bg(cx.theme().muted.opacity(0.35))
-            .border_1()
-            .border_color(
-                if self.composer.read(cx).focus_handle(cx).is_focused(window) {
-                    cx.theme().ring
+        let composer = crate::gpui::composer::surface(
+            cx,
+            self.composer.read(cx).focus_handle(cx).is_focused(window),
+            false,
+        )
+        .id("native-composer")
+        .debug_selector(|| "native-composer".into())
+        // An open completion menu takes the keys the composer otherwise edits with.
+        .key_context(if self.completion_active(window, cx) {
+            "ComposerCompletion"
+        } else {
+            "BoottyComposer"
+        })
+        // Escape the text area had nothing to dismiss shrinks an expanded composer, then
+        // interrupts a running turn.
+        .on_action(
+            cx.listener(|this, _: &gpui_kit::component::input::Escape, window, cx| {
+                if this.composer_expanded {
+                    this.set_composer_expanded(false, window, cx);
+                } else if is_busy(this.record.snapshot.status)
+                    && !this.record.snapshot.stopping()
+                    && !this.pending.contains("interrupt")
+                {
+                    this.command("interrupt", Vec::new(), window, cx);
                 } else {
-                    cx.theme().border
-                },
-            )
-            .when(
-                !self.attachments.is_empty() || !self.attachment_imports.is_empty(),
-                |body| body.child(self.render_attachments(cx)),
-            )
-            .when(!self.annotations.is_empty(), |body| {
-                body.child(self.render_annotations(cx))
-            })
-            .when(self.composer_expanded, |body| body.flex_1().min_h_0())
-            .child(self.render_composer_input(cx))
-            .child(self.render_composer_controls(window, cx))
-            .children(self.completion.clone());
+                    cx.propagate();
+                }
+            }),
+        )
+        // The text area binds the arrows itself, so recall takes its actions first.
+        .capture_action(
+            cx.listener(|this, _: &gpui_kit::component::input::MoveUp, window, cx| {
+                if this.recall_prompt(true, window, cx) {
+                    cx.stop_propagation();
+                }
+            }),
+        )
+        .capture_action(cx.listener(
+            |this, _: &gpui_kit::component::input::MoveDown, window, cx| {
+                if this.recall_prompt(false, window, cx) {
+                    cx.stop_propagation();
+                }
+            },
+        ))
+        // A press anywhere in the box writes in it, not only on the text's own line. A press
+        // the text area already took is prevented; this one is, so the conversation's own
+        // focus doesn't take it next.
+        .on_mouse_down(
+            gpui_kit::MouseButton::Left,
+            cx.listener(|this, _, window, cx| {
+                if !window.default_prevented() {
+                    this.composer.read(cx).focus_handle(cx).focus(window, cx);
+                    window.prevent_default();
+                }
+            }),
+        )
+        .max_w(self.column_width())
+        .when(
+            !self.attachments.is_empty() || !self.attachment_imports.is_empty(),
+            |body| body.child(self.render_attachments(cx)),
+        )
+        .when(!self.annotations.is_empty(), |body| {
+            body.child(self.render_annotations(cx))
+        })
+        .when(self.composer_expanded, |body| body.flex_1().min_h_0())
+        .child(self.render_composer_input(cx))
+        .child(self.render_composer_controls(window, cx))
+        .children(self.completion.clone());
         div().w_full().min_w_0().flex().flex_col().child(composer)
     }
 
@@ -4946,13 +4929,8 @@ impl NativeAgentSessionView {
                     )
                 },
             );
-        div()
-            .flex()
+        crate::gpui::composer::controls()
             .id("native-composer-controls")
-            .min_w_0()
-            .items_center()
-            .justify_start()
-            .gap_2()
             .child(
                 crate::gpui_composer_completion::ComposerCompletion::add_button(
                     self.completion.as_ref(),

@@ -1180,6 +1180,12 @@ sessions, and **Load older sessions** fetches the next 200. Opening a result
 resumes its original provider session and account rather than starting a new
 conversation.
 
+`agents.continue-after-restart` defaults to `true`. Bootty resumes interrupted
+work in its captured provider conversation and account after a restart. It sends
+a continuation through the durable follow-up queue, without replaying the
+original prompt. Explicit stops do not trigger a continuation. Repeated restarts
+without a completed turn stop automatic recovery until you resume manually.
+
 `agents.follow-up-behavior` defaults to `"queue"`. Messages sent during an active
 turn wait for it to finish; `"steer"` sends them into the active turn instead,
 waiting in the queue until the turn can take them; `"interrupt"` stops the turn and

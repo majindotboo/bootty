@@ -215,7 +215,8 @@ impl AppState {
                     }
                     return outcome;
                 };
-                if scope == self.mux_scope()
+                if !completion.preserves_selection()
+                    && scope == self.mux_scope()
                     && matches!(
                         command,
                         MuxCommand::ActivateWindow { .. }
@@ -227,12 +228,14 @@ impl AppState {
                 {
                     self.dismiss_session_creation();
                 }
-                if matches!(
-                    command,
-                    MuxCommand::ActivateWindow { .. }
-                        | MuxCommand::ActivatePane { .. }
-                        | MuxCommand::RestoreSession { .. }
-                ) && let Some(target) = value.get("terminal")
+                if !completion.preserves_selection()
+                    && matches!(
+                        command,
+                        MuxCommand::ActivateWindow { .. }
+                            | MuxCommand::ActivatePane { .. }
+                            | MuxCommand::RestoreSession { .. }
+                    )
+                    && let Some(target) = value.get("terminal")
                 {
                     match self.resolve_command_target(
                         "terminal.capture",

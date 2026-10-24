@@ -147,6 +147,7 @@ pub enum PendingCommandResult {
     SessionReopen {
         scope: SpaceId,
         identity: String,
+        selection: bootty_mux::controller::CommandSelection,
     },
     NativePanelClose {
         targets: Vec<CommandTarget>,
@@ -777,6 +778,10 @@ impl AppState {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Pending command variants retain one explicit polling precedence"
+    )]
     fn poll_pending_app_command(
         &mut self,
         pending: &mut PendingAppCommand,
@@ -806,11 +811,17 @@ impl AppState {
             }
             return Poll::Ready(Some(outcome));
         }
-        if let PendingCommandResult::SessionReopen { scope, identity } = &pending.result {
+        if let PendingCommandResult::SessionReopen {
+            scope,
+            identity,
+            selection,
+        } = &pending.result
+        {
             match self.dispatch_session_reopen(
                 *scope,
                 identity,
                 Some((pending.deadline, pending.cancellation.clone())),
+                *selection,
             ) {
                 CommandDispatch::Complete(outcome) => return Poll::Ready(Some(outcome)),
                 CommandDispatch::Pending(PendingCommandResult::SessionReopen { .. }) => {

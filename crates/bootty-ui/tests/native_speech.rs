@@ -16,6 +16,7 @@ fn record(account: &std::path::Path) -> NativeSessionRecord {
     let mut config = NativeSessionConfig::new(AgentKind::Codex, "/tmp/project");
     config.account_directory = Some(account.to_string_lossy().into_owned());
     NativeSessionRecord {
+        restart: bootty_agents::NativeRestart::default(),
         id: "speech".to_owned(),
         binding_id: "binding".to_owned(),
         task_identity: Some("task".to_owned()),

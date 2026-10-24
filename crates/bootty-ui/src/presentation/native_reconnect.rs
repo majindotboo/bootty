@@ -18,12 +18,22 @@ pub enum NativeReconnectStep {
 
 impl NativeReconnect {
     pub fn poll(&mut self, record: &NativeSessionRecord, now: Instant) -> NativeReconnectStep {
-        if self.session.as_deref() != Some(record.id.as_str()) || !record.snapshot.transport_lost {
+        let restarting = record.restart.needs_resume();
+        if self.session.as_deref() != Some(record.id.as_str())
+            || (!record.snapshot.transport_lost && !restarting)
+        {
             self.session = Some(record.id.clone());
             self.retry_at = None;
             self.failures = 0;
         }
-        if !record.snapshot.transport_lost || record.snapshot.status != NativeSessionStatus::Error {
+        if !((record.snapshot.transport_lost
+            && record.snapshot.status == NativeSessionStatus::Error)
+            || (restarting
+                && matches!(
+                    record.snapshot.status,
+                    NativeSessionStatus::Stopped | NativeSessionStatus::Error
+                )))
+        {
             return NativeReconnectStep::Idle;
         }
         if let Some(at) = self.retry_at.filter(|at| *at > now) {

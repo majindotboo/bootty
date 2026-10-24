@@ -33,6 +33,8 @@ pub struct NativeQueuedMessage {
 
 #[derive(Clone, Deserialize, Serialize)]
 pub(super) struct QueuedInput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restart_turn: Option<String>,
     pub(super) session: String,
     id: String,
     status: NativeQueuedMessageStatus,
@@ -226,6 +228,7 @@ impl NativeAgentService {
             steer,
         };
         let input = QueuedInput {
+            restart_turn: None,
             session: target.handle.clone(),
             id,
             status: info.status,
@@ -565,6 +568,14 @@ impl NativeAgentService {
         let input = candidate.followups.get_mut(index)?;
         input.status = NativeQueuedMessageStatus::Sending;
         let input = input.clone();
+        if let Some(turn) = &input.restart_turn
+            && let Some(record) = candidate
+                .records
+                .iter_mut()
+                .find(|record| record.id == input.session)
+        {
+            record.restart.sending(turn);
+        }
         let target = candidate
             .records
             .iter()
@@ -605,4 +616,63 @@ impl NativeAgentService {
             eprintln!("Queued conversation input could not be saved: {error}");
         }
     }
+}
+
+pub(super) fn prepare_restart(store: &mut Store, session: &str) -> Result<(), String> {
+    let Some(record) = store.records.iter_mut().find(|record| record.id == session) else {
+        return Ok(());
+    };
+    let Some(turn) = record.restart.prepare() else {
+        return Ok(());
+    };
+    let inputs = store
+        .followups
+        .iter()
+        .filter(|input| input.session == session)
+        .collect::<Vec<_>>();
+    if inputs
+        .iter()
+        .any(|input| input.restart_turn.as_deref() == Some(&turn))
+    {
+        return Ok(());
+    }
+    // Ambiguous delivery stays visible for explicit Retry; a full queue keeps its admitted input.
+    if inputs.len() >= 16
+        || inputs.iter().any(|input| {
+            matches!(
+                input.status,
+                NativeQueuedMessageStatus::Sending | NativeQueuedMessageStatus::Failed
+            )
+        })
+    {
+        record.restart.cancel();
+        return Ok(());
+    }
+    let prompt = crate::NativePrompt::text(
+        "Bootty restarted. Continue the interrupted work from where you left off.",
+    )?;
+    let input = QueuedInput {
+        session: session.to_owned(),
+        id: crate::terminal_session_id()?,
+        status: NativeQueuedMessageStatus::Queued,
+        prompt: crate::native_prompt::SavedNativePrompt::capture(&prompt),
+        steer: false,
+        restart_turn: Some(turn),
+    };
+    let position = store
+        .followups
+        .iter()
+        .position(|input| input.session == session)
+        .unwrap_or(store.followups.len());
+    store.followups.insert(position, input);
+    Ok(())
+}
+
+pub(super) fn cancel_restart(store: &mut Store, session: &str) {
+    if let Some(record) = store.records.iter_mut().find(|record| record.id == session) {
+        record.restart.cancel();
+    }
+    store
+        .followups
+        .retain(|input| input.session != session || input.restart_turn.is_none());
 }
