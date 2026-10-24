@@ -42,6 +42,16 @@ pub enum InputEvent {
         y: f64,
         button: MouseButton,
     },
+    ButtonDown {
+        x: f64,
+        y: f64,
+        button: MouseButton,
+    },
+    ButtonUp {
+        x: f64,
+        y: f64,
+        button: MouseButton,
+    },
     Scroll {
         x: f64,
         y: f64,
@@ -50,6 +60,12 @@ pub enum InputEvent {
     },
     /// At most [`crate::control::MAX_TEXT_UNITS`] UTF-16 units; longer text arrives in pieces.
     Text(String),
+    KeyDown {
+        key: Key,
+    },
+    KeyUp {
+        key: Key,
+    },
     Key {
         key: Key,
         modifiers: Vec<Modifier>,
@@ -165,6 +181,16 @@ pub trait Desktop: Send + Sync {
     /// # Errors
     /// Returns platform errors; delivery is never retried.
     fn post(&self, window: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError>;
+    /// Release only keys/buttons this backend owns. Cleanup must not require a live target.
+    /// # Errors
+    /// Returns an OS error when release cannot be delivered.
+    fn release_inputs(&self) -> Result<(), ComputerError> {
+        Ok(())
+    }
+    /// Independent pointer events can reach an uncovered inactive X11 window.
+    fn independent_input(&self) -> bool {
+        false
+    }
     /// Make the window the one its process sends keys to. The caller confirms the result.
     ///
     /// # Errors

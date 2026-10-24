@@ -701,7 +701,11 @@ impl GpuiWorkspace {
                 flush();
             });
             let cleanup = this.close_link_forwards(cx);
+            let input_cleanup = cx
+                .background_executor()
+                .spawn(this.state.computer_shutdown());
             async move {
+                input_cleanup.await;
                 checkpoint.await;
                 cleanup.await;
                 // GPUI clears windows before polling quit work; keep the admitted binding alive.
@@ -1383,7 +1387,11 @@ impl GpuiWorkspace {
             }
         }
         let cleanup = self.close_link_forwards(cx);
+        let input_cleanup = cx
+            .background_executor()
+            .spawn(self.state.computer_shutdown());
         cx.spawn_in(window, async move |weak, cx| {
+            input_cleanup.await;
             placement.await;
             for checkpoint in checkpoints {
                 if !checkpoint.await {

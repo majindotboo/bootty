@@ -992,6 +992,8 @@ fn app_mention() -> bootty_agents::NativeApplicationMention {
         target: bootty_computer::ComputerTarget {
             window_id: 42,
             native_id: None,
+            backend_id: None,
+            display: None,
             process_id: 19,
             bundle_id: "test.App".into(),
             application_name: None,
@@ -1274,4 +1276,79 @@ fn app_elements_observe_without_capturing_an_image(binding: CommandTarget) {
             .is_some_and(|text| text.contains("1 Button \"Seven\""))
     }));
     assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[rstest]
+#[case(json!({"action":"button_down","x":10.0,"y":20.0,"button":"left"}))]
+#[case(json!({"action":"button_up","x":10.0,"y":20.0,"button":"right"}))]
+#[case(json!({"action":"key_down","key":"control"}))]
+#[case(json!({"action":"key_up","key":"right"}))]
+#[case(json!({"action":"release_inputs"}))]
+fn held_input_uses_the_conversation_command_and_grant(
+    binding: CommandTarget,
+    #[case] action: Value,
+) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
+    let protocol = ToolProtocol::new(grant.clone());
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let received = calls.clone();
+    let commands = move |invocation: CommandInvocation, _: Instant, _: CommandCancellation| {
+        received.lock().unwrap().push(invocation);
+        success()
+    };
+    let input = json!({"name":"computer_input","arguments":{"application":"Zed","action":action}});
+    assert_eq!(
+        request(&protocol, &input, &commands).unwrap()["result"]["isError"],
+        true
+    );
+    assert_eq!(calls.lock().unwrap().len(), 0);
+    grant.grant_applications(&conversation(), &[]).unwrap();
+    assert_eq!(
+        request(&protocol, &input, &commands).unwrap()["result"]["isError"],
+        false
+    );
+    let invocation = calls.lock().unwrap().first().unwrap().clone();
+    assert_eq!(invocation.command, "agents.native.computer");
+    assert_eq!(invocation.target, Some(conversation()));
+    assert_eq!(
+        serde_json::from_str::<Value>(invocation.arguments.get(3).unwrap()).unwrap(),
+        action
+    );
+}
+
+#[rstest]
+fn app_grants_cannot_execute_on_another_app_or_after_revocation(
+    binding: CommandTarget,
+    #[values(false, true)] revoked: bool,
+) {
+    let grant = lease(binding.clone(), ToolPolicy::own_terminal(), Vec::new()).unwrap();
+    grant.bind(&binding, terminal()).unwrap();
+    let mention = app_mention();
+    grant
+        .grant_applications(&conversation(), std::slice::from_ref(&mention))
+        .unwrap();
+    let access = grant
+        .application_access(&conversation(), &mentioned_app())
+        .unwrap()
+        .unwrap();
+    if revoked {
+        grant.revoke();
+    }
+    let mut other = mention.target;
+    other.bundle_id = "test.AnotherApp".into();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    // The wrong app is refused before constructing any native backend or posting input.
+    assert!(matches!(
+        runtime.block_on(access.execute(
+            &other,
+            &bootty_computer::ComputerAction::KeyDown {
+                key: bootty_computer::Key::Control
+            }
+        )),
+        Err(bootty_computer::ComputerError::StaleTarget)
+    ));
 }

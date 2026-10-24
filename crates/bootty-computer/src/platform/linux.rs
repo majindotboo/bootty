@@ -7,7 +7,13 @@
 //! Deliberate limit: portal capture/input need a user-selected sharing session, which cannot yet
 //! be bound to our exact window token. Add that binding before enabling them for these targets.
 mod accessibility;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::{
+    sync::{
+        Arc, Mutex, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use x11rb::{
     connection::Connection as _,
@@ -38,28 +44,67 @@ const KEYSYM_CONTROL: u32 = 0xffe3;
 const KEYSYM_ALT: u32 = 0xffe9;
 
 pub fn native() -> Arc<dyn Desktop> {
+    connect(std::env::var("DISPLAY").ok().as_deref())
+}
+
+pub fn on_display(name: &str) -> Result<Arc<dyn Desktop>, ComputerError> {
+    if !crate::model::valid_display(name) {
+        return Err(ComputerError::InvalidTarget);
+    }
+    let desktop = connect(Some(name));
+    if desktop.display.is_none() {
+        return Err(ComputerError::Platform("X11 display is unavailable".into()));
+    }
+    Ok(desktop)
+}
+
+fn connect(name: Option<&str>) -> Arc<LinuxDesktop> {
+    static NEXT_CONNECTION: AtomicU64 = AtomicU64::new(1);
     Arc::new(LinuxDesktop {
-        display: x11rb::connect(None).ok().and_then(|(connection, screen)| {
+        display: x11rb::connect(name).ok().and_then(|(connection, screen)| {
             let root = connection.setup().roots.get(screen)?.root;
-            Some(Mutex::new(Display { connection, root }))
+            let backend_id = format!(
+                "x11:{}:{}:{}",
+                std::process::id(),
+                start_time(i32::try_from(std::process::id()).ok()?)?,
+                NEXT_CONNECTION.fetch_add(1, Ordering::Relaxed)
+            );
+            Some(Arc::new(Mutex::new(Display {
+                connection,
+                root,
+                name: name?.to_owned(),
+                backend_id,
+                held: HeldInput::default(),
+            })))
         }),
     })
 }
 
 struct LinuxDesktop {
-    display: Option<Mutex<Display>>,
+    display: Option<Arc<Mutex<Display>>>,
 }
 
 struct Display {
     connection: RustConnection,
     root: Window,
+    name: String,
+    backend_id: String,
+    held: HeldInput,
+}
+
+#[derive(Default)]
+struct HeldInput {
+    target: Option<ComputerTarget>,
+    buttons: Vec<u8>,
+    keys: Vec<Keycode>,
+    began: Option<Instant>,
 }
 
 impl LinuxDesktop {
-    fn with<T>(&self, work: impl FnOnce(&Display) -> Option<T>) -> Option<T> {
+    fn with<T>(&self, work: impl FnOnce(&mut Display) -> Option<T>) -> Option<T> {
         let display = self.display.as_ref()?;
-        let display = display.lock().unwrap_or_else(PoisonError::into_inner);
-        work(&display)
+        let mut display = display.lock().unwrap_or_else(PoisonError::into_inner);
+        work(&mut display)
     }
 }
 
@@ -85,7 +130,7 @@ impl Desktop for LinuxDesktop {
     fn windows(&self) -> Vec<NativeWindow> {
         let windows: Vec<NativeWindow> = self
             .with(|display| {
-                let stacking = display.cardinals(display.root, "_NET_CLIENT_LIST_STACKING")?;
+                let stacking = display.stacking()?;
                 // The stacking list runs bottom to top.
                 Some(
                     stacking
@@ -179,13 +224,66 @@ impl Desktop for LinuxDesktop {
 
     fn post(&self, window: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError> {
         require_x11(window)?;
-        self.with(|display| display.post(event).ok())
-            .ok_or_else(|| ComputerError::Platform("X11 rejected the input".into()))
+        let was_holding = self
+            .with(|display| Some(display.held.began.is_some()))
+            .unwrap_or(false);
+        let result = self
+            .with(|display| Some(display.post(window, event)))
+            .ok_or_else(rejected)?;
+        if result.is_err() {
+            self.release_inputs()?;
+        }
+        // A bounded gesture also cleans up if a client disappears between successful calls.
+        // Raise the limit only for an explicitly supported longer native input journey.
+        if !was_holding
+            && matches!(
+                event,
+                InputEvent::ButtonDown { .. } | InputEvent::KeyDown { .. }
+            )
+        {
+            let began = self.with(|display| display.held.began);
+            if let (Some(display), Some(began)) = (&self.display, began) {
+                let display = display.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_secs(20));
+                    let mut display = display.lock().unwrap_or_else(PoisonError::into_inner);
+                    if display.held.began == Some(began) {
+                        _ = display.release_inputs();
+                    }
+                });
+            }
+        }
+        result
+    }
+
+    fn independent_input(&self) -> bool {
+        self.display.is_some()
+    }
+
+    fn release_inputs(&self) -> Result<(), ComputerError> {
+        self.with(|display| Some(display.release_inputs()))
+            .unwrap_or(Ok(()))
     }
 
     fn raise(&self, window: &NativeWindow) -> Result<(), ComputerError> {
         require_x11(window)?;
         self.with(|display| {
+            if display
+                .cardinals(display.root, "_NET_SUPPORTING_WM_CHECK")
+                .is_none_or(|windows| windows.is_empty())
+            {
+                display
+                    .connection
+                    .set_input_focus(
+                        x11rb::protocol::xproto::InputFocus::PARENT,
+                        window.id,
+                        x11rb::CURRENT_TIME,
+                    )
+                    .ok()?
+                    .check()
+                    .ok()?;
+                return display.connection.sync().ok();
+            }
             let active = display.atom("_NET_ACTIVE_WINDOW")?;
             // Source 2 marks a pager-style request, which window managers honor.
             let event = ClientMessageEvent::new(32, window.id, active, [2, 0, 0, 0, 0]);
@@ -256,6 +354,18 @@ fn require_x11(window: &NativeWindow) -> Result<(), ComputerError> {
 }
 
 impl Display {
+    fn stacking(&self) -> Option<Vec<Window>> {
+        self.cardinals(self.root, "_NET_CLIENT_LIST_STACKING")
+            .filter(|list| !list.is_empty())
+            .or_else(|| {
+                self.connection
+                    .query_tree(self.root)
+                    .ok()?
+                    .reply()
+                    .ok()
+                    .map(|reply| reply.children)
+            })
+    }
     fn atom(&self, name: &str) -> Option<Atom> {
         Some(
             self.connection
@@ -302,7 +412,17 @@ impl Display {
 
     /// The active window and its process.
     fn active(&self) -> Option<(i32, Window)> {
-        let window = *self.cardinals(self.root, "_NET_ACTIVE_WINDOW")?.first()?;
+        let window = self
+            .cardinals(self.root, "_NET_ACTIVE_WINDOW")
+            .and_then(|windows| windows.first().copied())
+            .or_else(|| {
+                self.connection
+                    .get_input_focus()
+                    .ok()?
+                    .reply()
+                    .ok()
+                    .map(|reply| reply.focus)
+            })?;
         let owner = i32::try_from(*self.cardinals(window, "_NET_WM_PID")?.first()?).ok()?;
         Some((owner, window))
     }
@@ -353,6 +473,8 @@ impl Display {
         Some(ComputerTarget {
             window_id: window,
             native_id: None,
+            backend_id: Some(self.backend_id.clone()),
+            display: Some(self.name.clone()),
             process_id,
             application_name: Some(bundle_id.chars().take(256).collect()),
             bundle_id,
@@ -362,10 +484,39 @@ impl Display {
         })
     }
 
-    fn post(&self, event: &InputEvent) -> Result<(), ComputerError> {
+    fn post(&mut self, window: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError> {
+        let current = self
+            .native_window(window.id)
+            .and_then(|window| window.app)
+            .ok_or(ComputerError::TargetUnavailable)?;
+        if window
+            .app
+            .as_ref()
+            .is_none_or(|target| !crate::model::same_window(&current, target))
+        {
+            return Err(ComputerError::StaleTarget);
+        }
+        if let Some(target) = &self.held.target
+            && !crate::model::same_window(&current, target)
+        {
+            return Err(ComputerError::StaleTarget);
+        }
         match event {
+            InputEvent::ButtonDown { x, y, button } | InputEvent::ButtonUp { x, y, button } => {
+                self.transition_button(
+                    window,
+                    *x,
+                    *y,
+                    *button,
+                    matches!(event, InputEvent::ButtonDown { .. }),
+                )?;
+            }
+            InputEvent::KeyDown { key } | InputEvent::KeyUp { key } => {
+                self.transition_key(window, *key, matches!(event, InputEvent::KeyDown { .. }))?;
+            }
             InputEvent::Move { x, y } => self.pointer(*x, *y)?,
             InputEvent::Click { x, y, button } => {
+                self.begin_input(window)?;
                 self.pointer(*x, *y)?;
                 let button = match button {
                     MouseButton::Left => 1,
@@ -380,6 +531,7 @@ impl Display {
                 delta_x,
                 delta_y,
             } => {
+                self.begin_input(window)?;
                 self.pointer(*x, *y)?;
                 // Buttons 4 and 5 scroll up and down; 6 and 7 scroll left and right.
                 let clicks = |delta: i32| {
@@ -397,11 +549,13 @@ impl Display {
                 }
             }
             InputEvent::Text(text) => {
+                self.begin_input(window)?;
                 for character in text.chars() {
                     self.type_keysym(keysym(character), &[])?;
                 }
             }
             InputEvent::Key { key, modifiers } => {
+                self.begin_input(window)?;
                 let held: Vec<u32> = modifiers
                     .iter()
                     .map(|modifier| match modifier {
@@ -417,28 +571,173 @@ impl Display {
         self.connection.sync().map_err(|_| rejected())
     }
 
+    fn transition_button(
+        &mut self,
+        window: &NativeWindow,
+        x: f64,
+        y: f64,
+        button: MouseButton,
+        down: bool,
+    ) -> Result<(), ComputerError> {
+        let code = button_code(button);
+        if down {
+            let state = self
+                .connection
+                .query_pointer(self.root)
+                .map_err(|_| rejected())?
+                .reply()
+                .map_err(|_| rejected())?;
+            if u16::from(state.mask) & button_mask(code) != 0 {
+                return Err(ComputerError::InvalidAction(
+                    "button is already held".into(),
+                ));
+            }
+            self.begin_input(window)?;
+            self.pointer(x, y)?;
+            self.held.buttons.push(code);
+            self.fake(BUTTON_PRESS_EVENT, code, 0, 0)?;
+        } else {
+            if !self.held.buttons.contains(&code) {
+                return Err(ComputerError::InvalidAction(
+                    "button is not held by this owner".into(),
+                ));
+            }
+            self.pointer(x, y)?;
+            self.fake(BUTTON_RELEASE_EVENT, code, 0, 0)?;
+            self.connection.sync().map_err(|_| rejected())?;
+            self.held.buttons.retain(|held| *held != code);
+            self.finish_input();
+        }
+        Ok(())
+    }
+
+    fn transition_key(
+        &mut self,
+        window: &NativeWindow,
+        key: Key,
+        down: bool,
+    ) -> Result<(), ComputerError> {
+        let code = self.physical_key(key)?;
+        if down {
+            let state = self
+                .connection
+                .query_keymap()
+                .map_err(|_| keyboard_unavailable())?
+                .reply()
+                .map_err(|_| keyboard_unavailable())?;
+            if key_is_down(&state.keys, code) {
+                return Err(ComputerError::InvalidAction("key is already held".into()));
+            }
+            self.begin_input(window)?;
+            self.held.keys.push(code);
+            self.fake(KEY_PRESS_EVENT, code, 0, 0)?;
+        } else {
+            if !self.held.keys.contains(&code) {
+                return Err(ComputerError::InvalidAction(
+                    "key is not held by this owner".into(),
+                ));
+            }
+            self.fake(KEY_RELEASE_EVENT, code, 0, 0)?;
+            self.connection.sync().map_err(|_| rejected())?;
+            self.held.keys.retain(|held| *held != code);
+            self.finish_input();
+        }
+        Ok(())
+    }
+
     fn fake(&self, kind: u8, detail: u8, x: i16, y: i16) -> Result<(), ComputerError> {
         self.connection
             .xtest_fake_input(kind, detail, 0, self.root, x, y, 0)
-            .map(drop)
+            .map_err(|_| rejected())?
+            .check()
             .map_err(|_| ComputerError::Platform("XTest is unavailable".into()))
+    }
+
+    fn begin_input(&mut self, window: &NativeWindow) -> Result<(), ComputerError> {
+        let target = window.app.as_ref().ok_or(ComputerError::InvalidTarget)?;
+        if self.held.target.is_none() {
+            self.held.target = Some(target.clone());
+            self.held.began = Some(Instant::now());
+        }
+        Ok(())
+    }
+
+    fn finish_input(&mut self) {
+        if self.held.buttons.is_empty() && self.held.keys.is_empty() {
+            self.held = HeldInput::default();
+        }
+    }
+
+    fn release_inputs(&mut self) -> Result<(), ComputerError> {
+        let mut error = None;
+        // Try every owned release even when an earlier one failed. Retain failed ownership.
+        for code in self.held.buttons.clone() {
+            match self.fake(BUTTON_RELEASE_EVENT, code, 0, 0) {
+                Ok(()) => self.held.buttons.retain(|held| *held != code),
+                Err(failed) => error = Some(failed),
+            }
+        }
+        for code in self.held.keys.clone().into_iter().rev() {
+            match self.fake(KEY_RELEASE_EVENT, code, 0, 0) {
+                Ok(()) => self.held.keys.retain(|held| *held != code),
+                Err(failed) => error = Some(failed),
+            }
+        }
+        self.finish_input();
+        self.connection.sync().map_err(|_| rejected())?;
+        error.map_or(Ok(()), Err)
+    }
+
+    fn physical_key(&self, key: Key) -> Result<Keycode, ComputerError> {
+        let setup = self.connection.setup();
+        let map = self
+            .connection
+            .get_keyboard_mapping(
+                setup.min_keycode,
+                setup
+                    .max_keycode
+                    .saturating_sub(setup.min_keycode)
+                    .saturating_add(1),
+            )
+            .map_err(|_| keyboard_unavailable())?
+            .reply()
+            .map_err(|_| keyboard_unavailable())?;
+        map.keysyms
+            .chunks(usize::from(map.keysyms_per_keycode))
+            .position(|symbols| symbols.contains(&key_keysym(key)))
+            .and_then(|index| setup.min_keycode.checked_add(u8::try_from(index).ok()?))
+            .ok_or_else(keyboard_unavailable)
     }
 
     fn pointer(&self, x: f64, y: f64) -> Result<(), ComputerError> {
         self.fake(MOTION_NOTIFY_EVENT, 0, coordinate(x), coordinate(y))
     }
 
-    fn button(&self, button: u8, clicks: u32) -> Result<(), ComputerError> {
+    fn button(&mut self, button: u8, clicks: u32) -> Result<(), ComputerError> {
         for _ in 0..clicks {
+            let state = self
+                .connection
+                .query_pointer(self.root)
+                .map_err(|_| rejected())?
+                .reply()
+                .map_err(|_| rejected())?;
+            if button <= 5 && u16::from(state.mask) & button_mask(button) != 0 {
+                return Err(ComputerError::InvalidAction(
+                    "button is already held".into(),
+                ));
+            }
+            self.held.buttons.push(button);
             self.fake(BUTTON_PRESS_EVENT, button, 0, 0)?;
             self.fake(BUTTON_RELEASE_EVENT, button, 0, 0)?;
+            self.held.buttons.retain(|held| *held != button);
         }
+        self.finish_input();
         Ok(())
     }
 
     /// Press a keysym with modifiers held. A keysym missing from the keyboard map is bound to a
     /// spare keycode for the press, then unbound.
-    fn type_keysym(&self, keysym: u32, held: &[u32]) -> Result<(), ComputerError> {
+    fn type_keysym(&mut self, keysym: u32, held: &[u32]) -> Result<(), ComputerError> {
         let setup = self.connection.setup();
         let (first, last) = (setup.min_keycode, setup.max_keycode);
         let map = self
@@ -485,26 +784,68 @@ impl Display {
             self.connection.sync().map_err(|_| keyboard_unavailable())?;
             (spare, Some(spare))
         };
-        for modifier in &modifiers {
-            self.fake(KEY_PRESS_EVENT, *modifier, 0, 0)?;
+        let state = self
+            .connection
+            .query_keymap()
+            .map_err(|_| keyboard_unavailable())?
+            .reply()
+            .map_err(|_| keyboard_unavailable())?;
+        let already_down = |code: Keycode| key_is_down(&state.keys, code);
+        modifiers.sort_unstable();
+        modifiers.dedup();
+        modifiers.retain(|code| !already_down(*code));
+        let mut acquired = Vec::new();
+        let result = (|| {
+            if already_down(code) {
+                return Err(ComputerError::InvalidAction("key is already held".into()));
+            }
+            for code in modifiers.iter().copied().chain(std::iter::once(code)) {
+                acquired.push(code);
+                self.held.keys.push(code);
+                self.fake(KEY_PRESS_EVENT, code, 0, 0)?;
+            }
+            Ok(())
+        })();
+        let mut cleanup_error = None;
+        for code in acquired.into_iter().rev() {
+            match self.fake(KEY_RELEASE_EVENT, code, 0, 0) {
+                Ok(()) => self.held.keys.retain(|held| *held != code),
+                Err(error) => cleanup_error = Some(error),
+            }
         }
-        self.fake(KEY_PRESS_EVENT, code, 0, 0)?;
-        self.fake(KEY_RELEASE_EVENT, code, 0, 0)?;
-        for modifier in modifiers.iter().rev() {
-            self.fake(KEY_RELEASE_EVENT, *modifier, 0, 0)?;
-        }
+        self.finish_input();
         if let Some(spare) = spare {
             self.connection.sync().map_err(|_| keyboard_unavailable())?;
             self.connection
                 .change_keyboard_mapping(1, spare, map.keysyms_per_keycode, &vec![0; per])
                 .map_err(|_| keyboard_unavailable())?;
         }
-        Ok(())
+        result?;
+        cleanup_error.map_or(Ok(()), Err)
     }
 }
 
 fn rejected() -> ComputerError {
     ComputerError::Platform("X11 rejected the input".into())
+}
+
+fn key_is_down(keys: &[u8; 32], code: Keycode) -> bool {
+    keys.get(usize::from(code / 8))
+        .is_some_and(|bits| bits & (1 << (code % 8)) != 0)
+}
+
+fn button_mask(code: u8) -> u16 {
+    1_u16
+        .checked_shl(u32::from(code).saturating_add(7))
+        .unwrap_or(0)
+}
+
+const fn button_code(button: MouseButton) -> u8 {
+    match button {
+        MouseButton::Left => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Right => 3,
+    }
 }
 
 fn keyboard_unavailable() -> ComputerError {
@@ -581,6 +922,20 @@ fn keysym(character: char) -> u32 {
 
 const fn key_keysym(key: Key) -> u32 {
     match key {
+        Key::Control => KEYSYM_CONTROL,
+        Key::Shift => KEYSYM_SHIFT,
+        Key::Option => KEYSYM_ALT,
+        Key::Command => 0xffeb,
+        Key::Keypad0 => 0xffb0,
+        Key::Keypad1 => 0xffb1,
+        Key::Keypad2 => 0xffb2,
+        Key::Keypad3 => 0xffb3,
+        Key::Keypad4 => 0xffb4,
+        Key::Keypad5 => 0xffb5,
+        Key::Keypad6 => 0xffb6,
+        Key::Keypad7 => 0xffb7,
+        Key::Keypad8 => 0xffb8,
+        Key::Keypad9 => 0xffb9,
         Key::Return => KEYSYM_RETURN,
         Key::Tab => KEYSYM_TAB,
         Key::Escape => 0xff1b,

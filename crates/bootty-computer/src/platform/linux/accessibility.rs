@@ -207,6 +207,8 @@ impl Session {
         let target = ComputerTarget {
             window_id: id,
             native_id: Some(native_id),
+            backend_id: None,
+            display: None,
             process_id,
             bundle_id: bundle_id.into(),
             application_name: application_name.map(str::to_owned),

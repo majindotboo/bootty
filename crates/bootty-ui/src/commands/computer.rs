@@ -9,13 +9,13 @@ use bootty_control::{
 #[derive(Clone, Debug, PartialEq)]
 pub enum ComputerCommand {
     Status,
-    Targets,
+    Targets(Option<String>),
     Icons(Vec<String>),
     HostCapture,
     HostSnapshot,
     HostSnapshotRegion(HostCaptureRegion),
     Execute {
-        target: ComputerTarget,
+        target: Box<ComputerTarget>,
         action: ComputerAction,
         destination: Option<PathBuf>,
     },
@@ -95,7 +95,7 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
             "computer.targets",
             "List Computer Windows",
             "List exact local window tokens without enabling computer use or changing focus.",
-            &[][..],
+            &["display"][..],
             MutationClass::Read,
         ),
         (
@@ -124,6 +124,41 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
             "Click Computer Window",
             "Click a point inside the exact selected window, even behind other windows on macOS.",
             &["target", "x", "y", "button"][..],
+            MutationClass::Write,
+        ),
+        (
+            "computer.button-down",
+            "Hold Computer Button",
+            "Hold an independent button on the exact uncovered X11 window; release within 20 seconds.",
+            &["target", "x", "y", "button"][..],
+            MutationClass::Write,
+        ),
+        (
+            "computer.button-up",
+            "Release Computer Button",
+            "Release a button held by this owner on the same exact X11 window.",
+            &["target", "x", "y", "button"][..],
+            MutationClass::Write,
+        ),
+        (
+            "computer.key-down",
+            "Hold Computer Key",
+            "Hold a physical key on the exact focused X11 window; release within 20 seconds.",
+            &["target", "key"][..],
+            MutationClass::Write,
+        ),
+        (
+            "computer.key-up",
+            "Release Computer Key",
+            "Release a physical key held by this owner on the same exact X11 window.",
+            &["target", "key"][..],
+            MutationClass::Write,
+        ),
+        (
+            "computer.release-inputs",
+            "Release Computer Input",
+            "Release only this owner's held buttons and keys. A stale target also triggers cleanup.",
+            &["target"][..],
             MutationClass::Write,
         ),
         (
@@ -194,8 +229,9 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
                         _ => ValueType::String,
                     },
                 );
-                argument.required = !matches!(*name, "button" | "modifiers" | "allow-click")
-                    && id != "computer.snapshot";
+                argument.required =
+                    !matches!(*name, "button" | "modifiers" | "allow-click" | "display")
+                        && id != "computer.snapshot";
                 if *name == "button" {
                     argument.choices = ["left", "right", "middle"].map(str::to_owned).to_vec();
                 }
@@ -254,8 +290,10 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
             return Err(invalid());
         }
         "computer.status" if invocation.arguments.is_empty() => return Ok(ComputerCommand::Status),
-        "computer.targets" if invocation.arguments.is_empty() => {
-            return Ok(ComputerCommand::Targets);
+        "computer.targets" if invocation.arguments.len() <= 1 => {
+            return Ok(ComputerCommand::Targets(
+                invocation.arguments.first().cloned(),
+            ));
         }
         "computer.icons" => return resolve_icons(&invocation.arguments).ok_or_else(invalid),
         _ => {}
@@ -287,17 +325,15 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
             }
         }
         "computer.focus" => ComputerAction::Focus,
-        "computer.click" => ComputerAction::Click {
-            x: coordinate(1)?,
-            y: coordinate(2)?,
-            button: invocation
-                .arguments
-                .get(3)
-                .map_or(Ok(MouseButton::Left), |button| {
-                    serde_json::from_value(serde_json::Value::String(button.clone()))
-                        .map_err(|_| invalid())
-                })?,
-        },
+        "computer.release-inputs"
+        | "computer.key-down"
+        | "computer.key-up"
+        | "computer.button-down"
+        | "computer.button-up" => resolve_independent(invocation).ok_or_else(invalid)?,
+        "computer.click" => {
+            let (x, y, button) = resolve_button(&invocation.arguments).ok_or_else(invalid)?;
+            ComputerAction::Click { x, y, button }
+        }
         "computer.move" => ComputerAction::Move {
             x: coordinate(1)?,
             y: coordinate(2)?,
@@ -323,10 +359,50 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
     };
     target.validate_action(&action).map_err(|_| invalid())?;
     Ok(ComputerCommand::Execute {
-        target,
+        target: Box::new(target),
         action,
         destination,
     })
+}
+
+fn resolve_button(arguments: &[String]) -> Option<(f64, f64, MouseButton)> {
+    let (x, y) = (
+        arguments.get(1)?.parse().ok()?,
+        arguments.get(2)?.parse().ok()?,
+    );
+    let button = arguments.get(3).map_or(Some(MouseButton::Left), |button| {
+        serde_json::from_value(serde_json::Value::String(button.clone())).ok()
+    })?;
+    Some((x, y, button))
+}
+
+fn resolve_independent(invocation: &CommandInvocation) -> Option<ComputerAction> {
+    let argument = |index| invocation.arguments.get(index).map(String::as_str);
+    match invocation.command.as_str() {
+        "computer.release-inputs" if invocation.arguments.len() == 1 => {
+            Some(ComputerAction::ReleaseInputs)
+        }
+        "computer.key-down" | "computer.key-up" if invocation.arguments.len() == 2 => {
+            let key =
+                serde_json::from_value(serde_json::Value::String(argument(1)?.to_owned())).ok()?;
+            Some(if invocation.command == "computer.key-down" {
+                ComputerAction::KeyDown { key }
+            } else {
+                ComputerAction::KeyUp { key }
+            })
+        }
+        "computer.button-down" | "computer.button-up"
+            if (3..=4).contains(&invocation.arguments.len()) =>
+        {
+            let (x, y, button) = resolve_button(&invocation.arguments)?;
+            Some(if invocation.command == "computer.button-down" {
+                ComputerAction::ButtonDown { x, y, button }
+            } else {
+                ComputerAction::ButtonUp { x, y, button }
+            })
+        }
+        _ => None,
+    }
 }
 
 fn resolve_set_value(arguments: &[String]) -> Option<ComputerAction> {

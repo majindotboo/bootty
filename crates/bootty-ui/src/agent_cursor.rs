@@ -35,6 +35,8 @@ pub fn pointing<T, E>(
 ) -> Result<T, E> {
     let (x, y) = match action {
         ComputerAction::Click { x, y, .. }
+        | ComputerAction::ButtonDown { x, y, .. }
+        | ComputerAction::ButtonUp { x, y, .. }
         | ComputerAction::Move { x, y }
         | ComputerAction::Scroll { x, y, .. } => (*x, *y),
         ComputerAction::Press { element, .. } => element.center(),

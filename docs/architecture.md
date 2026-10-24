@@ -23,6 +23,7 @@ This file describes the current production structure.
 
 | Fact or mutation | Owner | Failure rule |
 | --- | --- | --- |
+| Native computer connections and held input | `bootty-computer::Computer`, retained by the command runtime | Exact display/backend/window tokens; errors, cancellation, revocation, shutdown and a bounded gesture deadline release only owned input. |
 | Application identity and local namespace | `bootty-config` | A conflicting process identity fails startup. |
 | The discoverable application process | The control instance lease | One identity publishes one generation endpoint. |
 | Persistent Space and binding metadata | `bootty-mux::repository::WorkspaceRepository` | A failed commit leaves the prior state active. |

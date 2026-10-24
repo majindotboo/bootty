@@ -205,6 +205,10 @@ impl Desktop for WindowsDesktop {
 
     fn post(&self, _window: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError> {
         let inputs = match event {
+            InputEvent::ButtonDown { .. }
+            | InputEvent::ButtonUp { .. }
+            | InputEvent::KeyDown { .. }
+            | InputEvent::KeyUp { .. } => return Err(ComputerError::Unsupported),
             InputEvent::Move { x, y } => vec![mouse_at(*x, *y, MOUSE_EVENT_FLAGS(0), 0)],
             InputEvent::Click { x, y, button } => {
                 let (down, up) = match button {
@@ -485,6 +489,8 @@ fn application(window: HWND, id: u32, bounds: &DisplayBounds) -> Option<Computer
     Some(ComputerTarget {
         window_id: id,
         native_id: None,
+        backend_id: None,
+        display: None,
         process_id: i32::try_from(process_id).ok()?,
         bundle_id,
         application_name,
@@ -584,6 +590,20 @@ fn virtual_key(key: Key) -> VIRTUAL_KEY {
     let digit = |offset: u16| VIRTUAL_KEY(0x30_u16.saturating_add(offset));
     let function = |offset: u16| VIRTUAL_KEY(VK_F1.0.saturating_add(offset));
     match key {
+        Key::Control => VIRTUAL_KEY(0x11),
+        Key::Shift => VIRTUAL_KEY(0x10),
+        Key::Option => VIRTUAL_KEY(0x12),
+        Key::Command => VIRTUAL_KEY(0x5b),
+        Key::Keypad0 => VIRTUAL_KEY(0x60),
+        Key::Keypad1 => VIRTUAL_KEY(0x61),
+        Key::Keypad2 => VIRTUAL_KEY(0x62),
+        Key::Keypad3 => VIRTUAL_KEY(0x63),
+        Key::Keypad4 => VIRTUAL_KEY(0x64),
+        Key::Keypad5 => VIRTUAL_KEY(0x65),
+        Key::Keypad6 => VIRTUAL_KEY(0x66),
+        Key::Keypad7 => VIRTUAL_KEY(0x67),
+        Key::Keypad8 => VIRTUAL_KEY(0x68),
+        Key::Keypad9 => VIRTUAL_KEY(0x69),
         Key::Return => VK_RETURN,
         Key::Tab => VK_TAB,
         Key::Escape => VK_ESCAPE,

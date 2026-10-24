@@ -1714,6 +1714,12 @@ impl NativeAgentSession {
         }
         publish_change(&self.change_handler);
     }
+
+    pub(crate) fn application_computer(&self) -> Option<bootty_computer::Computer> {
+        self.tools
+            .as_ref()
+            .map(|tools| tools.lease().application_computer())
+    }
 }
 
 impl Drop for NativeAgentSession {

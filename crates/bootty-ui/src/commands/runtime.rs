@@ -299,6 +299,7 @@ fn publish_creation_receipt(
 }
 
 pub struct CommandRuntime {
+    computer: bootty_computer::Computer,
     instance_handle: String,
     instance_generation: u64,
     window_generation: u64,
@@ -326,6 +327,7 @@ pub struct CommandRuntime {
 
 impl Drop for CommandRuntime {
     fn drop(&mut self) {
+        self.computer.release_inputs();
         self.jobs.retire();
         for pending in &self.pending {
             let _ = pending.cancellation.cancel();
@@ -453,6 +455,7 @@ impl CommandRuntime {
                     std::sync::Weak::new()
                 },
             )),
+            computer: bootty_computer::Computer::new(),
             agent_service: agents,
             terminal_agents: None,
             provider_updates: provider_updates::ProviderUpdates::default(),

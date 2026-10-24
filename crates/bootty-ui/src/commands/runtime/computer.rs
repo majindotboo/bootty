@@ -56,6 +56,9 @@ impl super::CommandRuntime {
         &self,
         policy: &bootty_config::config::ComputerConfig,
     ) {
+        if !policy.enabled || !policy.input_enabled {
+            self.computer.release_inputs();
+        }
         if !policy.enabled || !policy.capture_enabled {
             let Some(descriptor) = self.catalog.describe("browser.capture") else {
                 return;
@@ -70,6 +73,31 @@ impl super::CommandRuntime {
 }
 
 impl AppState {
+    /// Run on the existing quit worker, while its native owners are still alive.
+    pub(crate) fn computer_shutdown(&self) -> impl std::future::Future<Output = ()> + Send + use<> {
+        let computer = self.commands.computer.clone();
+        let agents = self.commands.native_agents.clone();
+        async move {
+            let run = || -> Result<(), ComputerError> {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                runtime.block_on(async {
+                    let direct = computer.shutdown().await;
+                    let applications = if let Some(agents) = agents {
+                        agents.shutdown_application_input().await
+                    } else {
+                        Ok(())
+                    };
+                    direct.and(applications)
+                })
+            };
+            if let Err(error) = run() {
+                eprintln!("Could not release owned computer input before quitting: {error}");
+            }
+        }
+    }
+
     pub(super) fn dispatch_computer_command(
         &self,
         command: ComputerCommand,
@@ -108,9 +136,9 @@ impl AppState {
         let capture_directory =
             crate::gpui_workspace::browser_profile_directory().with_file_name("computer-captures");
         let repaint = self.repaint.clone();
+        let computer = self.commands.computer.clone();
         self.dispatch_committed_command(execution, move || {
             let run = || -> Result<CommandOutcome, ComputerError> {
-                let computer = Computer::new();
                 let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
                 match command {
                     ComputerCommand::Status => Ok(super::serialized_command_outcome(serde_json::json!({
@@ -119,8 +147,8 @@ impl AppState {
                         "input_enabled": policy.input_enabled,
                         "permissions": runtime.block_on(computer.status())?,
                     }))),
-                    ComputerCommand::Targets => {
-                        let targets = runtime.block_on(computer.targets())?;
+                    ComputerCommand::Targets(display) => {
+                        let targets = runtime.block_on(async { if let Some(display) = display { computer.targets_on_display(&display).await } else { computer.targets().await } })?;
                         let total = targets.len();
                         let mut accepted = Vec::new();
                         let mut bytes = 0_usize;
@@ -332,11 +360,40 @@ impl AppState {
         });
         let always_allowed = self.config().computer.always_allowed_apps.clone();
         let repaint = self.repaint.clone();
+        let computer = self.commands.computer.clone();
         self.dispatch_committed_command(execution, move || {
-            run_application(&command, &always_allowed, deadline, cancellation, &repaint)
-                .unwrap_or_else(computer_error_outcome)
+            run_application(
+                &computer,
+                &command,
+                &always_allowed,
+                deadline,
+                cancellation,
+                &repaint,
+            )
+            .unwrap_or_else(computer_error_outcome)
         })
     }
+}
+
+fn application_window(
+    runtime: &tokio::runtime::Runtime,
+    access: &bootty_agents::NativeApplicationAccess,
+    previous: &bootty_computer::ComputerTarget,
+) -> Result<bootty_computer::ComputerTarget, ComputerError> {
+    let observed = access.observed();
+    let display = observed
+        .as_ref()
+        .and_then(|target| target.display.as_ref())
+        .or(previous.display.as_ref());
+    let windows = runtime.block_on(access.targets(display.map(String::as_str)))?;
+    windows
+        .into_iter()
+        .find(|candidate| {
+            candidate.window_id == previous.window_id
+                && candidate.native_id == previous.native_id
+                && candidate.process_id == previous.process_id
+        })
+        .ok_or(ComputerError::StaleTarget)
 }
 
 // The agent's tool call stays open while the user answers. Waiting ends early enough to finish
@@ -347,6 +404,7 @@ const APPROVAL_WAIT: Duration = bootty_host::private_stdio::TOOL_CALL_TIMEOUT
     .saturating_sub(Duration::from_secs(5));
 
 fn run_application(
+    computer: &Computer,
     command: &ApplicationCommand,
     always_allowed: &[String],
     deadline: Instant,
@@ -354,7 +412,6 @@ fn run_application(
     repaint: &RepaintHandle,
 ) -> Result<CommandOutcome, ComputerError> {
     let denied = |message: String| Ok(CommandOutcome::Denied { message });
-    let computer = Computer::new();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
@@ -385,6 +442,7 @@ fn run_application(
         Ok(access) => access,
         Err(message) => return denied(message),
     };
+    let window = application_window(&runtime, &access, window)?;
     let guard = access
         .begin(cancellation)
         .map_err(ComputerError::Platform)?;
@@ -395,7 +453,7 @@ fn run_application(
     // Observations see the app's current front window; input targets the observed one so
     // coordinates and element numbers keep meaning what the agent saw.
     let target = if action.observes() {
-        window.clone()
+        window
     } else if let Some(observed) = access.observed() {
         observed
     } else {
@@ -404,26 +462,22 @@ fn run_application(
             application.name
         ));
     };
-    target.validate_action(&action)?;
-    let access_setting = ComputerAccess::from_user_setting(true);
     let result = match crate::agent_cursor::pointing(&action, repaint.as_ref(), || {
-        runtime.block_on(computer.execute(&access_setting, &target, &action))
+        runtime.block_on(access.execute(&target, &action))
     }) {
-        Err(ComputerError::StaleTarget) => {
-            return Ok(CommandOutcome::StaleTarget {
-                message: format!(
-                    "{}'s window moved, resized or closed. Refresh with computer_elements or computer_snapshot.",
-                    application.name
-                ),
-            });
-        }
-        Err(ComputerError::StaleElement) => {
-            return Ok(CommandOutcome::StaleTarget {
-                message: format!(
+        Err(error @ (ComputerError::StaleTarget | ComputerError::StaleElement)) => {
+            let message = if matches!(error, ComputerError::StaleElement) {
+                format!(
                     "That element of {} moved, changed or closed. Refresh with computer_elements or computer_snapshot.",
                     application.name
-                ),
-            });
+                )
+            } else {
+                format!(
+                    "{}'s window moved, resized or closed. Refresh with computer_elements or computer_snapshot.",
+                    application.name
+                )
+            };
+            return Ok(CommandOutcome::StaleTarget { message });
         }
         result => result?,
     };
@@ -444,11 +498,7 @@ fn run_application(
         }
         snapshot @ ComputerResult::Snapshot { .. } => {
             snapshot_with_elements(snapshot, &access, |target| {
-                runtime.block_on(computer.execute(
-                    &access_setting,
-                    target,
-                    &ComputerAction::Elements,
-                ))
+                runtime.block_on(access.execute(target, &ComputerAction::Elements))
             })?
         }
         result => captured_result(result, None)?,

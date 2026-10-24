@@ -167,11 +167,20 @@ pub struct ApplicationGrants {
     granted: Vec<NativeApplication>,
     observed: Vec<Observation>,
     waiters: Vec<(String, mpsc::Sender<bool>)>,
+    computer: bootty_computer::Computer,
+}
+impl Drop for ApplicationGrants {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 impl ApplicationGrants {
     /// Dropping waiting senders wakes their tool calls without a grant.
     pub(crate) fn clear(&mut self) {
-        *self = Self::default();
+        self.computer.retire();
+        self.granted.clear();
+        self.observed.clear();
+        self.waiters.clear();
     }
     fn granted(&self, bundle_id: &str) -> bool {
         self.granted
@@ -221,6 +230,66 @@ impl PartialEq for NativeApplicationAccess {
     }
 }
 impl NativeApplicationAccess {
+    fn computer(&self) -> Option<bootty_computer::Computer> {
+        let state = self
+            .lease
+            .state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        (!state.revoked && state.applications.granted(&self.application.bundle_id))
+            .then(|| state.applications.computer.clone())
+    }
+
+    /// Discover only this granted app through its conversation's native owner.
+    /// # Errors
+    /// Rejects revoked grants and native discovery failures.
+    pub async fn targets(
+        &self,
+        display: Option<&str>,
+    ) -> Result<Vec<ComputerTarget>, bootty_computer::ComputerError> {
+        let computer = self
+            .computer()
+            .ok_or(bootty_computer::ComputerError::StaleTarget)?;
+        let mut targets = if let Some(display) = display {
+            computer.targets_on_display(display).await?
+        } else {
+            computer.targets().await?
+        };
+        if !self.current() {
+            return Err(bootty_computer::ComputerError::StaleTarget);
+        }
+        targets.retain(|target| target.bundle_id == self.application.bundle_id);
+        Ok(targets)
+    }
+
+    /// Execute under this app grant; the unrestricted computer owner never leaves the lease.
+    /// # Errors
+    /// Rejects revoked/wrong-app targets and native execution failures.
+    pub async fn execute(
+        &self,
+        target: &ComputerTarget,
+        action: &ComputerAction,
+    ) -> Result<bootty_computer::ComputerResult, bootty_computer::ComputerError> {
+        let computer = self
+            .computer()
+            .ok_or(bootty_computer::ComputerError::StaleTarget)?;
+        if target.bundle_id != self.application.bundle_id {
+            computer.release_all_inputs().await?;
+            return Err(bootty_computer::ComputerError::StaleTarget);
+        }
+        let result = computer
+            .execute(
+                &bootty_computer::ComputerAccess::from_user_setting(true),
+                target,
+                action,
+            )
+            .await;
+        if !self.current() {
+            computer.release_all_inputs().await?;
+            return Err(bootty_computer::ComputerError::StaleTarget);
+        }
+        result
+    }
     #[must_use]
     pub const fn application(&self) -> &NativeApplication {
         &self.application
@@ -311,6 +380,14 @@ impl NativeApplicationAccess {
 }
 
 impl ToolLease {
+    pub(crate) fn application_computer(&self) -> bootty_computer::Computer {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .applications
+            .computer
+            .clone()
+    }
     /// Provider children cannot widen their inherited tool authority through app grants.
     #[must_use]
     pub const fn application_mentions_supported(&self) -> bool {

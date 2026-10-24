@@ -2388,6 +2388,23 @@ impl NativeAgentService {
         Ok(())
     }
 
+    /// Await owned native input cleanup within the host's bounded quit work.
+    /// # Errors
+    /// Reports native cleanup errors after attempting every conversation.
+    pub async fn shutdown_application_input(&self) -> Result<(), bootty_computer::ComputerError> {
+        let computers: Vec<_> = lock(&self.live)
+            .values()
+            .filter_map(|session| session.application_computer())
+            .collect();
+        let mut error = None;
+        for computer in computers {
+            if let Err(failed) = computer.shutdown().await {
+                error = Some(failed);
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+
     fn commit(&self, mut candidate: Store) -> Result<(), String> {
         let saved = save_tool_images(&self.attachment_store, &mut candidate);
         self.catalog

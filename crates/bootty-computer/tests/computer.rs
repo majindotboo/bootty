@@ -20,6 +20,8 @@ fn target() -> ComputerTarget {
     ComputerTarget {
         window_id: 42,
         native_id: None,
+        backend_id: None,
+        display: None,
         process_id: 123,
         bundle_id: "dev.bootty.test-target".into(),
         application_name: None,
@@ -228,6 +230,11 @@ fn captured_frame_resize_invalidates_region(
 /// A desktop whose windows, focus and permissions a test controls. It records what reaches it.
 #[derive(Default)]
 struct Fake {
+    independent: bool,
+    entered: Option<std::sync::mpsc::Sender<()>>,
+    resume: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    released: Option<std::sync::mpsc::Sender<()>>,
+    trace: Mutex<Vec<&'static str>>,
     windows: Vec<NativeWindow>,
     /// Window-addressed input, as on macOS, unless a test says otherwise.
     route: Option<InputRoute>,
@@ -362,10 +369,40 @@ impl Desktop for Fake {
     }
 
     fn post(&self, _: &NativeWindow, event: &InputEvent) -> Result<(), ComputerError> {
+        if let Some(entered) = &self.entered {
+            _ = entered.send(());
+        }
+        let resume = self
+            .resume
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some(resume) = resume {
+            _ = resume.recv();
+        }
+        self.trace
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push("posted");
         self.posted
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(event.clone());
+        Ok(())
+    }
+
+    fn independent_input(&self) -> bool {
+        self.independent
+    }
+
+    fn release_inputs(&self) -> Result<(), ComputerError> {
+        self.trace
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push("released");
+        if let Some(released) = &self.released {
+            _ = released.send(());
+        }
         Ok(())
     }
 
@@ -1065,4 +1102,151 @@ async fn set_value_refuses_stale_or_disabled_elements(
     }
     assert!(fake.values.lock().unwrap().is_empty());
     assert_eq!(fake.posted(), Vec::<InputEvent>::new());
+}
+
+#[rstest]
+#[case(ComputerAction::ButtonDown { x: 10.0, y: 20.0, button: MouseButton::Left })]
+#[case(ComputerAction::ButtonUp { x: 10.0, y: 20.0, button: MouseButton::Right })]
+#[case(ComputerAction::KeyDown { key: Key::Control })]
+#[case(ComputerAction::KeyUp { key: Key::Right })]
+#[tokio::test]
+async fn independent_input_requires_the_backend_capability(
+    target: ComputerTarget,
+    #[case] action: ComputerAction,
+) {
+    let fake = Fake::focused(&target);
+    assert!(matches!(
+        run(&fake, &target, &action).await,
+        Err(ComputerError::Unsupported)
+    ));
+    assert_eq!(fake.posted(), []);
+}
+
+#[rstest]
+#[case("backend")]
+#[case("display")]
+#[case("launch")]
+#[case("pid")]
+#[tokio::test]
+async fn backend_and_display_are_part_of_exact_window_identity(
+    mut target: ComputerTarget,
+    #[case] changed: &str,
+) {
+    target.backend_id = Some("x11:owned-connection".into());
+    target.display = Some(":183".into());
+    let fake = Fake::focused(&target);
+    match changed {
+        "backend" => target.backend_id = Some("x11:replacement-connection".into()),
+        "display" => target.display = Some(":184".into()),
+        "launch" => target.launch_time += 1.0,
+        _ => target.process_id = target.process_id.saturating_add(1),
+    }
+    assert!(matches!(
+        run(&fake, &target, &ComputerAction::Snapshot).await,
+        Err(ComputerError::StaleTarget)
+    ));
+    assert_eq!(fake.posted(), []);
+}
+
+#[rstest]
+#[tokio::test]
+async fn cancelled_native_worker_releases_even_when_post_finishes_late(target: ComputerTarget) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    let (entered, wait_entered) = std::sync::mpsc::channel();
+    let (resume, wait_resume) = std::sync::mpsc::channel();
+    let (released, wait_released) = std::sync::mpsc::channel();
+    fake.independent = true;
+    fake.entered = Some(entered);
+    fake.resume = Mutex::new(Some(wait_resume));
+    fake.released = Some(released);
+    let fake = Arc::new(fake);
+    let computer = fake.computer();
+    let worker = computer.clone();
+    let task = tokio::spawn(async move {
+        worker
+            .execute(
+                &ComputerAccess::from_user_setting(true),
+                &target,
+                &ComputerAction::KeyDown { key: Key::Control },
+            )
+            .await
+    });
+    tokio::task::spawn_blocking(move || wait_entered.recv().unwrap())
+        .await
+        .unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    resume.send(()).unwrap();
+    tokio::task::spawn_blocking(move || wait_released.recv().unwrap())
+        .await
+        .unwrap();
+    let trace = fake.trace.lock().unwrap_or_else(PoisonError::into_inner);
+    assert_eq!(trace.first(), Some(&"posted"));
+    assert!(trace.iter().skip(1).all(|entry| *entry == "released"));
+    assert!(trace.len() >= 2);
+    drop(trace);
+}
+
+#[rstest]
+#[tokio::test]
+async fn dropping_the_native_owner_releases_its_completed_hold(target: ComputerTarget) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    let (released, wait_released) = std::sync::mpsc::channel();
+    fake.independent = true;
+    fake.released = Some(released);
+    let fake = Arc::new(fake);
+    let computer = fake.computer();
+    computer
+        .execute(
+            &ComputerAccess::from_user_setting(true),
+            &target,
+            &ComputerAction::ButtonDown {
+                x: 10.0,
+                y: 20.0,
+                button: MouseButton::Left,
+            },
+        )
+        .await
+        .unwrap();
+    drop(computer);
+    tokio::task::spawn_blocking(move || wait_released.recv().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        *fake.trace.lock().unwrap_or_else(PoisonError::into_inner),
+        ["posted", "released"]
+    );
+}
+
+#[rstest]
+#[tokio::test]
+async fn awaited_shutdown_releases_input_and_rejects_new_holds(target: ComputerTarget) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.independent = true;
+    let fake = Arc::new(fake);
+    let computer = fake.computer();
+    computer
+        .execute(
+            &ComputerAccess::from_user_setting(true),
+            &target,
+            &ComputerAction::KeyDown { key: Key::Control },
+        )
+        .await
+        .unwrap();
+    computer.shutdown().await.unwrap();
+    assert_eq!(
+        *fake.trace.lock().unwrap_or_else(PoisonError::into_inner),
+        ["posted", "released"]
+    );
+    assert!(matches!(
+        computer
+            .execute(
+                &ComputerAccess::from_user_setting(true),
+                &target,
+                &ComputerAction::KeyDown { key: Key::Right }
+            )
+            .await,
+        Err(ComputerError::TargetUnavailable)
+    ));
+    assert_eq!(fake.posted(), [InputEvent::KeyDown { key: Key::Control }]);
 }

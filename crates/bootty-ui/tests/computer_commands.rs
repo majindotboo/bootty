@@ -16,6 +16,8 @@ fn target() -> ComputerTarget {
     ComputerTarget {
         window_id: 42,
         native_id: None,
+        backend_id: None,
+        display: None,
         process_id: 123,
         bundle_id: "dev.bootty.test-target".into(),
         application_name: None,
@@ -59,7 +61,7 @@ fn shortcuts_use_one_typed_command_for_all_callers(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action: ComputerAction::Key {
                 key: Key::Return,
                 modifiers: vec![Modifier::Command, Modifier::Shift]
@@ -162,7 +164,7 @@ fn element_commands_share_the_typed_computer_executor(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action,
             destination: None,
         }
@@ -172,7 +174,7 @@ fn element_commands_share_the_typed_computer_executor(
 
 #[rstest]
 #[case("computer.status", ComputerCommand::Status)]
-#[case("computer.targets", ComputerCommand::Targets)]
+#[case("computer.targets", ComputerCommand::Targets(None))]
 fn discovery_commands_are_read_only(
     #[case] id: &str,
     #[case] expected: ComputerCommand,
@@ -260,7 +262,7 @@ fn explicit_snapshot_target_and_path_keep_the_existing_command_shape(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action: ComputerAction::Snapshot,
             destination: Some(destination)
         }
@@ -377,7 +379,7 @@ fn explicit_crop_keeps_the_captured_target_and_destination(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action: ComputerAction::SnapshotRegion { rect },
             destination: Some(path)
         }
@@ -458,4 +460,46 @@ fn agents_use_any_app_except_their_host_and_shells(
         ..target
     };
     assert_eq!(agent_may_use(&window), allowed);
+}
+
+#[rstest]
+#[case("computer.button-down", vec!["10", "20", "left"], ComputerAction::ButtonDown { x: 10.0, y: 20.0, button: bootty_computer::MouseButton::Left })]
+#[case("computer.button-up", vec!["10", "20", "right"], ComputerAction::ButtonUp { x: 10.0, y: 20.0, button: bootty_computer::MouseButton::Right })]
+#[case("computer.key-down", vec!["control"], ComputerAction::KeyDown { key: Key::Control })]
+#[case("computer.key-up", vec!["right"], ComputerAction::KeyUp { key: Key::Right })]
+#[case("computer.key-down", vec!["keypad_1"], ComputerAction::KeyDown { key: Key::Keypad1 })]
+#[case("computer.release-inputs", vec![], ComputerAction::ReleaseInputs)]
+fn independent_input_uses_the_shared_command_path(
+    target: ComputerTarget,
+    #[case] command: &str,
+    #[case] arguments: Vec<&str>,
+    #[case] action: ComputerAction,
+    #[values(
+        Caller::CommandPalette,
+        Caller::Keybinding,
+        Caller::BuiltinKeybinding,
+        Caller::Cli,
+        Caller::Socket,
+        Caller::Luau,
+        Caller::Internal
+    )]
+    caller: Caller,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut args = vec![serde_json::to_string(&target)?];
+    args.extend(arguments.into_iter().map(str::to_owned));
+    let resolved = CommandCatalog::default()
+        .resolve(CommandInvocation::new(command, args, caller))
+        .map_err(|outcome| format!("{outcome:?}"))?;
+    let CommandExecutor::Core(CoreCommandExecutor::Computer(actual)) = resolved.executor else {
+        return Err("not the shared computer command".into());
+    };
+    assert_eq!(
+        actual,
+        ComputerCommand::Execute {
+            target: Box::new(target),
+            action,
+            destination: None
+        }
+    );
+    Ok(())
 }

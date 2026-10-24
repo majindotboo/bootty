@@ -104,6 +104,39 @@ tokens separate, even when their app, title and geometry match. `computer_elemen
 prefers accessibility targets; `computer_snapshot` selects an X11 target and cannot
 attach AT-SPI elements to that observation. Use a fresh element observation before
 semantic input. The CLI/socket can select either exact token from `computer.targets`.
+`computer.targets :183` discovers an explicitly selected local X11 display. The
+optional display applies only to X11 discovery; AT-SPI tokens keep their separate
+bus identity. Subsequent target discovery also includes those open display
+connections. X11 tokens include both `display` and `backend_id`: they are valid
+only for the Bootty owner and connection that observed them. A restarted owner,
+replaced backend, resized window, or changed process requires a fresh token.
+No target is inferred by matching accessibility and X11 geometry or PID.
+
+`computer.button-down <target> <x> <y> [left|right|middle]` and
+`computer.button-up <target> <x> <y> [left|right|middle]` deliver separate native
+button transitions. Both buttons can overlap and either can be released first.
+`computer.key-down <target> <key>` and `computer.key-up <target> <key>` do the
+same for physical keys, including arrows, `control`, `shift`, `option`,
+`command` (Super on X11), and `keypad_0` through `keypad_9`. `computer.key`
+continues to send an atomic shortcut. These independent actions are currently
+supported only on X11; other backends report unsupported.
+
+Independent buttons need an uncovered point in the exact window but do not
+require keyboard focus. Keys need that window's actual keyboard focus. No
+independent action raises a window, reserves focus, or locks out other apps.
+All transitions revalidate the target's window, PID, process start, bounds,
+backend and display. Already held native input is refused rather than adopted.
+
+End every journey with `computer.release-inputs <target>`. It releases only
+input owned by this Bootty computer owner. Native execution errors, dropped or
+expired work, conversation revocation, input-policy revocation and normal owner
+shutdown also release owned input. A gesture is bounded to 20 seconds from its
+first down event, after which its keys and buttons are released. Invalid command
+arguments do not start native execution; callers must still end their journey.
+The agent `computer_input` actions are `button_down`, `button_up`, `key_down`,
+`key_up` and `release_inputs`, with the same coordinates/button/key fields and
+conversation grants. A stale observation must be refreshed before new input.
+
 X11 capture and XTest input remain available through X11 tokens. Native Wayland
 capture/input need a desktop portal sharing session bound to the exact selected
 window; Bootty does not create that session or capture a whole screen as a fallback.

@@ -67,6 +67,46 @@ pub fn execute(
         }
         ComputerAction::Focus => focus(desktop, target),
         ComputerAction::Click { x, y, button } => click(desktop, target, *x, *y, *button),
+        ComputerAction::ButtonDown { x, y, button } | ComputerAction::ButtonUp { x, y, button } => {
+            if !desktop.independent_input() {
+                return Err(ComputerError::Unsupported);
+            }
+            let window = validate(desktop, target, Need::IndependentPointer(*x, *y))?;
+            let event = if matches!(action, ComputerAction::ButtonDown { .. }) {
+                InputEvent::ButtonDown {
+                    x: *x,
+                    y: *y,
+                    button: *button,
+                }
+            } else {
+                InputEvent::ButtonUp {
+                    x: *x,
+                    y: *y,
+                    button: *button,
+                }
+            };
+            desktop.post(&window, &event)?;
+            Ok(ComputerResult::Posted)
+        }
+        ComputerAction::KeyDown { key } | ComputerAction::KeyUp { key } => {
+            if !desktop.independent_input() {
+                return Err(ComputerError::Unsupported);
+            }
+            let window = validate(desktop, target, Need::Keys)?;
+            let event = if matches!(action, ComputerAction::KeyDown { .. }) {
+                InputEvent::KeyDown { key: *key }
+            } else {
+                InputEvent::KeyUp { key: *key }
+            };
+            desktop.post(&window, &event)?;
+            Ok(ComputerResult::Posted)
+        }
+        ComputerAction::ReleaseInputs => {
+            // Identity is still checked; failed validation also triggers owner cleanup.
+            validate(desktop, target, Need::Read)?;
+            desktop.release_inputs()?;
+            Ok(ComputerResult::Posted)
+        }
         ComputerAction::Move { x, y } => {
             pointer(desktop, target, *x, *y, &InputEvent::Move { x: *x, y: *y })
         }
@@ -132,6 +172,7 @@ enum Need {
     Keys,
     /// A pointer event at this desktop point.
     Pointer(f64, f64),
+    IndependentPointer(f64, f64),
 }
 
 /// The current window for a token, once it meets what the action needs.
@@ -157,6 +198,8 @@ fn validate(
         .as_ref()
         .ok_or(ComputerError::TargetUnavailable)?;
     if current.process_id != expected.process_id
+        || current.backend_id != expected.backend_id
+        || current.display != expected.display
         || current.bundle_id != expected.bundle_id
         || current.launch_time.to_bits() != expected.launch_time.to_bits()
         || current.bounds != expected.bounds
@@ -172,11 +215,13 @@ fn validate(
     }
     match (need, desktop.route()) {
         (Need::Read | Need::Element, _) => {}
-        (Need::Keys | Need::Pointer(_, _), _) if current.is_semantic_only() => {
+        (Need::Keys | Need::Pointer(_, _) | Need::IndependentPointer(_, _), _)
+            if current.is_semantic_only() =>
+        {
             return Err(ComputerError::Unsupported);
         }
         (Need::Keys, _) => receives_keys(desktop, &windows, current)?,
-        (Need::Pointer(x, y), route) => {
+        (Need::Pointer(x, y) | Need::IndependentPointer(x, y), route) => {
             if !contains(&window.bounds, x, y) {
                 return Err(ComputerError::InvalidAction(
                     "coordinates are outside the target".into(),
@@ -184,7 +229,9 @@ fn validate(
             }
             // Shared pointer input lands on whatever is in front at the point.
             if route == InputRoute::Shared {
-                receives_keys(desktop, &windows, current)?;
+                if !matches!(need, Need::IndependentPointer(_, _)) {
+                    receives_keys(desktop, &windows, current)?;
+                }
                 uncovered(&windows, window, x, y)?;
             }
         }

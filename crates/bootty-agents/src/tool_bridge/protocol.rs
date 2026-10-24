@@ -888,9 +888,22 @@ fn outcome_result(outcome: &CommandOutcome, image: bool) -> (Value, bool) {
     )
 }
 
+fn independent_action_schemas() -> Vec<Value> {
+    let mut variants = vec![
+        json!({"type":"object","properties":{"action":{"const":"release_inputs"}},"required":["action"],"additionalProperties":false}),
+    ];
+    for name in ["key_down", "key_up"] {
+        variants.push(json!({"type":"object","properties":{"action":{"const":name},"key":{"type":"string","description":"Physical X11 key including control, shift, option, command, arrows and keypad_0 through keypad_9. Release within 20 seconds."}},"required":["action","key"],"additionalProperties":false}));
+    }
+    for name in ["button_down", "button_up"] {
+        variants.push(json!({"type":"object","properties":{"action":{"const":name},"x":{"type":"number"},"y":{"type":"number"},"button":{"type":"string","enum":["left","right","middle"]}},"required":["action","x","y","button"],"additionalProperties":false}));
+    }
+    variants
+}
+
 fn application_action_schema() -> Value {
     let number = json!({"type":"number"});
-    let mut variants = Vec::new();
+    let mut variants = independent_action_schemas();
     for (name, fields) in [
         ("focus", vec![]),
         (

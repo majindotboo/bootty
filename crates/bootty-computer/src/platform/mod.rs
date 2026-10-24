@@ -15,3 +15,13 @@ pub use macos::native;
 pub use unsupported::native;
 #[cfg(target_os = "windows")]
 pub use windows::native;
+
+#[cfg(target_os = "linux")]
+pub use linux::on_display;
+
+#[cfg(not(target_os = "linux"))]
+pub fn on_display(
+    _display: &str,
+) -> Result<std::sync::Arc<dyn crate::desktop::Desktop>, crate::ComputerError> {
+    Err(crate::ComputerError::Unsupported)
+}

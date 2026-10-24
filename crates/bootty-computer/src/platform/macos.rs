@@ -286,6 +286,10 @@ impl Desktop for MacDesktop {
             return Err(ComputerError::SecureInput);
         }
         let events = match event {
+            InputEvent::ButtonDown { .. }
+            | InputEvent::ButtonUp { .. }
+            | InputEvent::KeyDown { .. }
+            | InputEvent::KeyUp { .. } => return Err(ComputerError::Unsupported),
             InputEvent::Move { x, y } => {
                 vec![mouse(CGEventType::MouseMoved, *x, *y, MouseButton::Left)?]
             }
@@ -623,6 +627,8 @@ fn application(
     Some(ComputerTarget {
         window_id,
         native_id: None,
+        backend_id: None,
+        display: None,
         process_id,
         bundle_id: app.bundleIdentifier()?.to_string(),
         application_name: app
@@ -1146,6 +1152,20 @@ fn draw(image: &CGImage, width: u32, height: u32) -> Result<Image, ComputerError
 /// macOS virtual key codes from Carbon's `Events.h`.
 const fn key_code(key: Key) -> u16 {
     match key {
+        Key::Control => 0x3b,
+        Key::Shift => 0x38,
+        Key::Option => 0x3a,
+        Key::Command => 0x37,
+        Key::Keypad0 => 0x52,
+        Key::Keypad1 => 0x53,
+        Key::Keypad2 => 0x54,
+        Key::Keypad3 => 0x55,
+        Key::Keypad4 => 0x56,
+        Key::Keypad5 => 0x57,
+        Key::Keypad6 => 0x58,
+        Key::Keypad7 => 0x59,
+        Key::Keypad8 => 0x5b,
+        Key::Keypad9 => 0x5c,
         Key::Return => 0x24,
         Key::Tab => 0x30,
         Key::Escape => 0x35,

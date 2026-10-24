@@ -48,6 +48,31 @@ pub enum MouseButton {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Key {
+    Control,
+    Shift,
+    Option,
+    Command,
+    #[serde(rename = "keypad_0")]
+    Keypad0,
+    #[serde(rename = "keypad_1")]
+    Keypad1,
+    #[serde(rename = "keypad_2")]
+    Keypad2,
+    #[serde(rename = "keypad_3")]
+    Keypad3,
+    #[serde(rename = "keypad_4")]
+    Keypad4,
+    #[serde(rename = "keypad_5")]
+    Keypad5,
+    #[serde(rename = "keypad_6")]
+    Keypad6,
+    #[serde(rename = "keypad_7")]
+    Keypad7,
+    #[serde(rename = "keypad_8")]
+    Keypad8,
+    #[serde(rename = "keypad_9")]
+    Keypad9,
+
     Return,
     Tab,
     Escape,
@@ -168,6 +193,26 @@ pub enum ComputerAction {
         y: f64,
         button: MouseButton,
     },
+    /// Hold one button until `ButtonUp` or `ReleaseInputs`. Supported on X11 only.
+    ButtonDown {
+        x: f64,
+        y: f64,
+        button: MouseButton,
+    },
+    ButtonUp {
+        x: f64,
+        y: f64,
+        button: MouseButton,
+    },
+    /// Release only input held by this computer owner, even after a target disappears.
+    ReleaseInputs,
+    /// A physical key with an independent release. Supported on X11 only.
+    KeyDown {
+        key: Key,
+    },
+    KeyUp {
+        key: Key,
+    },
     Move {
         x: f64,
         y: f64,
@@ -239,7 +284,11 @@ impl ComputerAction {
     pub fn validate(&self) -> Result<(), ComputerError> {
         match self {
             Self::SnapshotRegion { rect } => rect.validate(),
-            Self::Click { x, y, .. } | Self::Move { x, y } | Self::Scroll { x, y, .. }
+            Self::Click { x, y, .. }
+            | Self::ButtonDown { x, y, .. }
+            | Self::ButtonUp { x, y, .. }
+            | Self::Move { x, y }
+            | Self::Scroll { x, y, .. }
                 if !x.is_finite() || !y.is_finite() =>
             {
                 Err(ComputerError::InvalidAction(
@@ -451,6 +500,12 @@ pub struct ComputerTarget {
     /// or receive synthesized input. Their frames are toolkit-reported, possibly window-relative.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub native_id: Option<String>,
+    /// X11 connection identity. Never interchangeable with an AT-SPI identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_id: Option<String>,
+    /// Local X11 display used to discover this token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<String>,
     pub process_id: i32,
     pub bundle_id: String,
     /// Presentation metadata; it does not authorize or identify a window.
@@ -475,6 +530,16 @@ impl ComputerTarget {
     pub fn validate(&self) -> Result<(), ComputerError> {
         let bounds = &self.bounds;
         if self.window_id == 0
+            || self
+                .backend_id
+                .as_ref()
+                .is_some_and(|id| id.is_empty() || id.len() > 256)
+            || self
+                .display
+                .as_ref()
+                .is_some_and(|display| !valid_display(display))
+            || (self.native_id.is_some() && (self.backend_id.is_some() || self.display.is_some()))
+            || self.backend_id.is_some() != self.display.is_some()
             || self
                 .native_id
                 .as_ref()
@@ -512,6 +577,8 @@ impl ComputerTarget {
                 ComputerError::InvalidAction("capture rectangle is outside the target".into()),
             ),
             ComputerAction::Click { x, y, .. }
+            | ComputerAction::ButtonDown { x, y, .. }
+            | ComputerAction::ButtonUp { x, y, .. }
             | ComputerAction::Move { x, y }
             | ComputerAction::Scroll { x, y, .. }
                 if !self.contains(*x, *y) =>
@@ -582,6 +649,11 @@ impl ComputerResult {
                 Self::Posted,
                 ComputerAction::Focus
                 | ComputerAction::Click { .. }
+                | ComputerAction::ButtonDown { .. }
+                | ComputerAction::ButtonUp { .. }
+                | ComputerAction::ReleaseInputs
+                | ComputerAction::KeyDown { .. }
+                | ComputerAction::KeyUp { .. }
                 | ComputerAction::Move { .. }
                 | ComputerAction::TypeText { .. }
                 | ComputerAction::SetValue { .. }
@@ -677,13 +749,27 @@ impl ComputerResult {
 }
 
 /// The same observed window token, compared exactly.
-fn same_window(observed: &ComputerTarget, target: &ComputerTarget) -> bool {
+pub fn same_window(observed: &ComputerTarget, target: &ComputerTarget) -> bool {
     observed.window_id == target.window_id
         && observed.native_id == target.native_id
+        && observed.backend_id == target.backend_id
+        && observed.display == target.display
         && observed.process_id == target.process_id
         && observed.bundle_id == target.bundle_id
         && observed.launch_time.to_bits() == target.launch_time.to_bits()
         && observed.bounds == target.bounds
+}
+
+/// Only local, explicitly numbered X11 displays are routable; no network display transport.
+pub fn valid_display(display: &str) -> bool {
+    display.strip_prefix(':').is_some_and(|number| {
+        !number.is_empty()
+            && number.len() <= 10
+            && number.split('.').count() <= 2
+            && number
+                .split('.')
+                .all(|part| !part.is_empty() && part.parse::<u16>().is_ok())
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
