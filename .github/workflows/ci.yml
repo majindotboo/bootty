@@ -42,6 +42,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
             libayatana-appindicator3-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
@@ -175,6 +176,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
+            libasound2-dev \
             libfontconfig1-dev \
             libfreetype6-dev \
             libgl1-mesa-dev \
