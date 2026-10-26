@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "bootty"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -938,7 +938,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-agents"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anstyle-parse",
  "anyhow",
@@ -979,7 +979,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-browser"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "assert_fs",
  "async-channel",
@@ -1006,7 +1006,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-computer"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "atspi-proxies",
  "base64 0.23.1",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-control"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -1073,7 +1073,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-daemon"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-git"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -1113,7 +1113,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-host"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "assert_fs",
@@ -1152,7 +1152,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-mux"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anstyle-parse",
  "anyhow",
@@ -1220,7 +1220,7 @@ version = "0.0.0"
 
 [[package]]
 name = "bootty-tests"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "bootty-config",
  "bootty-mux",
@@ -1232,7 +1232,7 @@ dependencies = [
 
 [[package]]
 name = "bootty-ui"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
