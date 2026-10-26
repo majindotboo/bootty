@@ -82,6 +82,10 @@ pub struct SubscriptionBatch {
 }
 
 impl SubscriptionBatch {
+    #[allow(
+        clippy::missing_const_for_fn,
+        reason = "VecDeque::is_empty is not const on older supported nightly toolchains"
+    )]
     pub(crate) fn has_events(&self) -> bool {
         !self.events.is_empty()
     }
