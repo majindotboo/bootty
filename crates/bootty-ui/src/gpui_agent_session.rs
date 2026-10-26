@@ -18,13 +18,15 @@ use bootty_control::{
     CommandTarget,
 };
 use gpui_kit::component::{
-    ActiveTheme as _, Colorize as _, Disableable as _, IconName, Selectable as _, Sizable as _,
+    ActiveTheme as _, Colorize as _, Disableable as _, Icon, IconName, Selectable as _,
+    Sizable as _,
     button::{Button, ButtonVariants as _},
     collapsible::Collapsible,
     input::{InputEvent, Textarea, TextareaState},
     menu::DropdownMenu as _,
     scroll::ScrollableElement as _,
     text::{TextView, TextViewState},
+    tree::TreeItem,
 };
 use gpui_kit::{
     App, Context, Entity, EntityInputHandler as _, EventEmitter, FocusHandle, Focusable,
@@ -318,6 +320,8 @@ pub struct NativeAgentSessionView {
     tool_diffs: BTreeMap<String, ToolDiffs>,
     /// Files opened in a turn's list of changed files, by the turn's last reply and the path.
     turn_change_diffs: BTreeMap<(String, String), Vec<TurnChangeDiff>>,
+    /// Folder disclosures under each turn's last reply; closed by default.
+    turn_change_folders: BTreeMap<String, BTreeMap<gpui_kit::SharedString, bool>>,
     async_questions: BTreeMap<String, Entity<questions::AsyncQuestionsView>>,
     subagent_details: BTreeMap<String, subagents::SubagentConversation>,
     transcript_subscriptions: BTreeMap<String, Vec<Subscription>>,
@@ -543,6 +547,7 @@ impl NativeAgentSessionView {
             link_marks: BTreeMap::new(),
             tool_diffs: BTreeMap::new(),
             turn_change_diffs: BTreeMap::new(),
+            turn_change_folders: BTreeMap::new(),
             async_questions: BTreeMap::new(),
             subagent_details: BTreeMap::new(),
             transcript_subscriptions: BTreeMap::new(),
@@ -1050,6 +1055,8 @@ impl NativeAgentSessionView {
             self.selected_response = None;
         }
         self.tool_disclosures
+            .retain(|id, _| current.contains(id.as_str()));
+        self.turn_change_folders
             .retain(|id, _| current.contains(id.as_str()));
         let mut added = Vec::new();
         for item in &self.record.snapshot.transcript {
@@ -2093,12 +2100,16 @@ impl NativeAgentSessionView {
         if !open {
             self.unfold_text([id], cx);
         }
+        self.remeasure_message(id);
+        cx.notify();
+    }
+
+    fn remeasure_message(&self, id: &str) {
         if let Some(ix) = self.timeline.iter().position(
             |row| matches!(row, TranscriptRow::Message { id: message, .. } if message == id),
         ) {
             self.list.remeasure_items(ix..ix.saturating_add(1));
         }
-        cx.notify();
     }
 
     /// A thought inside an expanded Work row: one line, like a tool, until opened.
@@ -2696,12 +2707,12 @@ impl NativeAgentSessionView {
                 .collect();
             self.turn_change_diffs.insert(key, diffs);
         }
+        self.remeasure_message(&reply.id);
         cx.notify();
     }
 
-    /// Under a settled turn's reply, every file the turn changed; each opens its diff in place,
-    /// and Review shows them all in the Changes panel. A turn that changed one file already shows
-    /// it at its change.
+    /// A compact tree under a settled reply. Folders start closed; files open their diffs in
+    /// place, and Open diff shows every change in the Changes panel.
     fn render_turn_changes(
         &self,
         final_index: usize,
@@ -2720,6 +2731,12 @@ impl NativeAgentSessionView {
         let summary = format!("+{}:-{}", total.added, total.removed);
         let reviewable = self.turn_reviewable(reply);
         let reply_id = reply.id.clone();
+        let empty = BTreeMap::new();
+        let tree = crate::gpui::change_tree(
+            changes.iter().map(|change| change.path.clone().into()),
+            self.turn_change_folders.get(&reply_id).unwrap_or(&empty),
+            false,
+        );
         let heading = div()
             .flex()
             .items_center()
@@ -2730,12 +2747,13 @@ impl NativeAgentSessionView {
             .text_color(cx.theme().muted_foreground)
             .child(
                 div()
-                    .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(format!("Changed {} files", changes.len())),
+                    .child(format!("{} changed files", changes.len())),
             )
             .child(crate::gpui::line_counts(total, cx))
+            .child(div().flex_1())
+            .children(Self::turn_folders_button(&reply_id, &tree, owner))
             .when(reviewable, |row| {
                 let (owner, id) = (owner.clone(), reply_id.clone());
                 row.child(
@@ -2744,7 +2762,8 @@ impl NativeAgentSessionView {
                             let id = id.clone();
                             move || format!("review-turn:{id}")
                         })
-                        .label("Review")
+                        .icon(gpui_kit::assets::IconName::FileDiff)
+                        .label("Open diff")
                         .ghost()
                         .xsmall()
                         .loading(self.pending.contains("turn-diff"))
@@ -2767,16 +2786,174 @@ impl NativeAgentSessionView {
                 .debug_selector(move || format!("native-turn-changes:{summary}"))
                 .mt_2()
                 .rounded_md()
-                .border_1()
-                .border_color(cx.theme().border)
+                .bg(cx.theme().muted.opacity(0.3))
                 .overflow_hidden()
                 .flex()
                 .flex_col()
                 .child(heading)
-                .children(changes.into_iter().map(|change| {
-                    self.render_turn_change(&change, final_index, &reply_id, owner, cx)
-                })),
+                .child(self.render_turn_tree(&tree, &changes, final_index, &reply_id, owner, cx)),
         )
+    }
+
+    fn turn_folders_button(
+        reply_id: &str,
+        tree: &[TreeItem],
+        owner: &gpui_kit::WeakEntity<Self>,
+    ) -> Option<Button> {
+        fn folders(tree: &[TreeItem], states: &mut BTreeMap<gpui_kit::SharedString, bool>) {
+            for item in tree.iter().filter(|item| item.is_folder()) {
+                states.insert(item.id.clone(), item.is_expanded());
+                folders(&item.children, states);
+            }
+        }
+        let mut states = BTreeMap::new();
+        folders(tree, &mut states);
+        if states.is_empty() {
+            return None;
+        }
+        let expanded = states.values().all(|open| *open);
+        let label = if expanded {
+            "Collapse all folders"
+        } else {
+            "Expand all folders"
+        };
+        let (owner, id) = (owner.clone(), reply_id.to_owned());
+        Some(
+            Button::new(gpui_kit::SharedString::from(format!("turn-folders:{id}")))
+                .debug_selector(move || format!("native-turn-folders:{label}"))
+                .ghost()
+                .xsmall()
+                .icon(Icon::default().path(if expanded {
+                    "icons/chevrons-down-up.svg"
+                } else {
+                    "icons/chevrons-up-down.svg"
+                }))
+                .accessibility_label(label)
+                .tooltip(label)
+                .on_click(move |_, _, cx| {
+                    _ = owner.update(cx, |this, cx| {
+                        this.turn_change_folders.insert(
+                            id.clone(),
+                            states
+                                .keys()
+                                .map(|path| (path.clone(), !expanded))
+                                .collect(),
+                        );
+                        this.remeasure_message(&id);
+                        cx.notify();
+                    });
+                }),
+        )
+    }
+
+    fn render_turn_tree(
+        &self,
+        tree: &[TreeItem],
+        changes: &[TurnChange],
+        final_index: usize,
+        reply_id: &str,
+        owner: &gpui_kit::WeakEntity<Self>,
+        cx: &App,
+    ) -> gpui_kit::Div {
+        div().flex().flex_col().children(tree.iter().map(|item| {
+            if !item.is_folder() {
+                return changes
+                    .iter()
+                    .find(|change| change.path == item.id.as_ref())
+                    .map_or_else(div, |change| {
+                        self.render_turn_change(change, final_index, reply_id, owner, cx)
+                    });
+            }
+            let open = item.is_expanded();
+            let path = item.id.clone();
+            let counts = changes
+                .iter()
+                .filter(|change| change.path.replace('\\', "/").starts_with(path.as_ref()))
+                .filter_map(|change| change.counts)
+                .fold(
+                    bootty_git::changes::LineCounts::default(),
+                    bootty_git::changes::LineCounts::plus,
+                );
+            let (toggle, id) = (owner.clone(), reply_id.to_owned());
+            let heading = Button::new(gpui_kit::SharedString::from(format!(
+                "turn-folder:{id}:{path}"
+            )))
+            .debug_selector({
+                let path = path.clone();
+                move || format!("native-turn-folder:{path}")
+            })
+            .ghost()
+            .small()
+            .w_full()
+            .h_7()
+            .px_2()
+            .toggled(open)
+            .accessibility_label(format!(
+                "{} folder {}",
+                if open { "Collapse" } else { "Expand" },
+                item.label
+            ))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .w_full()
+                    .min_w_0()
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        })
+                        .xsmall()
+                        .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        Icon::new(if open {
+                            IconName::FolderOpen
+                        } else {
+                            IconName::Folder
+                        })
+                        .small()
+                        .text_color(cx.theme().muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_color(cx.theme().muted_foreground)
+                            .child(item.label.clone()),
+                    )
+                    .child(crate::gpui::line_counts(counts, cx)),
+            )
+            .on_click(move |_, _, cx| {
+                _ = toggle.update(cx, |this, cx| {
+                    this.turn_change_folders
+                        .entry(id.clone())
+                        .or_default()
+                        .insert(path.clone(), !open);
+                    this.remeasure_message(&id);
+                    cx.notify();
+                });
+            });
+            div().child(
+                Collapsible::new().open(open).child(heading).content(
+                    self.render_turn_tree(
+                        &item.children,
+                        changes,
+                        final_index,
+                        reply_id,
+                        owner,
+                        cx,
+                    )
+                    .pl_3(),
+                ),
+            )
+        }))
     }
 
     /// One file in a turn's list of changed files, with its diff under it when open.
@@ -2793,30 +2970,47 @@ impl NativeAgentSessionView {
             .get(&(reply_id.to_owned(), change.path.clone()));
         let toggle = owner.clone();
         let path = change.path.clone();
-        let trailing = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .children(
-                change
-                    .counts
-                    .map(|counts| crate::gpui::line_counts(counts, cx)),
-            )
-            .child(crate::gpui::sized_icon(
-                if open.is_some() {
-                    "chevron-down"
-                } else {
-                    "chevron-right"
-                },
-                crate::gpui::IconSize::Small,
-                cx.theme().muted_foreground,
-            ));
-        let row = crate::gpui::change_row(
-            gpui_kit::SharedString::from(format!("turn-change:{reply_id}:{path}")),
-            change.kind,
-            &change.path,
-            trailing,
-            cx,
+        let row = Button::new(gpui_kit::SharedString::from(format!(
+            "turn-change:{reply_id}:{path}"
+        )))
+        .ghost()
+        .small()
+        .w_full()
+        .h_7()
+        .px_2()
+        .accessibility_label(format!("{}: {path}", change.kind.name()))
+        .tooltip(path.clone())
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .w_full()
+                .min_w_0()
+                .child(div().w_3().flex_none())
+                .child(
+                    Icon::default()
+                        .path(format!(
+                            "icons/{}.svg",
+                            crate::gpui_prompt_attachments::icon(&path)
+                        ))
+                        .small()
+                        .text_color(cx.theme().muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .font_family(cx.theme().mono_font_family.clone())
+                        .child(path.rsplit(['/', '\\']).next().unwrap_or(&path).to_owned()),
+                )
+                .children(
+                    change
+                        .counts
+                        .map(|counts| crate::gpui::line_counts(counts, cx)),
+                ),
         )
         .debug_selector({
             let path = path.clone();

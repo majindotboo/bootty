@@ -2,11 +2,81 @@
 //! the lines the change adds and removes at the right.
 
 use bootty_git::{changes::LineCounts, diff::FileDiff};
-use gpui_kit::component::{ActiveTheme as _, list::ListItem};
+use gpui_kit::component::{ActiveTheme as _, list::ListItem, tree::TreeItem};
 use gpui_kit::{
     App, Div, ElementId, FontWeight, Hsla, IntoElement, ParentElement as _, SharedString,
     Styled as _, div, prelude::FluentBuilder as _,
 };
+use std::collections::BTreeMap;
+
+#[derive(Default)]
+struct Folder {
+    directories: BTreeMap<String, Self>,
+    files: BTreeMap<String, SharedString>,
+}
+
+impl Folder {
+    fn items(
+        self,
+        prefix: &str,
+        expansion: &BTreeMap<SharedString, bool>,
+        expanded: bool,
+    ) -> Vec<TreeItem> {
+        let mut items = Vec::new();
+        for (mut name, mut folder) in self.directories {
+            let mut path = format!("{prefix}{name}/");
+            // Empty directory chains share a row.
+            while folder.files.is_empty() && folder.directories.len() == 1 {
+                let Some((child, nested)) = folder.directories.pop_first() else {
+                    break;
+                };
+                name.push('/');
+                name.push_str(&child);
+                path.push_str(&child);
+                path.push('/');
+                folder = nested;
+            }
+            let id: SharedString = path.clone().into();
+            let open = expansion.get(&id).copied().unwrap_or(expanded);
+            items.push(
+                TreeItem::new(id, name)
+                    .children(folder.items(&path, expansion, expanded))
+                    .expanded(open),
+            );
+        }
+        items.extend(
+            self.files
+                .into_iter()
+                .map(|(name, path)| TreeItem::new(path, name)),
+        );
+        items
+    }
+}
+
+/// Group changed paths into sorted folders, compacting directory chains into one row.
+pub fn change_tree(
+    paths: impl IntoIterator<Item = SharedString>,
+    expansion: &BTreeMap<SharedString, bool>,
+    expanded: bool,
+) -> Vec<TreeItem> {
+    let mut root = Folder::default();
+    for path in paths {
+        let normalized = path.replace('\\', "/");
+        let mut parts = normalized
+            .split('/')
+            .filter(|part| !part.is_empty())
+            .peekable();
+        let mut parent = &mut root;
+        while let Some(part) = parts.next() {
+            if parts.peek().is_none() {
+                parent.files.insert(part.to_owned(), path.clone());
+            } else {
+                parent = parent.directories.entry(part.to_owned()).or_default();
+            }
+        }
+    }
+    root.items("", expansion, expanded)
+}
 
 /// What a change did to its file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

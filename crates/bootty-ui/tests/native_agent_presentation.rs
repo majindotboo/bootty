@@ -2446,8 +2446,7 @@ fn patches_say_what_they_did_to_their_file(
     pretty_assertions::assert_eq!(ChangeKind::of_diff(&file), kind);
 }
 
-/// A settled turn lists every file it changed under its reply, with +/− summed across its
-/// edits, and each shows its diff in place until clicked again.
+/// A settled turn groups its files in closed folders. Expanding reveals files and inline diffs.
 #[gpui_kit::test]
 fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     cx.update(|cx| {
@@ -2498,7 +2497,19 @@ fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     ] {
         assert!(visual.debug_bounds(selector).is_none());
     }
-    assert!(visual.debug_bounds("native-turn-changes:+4:-3").is_some());
+    let summary = visual.debug_bounds("native-turn-changes:+4:-3").unwrap();
+    assert!(
+        summary.size.height < px(70.),
+        "closed folders keep the summary compact"
+    );
+    assert!(
+        visual
+            .debug_bounds("native-turn-change:src/main.rs")
+            .is_none()
+    );
+    let folder = visual.debug_bounds("native-turn-folder:src/").unwrap();
+    visual.simulate_click(folder.center(), Modifiers::none());
+    redraw(visual);
     let main = visual
         .debug_bounds("native-turn-change:src/main.rs")
         .expect("main.rs once");
@@ -2523,6 +2534,97 @@ fn settled_turns_list_the_files_they_changed(cx: &mut TestAppContext) {
     visual.run_until_parked();
     visual.update(|window, cx| window.draw(cx).clear(cx));
     assert!(visual.debug_bounds(diff).is_none());
+}
+
+/// A large change set takes one row per top-level folder until the user asks for detail.
+#[gpui_kit::test]
+fn large_turn_change_trees_start_compact(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_kit::component::init(cx);
+        init_theme(UiPalette::default(), cx);
+    });
+    let paths = (0..18)
+        .map(|index| {
+            if index < 16 {
+                format!("crates/bootty-ui/src/module{}/file{index}.rs", index % 3)
+            } else {
+                format!("docs/page{index}.md")
+            }
+        })
+        .collect::<Vec<_>>();
+    let changes = paths
+        .iter()
+        .map(|path| {
+            serde_json::json!({
+                "path": format!("/tmp/project/{path}"), "diff": "@@ -1 +1 @@\n-old\n+new\n"
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut record = saved_record("idle");
+    record.snapshot.transcript = serde_json::from_value(serde_json::json!([
+        {"id": "prompt", "role": "user", "text": "Make changes", "complete": true},
+        {"id": "edit", "role": "tool", "text": "", "complete": true,
+         "tool": {"name": "fileChange", "status": "completed", "input": serde_json::to_string(&changes).unwrap()}},
+        {"id": "done", "role": "assistant", "text": "Done.", "complete": true}
+    ])).unwrap();
+    let (sender, _) = native_command_sender(&record);
+    let (_, visual) = cx.add_window_view(|window, cx| {
+        let view = cx.new(|cx| {
+            NativeAgentSessionView::new(
+                record,
+                sender.for_caller(Caller::Internal),
+                true,
+                window,
+                cx,
+            )
+        });
+        gpui_kit::component::Root::new(view, window, cx)
+    });
+    visual.simulate_resize(size(px(1000.), px(1100.)));
+    redraw(visual);
+    let summary = visual.debug_bounds("native-turn-changes:+18:-18").unwrap();
+    assert!(
+        summary.size.height < px(100.),
+        "18 files occupy only a header and two folder rows"
+    );
+    assert!(
+        visual
+            .debug_bounds("native-turn-folder:crates/bootty-ui/src/")
+            .is_some()
+    );
+    assert!(visual.debug_bounds("native-turn-folder:docs/").is_some());
+    for path in &paths {
+        assert!(
+            visual
+                .debug_bounds(format!("native-turn-change:{path}").leak())
+                .is_none()
+        );
+    }
+    let expand = visual
+        .debug_bounds("native-turn-folders:Expand all folders")
+        .unwrap();
+    visual.simulate_click(expand.center(), Modifiers::none());
+    redraw(visual);
+    for path in &paths {
+        assert!(
+            visual
+                .debug_bounds(format!("native-turn-change:{path}").leak())
+                .is_some(),
+            "{path} is accessible after expanding"
+        );
+    }
+    let collapse = visual
+        .debug_bounds("native-turn-folders:Collapse all folders")
+        .unwrap();
+    visual.simulate_click(collapse.center(), Modifiers::none());
+    redraw(visual);
+    for path in &paths {
+        assert!(
+            visual
+                .debug_bounds(format!("native-turn-change:{path}").leak())
+                .is_none()
+        );
+    }
 }
 
 /// Commentary stays visible; command and edit details share an expandable work group.

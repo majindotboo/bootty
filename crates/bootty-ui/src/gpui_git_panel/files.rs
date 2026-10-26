@@ -25,45 +25,6 @@ pub(super) struct DiffFiles {
 
 impl EventEmitter<SelectFile> for DiffFiles {}
 
-#[derive(Default)]
-struct Folder {
-    directories: BTreeMap<String, Self>,
-    files: BTreeMap<String, SharedString>,
-}
-
-impl Folder {
-    fn items(self, prefix: &str, expansion: &BTreeMap<SharedString, bool>) -> Vec<TreeItem> {
-        let mut items = Vec::new();
-        for (mut name, mut folder) in self.directories {
-            let mut path = format!("{prefix}{name}/");
-            // Empty directory chains share a row, as they do in the reference tree.
-            while folder.files.is_empty() && folder.directories.len() == 1 {
-                let Some((child, nested)) = folder.directories.pop_first() else {
-                    break;
-                };
-                name.push('/');
-                name.push_str(&child);
-                path.push_str(&child);
-                path.push('/');
-                folder = nested;
-            }
-            let id: SharedString = path.clone().into();
-            let expanded = expansion.get(&id).copied().unwrap_or(true);
-            items.push(
-                TreeItem::new(id, name)
-                    .children(folder.items(&path, expansion))
-                    .expanded(expanded),
-            );
-        }
-        items.extend(
-            self.files
-                .into_iter()
-                .map(|(name, path)| TreeItem::new(path, name)),
-        );
-        items
-    }
-}
-
 fn expansions(items: &[TreeItem], result: &mut BTreeMap<SharedString, bool>) {
     for item in items {
         if item.is_folder() {
@@ -102,21 +63,11 @@ impl DiffFiles {
     pub(super) fn set_files(&mut self, files: &[DiffFile], cx: &mut Context<Self>) {
         let mut expansion = BTreeMap::new();
         expansions(&self.roots, &mut expansion);
-        let mut root = Folder::default();
         self.files.clear();
         for file in files {
             self.files.insert(file.path().clone(), file.status());
-            let mut parts = file.path().split('/').peekable();
-            let mut parent = &mut root;
-            while let Some(part) = parts.next() {
-                if parts.peek().is_none() {
-                    parent.files.insert(part.to_owned(), file.path().clone());
-                } else {
-                    parent = parent.directories.entry(part.to_owned()).or_default();
-                }
-            }
         }
-        self.roots = root.items("", &expansion);
+        self.roots = crate::gpui::change_tree(self.files.keys().cloned(), &expansion, true);
         self.tree.update(cx, |tree, cx| {
             let selected = tree.selected_item().cloned();
             tree.set_items(self.roots.clone(), cx);

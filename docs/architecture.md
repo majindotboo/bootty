@@ -592,7 +592,9 @@ after a turn settles. Thinking, commands and file edits between messages fold in
 work summaries; a settled turn's duration reads on its last fold. Summaries name
 two primary activities and count repeated edits to one file once. Expanding work
 shows file paths, line counts and diff disclosures. A settled reply also keeps its
-combined list of changed files. Codex reports edits as `fileChange`; Claude's Edit, MultiEdit and Write
+combined changed-file tree, with compact directory chains and folders closed by
+default. Its header offers folder expansion and the full diff; file rows show
+inline diffs on demand. Codex reports edits as `fileChange`; Claude's Edit, MultiEdit and Write
 results and Pi's edit results become the same `fileChange` from the provider's own
 patch, live and in history. A patch too large for a provider message is left out
 whole, so its file shows without a diff instead of a cut one. Live work retains its elapsed timer independently of the fold. Selected
