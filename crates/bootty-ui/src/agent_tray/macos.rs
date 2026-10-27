@@ -181,14 +181,21 @@ pub fn run_helper(exit: fn(bool) -> !) -> Result<()> {
 fn read_snapshots(state: &Mutex<Option<Snapshot>>, wake: &async_channel::Sender<()>) -> Result<()> {
     let stdin = io::stdin();
     let mut input = stdin.lock();
-    while let Some(message) =
-        bootty_host::private_stdio::read_message(&mut input, MAX_MESSAGE_BYTES)?
-    {
+    while let Some(snapshot) = read_snapshot(&mut input)? {
         *state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) =
-            Some(serde_json::from_slice(&message)?);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(snapshot);
         let _ = wake.try_send(());
     }
     Ok(())
+}
+
+/// Reads one bounded snapshot frame. Closing the parent's input ends the stream.
+/// # Errors
+/// Returns framing, input, or snapshot decoding failures.
+pub fn read_snapshot(input: &mut impl std::io::BufRead) -> Result<Option<Snapshot>> {
+    let Some(message) = bootty_host::private_stdio::read_message(input, MAX_MESSAGE_BYTES)? else {
+        return Ok(None);
+    };
+    Ok(Some(serde_json::from_slice(&message)?))
 }

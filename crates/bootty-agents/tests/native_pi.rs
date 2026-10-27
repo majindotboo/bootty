@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/native_peer.rs"]
+pub mod native_peer;
+#[path = "support/pi_peer.rs"]
+pub mod pi_peer;
 pub mod support;
 use std::{fs, io::Cursor, path::Path};
 
@@ -138,15 +142,15 @@ for line in sys.stdin:
 closing()
 "#;
 
-fn fixture(root: &Path) -> std::io::Result<String> {
+fn fixture(root: &Path) -> String {
     let path = root.join("pi-rpc.py");
-    bootty_test_support::write_executable(&path, PI_FIXTURE)?;
-    Ok(path.to_string_lossy().into_owned())
+
+    path.to_string_lossy().into_owned()
 }
 
-fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
+fn config(root: &Path) -> NativeSessionConfig {
     let mut config = NativeSessionConfig::new(AgentKind::Pi, root);
-    config.program = fixture(root)?;
+    config.program = fixture(root);
     config.account_directory = Some(root.join("account").to_string_lossy().into_owned());
     config.arguments = vec![
         "--provider".to_owned(),
@@ -154,7 +158,7 @@ fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
         "--model".to_owned(),
         "fixture-model".to_owned(),
     ];
-    Ok(config)
+    config
 }
 
 /// Rewinding runs Bootty's Pi command for the message's timestamp, and once Pi holds fewer
@@ -175,7 +179,7 @@ fn rewinding_moves_pi_back_to_before_a_message(
     if let Some(flag) = flag {
         fs::write(root.path().join(flag), "").unwrap();
     }
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     for prompt in ["first", "second"] {
         session.send_prompt(prompt).unwrap();
         fs::write(root.path().join("settle"), "").unwrap();
@@ -228,20 +232,16 @@ fn rewinding_moves_pi_back_to_before_a_message(
 fn legacy_pi_permissions_do_not_block_saved_conversations(#[case] permissions: &str) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create(
-            "binding",
-            "Saved conversation",
-            config(root.path()).unwrap(),
-        )
+        .create("binding", "Saved conversation", config(root.path()))
         .unwrap();
     service.shutdown().unwrap();
     drop(service);
     let mut catalog: Value = support::stored_catalog(&path).unwrap();
     catalog["records"][0]["config"]["permissions"] = json!(permissions);
     fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
-    let restored = NativeAgentService::open(&path).unwrap();
+    let restored = open(&path).unwrap();
     let saved = restored.sessions();
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].id, record.id);
@@ -262,9 +262,9 @@ fn legacy_pi_permissions_do_not_block_saved_conversations(#[case] permissions: &
 /// with a notice, and the run goes on.
 fn pi_large_completion_keeps_the_owned_image_budget(#[case] event: &str, #[case] owned: bool) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("binding", "Image", config(root.path()).unwrap())
+        .create("binding", "Image", config(root.path()))
         .unwrap();
     let mut seed = 17_u32;
     let pixels = image::RgbaImage::from_fn(500, 500, |_, _| {
@@ -353,10 +353,10 @@ fn pi_side_chat_from_older_history_keeps_its_branch_and_displayed_page() {
         .to_string(),
     )
     .unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.session_id = Some("owned-pi-id".into());
     config.session_file = Some(path.to_string_lossy().into_owned());
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
         .create_for_task("binding", "task", "Parent", config)
         .unwrap();
@@ -427,10 +427,10 @@ fn pi_history_pages_follow_the_live_branch_through_compaction(
     }
     fs::write(&path, &saved).unwrap();
     fs::write(root.path().join("history-leaf"), "latest").unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.session_id = Some("owned-pi-id".into());
     config.session_file = Some(path.to_string_lossy().into_owned());
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     let live = session.snapshot();
     let mut page = session.read_history("latest").unwrap();
     let mut ids = std::collections::BTreeSet::new();
@@ -473,16 +473,12 @@ fn native_attachments_are_private_session_scoped_and_survive_restart() {
     let root = TempDir::new().unwrap();
     let second_root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create("binding", "Conversation", config(root.path()).unwrap())
+        .create("binding", "Conversation", config(root.path()))
         .unwrap();
     let other = service
-        .create(
-            "other-binding",
-            "Other",
-            config(second_root.path()).unwrap(),
-        )
+        .create("other-binding", "Other", config(second_root.path()))
         .unwrap();
 
     let markdown = root.path().join("notes.md");
@@ -645,7 +641,7 @@ fn native_attachments_are_private_session_scoped_and_survive_restart() {
     service.shutdown().unwrap();
     drop(service);
 
-    let restored = NativeAgentService::open(&catalog).unwrap();
+    let restored = open(&catalog).unwrap();
     let restored_record = restored
         .sessions()
         .into_iter()
@@ -684,7 +680,7 @@ fn exact_process_identity_streaming_history_and_abort_share_one_rpc_owner(
     if legacy_ack {
         fs::write(root.path().join("legacy-ack"), "").unwrap();
     }
-    let config = config(root.path()).unwrap();
+    let config = real_config(root.path()).unwrap();
     let session = NativeAgentSession::spawn(config.clone()).unwrap();
     assert_eq!(
         session.snapshot().session_id.as_deref(),
@@ -763,9 +759,9 @@ fn only_pending_dialogs_accept_their_native_answer_schema(
     #[case] invalid: Value,
 ) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("captured-binding", "Dialog", config(root.path()).unwrap())
+        .create("captured-binding", "Dialog", config(root.path()))
         .unwrap();
     let session = service.resolve(&record.target()).unwrap();
     service.prompt(&record.target(), method).unwrap();
@@ -827,7 +823,7 @@ fn pi_extension_editor_can_wait_for_input_before_acknowledging_its_prompt(
     if expected == NativeSessionStatus::Error {
         fs::write(root.path().join("reject-editor"), "").unwrap();
     }
-    let session = Arc::new(NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap());
+    let session = Arc::new(spawn(config(root.path())).unwrap());
     let (wake, changes) = mpsc::channel();
     session.set_change_handler(Arc::new(move || {
         let _ = wake.send(());
@@ -890,9 +886,9 @@ fn pi_extension_editor_can_wait_for_input_before_acknowledging_its_prompt(
 #[rstest]
 fn resume_uses_the_exact_saved_file_account_and_task_identity() {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Pi", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Pi", config(root.path()))
         .unwrap();
     assert!(record.id.starts_with("native:pi:"));
     assert_eq!(record.snapshot.session_id.as_deref(), Some("owned-pi-id"));
@@ -930,15 +926,15 @@ fn resume_uses_the_exact_saved_file_account_and_task_identity() {
 #[case("{")]
 fn invalid_or_mismatched_protocol_cannot_initialize_a_live_session(#[case] fault: &str) {
     let root = TempDir::new().unwrap();
-    let config = config(root.path()).unwrap();
+    let config = config(root.path());
     fs::write(root.path().join("fault"), fault).unwrap();
-    assert!(NativeAgentSession::spawn(config).is_err());
+    assert!(spawn(config).is_err());
 }
 
 #[rstest]
 fn provider_identity_changes_and_handled_prompts_do_not_invent_turn_success() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("handled").unwrap();
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
     assert!(!session.snapshot().completed_turn);
@@ -955,10 +951,10 @@ proptest! {
     #[test]
     fn relative_resume_selectors_are_rejected_before_launch(selector in "[a-zA-Z0-9_-]{1,32}") {
         let root = TempDir::new().unwrap();
-        let mut config = config(root.path()).unwrap();
+        let mut config = config(root.path());
         config.session_id = Some("captured-uuid".to_owned());
         config.session_file = Some(selector);
-        prop_assert!(NativeAgentSession::spawn(config).is_err());
+        prop_assert!(spawn(config).is_err());
         prop_assert!(!root.path().join("launch.json").exists());
     }
 }
@@ -966,7 +962,7 @@ proptest! {
 #[rstest]
 fn pi_first_dispatch_keeps_accepted_abort_outcome_after_manual_success() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     assert_eq!(session.snapshot().first_turn, None);
     session.send_prompt("handled").unwrap();
     assert_eq!(session.snapshot().first_turn, None);
@@ -988,7 +984,7 @@ fn pi_first_dispatch_keeps_accepted_abort_outcome_after_manual_success() {
 #[rstest]
 fn pi_active_followup_uses_steer_without_replacing_the_original_run() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("first work").unwrap();
     session.rpc("get_state", json!({})).unwrap();
     let active = session.snapshot();
@@ -1044,7 +1040,7 @@ fn pi_first_receipt_uses_fixed_admission_identity_and_actual_session_outcome(
     #[case] outcome: NativeTurnOutcome,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     let first_id = session.snapshot().first_turn.unwrap().id;
     if prompt == "normal" {
@@ -1078,7 +1074,7 @@ fn pi_first_receipt_uses_fixed_admission_identity_and_actual_session_outcome(
 #[rstest]
 fn pi_projects_messages_without_turning_extension_ui_state_into_chat() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let assistant = json!({"role":"assistant","timestamp":10,"content":[{"type":"text","text":"\u{001b}[38;5;109mHello world\u{001b}[39m"}]});
     let thinking = json!({"role":"assistant","timestamp":11,"content":[{"type":"thinking","thinking":"Planning"},{"type":"toolCall","id":"call","name":"read","arguments":{}}]});
     let custom = json!({"role":"custom","timestamp":12,"customType":"extension-note","display":true,"content":"A custom message"});
@@ -1159,7 +1155,7 @@ fn pi_tool_results_keep_the_observed_name_input_and_failure_across_history(
     #[case] status: NativeToolStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let arguments = json!({"cmd":"printf 'tool input'"});
     fs::write(
         root.path().join("events.json"),
@@ -1208,7 +1204,7 @@ fn pi_tool_results_keep_the_observed_name_input_and_failure_across_history(
 #[rstest]
 fn pi_edits_become_file_changes_from_its_patch() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let arguments = json!({"path":"src/main.rs","edits":[{"oldText":"old","newText":"new"}]});
     // Observed from Pi's edit tool: `details.patch` is a standard unified patch.
     let details = json!({"diff":" 1 ctx\n-2 old\n+2 new","firstChangedLine":2,
@@ -1254,7 +1250,7 @@ fn nested_tool_results_survive_history_refresh_and_process_restart(
     #[case] mcp: bool,
 ) {
     let root = TempDir::new().unwrap();
-    let launch = config(root.path()).unwrap();
+    let launch = config(root.path());
     let args = json!({"cmd":"printf 'nested output'"});
     // Identifier and metadata observed from the installed Pi MCP client.
     let (name, expected_name, details) = if mcp {
@@ -1282,7 +1278,7 @@ fn nested_tool_results_survive_history_refresh_and_process_restart(
     )
     .unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service.create("binding", "Conversation", launch).unwrap();
     let initial = service
         .resolve(&record.target())
@@ -1313,7 +1309,7 @@ fn nested_tool_results_survive_history_refresh_and_process_restart(
     assert_eq!(refreshed.transcript, initial);
     service.shutdown().unwrap();
     drop(service);
-    let reopened = NativeAgentService::open(&catalog).unwrap();
+    let reopened = open(&catalog).unwrap();
     let saved = reopened
         .sessions()
         .into_iter()
@@ -1341,9 +1337,9 @@ fn pi_resume_keeps_an_empty_provider_projection_instead_of_restoring_cached_noti
     #[case] messages: Value,
 ) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("binding", "Pi", config(root.path()).unwrap())
+        .create("binding", "Pi", config(root.path()))
         .unwrap();
     let session = service.resolve(&record.target()).unwrap();
     fs::write(
@@ -1420,9 +1416,9 @@ fn provider_message_times_survive_history_refresh_and_catalog_reload(#[case] tim
     ]);
     fs::write(root.path().join("history.json"), history.to_string()).unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create("binding-captured", "Pi", config(root.path()).unwrap())
+        .create("binding-captured", "Pi", config(root.path()))
         .unwrap();
     let session = service.resolve(&record.target()).unwrap();
     let expected = vec![
@@ -1443,7 +1439,7 @@ fn provider_message_times_survive_history_refresh_and_catalog_reload(#[case] tim
     service.stop(&record.target()).unwrap();
     service.shutdown().unwrap();
     drop(service);
-    let restored = NativeAgentService::open(&catalog).unwrap();
+    let restored = open(&catalog).unwrap();
     assert_eq!(times(&restored.sessions()[0].snapshot.transcript), expected);
     restored.shutdown().unwrap();
 }
@@ -1462,7 +1458,7 @@ fn legacy_transcript_without_times_stays_unknown() {
 #[case("preserve the debugging context")]
 fn pi_compact_completion_routes_to_compaction_without_an_llm_turn(#[case] instructions: &str) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     assert!(
         session
             .completions()
@@ -1490,7 +1486,7 @@ fn pi_compact_completion_routes_to_compaction_without_an_llm_turn(#[case] instru
 #[rstest]
 fn pi_subagent_lifecycle_and_results_survive_history_without_inventing_threads() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let result = json!({"role":"toolResult","timestamp":2,"toolCallId":"spawn","toolName":"spawn_agent","content":[{"type":"text","text":"Started reviewer"}],"details":{"version":1,"tool":"spawn_agent","agent":{"id":"/root/reviewer","description":"Review the patch","model":"gpt-6-sol","status":"running","startedAt":1000}}});
     fs::write(
         root.path().join("events.json"),
@@ -1552,10 +1548,10 @@ fn pi_subagent_transcripts_read_the_file_their_parent_names() {
         json!({"type":"message","id":"c1","parentId":null,"message":{"role":"user","timestamp":1,"content":[{"type":"text","text":"Review the patch"}]}}),
         json!({"type":"message","id":"c2","parentId":"c1","message":{"role":"assistant","timestamp":2,"content":[{"type":"text","text":"Looks good"}]}}),
     ])).unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.session_id = Some("owned-pi-id".into());
     config.session_file = Some(parent.to_string_lossy().into_owned());
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     let spawned = json!({"role":"toolResult","timestamp":2,"toolCallId":"spawn","toolName":"spawn_agent","content":[{"type":"text","text":"Started reviewer"}],"details":{"version":1,"tool":"spawn_agent","agent":{"id":"/root/reviewer","description":"Review the patch","status":"running","startedAt":1000}}});
     fs::write(
         root.path().join("events.json"),
@@ -1605,9 +1601,9 @@ fn inline_attachment_ranges_require_exact_admitted_tokens(
     #[case] accepted: bool,
 ) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("binding", "Inline references", config(root.path()).unwrap())
+        .create("binding", "Inline references", config(root.path()))
         .unwrap();
     let path = root.path().join("notes.md");
     fs::write(&path, "admitted file").unwrap();
@@ -1653,9 +1649,9 @@ fn inline_attachment_ranges_require_exact_admitted_tokens(
 #[rstest]
 fn pi_rejects_an_unavailable_automatic_review_policy_before_launching() {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.permissions = "auto".parse().unwrap();
-    assert!(NativeAgentSession::spawn(config).is_err());
+    assert!(spawn(config).is_err());
     assert!(!root.path().join("launch.json").exists());
 }
 
@@ -1665,7 +1661,7 @@ fn pi_rejects_an_unavailable_automatic_review_policy_before_launching() {
 #[case::interrupted_end("message_end")]
 fn pi_unreported_stream_usage_preserves_the_last_observed_context(#[case] event: &str) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let observed = json!({"input":81,"output":4,"cacheRead":22,"cacheWrite":3,"totalTokens":110});
     let empty = json!({"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0});
     for (kind, usage, timestamp) in [("message_end", observed.clone(), 900), (event, empty, 901)] {
@@ -1687,7 +1683,7 @@ fn pi_unreported_stream_usage_preserves_the_last_observed_context(#[case] event:
 #[rstest]
 fn pi_cancel_returns_to_idle_without_a_provider_abort_failure() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("aborted").unwrap();
     session.interrupt().unwrap();
     let snapshot = session.snapshot();
@@ -1709,7 +1705,7 @@ fn pi_cancel_returns_to_idle_without_a_provider_abort_failure() {
 fn pi_interrupt_cancels_pending_ui_before_waiting_for_abort(#[case] method: &str) {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("abort-needs-answer"), "").unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(method).unwrap();
     assert_eq!(session.snapshot().status, NativeSessionStatus::Waiting);
     session.interrupt().unwrap();
@@ -1742,12 +1738,12 @@ fn resumed_pi_retains_the_last_provider_failure(
     #[case] error: Option<&str>,
 ) {
     let root = TempDir::new().unwrap();
-    let config = config(root.path()).unwrap();
+    let config = config(root.path());
     fs::write(root.path().join("history.json"), json!([
         {"role":"user","timestamp":1,"content":"hi"},
         {"role":"assistant","timestamp":2,"content":[],"stopReason":stop_reason,"errorMessage":error}
     ]).to_string()).unwrap();
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     let snapshot = session.snapshot();
     assert_eq!(snapshot.status, NativeSessionStatus::Idle);
     assert_eq!(snapshot.error.as_deref(), error);
@@ -1769,9 +1765,9 @@ fn resumed_pi_retains_the_last_provider_failure(
 #[test]
 fn oversized_pi_dialogs_are_cancelled_without_ending_the_conversation() {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("captured-binding", "Dialog", config(root.path()).unwrap())
+        .create("captured-binding", "Dialog", config(root.path()))
         .unwrap();
     let session = service.resolve(&record.target()).unwrap();
     service
@@ -1796,7 +1792,7 @@ fn oversized_pi_dialogs_are_cancelled_without_ending_the_conversation() {
 #[rstest]
 fn pi_turn_usage_sums_the_turns_model_calls() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let call = |timestamp: u64, text: &str, usage: Value| {
         json!({"type":"message_end","message":{"role":"assistant","timestamp":timestamp,
             "content":[{"type":"text","text":text}],"usage":usage,"stopReason":"stop"}})
@@ -1848,7 +1844,7 @@ fn pi_auto_compaction_shows_how_it_ended(
     #[case] expected: Option<NativeToolStatus>,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let mut end = end;
     end["type"] = "auto_compaction_end".into();
     fs::write(
@@ -1866,4 +1862,50 @@ fn pi_auto_compaction_shows_how_it_ended(
         expected
     );
     session.stop();
+}
+
+fn open(path: impl Into<std::path::PathBuf>) -> Result<NativeAgentService, String> {
+    NativeAgentService::open_with(path, native_peer::clock(), pi_peer::launcher())
+}
+fn spawn(config: NativeSessionConfig) -> Result<NativeAgentSession, String> {
+    NativeAgentSession::spawn_with(config, native_peer::clock(), &pi_peer::launcher())
+}
+fn real_config(root: &Path) -> std::io::Result<NativeSessionConfig> {
+    let mut config = config(root);
+    let path = root.join("real-pi.py");
+    bootty_test_support::write_executable(&path, PI_FIXTURE)?;
+    config.program = path.to_string_lossy().into_owned();
+    Ok(config)
+}
+
+proptest! {
+    #[test]
+    fn native_transcript_presentation_matches_terminal_parsing(
+        fragments in proptest::collection::vec(prop_oneof![
+            any::<char>().prop_map(|character| character.to_string()),
+            (0_u8..=159).prop_map(|byte| char::from(byte).to_string()),
+            Just("\x1b[31m".to_owned()),
+            Just("\x1b]52;c;YWJj\x07".to_owned()),
+            Just("\x1bP$qm\x1b\\".to_owned()),
+        ], 0..32),
+    ) {
+        struct Plain(String);
+        impl anstyle_parse::Perform for Plain {
+            fn print(&mut self, character: char) {
+                if !character.is_control() { self.0.push(character); }
+            }
+            fn execute(&mut self, byte: u8) {
+                if matches!(byte, b'\n' | b'\r' | b'\t') { self.0.push(char::from(byte)); }
+            }
+        }
+        let text = fragments.concat();
+        let mut parser = anstyle_parse::Parser::<anstyle_parse::Utf8Parser>::default();
+        let mut expected = Plain(String::new());
+        for byte in text.bytes() { parser.advance(&mut expected, byte); }
+        let item: NativeTranscriptItem = serde_json::from_value(json!({
+            "id":"presentation", "role":"plan", "text":text, "complete":true,
+        })).unwrap();
+        assert_eq!(item.display_text(), expected.0);
+        assert_eq!(item.text, text);
+    }
 }

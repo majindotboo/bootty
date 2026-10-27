@@ -5,8 +5,9 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
@@ -86,17 +87,7 @@ pub fn run(args: &Args) -> Result<()> {
     let timer = Timer::start();
     let mut sampler = start_sampler(&args.output_dir, seconds, interval_ms)?;
     match &sampler {
-        Some(sampler) => write_json(
-            &mut summary,
-            &Sampler {
-                schema_version: 1,
-                event: "power_sampler",
-                tool: Some(sampler.tool),
-                status: "started",
-                log: Some(sampler.log.display().to_string()),
-                detail: None,
-            },
-        )?,
+        Some(sampler) => sampler.write_started(&mut summary)?,
         None => write_json(
             &mut summary,
             &Sampler {
@@ -123,7 +114,7 @@ pub fn run(args: &Args) -> Result<()> {
         .stderr(File::create(&stderr_path)?);
     let outcome = wait_for_command(&mut command)?;
     if let Some(sampler) = &mut sampler {
-        sampler.finish()?;
+        let _status = sampler.finish()?;
     }
     let (exit_code, success) = match outcome {
         CommandOutcome::Exited(status) => {
@@ -180,7 +171,8 @@ impl std::fmt::Display for CommandFailure {
 
 impl std::error::Error for CommandFailure {}
 
-struct RunningSampler {
+/// Owns a sampling process and its deadline, independent of sampler discovery.
+pub struct RunningSampler {
     child: Child,
     tool: &'static str,
     log: PathBuf,
@@ -189,10 +181,56 @@ struct RunningSampler {
 }
 
 impl RunningSampler {
-    fn finish(&mut self) -> Result<()> {
+    /// Starts a sampler in its own process group with an explicit clock.
+    /// # Errors
+    /// Returns log creation or process startup failures.
+    pub fn start(
+        mut command: Command,
+        tool: &'static str,
+        log: PathBuf,
+        deadline: Duration,
+        now: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Result<Self> {
+        let file = File::create(&log)?;
+        crate::process::configure_group(&mut command);
+        let child = command
+            .stdin(Stdio::null())
+            .stdout(file.try_clone()?)
+            .stderr(file)
+            .spawn()?;
+        Ok(Self {
+            child,
+            tool,
+            log,
+            deadline,
+            timer: Timer::with_clock(now),
+        })
+    }
+
+    /// Records the sampler selected for this measurement.
+    /// # Errors
+    /// Returns evidence serialization or output errors.
+    pub fn write_started(&self, output: &mut impl Write) -> Result<()> {
+        write_json(
+            output,
+            &Sampler {
+                schema_version: 1,
+                event: "power_sampler",
+                tool: Some(self.tool),
+                status: "started",
+                log: Some(self.log.display().to_string()),
+                detail: None,
+            },
+        )
+    }
+
+    /// Waits for completion, cancellation, or the sampling deadline, then reaps the process.
+    /// # Errors
+    /// Returns process observation or cancellation failures.
+    pub fn finish(&mut self) -> Result<ExitStatus> {
         loop {
-            if self.child.try_wait()?.is_some() {
-                return Ok(());
+            if let Some(status) = self.child.try_wait()? {
+                return Ok(status);
             }
             if crate::cancellation::interrupted() {
                 crate::process::terminate_group(&mut self.child);
@@ -200,7 +238,7 @@ impl RunningSampler {
             }
             if self.timer.elapsed() >= self.deadline {
                 crate::process::terminate_group(&mut self.child);
-                return Ok(());
+                return self.child.wait().map_err(Into::into);
             }
             thread::sleep(Duration::from_millis(10));
         }
@@ -244,7 +282,38 @@ fn start_sampler(
     seconds: u64,
     interval_ms: u64,
 ) -> Result<Option<RunningSampler>> {
-    let (tool, log, mut command) = if program_exists("powermetrics") {
+    let Some(plan) = sampler_plan(output_dir, seconds, interval_ms, |program| {
+        program_exists(program)
+    }) else {
+        return Ok(None);
+    };
+    let nominal = Duration::from_millis(interval_ms.saturating_mul(seconds));
+    RunningSampler::start(
+        plan.command,
+        plan.tool,
+        plan.log,
+        nominal.saturating_add(Duration::from_secs(1)),
+        Arc::new(Instant::now),
+    )
+    .map(Some)
+}
+
+/// The selected sampler command and its output location.
+pub struct SamplerPlan {
+    pub command: Command,
+    pub tool: &'static str,
+    pub log: PathBuf,
+}
+
+/// Selects a hardware sampler using the available programs on the execution host.
+#[must_use]
+pub fn sampler_plan(
+    output_dir: &Path,
+    seconds: u64,
+    interval_ms: u64,
+    available: impl Fn(&str) -> bool,
+) -> Option<SamplerPlan> {
+    let (tool, log, command) = if available("powermetrics") {
         let mut command = Command::new("sudo");
         command.args([
             "powermetrics",
@@ -256,11 +325,11 @@ fn start_sampler(
             &seconds.to_string(),
         ]);
         ("powermetrics", output_dir.join("powermetrics.log"), command)
-    } else if program_exists("pidstat") {
+    } else if available("pidstat") {
         let mut command = Command::new("pidstat");
         command.args(["-durh", "1", &seconds.to_string()]);
         ("pidstat", output_dir.join("pidstat.log"), command)
-    } else if program_exists("nvidia-smi") {
+    } else if available("nvidia-smi") {
         let mut command = Command::new("nvidia-smi");
         command.args([
             "--query-gpu=timestamp,power.draw,utilization.gpu,temperature.gpu",
@@ -270,23 +339,9 @@ fn start_sampler(
         ]);
         ("nvidia-smi", output_dir.join("nvidia-smi.log"), command)
     } else {
-        return Ok(None);
+        return None;
     };
-    let file = File::create(&log)?;
-    crate::process::configure_group(&mut command);
-    let child = command
-        .stdin(Stdio::null())
-        .stdout(file.try_clone()?)
-        .stderr(file)
-        .spawn()?;
-    let nominal = Duration::from_millis(interval_ms.saturating_mul(seconds));
-    Ok(Some(RunningSampler {
-        child,
-        tool,
-        log,
-        deadline: nominal.saturating_add(Duration::from_secs(1)),
-        timer: Timer::start(),
-    }))
+    Some(SamplerPlan { command, tool, log })
 }
 
 fn environment_u64(name: &str, default: u64) -> Result<u64> {
@@ -350,7 +405,7 @@ fn shell_quote(value: &OsStr) -> String {
     value.to_string_lossy().into_owned()
 }
 
-fn write_json(output: &mut File, value: &impl Serialize) -> Result<()> {
+fn write_json(output: &mut impl Write, value: &impl Serialize) -> Result<()> {
     serde_json::to_writer(&mut *output, value)?;
     writeln!(output)?;
     Ok(())

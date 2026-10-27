@@ -83,7 +83,7 @@ impl NativeAgentSession {
             .iter()
             .filter_map(|entry| entry.entry.uuid.as_deref())
             .collect::<Vec<_>>();
-        let mut limit = PAGE_SIZE;
+        let mut limit = HistoryPosition::page_limit(previous, direction);
         let (start, end, history) = loop {
             let (start, end) = page_range(&ids, previous, direction, limit)?;
             if let Some(history) = project_branch(
@@ -113,6 +113,7 @@ impl NativeAgentSession {
             at_latest: end == ids.len(),
             pi_leaf: None,
             codex_legacy: false,
+            limit: Some(limit),
         };
         let page = NativeHistoryPage {
             transcript: history.transcript,

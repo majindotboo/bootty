@@ -12,7 +12,7 @@ use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget,
 };
 use bootty_ui::{
-    AppEffect, AppState,
+    AppState,
     commands::{RunCommand, RunNodeRequest, capture_run_plan},
 };
 use pretty_assertions::assert_eq;
@@ -25,11 +25,22 @@ use serde_json::json;
 /// only a broken fixture reaches this, so it is generous enough for a loaded machine.
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
+#[path = "support/agent_clock.rs"]
+mod agent_clock;
+#[cfg(unix)]
+#[path = "support/provider_queries.rs"]
+mod provider_queries;
+
 #[path = "support/idle_frames.rs"]
 mod frames;
-#[cfg(windows)]
 #[path = "support/naming_backend.rs"]
 mod naming_backend;
+#[cfg(unix)]
+#[path = "support/native_provider.rs"]
+mod native_provider;
+#[cfg(unix)]
+#[path = "support/orchestration_provider.rs"]
+mod orchestration_provider;
 pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
@@ -167,6 +178,7 @@ fn previous_session_profiles_require_turn_identity(node: RunNodeRequest, #[case]
 }
 
 struct HostFixture {
+    clock: agent_clock::Clock,
     directory: Arc<assert_fs::TempDir>,
     state: AppState,
     wakes: mpsc::Receiver<()>,
@@ -190,7 +202,7 @@ impl HostFixture {
                 );
                 stop.target = Some(record.target);
                 stop.confirmation = Some(stop.confirmation());
-                let outcome = submit(&mut self.state, &self.wakes, stop)?;
+                let outcome = submit(&mut self.state, &self.wakes, &self.clock, stop)?;
                 if !matches!(outcome, CommandOutcome::Success { .. }) {
                     return Err(format!(
                         "Fixture terminal did not close through its shared owner: {outcome:?}"
@@ -213,6 +225,7 @@ impl Drop for HostFixture {
 fn submit(
     state: &mut AppState,
     wakes: &mpsc::Receiver<()>,
+    clock: &agent_clock::Clock,
     invocation: CommandInvocation,
 ) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     let command = invocation.command.clone();
@@ -224,7 +237,7 @@ fn submit(
         .submit(invocation, deadline, CommandCancellation::new())
         .map_err(|error| format!("Fixture command submission failed: {error:?}"))?;
     loop {
-        let effects = state.update_frame(frames::idle_frame(Instant::now()));
+        state.update_frame(frames::idle_frame(clock.tick(state)));
         match response.try_recv() {
             Ok(outcome) => return Ok(outcome),
             Err(mpsc::TryRecvError::Disconnected) => return Err("command disconnected".into()),
@@ -234,21 +247,7 @@ fn submit(
         if remaining.is_zero() {
             return Err(format!("Fixture {command} did not complete before its deadline").into());
         }
-        // Drive the timers requested by the public frame contract, as the real window does.
-        let delay = effects
-            .into_iter()
-            .filter_map(|effect| match effect {
-                AppEffect::RequestRepaint => Some(Duration::ZERO),
-                AppEffect::RepaintAfter(delay) => Some(delay),
-                _ => None,
-            })
-            .min()
-            .unwrap_or(remaining)
-            .min(remaining);
-        match wakes.recv_timeout(delay) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(error) => return Err(error.into()),
-        }
+        wakes.recv_timeout(remaining)?;
     }
 }
 
@@ -274,6 +273,11 @@ fn host() -> Result<HostFixture, Box<dyn std::error::Error>> {
     let project = directory.path().join("project");
     std::fs::create_dir(&project)?;
     config.session.working_directory = Some(project);
+    #[cfg(unix)]
+    {
+        config.session.shell = Some("/bin/sh".into());
+        config.session.shell_integration = false;
+    }
     // Keep provider queries independent of installed providers and credentials.
     config.agents.claude.program = directory
         .path()
@@ -302,7 +306,7 @@ fn reopen_host(
     directory: Arc<assert_fs::TempDir>,
     config: bootty_config::config::BoottyConfig,
 ) -> Result<HostFixture, Box<dyn std::error::Error>> {
-    reopen_host_with_backends(directory, config, support::backends())
+    reopen_host_with_backends(directory, config, naming_backend::backends(None, false)?)
 }
 
 fn reopen_host_with_backends(
@@ -310,9 +314,26 @@ fn reopen_host_with_backends(
     config: bootty_config::config::BoottyConfig,
     backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
 ) -> Result<HostFixture, Box<dyn std::error::Error>> {
+    reopen_host_with_launcher(
+        directory,
+        config,
+        backends,
+        Arc::new(bootty_agents::NativeChild::spawn),
+    )
+}
+
+fn reopen_host_with_launcher(
+    directory: Arc<assert_fs::TempDir>,
+    config: bootty_config::config::BoottyConfig,
+    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
+    launcher: bootty_agents::NativeLauncher,
+) -> Result<HostFixture, Box<dyn std::error::Error>> {
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let clock = agent_clock::Clock::default();
+    let mut runtime = clock.runtime(events);
+    runtime.launcher = launcher;
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "runs-fixture".to_owned(),
         backends,
@@ -321,11 +342,12 @@ fn reopen_host_with_backends(
         }),
         None,
         None,
-        Some(events),
+        Some(runtime),
     )?;
     let CommandOutcome::Success { value, .. } = submit(
         &mut state,
         &wakes,
+        &clock,
         CommandInvocation::new(
             "resource.current",
             vec!["binding".to_owned()],
@@ -336,6 +358,7 @@ fn reopen_host_with_backends(
         return Err("Binding discovery failed".into());
     };
     Ok(HostFixture {
+        clock,
         directory,
         state,
         wakes,
@@ -357,6 +380,7 @@ fn run_mutation(
     submit(
         &mut host.state,
         &host.wakes,
+        &host.clock,
         bound(
             CommandInvocation::new(command, arguments, Caller::Socket),
             binding,
@@ -371,6 +395,7 @@ fn create(
     let outcome = submit(
         &mut host.state,
         &host.wakes,
+        &host.clock,
         bound(
             CommandInvocation::new(
                 "runs.create",
@@ -490,6 +515,7 @@ fn read_omits_launch_prompt_and_account_metadata(
     let outcome = submit(
         &mut host.state,
         &host.wakes,
+        &host.clock,
         CommandInvocation::new("runs.read", vec![run], Caller::Socket),
     )
     .unwrap();
@@ -557,7 +583,7 @@ fn terminal_runs_are_rejected_without_publishing_work(
         ),
         &host.binding,
     );
-    let outcome = submit(&mut host.state, &host.wakes, invocation).unwrap();
+    let outcome = submit(&mut host.state, &host.wakes, &host.clock, invocation).unwrap();
     assert!(matches!(outcome, CommandOutcome::Failed { code, message }
         if code == "run_failed" && message.contains("Unix")));
     assert_eq!(
@@ -571,60 +597,26 @@ fn terminal_runs_are_rejected_without_publishing_work(
 #[cfg(unix)]
 struct ProviderFixture {
     host: HostFixture,
-    _gates: Vec<std::fs::File>,
 }
 
 #[cfg(unix)]
 fn providers(first_state: &str) -> Result<ProviderFixture, Box<dyn std::error::Error>> {
     let directory = Arc::new(assert_fs::TempDir::new()?);
     let program = directory.path().join("provider.py");
-    bootty_test_support::write_executable(
-        &program,
-        r"#!/usr/bin/env python3
-import json, os, pathlib, sys
-account = pathlib.Path(os.environ['CLAUDE_CONFIG_DIR'])
-if sys.argv[1:3] == ['agents', '--json']:
-    if not (account / 'identity').exists():
-        with open(account / 'started', 'rb', buffering=0) as gate:
-            gate.read(1)
-    print(json.dumps([{'sessionId': (account / 'identity').read_text(), 'state': (account / 'state').read_text()}]))
-    sys.exit(0)
-args = sys.argv[1:]
-session = args[args.index('--session-id') + 1]
-(account / 'identity').write_text(session)
-with open(account.parent / 'order', 'a') as order:
-    order.write(account.name + '\n')
-with open(account / 'started', 'wb', buffering=0) as gate:
-    gate.write(b'x')
-print('ready', flush=True)
-for line in sys.stdin:
-    pass
-",
-    )?;
+    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n")?;
+    let fixture = orchestration_provider::Fixture::new(directory.path(), None);
     let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
     );
     config.session.working_directory = Some(directory.path().to_path_buf());
+    config.session.shell = Some("/bin/sh".into());
+    config.session.shell_integration = false;
     config.agents.claude.program = program.to_string_lossy().into_owned();
-    let mut gates = Vec::new();
     for (id, state) in [("a", first_state), ("b", "done")] {
         let account = directory.path().join(id);
         std::fs::create_dir(&account)?;
         std::fs::write(account.join("state"), state)?;
-        if !std::process::Command::new("mkfifo")
-            .arg(account.join("started"))
-            .status()?
-            .success()
-        {
-            return Err("fixture FIFO creation failed".into());
-        }
-        gates.push(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(account.join("started"))?,
-        );
         config.agents.claude.profiles.insert(
             id.to_owned(),
             AgentProfileConfig {
@@ -636,20 +628,24 @@ for line in sys.stdin:
     }
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let clock = agent_clock::Clock::default();
+    let mut runtime = clock.runtime(events);
+    runtime.terminal_transport = fixture.transport();
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "provider-run".to_owned(),
-        support::backends(),
+        fixture.backends()?,
         Arc::new(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(runtime),
     )?;
     let CommandOutcome::Success { value, .. } = submit(
         &mut state,
         &wakes,
+        &clock,
         CommandInvocation::new(
             "resource.current",
             vec!["binding".to_owned()],
@@ -661,12 +657,12 @@ for line in sys.stdin:
     };
     Ok(ProviderFixture {
         host: HostFixture {
+            clock,
             directory,
             state,
             wakes,
             binding: issued_binding(&value)?,
         },
-        _gates: gates,
     })
 }
 
@@ -691,6 +687,7 @@ fn two_provider_workers_observe_dependency_order_without_idle_success(
     let create = submit(
         &mut fixture.host.state,
         &fixture.host.wakes,
+        &fixture.host.clock,
         bound(
             CommandInvocation::new(
                 "runs.create",
@@ -708,6 +705,7 @@ fn two_provider_workers_observe_dependency_order_without_idle_success(
     let result = submit(
         &mut fixture.host.state,
         &fixture.host.wakes,
+        &fixture.host.clock,
         bound(
             CommandInvocation::new("runs.dispatch", vec![run], Caller::Socket),
             &fixture.host.binding,
@@ -745,7 +743,21 @@ fn two_provider_workers_observe_dependency_order_without_idle_success(
             .host
             .wakes
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!(
+                    "provider {provider_state}: {error}; nodes {:?}; observations {:?}",
+                    snapshot.runs[0]
+                        .nodes
+                        .iter()
+                        .map(|node| &node.state)
+                        .collect::<Vec<_>>(),
+                    native
+                        .live_records()
+                        .into_iter()
+                        .map(|record| record.observation)
+                        .collect::<Vec<_>>()
+                )
+            });
     }
     assert_eq!(
         std::fs::read_to_string(fixture.host.directory.path().join("order")).unwrap(),
@@ -764,34 +776,7 @@ fn two_provider_workers_observe_dependency_order_without_idle_success(
 fn native_provider_host(mode: &str) -> Result<HostFixture, Box<dyn std::error::Error>> {
     let directory = Arc::new(assert_fs::TempDir::new()?);
     let program = directory.path().join("native-provider.py");
-    bootty_test_support::write_executable(
-        &program,
-        r"#!/usr/bin/env python3
-import json,os,pathlib,sys
-assert sys.argv[1:4] == ['app-server','--listen','stdio://']
-account=pathlib.Path(os.environ['CODEX_HOME'])
-thread='thread-'+str(os.getpid())
-turn=0
-def emit(value): print(json.dumps(value),flush=True)
-def reply(ident,result): emit({'id':ident,'result':result})
-def notice(method,**params): emit({'method':method,'params':{'threadId':thread,'turnId':'turn-'+str(turn),**params}})
-for line in sys.stdin:
- value=json.loads(line); method=value.get('method'); ident=value.get('id'); params=value.get('params',{})
- if method == 'initialized': continue
- if method == 'initialize': reply(ident,{})
- elif method in ['thread/start','thread/resume']: reply(ident,{'thread':{'id':thread,'turns':[]}})
- elif method == 'turn/start':
-  turn+=1; text=params['input'][0]['text']
-  with open(account.parent/'order','a') as order: order.write(text+'\n')
-  notice('turn/started',turn={'id':'turn-'+str(turn),'status':'inProgress','items':[]})
-  status=(account/'mode').read_text() if text == 'first' else 'completed'
-  notice('turn/completed',turn={'id':'turn-'+str(turn),'status':'completed' if status == 'wrong_ack' else status,'items':[]})
-  reply(ident,{'turn':{'id':'wrong-turn' if status == 'wrong_ack' else 'turn-'+str(turn)}})
- elif method == 'turn/interrupt':
-  notice('turn/completed',turn={'id':'turn-'+str(turn),'status':'interrupted','items':[]}); reply(ident,{})
- else: reply(ident,{})
-",
-    )?;
+    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n")?;
     let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
@@ -800,7 +785,6 @@ for line in sys.stdin:
     std::fs::create_dir(&project)?;
     let account = directory.path().join("account");
     std::fs::create_dir(&account)?;
-    std::fs::write(account.join("mode"), mode)?;
     config.session.working_directory = Some(project);
     // Native run behavior does not depend on the user's interactive shell startup.
     config.session.shell = Some("/bin/sh".into());
@@ -815,7 +799,16 @@ for line in sys.stdin:
             arguments: Vec::new(),
         },
     );
-    reopen_host(directory, config)
+    reopen_host_with_launcher(
+        directory,
+        config,
+        naming_backend::backends(None, false)?,
+        native_provider::Fixture {
+            first_turn_status: Some(mode.to_owned()),
+            ..Default::default()
+        }
+        .launcher(),
+    )
 }
 
 #[cfg(unix)]
@@ -898,6 +891,7 @@ fn native_dependent_work_uses_exact_first_turn_without_creating_another_saved_ta
     let outcome = submit(
         &mut host.state,
         &host.wakes,
+        &host.clock,
         bound(
             CommandInvocation::new(
                 "runs.create_for_session",
@@ -1001,7 +995,7 @@ fn session_work_rejects_stale_parent_or_configuration_drift_without_creating_wor
                 Vec::new()
             };
             std::fs::write(&host.state.config().config_path, format!(
-                "[agents.codex]\nprogram = {}\nselected = \"fixture\"\n[agents.codex.profiles.fixture]\nname = \"Fixture\"\ndirectory = {}\narguments = {}\n",
+                "[session]\nshell = '/bin/sh'\n[agents]\nauto-update = false\n[agents.codex]\nprogram = {}\nselected = \"fixture\"\n[agents.codex.profiles.fixture]\nname = \"Fixture\"\ndirectory = {}\narguments = {}\n",
                 serde_json::to_string(program).unwrap(), serde_json::to_string(&account.to_string_lossy()).unwrap(), serde_json::to_string(&arguments).unwrap(),
             )).unwrap();
             assert!(host.state.reload_config(&mut Vec::new()));
@@ -1011,6 +1005,7 @@ fn session_work_rejects_stale_parent_or_configuration_drift_without_creating_wor
     let outcome = submit(
         &mut host.state,
         &host.wakes,
+        &host.clock,
         bound(
             CommandInvocation::new(
                 "runs.create_for_session",
@@ -1141,7 +1136,7 @@ fn provider_sign_in_from_an_empty_binding_captures_the_requested_account() {
     let mut host = reopen_host_with_backends(
         Arc::clone(&directory),
         config,
-        naming_backend::backends().unwrap(),
+        naming_backend::backends(None, false).unwrap(),
     )
     .unwrap();
     assert_eq!(host.state.mux().all_sessions(), []);

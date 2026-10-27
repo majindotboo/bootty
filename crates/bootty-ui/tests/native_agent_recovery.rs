@@ -20,8 +20,16 @@ use std::{
 /// only a broken fixture reaches this, so it is generous enough for a loaded machine.
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
+#[path = "support/agent_clock.rs"]
+mod agent_clock;
+#[path = "support/provider_queries.rs"]
+mod provider_queries;
+
 #[path = "support/idle_frames.rs"]
 mod frames;
+
+#[path = "support/naming_backend.rs"]
+mod naming_backend;
 pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
@@ -29,12 +37,14 @@ mod test_config;
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 struct Host {
+    clock: agent_clock::Clock,
+    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
     directory: assert_fs::TempDir,
     state: AppState,
     wakes: mpsc::Receiver<()>,
     session: CommandTarget,
     terminal: CommandTarget,
-    _gate: fs::File,
+    ready: Arc<std::os::unix::net::UnixListener>,
 }
 impl Host {
     fn close(&mut self) -> TestResult<()> {
@@ -48,15 +58,15 @@ impl Host {
             let mut close = CommandInvocation::new("pane.close", Vec::new(), Caller::Socket);
             close.target = Some(record.target);
             close.confirmation = Some(close.confirmation());
-            success(submit(&mut self.state, &self.wakes, close)?)?;
+            success(submit(&mut self.state, &self.wakes, &self.clock, close)?)?;
         }
         for archive in self.state.recovery_archives().iter() {
             let mut delete =
                 CommandInvocation::new("recovery.delete", vec![archive.id.clone()], Caller::Socket);
-            let outcome = submit(&mut self.state, &self.wakes, delete.clone())?;
+            let outcome = submit(&mut self.state, &self.wakes, &self.clock, delete.clone())?;
             if let CommandOutcome::ConfirmationRequired { confirmation } = outcome {
                 delete.confirmation = Some(*confirmation);
-                success(submit(&mut self.state, &self.wakes, delete)?)?;
+                success(submit(&mut self.state, &self.wakes, &self.clock, delete)?)?;
             } else {
                 return Err(
                     format!("fixture deletion requires host confirmation: {outcome:?}").into(),
@@ -104,6 +114,7 @@ fn topology(state: &AppState) -> Vec<(String, String, Option<String>)> {
 fn submit(
     state: &mut AppState,
     wakes: &mpsc::Receiver<()>,
+    clock: &agent_clock::Clock,
     invocation: CommandInvocation,
 ) -> TestResult<CommandOutcome> {
     let deadline = Instant::now()
@@ -114,7 +125,7 @@ fn submit(
         .submit(invocation, deadline, CommandCancellation::new())
         .map_err(|error| format!("command submission failed: {error:?}"))?;
     loop {
-        state.update_frame(frames::idle_frame(Instant::now()));
+        state.update_frame(frames::idle_frame(clock.tick(state)));
         match response.try_recv() {
             Ok(outcome) => return Ok(outcome),
             Err(mpsc::TryRecvError::Disconnected) => return Err("command disconnected".into()),
@@ -123,28 +134,18 @@ fn submit(
         wakes.recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
     }
 }
-fn provider(directory: &Path) -> TestResult<(std::path::PathBuf, fs::File)> {
-    let gate = directory.join("query-gate");
-    if !std::process::Command::new("mkfifo")
-        .arg(&gate)
-        .status()?
-        .success()
-    {
-        return Err("query FIFO creation failed".into());
-    }
-    let gate = fs::OpenOptions::new().read(true).write(true).open(gate)?;
+fn provider(
+    directory: &Path,
+) -> TestResult<(std::path::PathBuf, Arc<std::os::unix::net::UnixListener>)> {
+    let ready = Arc::new(std::os::unix::net::UnixListener::bind(
+        directory.join("query-ready.sock"),
+    )?);
     let program = directory.join("claude-fixture.py");
     bootty_test_support::write_executable(
         &program,
         r"#!/usr/bin/env python3
-import json, os, pathlib, sys
+import json, os, pathlib, socket, sys
 directory = pathlib.Path(__file__).parent
-if sys.argv[1:3] == ['agents', '--json']:
-    with open(directory / 'query-gate', 'rb', buffering=0) as gate:
-        gate.read(1)
-    paths = list(directory.glob('session-*.json'))
-    print(json.dumps([{'sessionId': json.loads(path.read_text())['session_id'], 'status': 'idle'} for path in paths]))
-    sys.exit(0)
 arguments = sys.argv[1:]
 session_id = arguments[arguments.index('--session-id') + 1] if '--session-id' in arguments else arguments[arguments.index('--resume') + 1]
 clean = []
@@ -161,8 +162,8 @@ path = directory / ('session-' + session_id + '.json')
 temporary = path.with_suffix('.tmp')
 temporary.write_text(json.dumps({'session_id': session_id, 'arguments': clean, 'account': os.environ.get('CLAUDE_CONFIG_DIR'), 'cwd': os.getcwd(), 'tool_configs': tool_configs}))
 os.replace(temporary, path)
-with open(directory / 'query-gate', 'wb', buffering=0) as gate:
-    gate.write(b'x')
+with socket.socket(socket.AF_UNIX) as ready:
+    ready.connect(str(directory / 'query-ready.sock'))
 print('provider ready', flush=True)
 for line in sys.stdin:
     with open(directory / 'received', 'a') as received:
@@ -170,17 +171,20 @@ for line in sys.stdin:
     print('received', flush=True)
 ",
     )?;
-    Ok((program, gate))
+    Ok((program, ready))
 }
 #[fixture]
 fn host() -> TestResult<Host> {
     let directory = assert_fs::TempDir::new()?;
-    let (program, gate) = provider(directory.path())?;
+    let (program, ready) = provider(directory.path())?;
     let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
     );
     config.session.output_archives = true;
+    config.session.shell = Some("/bin/sh".into());
+    config.session.shell_integration = false;
+    config.session.working_directory = Some(directory.path().to_path_buf());
     config.agents.allow_spawn = true;
     config.agents.claude.program = directory
         .path()
@@ -206,21 +210,26 @@ fn host() -> TestResult<Host> {
     }
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let clock = agent_clock::Clock::default();
+    let backends = naming_backend::backends(None, true)?;
+    let mut runtime = clock.runtime(events);
+    runtime.terminal_transport = provider_queries::terminal_transport(Some(Arc::clone(&ready)));
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         format!("recovery-{}", directory.path().display()),
-        support::backends(),
+        Arc::clone(&backends),
         Arc::new(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(runtime),
     )?;
     let binding = target(
         &success(submit(
             &mut state,
             &wakes,
+            &clock,
             CommandInvocation::new(
                 "resource.current",
                 vec!["binding".to_owned()],
@@ -238,7 +247,10 @@ fn host() -> TestResult<Host> {
         Caller::Socket,
     );
     create.target = Some(binding);
-    let session = target(&success(submit(&mut state, &wakes, create)?)?, "created")?;
+    let session = target(
+        &success(submit(&mut state, &wakes, &clock, create)?)?,
+        "created",
+    )?;
     let mut start = CommandInvocation::new(
         "agents.claude.start",
         vec![
@@ -251,14 +263,19 @@ fn host() -> TestResult<Host> {
         Caller::Internal,
     );
     start.target = Some(session.clone());
-    let terminal = target(&success(submit(&mut state, &wakes, start)?)?, "terminal")?;
+    let terminal = target(
+        &success(submit(&mut state, &wakes, &clock, start)?)?,
+        "terminal",
+    )?;
     Ok(Host {
+        clock,
+        backends,
         directory,
         state,
         wakes,
         session,
         terminal,
-        _gate: gate,
+        ready,
     })
 }
 fn wait_observed(host: &mut Host, terminal: &CommandTarget) -> TestResult<()> {
@@ -306,7 +323,7 @@ fn close_original_turn(host: &mut Host) -> TestResult<()> {
     let mut close = CommandInvocation::new("agents.claude.stop", Vec::new(), Caller::Socket);
     close.target = Some(host.terminal.clone());
     close.confirmation = Some(close.confirmation());
-    success(submit(&mut host.state, &host.wakes, close)?)?;
+    success(submit(&mut host.state, &host.wakes, &host.clock, close)?)?;
     Ok(())
 }
 #[rstest]
@@ -349,7 +366,7 @@ fn history_resume_reuses_the_exact_live_terminal_only_after_account_validation(
         Caller::Socket,
     );
     resume.target = Some(host.session.clone());
-    let outcome = submit(&mut host.state, &host.wakes, resume)?;
+    let outcome = submit(&mut host.state, &host.wakes, &host.clock, resume)?;
     if changed_account {
         if !matches!(&outcome, CommandOutcome::Failed { message, .. } if message.contains("account changed"))
         {
@@ -419,6 +436,7 @@ fn explicit_recovery_keeps_native_observation_account_and_original_caller(
         submit(
             &mut host.state,
             &host.wakes,
+            &host.clock,
             CommandInvocation::new(
                 format!("recovery.{operation}"),
                 vec![archive.id.clone()],
@@ -494,12 +512,13 @@ fn missing_original_destination_cannot_launch_into_another_session(host: TestRes
     let mut close = CommandInvocation::new("session.close", Vec::new(), Caller::Socket);
     close.target = Some(host.session.clone());
     close.confirmation = Some(close.confirmation());
-    success(submit(&mut host.state, &host.wakes, close).unwrap()).unwrap();
+    success(submit(&mut host.state, &host.wakes, &host.clock, close).unwrap()).unwrap();
     let binding = target(
         &success(
             submit(
                 &mut host.state,
                 &host.wakes,
+                &host.clock,
                 CommandInvocation::new(
                     "resource.current",
                     vec!["binding".to_owned()],
@@ -521,12 +540,13 @@ fn missing_original_destination_cannot_launch_into_another_session(host: TestRes
         Caller::Socket,
     );
     create.target = Some(binding);
-    success(submit(&mut host.state, &host.wakes, create).unwrap()).unwrap();
+    success(submit(&mut host.state, &host.wakes, &host.clock, create).unwrap()).unwrap();
     let before = topology(&host.state);
     for operation in ["resume", "fork"] {
         let outcome = submit(
             &mut host.state,
             &host.wakes,
+            &host.clock,
             CommandInvocation::new(
                 format!("recovery.{operation}"),
                 vec![archive.id.clone()],
@@ -551,16 +571,7 @@ fn missing_original_destination_cannot_launch_into_another_session(host: TestRes
     host.close().unwrap();
 }
 
-fn interrupt_provider(directory: &Path) -> TestResult<(std::path::PathBuf, fs::File)> {
-    let gate = directory.join("raw-query-gate");
-    if !std::process::Command::new("mkfifo")
-        .arg(&gate)
-        .status()?
-        .success()
-    {
-        return Err("control query FIFO creation failed".into());
-    }
-    let gate = fs::OpenOptions::new().read(true).write(true).open(gate)?;
+fn interrupt_provider(directory: &Path) -> TestResult<std::path::PathBuf> {
     let program = directory.join("interrupt-provider.py");
     bootty_test_support::write_executable(
         &program,
@@ -592,25 +603,6 @@ def send(peer, value, masked=False):
 def handshake(peer):
     data = b''
     while not data.endswith(b'\r\n\r\n'): data += exact(peer, 1)
-if arguments and arguments[0] == 'app-server':
-    listener = socket.socket(socket.AF_UNIX)
-    listener.bind(arguments[arguments.index('--listen') + 1][7:])
-    listener.listen(1)
-    peer, _ = listener.accept()
-    handshake(peer)
-    peer.sendall(b'HTTP/1.1 101 Switching Protocols\r\n\r\n')
-    while True:
-        request = receive(peer)
-        if request.get('method') == 'initialize': send(peer, {'id': request['id'], 'result': {}})
-        if request.get('method') == 'thread/start': send(peer, {'id': request['id'], 'result': {'thread': {'id': 'exact-control', 'status': {'type': 'active', 'activeFlags': []}}}})
-        if request.get('method') == 'turn/interrupt':
-            send(peer, {'id': request['id'], 'result': {}})
-            send(peer, {'method': 'turn/completed', 'params': {'threadId': 'exact-control', 'turn': {'status': 'interrupted'}}})
-    sys.exit(0)
-if arguments[:2] == ['agents', '--json']:
-    with open(directory / 'raw-query-gate', 'rb', buffering=0) as gate: gate.read(1)
-    print(json.dumps([{'sessionId': (directory / 'raw-session').read_text(), 'status': 'busy'}]))
-    sys.exit(0)
 tty.setraw(0)
 if '--remote' in arguments:
     peer = socket.socket(socket.AF_UNIX)
@@ -624,7 +616,7 @@ if '--remote' in arguments:
     receive(peer)
 elif '--session-id' in arguments:
     (directory / 'raw-session').write_text(arguments[arguments.index('--session-id') + 1])
-    with open(directory / 'raw-query-gate', 'wb', buffering=0) as gate: gate.write(b'x')
+    with socket.socket(socket.AF_UNIX) as ready: ready.connect(str(directory / 'query-ready.sock'))
 else:
     extension = pathlib.Path(arguments[arguments.index('--extension') + 1])
     connection = json.loads(extension.with_name('connection.json').read_text())
@@ -646,7 +638,7 @@ while True:
     print('control received', flush=True)
 ",
     )?;
-    Ok((program, gate))
+    Ok(program)
 }
 
 #[rstest]
@@ -661,7 +653,7 @@ fn shared_interrupt_matches_the_native_provider_key(
 ) {
     let mut host = host.unwrap();
     close_original_turn(&mut host).unwrap();
-    let (program, _gate) = interrupt_provider(host.directory.path()).unwrap();
+    let program = interrupt_provider(host.directory.path()).unwrap();
     let mut start = CommandInvocation::new(
         format!("agents.{provider}.start"),
         vec![
@@ -672,7 +664,7 @@ fn shared_interrupt_matches_the_native_provider_key(
         Caller::Socket,
     );
     start.target = Some(host.session.clone());
-    let value = success(submit(&mut host.state, &host.wakes, start).unwrap()).unwrap();
+    let value = success(submit(&mut host.state, &host.wakes, &host.clock, start).unwrap()).unwrap();
     let terminal = target(&value, "terminal").unwrap();
     let service = host.state.terminal_agent_service().unwrap();
     let deadline = Instant::now().checked_add(FIXTURE_DEADLINE).unwrap();
@@ -694,7 +686,7 @@ fn shared_interrupt_matches_the_native_provider_key(
     );
     invocation.target = Some(terminal.clone());
     invocation.confirmation = Some(invocation.confirmation());
-    success(submit(&mut host.state, &host.wakes, invocation).unwrap()).unwrap();
+    success(submit(&mut host.state, &host.wakes, &host.clock, invocation).unwrap()).unwrap();
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));
         if let Ok(bytes) = fs::read(host.directory.path().join("interrupt-bytes"))
@@ -741,7 +733,12 @@ fn cancelled_codex_accepts_next_prompt(
         Caller::Socket,
     );
     invocation.target = Some(terminal.clone());
-    success(submit(&mut host.state, &host.wakes, invocation)?)?;
+    success(submit(
+        &mut host.state,
+        &host.wakes,
+        &host.clock,
+        invocation,
+    )?)?;
     let expected = b"\x03after cancellation\r";
     loop {
         host.state.update_frame(frames::idle_frame(Instant::now()));
@@ -850,16 +847,19 @@ fn restart_cold_with_checkpoint(
     config.agents.claude.enabled = enabled;
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    host.state = AppState::new_for_window_with_agents(
+    let mut runtime = host.clock.runtime(events);
+    runtime.terminal_transport =
+        provider_queries::terminal_transport(Some(Arc::clone(&host.ready)));
+    host.state = AppState::new_for_window_with_agent_runtime(
         config,
         format!("recovery-{}", host.directory.path().display()),
-        support::backends(),
+        Arc::clone(&host.backends),
         Arc::new(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(runtime),
     )?;
     host.wakes = wakes;
     Ok((cold, source))
@@ -882,7 +882,12 @@ fn restored_agent_target(host: &mut Host) -> TestResult<CommandTarget> {
                 vec!["binding".to_owned()],
                 Caller::Socket,
             );
-            let value = success(submit(&mut host.state, &host.wakes, binding.clone())?)?;
+            let value = success(submit(
+                &mut host.state,
+                &host.wakes,
+                &host.clock,
+                binding.clone(),
+            )?)?;
             let binding_target = target(&value, "target")?;
             let session = host
                 .state
@@ -915,7 +920,7 @@ fn restored_agent_target(host: &mut Host) -> TestResult<CommandTarget> {
                 .ok_or("issued pane")?,
             );
             let target = binding.target.clone().ok_or("target")?;
-            success(submit(&mut host.state, &host.wakes, binding)?)?;
+            success(submit(&mut host.state, &host.wakes, &host.clock, binding)?)?;
             return Ok(target);
         }
         host.wakes
@@ -994,7 +999,7 @@ fn cold_terminal_agent_resumes_same_tab_and_pane_with_captured_account_without_p
         Caller::Internal,
     );
     duplicate.target = Some(destination);
-    let outcome = submit(&mut host.state, &host.wakes, duplicate)?;
+    let outcome = submit(&mut host.state, &host.wakes, &host.clock, duplicate)?;
     if !matches!(outcome, CommandOutcome::Failed { .. }) {
         return Err(format!("duplicate cold recovery was accepted: {outcome:?}").into());
     }
@@ -1052,7 +1057,7 @@ fn logical_agent_location_survives_interrupted_checkpoint_catalog_ordering(
         Caller::Internal,
     );
     stale.target = Some(source.target);
-    let outcome = submit(&mut host.state, &host.wakes, stale)?;
+    let outcome = submit(&mut host.state, &host.wakes, &host.clock, stale)?;
     if !matches!(outcome, CommandOutcome::StaleTarget { .. }) {
         return Err(format!("stale logical association was accepted: {outcome:?}").into());
     }
@@ -1102,6 +1107,8 @@ fn ordinary_input_revokes_cold_agent_recovery(
     #[case] native: bool,
 ) -> TestResult<()> {
     let mut host = host?;
+    // This case writes to the replacement shell, so it retains a real input destination.
+    host.backends = support::backends();
     let (_cold, source) = restart_cold(&mut host, false)?;
     let destination = restored_agent_target(&mut host)?;
     if !host
@@ -1129,11 +1136,11 @@ fn ordinary_input_revokes_cold_agent_recovery(
             Caller::Socket,
         );
         write.target = Some(destination.clone());
-        success(submit(&mut host.state, &host.wakes, write)?)?;
+        success(submit(&mut host.state, &host.wakes, &host.clock, write)?)?;
     }
     fs::write(
         &host.state.config().config_path,
-        "[multiplexer]\nbackend = 'native'\n[agents.claude]\nenabled = true\n",
+        "[multiplexer]\nbackend = 'native'\n[session]\nshell = '/bin/sh'\n[agents]\nauto-update = false\n[agents.claude]\nenabled = true\n",
     )?;
     if !host.state.reload_config(&mut Vec::new()) {
         return Err("provider enablement reload failed".into());
@@ -1144,7 +1151,7 @@ fn ordinary_input_revokes_cold_agent_recovery(
         Caller::Internal,
     );
     recover.target = Some(destination);
-    let outcome = submit(&mut host.state, &host.wakes, recover)?;
+    let outcome = submit(&mut host.state, &host.wakes, &host.clock, recover)?;
     if !matches!(outcome, CommandOutcome::Failed { .. }) {
         return Err(format!("ordinary input did not revoke recovery: {outcome:?}").into());
     }

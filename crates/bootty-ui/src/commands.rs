@@ -66,6 +66,7 @@ pub use sessions::SessionAction;
 pub use surfaces::{SurfaceChooserAction, SurfaceCommand};
 pub use themes::ThemeAction;
 
+pub use runtime::AgentRuntimeConfig;
 pub(crate) use runtime::{CommandRuntime, command_outcome_message};
 
 pub(crate) use bootty_mux::target::ExactMuxTarget;
@@ -1006,6 +1007,23 @@ pub struct CommandCatalog {
     control: Arc<ControlCatalog>,
 }
 
+// Descriptor factories are static metadata. Keymap compilation resolves hundreds of bindings;
+// retain the schemas once rather than rebuilding every provider's catalog for each lookup.
+fn native_descriptors() -> &'static [CommandDescriptor] {
+    static DESCRIPTORS: OnceLock<Vec<CommandDescriptor>> = OnceLock::new();
+    DESCRIPTORS.get_or_init(native_command_descriptors)
+}
+
+fn terminal_descriptors() -> &'static [CommandDescriptor] {
+    static DESCRIPTORS: OnceLock<Vec<CommandDescriptor>> = OnceLock::new();
+    DESCRIPTORS.get_or_init(terminal_command_descriptors)
+}
+
+fn agent_descriptors() -> &'static [CommandDescriptor] {
+    static DESCRIPTORS: OnceLock<Vec<CommandDescriptor>> = OnceLock::new();
+    DESCRIPTORS.get_or_init(agent_command_descriptors)
+}
+
 struct NativeCatalogSource {
     agents: Option<Arc<AgentService>>,
     jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
@@ -1013,17 +1031,22 @@ struct NativeCatalogSource {
 
 impl CommandCatalogSource for NativeCatalogSource {
     fn list(&self) -> Vec<CommandDescriptor> {
-        let mut descriptors = agent_command_descriptors();
-        descriptors.extend(native_command_descriptors());
-        for descriptor in terminal_command_descriptors() {
+        let mut descriptors = agent_descriptors().to_vec();
+        descriptors.extend_from_slice(native_descriptors());
+        for descriptor in terminal_descriptors() {
             descriptors.retain(|old| old.id != descriptor.id);
-            descriptors.push(descriptor);
+            descriptors.push(descriptor.clone());
         }
         descriptors
     }
 
     fn describe(&self, id: &str) -> Option<CommandDescriptor> {
-        self.list().into_iter().find(|command| command.id == id)
+        terminal_descriptors()
+            .iter()
+            .chain(agent_descriptors())
+            .chain(native_descriptors())
+            .find(|command| command.id == id)
+            .cloned()
     }
 
     fn topics(&self) -> std::collections::BTreeSet<String> {
@@ -1138,9 +1161,10 @@ impl CommandCatalog {
         &self,
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
-        if let Some(descriptor) = native_command_descriptors()
-            .into_iter()
+        if let Some(descriptor) = native_descriptors()
+            .iter()
             .find(|descriptor| descriptor.id == invocation.command)
+            .cloned()
         {
             validate_arguments(&descriptor, &invocation.arguments)?;
             return Ok(ResolvedCommandInvocation {
@@ -1149,9 +1173,10 @@ impl CommandCatalog {
                 executor: CommandExecutor::NativeAgent,
             });
         }
-        if let Some(descriptor) = terminal_command_descriptors()
-            .into_iter()
+        if let Some(descriptor) = terminal_descriptors()
+            .iter()
             .find(|descriptor| descriptor.id == invocation.command)
+            .cloned()
         {
             validate_arguments(&descriptor, &invocation.arguments)?;
             let executor = if self.terminals.is_some() {
@@ -1165,9 +1190,10 @@ impl CommandCatalog {
                 executor,
             });
         }
-        if let Some(descriptor) = agent_command_descriptors()
-            .into_iter()
+        if let Some(descriptor) = agent_descriptors()
+            .iter()
             .find(|descriptor| descriptor.id == invocation.command)
+            .cloned()
         {
             validate_arguments(&descriptor, &invocation.arguments)?;
             let executor = self

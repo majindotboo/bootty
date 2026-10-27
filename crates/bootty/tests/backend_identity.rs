@@ -1,14 +1,14 @@
 #![cfg(test)]
 #![cfg(unix)]
 
-use std::{env, os::unix::fs::PermissionsExt, path::PathBuf};
+use std::{env, path::PathBuf};
 
-use assert_fs::{TempDir, prelude::*};
+use assert_fs::{TempDir, fixture::PathChild as _};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bootty_config::ApplicationIdentity;
 use bootty_host::ssh::SshRemote;
+use bootty_mux::SshTarget;
 use bootty_mux::tmux::TmuxControlRunner;
-use bootty_mux::{SshTarget, process::CommandRunner};
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
@@ -18,9 +18,7 @@ const FIXTURE_ENV: &str = "BOOTTY_BACKEND_IDENTITY_FIXTURE";
 fn executable(directory: &TempDir, name: &str, source: &str) -> PathBuf {
     let child = directory.child(name);
     let path = child.path().to_path_buf();
-    child.write_str(source).expect("write executable");
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-        .expect("make executable");
+    bootty_test_support::write_executable(&path, source).expect("write executable");
     path
 }
 
@@ -31,11 +29,6 @@ fn directory() -> TempDir {
 
 #[rstest]
 fn development_tmux_uses_a_distinct_server_namespace(directory: TempDir) {
-    executable(
-        &directory,
-        "argv-probe",
-        "#!/bin/sh\nprintf '%s\\n' \"$@\"\n",
-    );
     executable(
         &directory,
         "ssh-probe",
@@ -80,7 +73,6 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
         .initialize_process()
         .expect("isolated development identity");
     let fixture = PathBuf::from(env::var_os(FIXTURE_ENV).expect("fixture directory"));
-    let argv_probe = fixture.join("argv-probe");
     let command = vec![
         "kill-session".to_owned(),
         "-t".to_owned(),
@@ -88,18 +80,40 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
     ];
 
     let production = TmuxControlRunner::for_identity(ApplicationIdentity::Production)
-        .run(argv_probe.to_str().expect("probe path"), &command)
+        .command("tmux", &command)
         .expect("production tmux command");
     let development = TmuxControlRunner::for_identity(ApplicationIdentity::Development)
-        .run(argv_probe.to_str().expect("probe path"), &command)
+        .command("tmux", &command)
         .expect("development tmux command");
 
-    assert_eq!(production.stdout, "kill-session\n-t\nbuild\n");
     assert_eq!(
-        development.stdout,
-        format!(
-            "-L\n{}\nkill-session\n-t\nbuild\n",
-            ApplicationIdentity::Development.namespace()
+        production,
+        (
+            "/usr/bin/env".to_owned(),
+            vec![
+                "-u".to_owned(),
+                "NO_COLOR".to_owned(),
+                "tmux".to_owned(),
+                "kill-session".to_owned(),
+                "-t".to_owned(),
+                "build".to_owned(),
+            ]
+        )
+    );
+    assert_eq!(
+        development,
+        (
+            "/usr/bin/env".to_owned(),
+            vec![
+                "-u".to_owned(),
+                "NO_COLOR".to_owned(),
+                "tmux".to_owned(),
+                "-L".to_owned(),
+                ApplicationIdentity::Development.namespace().to_owned(),
+                "kill-session".to_owned(),
+                "-t".to_owned(),
+                "build".to_owned(),
+            ]
         )
     );
 
@@ -111,15 +125,18 @@ fn development_tmux_uses_a_distinct_server_namespace_helper() {
         args: Vec::new(),
     });
     let remote = TmuxControlRunner::for_remote(remote.into())
-        .run("tmux", &command)
+        .command("tmux", &command)
         .expect("remote tmux command");
     assert!(
         remote
-            .stdout
-            .contains(ApplicationIdentity::Development.namespace())
+            .1
+            .iter()
+            .any(|argument| argument.contains(ApplicationIdentity::Development.namespace()))
     );
     let payload = remote
-        .stdout
+        .1
+        .last()
+        .expect("remote command line")
         .split_whitespace()
         .last()
         .expect("remote execution payload");

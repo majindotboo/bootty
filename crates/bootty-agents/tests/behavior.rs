@@ -1063,3 +1063,52 @@ fn a_stop_counts_as_a_finished_turn_even_when_its_start_was_missed() {
         claude_after(&[json!({"hook_event_name": "Stop", "last_assistant_message": "Done."})]);
     assert!(state.turn_ended_at.is_some(), "{state:?}");
 }
+
+#[rstest::rstest]
+fn persistence_settles_when_the_injected_clock_advances() {
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc,
+    };
+    let root = assert_fs::TempDir::new().unwrap();
+    let path = root.path().join("agent-state.json");
+    let origin = Instant::now();
+    let seconds = Arc::new(AtomicU64::new(0));
+    let time = Arc::clone(&seconds);
+    let saved = path.clone();
+    let (observed, observations) = mpsc::channel();
+    let executor: Arc<dyn AgentCommandExecutor> = Arc::new(|_, _, _| CommandOutcome::success());
+    let service = AgentService::new_with_resolver(
+        executor,
+        Arc::new(Events::default()),
+        Arc::new(ScopeResolver),
+    )
+    .persisted_at_with_clock(
+        &path,
+        Arc::new(move || {
+            let _ = observed.send(saved.exists());
+            origin
+                .checked_add(Duration::from_secs(time.load(Ordering::Acquire)))
+                .unwrap()
+        }),
+    );
+    let outcome = service.ingest(
+        AgentKind::Claude,
+        Some("%7"),
+        json!({"hook_event_name":"Stop","last_assistant_message":"Saved after settling."}),
+        origin.checked_add(Duration::from_secs(30)).unwrap(),
+        &CommandCancellation::new(),
+    );
+    assert!(matches!(outcome, CommandOutcome::Success { .. }));
+    // Submission and the worker's first deadline check both observe the same instant.
+    for _ in 0..2 {
+        assert!(!observations.recv_timeout(Duration::from_secs(30)).unwrap());
+    }
+    assert!(!path.exists());
+    seconds.store(1, Ordering::Release);
+    service.clock_advanced();
+    // The writer reads its clock again after the write, so this event observes completion.
+    while !observations.recv_timeout(Duration::from_secs(30)).unwrap() {}
+    let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(saved["panes"][0]["last_message"], "Saved after settling.");
+}

@@ -1,6 +1,10 @@
 #![cfg(unix)]
 
+#[path = "support/native_peer.rs"]
+pub mod native_peer;
 pub mod support;
+#[path = "support/tool_peer.rs"]
+pub mod tool_peer;
 use std::{
     fs,
     path::Path,
@@ -86,58 +90,19 @@ fn bridge(
     Ok((tools, lease))
 }
 
-// The fake app-server consumes the actual ephemeral MCP overrides and private transport.
-// It returns each MCP result through a normal provider RPC, without printing private tokens.
+// The in-process app-server consumes the real private MCP attachment.
 fn provider(root: &Path) -> std::io::Result<NativeSessionConfig> {
     let path = root.join("provider.py");
-    bootty_test_support::write_executable(
-        &path,
-        r"#!/usr/bin/env python3
-import json,socket,sys
-assert sys.argv[1:4] == ['app-server','--listen','stdio://']
-config={}
-for i in range(4,len(sys.argv),2):
- assert sys.argv[i] == '--config'
- key,value=sys.argv[i+1].split('=',1)
- config[key]=json.loads(value)
-key=next(key for key in config if key.startswith('mcp_servers.') and key.endswith('.args'))
-name=key.removesuffix('.args')
-assert config[name+'.required'] is True
-assert config[name+'.command']
-args=config[key]
-assert args[0]=='--agent-tool-stdio'
-with open(args[1]) as f: connection=json.load(f)
-def tools(method,params={}):
- request={'jsonrpc':'2.0','id':1,'method':method,'params':params}
- with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as stream:
-  stream.connect(connection['socket'])
-  stream.sendall((json.dumps({'token':connection['token'],'request':request})+'\n').encode())
-  return json.loads(stream.makefile().readline())['result']
-def emit(value): print(json.dumps(value),flush=True)
-initial_catalog=None
-for line in sys.stdin:
- value=json.loads(line)
- method=value.get('method')
- if method=='initialized': continue
- if method=='initialize': result={}
- elif method in ['thread/start','thread/resume']:
-  initial_catalog=tools('tools/list')
-  result={'thread':{'id':'tools-thread','turns':[]}}
- elif method=='__tools': result={'catalog':initial_catalog,'read':tools('tools/call',{'name':'terminal_read','arguments':{'scope':'history','max_lines':7}}),'status':tools('tools/call',{'name':'get_agent_status'}),'models':tools('tools/call',{'name':'list_models'}),'computer':tools('tools/call',{'name':'computer_snapshot','arguments':{'application':'unmentioned'}})}
- elif method=='__approval':
-  server=value['params']['server']
-  if server=='attached': server=name.removeprefix('mcp_servers.')
-  emit({'id':'approval','method':'mcpServer/elicitation/request','params':{'threadId':'tools-thread','turnId':None,'serverName':server,'mode':'form','message':'Allow this tool?','requestedSchema':{'type':'object','properties':{}}}})
-  result={}
- else: result={}
- emit({'id':value['id'],'result':result})
-",
-    )?;
+    fs::write(&path, "in-process tools provider")?;
     let mut config = NativeSessionConfig::new(AgentKind::Codex, root);
     config.program = path.to_string_lossy().into_owned();
     config.account_directory = Some(root.join("captured-account").to_string_lossy().into_owned());
     config.arguments = vec!["--model".to_owned(), "captured-model".to_owned()];
     Ok(config)
+}
+
+fn open(path: impl Into<std::path::PathBuf>) -> Result<NativeAgentService, String> {
+    NativeAgentService::open_with(path, native_peer::clock(), tool_peer::launcher())
 }
 
 #[rstest]
@@ -159,7 +124,7 @@ fn mcp_requests_identify_only_the_captured_attachment(
         Some(&target(ResourceKind::Terminal, "task pane")),
     )
     .unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
         .create_for_task_with_tools(
             "binding",
@@ -200,7 +165,7 @@ fn app_access_cards_answer_waiting_calls_without_the_provider(
         Some(&target(ResourceKind::Terminal, "task pane")),
     )
     .unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
         .create_for_task_with_tools(
             "binding",
@@ -270,7 +235,7 @@ fn always_allowed_apps_are_granted_without_a_card() {
         Some(&target(ResourceKind::Terminal, "task pane")),
     )
     .unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
         .create_for_task_with_tools(
             "binding",
@@ -334,7 +299,7 @@ fn spawned_child_publishes_before_startup_and_retains_failure(#[case] reject_pla
         .bind(&binding, target(ResourceKind::Terminal, "parent pane"))
         .unwrap();
     let parent_lease = parent_tools.lease().clone();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
         .create_for_task_with_tools(
             "binding",
@@ -449,7 +414,7 @@ fn browser_attachment_is_live_metadata_and_never_restored_from_history() {
         .bind(&binding, target(ResourceKind::Terminal, "task pane"))
         .unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
         .create_for_task_with_tools(
             "binding",
@@ -500,7 +465,7 @@ fn browser_attachment_is_live_metadata_and_never_restored_from_history() {
         bootty_agents::NativeBrowserAccess::Unavailable
     );
     drop(service);
-    let restored = NativeAgentService::open(&path).unwrap();
+    let restored = open(&path).unwrap();
     assert_eq!(
         restored.sessions()[0].snapshot.browser_access,
         bootty_agents::NativeBrowserAccess::Unavailable
@@ -519,7 +484,7 @@ fn native_mcp_attachment_preserves_exact_authority_and_resume_configuration(
     let terminal = target(ResourceKind::Terminal, "captured task terminal");
     let policy =
         TerminalAgentService::open(root.path().join("terminal.json")).expect("Policy owner");
-    let service = NativeAgentService::open(root.path().join("native.json")).expect("Native owner");
+    let service = open(root.path().join("native.json")).expect("Native owner");
     let config = provider(root.path()).expect("Provider fixture");
     let (tools, lease) = bridge(&commands, caller, Some(&terminal)).expect("Exact attachment");
     let tools = policy
@@ -721,7 +686,7 @@ fn unbound_or_revoked_tools_fail_before_native_identity_publication(
     let root = TempDir::new().expect("Fixture directory");
     let commands = Arc::new(Commands::default());
     let terminal = target(ResourceKind::Terminal, "captured task");
-    let service = NativeAgentService::open(root.path().join("native.json")).expect("Native owner");
+    let service = open(root.path().join("native.json")).expect("Native owner");
     let (tools, lease) =
         bridge(&commands, Caller::Socket, bound.then_some(&terminal)).expect("Attachment");
     if revoked {

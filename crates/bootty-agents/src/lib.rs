@@ -51,12 +51,17 @@ pub use native_service::tool_activity::{
     MAX_NATIVE_ACTIVITY_ITEMS, NativeActivityItem, NativeActivityPage, NativeActivityTool,
 };
 mod native_session;
+mod native_transport;
+pub use native_transport::{NativeChild, NativeChildControl, NativeLaunch, NativeLauncher};
 mod quick_text;
 pub use quick_text::{
-    GeneratedCommitMessage, GeneratedPullRequest, generate_commit_message, generate_pull_request,
+    GeneratedCommitMessage, GeneratedPullRequest, QuickOutput, QuickQuery, generate_commit_message,
+    generate_commit_message_using, generate_pull_request, generate_pull_request_using,
 };
 mod session_names;
-pub use session_names::{GeneratedSessionNames, generate_session_names};
+pub use session_names::{
+    GeneratedSessionNames, generate_session_names, generate_session_names_using,
+};
 mod orchestration;
 mod persistence;
 mod pi_terminal;
@@ -77,6 +82,7 @@ mod terminal_pi_account;
 mod terminal_process;
 mod terminal_provider;
 mod terminal_service;
+mod terminal_transport;
 mod tool_application;
 mod tool_bridge;
 mod tool_policy;
@@ -111,7 +117,8 @@ pub use provider::{
 pub use service::{AgentPaneResolver, AgentService};
 pub use terminal_accounts::{
     TerminalAccountStatus, terminal_account_launch, terminal_account_status,
-    terminal_account_status_in, terminal_account_status_with_pi_selector_in,
+    terminal_account_status_in, terminal_account_status_using,
+    terminal_account_status_with_pi_selector_in,
 };
 pub use terminal_commands::terminal_command_descriptors;
 pub use terminal_connectors::{
@@ -119,7 +126,10 @@ pub use terminal_connectors::{
     parse_claude_connectors, parse_codex_connectors, terminal_connector_launch,
     terminal_connectors,
 };
-pub use terminal_history::{TerminalHistoryEntry, TerminalHistoryQuery, terminal_provider_history};
+pub use terminal_history::{
+    TerminalHistoryEntry, TerminalHistoryQuery, terminal_provider_history,
+    terminal_provider_history_using,
+};
 pub use terminal_observation::{
     AgentObservation, ObservationSink, TerminalAgentStatus, terminal_session_id,
 };
@@ -130,7 +140,8 @@ pub use terminal_service::{
 
 pub use terminal_provider::{
     TerminalProviderStatus, terminal_provider_installer, terminal_provider_status,
-    terminal_provider_status_with_pi_selector, terminal_provider_update,
+    terminal_provider_status_using, terminal_provider_status_with_pi_selector,
+    terminal_provider_update,
 };
 
 pub use tool_bridge::{
@@ -145,6 +156,8 @@ pub use tool_policy::{
 pub use tool_spawn::{ToolChildControlRequest, ToolChildOperation, ToolSpawnRequest};
 
 pub use terminal_pi_account::PiAccountSelector;
+pub use terminal_process::QueryOutput as TerminalQueryOutput;
+pub use terminal_transport::{TerminalLauncher, TerminalProviderTransport, TerminalQuery};
 
 pub use native_attachments::{
     MAX_NATIVE_ATTACHMENT_FILE_BYTES, MAX_NATIVE_ATTACHMENT_IMAGE_BYTES,

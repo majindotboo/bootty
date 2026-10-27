@@ -14,7 +14,7 @@ pub use catalog::{
     list_remote_projects_with_runner, list_remote_with_runner, list_remote_worktrees_with_runner,
     snapshot, toggle_remote_project_favorite_with_runner,
 };
-pub use space::RemoteSpaceBackend;
+pub use space::{RemoteSpaceBackend, RemoteSpaceTransport};
 pub use space_protocol::{
     PaneRequest, decode_command, encode_command, encode_stream_command, read_stream_command,
 };

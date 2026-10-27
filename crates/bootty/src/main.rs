@@ -1,7 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![cfg_attr(windows, feature(windows_process_exit_code_from))]
 
-use std::{ffi::OsStr, io, path::PathBuf, process::ExitCode, sync::Arc};
+use std::{ffi::OsStr, io, process::ExitCode, sync::Arc};
 
 use anyhow::Result;
 use bootty::cli::{Cli, Command, EventCommand, RemoteSpaceCommand, TaskCommand};
@@ -10,7 +10,7 @@ use bootty_control as control;
 use bootty_control::{Caller, CommandInvocation};
 use clap::Parser;
 
-mod cli_runtime;
+use bootty::cli_runtime;
 #[cfg(target_os = "macos")]
 mod macos_cli;
 
@@ -43,7 +43,8 @@ fn agent_tray_helper(exit: fn(bool) -> !) -> Result<ExitCode> {
 }
 
 fn run() -> Result<ExitCode> {
-    if let Some(connection) = agent_tool_stdio_connection()? {
+    if let Some(connection) = bootty::cli::agent_tool_stdio_connection(std::env::args_os().skip(1))?
+    {
         let stdin = io::stdin();
         let stdout = io::stdout();
         bootty_agents::tool_stdio(&connection, &mut stdin.lock(), &mut stdout.lock())
@@ -52,16 +53,18 @@ fn run() -> Result<ExitCode> {
     }
 
     let identity = ApplicationIdentity::current();
-    bootty_mux::rmux::prepare_local_rmux_daemon(identity)?;
+    identity.initialize_process()?;
     if let Some(code) = bootty_mux::rmux::run_embedded_rmux_daemon()? {
         return Ok(process_exit_code(code));
     }
-    let backends = Arc::new(bootty_mux::provider::MuxBackendRegistry::desktop()?);
     let cli = Cli::parse();
+    let existing =
+        matches!(cli.subcommand(), Some(Command::App(_)) | None) && open_running_instance(&cli)?;
     // Correct a stale `$SHELL` to the OS login shell before any child inherits
     // it; tmux otherwise bakes the wrong shell into the server's default-shell.
     // Finder launches need the account login environment before any service starts.
-    if cli.needs_login_environment()
+    if !existing
+        && cli.needs_login_environment()
         && let Some(code) = bootty::shell_env::initialize_shell_environment()?
     {
         return Ok(process_exit_code(code));
@@ -71,35 +74,16 @@ fn run() -> Result<ExitCode> {
         eprintln!("Could not install the Bootty command: {error}");
     }
 
-    run_command(&cli, backends)
+    if existing {
+        return Ok(ExitCode::SUCCESS);
+    }
+    run_command(&cli)
 }
 
-fn agent_tool_stdio_connection() -> Result<Option<PathBuf>> {
-    let mut arguments = std::env::args_os().skip(1);
-    if arguments.next().as_deref() != Some(OsStr::new("--agent-tool-stdio")) {
-        return Ok(None);
+fn run_command(cli: &Cli) -> Result<ExitCode> {
+    if cli_runtime::invoke(cli)? {
+        return Ok(ExitCode::SUCCESS);
     }
-    let connection = arguments.next().ok_or_else(|| {
-        anyhow::anyhow!("--agent-tool-stdio requires an absolute connection path")
-    })?;
-    if arguments.next().is_some() {
-        return Err(anyhow::anyhow!(
-            "--agent-tool-stdio accepts exactly one connection path"
-        ));
-    }
-    let connection = PathBuf::from(connection);
-    if !connection.is_absolute() {
-        return Err(anyhow::anyhow!(
-            "--agent-tool-stdio requires an absolute connection path"
-        ));
-    }
-    Ok(Some(connection))
-}
-
-fn run_command(
-    cli: &Cli,
-    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
-) -> Result<ExitCode> {
     match cli.subcommand() {
         Some(Command::Run(args)) => {
             return cli_runtime::run_job(cli, args).map(|()| ExitCode::SUCCESS);
@@ -126,30 +110,6 @@ fn run_command(
             )?;
             return Ok(ExitCode::SUCCESS);
         }
-        Some(Command::Invoke {
-            name,
-            arguments,
-            stdin,
-            stdin_json,
-            target,
-            yes,
-            detached,
-        }) => {
-            let invocation = cli_runtime::command_invocation(
-                cli,
-                name,
-                arguments,
-                (*stdin, *stdin_json),
-                target.as_deref(),
-            )?;
-            let response = cli_runtime::invoke_control_command(cli, invocation, *yes, *detached)?;
-            if *detached {
-                cli_runtime::print_control_response(response, cli.json())?;
-            } else {
-                cli_runtime::print_command_response(response, cli.json())?;
-            }
-            return Ok(ExitCode::SUCCESS);
-        }
         Some(Command::Task(command)) => {
             let (method, params) = match command {
                 TaskCommand::Status { task } => ("task.status", serde_json::json!({"task": task})),
@@ -165,15 +125,11 @@ fn run_command(
             events(cli, command)?;
             return Ok(ExitCode::SUCCESS);
         }
-        Some(Command::Dynamic(arguments)) => {
-            cli_runtime::invoke_dynamic_command(cli, arguments)?;
-            return Ok(ExitCode::SUCCESS);
-        }
         Some(Command::Update) => {
             return bootty::update::update().map(|()| ExitCode::SUCCESS);
         }
         Some(Command::RemoteSpace(command)) => {
-            remote_space(cli, &backends, command)?;
+            remote_space(cli, command)?;
             return Ok(ExitCode::SUCCESS);
         }
         Some(Command::RemoteExec { payload }) => {
@@ -185,30 +141,43 @@ fn run_command(
                 bootty_mux::rmux::run_remote_rmux_command(payload)?,
             ));
         }
-        Some(Command::App(_)) | None => {}
+        Some(Command::App(_) | Command::Invoke { .. } | Command::Dynamic(_)) | None => {}
     }
-    launch_app(cli, backends)
+    launch_app(cli)
 }
 
-fn launch_app(
-    cli: &Cli,
-    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
-) -> Result<ExitCode> {
-    let config = cli.load_config()?;
-    if control::running_instance()?.is_some() {
-        if config.cli_default_open_behavior.opens_new_window() {
-            cli_runtime::invoke_control_command(
-                cli,
-                CommandInvocation::from_action("new_window", Caller::Cli),
-                false,
-                false,
-            )?;
-        }
+fn launch_app(cli: &Cli) -> Result<ExitCode> {
+    if open_running_instance(cli)? {
         return Ok(ExitCode::SUCCESS);
     }
+    let config = cli.load_config()?;
+    let backends = desktop_backends()?;
     let window_state_key = cli.window_state_key().to_owned();
 
     bootty_ui::native_host::run(config, window_state_key, backends).map(|()| ExitCode::SUCCESS)
+}
+
+fn desktop_backends() -> Result<Arc<bootty_mux::provider::MuxBackendRegistry>> {
+    bootty_mux::rmux::prepare_local_rmux_daemon(ApplicationIdentity::for_process())?;
+    Ok(Arc::new(
+        bootty_mux::provider::MuxBackendRegistry::desktop()?
+    ))
+}
+
+fn open_running_instance(cli: &Cli) -> Result<bool> {
+    if control::running_instance()?.is_none() {
+        return Ok(false);
+    }
+    let config = cli.load_config()?;
+    if config.cli_default_open_behavior.opens_new_window() {
+        cli_runtime::invoke_control_command(
+            cli,
+            CommandInvocation::from_action("new_window", Caller::Cli),
+            false,
+            false,
+        )?;
+    }
+    Ok(true)
 }
 
 fn events(cli: &Cli, command: &EventCommand) -> Result<()> {
@@ -246,11 +215,7 @@ fn events(cli: &Cli, command: &EventCommand) -> Result<()> {
     Ok(())
 }
 
-fn remote_space(
-    cli: &Cli,
-    backends: &bootty_mux::provider::MuxBackendRegistry,
-    command: &RemoteSpaceCommand,
-) -> Result<()> {
+fn remote_space(cli: &Cli, command: &RemoteSpaceCommand) -> Result<()> {
     let config = cli.load_config()?;
     match command {
         RemoteSpaceCommand::List => {
@@ -270,11 +235,12 @@ fn remote_space(
             );
         }
         RemoteSpaceCommand::Snapshot { id, backend } => {
+            let backends = desktop_backends()?;
             println!(
                 "{}",
                 serde_json::to_string(&bootty_mux::remote_space::snapshot(
                     &config,
-                    backends,
+                    &backends,
                     id,
                     (*backend).into(),
                 )?)?
@@ -285,7 +251,8 @@ fn remote_space(
             backend,
             payload,
         } => {
-            bootty_mux::remote_space::execute(&config, backends, id, (*backend).into(), payload)?;
+            let backends = desktop_backends()?;
+            bootty_mux::remote_space::execute(&config, &backends, id, (*backend).into(), payload)?;
         }
     }
     Ok(())

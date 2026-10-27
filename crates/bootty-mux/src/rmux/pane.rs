@@ -1337,9 +1337,11 @@ impl RmuxWorker {
     }
 
     fn settling(&mut self) -> bool {
+        let now = Instant::now();
         self.settle.holds(
+            now,
             self.last_terminal_change
-                .map_or(Duration::ZERO, |instant| instant.elapsed()),
+                .map_or(Duration::ZERO, |instant| now.duration_since(instant)),
         )
     }
 

@@ -2032,17 +2032,32 @@ fn terminal_engine_overwrites_the_line_on_carriage_return() {
     );
 }
 
-#[test]
-fn terminal_engine_rewrites_a_status_line_without_duplicating_it() {
+#[rstest::rstest]
+#[case::carriage_return(
+    b"muse-spark-1.3-contributor\r",
+    b"muse-spark-1.3-contributor\n",
+    "muse-spark-1.3-contributor"
+)]
+#[case::cursor_up(
+    b"Thinking (1s)\r\n",
+    b"\x1b[1A\r\x1b[2KThinking (2s)\r\n",
+    "Thinking (2s)"
+)]
+fn terminal_engine_rewrites_a_status_line_without_duplicating_it(
+    #[case] initial: &[u8],
+    #[case] rewrite: &[u8],
+    #[case] expected: &str,
+) {
     let mut engine = TerminalEngine::new(test_geometry(40, 2)).expect("test operation succeeds");
 
-    engine.write_vt(b"muse-spark-1.3-contributor\r");
-    engine.write_vt(b"muse-spark-1.3-contributor\n");
+    engine.write_vt(initial);
+    engine.extract_frame().expect("initial frame publishes");
+    engine.write_vt(rewrite);
     let frame = engine.extract_frame().expect("test operation succeeds");
 
     assert_eq!(
         visible_text_rows(frame).expect("frame matches expected behavior"),
-        vec!["muse-spark-1.3-contributor".to_owned()]
+        vec![expected.to_owned()]
     );
 }
 

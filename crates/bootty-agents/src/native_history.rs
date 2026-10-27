@@ -88,6 +88,17 @@ pub struct HistoryPosition {
     pub(crate) at_latest: bool,
     pub(crate) pi_leaf: Option<String>,
     pub(crate) codex_legacy: bool,
+    pub(crate) limit: Option<usize>,
+}
+
+impl HistoryPosition {
+    pub fn page_limit(previous: Option<&Self>, direction: &str) -> usize {
+        // Adjacent pages start with the capacity that fit, rather than retrying oversized pages.
+        previous
+            .filter(|_| direction != "latest")
+            .and_then(|position| position.limit)
+            .unwrap_or(PAGE_SIZE)
+    }
 }
 
 impl NativeAgentSession {
@@ -130,7 +141,7 @@ impl NativeAgentSession {
             return self.read_legacy_codex_history(current, previous, direction);
         }
         let (cursor, descending) = adjacent_cursor(previous, direction)?;
-        let mut limit = PAGE_SIZE;
+        let mut limit = HistoryPosition::page_limit(previous, direction);
         let (response, mut history) = loop {
             let response = match self.rpc(
                 "thread/items/list",
@@ -191,6 +202,7 @@ impl NativeAgentSession {
             at_latest,
             pi_leaf: None,
             codex_legacy: false,
+            limit: Some(limit),
         };
         let page = NativeHistoryPage {
             transcript: history.transcript,
@@ -252,7 +264,7 @@ impl NativeAgentSession {
             }
             _ => return Err("History direction must be older, newer or latest".into()),
         };
-        let mut limit = PAGE_SIZE;
+        let mut limit = HistoryPosition::page_limit(previous, direction);
         let (start, end, mut history) = loop {
             let (start, end) = if descending {
                 (offset.saturating_sub(limit), offset)
@@ -283,6 +295,7 @@ impl NativeAgentSession {
             at_latest: end == data.len(),
             pi_leaf: None,
             codex_legacy: true,
+            limit: Some(limit),
         };
         let page = NativeHistoryPage {
             transcript: history.transcript,
@@ -376,6 +389,7 @@ impl NativeAgentSession {
         let current = self.snapshot();
         let mut previous = None;
         let mut transcript = Vec::new();
+        let mut serialized_bytes = 2_usize; // The empty JSON array.
         let mut found = false;
         // Bound provider round trips independently of the 2-MiB copied-context limit.
         // Larger lookbacks need a provider-owned bounded range export.
@@ -406,13 +420,18 @@ impl NativeAgentSession {
                     return Err("The completed response is no longer in provider history".into());
                 }
             }
+            // Count each page once, including the comma between two nonempty arrays.
+            if !prefix.is_empty() {
+                let page_bytes = serde_json::to_vec(&prefix)
+                    .map_err(|error| error.to_string())?
+                    .len();
+                serialized_bytes = serialized_bytes
+                    .saturating_add(page_bytes.saturating_sub(2))
+                    .saturating_add(usize::from(!transcript.is_empty()));
+            }
             prefix.append(&mut transcript);
             transcript = prefix;
-            if serde_json::to_vec(&transcript)
-                .map_err(|error| error.to_string())?
-                .len()
-                > 2 * 1024 * 1024
-            {
+            if serialized_bytes > 2 * 1024 * 1024 {
                 return Err("The conversation exceeds the side-chat context limit".into());
             }
             if !page.has_older {
@@ -510,7 +529,6 @@ fn project_page(
 ) -> Result<Option<NativeSessionSnapshot>, String> {
     let mut history = NativeSessionSnapshot::new(AgentKind::Codex);
     let mut ids = std::collections::BTreeSet::new();
-    let mut expected = std::collections::BTreeSet::new();
     // A turn starts with one message; any after it steered the turn.
     let mut started_turns = std::collections::BTreeSet::new();
     for index in 0..data.len() {
@@ -528,9 +546,6 @@ fn project_page(
         if id.is_empty() || id.len() > 8192 || !ids.insert(id) {
             return Err("History item identities are invalid or duplicated".into());
         }
-        let mut single = NativeSessionSnapshot::new(AgentKind::Codex);
-        single.history_item(item);
-        expected.extend(single.transcript.into_iter().map(|item| item.id));
         history.with_message_times(
             (
                 field(entry, "startedAtMs").as_i64(),
@@ -545,9 +560,7 @@ fn project_page(
             history.mark_steered([id]);
         }
     }
-    if expected
-        .iter()
-        .any(|id| !history.transcript.iter().any(|item| &item.id == id))
+    if history.evicted != 0
         || serde_json::to_vec(&history.transcript)
             .map_err(|error| error.to_string())?
             .len()

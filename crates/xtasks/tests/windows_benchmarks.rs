@@ -1,31 +1,48 @@
 #![cfg(windows)]
 
 use std::fs;
-use std::process::Command;
 
 use assert_fs::TempDir;
 use serde_json::Value;
 
 #[test]
-fn smoke_gate_runs_python_validators_and_reports_cargo_failure() {
+fn smoke_gate_selects_python_validators_and_reports_cargo_failure() {
     let workspace = TempDir::new().unwrap();
-    let scripts = workspace.join("scripts");
-    fs::create_dir(&scripts).unwrap();
-    for name in [
-        "validate-benchmark-manifests.py",
-        "build-benchmark-dashboard.py",
-    ] {
-        fs::write(scripts.join(name), "print('validator ran')\n").unwrap();
-    }
     let evidence = workspace.join("evidence");
-    let output = Command::new(env!("CARGO_BIN_EXE_xtasks"))
-        .args(["benchmark", "suite", "--ci-smoke", "--output"])
-        .arg(&evidence)
-        .current_dir(workspace.path())
-        .output()
-        .unwrap();
-
-    assert!(!output.status.success());
+    let outcome = xtasks::benchmark::suite::run_with(
+        xtasks::benchmark::suite::Args {
+            ci_smoke: true,
+            quick: false,
+            output: Some(evidence.clone()),
+        },
+        xtasks::benchmark::suite::Metadata::new(
+            "time".into(),
+            "revision".into(),
+            "host".into(),
+            "rustc".into(),
+            "cargo".into(),
+        ),
+        |command, log| {
+            use std::os::windows::process::ExitStatusExt as _;
+            let code = if command.get_program() == "python" {
+                assert!(
+                    command
+                        .get_args()
+                        .next()
+                        .unwrap()
+                        .to_string_lossy()
+                        .ends_with(".py")
+                );
+                fs::write(log, "validator ran\n")?;
+                0
+            } else {
+                assert_eq!(command.get_program(), "cargo");
+                101
+            };
+            Ok(std::process::ExitStatus::from_raw(code))
+        },
+    );
+    assert!(outcome.is_err());
     let records: Vec<Value> = fs::read_to_string(evidence.join("summary.jsonl"))
         .unwrap()
         .lines()

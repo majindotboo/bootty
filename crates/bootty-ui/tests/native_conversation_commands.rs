@@ -36,22 +36,42 @@ use serde_json::{Value, json};
 /// only a broken fixture reaches this, so it is generous enough for a loaded machine.
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
+#[path = "support/agent_clock.rs"]
+mod agent_clock;
+#[path = "support/provider_queries.rs"]
+mod provider_queries;
+
 #[path = "support/idle_frames.rs"]
 mod frames;
+#[path = "support/naming_backend.rs"]
+mod naming_backend;
+#[path = "support/native_provider.rs"]
+mod native_provider;
 pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-// Real provider subprocess, public app-server protocol, and reply barriers; no timed sleeps.
-fn provider(root: &Path) -> TestResult<String> {
+// Discovery validates an installed executable; protocol tests explicitly inject their stdio peer.
+fn provider(root: &Path, real: bool) -> TestResult<String> {
     let program = root.join("codex-provider.py");
-    bootty_test_support::write_executable(&program, include_str!("support/codex_provider.py"))?;
+    bootty_test_support::write_executable(
+        &program,
+        if real {
+            include_str!("support/codex_provider.py")
+        } else {
+            "#!/bin/sh\nexit 77\n"
+        },
+    )?;
     Ok(program.to_string_lossy().into_owned())
 }
 
 struct Host {
+    clock: agent_clock::Clock,
+    provider: native_provider::Fixture,
+    launcher: bootty_agents::NativeLauncher,
+    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
     state: AppState,
     wakes: mpsc::Receiver<()>,
     wake: mpsc::Sender<()>,
@@ -67,8 +87,19 @@ impl Host {
         Self::new_with_spawn(enabled, false)
     }
 
+    fn new_real(enabled: bool) -> TestResult<Self> {
+        Self::new_with_provider(
+            enabled,
+            false,
+            MultiplexerBackendConfig::Native,
+            None,
+            true,
+            naming_backend::backends(None, false)?,
+        )
+    }
+
     fn new_with_spawn(enabled: bool, allow_spawn: bool) -> TestResult<Self> {
-        Self::new_with_backend(enabled, allow_spawn, MultiplexerBackendConfig::Native)
+        Self::new_with_child_provider(enabled, allow_spawn, MultiplexerBackendConfig::Native, None)
     }
 
     fn new_with_backend(
@@ -76,7 +107,29 @@ impl Host {
         allow_spawn: bool,
         backend: MultiplexerBackendConfig,
     ) -> TestResult<Self> {
-        Self::new_with_child_provider(enabled, allow_spawn, backend, None)
+        Self::new_with_provider(
+            enabled,
+            allow_spawn,
+            backend,
+            None,
+            false,
+            support::backends(),
+        )
+    }
+
+    fn new_with_focus(enabled: bool, allow_spawn: bool) -> TestResult<Self> {
+        Self::new_with_provider(
+            enabled,
+            allow_spawn,
+            MultiplexerBackendConfig::Native,
+            None,
+            false,
+            naming_backend::backends(None, true)?,
+        )
+    }
+
+    fn new_with_terminal(enabled: bool, allow_spawn: bool) -> TestResult<Self> {
+        Self::new_with_backend(enabled, allow_spawn, MultiplexerBackendConfig::Native)
     }
 
     fn new_with_child_provider(
@@ -85,8 +138,26 @@ impl Host {
         backend: MultiplexerBackendConfig,
         child: Option<AgentKind>,
     ) -> TestResult<Self> {
+        Self::new_with_provider(
+            enabled,
+            allow_spawn,
+            backend,
+            child,
+            false,
+            naming_backend::backends(None, false)?,
+        )
+    }
+
+    fn new_with_provider(
+        enabled: bool,
+        allow_spawn: bool,
+        backend: MultiplexerBackendConfig,
+        child: Option<AgentKind>,
+        real: bool,
+        backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
+    ) -> TestResult<Self> {
         let directory = assert_fs::TempDir::new()?;
-        let program = provider(directory.path())?;
+        let program = provider(directory.path(), real)?;
         let config_path = directory.path().join("config.toml");
         WorkspaceRepository::open(&config_path)?
             .0
@@ -149,18 +220,31 @@ impl Host {
         let (wake, wakes) = mpsc::channel();
         let repaint = wake.clone();
         let (events, _receiver) = bootty_control::event_queue();
-        let state = AppState::new_for_window_with_agents(
+        let clock = agent_clock::Clock::default();
+        let provider = native_provider::Fixture::default();
+        let mut runtime = clock.runtime(events);
+        runtime.launcher = if real {
+            Arc::new(bootty_agents::NativeChild::spawn)
+        } else {
+            provider.launcher()
+        };
+        let launcher = Arc::clone(&runtime.launcher);
+        let state = AppState::new_for_window_with_agent_runtime(
             config,
             "native-conversation-tests".to_owned(),
-            support::backends(),
+            Arc::clone(&backends),
             Arc::new(move || {
                 let _ = repaint.send(());
             }),
             None,
             None,
-            Some(events),
+            Some(runtime),
         )?;
         Ok(Self {
+            clock,
+            provider,
+            launcher,
+            backends,
             directory,
             state,
             wakes,
@@ -265,23 +349,27 @@ impl Host {
         if let Some(selected) = selected {
             selected.clone_into(&mut config.agents.codex.selected);
         }
-        self.state = AppState::new_for_window_with_agents(
+        let mut runtime = self.clock.runtime(events);
+        runtime.launcher = Arc::clone(&self.launcher);
+        self.state = AppState::new_for_window_with_agent_runtime(
             config,
             "native-conversation-tests".to_owned(),
-            support::backends(),
+            Arc::clone(&self.backends),
             Arc::new(move || {
                 let _ = repaint.send(());
             }),
             None,
             None,
-            Some(events),
+            Some(runtime),
         )
         .unwrap();
     }
 
     fn tick(&mut self) {
-        self.effects
-            .extend(self.state.update_frame(frames::idle_frame(Instant::now())));
+        self.effects.extend(
+            self.state
+                .update_frame(frames::idle_frame(self.clock.tick(&self.state))),
+        );
     }
 
     fn submit(&mut self, invocation: CommandInvocation) -> TestResult<CommandOutcome> {
@@ -976,6 +1064,10 @@ fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() {
         .unwrap()
         .rpc("__calls", json!({}))
         .unwrap();
+    assert_eq!(
+        calls["transport"], "in-process",
+        "the protocol fixture owns its stdio peer"
+    );
     let methods = calls["methods"].as_array().expect("Provider calls missing");
     assert_eq!(
         methods
@@ -1214,7 +1306,7 @@ fn reopening_a_conversation_waits_for_terminal_membership_reconciliation(
 
 #[rstest]
 fn failed_native_reopen_preserves_its_cause_instead_of_cancelling_itself() {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_terminal(true, false).unwrap();
     let binding = host.binding(false).unwrap();
     let cwd = host.directory.path().join("removed-checkout");
     fs::create_dir(&cwd).unwrap();
@@ -1368,7 +1460,7 @@ fn native_conversations_notify_when_they_need_approval_and_finish() {
 /// conversation's own interrupt does.
 #[rstest]
 fn interrupt_agent_stops_the_conversation_in_the_focused_pane() {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_focus(true, false).unwrap();
     let binding = host.binding(false).unwrap();
     let record = record(
         &host
@@ -1629,7 +1721,7 @@ fn checkpointing_a_shared_backend_saves_only_each_spaces_own_sessions() {
 
 #[rstest]
 fn native_task_identity_is_exactly_scoped_and_shell_keeps_real_tabs_and_splits() {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_focus(true, false).unwrap();
     let other = host.binding(true).unwrap();
     let home = host.binding(false).unwrap();
     let launched = host
@@ -1757,6 +1849,25 @@ fn native_task_identity_is_exactly_scoped_and_shell_keeps_real_tabs_and_splits()
 #[case::background(true)]
 fn observed_dialog_completion_focuses_only_foreground_native_start(#[case] background: bool) {
     let mut host = Host::new(true).unwrap();
+    bootty_test_support::write_executable(
+        &host.program,
+        r#"#!/bin/sh
+output=
+ephemeral=false
+execute=false
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        exec) execute=true ;;
+        --ephemeral) ephemeral=true ;;
+        --output-last-message) shift; output=$1 ;;
+    esac
+    shift
+done
+[ "$execute" = true ] && [ "$ephemeral" = true ] && [ -n "$output" ] || exit 3
+printf '%s' '{"title":"Fix native composer","slug":"fix-native-composer"}' > "$output"
+"#,
+    )
+    .unwrap();
     let binding = host.binding(false).unwrap();
     let scope = host.state.mux_scope();
     let cwd = host.directory.path().to_string_lossy().into_owned();
@@ -1921,7 +2032,9 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(#[case] backg
 fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() {
     let mut host = Host::new(true).unwrap();
     let binding = host.binding(false).unwrap();
-    fs::write(host.directory.path().join("fail-initialize"), "").unwrap();
+    host.provider
+        .initialize_error
+        .store(true, std::sync::atomic::Ordering::Release);
     let attachment = host.directory.path().join("initial.txt");
     fs::write(&attachment, "Retain this attachment across a failed start").unwrap();
     let mut start = CommandInvocation::new(
@@ -1999,7 +2112,9 @@ fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() {
         Some(failed.id.as_str())
     );
 
-    fs::remove_file(host.directory.path().join("fail-initialize")).unwrap();
+    host.provider
+        .initialize_error
+        .store(false, std::sync::atomic::Ordering::Release);
     let mut focus = CommandInvocation::new("agents.native.focus", Vec::new(), Caller::Socket);
     focus.target = Some(failed.target());
     let recovered: NativeSessionRecord =
@@ -2158,7 +2273,7 @@ fn native_tabs_share_the_existing_task_and_create_real_backend_windows() {
 #[case::tab(false)]
 #[case::resumed_tab(true)]
 fn native_tab_tools_read_the_captured_pane_after_another_task_is_focused(#[case] resume: bool) {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_terminal(true, false).unwrap();
     let binding = host.binding(false).unwrap();
     let mut shell = CommandInvocation::new(
         "session.create",
@@ -2493,7 +2608,7 @@ fn concurrent_native_restore_keeps_the_first_launch_and_its_tools() {
 #[case::detached(false)]
 #[case::restarted(true)]
 fn saved_native_task_keyboard_selection_restores_its_terminal_checkpoint(#[case] restart: bool) {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_terminal(true, false).unwrap();
     let mut binding = host.binding(false).unwrap();
     let launched = host
         .start(
@@ -2715,7 +2830,7 @@ fn legacy_native_conversation(host: &Host) -> TestResult<NativeSessionRecord> {
 
 #[rstest]
 fn opening_without_a_checkpoint_starts_a_shell_and_resumes_the_same_provider() {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_terminal(true, false).unwrap();
     let saved_record = legacy_native_conversation(&host).unwrap();
     host.restart();
     let binding = host.binding(false).unwrap();
@@ -3133,7 +3248,7 @@ fn attach_sibling_tui(
     let bridge = ToolBridge::prepare(
         ToolBridgeContext {
             scope: ToolScope {
-                provider: AgentKind::Codex,
+                provider: AgentKind::Claude,
                 binding: binding.clone(),
             },
             caller: Caller::Socket,
@@ -3168,7 +3283,7 @@ fn attach_sibling_tui(
                 .into_owned(),
         ),
     };
-    let prepared = service.prepare_with_tools(AgentKind::Codex, launch, bridge, None)?;
+    let prepared = service.prepare_with_tools(AgentKind::Claude, launch, bridge, None)?;
     service.register(prepared, terminal.clone(), binding_id.to_owned())?;
     Ok(sibling)
 }
@@ -3637,7 +3752,7 @@ fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
 
 #[rstest]
 fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() {
-    let mut host = Host::new_with_spawn(true, true).unwrap();
+    let mut host = Host::new_with_terminal(true, true).unwrap();
     let binding = host.binding(false).unwrap();
     let created = host
         .start(&binding, "parent", "parent-terminal-tools", "parent work")
@@ -3880,7 +3995,7 @@ fn palette_surface_choice_retains_its_exact_native_parent_and_rejects_replaced_g
 ) {
     use bootty_ui::presentation::dialogs::CommandPaletteEvent;
     use bootty_ui::surface_creation::SurfaceParent;
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_focus(true, false).unwrap();
     let binding = host.binding(false).unwrap();
     let created = host
         .start(&binding, "palette-parent", "palette-task", "")
@@ -4032,112 +4147,20 @@ fn agent_choice_splits_the_captured_pane_instead_of_creating_a_tab(
     )]
     backend: MultiplexerBackendConfig,
 ) {
-    if matches!(backend, MultiplexerBackendConfig::Native) {
-        return agent_choice_split(command, conversation_parent, backend);
-    }
-    run_isolated_split(command, conversation_parent, backend);
-}
-
-const SPLIT_ENV: &str = "BOOTTY_SPLIT_CHILD";
-const SPLIT_CHILD: &str = "isolated_split_child";
-
-/// rmux and tmux keep their servers in process-global, per-user locations, so their splits run
-/// in a child with private `RMUX_TMPDIR` and `TMUX_TMPDIR` instead of the developer's servers.
-fn run_isolated_split(command: &str, conversation_parent: bool, backend: MultiplexerBackendConfig) {
-    // Socket paths include the development namespace and must fit Unix socket limits.
-    let directory = assert_fs::TempDir::new_in("/tmp").unwrap();
-    let executable = std::env::current_exe().unwrap();
-    let mut child = std::process::Command::new(&executable);
-    child
-        .args(["--exact", SPLIT_CHILD, "--nocapture"])
-        .env(SPLIT_ENV, format!("{command} {conversation_parent}"))
-        .env("TMUX_TMPDIR", directory.path())
-        .env("RMUX_TMPDIR", directory.path())
-        // Panes inherit the server's environment; a developer's login shell must not decide timing.
-        .env("SHELL", "/bin/sh")
-        .env("ENV", "");
-    if matches!(backend, MultiplexerBackendConfig::Rmux) {
-        let helper = directory.path().join("bootty-daemon");
-        bootty_test_support::write_executable(
-            &helper,
-            format!(
-                "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact {SPLIT_CHILD} --nocapture\n",
-                bootty_host::shell_quote(&executable.to_string_lossy()),
-            ),
-        ).unwrap();
-        child
-            .env("BOOTTY_DAEMON_BINARY", &helper)
-            .env("BOOTTY_SPLIT_BACKEND", "rmux");
-    } else {
-        child.env("BOOTTY_SPLIT_BACKEND", "tmux");
-    }
-    let output = child.output().unwrap();
-    // A tmux server outlives its last session; stop the private one with its directory.
-    for socket in fs::read_dir(directory.path())
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("tmux-"))
-        .flat_map(|entry| fs::read_dir(entry.path()).into_iter().flatten())
-        .filter_map(Result::ok)
-    {
-        let _ = std::process::Command::new("tmux")
-            .arg("-S")
-            .arg(socket.path())
-            .arg("kill-server")
-            .output();
-    }
-    assert!(
-        output.status.success(),
-        "isolated {backend:?} split failed: {}\n{}{}",
-        output.status,
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Runs inside `run_isolated_split`, as the split itself or as its rmux daemon helper.
-#[test]
-fn isolated_split_child() {
-    if let Some(endpoint) = std::env::var_os("BOOTTY_RMUX_PIPE_ENDPOINT") {
-        bootty_mux::rmux::run_pipe_helper(endpoint.into()).unwrap();
-        return;
-    }
-    let Some(spec) = std::env::var_os(SPLIT_ENV) else {
-        return;
+    // These cases exercise chooser routing and placement under each host policy. Backend process
+    // and transport contracts are exercised by bootty-mux's backend tests.
+    let backends = match backend {
+        // Process-local placement retains its runtime and focus contracts without a shell.
+        MultiplexerBackendConfig::Native => naming_backend::backends(None, true).unwrap(),
+        MultiplexerBackendConfig::Rmux => {
+            naming_backend::backends(Some(Arc::new(bootty_mux::rmux::RmuxProvider)), false).unwrap()
+        }
+        MultiplexerBackendConfig::Tmux => {
+            naming_backend::backends(Some(Arc::new(bootty_mux::tmux::TmuxProvider)), false).unwrap()
+        }
+        MultiplexerBackendConfig::Herdr => panic!("split fixture requires a pane-aware backend"),
     };
-    let spec = spec.to_string_lossy();
-    let (command, conversation_parent) = spec.split_once(' ').expect("malformed split spec");
-    if std::env::var_os("BOOTTY_SPLIT_BACKEND").is_some_and(|backend| backend == "tmux") {
-        return agent_choice_split(
-            command,
-            conversation_parent == "true",
-            MultiplexerBackendConfig::Tmux,
-        );
-    }
-    // A private daemon at this child's endpoint plays the app's rmux owner.
-    let endpoint =
-        bootty_mux::rmux::endpoint_path_for(bootty_config::ApplicationIdentity::for_process())
-            .unwrap();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .worker_threads(1)
-        .build()
-        .unwrap();
-    let daemon = runtime
-        .block_on(rmux_server::ServerDaemon::new(rmux_server::DaemonConfig::new(endpoint)).bind())
-        .unwrap();
-    agent_choice_split(
-        command,
-        conversation_parent == "true",
-        MultiplexerBackendConfig::Rmux,
-    );
-    runtime.block_on(daemon.shutdown()).unwrap();
-    // Pane I/O tasks belong to processes that end with this child; do not wait for them.
-    runtime.shutdown_background();
-}
-
-fn agent_choice_split(command: &str, conversation_parent: bool, backend: MultiplexerBackendConfig) {
-    let mut host = Host::new_with_backend(true, true, backend).unwrap();
+    let mut host = Host::new_with_provider(true, true, backend, None, false, backends).unwrap();
     let binding = host.binding(false).unwrap();
     let fixture = host
         .directory
@@ -4284,7 +4307,7 @@ fn terminal_choice_splits_the_exact_native_pane_instead_of_creating_a_tab(
     #[case] command: &str,
     #[values(Caller::CommandPalette, Caller::Keybinding, Caller::Socket)] caller: Caller,
 ) {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_with_focus(true, false).unwrap();
     let binding = host.binding(false).unwrap();
     let native = record(
         &host
@@ -4488,9 +4511,8 @@ fn closing_a_native_pane_through_the_terminal_command_also_retires_its_provider(
 fn native_mux_placement_is_published_before_provider_initialization() {
     let mut host = Host::new(true).unwrap();
     let binding = host.binding(false).unwrap();
-    fs::write(host.directory.path().join("hold-thread-start"), "").unwrap();
-    let ready = std::os::unix::net::UnixListener::bind(host.directory.path().join("start-barrier"))
-        .unwrap();
+    let (ready, started) = mpsc::channel();
+    *host.provider.start_barrier.lock().unwrap() = Some(ready);
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
         .expect("deadline");
@@ -4544,9 +4566,9 @@ fn native_mux_placement_is_published_before_provider_initialization() {
         receiver.try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
-    let (mut ready_stream, _) = ready.accept().unwrap();
-    let mut byte = [0];
-    std::io::Read::read_exact(&mut ready_stream, &mut byte).unwrap();
+    started
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .unwrap();
     host.state
         .native_agent_service()
         .expect("native owner")
@@ -4566,7 +4588,7 @@ fn native_mux_placement_is_published_before_provider_initialization() {
 #[case::active(false)]
 #[case::inactive(true)]
 fn model_catalog_and_favorites_reuse_the_captured_provider_discovery(#[case] inactive: bool) {
-    let mut host = Host::new(true).unwrap();
+    let mut host = Host::new_real(true).unwrap();
     let binding = host.binding(inactive).unwrap();
     let mut query = CommandInvocation::new(
         "agents.native.catalog",
@@ -4689,37 +4711,8 @@ fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() {
 }
 
 fn pi_child_provider(directory: &Path) -> TestResult<String> {
-    let program = directory.join("pi-child.py");
-    bootty_test_support::write_executable(
-        &program,
-        r"#!/usr/bin/env python3
-import json,os,sys
-account=os.environ['PI_CODING_AGENT_DIR']
-os.makedirs(account,exist_ok=True)
-session='pi-child-'+str(os.getpid())
-file=os.path.join(account,session+'.jsonl')
-with open(file,'w') as output: output.write(json.dumps({'type':'session','id':session,'version':3})+'\n')
-with open(os.path.join(account,'launch.json'),'w') as output: json.dump({'argv':sys.argv,'account':account},output)
-messages=[]
-def emit(value): print(json.dumps(value),flush=True)
-for line in sys.stdin:
- value=json.loads(line);kind=value['type'];data={}
- if kind=='get_state': data={'sessionId':session,'sessionFile':file,'isStreaming':False,'isCompacting':False}
- elif kind=='get_commands': data={'commands':[{'name':'__bootty_checkpoint'}]}
- elif kind=='switch_session': data={'cancelled':False}
- elif kind=='get_messages': data={'messages':messages}
- elif kind=='get_available_models': data={'models':[]}
- elif kind=='prompt':
-  if value['message']=='/__bootty_checkpoint': data={'disposition':'handled'}
-  else:
-   user={'role':'user','content':value['message'],'timestamp':1}
-   answer={'role':'assistant','content':[{'type':'text','text':'Pi child completed'}],'timestamp':2,'stopReason':'stop'}
-   emit({'type':'agent_start'})
-   for message in [user,answer]: emit({'type':'message_end','message':message})
-   messages.extend([user,answer]);emit({'type':'agent_end','messages':[answer],'willRetry':False});emit({'type':'agent_settled'});data={'disposition':'started'}
- emit({'type':'response','id':value['id'],'command':kind,'success':True,'data':data})
-",
-    )?;
+    let program = directory.join("pi-child");
+    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n")?;
     Ok(program.to_string_lossy().into_owned())
 }
 

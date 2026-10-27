@@ -16,8 +16,8 @@ use std::{
 
 use bootty_config::config::MultiplexerBackendConfig;
 use bootty_control::{
-    AppCommandRequest, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
-    CommandTarget, MutationClass, ResourceKind, ValueType,
+    Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, MutationClass,
+    ResourceKind, ValueType,
 };
 use bootty_mux::repository::{SpaceMuxOverride, WorkspaceRepository};
 use bootty_mux::workspace::{
@@ -32,21 +32,76 @@ use rusqlite::Connection;
 /// only a broken fixture reaches this, so it is generous enough for a loaded machine.
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
+#[cfg(unix)]
+#[path = "support/agent_clock.rs"]
+mod agent_clock;
+#[cfg(unix)]
+#[path = "support/provider_queries.rs"]
+mod provider_queries;
+
 #[path = "support/idle_frames.rs"]
 mod frames;
 #[path = "support/naming_backend.rs"]
 mod naming_backend;
+
+#[cfg(unix)]
+#[path = "support/orchestration_provider.rs"]
+mod orchestration_provider;
 pub mod support;
+#[cfg(unix)]
+#[path = "support/terminal_provider.rs"]
+mod terminal_provider;
 #[path = "support/config.rs"]
 mod test_config;
 
-fn native_state(directory: &Path) -> AppState {
+fn event_repaint(repaint: impl Fn() + Send + Sync + 'static) -> bootty_mux::RepaintHandle {
+    let host = std::thread::current();
+    Arc::new(move || {
+        repaint();
+        host.unpark();
+    })
+}
+
+fn agent_runtime(
+    events: bootty_control::ControlEventSender,
+) -> bootty_ui::commands::AgentRuntimeConfig {
+    let mut runtime = bootty_ui::commands::AgentRuntimeConfig::new(events);
+    runtime.launcher = Arc::new(|launch| {
+        Err(format!(
+            "No native provider fixture for {}",
+            launch.config.program
+        ))
+    });
+    #[cfg(unix)]
+    let runtime = bootty_ui::commands::AgentRuntimeConfig {
+        terminal_transport: terminal_provider::transport(false, None),
+        ..runtime
+    };
+    runtime
+}
+
+fn metadata_state(directory: &Path) -> AppState {
+    state_with_backends(directory, naming_backend::backends(None, false).unwrap())
+}
+
+fn focus_state(directory: &Path) -> AppState {
+    state_with_backends(directory, naming_backend::backends(None, true).unwrap())
+}
+
+fn terminal_state(directory: &Path) -> AppState {
+    state_with_backends(directory, support::backends())
+}
+
+fn state_with_backends(
+    directory: &Path,
+    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
+) -> AppState {
     let mut config = test_config::config(
         directory.join("config.toml"),
         MultiplexerBackendConfig::Native,
     );
     config.session.working_directory = Some(directory.to_owned());
-    AppState::new(config, support::backends(), Arc::new(|| {}), None, None).expect("app state")
+    AppState::new(config, backends, event_repaint(|| {}), None, None).expect("app state")
 }
 
 fn open_native_session(state: &mut AppState, cwd: &Path, started: Instant) {
@@ -114,7 +169,7 @@ fn native_terminal_form() -> (assert_fs::TempDir, AppState, mpsc::Receiver<()>) 
     let state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -296,7 +351,7 @@ fn empty_terminal_form_starts_one_shell_only_after_explicit_start(
 #[rstest]
 fn creating_a_session_selects_it_and_keeps_it_selected_after_refresh() {
     let directory = assert_fs::TempDir::new().expect("isolated config");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     for name in ["first", "second", "third"] {
         let cwd = directory.path().join(name);
         fs::create_dir(&cwd).expect("project directory");
@@ -333,8 +388,8 @@ fn directory_picker_generates_valid_unique_names_without_changing_cwd(
     config.session.working_directory = Some(directory.path().to_owned());
     let mut state = AppState::new(
         config,
-        naming_backend::backends().unwrap(),
-        Arc::new(|| {}),
+        naming_backend::backends(None, false).unwrap(),
+        event_repaint(|| {}),
         None,
         None,
     )
@@ -365,7 +420,7 @@ fn pane_count(state: &AppState) -> usize {
 #[case(true)]
 fn modal_dismissal_restores_the_underlying_input_route(#[case] sidebar: bool) {
     let directory = assert_fs::TempDir::new().expect("isolated config");
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     let started = Instant::now();
     if sidebar {
         submit_action(
@@ -452,7 +507,7 @@ fn find_switches_share_command_and_button_state(
     caller: Caller,
 ) {
     let directory = assert_fs::TempDir::new().expect("isolated workspace");
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     let started = Instant::now();
     open_native_session(&mut state, directory.path(), started);
     let outcome = submit_action(&mut state, command, caller, started);
@@ -577,7 +632,7 @@ fn browser_commands_resolve_typed_page_targets() {
 #[rstest]
 fn browser_request_honors_command_cancellation() {
     let directory = assert_fs::TempDir::new().expect("isolated config");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let started = Instant::now();
     let cancellation = CommandCancellation::new();
     let outcomes = state
@@ -701,34 +756,47 @@ fn wait_for_native_agent_input(
 #[rstest]
 fn terminal_agents_list_in_the_agents_panel_and_notify() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let config = test_config::config(
+    let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
     );
+    let account = directory.path().join("account");
+    fs::create_dir(&account).unwrap();
+    let program = directory.path().join("provider.py");
+    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n").unwrap();
+    config.agents.claude.program = program.to_string_lossy().into_owned();
+    config.agents.claude.selected = "fixture".into();
+    config.agents.claude.profiles.insert(
+        "fixture".into(),
+        bootty_config::config::AgentProfileConfig {
+            name: "Fixture".into(),
+            directory: Some(account.to_string_lossy().into_owned()),
+            arguments: Vec::new(),
+        },
+    );
+    let fixture = orchestration_provider::Fixture::new(directory.path(), None);
     let (wake, wakes) = mpsc::channel();
     let (agent_events, _agent_event_receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let clock = agent_clock::Clock::default();
+    let mut runtime = clock.runtime(agent_events);
+    runtime.terminal_transport = fixture.transport();
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
-        support::backends(),
-        Arc::new(move || {
+        fixture.backends().unwrap(),
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(agent_events),
+        Some(runtime),
     )
     .expect("composed app state");
     let started = Instant::now();
     open_native_session(&mut state, directory.path(), started);
-    let program = claude_terminal_fixture(directory.path()).unwrap();
     let session_id = "00000000-0000-4000-8000-000000000011";
-    let query = directory.path().join("query-session");
-    fs::write(
-        &query,
-        serde_json::json!({"session_id": session_id}).to_string(),
-    )
-    .unwrap();
+    let query = account.join("state");
+    fs::write(&query, "busy").unwrap();
     let launched = submit_command_from_caller(
         &mut state,
         &wakes,
@@ -759,16 +827,12 @@ fn terminal_agents_list_in_the_agents_panel_and_notify() {
         ("terminal", "working")
     );
 
-    fs::write(
-        &query,
-        serde_json::json!({"session_id": session_id, "status": "waiting"}).to_string(),
-    )
-    .unwrap();
+    fs::write(&query, "waiting").unwrap();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
         .expect("deadline fits");
     loop {
-        let mut frame = frames::idle_frame(Instant::now());
+        let mut frame = frames::idle_frame(clock.tick(&state));
         frame.input.window_focused = false;
         let notified = state.update_frame(frame).into_iter().any(|effect| {
             matches!(effect, bootty_ui::AppEffect::DesktopNotification { title, .. }
@@ -793,16 +857,16 @@ fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
     );
     let (wake, wakes) = mpsc::channel();
     let (agent_events, _agent_event_receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(agent_events),
+        Some(agent_runtime(agent_events)),
     )
     .expect("composed app state");
     let started = Instant::now();
@@ -976,7 +1040,7 @@ fn discovered_resource_target_cannot_retarget_a_replacement_binding() {
     let mut first = AppState::new(
         config.clone(),
         support::backends(),
-        Arc::new(|| {}),
+        event_repaint(|| {}),
         None,
         None,
     )
@@ -997,8 +1061,14 @@ fn discovered_resource_target_cannot_retarget_a_replacement_binding() {
         serde_json::from_value(value["target"].clone()).expect("current binding target");
     drop(first);
 
-    let mut replacement = AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("replacement app state");
+    let mut replacement = AppState::new(
+        config,
+        support::backends(),
+        event_repaint(|| {}),
+        None,
+        None,
+    )
+    .expect("replacement app state");
     let mut invocation = CommandInvocation::new("edit_space", Vec::new(), Caller::Socket);
     invocation.target = Some(target);
     let outcome = submit_command(
@@ -1015,7 +1085,7 @@ fn discovered_resource_target_cannot_retarget_a_replacement_binding() {
 fn native_split_command_publishes_the_binding_owned_layout() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
     let started = Instant::now();
-    let mut state = native_state(directory.path());
+    let mut state = focus_state(directory.path());
     open_native_session(&mut state, directory.path(), started);
 
     let outcome = submit_terminal_choice(
@@ -1065,7 +1135,7 @@ fn native_split_command_publishes_the_binding_owned_layout() {
 fn native_window_actions_use_the_binding_owned_plan() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
     let started = Instant::now();
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     open_native_session(&mut state, directory.path(), started);
 
     let session = state.mux().sessions()[0].clone();
@@ -1170,7 +1240,7 @@ fn native_window_actions_use_the_binding_owned_plan() {
 fn a_failed_socket_command_reaches_its_caller_not_the_window() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
     let started = Instant::now();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     open_native_session(&mut state, directory.path(), started);
     let mut paste = CommandInvocation::new("terminal.paste", vec!["hi".to_owned()], Caller::Socket);
     paste.target = Some(CommandTarget {
@@ -1201,8 +1271,14 @@ fn close_window_policy_only_applies_to_the_last_workspace_surface(
     );
     config.session.working_directory = Some(directory.path().to_owned());
     config.when_closing_with_no_tabs = bootty_config::config::WhenClosingWithNoTabs::CloseWindow;
-    let mut state =
-        AppState::new(config, support::backends(), Arc::new(|| {}), None, None).unwrap();
+    let mut state = AppState::new(
+        config,
+        support::backends(),
+        event_repaint(|| {}),
+        None,
+        None,
+    )
+    .unwrap();
     for index in 0..session_count {
         let cwd = directory.path().join(format!("session-{index}"));
         fs::create_dir(&cwd).unwrap();
@@ -1226,25 +1302,26 @@ fn close_window_policy_only_applies_to_the_last_workspace_surface(
         .submit(
             invocation,
             started
-                .checked_add(Duration::from_secs(1))
+                .checked_add(FIXTURE_DEADLINE)
                 .expect("test timestamp fits"),
             CommandCancellation::new(),
         )
         .unwrap();
     let mut closed = false;
-    let outcome = (0..100)
-        .find_map(|tick| {
-            closed |= state
-                .update_frame(frames::idle_frame(
-                    started
-                        .checked_add(Duration::from_millis(tick))
-                        .expect("test timestamp fits"),
-                ))
-                .iter()
-                .any(|effect| matches!(effect, bootty_ui::AppEffect::CloseWindow));
-            receiver.recv_timeout(Duration::from_millis(5)).ok()
-        })
-        .expect("close command outcome");
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .expect("close deadline");
+    let outcome = loop {
+        closed |= state
+            .update_frame(frames::idle_frame(Instant::now()))
+            .iter()
+            .any(|effect| matches!(effect, bootty_ui::AppEffect::CloseWindow));
+        if let Ok(outcome) = receiver.try_recv() {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "close command did not answer");
+        std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+    };
     assert!(
         matches!(outcome, CommandOutcome::Success { .. }),
         "{outcome:?}"
@@ -1274,8 +1351,14 @@ fn keeping_the_window_open_still_closes_its_last_backend_pane(
     );
     config.session.working_directory = Some(directory.path().to_owned());
     config.when_closing_with_no_tabs = bootty_config::config::WhenClosingWithNoTabs::KeepWindowOpen;
-    let mut state =
-        AppState::new(config, support::backends(), Arc::new(|| {}), None, None).unwrap();
+    let mut state = AppState::new(
+        config,
+        support::backends(),
+        event_repaint(|| {}),
+        None,
+        None,
+    )
+    .unwrap();
     open_native_session(&mut state, directory.path(), Instant::now());
     let mut invocation = CommandInvocation::from_action("close_surface", caller);
     if caller == Caller::Socket {
@@ -1294,19 +1377,20 @@ fn keeping_the_window_open_still_closes_its_last_backend_pane(
         .app_command_sender(caller)
         .submit(
             invocation,
-            started.checked_add(Duration::from_secs(5)).unwrap(),
+            started.checked_add(FIXTURE_DEADLINE).unwrap(),
             CommandCancellation::new(),
         )
         .unwrap();
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .expect("close deadline");
     let outcome = loop {
         state.update_frame(frames::idle_frame(Instant::now()));
-        if let Ok(outcome) = outcomes.recv_timeout(Duration::from_millis(5)) {
+        if let Ok(outcome) = outcomes.try_recv() {
             break outcome;
         }
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "close command completed"
-        );
+        assert!(Instant::now() < deadline, "close command did not answer");
+        std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
     };
     assert!(
         matches!(outcome, CommandOutcome::Success { .. }),
@@ -1391,30 +1475,27 @@ fn submit_command(
     invocation: CommandInvocation,
     started: Instant,
 ) -> CommandOutcome {
-    let commands = state.app_command_sender(Caller::Socket);
-    let (response, outcomes) = mpsc::channel();
-    commands
-        .try_send(AppCommandRequest {
-            creation_receipt: None,
-            invocation,
-            deadline: Instant::now()
-                .checked_add(Duration::from_secs(1))
-                .expect("test timestamp fits"),
-            cancellation: CommandCancellation::new(),
-            response,
-        })
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .expect("command deadline");
+    let outcomes = state
+        .app_command_sender(Caller::Socket)
+        .submit(invocation, deadline, CommandCancellation::new())
         .expect("submit command");
-    (0..100)
-        .find_map(|tick| {
-            state.update_frame(frames::idle_frame(
-                started
-                    .checked_add(Duration::from_millis(tick))
-                    .expect("test timestamp fits"),
-            ));
-            // A native create answers once its pane's process has started.
-            outcomes.recv_timeout(Duration::from_millis(5)).ok()
-        })
-        .expect("command outcome")
+    let mut frame_at = started;
+    loop {
+        state.update_frame(frames::idle_frame(frame_at));
+        match outcomes.try_recv() {
+            Ok(outcome) => return outcome,
+            Err(mpsc::TryRecvError::Disconnected) => panic!("command reply disconnected"),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        assert!(Instant::now() < deadline, "command did not answer");
+        frame_at = frame_at
+            .checked_add(Duration::from_millis(1))
+            .expect("frame timestamp");
+        std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
 }
 
 fn submit_action(
@@ -1442,7 +1523,7 @@ fn submit_command_from_caller(
         .submit(
             invocation,
             Instant::now()
-                .checked_add(Duration::from_secs(5))
+                .checked_add(FIXTURE_DEADLINE)
                 .expect("test timestamp fits"),
             CommandCancellation::new(),
         )
@@ -1478,12 +1559,25 @@ fn commit_messages_are_written_by_codex_from_the_staged_changes() {
     };
     git(&["init", "--quiet"]);
     let codex = directory.path().join("codex.py");
-    bootty_test_support::write_executable(&codex, r"#!/usr/bin/env python3
-import json,pathlib,sys
-args=sys.argv[1:]
-assert args[args.index('--model')+1]=='quick-model' and '+contents' in args[-1]
-pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps({'subject':'Add notes','body':'They start the list.'}))
-",
+    bootty_test_support::write_executable(
+        &codex,
+        r#"#!/bin/sh
+prior=
+output=
+model=
+last=
+for argument do
+    case "$prior" in
+        --model) model=$argument ;;
+        --output-last-message) output=$argument ;;
+    esac
+    prior=$argument
+    last=$argument
+done
+[ "$model" = quick-model ] && [ -n "$output" ] || exit 2
+case "$last" in *+contents*) ;; *) exit 3 ;; esac
+printf '%s' '{"subject":"Add notes","body":"They start the list."}' > "$output"
+"#,
     )
     .unwrap();
     let (wake, wakes) = mpsc::channel();
@@ -1497,7 +1591,7 @@ pathlib.Path(args[args.index('--output-last-message')+1]).write_text(json.dumps(
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -1549,7 +1643,7 @@ fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -1673,7 +1767,7 @@ fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] 
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -1786,8 +1880,14 @@ fn native_pane_arrangement_preserves_ids_and_publishes_only_completed_layouts() 
     );
     // OSC titles are independent of layout mutations; keep this fixture's shell title stable.
     config.session.shell = cfg!(unix).then(|| "/bin/sh".to_owned());
-    let mut state =
-        AppState::new(config, support::backends(), Arc::new(|| {}), None, None).expect("app state");
+    let mut state = AppState::new(
+        config,
+        support::backends(),
+        event_repaint(|| {}),
+        None,
+        None,
+    )
+    .expect("app state");
     open_native_session(&mut state, directory.path(), started);
     let first_window = state.mux().selected_window().expect("window").to_owned();
     let first = state.focused_pane().expect("first pane");
@@ -1904,7 +2004,7 @@ fn link_commands_open_the_resolved_document_and_honor_cancellation(
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -2008,7 +2108,7 @@ fn capture_and_export_use_the_attached_pane_and_never_replace_a_file() {
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -2087,7 +2187,7 @@ fn authored_theme_preview_restore_save_and_apply_share_command_path(
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -2293,20 +2393,6 @@ fn claude_terminal_fixture(directory: &Path) -> std::io::Result<PathBuf> {
         r"#!/usr/bin/env python3
 import json, os, pathlib, sys
 directory = pathlib.Path(__file__).parent
-if sys.argv[1:3] == ['agents', '--json']:
-    source = directory / 'query-session'
-    if not source.exists():
-        source = directory / 'agent-output'
-    if source.exists():
-        observed = json.loads(source.read_text())
-        # Other fixtures rewrite the default status text; a test can name another status.
-        reported = {'sessionId': observed['session_id'], 'status': 'busy',
-                    'waitingFor': observed.get('detail')}
-        reported.update({key: observed[key] for key in ['status'] if key in observed})
-        print(json.dumps([reported]))
-    else:
-        print('[]')
-    sys.exit(0)
 arguments = sys.argv[1:]
 session_id = arguments[1]
 arguments = arguments[2:]
@@ -2364,16 +2450,16 @@ fn disabled_providers_do_not_launch_or_mutate_terminals(
     }
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .unwrap();
     let now = Instant::now();
@@ -2463,16 +2549,16 @@ fn chooser_profile_keeps_the_accepted_terminal_when_its_checkpoint_write_fails(
     );
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .unwrap();
     let started = Instant::now();
@@ -2633,16 +2719,16 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty(
     }
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .unwrap();
     let started = Instant::now();
@@ -2772,16 +2858,16 @@ fn provider_splits_reject_invalid_or_retired_destinations_before_launch(#[case] 
         .into_owned();
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .unwrap();
     let now = Instant::now();
@@ -2872,28 +2958,31 @@ fn native_state_is_bounded_and_saved_provider_history_keeps_selected_account_and
             arguments: Vec::new(),
         },
     );
-    let mut state = AppState::new_for_window_with_agents(
+    fs::create_dir_all(&account).unwrap();
+    fs::write(account.join("state"), "busy").unwrap();
+    let detail = "é".repeat(8 * 1024);
+    fs::write(account.join("detail"), &detail).unwrap();
+    let program = directory.path().join("provider.py");
+    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n").unwrap();
+    config.agents.claude.program = program.to_string_lossy().into_owned();
+    let fixture = orchestration_provider::Fixture::new(directory.path(), None);
+    let mut runtime = agent_runtime(events);
+    runtime.terminal_transport = fixture.transport();
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
-        support::backends(),
-        Arc::new(move || {
+        fixture.backends().unwrap(),
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(runtime),
     )
     .unwrap();
     let now = Instant::now();
     open_native_session(&mut state, directory.path(), now);
-    let program = claude_terminal_fixture(directory.path()).unwrap();
     let session = "8ea5a4d1-9c09-4e2a-93e2-c4d2d9658b60";
-    let detail = "é".repeat(8 * 1024);
-    fs::write(
-        directory.path().join("query-session"),
-        serde_json::to_vec(&serde_json::json!({"session_id":session,"detail":detail})).unwrap(),
-    )
-    .unwrap();
     let argv = serde_json::to_string(&[
         "--session-id",
         session,
@@ -3108,16 +3197,16 @@ fn agent_attention_projects_live_targets_and_notifies_once(
     let (wake, wakes) = mpsc::channel();
     let (events, receiver) = bootty_control::event_queue();
     drop(receiver); // Publication failure must not erase the provider's observed state.
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .unwrap();
     let now = Instant::now();
@@ -3183,7 +3272,7 @@ fn agent_attention_projects_live_targets_and_notifies_once(
 #[rstest]
 fn doctor_reports_the_live_binding_without_creating_processes() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let result = submit_action(&mut state, "doctor", Caller::Socket, Instant::now());
     let CommandOutcome::Success { value, .. } = result else {
         panic!("{result:?}")
@@ -3217,7 +3306,7 @@ fn jobs_use_the_shared_mailbox_and_preserve_process_results(#[case] caller: Call
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -3311,16 +3400,16 @@ fn job_events_are_owned_by_the_live_window_registry() {
     );
     let (wake, wakes) = mpsc::channel();
     let (events, receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .unwrap();
     let source = state.command_catalog().control_catalog();
@@ -3392,7 +3481,7 @@ fn shell_history_uses_shared_commands_and_keeps_the_shell_file(
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -3458,7 +3547,7 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -3569,7 +3658,7 @@ fn dock_commands_share_palette_bindings_and_window_completion(
     assert_eq!(bound.command, command);
 
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let now = Instant::now();
     let response = state
         .app_command_sender(caller)
@@ -3640,7 +3729,7 @@ fn legacy_sidebar_commands_request_dock_mutations(
     #[case] expected: bootty_ui::commands::DockAction,
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let initial = state.config().chrome.sidebar;
     let now = Instant::now();
     let _response = state
@@ -3661,7 +3750,7 @@ fn legacy_sidebar_commands_request_dock_mutations(
 #[rstest]
 fn setting_links_use_the_shared_command_path() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let now = Instant::now();
     let response = state
         .app_command_sender(Caller::Cli)
@@ -3686,7 +3775,7 @@ fn setting_links_use_the_shared_command_path() {
 #[case("toggle_sidebar_focus")]
 fn returning_from_sidebar_requests_native_terminal_focus(#[case] command: &str) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = focus_state(directory.path());
     let now = Instant::now();
     submit_action(&mut state, "toggle_sidebar_focus", Caller::Keybinding, now);
     assert!(state.sidebar_focused());
@@ -3756,7 +3845,7 @@ fn session_create_refuses_a_bad_request_before_the_backend(
     #[case] expected: &str,
 ) {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let outcome = submit_command(
         &mut state,
         CommandInvocation::new("session.create", arguments, Caller::Socket),
@@ -3780,7 +3869,7 @@ fn session_create_refuses_a_bad_request_before_the_backend(
 #[test]
 fn new_sessions_can_start_in_a_sessions_project() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let project = directory
         .path()
         .join("project")
@@ -3797,7 +3886,7 @@ fn new_sessions_can_start_in_a_sessions_project() {
 #[test]
 fn closing_the_last_space_says_why() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     assert!(!state.close_space_from_ui(state.active_space_id()));
     assert_eq!(
         state.last_error_notice(),
@@ -3810,7 +3899,7 @@ fn closing_the_last_space_says_why() {
 fn a_stale_surface_chooser_says_why() {
     use bootty_ui::surface_creation::{PendingNewSurface, SurfaceParent, SurfacePlacement};
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let binding = CommandTarget {
         kind: ResourceKind::Binding,
         handle: "captured-binding".to_owned(),
@@ -3897,7 +3986,7 @@ fn session_requests_leave_selection_and_the_active_space_alone() {
         )
         .expect("create Space")
         .expect("valid Space");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let started = Instant::now();
     let project = directory.path().join("project");
     fs::create_dir(&project).expect("project directory");
@@ -4004,7 +4093,7 @@ fn project_scripts_open_in_new_tabs() {
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -4015,8 +4104,8 @@ fn project_scripts_open_in_new_tabs() {
     open_native_session(&mut state, directory.path(), started);
     let cwd = directory.path().to_string_lossy().into_owned();
     let settings = serde_json::json!({"scripts": [
-        {"name": "Mark", "command": "printf ran > marked; exec cat", "setup": false},
-        {"name": "Install", "command": "printf done > installed; exec cat", "setup": true},
+        {"name": "Mark", "command": "printf ran > marked; printf 'script-ready\n'; exec cat", "setup": false},
+        {"name": "Install", "command": "printf done > installed; printf 'script-ready\n'; exec cat", "setup": true},
     ]});
     let configured = submit_command(
         &mut state,
@@ -4045,15 +4134,22 @@ fn project_scripts_open_in_new_tabs() {
             let deadline = Instant::now()
                 .checked_add(Duration::from_secs(10))
                 .expect("test deadline fits");
-            let opened = std::iter::repeat_with(|| {
+            loop {
                 state.update_frame(frames::idle_frame(started));
-                _ = wakes.recv_timeout(Duration::from_millis(10));
-                state.mux().sessions()[0].windows.len() > windows
+                if state.mux().sessions()[0].windows.len() > windows
                     && directory.path().join(file).exists()
-            })
-            .take_while(|_| Instant::now() < deadline)
-            .any(|opened| opened);
-            assert!(opened, "{command} opened no tab that ran its script");
+                {
+                    break;
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                assert!(
+                    !remaining.is_zero(),
+                    "{command} opened no tab that ran its script"
+                );
+                wakes
+                    .recv_timeout(remaining)
+                    .expect("script output wakes its host");
+            }
         }
         outcome
     };
@@ -4085,7 +4181,7 @@ fn explicit_tab_starts_literal_argv_and_failure_preserves_the_session(
     let mut state = AppState::new(
         config,
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -4163,7 +4259,7 @@ fn explicit_tab_starts_literal_argv_and_failure_preserves_the_session(
 #[case(Caller::Internal)]
 fn session_grouping_command_persists_without_changing_sessions(#[case] caller: Caller) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let now = Instant::now();
     open_native_session(&mut state, directory.path(), now);
     let sessions = state
@@ -4205,7 +4301,7 @@ fn session_grouping_command_persists_without_changing_sessions(#[case] caller: C
 #[case(Caller::Internal)]
 fn follow_up_queueing_toggles_and_persists(#[case] caller: Caller) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let now = Instant::now();
     let before = state.config().agents.follow_up_behavior;
     for expected in [before.opposite(), before] {
@@ -4229,7 +4325,7 @@ fn follow_up_queueing_toggles_and_persists(#[case] caller: Caller) {
 #[rstest]
 fn rejected_session_view_save_keeps_the_accepted_view() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let path = directory.path().join("config.toml");
     if path.exists() {
         fs::remove_file(&path).unwrap();
@@ -4265,7 +4361,7 @@ fn selected_saved_session_restores_on_start_and_reattaches_without_changing_iden
     let directory = assert_fs::TempDir::new().expect("private workspace");
     let project = directory.path().join("project");
     fs::create_dir(&project).expect("project directory");
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     open_native_session(&mut state, &project, Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let original = saved_sessions(&mut state, &space).remove(0);
@@ -4305,7 +4401,7 @@ fn selected_saved_session_restores_on_start_and_reattaches_without_changing_iden
                 .as_ref()],
         )
         .expect("preserve committed database including WAL");
-    let mut state = native_state(restarted.path());
+    let mut state = terminal_state(restarted.path());
     let space = spaces_listing(&mut state).remove(0);
     let restored = saved_sessions(&mut state, &space);
     assert_eq!(restored.len(), 1);
@@ -4359,7 +4455,7 @@ fn closed_session_keeps_its_saved_identity_and_does_not_adopt_a_name_collision()
     let directory = assert_fs::TempDir::new().expect("private workspace");
     let project = directory.path().join("project");
     fs::create_dir(&project).expect("project directory");
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     open_native_session(&mut state, &project, Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let original = saved_sessions(&mut state, &space).remove(0);
@@ -4411,7 +4507,7 @@ fn closed_session_keeps_its_saved_identity_and_does_not_adopt_a_name_collision()
 #[case::oversize(&"a".repeat(257))]
 fn invalid_saved_session_title_leaves_existing_metadata_unchanged(#[case] title: &str) {
     let directory = assert_fs::TempDir::new().expect("private workspace");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let before = saved_sessions(&mut state, &space);
@@ -4438,7 +4534,7 @@ fn invalid_saved_session_title_leaves_existing_metadata_unchanged(#[case] title:
 #[case::edited(false)]
 fn generated_saved_title_preserves_a_newer_manual_edit(#[case] current: bool) {
     let directory = assert_fs::TempDir::new().expect("private workspace");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let original = saved_sessions(&mut state, &space).remove(0);
@@ -4479,7 +4575,7 @@ fn generated_saved_title_preserves_a_newer_manual_edit(#[case] current: bool) {
 #[rstest]
 fn failed_saved_title_commit_keeps_live_and_restarted_metadata_unchanged() {
     let directory = assert_fs::TempDir::new().expect("private workspace");
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let before = saved_sessions(&mut state, &space);
@@ -4520,7 +4616,7 @@ fn failed_saved_title_commit_keeps_live_and_restarted_metadata_unchanged() {
                 .as_ref()],
         )
         .expect("preserve committed database including WAL");
-    let mut state = native_state(restarted.path());
+    let mut state = metadata_state(restarted.path());
     let space = spaces_listing(&mut state).remove(0);
     let after = saved_sessions(&mut state, &space);
     assert_eq!(after[0]["identity"], before[0]["identity"]);
@@ -4576,16 +4672,16 @@ fn named_agent_start_creates_exactly_one_task_directly_on_its_issued_binding(
     });
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "named-task".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .expect("native state");
     let now = Instant::now();
@@ -4743,16 +4839,16 @@ fn native_agent_retry_reuses_saved_identity_and_user_title_after_launch_failure(
     );
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "retry-agent".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .unwrap();
     let space = spaces_listing(&mut state).remove(0);
@@ -4829,25 +4925,16 @@ fn native_agent_retry_reuses_saved_identity_and_user_title_after_launch_failure(
 #[cfg(unix)]
 fn finished_claude_terminal_fixture(
     directory: &Path,
-) -> Result<(PathBuf, fs::File), Box<dyn std::error::Error>> {
+) -> Result<(PathBuf, Arc<std::os::unix::net::UnixListener>), Box<dyn std::error::Error>> {
     let program = claude_terminal_fixture(directory)?;
-    let gate = directory.join("query-gate");
-    let status = Command::new("mkfifo").arg(&gate).status()?;
-    if !status.success() {
-        return Err("provider query FIFO was not created".into());
-    }
-    let gate = fs::OpenOptions::new().read(true).write(true).open(gate)?;
+    let gate = Arc::new(std::os::unix::net::UnixListener::bind(
+        directory.join("query-ready.sock"),
+    )?);
     // The first query waits for the real session ID, without waiting for an observer poll.
-    let script = fs::read_to_string(&program)?
-        .replace(
-            "    if source.exists():\n        observed",
-            "    if not source.exists():\n        with open(directory / 'query-gate', 'rb', buffering=0) as gate:\n            gate.read(1)\n    if source.exists():\n        observed",
-        )
-        .replace("'status': 'busy'", "'state': 'done'")
-        .replace(
-            "os.replace(temporary, path)\n",
-            "os.replace(temporary, path)\nwith open(directory / 'query-gate', 'wb', buffering=0) as gate:\n    gate.write(b'x')\n",
-        );
+    let script = fs::read_to_string(&program)?.replace(
+        "os.replace(temporary, path)\n",
+        "os.replace(temporary, path)\nimport socket\nwith socket.socket(socket.AF_UNIX) as ready:\n    ready.connect(str(directory / 'query-ready.sock'))\n",
+    );
     bootty_test_support::write_executable(&program, script)?;
     Ok((program, gate))
 }
@@ -4866,7 +4953,7 @@ fn wait_for_finished_native_agent(
     loop {
         fixture
             .state
-            .update_frame(frames::idle_frame(Instant::now()));
+            .update_frame(frames::idle_frame(fixture.clock.tick(&fixture.state)));
         if service.live_records().iter().any(|record| {
             record.target == fixture.parent
                 && record.observation.status == bootty_agents::TerminalAgentStatus::Finished
@@ -4883,12 +4970,13 @@ fn wait_for_finished_native_agent(
 
 #[cfg(unix)]
 struct NativeSpawnFixture {
+    clock: agent_clock::Clock,
     directory: assert_fs::TempDir,
     state: AppState,
     wakes: mpsc::Receiver<()>,
     parent: CommandTarget,
     other: bootty_mux::controller::SpaceId,
-    _query_gate: Option<fs::File>,
+    _query_gate: Option<Arc<std::os::unix::net::UnixListener>>,
 }
 
 #[cfg(unix)]
@@ -4930,6 +5018,27 @@ fn configure_pi_child(
 }
 
 #[cfg(unix)]
+fn native_spawn_backends(
+    directory: &Path,
+    finished: bool,
+    pi: bool,
+    runtime: &mut bootty_ui::commands::AgentRuntimeConfig,
+) -> Result<Arc<bootty_mux::provider::MuxBackendRegistry>, Box<dyn std::error::Error>> {
+    if finished {
+        return Ok(support::backends());
+    }
+    let account = directory.join("account");
+    fs::create_dir_all(&account)?;
+    fs::write(account.join("state"), "busy")?;
+    let fixture = orchestration_provider::Fixture::new(
+        directory,
+        pi.then(|| directory.join("pi-terminal.py")),
+    );
+    runtime.terminal_transport = fixture.transport();
+    Ok(fixture.backends()?)
+}
+
+#[cfg(unix)]
 fn native_spawn_fixture_with_pi(
     enabled: bool,
     finished: bool,
@@ -4940,12 +5049,15 @@ fn native_spawn_fixture_with_pi(
         let (program, gate) = finished_claude_terminal_fixture(directory.path())?;
         (program, Some(gate))
     } else {
-        (claude_terminal_fixture(directory.path())?, None)
+        let program = directory.path().join("claude-fixture.py");
+        bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n")?;
+        (program, None)
     };
     let mut config = test_config::config(
         directory.path().join("config.toml"),
         MultiplexerBackendConfig::Native,
     );
+    config.session.working_directory = Some(directory.path().to_path_buf());
     config.agents.allow_spawn = enabled;
     config.agents.codex.enabled = false;
     config.agents.pi.enabled = pi;
@@ -4981,16 +5093,20 @@ fn native_spawn_fixture_with_pi(
         .id();
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let clock = agent_clock::Clock::default();
+    let mut runtime = clock.runtime(events);
+    runtime.terminal_transport = terminal_provider::transport(finished, query_gate.clone());
+    let backends = native_spawn_backends(directory.path(), finished, pi, &mut runtime)?;
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "spawn-test".to_owned(),
-        support::backends(),
-        Arc::new(move || {
+        backends,
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(runtime),
     )?;
     let current = submit_command(
         &mut state,
@@ -5019,6 +5135,7 @@ fn native_spawn_fixture_with_pi(
     };
     let parent = serde_json::from_value(value["terminal"].clone())?;
     Ok(NativeSpawnFixture {
+        clock,
         directory,
         state,
         wakes,
@@ -5220,16 +5337,16 @@ fn saved_provider_history_bounds_actual_json_without_cutting_complete_metadata()
     );
     let (wake, wakes) = mpsc::channel();
     let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agents(
+    let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "history-bounds".to_owned(),
         support::backends(),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(events),
+        Some(agent_runtime(events)),
     )
     .expect("native history owner");
     let outcome = submit_command_from_caller(
@@ -5507,7 +5624,7 @@ fn accepted_activity_receipt(
 #[case(Caller::Luau)]
 fn activity_requires_an_internal_accepted_input_receipt(#[case] caller: Caller) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let before = saved_sessions(&mut state, &space);
@@ -5542,7 +5659,7 @@ fn accepted_terminal_input_records_durable_activity(
     #[case] arguments: Vec<String>,
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let before = saved_sessions(&mut state, &space).remove(0);
@@ -5586,7 +5703,7 @@ fn accepted_terminal_input_records_durable_activity(
 #[rstest]
 fn focus_empty_and_rejected_terminal_input_do_not_record_activity() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let before = saved_sessions(&mut state, &space);
@@ -5614,7 +5731,7 @@ fn focus_empty_and_rejected_terminal_input_do_not_record_activity() {
 #[rstest]
 fn activity_is_max_only_and_failed_persistence_preserves_the_previous_timestamp() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let saved = saved_sessions(&mut state, &space).remove(0);
@@ -5656,7 +5773,7 @@ fn activity_is_max_only_and_failed_persistence_preserves_the_previous_timestamp(
 #[case(i64::MAX)]
 fn invalid_activity_timestamp_is_refused(#[case] at: i64) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     open_native_session(&mut state, directory.path(), Instant::now());
     let space = spaces_listing(&mut state).remove(0);
     let before = saved_sessions(&mut state, &space);
@@ -5673,7 +5790,7 @@ fn invalid_activity_timestamp_is_refused(#[case] at: i64) {
 #[rstest]
 fn project_commands_register_empty_groups_without_creating_sessions_and_reject_old_bindings() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     assert!(matches!(
         submit_action(
             &mut state,
@@ -5735,7 +5852,7 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
     assert_eq!(value[0]["collapsed"], true);
     assert_eq!(state.mux().sessions().len(), 0);
     drop(state);
-    let mut reopened = native_state(directory.path());
+    let mut reopened = metadata_state(directory.path());
     assert!(matches!(
         submit_command(
             &mut reopened,
@@ -5778,7 +5895,7 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
 #[case(Caller::Socket)]
 fn add_project_requests_a_system_folder_chooser_and_registers_any_location(#[case] caller: Caller) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     let outcomes = state
         .app_command_sender(caller)
         .submit(
@@ -5831,7 +5948,7 @@ fn sidebar_navigation_skips_sessions_in_collapsed_projects(
     let second = directory.path().join("second");
     fs::create_dir(&first).unwrap();
     fs::create_dir(&second).unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = terminal_state(directory.path());
     open_native_session(&mut state, &first, Instant::now());
     let first_id = state.mux().selected_session().unwrap().to_owned();
     open_native_session(&mut state, &second, Instant::now());
@@ -5871,7 +5988,7 @@ fn close_surface_on_creation_preserves_the_underlying_workspace(
     #[values(Caller::Keybinding, Caller::BuiltinKeybinding, Caller::CommandPalette)] caller: Caller,
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = native_state(directory.path());
+    let mut state = metadata_state(directory.path());
     if has_session {
         open_native_session(&mut state, directory.path(), Instant::now());
     }

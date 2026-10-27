@@ -1,7 +1,7 @@
 //! Dictation over `OpenAI` Realtime transcription or on device, and voice mode's WebRTC media for
 //! a call the conversation's Codex session makes. Microphone and speaker stay in the native audio
 //! host.
-use super::{AudioHost, account::Auth, publish};
+use super::{AudioHost, VoiceContext, account::Auth};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_host::speech::SpeechEvent;
 use serde_json::{Value, json};
@@ -25,6 +25,7 @@ enum Sink {
 
 pub(super) struct Session {
     audio: AudioHost,
+    context: VoiceContext,
     sink: Sink,
     closed: bool,
     audio_bytes: usize,
@@ -60,28 +61,29 @@ impl Loudness {
 }
 
 impl Session {
-    pub fn dictation(auth: &Auth) -> Result<Self, String> {
+    pub fn dictation(auth: &Auth, context: &VoiceContext) -> Result<Self, String> {
         let socket = dictation_socket(auth)?;
-        Self::start(Sink::OpenAi(Box::new(socket)), "start_dictation")
+        Self::start(Sink::OpenAi(Box::new(socket)), "start_dictation", context)
     }
 
     #[cfg(target_os = "macos")]
-    pub fn on_device() -> Result<Self, String> {
+    pub fn on_device(context: &VoiceContext) -> Result<Self, String> {
         let recognition = super::on_device::Recognition::start()?;
-        Self::start(Sink::OnDevice(recognition), "start_dictation")
+        Self::start(Sink::OnDevice(recognition), "start_dictation", context)
     }
 
     /// Codex makes the voice call and answers this offer; Codex then listens, delegates to the
     /// conversation's agent and speaks its replies.
-    pub fn voice_call() -> Result<Self, String> {
-        Self::start(Sink::Call, "start_v3")
+    pub fn voice_call(context: &VoiceContext) -> Result<Self, String> {
+        Self::start(Sink::Call, "start_v3", context)
     }
 
-    fn start(sink: Sink, mode: &str) -> Result<Self, String> {
-        let mut audio = AudioHost::start()?;
+    fn start(sink: Sink, mode: &str, context: &VoiceContext) -> Result<Self, String> {
+        let mut audio = (context.audio_host)()?;
         audio.send(&json!({"type":mode}))?;
         Ok(Self {
             audio,
+            context: context.clone(),
             sink,
             closed: false,
             audio_bytes: 0,
@@ -101,7 +103,7 @@ impl Session {
         self.audio.send(&json!({"type":"stop"}))?;
         if self.voice() {
             self.closed = true;
-            return publish(&SpeechEvent::Stopped);
+            return (self.context.publish)(&SpeechEvent::Stopped);
         }
         if self.audio_bytes < 4800 {
             return Err(
@@ -166,7 +168,7 @@ impl Session {
         };
         while let Some(heard) = recognition.heard() {
             match heard {
-                Heard::Partial(text) => publish(&SpeechEvent::Partial { text })?,
+                Heard::Partial(text) => (self.context.publish)(&SpeechEvent::Partial { text })?,
                 Heard::Final(text) => return self.transcribed(&text),
                 Heard::Failed(message) => return Err(message),
             }
@@ -182,8 +184,8 @@ impl Session {
         if text.len() > 32_768 {
             return Err("The transcript exceeds its size limit".into());
         }
-        publish(&SpeechEvent::Final { text: text.into() })?;
-        publish(&SpeechEvent::Stopped)?;
+        (self.context.publish)(&SpeechEvent::Final { text: text.into() })?;
+        (self.context.publish)(&SpeechEvent::Stopped)?;
         self.closed = true;
         Ok(())
     }
@@ -205,7 +207,7 @@ impl Session {
                     }
                     Some("conversation.item.input_audio_transcription.delta") => {
                         if let Some(text) = event.get("delta").and_then(Value::as_str) {
-                            publish(&SpeechEvent::Partial { text: text.into() })?;
+                            (self.context.publish)(&SpeechEvent::Partial { text: text.into() })?;
                         }
                     }
                     Some(
@@ -244,7 +246,7 @@ impl Session {
                     .and_then(Value::as_str)
                     .filter(|sdp| sdp.len() <= 32_768)
                     .ok_or("Invalid audio host offer")?;
-                publish(&SpeechEvent::Offer { sdp: sdp.into() })
+                (self.context.publish)(&SpeechEvent::Offer { sdp: sdp.into() })
             }
             Some("pcm") if self.deadline.is_none() => {
                 if event.get("sample_rate").and_then(Value::as_u64) != Some(24_000)
@@ -267,7 +269,7 @@ impl Session {
                 }
                 self.audio_bytes = self.audio_bytes.saturating_add(bytes.len());
                 if let Some(rms) = self.loudness.add(&bytes) {
-                    publish(&SpeechEvent::Level { rms })?;
+                    (self.context.publish)(&SpeechEvent::Level { rms })?;
                 }
                 match &mut self.sink {
                     Sink::Call => Ok(()),
@@ -319,7 +321,9 @@ impl Session {
 
     fn media_state(&mut self, state: Option<&str>) -> Result<(), String> {
         match state {
-            Some("connected" | "recording" | "listening") => publish(&SpeechEvent::Listening),
+            Some("connected" | "recording" | "listening") => {
+                (self.context.publish)(&SpeechEvent::Listening)
+            }
             Some("failed") if self.voice() => {
                 Err("Voice connection failed. Check your network and try again.".into())
             }
@@ -328,7 +332,7 @@ impl Session {
             }
             Some("closed") if self.voice() => {
                 self.closed = true;
-                publish(&SpeechEvent::Closed)
+                (self.context.publish)(&SpeechEvent::Closed)
             }
             _ => Ok(()),
         }

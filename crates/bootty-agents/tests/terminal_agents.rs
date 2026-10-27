@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use std::fs;
 
 use bootty_agents::{
@@ -79,7 +81,10 @@ fn target(generation: u64) -> CommandTarget {
 
 fn launch() -> AgentLaunch {
     AgentLaunch {
-        program: "codex".to_owned(),
+        program: std::env::temp_dir()
+            .join("bootty-unobserved-provider-fixture")
+            .to_string_lossy()
+            .into_owned(),
         cwd: None,
         arguments: vec![
             "--model".to_owned(),
@@ -218,21 +223,59 @@ fn account_queries_publish_only_native_readiness(
     #[case] output: &str,
     #[case] authenticated: bool,
 ) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let program = directory.path().join("provider");
-    bootty_test_support::write_executable(
-        &program,
-        format!(
-            "#!/bin/sh\nprintf '%s' '{}'\nexit {}\n",
-            output.replace('\'', "'\\''"),
-            i32::from(!authenticated),
-        ),
-    )
-    .unwrap();
-    let result = bootty_agents::terminal_account_status(
+    let root = assert_fs::TempDir::new().unwrap();
+    let account = root.path().to_string_lossy().into_owned();
+    let captured_account = account.clone();
+    let response = output.as_bytes().to_vec();
+    let transport = bootty_agents::TerminalProviderTransport {
+        output: std::sync::Arc::new(move |command, _cancelled| {
+            assert_eq!(command.get_program(), "fixture-account-provider");
+            let account = command
+                .get_envs()
+                .find(|(name, _)| *name == provider.account_directory_variable())
+                .unwrap()
+                .1
+                .unwrap();
+            assert_eq!(account, std::ffi::OsStr::new(&captured_account));
+            let args = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                args,
+                if provider == AgentKind::Claude {
+                    vec!["auth", "status", "--json"]
+                } else {
+                    vec![
+                        "auth",
+                        "check",
+                        "--provider",
+                        "provider",
+                        "--json",
+                        "--no-refresh",
+                    ]
+                }
+            );
+            Ok(bootty_agents::TerminalQueryOutput {
+                successful: authenticated,
+                exit_code: Some(i32::from(!authenticated)),
+                stdout: response.clone(),
+                stderr: Vec::new(),
+            })
+        }),
+        observer_launch: std::sync::Arc::new(|_| {
+            panic!("account inspection must not start an observer")
+        }),
+        launch: std::sync::Arc::new(|_| {
+            panic!("account inspection must not open a provider stream")
+        }),
+    };
+    let result = bootty_agents::terminal_account_status_using(
         provider,
-        program.to_str().unwrap(),
-        Some("provider"),
+        "fixture-account-provider",
+        Some(&bootty_agents::PiAccountSelector::provider("provider")),
+        Some(&account),
+        &transport,
     )
     .unwrap();
     assert_eq!(

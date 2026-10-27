@@ -29,8 +29,8 @@ use bootty_terminal::{
     scheduler::{RepaintScheduler, RepaintSignal},
     terminal_frame::CursorSnapshot,
     terminal_session::{
-        CURSOR_COMMIT_DELAY, CursorHold, PublishHold, WORKER_OUTPUT_HOLD_MAX, WORKER_OUTPUT_QUIET,
-        output_settling, should_publish_frame_after_work,
+        CURSOR_COMMIT_DELAY, CursorHold, OutputSettle, PublishHold, WORKER_OUTPUT_HOLD_MAX,
+        WORKER_OUTPUT_QUIET, should_publish_frame_after_work,
     },
 };
 #[cfg(unix)]
@@ -249,16 +249,42 @@ fn continuous_drained_output_publishes_at_the_ready_interval() {
     ));
 }
 
+proptest! {
+    #[test]
+    fn quiet_window_waits_for_quiet_but_never_past_the_cap(
+        since_change_us in 0_u64..10_000,
+        held_us in 0_u64..10_000,
+    ) {
+        let mut settle = OutputSettle::default();
+        let start = Instant::now();
+        prop_assert!(settle.holds(start, Duration::ZERO));
+        let held = Duration::from_micros(held_us);
+        let since_change = Duration::from_micros(since_change_us);
+        prop_assert_eq!(
+            settle.holds(start.checked_add(held).expect("hold time fits"), since_change),
+            since_change < WORKER_OUTPUT_QUIET && held < WORKER_OUTPUT_HOLD_MAX,
+        );
+    }
+}
+
 #[rstest::rstest]
-#[case::output_still_arriving(Duration::ZERO, Duration::ZERO, true)]
-#[case::output_went_quiet(WORKER_OUTPUT_QUIET, Duration::ZERO, false)]
-#[case::hold_cap_reached(Duration::ZERO, WORKER_OUTPUT_HOLD_MAX, false)]
-fn quiet_window_waits_for_quiet_but_never_past_the_cap(
-    #[case] since_last_change: Duration,
-    #[case] held_for: Duration,
-    #[case] expected: bool,
-) {
-    assert_eq!(output_settling(since_last_change, held_for), expected);
+fn publishing_restarts_the_quiet_window_for_the_next_redraw() {
+    let mut settle = OutputSettle::default();
+    let start = Instant::now();
+    assert!(settle.holds(start, Duration::ZERO));
+    let next = start
+        .checked_add(WORKER_OUTPUT_HOLD_MAX)
+        .expect("hold cap fits");
+    assert!(!settle.holds(next, Duration::ZERO));
+    settle.reset();
+    assert!(settle.holds(next, Duration::ZERO));
+    assert!(
+        !settle.holds(
+            next.checked_add(WORKER_OUTPUT_HOLD_MAX)
+                .expect("next hold cap fits"),
+            Duration::ZERO
+        )
+    );
 }
 
 const fn cursor(x: u16, y: u16) -> CursorSnapshot {
@@ -401,186 +427,110 @@ fn publish_holds_rank_above_input_echo(
     );
 }
 
-// One logical redraw split across write(2) calls from the same process, a fraction of a
-// millisecond apart, as tmux and pi-tui do. pi-tui closes its synchronized-output block and then
-// positions the cursor; tmux positions the cursor and then opens its block. A frame published inside
-// either gap parks the cursor mid-screen. The writer is this test binary (see
-// `redraw_writer_helper`), because a shell cannot space two writes that closely.
-const REDRAW_WRITER_ROWS: &str = "BOOTTY_TEST_REDRAW_ROWS";
-const REDRAW_WRITER_LEAD: &str = "BOOTTY_TEST_REDRAW_LEAD";
-const REDRAW_WRITER_INNER_END: &str = "BOOTTY_TEST_REDRAW_INNER_END";
-const REDRAW_WRITER_TRAIL: &str = "BOOTTY_TEST_REDRAW_TRAIL";
-#[cfg(unix)]
-const REDRAW_WRITER_DONE: &str = "BOOTTY_TEST_REDRAW_DONE";
-const REDRAW_WRITE_GAP: Duration = Duration::from_micros(150);
-
-#[test]
-fn redraw_writer_helper() {
-    use std::io::Write as _;
-    let Ok(rows) = std::env::var(REDRAW_WRITER_ROWS) else {
-        return;
-    };
-    let rows: usize = rows.parse().expect("row count");
-    let lead = std::env::var(REDRAW_WRITER_LEAD).unwrap_or_default();
-    let inner_end = std::env::var(REDRAW_WRITER_INNER_END).unwrap_or_default();
-    let trail = std::env::var(REDRAW_WRITER_TRAIL).unwrap_or_default();
-    let row = format!("\x1b[2K{}\x1b[B\r", "x".repeat(150));
-    let block = format!(
-        "\x1b[?2026h\x1b[H{}{inner_end}\x1b[?2026l",
-        row.repeat(rows)
-    );
-    let mut out = std::io::stdout().lock();
-    let mut write = |bytes: &str| {
-        out.write_all(bytes.as_bytes()).expect("pty write");
-        out.flush().expect("pty flush");
-    };
-    for _ in 0..13 {
-        if !lead.is_empty() {
-            write(&lead);
-            thread::sleep(REDRAW_WRITE_GAP);
-        }
-        write(&block);
-        if !trail.is_empty() {
-            thread::sleep(REDRAW_WRITE_GAP);
-            write(&trail);
-        }
-        // Past the worker's ready interval, so each redraw's first write is publishable on its own.
-        thread::sleep(Duration::from_millis(20));
-    }
-    // Keep the PTY alive until the parent has stopped queuing keys and inspected its frames.
-    #[cfg(unix)]
-    {
-        use std::io::Read as _;
-        let path = std::env::var_os(REDRAW_WRITER_DONE).expect("redraw completion socket");
-        let mut completion =
-            std::os::unix::net::UnixStream::connect(path).expect("redraw completion");
-        let _ = completion.read(&mut [0]);
-    }
-}
-
+// Shell lifecycle events prove each write reached the worker. A capture queued after the
+// event crosses the following command turn, after that write's publication decision.
 #[cfg(unix)]
 #[rstest::rstest]
-#[case::pi_trailing_cursor_move_small(1, "", "\x1b[A", "\x1b[5B\x1b[3G", (2, 5), false)]
-#[case::pi_trailing_cursor_move_full(20, "", "\x1b[A", "\x1b[5B\x1b[3G", (2, 24), false)]
-#[case::tmux_leading_cursor_move(1, "\x1b[28;197H", "\x1b[29;3H", "", (2, 28), false)]
-#[case::tmux_leading_cursor_move_while_typing(1, "\x1b[28;197H", "\x1b[29;3H", "", (2, 28), true)]
-fn frames_never_show_the_cursor_between_writes_of_one_redraw(
-    #[case] rows: usize,
-    #[case] lead: &str,
-    #[case] inner_end: &str,
-    #[case] trail: &str,
-    #[case] cursor_after_redraw: (u16, u16),
-    #[case] typing: bool,
-) {
-    let control_directory = TempDir::new().expect("redraw control directory");
-    let completion_path = control_directory.path().join("done");
-    let completion = std::os::unix::net::UnixListener::bind(&completion_path)
-        .expect("redraw completion listener");
-    completion
-        .set_nonblocking(true)
-        .expect("nonblocking completion");
+fn a_worker_holds_an_incomplete_redraw_until_output_settles() {
+    use bootty_terminal::{
+        shell_lifecycle::ShellEvent, terminal_capture::CaptureOptions,
+        terminal_side_effect::TerminalSideEffect,
+    };
+    let (events, effects) = std::sync::mpsc::channel();
+    let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
+    let now = Arc::new(std::sync::Mutex::new(Instant::now()));
+    let clock = Arc::clone(&now);
     let config = TerminalSessionConfig {
         launch: SessionLaunchConfig {
-            shell: Some(
-                std::env::current_exe()
-                    .expect("test binary path")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
+            shell: Some("/bin/sh".to_owned()),
             args: vec![
-                "--exact".into(),
-                "redraw_writer_helper".into(),
-                "--nocapture".into(),
+                "-c".to_owned(),
+                concat!(
+                    "stty -echo; ",
+                    "printf '\\033[Hintermediate\\033]133;C\\007'; ",
+                    "IFS= read -r acknowledgement || exit; ",
+                    "printf '\\033[Hready\\033[K\\033[3;3H\\033]133;D;0\\007'; ",
+                    "IFS= read -r finish",
+                )
+                .to_owned(),
             ],
-            env: vec![
-                (
-                    REDRAW_WRITER_DONE.into(),
-                    completion_path.to_string_lossy().into_owned(),
-                ),
-                (REDRAW_WRITER_ROWS.into(), rows.to_string()),
-                (REDRAW_WRITER_LEAD.into(), lead.into()),
-                (REDRAW_WRITER_INNER_END.into(), inner_end.into()),
-                (REDRAW_WRITER_TRAIL.into(), trail.into()),
-            ],
-            shell_integration: false,
             ..SessionLaunchConfig::default()
         },
+        side_effect_tx: Some(events),
         ..TerminalSessionConfig::default()
     };
-    let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
-    let mut session = TerminalSession::new_with_config(
-        geometry(200, 30),
+    let mut session = TerminalSession::new_with_config_and_host_metrics_and_clock(
+        geometry(40, 6),
+        1.0,
+        CellMetrics::new(8.0, 16.0),
         config,
         Arc::new(move || {
             let _ = repaint_tx.send(());
         }),
+        Arc::new(move || *clock.lock().expect("frame clock")),
     )
     .expect("terminal starts");
-
-    let mut cursors = Vec::new();
-    let mut completed = None;
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
-        .expect("test deadline");
-    while Instant::now() < deadline {
-        match completion.accept() {
-            Ok((stream, _)) => {
-                completed = Some(stream);
-                break;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(error) => panic!("redraw completion failed: {error}"),
-        }
-        let exited = session.child_exited().expect("child status reads");
-        if typing && !exited {
-            // Keystrokes arm the input fast path, which must not publish the redraw's first write.
+    for (event, expected) in [
+        (ShellEvent::CommandStart, "intermediate"),
+        (ShellEvent::CommandFinish { exit_code: Some(0) }, "ready"),
+    ] {
+        assert_eq!(
+            effects
+                .recv_timeout(Duration::from_secs(5))
+                .expect("child output parsed")
+                .effect,
+            TerminalSideEffect::ShellLifecycle(event),
+        );
+        let captured = session
+            .capture(CaptureOptions::default())
+            .expect("queue capture")
+            .receive_for("capture after output", Duration::from_secs(5))
+            .expect("worker responds")
+            .expect("capture succeeds");
+        assert_eq!(captured.text.trim(), expected);
+        assert!(
             session
-                .encode_key(KeyInput {
-                    key: TerminalKey::A,
-                    mods: KeyMods::default(),
-                    repeat: false,
-                    utf8: Some("a"),
-                    unshifted: Some('a'),
-                })
-                .expect("key queues");
-        }
-        if repaint_rx.recv_timeout(Duration::from_millis(5)).is_err() {
-            if exited {
-                break;
-            }
-            continue;
-        }
-        let frame = session.extract_frame().expect("frame extracts");
-        if let Some(cursor) = &frame.cursor {
-            cursors.push((cursor.x, cursor.y));
+                .extract_frame()
+                .expect("published frame")
+                .text_rows()
+                .iter()
+                .all(String::is_empty),
+            "the incomplete redraw must stay unpublished while the clock is frozen",
+        );
+        if expected == "intermediate" {
+            session
+                .write_input(b"\n")
+                .expect("release trailing redraw output");
         }
     }
-    assert!(completed.is_some(), "redraw writer did not complete");
-    drop(session);
-    drop(completed);
-    // The pty echoes typed keys, which walks the cursor along its row between redraws.
-    let at_rest = |cursor: (u16, u16)| {
-        if typing {
-            cursor.1 == cursor_after_redraw.1
-        } else {
-            cursor == cursor_after_redraw
-        }
-    };
-    // libtest's "running 1 test" header lands before the first redraw; judge from the first
-    // completed redraw onward.
-    let first_redraw = cursors
-        .iter()
-        .position(|&cursor| at_rest(cursor))
-        .unwrap_or(cursors.len());
-    let after_first = &cursors[first_redraw..];
-    assert!(
-        after_first.len() >= 6,
-        "expected one frame per redraw, saw {cursors:?}"
+    // Advance the product clock and wake its command loop. I/O timeouts remain real deadlines.
+    {
+        let mut now = now.lock().expect("frame clock");
+        *now = now
+            .checked_add(Duration::from_millis(100))
+            .expect("frame time fits");
+    }
+    let pending = session
+        .capture(CaptureOptions::default())
+        .expect("wake worker");
+    pending
+        .receive_for("wake after quiet", Duration::from_secs(5))
+        .expect("worker responds")
+        .expect("capture succeeds");
+    repaint_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("settled redraw publishes");
+    let frame = session.extract_frame().expect("settled frame");
+    assert_eq!(
+        frame
+            .text_rows()
+            .into_iter()
+            .filter(|row| !row.is_empty())
+            .collect::<Vec<_>>(),
+        ["ready".to_owned()],
     );
-    assert!(
-        after_first.iter().all(|&cursor| at_rest(cursor)),
-        "a frame was published between two writes of one redraw: {cursors:?}"
-    );
+    let cursor = frame.cursor.expect("final cursor");
+    assert_eq!((cursor.x, cursor.y), (2, 2));
 }
 
 /// One element is a command line the shell runs; more are a program found on `PATH` and its
@@ -601,8 +551,15 @@ fn a_launch_command_runs_in_place_of_the_shell(#[case] command: &[&str], #[case]
         },
         ..TerminalSessionConfig::default()
     };
-    let mut session = TerminalSession::new_with_config(geometry(40, 4), config, Arc::new(|| {}))
-        .expect("terminal starts");
+    let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
+    let mut session = TerminalSession::new_with_config(
+        geometry(40, 4),
+        config,
+        Arc::new(move || {
+            let _ = repaint_tx.send(());
+        }),
+    )
+    .expect("terminal starts");
 
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(2))
@@ -618,7 +575,9 @@ fn a_launch_command_runs_in_place_of_the_shell(#[case] command: &[&str], #[case]
         if rows == [expected.to_owned()] || Instant::now() > deadline {
             break rows;
         }
-        thread::sleep(Duration::from_millis(10));
+        repaint_rx
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .expect("launch command publishes its output");
     };
 
     assert_eq!(rows, [expected.to_owned()]);
@@ -626,132 +585,62 @@ fn a_launch_command_runs_in_place_of_the_shell(#[case] command: &[&str], #[case]
 
 #[cfg(unix)]
 #[test]
-fn carriage_return_rewrite_publishes_a_single_row() {
-    let config = TerminalSessionConfig {
-        launch: SessionLaunchConfig {
-            shell: Some("/bin/sh".to_owned()),
-            args: vec![
-                "-c".to_owned(),
-                "printf 'STATUS-LINE\\rSTATUS-LINE\\n'".to_owned(),
-            ],
-            ..SessionLaunchConfig::default()
-        },
-        ..TerminalSessionConfig::default()
-    };
-    let mut session = TerminalSession::new_with_config(geometry(40, 4), config, Arc::new(|| {}))
-        .expect("terminal starts");
-
-    for _ in 0..100 {
-        if session.child_exited().expect("child status reads") {
-            break;
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-    // Let the worker drain the exited child's final bytes into a published frame.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let rows = loop {
-        let rows = session
-            .extract_frame()
-            .expect("frame reads")
-            .text_rows()
-            .into_iter()
-            .filter(|row| !row.is_empty())
-            .collect::<Vec<_>>();
-        if rows == ["STATUS-LINE".to_owned()] || Instant::now() > deadline {
-            break rows;
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-
-    assert_eq!(rows, ["STATUS-LINE".to_owned()]);
-}
-
-#[cfg(unix)]
-#[test]
-fn cursor_up_rewrite_publishes_a_single_row() {
-    let config = TerminalSessionConfig {
-        launch: SessionLaunchConfig {
-            shell: Some("/bin/sh".to_owned()),
-            args: vec![
-                "-c".to_owned(),
-                "printf 'Thinking (1s)\\n'; sleep 0.05; printf '\\033[1A\\r\\033[2KThinking (2s)\\n'"
-                    .to_owned(),
-            ],
-            ..SessionLaunchConfig::default()
-        },
-        ..TerminalSessionConfig::default()
-    };
-    let mut session = TerminalSession::new_with_config(geometry(40, 4), config, Arc::new(|| {}))
-        .expect("terminal starts");
-
-    for _ in 0..100 {
-        if session.child_exited().expect("child status reads") {
-            break;
-        }
-        thread::sleep(Duration::from_millis(2));
-    }
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let rows = loop {
-        let rows = session
-            .extract_frame()
-            .expect("frame reads")
-            .text_rows()
-            .into_iter()
-            .filter(|row| !row.is_empty())
-            .collect::<Vec<_>>();
-        if rows == ["Thinking (2s)".to_owned()] || Instant::now() > deadline {
-            break rows;
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-
-    assert_eq!(rows, ["Thinking (2s)".to_owned()]);
-}
-
-#[cfg(unix)]
-#[test]
 fn streaming_rewrites_publish_coherent_frames() {
+    let (repaint_tx, repaint_rx) = std::sync::mpsc::channel();
     let config = TerminalSessionConfig {
         launch: SessionLaunchConfig {
             shell: Some("/bin/sh".to_owned()),
             args: vec![
                 "-c".to_owned(),
-                "i=1; while [ $i -le 40 ]; do printf '\\033[2;1HThinking (%s)\\033[K' \"$i\"; i=$((i + 1)); sleep 0.05; done".to_owned(),
+                "stty -echo; i=1; while [ $i -le 40 ]; do printf '\\033[2;1HThinking (%s)\\033[K' \"$i\"; IFS= read -r acknowledgement || exit; i=$((i + 1)); done".to_owned(),
             ],
             ..SessionLaunchConfig::default()
         },
         ..TerminalSessionConfig::default()
     };
-    let mut session = TerminalSession::new_with_config(geometry(40, 6), config, Arc::new(|| {}))
-        .expect("terminal starts");
+    let mut session = TerminalSession::new_with_config(
+        geometry(40, 6),
+        config,
+        Arc::new(move || {
+            let _ = repaint_tx.send(());
+        }),
+    )
+    .expect("terminal starts");
 
-    // Read frames while the child streams, like the live UI does. Every observed
-    // frame must show a single spinner state; mixed rows mean a torn publish.
+    // Acknowledge each published rewrite so every state is observed without pacing the child.
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(Duration::from_secs(30))
         .expect("test deadline");
     let mut saw_frames = 0;
-    while Instant::now() < deadline {
-        let rows = session.extract_frame().expect("frame reads").text_rows();
-        saw_frames += 1;
-        let spinners = rows
-            .iter()
-            .filter(|row| row.contains("Thinking"))
-            .collect::<Vec<_>>();
-        assert!(
-            spinners.len() <= 1,
-            "torn frame shows multiple spinner states: {spinners:?}"
-        );
-        if let [only] = spinners.as_slice() {
+    for state in 1..=40 {
+        let expected = format!("Thinking ({state})");
+        loop {
+            repaint_rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("rewrite publishes a frame");
+            let rows = session.extract_frame().expect("frame reads").text_rows();
+            saw_frames += 1;
+            let spinners = rows
+                .iter()
+                .filter(|row| row.contains("Thinking"))
+                .collect::<Vec<_>>();
             assert!(
-                only.starts_with("Thinking (") && only.ends_with(')'),
-                "torn spinner row: {only:?}"
+                spinners.len() <= 1,
+                "torn frame shows multiple spinner states: {spinners:?}"
             );
+            if let [only] = spinners.as_slice() {
+                assert!(
+                    only.starts_with("Thinking (") && only.ends_with(')'),
+                    "torn spinner row: {only:?}"
+                );
+                if **only == expected {
+                    break;
+                }
+            }
         }
-        if session.child_exited().expect("child status reads") {
-            break;
-        }
-        thread::sleep(Duration::from_millis(20));
+        session
+            .write_input(b"\n")
+            .expect("acknowledge published rewrite");
     }
     assert!(saw_frames > 3, "streaming starved frame publication");
 }

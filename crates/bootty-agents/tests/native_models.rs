@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/model_peer.rs"]
+pub mod model_peer;
+#[path = "support/native_peer.rs"]
+pub mod native_peer;
 pub mod support;
 use std::{fs, path::Path};
 
@@ -10,127 +14,13 @@ use proptest::prelude::*;
 use rstest::rstest;
 use serde_json::{Value, json};
 
-/// One fake for Codex, Claude and Pi, picked by the arguments each is launched with.
-const PROVIDER: &str = r"#!/usr/bin/env python3
-import json,os,sys
-pi='--mode' in sys.argv
-claude='--input-format' in sys.argv
-identity=sys.argv[sys.argv.index('--resume' if '--resume' in sys.argv else '--session-id')+1] if claude else None
-model={'provider':'configured','id':'available','name':'Available','reasoning':True,'thinkingLevelMap':{'xhigh':None,'max':'high'}}
-effort=sys.argv[sys.argv.index('--effort')+1] if '--effort' in sys.argv else 'medium'
-goal=None
-fast=any(json.loads(sys.argv[i+1]).get('fastMode',False) for i,arg in enumerate(sys.argv[:-1]) if arg=='--settings')
-if claude:
- with open('argv.json','w') as output: json.dump(sys.argv[1:],output)
-def emit(value): print(json.dumps(value),flush=True)
-def finish(): emit({'type':'result','subtype':'success','session_id':identity,'uuid':'result-uuid','is_error':False,'terminal_reason':'completed','result':'Done','errors':[]})
-def reply(value,data):
- if claude: emit({'type':'control_response','response':{'subtype':'success','request_id':value['request_id'],'response':data}})
- elif pi: emit({'id':value['id'],'type':'response','command':value['type'],'success':True,'data':data})
- else: emit({'id':value['id'],'result':data})
-for line in sys.stdin:
- value=json.loads(line)
- if claude and value['type']=='user':
-  with open('prompt.json','w') as output: json.dump({'params':value['message'],'model':model,'effort':effort,'fast':fast},output)
-  emit({'type':'system','subtype':'init','session_id':identity,'cwd':os.getcwd()})
-  emit(dict(value,isReplay=True))
-  # Observed from Claude 2.1.299: a plan arrives as an ExitPlanMode approval.
-  if value['message']['content']=='plan': emit({'type':'control_request','request_id':'plan-id','request':{'subtype':'can_use_tool','tool_name':'ExitPlanMode','tool_use_id':'plan-tool','input':{'plan':'1. Write it'},'requires_user_interaction':True}})
-  elif value['message']['content']=='finish': finish()
-  continue
- if claude and value['type']=='control_response':
-  finish()
-  continue
- method=value['request']['subtype'] if claude else value.get('type') if pi else value.get('method')
- params=value['request'] if claude else value if pi else value.get('params',{})
- if method=='initialized': continue
- if method=='initialize':
-  catalog={'models':[{'value':'available','resolvedModel':'claude-test','displayName':'Available','supportsFastMode':True,'supportsEffort':True,'supportedEffortLevels':['medium','high','max']}]}
-  if claude and os.path.exists('claude-catalog.json'):
-   with open('claude-catalog.json') as source: catalog=json.load(source)
-  reply(value,catalog if claude else {})
- elif method in ['thread/start','thread/resume']:
-  with open('thread-started','w') as output: output.write(method)
-  reply(value,{'thread':{'id':'thread','turns':[]}})
- elif method=='skills/list': reply(value,{'data':[{'cwd':os.getcwd(),'skills':[{'name':'project-skill','path':os.path.join(os.getcwd(),'SKILL.md'),'enabled':True,'description':'Project work','scope':'project'},{'name':'disabled','path':'/disabled','enabled':False}]}]})
- elif method=='app/installed':
-  apps=[{'id':'mail','runtimeName':'Mail','enabled':True,'callable':True},{'id':'disabled-app','enabled':False,'callable':False},{'id':'uncallable','enabled':True,'callable':False}]
-  if os.path.exists('apps.json'):
-   with open('apps.json') as source: apps=json.load(source)
-  reply(value,{'apps':apps})
- elif method=='app/read': reply(value,{'apps':[{'id':'mail','name':'Mail','description':'Read and manage mail'}]})
- elif method=='app/list':
-  if os.path.exists('apps.json'):
-   with open('apps.json') as source: apps=json.load(source)
-  else: apps=[{'id':'mail','name':'Mail','isAccessible':True,'isEnabled':True},{'id':'disabled-app','name':'Disabled','isAccessible':True,'isEnabled':False},{'id':'inaccessible','name':'Private','isAccessible':False,'isEnabled':True}]
-  reply(value,{'data':apps,'nextCursor':None})
- elif method=='plugin/installed': reply(value,{'marketplaces':[{'name':'market','plugins':[{'id':'review@market','name':'review','installed':True,'enabled':True,'interface':{'displayName':'Code review','shortDescription':'Review changes'}},{'id':'disabled-plugin','installed':True,'enabled':False},{'id':'uninstalled','installed':False,'enabled':True},{'id':'admin-blocked','installed':True,'enabled':True,'availability':'DISABLED_BY_ADMIN'}]}]})
- elif method=='collaborationMode/list': reply(value,{'data':[{'name':'Plan','mode':'plan'}]})
- elif method=='experimentalFeature/list': reply(value,{'data':[{'name':'goals','enabled':True}]})
- elif method=='thread/goal/get': reply(value,{'goal':goal})
- elif method=='thread/goal/set':
-  assert params['threadId']=='thread' and 'origin' not in params
-  goal={**(goal or {'tokensUsed':1200,'tokenBudget':50000,'timeUsedSeconds':90}),**{key:params[key] for key in ['objective','status'] if key in params}}
-  reply(value,{'goal':goal})
- elif method=='thread/goal/clear':
-  assert params=={'threadId':'thread'}
-  goal=None
-  reply(value,{'cleared':True})
-
- elif method=='get_commands': reply(value,{'commands':[{'name':'review','description':'Review work','source':'extension'},{'name':'skill:project-skill','source':'skill','description':'Project work','sourceInfo':{'path':os.path.join(os.getcwd(),'SKILL.md'),'scope':'project'}}]+([] if os.path.exists('no-plan') else [{'name':'__bootty_plan','source':'extension'}])})
- elif method=='model/list':
-  advertised={'id':'catalog-id','model':'available','displayName':'Available','supportedReasoningEfforts':[{'reasoningEffort':'medium'},{'reasoningEffort':'high'}],'defaultReasoningEffort':'medium','isDefault':True,'serviceTiers':[{'id':'fast'}]}
-  if os.path.exists('speed-capabilities.json'):
-   del advertised['serviceTiers']
-   with open('speed-capabilities.json') as source: advertised.update(json.load(source))
-  reply(value,{'data':[advertised],'nextCursor':None})
- elif method=='config/read':
-  settings={'model':'available','model_reasoning_effort':'high'}
-  if os.path.exists('codex-config.json'):
-   with open('codex-config.json') as source: settings.update(json.load(source))
-  reply(value,{'config':settings})
- elif method=='get_available_models': reply(value,{'models':[model]})
- elif method=='get_state': reply(value,{'sessionId':'thread','sessionFile':os.path.join(os.getcwd(),'session.jsonl'),'model':model,'thinkingLevel':effort,'isStreaming':False,'isCompacting':False})
- elif method=='get_messages': reply(value,{'messages':[]})
- elif method=='set_model':
-  if claude: assert params['model']==model['id']
-  else: assert params['provider']==model['provider'] and params['modelId']==model['id']
-  model['contextWindow']=32768
-  reply(value,model)
- elif method=='set_thinking_level': effort=params['level'];reply(value,{})
- elif method=='apply_flag_settings':
-  effort=params['settings'].get('effortLevel',effort)
-  fast=params['settings'].get('fastMode',fast)
-  reply(value,{})
- elif method=='interrupt': reply(value,{})
- elif method=='set_permission_mode':
-  with open('modes','a') as output: output.write(params['mode']+'\n')
-  reply(value,{'mode':params['mode']})
- elif method=='get_settings':
-  settings={'effective':{'effortLevel':effort,'fastMode':fast}}
-  if os.path.exists('claude-settings.json'):
-   with open('claude-settings.json') as source: settings=json.load(source)
-  reply(value,settings)
- elif pi and method=='prompt' and params['message'].startswith('/__bootty_plan '):
-  with open('modes','a') as output: output.write(params['message']+'\n')
-  reply(value,{'disposition':'handled'})
- elif method in ['turn/start','turn/steer','prompt']:
-  if method=='turn/start':
-   emit({'method':'turn/started','params':{'threadId':'thread','turn':{'id':'turn','status':'inProgress','items':[]}}})
-   emit({'method':'item/completed','params':{'threadId':'thread','turnId':'turn','item':{'id':'provider-user','type':'userMessage','content':params['input']}}})
-  with open('prompt.json','w') as output: json.dump({'params':params,'model':model,'effort':effort,'fast':fast},output)
-  if pi: reply(value,{'disposition':'handled'})
-  else: reply(value,{'turn':{'id':'turn'}})
- else: raise Exception(method)
-";
-
-fn config(root: &Path, provider: AgentKind) -> std::io::Result<NativeSessionConfig> {
+fn config(root: &Path, provider: AgentKind) -> NativeSessionConfig {
     let script = root.join("provider.py");
-    bootty_test_support::write_executable(&script, PROVIDER)?;
+
     let mut config = NativeSessionConfig::new(provider, root);
     config.program = script.to_string_lossy().into_owned();
     config.account_directory = Some(root.join("account").to_string_lossy().into_owned());
-    Ok(config)
+    config
 }
 
 #[rstest]
@@ -138,9 +28,14 @@ fn config(root: &Path, provider: AgentKind) -> std::io::Result<NativeSessionConf
 #[case(true)]
 fn codex_fast_mode_is_sent_with_the_turn(#[case] fast: bool) {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path(), AgentKind::Codex).unwrap();
+    let mut config = config(root.path(), AgentKind::Codex);
     config.fast_mode = fast;
-    let session = bootty_agents::NativeAgentSession::spawn(config).unwrap();
+    let session = bootty_agents::NativeAgentSession::spawn_with(
+        config,
+        native_peer::clock(),
+        &model_peer::launcher(),
+    )
+    .unwrap();
     session.send_prompt("hello").unwrap();
     let wire: Value =
         serde_json::from_slice(&fs::read(root.path().join("prompt.json")).unwrap()).unwrap();
@@ -157,9 +52,11 @@ fn codex_fast_mode_is_sent_with_the_turn(#[case] fast: bool) {
 #[case(AgentKind::Claude)]
 fn discovery_opens_no_conversation_and_submits_no_turn(#[case] provider: AgentKind) {
     let root = TempDir::new().unwrap();
-    let options =
-        bootty_agents::NativeAgentSession::discover_models(config(root.path(), provider).unwrap())
-            .unwrap();
+    let options = bootty_agents::NativeAgentSession::discover_models_with(
+        config(root.path(), provider),
+        &model_peer::launcher(),
+    )
+    .unwrap();
     assert_eq!(options.len(), 1);
     assert!(!root.path().join("thread-started").exists());
     assert!(!root.path().join("prompt.json").exists());
@@ -192,9 +89,11 @@ fn discovery_reports_the_captured_provider_policy_without_starting_a_conversatio
         serde_json::to_vec(&settings).unwrap(),
     )
     .unwrap();
-    let mut config = config(root.path(), provider).unwrap();
+    let mut config = config(root.path(), provider);
     config.permissions = bootty_agents::NativePermissionMode::Supervised;
-    let catalog = bootty_agents::NativeAgentSession::discover_catalog(config).unwrap();
+    let catalog =
+        bootty_agents::NativeAgentSession::discover_catalog_with(config, &model_peer::launcher())
+            .unwrap();
     assert_eq!(catalog.permissions, expected);
     assert_eq!(catalog.models.len(), 1);
     assert!(!root.path().join("thread-started").exists());
@@ -214,8 +113,8 @@ fn committed_selection_drives_the_next_provider_prompt(
 ) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
-    let mut launch = config(root.path(), provider).unwrap();
+    let service = open(&path).unwrap();
+    let mut launch = config(root.path(), provider);
     launch.fast_mode = provider != AgentKind::Pi && !fast;
     let record = service.create("binding", "Session", launch).unwrap();
     let models = service.models(&record.target()).unwrap();
@@ -278,7 +177,7 @@ fn committed_selection_drives_the_next_provider_prompt(
         );
     }
     service.shutdown().unwrap();
-    let reopened = NativeAgentService::open(&path).unwrap();
+    let reopened = open(&path).unwrap();
     let saved: Value = support::stored_catalog(&path).unwrap();
     assert_eq!(saved["records"][0]["config"]["model"], model);
     drop(reopened);
@@ -290,8 +189,8 @@ proptest! {
     fn unadvertised_selection_leaves_durable_configuration_unchanged(selector in "unavailable-[a-z]{1,8}", invalid_model in any::<bool>()) {
         let root = TempDir::new().unwrap();
         let path = root.path().join("native.json");
-        let service = NativeAgentService::open(&path).unwrap();
-        let record = service.create("binding", "Session", config(root.path(), AgentKind::Codex).unwrap()).unwrap();
+        let service = open(&path).unwrap();
+        let record = service.create("binding", "Session", config(root.path(), AgentKind::Codex)).unwrap();
         let before: Value = support::stored_catalog(&path).unwrap();
         let selection = NativeModelSelection {
                 plan_mode: None,
@@ -310,13 +209,9 @@ fast_mode: None,
 fn failed_configuration_write_keeps_the_prior_prompt_settings() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create(
-            "binding",
-            "Session",
-            config(root.path(), AgentKind::Codex).unwrap(),
-        )
+        .create("binding", "Session", config(root.path(), AgentKind::Codex))
         .unwrap();
     support::break_catalog(&path).unwrap();
     assert!(
@@ -353,8 +248,8 @@ fn favorites_persist_per_account_without_changing_prompt_configuration(
 ) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
-    let config = config(root.path(), provider).unwrap();
+    let service = open(&path).unwrap();
+    let config = config(root.path(), provider);
     let record = service
         .create("binding", "Session", config.clone())
         .unwrap();
@@ -368,8 +263,12 @@ fn favorites_persist_per_account_without_changing_prompt_configuration(
     assert!(!root.path().join("prompt.json").exists());
     service.shutdown().unwrap();
     drop(service);
-    let reopened = NativeAgentService::open(&path).unwrap();
-    let mut models = bootty_agents::NativeAgentSession::discover_models(config.clone()).unwrap();
+    let reopened = open(&path).unwrap();
+    let mut models = bootty_agents::NativeAgentSession::discover_models_with(
+        config.clone(),
+        &model_peer::launcher(),
+    )
+    .unwrap();
     reopened.mark_model_favorites(&config, &mut models);
     assert!(models[0].is_favorite);
     let mut other_account = config.clone();
@@ -410,8 +309,8 @@ fn favorites_persist_per_account_without_changing_prompt_configuration(
 fn a_failed_favorite_commit_does_not_publish_the_star() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
-    let config = config(root.path(), AgentKind::Codex).unwrap();
+    let service = open(&path).unwrap();
+    let config = config(root.path(), AgentKind::Codex);
     let record = service
         .create("binding", "Session", config.clone())
         .unwrap();
@@ -433,8 +332,9 @@ fn a_failed_favorite_commit_does_not_publish_the_star() {
 #[case(AgentKind::Pi)]
 fn completion_discovery_reads_the_project_catalog_without_a_turn(#[case] provider: AgentKind) {
     let root = TempDir::new().unwrap();
-    let catalog = bootty_agents::NativeAgentSession::discover_completions(
-        config(root.path(), provider).unwrap(),
+    let catalog = bootty_agents::NativeAgentSession::discover_completions_with(
+        config(root.path(), provider),
+        &model_peer::launcher(),
     )
     .unwrap();
     let skill = catalog
@@ -490,9 +390,9 @@ fn advertise_claude_skill(root: &Path) -> std::io::Result<()> {
 fn advertised_skill_chips_use_the_provider_protocol(#[case] provider: AgentKind) {
     let root = TempDir::new().unwrap();
     advertise_claude_skill(root.path()).unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("binding", "Session", config(root.path(), provider).unwrap())
+        .create("binding", "Session", config(root.path(), provider))
         .unwrap();
     service
         .prompt(
@@ -560,9 +460,9 @@ fn advertised_skill_chips_use_the_provider_protocol(#[case] provider: AgentKind)
 fn skill_text_in_attached_reference_context_does_not_execute(#[case] provider: AgentKind) {
     let root = TempDir::new().unwrap();
     advertise_claude_skill(root.path()).unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("binding", "Session", config(root.path(), provider).unwrap())
+        .create("binding", "Session", config(root.path(), provider))
         .unwrap();
     let authored = "Read this quote";
     let message = format!("{authored}\n\nQuoted content: $project-skill");
@@ -589,10 +489,10 @@ fn skill_text_in_attached_reference_context_does_not_execute(#[case] provider: A
 #[rstest]
 fn claude_plan_mode_follows_the_choice_and_ends_when_the_plan_is_approved() {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path(), AgentKind::Claude).unwrap();
+    let mut config = config(root.path(), AgentKind::Claude);
     config.plan_mode = Some(true);
     config.model = Some("available".to_owned());
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service.create("binding", "Session", config).unwrap();
     let target = record.target();
     let argv: Vec<String> =
@@ -602,6 +502,10 @@ fn claude_plan_mode_follows_the_choice_and_ends_when_the_plan_is_approved() {
             .any(|pair| pair == ["--permission-mode", "plan"])
     );
     let modes = || fs::read_to_string(root.path().join("modes")).unwrap_or_default();
+    let (changed, changes) = std::sync::mpsc::channel();
+    service.set_change_handler(std::sync::Arc::new(move || {
+        let _ = changed.send(());
+    }));
     let wait = |ready: &dyn Fn(&bootty_agents::NativeSessionRecord) -> bool| {
         let deadline = std::time::Instant::now()
             .checked_add(std::time::Duration::from_secs(5))
@@ -612,7 +516,9 @@ fn claude_plan_mode_follows_the_choice_and_ends_when_the_plan_is_approved() {
             .any(|record| record.target() == target && ready(record))
         {
             assert!(std::time::Instant::now() < deadline, "timed out");
-            std::thread::sleep(std::time::Duration::from_millis(5));
+            changes
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .unwrap();
         }
     };
 
@@ -661,9 +567,9 @@ fn pi_plan_mode_switches_bootty_extension_before_the_turn(#[case] extension: boo
     if !extension {
         fs::write(root.path().join("no-plan"), "").unwrap();
     }
-    let mut config = config(root.path(), AgentKind::Pi).unwrap();
+    let mut config = config(root.path(), AgentKind::Pi);
     config.model = Some("configured/available".to_owned());
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let target = service
         .create("binding", "Session", config)
         .unwrap()
@@ -716,10 +622,14 @@ fn record_request(service: &NativeAgentService, target: &bootty_control::Command
 #[rstest]
 fn claude_discovery_keeps_launch_efforts_and_live_controls_offer_only_supported_efforts() {
     let root = TempDir::new().unwrap();
-    let config = config(root.path(), AgentKind::Claude).unwrap();
-    let launch = bootty_agents::NativeAgentSession::discover_models(config.clone()).unwrap();
+    let config = config(root.path(), AgentKind::Claude);
+    let launch = bootty_agents::NativeAgentSession::discover_models_with(
+        config.clone(),
+        &model_peer::launcher(),
+    )
+    .unwrap();
     assert!(launch[0].reasoning_efforts.contains(&"max".to_owned()));
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service.create("binding", "Session", config).unwrap();
     assert!(
         !service.models(&record.target()).unwrap()[0]
@@ -748,8 +658,8 @@ fn claude_discovery_keeps_launch_efforts_and_live_controls_offer_only_supported_
 #[case("max")]
 fn claude_creation_effort_reaches_the_first_prompt(#[case] effort: &str) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
-    let mut config = config(root.path(), AgentKind::Claude).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
+    let mut config = config(root.path(), AgentKind::Claude);
     config.model = Some("available".into());
     config.reasoning_effort = Some(effort.into());
     let record = service.create("binding", "Session", config).unwrap();
@@ -764,8 +674,9 @@ fn claude_creation_effort_reaches_the_first_prompt(#[case] effort: &str) {
 #[rstest]
 fn codex_catalog_resolves_configured_effort_before_starting_a_conversation() {
     let root = TempDir::new().unwrap();
-    let options = bootty_agents::NativeAgentSession::discover_models(
-        config(root.path(), AgentKind::Codex).unwrap(),
+    let options = bootty_agents::NativeAgentSession::discover_models_with(
+        config(root.path(), AgentKind::Codex),
+        &model_peer::launcher(),
     )
     .unwrap();
     assert!(options[0].is_default);
@@ -782,7 +693,7 @@ fn claude_catalog_resolves_model_and_account_effort_without_a_placeholder(
     #[case] expected: Option<&str>,
 ) {
     let root = TempDir::new().unwrap();
-    let config = config(root.path(), AgentKind::Claude).unwrap();
+    let config = config(root.path(), AgentKind::Claude);
     fs::write(root.path().join("claude-catalog.json"), serde_json::to_vec(&json!({"models":[
         {"value":"default","resolvedModel":"claude-opus-5-5","displayName":"Default (recommended)"},
         {"value":"opus","resolvedModel":"claude-opus-5-5","displayName":"Opus","description":"Opus 5.5 · Best for everyday tasks","supportsEffort":true,"supportedEffortLevels":["high","xhigh"]}
@@ -795,7 +706,9 @@ fn claude_catalog_resolves_model_and_account_effort_without_a_placeholder(
         .unwrap(),
     )
     .unwrap();
-    let models = bootty_agents::NativeAgentSession::discover_models(config).unwrap();
+    let models =
+        bootty_agents::NativeAgentSession::discover_models_with(config, &model_peer::launcher())
+            .unwrap();
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, "opus");
     assert_eq!(models[0].display_name, "Opus 5.5");
@@ -810,8 +723,12 @@ fn provider_references_use_the_advertised_account_catalog() {
         NativeAgentSession, NativeCompletionKind, NativePrompt, NativeProviderMention,
     };
     let root = TempDir::new().unwrap();
-    let session =
-        NativeAgentSession::spawn(config(root.path(), AgentKind::Codex).unwrap()).unwrap();
+    let session = NativeAgentSession::spawn_with(
+        config(root.path(), AgentKind::Codex),
+        native_peer::clock(),
+        &model_peer::launcher(),
+    )
+    .unwrap();
     let catalog = session.completions().unwrap();
     let options: Vec<_> = catalog
         .options
@@ -867,8 +784,12 @@ fn a_disabled_app_cannot_be_submitted_using_an_old_chip() {
         NativeAgentSession, NativeCompletionKind, NativePrompt, NativeProviderMention,
     };
     let root = TempDir::new().unwrap();
-    let session =
-        NativeAgentSession::spawn(config(root.path(), AgentKind::Codex).unwrap()).unwrap();
+    let session = NativeAgentSession::spawn_with(
+        config(root.path(), AgentKind::Codex),
+        native_peer::clock(),
+        &model_peer::launcher(),
+    )
+    .unwrap();
     let option = session
         .completions()
         .unwrap()
@@ -898,12 +819,12 @@ fn a_disabled_app_cannot_be_submitted_using_an_old_chip() {
 fn queued_provider_references_restore_as_typed_mentions() {
     use bootty_agents::{NativeCompletionKind, NativeProviderMention};
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("store.json")).unwrap();
+    let service = open(root.path().join("store.json")).unwrap();
     let record = service
         .create(
             "binding",
             "Mention queue",
-            config(root.path(), AgentKind::Codex).unwrap(),
+            config(root.path(), AgentKind::Codex),
         )
         .unwrap();
     let target = record.target();
@@ -948,13 +869,9 @@ fn queued_provider_references_restore_as_typed_mentions() {
 fn plan_mode_is_persisted_and_sent_as_a_provider_collaboration_mode(#[case] plan: bool) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("store.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create(
-            "binding",
-            "Planning",
-            config(root.path(), AgentKind::Codex).unwrap(),
-        )
+        .create("binding", "Planning", config(root.path(), AgentKind::Codex))
         .unwrap();
     let target = record.target();
     let selection = NativeModelSelection {
@@ -980,13 +897,9 @@ fn plan_mode_is_persisted_and_sent_as_a_provider_collaboration_mode(#[case] plan
 fn implementing_a_plan_runs_its_turn_outside_plan_mode() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("store.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create(
-            "binding",
-            "Planning",
-            config(root.path(), AgentKind::Codex).unwrap(),
-        )
+        .create("binding", "Planning", config(root.path(), AgentKind::Codex))
         .unwrap();
     let target = record.target();
     let selection = NativeModelSelection {
@@ -1014,9 +927,12 @@ fn implementing_a_plan_runs_its_turn_outside_plan_mode() {
 #[rstest]
 fn user_goal_controls_update_and_clear_the_provider_goal_without_sending_a_turn() {
     let root = TempDir::new().unwrap();
-    let session =
-        bootty_agents::NativeAgentSession::spawn(config(root.path(), AgentKind::Codex).unwrap())
-            .unwrap();
+    let session = bootty_agents::NativeAgentSession::spawn_with(
+        config(root.path(), AgentKind::Codex),
+        native_peer::clock(),
+        &model_peer::launcher(),
+    )
+    .unwrap();
     session.set_goal("Improve the composer").unwrap();
     assert_eq!(
         session.completions().unwrap().goal.as_deref(),
@@ -1082,12 +998,12 @@ fn speed_controls_follow_the_captured_models_advertised_capabilities(
         )
         .unwrap();
     }
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
         .create(
             "binding",
             "Speed capabilities",
-            config(root.path(), provider).unwrap(),
+            config(root.path(), provider),
         )
         .unwrap();
     let catalog = service.models(&record.target()).unwrap();
@@ -1106,4 +1022,8 @@ fn speed_controls_follow_the_captured_models_advertised_capabilities(
     );
     assert_eq!(service.sessions()[0].config.fast_mode, expected);
     service.shutdown().unwrap();
+}
+
+fn open(path: impl Into<std::path::PathBuf>) -> Result<NativeAgentService, String> {
+    NativeAgentService::open_with(path, native_peer::clock(), model_peer::launcher())
 }

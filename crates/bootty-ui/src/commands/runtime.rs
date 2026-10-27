@@ -302,6 +302,26 @@ fn publish_creation_receipt(
     }
 }
 
+/// Host-owned agent events, monotonic time, and native provider transport.
+pub struct AgentRuntimeConfig {
+    pub events: ControlEventSender,
+    pub clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    pub launcher: bootty_agents::NativeLauncher,
+    pub terminal_transport: bootty_agents::TerminalProviderTransport,
+}
+
+impl AgentRuntimeConfig {
+    #[must_use]
+    pub fn new(events: ControlEventSender) -> Self {
+        Self {
+            events,
+            clock: Arc::new(Instant::now),
+            launcher: Arc::new(bootty_agents::NativeChild::spawn),
+            terminal_transport: bootty_agents::TerminalProviderTransport::default(),
+        }
+    }
+}
+
 pub struct CommandRuntime {
     instance_handle: String,
     instance_generation: u64,
@@ -314,6 +334,7 @@ pub struct CommandRuntime {
     terminal_agents: Option<Arc<TerminalAgentService>>,
     provider_updates: provider_updates::ProviderUpdates,
     native_agents: Option<Arc<NativeAgentService>>,
+    native_launcher: bootty_agents::NativeLauncher,
     native_agent_error: Option<String>,
     native_panes: HashMap<String, (SpaceId, CommandTarget)>,
     terminal_agent_error: Option<String>,
@@ -354,9 +375,15 @@ impl CommandRuntime {
 
     pub(crate) fn new_with_agents(
         repaint: RepaintHandle,
-        events: ControlEventSender,
+        services: AgentRuntimeConfig,
         agent_state: &std::path::Path,
     ) -> Self {
+        let AgentRuntimeConfig {
+            events,
+            clock,
+            launcher,
+            terminal_transport,
+        } = services;
         let (sender, receiver) = app_command_channel(64, repaint.clone());
         let scope_index = Arc::new(AgentScopeIndex::default());
         let nested_commands: Arc<dyn AgentCommandExecutor> = Arc::new(AppCommandAgentExecutor {
@@ -369,16 +396,23 @@ impl CommandRuntime {
                 events.clone(),
                 scope_index.clone(),
             )
-            .persisted_at(agent_state),
+            .persisted_at_with_clock(agent_state, Arc::clone(&clock)),
         );
-        let (terminals, terminal_error) =
-            match TerminalAgentService::open(agent_state.with_extension("terminals.json")) {
-                Ok(service) => (Some(Arc::new(service)), None),
-                Err(mut error) => {
-                    error.truncate(error.floor_char_boundary(4096));
-                    (None, Some(error))
-                }
-            };
+        let (terminals, terminal_error) = match TerminalAgentService::open_with_clock(
+            agent_state.with_extension("terminals.json"),
+            Arc::clone(&clock),
+        ) {
+            Ok(service) => (
+                Some(Arc::new(
+                    service.with_provider_transport(terminal_transport),
+                )),
+                None,
+            ),
+            Err(mut error) => {
+                error.truncate(error.floor_char_boundary(4096));
+                (None, Some(error))
+            }
+        };
         if let Some(terminals) = &terminals {
             terminals.set_change_handler(repaint.clone());
         }
@@ -389,9 +423,14 @@ impl CommandRuntime {
             Some(scope_index),
             Some(events),
         );
+        runtime.native_launcher = Arc::clone(&launcher);
         runtime.terminal_agents.clone_from(&terminals);
         runtime.terminal_agent_error = terminal_error;
-        match NativeAgentService::open(agent_state.with_extension("conversations.json")) {
+        match NativeAgentService::open_with(
+            agent_state.with_extension("conversations.json"),
+            clock,
+            launcher,
+        ) {
             Ok(service) => {
                 service.set_change_handler(repaint);
                 let service = Arc::new(service);
@@ -461,6 +500,7 @@ impl CommandRuntime {
             terminal_agents: None,
             provider_updates: provider_updates::ProviderUpdates::default(),
             native_agents: None,
+            native_launcher: Arc::new(bootty_agents::NativeChild::spawn),
             native_agent_error: None,
             native_panes: HashMap::new(),
             terminal_agent_error: None,

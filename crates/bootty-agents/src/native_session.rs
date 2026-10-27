@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::{ChildStdin, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         Arc, Mutex, MutexGuard, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -13,12 +13,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    AgentKind, AgentLaunch, NativeAgentRequest, NativeSessionSnapshot, NativeSessionStatus,
+    AgentKind, AgentLaunch, NativeAgentRequest, NativeChild, NativeChildControl, NativeLaunch,
+    NativeLauncher, NativeSessionSnapshot, NativeSessionStatus,
     native_protocol::{NativeTurnOutcome, field, string},
 };
 
@@ -420,8 +420,8 @@ impl NativeSessionConfig {
 pub struct NativeAgentSession {
     _provider_use: Option<crate::ProviderUse>,
     pub(crate) config: NativeSessionConfig,
-    child: Arc<Mutex<ProcessTreeChild>>,
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    child: Arc<Mutex<Box<dyn NativeChildControl>>>,
+    stdin: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     pub(crate) snapshot: Arc<Mutex<NativeSessionSnapshot>>,
     pending: PendingReplies,
     next_request: Arc<AtomicU64>,
@@ -449,16 +449,21 @@ impl NativeAgentSession {
     /// # Errors
     /// Returns provider launch, handshake, resume or protocol errors after reaping the child.
     pub fn spawn(config: NativeSessionConfig) -> Result<Self, String> {
-        let session = Self::start_with_clock(config, Arc::new(Instant::now))?;
-        session.initialize()?;
-        Ok(session)
+        let launcher: crate::NativeLauncher = std::sync::Arc::new(crate::NativeChild::spawn);
+        Self::spawn_with(config, Arc::new(Instant::now), &launcher)
     }
 
-    pub(crate) fn start_with_clock(
+    /// Start and initialize a native provider with injected time and stdio ownership.
+    /// # Errors
+    /// Returns launch, handshake, resume or protocol errors after closing the peer.
+    pub fn spawn_with(
         config: NativeSessionConfig,
         clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+        launcher: &NativeLauncher,
     ) -> Result<Self, String> {
-        Self::start_with_tools(config, clock, None, None)
+        let session = Self::start_with_tools(config, clock, None, None, launcher)?;
+        session.initialize()?;
+        Ok(session)
     }
 
     pub(crate) fn start_with_tools(
@@ -466,6 +471,7 @@ impl NativeAgentSession {
         clock: Arc<dyn Fn() -> Instant + Send + Sync>,
         tools: Option<Arc<crate::ToolBridge>>,
         attachment_directory: Option<&Path>,
+        launcher: &NativeLauncher,
     ) -> Result<Self, String> {
         let provider_use = if config.remote.is_none() {
             crate::ProviderUse::acquire(&config.program)?
@@ -473,24 +479,15 @@ impl NativeAgentSession {
             None
         };
         let claude = claude_protocol(&config)?;
-        let (mut child, launch_resources) =
-            spawn_native_child(&config, tools.as_deref(), attachment_directory)?;
-        let stdin = child
-            .child_mut()
-            .stdin
-            .take()
-            .ok_or("Agent stdin was not opened")?;
-        let stdout = child
-            .child_mut()
-            .stdout
-            .take()
-            .ok_or("Agent stdout was not opened")?;
-        let stderr = child
-            .child_mut()
-            .stderr
-            .take()
-            .ok_or("Agent stderr was not opened")?;
-        let child = Arc::new(Mutex::new(child));
+        let (peer, launch_resources) =
+            spawn_native_child(&config, tools.as_deref(), attachment_directory, launcher)?;
+        let NativeChild {
+            stdin,
+            stdout,
+            stderr,
+            control,
+        } = peer;
+        let child = Arc::new(Mutex::new(control));
         let stdin = Arc::new(Mutex::new(Some(stdin)));
         let next_request = Arc::new(AtomicU64::new(1));
         let cancel_requested = Arc::new(AtomicBool::new(false));
@@ -1726,7 +1723,7 @@ fn join_workers(workers: &Mutex<Vec<NativeWorker>>) -> Result<(), String> {
 fn start_stderr_worker(
     reader: impl Read + Send + 'static,
     tail: Arc<Mutex<Vec<u8>>>,
-    child: &Mutex<ProcessTreeChild>,
+    child: &Mutex<Box<dyn NativeChildControl>>,
 ) -> Result<NativeWorker, String> {
     spawn_worker("native-agent-stderr", move || drain_stderr(reader, &tail))
         .inspect_err(|_| terminate(child))
@@ -1787,7 +1784,7 @@ fn route_reply(value: &Value, pending: &PendingReplies, provider: AgentKind) {
     }
 }
 
-fn terminate(child: &Mutex<ProcessTreeChild>) {
+fn terminate(child: &Mutex<Box<dyn NativeChildControl>>) {
     let mut child = lock(child);
     let _ = child.terminate();
     let _ = child.wait();
@@ -1815,7 +1812,7 @@ struct ProtocolReader {
     snapshot: Arc<Mutex<NativeSessionSnapshot>>,
     pending: PendingReplies,
     change_handler: ChangePublisher,
-    input: Arc<Mutex<Option<ChildStdin>>>,
+    input: Arc<Mutex<Option<Box<dyn Write + Send>>>>,
     next: Arc<AtomicU64>,
     closing: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
@@ -2004,7 +2001,7 @@ impl ProtocolReader {
     fn finish(
         &self,
         fault: Option<String>,
-        child: &Mutex<ProcessTreeChild>,
+        child: &Mutex<Box<dyn NativeChildControl>>,
         tools: Option<&crate::ToolBridge>,
         remote: bool,
         tail: &Mutex<Vec<u8>>,
@@ -2026,7 +2023,7 @@ impl ProtocolReader {
         let error = fault.unwrap_or_else(|| {
             format!(
                 "Agent process ended ({}): {}",
-                status.map_or_else(|error| error.to_string(), |status| status.to_string()),
+                status.unwrap_or_else(|error| error),
                 String::from_utf8_lossy(&lock(tail))
             )
         });
@@ -2679,7 +2676,7 @@ fn validate_answers(parameters: &Value, response: &Value) -> Result<(), String> 
 }
 
 fn send_rpc(
-    input: &Mutex<Option<ChildStdin>>,
+    input: &Mutex<Option<Box<dyn Write + Send>>>,
     pending: &PendingReplies,
     next: &AtomicU64,
     closing: &AtomicBool,
@@ -2693,7 +2690,7 @@ fn send_rpc(
 }
 
 fn begin_rpc(
-    input: &Mutex<Option<ChildStdin>>,
+    input: &Mutex<Option<Box<dyn Write + Send>>>,
     pending: &PendingReplies,
     next: &AtomicU64,
     closing: &AtomicBool,
@@ -2813,7 +2810,7 @@ fn wait_for_reply(
 }
 
 fn write_frame(
-    input: &Mutex<Option<ChildStdin>>,
+    input: &Mutex<Option<Box<dyn Write + Send>>>,
     closing: &AtomicBool,
     value: &Value,
 ) -> Result<(), String> {
@@ -2821,7 +2818,7 @@ fn write_frame(
 }
 
 fn write_frame_with_limit(
-    input: &Mutex<Option<ChildStdin>>,
+    input: &Mutex<Option<Box<dyn Write + Send>>>,
     closing: &AtomicBool,
     value: &Value,
     limit: usize,
@@ -2876,7 +2873,8 @@ fn spawn_native_child(
     config: &NativeSessionConfig,
     tools: Option<&crate::ToolBridge>,
     attachment_directory: Option<&std::path::Path>,
-) -> Result<(ProcessTreeChild, NativeLaunchResources), String> {
+    launcher: &NativeLauncher,
+) -> Result<(NativeChild, NativeLaunchResources), String> {
     if tools.is_some_and(|tools| {
         tools.lease().scope().provider != config.provider
             || tools.lease().terminal_target().is_none()
@@ -2897,20 +2895,22 @@ fn spawn_native_child(
             None,
         )
     };
-    let mut command = native_command(config, &tool_arguments, attachment_directory)?;
-    ProcessTreeChild::spawn_with_console_window(&mut command, ConsoleWindowBehavior::Suppress)
-        .map(|child| {
-            (
-                child,
-                NativeLaunchResources {
-                    _remote_tools: remote_tools,
-                },
-            )
-        })
-        .map_err(|error| format!("Cannot start {}: {error}", config.provider))
+    launcher(&NativeLaunch {
+        config,
+        tool_arguments: &tool_arguments,
+        attachment_directory,
+    })
+    .map(|child| {
+        (
+            child,
+            NativeLaunchResources {
+                _remote_tools: remote_tools,
+            },
+        )
+    })
 }
 
-fn native_command(
+pub fn native_command(
     config: &NativeSessionConfig,
     tool_arguments: &[String],
     attachment_directory: Option<&std::path::Path>,

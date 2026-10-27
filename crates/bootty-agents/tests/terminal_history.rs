@@ -1,14 +1,34 @@
+#![cfg(test)]
 use std::{
     fs,
     path::{Path, PathBuf},
     time::{Duration, UNIX_EPOCH},
 };
 
-use bootty_agents::{AgentKind, TerminalHistoryQuery, terminal_provider_history};
+use bootty_agents::{AgentKind, TerminalHistoryQuery};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
 use serde_json::{Value, json};
+
+#[cfg(unix)]
+#[path = "support/terminal_transport.rs"]
+mod terminal_transport;
+#[cfg(unix)]
+use terminal_transport::{Fixture, providers};
+
+fn terminal_provider_history(
+    query: &TerminalHistoryQuery<'_>,
+) -> Result<Vec<bootty_agents::TerminalHistoryEntry>, String> {
+    #[cfg(unix)]
+    {
+        bootty_agents::terminal_provider_history_using(query, &providers().transport())
+    }
+    #[cfg(not(unix))]
+    {
+        bootty_agents::terminal_provider_history(query)
+    }
+}
 
 type FixtureResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -173,7 +193,10 @@ fn existing_project_aliases_match_without_rewriting_provider_metadata(
     if provider == AgentKind::Codex {
         let pages =
             [json!({"data":[{"id":"saved-id","cwd":stored,"ephemeral":false}],"nextCursor":null})];
-        executable = program(&directory, &codex_script(directory.path(), &pages).unwrap()).unwrap();
+        executable = program(
+            &directory,
+            &codex_fixture(directory.path(), &pages).unwrap(),
+        );
         request.program = &executable;
     } else {
         let record = if provider == AgentKind::Claude {
@@ -422,39 +445,24 @@ proptest! {
 }
 
 #[cfg(unix)]
-fn quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+fn program(directory: &assert_fs::TempDir, fixture: &Fixture) -> String {
+    providers().register(&directory.path().join("provider"), fixture.clone())
 }
 
 #[cfg(unix)]
-fn program(directory: &assert_fs::TempDir, script: &str) -> FixtureResult<String> {
-    let path = directory.path().join("codex");
-    bootty_test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n"))?;
-    Ok(path
-        .to_str()
-        .ok_or("Fixture program path is not UTF-8")?
-        .to_owned())
-}
-
-#[cfg(unix)]
-fn codex_script(account: &Path, pages: &[Value]) -> FixtureResult<String> {
-    use std::fmt::Write as _;
-    let mut script = format!(
-        "[ \"$CODEX_HOME\" = {} ] || exit 9\n[ \"$*\" = 'app-server --listen stdio://' ] || exit 9\nIFS= read -r initialize\nprintf '%s\\n' '{{\"id\":1,\"result\":{{}}}}'\nIFS= read -r initialized\n",
-        quoted(
-            account
-                .to_str()
-                .ok_or("Fixture account path is not UTF-8")?
-        )
-    );
-    for (index, page) in pages.iter().enumerate() {
-        write!(
-            script,
-            "IFS= read -r request\ncase \"$request\" in *'\"method\":\"thread/list\"'*'\"useStateDbOnly\":true'*) ;; *) exit 9 ;; esac\nprintf '%s\\n' {}\n",
-            quoted(&json!({"id":index.saturating_add(2),"result":page}).to_string())
-        )?;
-    }
-    Ok(script)
+fn codex_fixture(account: &Path, pages: &[Value]) -> FixtureResult<Fixture> {
+    let mut fixture = Fixture::output(Vec::new());
+    fixture.codex = true;
+    fixture.pages = Some(pages.to_vec());
+    fixture.arguments = Some("app-server --listen stdio://".to_owned());
+    fixture.environment = Some((
+        "CODEX_HOME".to_owned(),
+        account
+            .to_str()
+            .ok_or("Fixture account path is not UTF-8")?
+            .to_owned(),
+    ));
+    Ok(fixture)
 }
 
 #[cfg(unix)]
@@ -469,7 +477,10 @@ fn codex_public_history_pages_retain_thread_id_and_title_unnamed_threads_by_prev
         json!({"data":[{"id":"thread-two","cwd":cwd,"createdAt":5,"updatedAt":15,"ephemeral":false,"preview":"Fix the\n  turn   rail"}],"nextCursor":"last-page"}),
         json!({"data":[{"id":"thread-three","cwd":cwd,"createdAt":1,"updatedAt":2,"ephemeral":false}],"nextCursor":null}),
     ];
-    let program = program(&directory, &codex_script(directory.path(), &pages).unwrap()).unwrap();
+    let program = program(
+        &directory,
+        &codex_fixture(directory.path(), &pages).unwrap(),
+    );
     let mut request = query(AgentKind::Codex, directory.path(), Some(&cwd));
     request.program = &program;
     let entries = terminal_provider_history(&request).unwrap();
@@ -501,7 +512,10 @@ fn older_pages_hold_only_sessions_updated_before_the_cursor(#[case] provider: Ag
             json!({"data":[thread("newest", 30), thread("newer", 20)],"nextCursor":"older"}),
             json!({"data":[thread("oldest", 10)],"nextCursor":null}),
         ];
-        executable = program(&directory, &codex_script(directory.path(), &pages).unwrap()).unwrap();
+        executable = program(
+            &directory,
+            &codex_fixture(directory.path(), &pages).unwrap(),
+        );
         request.program = &executable;
     } else {
         for (id, modified) in [("newest", 30), ("newer", 20), ("oldest", 10)] {
@@ -539,9 +553,8 @@ fn codex_invalid_or_ambiguous_history_fails_closed(#[case] page: Value) {
     let page: Value = serde_json::from_str(&page).unwrap();
     let program = program(
         &directory,
-        &codex_script(directory.path(), &[page]).unwrap(),
-    )
-    .unwrap();
+        &codex_fixture(directory.path(), &[page]).unwrap(),
+    );
     let mut request = query(AgentKind::Codex, directory.path(), Some(&cwd));
     request.program = &program;
     assert!(terminal_provider_history(&request).is_err());
@@ -552,14 +565,15 @@ fn codex_invalid_or_ambiguous_history_fails_closed(#[case] page: Value) {
 fn codex_malformed_history_reaps_the_owned_process_and_redacts_provider_errors() {
     let directory = assert_fs::TempDir::new().unwrap();
     let pid_file = directory.path().join("provider.pid");
-    let script = format!(
-        "printf '%s' \"$$\" > {}\nprintf '%s\\n' '{{malformed secret response}}'\nexec /bin/cat",
-        quoted(pid_file.to_str().unwrap())
-    );
-    let program = program(&directory, &script).unwrap();
+    let script = r#"printf '%s' "$$" > "$CODEX_HOME/provider.pid"
+printf '%s\n' '{malformed secret response}'
+exec /bin/cat"#;
+    let path = directory.path().join("real-provider");
+    bootty_test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+    let program = path.to_str().unwrap().to_owned();
     let mut request = query(AgentKind::Codex, directory.path(), None);
     request.program = &program;
-    let error = terminal_provider_history(&request).unwrap_err();
+    let error = bootty_agents::terminal_provider_history(&request).unwrap_err();
     assert!(!error.contains("secret"));
     let pid = fs::read_to_string(pid_file).unwrap();
     assert!(

@@ -1,10 +1,9 @@
+#![cfg(test)]
 #![cfg(unix)]
 
 use std::fs;
 
-use bootty_agents::{
-    AgentKind, TerminalAgentService, terminal_account_status_in, terminal_provider_status,
-};
+use bootty_agents::{AgentKind, TerminalAgentService};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -12,51 +11,72 @@ use serde_json::{Value, json};
 
 const ACCOUNT_DIRECTORY: &str = "/selected account/with spaces";
 
-fn executable(directory: &assert_fs::TempDir, script: &str) -> std::io::Result<String> {
-    let path = directory.path().join("provider");
-    bootty_test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n"))?;
-    path.to_str().map(str::to_owned).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "fixture provider path is not UTF-8",
-        )
-    })
+#[path = "support/terminal_transport.rs"]
+mod terminal_transport;
+use terminal_transport::{Fixture, providers};
+
+fn executable(directory: &assert_fs::TempDir, fixture: &Fixture) -> String {
+    providers().register(&directory.path().join("provider"), fixture.clone())
 }
 
-fn quoted(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\\''"))
+fn service(path: std::path::PathBuf) -> TerminalAgentService {
+    TerminalAgentService::open(path)
+        .unwrap()
+        .with_provider_transport(providers().transport())
 }
 
-fn provider_script(provider: AgentKind, response: &Value, exit: i32) -> String {
-    let scope = match provider {
-        AgentKind::Claude => {
-            "[ \"$CLAUDE_CONFIG_DIR\" = '/selected account/with spaces' ] || exit 9\n[ \"$*\" = 'auth status --json' ] || exit 9"
-        }
-        AgentKind::Pi => {
-            "[ \"$PI_CODING_AGENT_DIR\" = '/selected account/with spaces' ] || exit 9\n[ \"$*\" = 'auth check --provider openai-codex --json --no-refresh' ] || exit 9"
-        }
-        AgentKind::Codex => {
-            r#"[ "$CODEX_HOME" = '/selected account/with spaces' ] || exit 9
-[ "$*" = 'app-server --listen stdio://' ] || exit 9
-IFS= read -r initialize
-case "$initialize" in *'"method":"initialize"'*) ;; *) exit 9 ;; esac
-printf '%s\n' '{"id":1,"result":{}}'
-IFS= read -r initialized
-case "$initialized" in *'"method":"initialized"'*) ;; *) exit 9 ;; esac
-IFS= read -r account
-case "$account" in *'"method":"account/read"'*'"refreshToken":false'*) ;; *) exit 9 ;; esac
-printf '%s\n' '{"method":"account/updated","params":{"accessToken":"discarded-notification"}}'"#
-        }
+fn terminal_account_status_in(
+    provider: AgentKind,
+    program: &str,
+    provider_id: Option<&str>,
+    directory: Option<&str>,
+) -> Result<bootty_agents::TerminalAccountStatus, String> {
+    let selector = provider_id.map(bootty_agents::PiAccountSelector::provider);
+    bootty_agents::terminal_account_status_using(
+        provider,
+        program,
+        selector.as_ref(),
+        directory,
+        &providers().transport(),
+    )
+}
+
+fn terminal_provider_status(
+    provider: AgentKind,
+    program: &str,
+    directory: Option<&str>,
+    provider_id: Option<&str>,
+) -> bootty_agents::TerminalProviderStatus {
+    let selector = provider_id.map(bootty_agents::PiAccountSelector::provider);
+    bootty_agents::terminal_provider_status_using(
+        provider,
+        program,
+        directory,
+        selector.as_ref(),
+        &providers().transport(),
+    )
+}
+
+fn provider_fixture(provider: AgentKind, response: &Value, exit: i32) -> Fixture {
+    let (arguments, variable) = match provider {
+        AgentKind::Claude => ("auth status --json", "CLAUDE_CONFIG_DIR"),
+        AgentKind::Pi => (
+            "auth check --provider openai-codex --json --no-refresh",
+            "PI_CODING_AGENT_DIR",
+        ),
+        AgentKind::Codex => ("app-server --listen stdio://", "CODEX_HOME"),
     };
     let response = if provider == AgentKind::Codex {
         json!({"id":2,"result":response})
     } else {
         response.clone()
     };
-    format!(
-        "if [ \"$*\" = '--version' ]; then printf '%s\\n' 'test-provider 1'; exit 0; fi\n{scope}\nprintf '%s\\n' {}\nexit {exit}",
-        quoted(&response.to_string())
-    )
+    let mut fixture = Fixture::output(format!("{response}\n"));
+    fixture.arguments = Some(arguments.to_owned());
+    fixture.environment = Some((variable.to_owned(), ACCOUNT_DIRECTORY.to_owned()));
+    fixture.exit = exit;
+    fixture.codex = provider == AgentKind::Codex;
+    fixture
 }
 
 #[rstest]
@@ -75,7 +95,7 @@ fn provider_checks_use_exact_scope_and_only_supported_account_metadata(
     #[case] subscription: Option<&str>,
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let program = executable(&directory, &provider_script(provider, &response, exit)).unwrap();
+    let program = executable(&directory, &provider_fixture(provider, &response, exit));
     let status = terminal_provider_status(
         provider,
         &program,
@@ -108,7 +128,7 @@ fn signed_out_is_distinct_from_unavailable_or_unverified(
     #[case] authenticated: Option<bool>,
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let program = executable(&directory, &provider_script(provider, &response, exit)).unwrap();
+    let program = executable(&directory, &provider_fixture(provider, &response, exit));
     let status = terminal_provider_status(
         provider,
         &program,
@@ -124,12 +144,12 @@ fn signed_out_is_distinct_from_unavailable_or_unverified(
 }
 
 #[rstest]
-#[case("printf '%s' '{bad secret-response'")]
-#[case("printf '%s' '{\"id\":1,\"error\":{\"message\":\"secret-response\"}}'")]
-#[case("exit 1")]
+#[case("{bad secret-response")]
+#[case("{\"id\":1,\"error\":{\"message\":\"secret-response\"}}\n")]
+#[case("")]
 fn codex_transport_errors_do_not_publish_raw_response(#[case] script: &str) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let program = executable(&directory, script).unwrap();
+    let program = executable(&directory, &Fixture::output(script));
     let error = terminal_account_status_in(AgentKind::Codex, &program, None, None).unwrap_err();
     assert!(!error.contains("secret-response"));
 }
@@ -140,9 +160,8 @@ fn account_response_and_label_bounds_preserve_readiness_without_unsafe_labels() 
     let response = json!({"loggedIn":true,"authMethod":"claude.ai","email":"x".repeat(257),"subscriptionType":"max\nsecret"});
     let program = executable(
         &directory,
-        &provider_script(AgentKind::Claude, &response, 0),
-    )
-    .unwrap();
+        &provider_fixture(AgentKind::Claude, &response, 0),
+    );
     let status =
         terminal_account_status_in(AgentKind::Claude, &program, None, Some(ACCOUNT_DIRECTORY))
             .unwrap();
@@ -152,9 +171,8 @@ fn account_response_and_label_bounds_preserve_readiness_without_unsafe_labels() 
     let response = json!({"loggedIn":true,"unused":"x".repeat(64 * 1024)});
     let program = executable(
         &directory,
-        &provider_script(AgentKind::Claude, &response, 0),
-    )
-    .unwrap();
+        &provider_fixture(AgentKind::Claude, &response, 0),
+    );
     assert!(
         terminal_account_status_in(AgentKind::Claude, &program, None, Some(ACCOUNT_DIRECTORY))
             .is_err()
@@ -186,13 +204,13 @@ fn pi_selected_account_defaults_and_explicit_provider_stay_in_scope(
     };
     let arguments = format!("auth check --provider {selected}{model} --json --no-refresh");
     let response = json!({"status":"ready","provider":reported_provider,"authType":"oauth"});
-    let script = format!(
-        "[ \"$PI_CODING_AGENT_DIR\" = {} ] || exit 9\n[ \"$*\" = {} ] || exit 9\nprintf '%s\\n' {}",
-        quoted(account_directory),
-        quoted(&arguments),
-        quoted(&response.to_string())
-    );
-    let program = executable(&directory, &script).unwrap();
+    let mut script = Fixture::output(response.to_string());
+    script.environment = Some((
+        "PI_CODING_AGENT_DIR".to_owned(),
+        account_directory.to_owned(),
+    ));
+    script.arguments = Some(arguments);
+    let program = executable(&directory, &script);
     let status =
         terminal_account_status_in(AgentKind::Pi, &program, explicit, Some(account_directory));
     assert_eq!(status.is_ok(), ready);
@@ -212,9 +230,10 @@ fn pi_explicit_provider_does_not_read_or_require_default_settings() {
     .unwrap();
     let program = executable(
         &directory,
-        "printf '%s' '{\"status\":\"ready\",\"provider\":\"openai-codex\",\"authType\":\"oauth\"}'",
-    )
-    .unwrap();
+        &Fixture::output(
+            "{\"status\":\"ready\",\"provider\":\"openai-codex\",\"authType\":\"oauth\"}",
+        ),
+    );
     let account_directory = directory.path().to_str().unwrap();
     let status = terminal_account_status_in(
         AgentKind::Pi,
@@ -241,7 +260,8 @@ fn pi_explicit_provider_does_not_read_or_require_default_settings() {
 fn pi_defaults_use_provider_environment_and_home() {
     // Each subprocess owns its environment; no unsafe process-global environment mutation.
     if let Ok(program) = std::env::var("BOOTTY_PI_STATUS_TEST_PROGRAM") {
-        let status = terminal_account_status_in(AgentKind::Pi, &program, None, None).unwrap();
+        let status =
+            bootty_agents::terminal_account_status_in(AgentKind::Pi, &program, None, None).unwrap();
         assert_eq!(status.authenticated, Some(true));
         assert!(status.detail.unwrap().contains("selected-provider"));
         return;
@@ -260,12 +280,18 @@ fn pi_defaults_use_provider_environment_and_home() {
                 .to_string(),
         )
         .unwrap();
-        let account_directory = account.to_str().unwrap();
-        let script = format!(
-            "[ \"$PI_CODING_AGENT_DIR\" = {} ] || exit 9\n[ \"$*\" = 'auth check --provider selected-provider --model selected-model --json --no-refresh' ] || exit 9\nprintf '%s' '{{\"status\":\"ready\",\"provider\":\"selected-provider\",\"authType\":\"oauth\"}}'",
-            quoted(account_directory)
-        );
-        let program = executable(&directory, &script).unwrap();
+        fs::write(
+            directory.path().join("expected-account"),
+            format!("{}\n", account.display()),
+        )
+        .unwrap();
+        let script = r#"IFS= read -r expected < "${0%/*}/expected-account"
+[ "$PI_CODING_AGENT_DIR" = "$expected" ] || exit 9
+[ "$*" = 'auth check --provider selected-provider --model selected-model --json --no-refresh' ] || exit 9
+printf '%s' '{"status":"ready","provider":"selected-provider","authType":"oauth"}'"#;
+        let path = directory.path().join("real-provider");
+        bootty_test_support::write_executable(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        let program = path.to_str().unwrap().to_owned();
         let mut child = std::process::Command::new(std::env::current_exe().unwrap());
         child
             .args([
@@ -304,10 +330,11 @@ fn pi_default_cache_never_adopts_a_different_account_directory() {
     }
     let program = executable(
         &directory,
-        "printf '%s' '{\"status\":\"ready\",\"provider\":\"first-provider\",\"authType\":\"oauth\"}'",
-    )
-    .unwrap();
-    let service = TerminalAgentService::open(directory.path().join("catalog.json")).unwrap();
+        &Fixture::output(
+            "{\"status\":\"ready\",\"provider\":\"first-provider\",\"authType\":\"oauth\"}",
+        ),
+    );
+    let service = service(directory.path().join("catalog.json"));
     let status = service.inspect_provider(AgentKind::Pi, &program, first.to_str(), None);
     assert_eq!(status.authenticated, Some(true));
     assert!(
@@ -333,10 +360,9 @@ proptest! {
     #[test]
     fn cached_status_never_crosses_account_or_model_provider_scope(other in "[a-z]{1,20}") {
         let directory = assert_fs::TempDir::new().unwrap();
-        let service = TerminalAgentService::open(directory.path().join("catalog.json")).unwrap();
+        let service = service(directory.path().join("catalog.json"));
         let response = json!({"status":"ready","provider":"openai-codex","authType":"oauth"});
-        let program = executable(&directory, &provider_script(AgentKind::Pi, &response, 0))
-            .map_err(|error| TestCaseError::fail(error.to_string()))?;
+        let program = executable(&directory, &provider_fixture(AgentKind::Pi, &response, 0));
         service.inspect_provider(AgentKind::Pi, &program, Some(ACCOUNT_DIRECTORY), Some("openai-codex"));
         prop_assert!(service.provider_status(AgentKind::Pi, &program, Some(ACCOUNT_DIRECTORY), Some("openai-codex")).is_some());
         prop_assert!(service.provider_status(AgentKind::Pi, &program, Some(&other), Some("openai-codex")).is_none());
@@ -373,18 +399,16 @@ fn pi_launch_selectors_delegate_exact_model_and_provider_without_default_fallbac
         .unwrap()
         .unwrap();
     let response = json!({"status":"ready","provider":reported_provider,"authType":"oauth","credentials":"secret","subscriptionType":"invented-plan"});
-    let script = format!(
-        "[ \"$PI_CODING_AGENT_DIR\" = {} ] || exit 9\n[ \"$*\" = {} ] || exit 9\nprintf '%s' {}",
-        quoted(account),
-        quoted(expected_command),
-        quoted(&response.to_string())
-    );
-    let program = executable(&directory, &script).unwrap();
-    let result = bootty_agents::terminal_account_status_with_pi_selector_in(
+    let mut script = Fixture::output(response.to_string());
+    script.environment = Some(("PI_CODING_AGENT_DIR".to_owned(), account.to_owned()));
+    script.arguments = Some(expected_command.to_owned());
+    let program = executable(&directory, &script);
+    let result = bootty_agents::terminal_account_status_using(
         AgentKind::Pi,
         &program,
         Some(&selector),
         Some(account),
+        &providers().transport(),
     );
     assert_eq!(result.is_ok(), ready);
     if let Ok(status) = result {
@@ -412,9 +436,10 @@ fn pi_selector_cache_tracks_exact_account_and_model_arguments() {
     let directory = assert_fs::TempDir::new().unwrap();
     let program = executable(
         &directory,
-        "printf '%s' '{\"status\":\"ready\",\"provider\":\"openai-codex\",\"authType\":\"oauth\"}'",
-    )
-    .unwrap();
+        &Fixture::output(
+            "{\"status\":\"ready\",\"provider\":\"openai-codex\",\"authType\":\"oauth\"}",
+        ),
+    );
     let first = bootty_agents::PiAccountSelector::from_arguments(&[
         "--model".to_owned(),
         "openai-codex/first".to_owned(),
@@ -435,7 +460,7 @@ fn pi_selector_cache_tracks_exact_account_and_model_arguments() {
     ])
     .unwrap()
     .unwrap();
-    let service = TerminalAgentService::open(directory.path().join("catalog.json")).unwrap();
+    let service = service(directory.path().join("catalog.json"));
     let status = service.inspect_provider_with_pi_selector(
         AgentKind::Pi,
         &program,
@@ -491,4 +516,23 @@ fn pi_literal_prompt_arguments_do_not_change_account_scope() {
         selector,
         Some(bootty_agents::PiAccountSelector::provider("selected"))
     );
+}
+
+#[rstest]
+#[case(0)]
+#[case(7)]
+fn local_provider_queries_retain_real_output_and_exit_status(#[case] exit: i32) {
+    let mut command = std::process::Command::new("/bin/sh");
+    command.args([
+        "-c",
+        "printf output; printf diagnostic >&2; exit \"$1\"",
+        "provider",
+        &exit.to_string(),
+    ]);
+    let output =
+        (bootty_agents::TerminalProviderTransport::default().output)(command, &|| false).unwrap();
+    assert_eq!(output.stdout, b"output");
+    assert_eq!(output.stderr, b"diagnostic");
+    assert_eq!(output.exit_code, Some(exit));
+    assert_eq!(output.successful, exit == 0);
 }

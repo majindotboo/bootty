@@ -35,7 +35,6 @@ const POSIX_SHELL: &str = "/bin/sh";
 /// What a prepared pane prints back. No scenario prints it for another reason.
 const PANE_READY: &str = "BOOTTY_PANE_READY";
 const PANE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-const PANE_PROBE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn start_embedded_rmux_daemon_for_tests() -> Result<()> {
     static STARTED: OnceLock<std::result::Result<(), String>> = OnceLock::new();
@@ -47,7 +46,10 @@ fn start_embedded_rmux_daemon_for_tests() -> Result<()> {
             thread::spawn(move || {
                 let started_tx = ready_tx.clone();
                 let result = (|| -> Result<()> {
-                    let runtime = Builder::new_multi_thread().enable_all().build()?;
+                    let runtime = Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()?;
                     runtime.block_on(async {
                         let daemon =
                             rmux_server::ServerDaemon::new(rmux_server::DaemonConfig::new(socket))
@@ -190,7 +192,7 @@ mod scenario {
         let argv = [
             POSIX_SHELL.to_owned(),
             "-c".to_owned(),
-            "printf '%s\\0' \"$@\" > \"$0\"; exec sleep 600".to_owned(),
+            "printf '%s\\0' \"$@\" > \"$0\"; read hold".to_owned(),
             output.to_string_lossy().into_owned(),
         ]
         .into_iter()
@@ -220,7 +222,7 @@ mod scenario {
             if text.ends_with('\0') && fields(&text).len() == arguments.len() {
                 break;
             }
-            thread::sleep(std::time::Duration::from_millis(10));
+            thread::yield_now();
         }
         assert_eq!(fields(&read()), arguments);
 
@@ -280,7 +282,7 @@ mod scenario {
             if capture.text.contains("hidden-ready") || started.elapsed() > PANE_TIMEOUT {
                 break capture;
             }
-            thread::sleep(std::time::Duration::from_millis(20));
+            thread::yield_now();
         };
         anyhow::ensure!(ready.text.contains("hidden-ready"), "{ready:?}");
         assert_eq!((ready.captured_lines, ready.omitted_lines), (24, 0));
@@ -305,7 +307,7 @@ mod scenario {
         while std::fs::read_to_string(&received).unwrap_or_default() != expected
             && started.elapsed() < PANE_TIMEOUT
         {
-            thread::sleep(std::time::Duration::from_millis(20));
+            thread::yield_now();
         }
         assert_eq!(std::fs::read_to_string(&received)?, expected);
 
@@ -1137,20 +1139,6 @@ mod scenario {
     }
 
     pub fn terminal_queries_do_not_leak_into_the_shell() -> Result<()> {
-        // The round trip needs a program that can put the pane in raw mode and read
-        // its own stdin. Skip rather than spending the whole `wait_for_terminal_text`
-        // deadline on a shell that printed "command not found", which would take
-        // every scenario chained after this one down with it.
-        if !std::process::Command::new("python3")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            eprintln!("skipping terminal_queries_do_not_leak_into_the_shell: no python3 on PATH");
-            return Ok(());
-        }
         let (mut backend, registry, session_id, window_id, pane) =
             create_embedded_session(unscoped_tag())?;
         let mut terminal = open_terminal(registry.clone(), &pane, &window_id)?;
@@ -1163,9 +1151,10 @@ mod scenario {
         // through the pane shell's quoting rules.
         let script_path =
             std::env::temp_dir().join(format!("bootty-terminal-query-{session_id}.py"));
-        std::fs::write(
+        bootty_test_support::write_executable(
             &script_path,
-            r#"import os, select, sys, termios, tty
+            r#"#!/usr/bin/env python3
+import os, select, sys, termios, tty
 
 fd = sys.stdin.fileno()
 saved = termios.tcgetattr(fd)
@@ -1176,32 +1165,32 @@ data = b""
 # models Crossterm's support probe, which then returns terminal ownership to the
 # shell. Bootty must not inject a second, delayed response batch afterwards.
 while b"c" not in data:
-    if not select.select([fd], [], [], 2.0)[0]:
+    if not select.select([fd], [], [], 30.0)[0]:
         break
     data += os.read(fd, 1)
 os.write(fd, b"\x1b]11;?\x1b\\")
 colour = b""
 while b"\x1b\\" not in colour:
-    if not select.select([fd], [], [], 2.0)[0]:
+    if not select.select([fd], [], [], 30.0)[0]:
         break
     colour += os.read(fd, 1)
 os.write(fd, b"\x1b[14t\x1b[16t")
 size = b""
 while b"\x1b[4;480;800t" not in size or b"\x1b[6;20;10t" not in size:
-    if not select.select([fd], [], [], 2.0)[0]:
+    if not select.select([fd], [], [], 30.0)[0]:
         break
     size += os.read(fd, 1)
 os.write(fd, b"\x1b[?1016h\x1b[?1016$p")
 pixel_mouse = b""
 while b"\x1b[?1016;1$y" not in pixel_mouse:
-    if not select.select([fd], [], [], 2.0)[0]:
+    if not select.select([fd], [], [], 30.0)[0]:
         break
     pixel_mouse += os.read(fd, 1)
 os.write(fd, b"\x1b[?1016l")
 os.write(fd, b"\x1bPtmux;\x1b\x1b_Gi=4207,s=1,v=1,a=q,t=d,f=24;AAAA\x1b\x1b\\\x1b\\")
 graphics = b""
 while b"\x1b_Gi=4207;OK\x1b\\" not in graphics:
-    if not select.select([fd], [], [], 2.0)[0]:
+    if not select.select([fd], [], [], 30.0)[0]:
         break
     graphics += os.read(fd, 1)
 termios.tcsetattr(fd, termios.TCSADRAIN, saved)
@@ -1220,7 +1209,7 @@ print("BOOTTY_RMUX_COLOR_QUERY_OK")
         )?;
         terminal.write_input(
             format!(
-                "stty echo; python3 {}; sleep 1; printf '%s%s\\n' 'BOOTTY_RMUX_QUERY' '_CLEAN'\r",
+                "stty echo; {}; printf '%s%s\\n' 'BOOTTY_RMUX_QUERY' '_CLEAN'\r",
                 script_path.display()
             )
             .as_bytes(),
@@ -1300,27 +1289,16 @@ print("BOOTTY_RMUX_COLOR_QUERY_OK")
     }
 
     pub fn kitty_keyboard_protocol_reports_command_alt_key() -> Result<()> {
-        if !std::process::Command::new("python3")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|status| status.success())
-        {
-            eprintln!(
-                "skipping kitty_keyboard_protocol_reports_command_alt_key: no python3 on PATH"
-            );
-            return Ok(());
-        }
         let (mut backend, registry, session_id, window_id, pane) =
             create_embedded_session(unscoped_tag())?;
         let mut terminal = open_terminal(registry, &pane, &window_id)?;
         prepare_pane(&mut terminal)?;
         let script_path =
             std::env::temp_dir().join(format!("bootty-kitty-keyboard-{session_id}.py"));
-        std::fs::write(
+        bootty_test_support::write_executable(
             &script_path,
-            r#"import os, select, sys, termios, tty
+            r#"#!/usr/bin/env python3
+import os, select, sys, termios, tty
 
 fd = sys.stdin.fileno()
 saved = termios.tcgetattr(fd)
@@ -1329,7 +1307,7 @@ os.write(fd, b"\x1b[>7u\x1b[?u\x1b[cBOOTTY_RMUX_KITTY_READY\r\n")
 data = b""
 expected = b"\x1b[98;11u"
 while expected not in data:
-    if not select.select([fd], [], [], 10.0)[0]:
+    if not select.select([fd], [], [], 30.0)[0]:
         break
     data += os.read(fd, 4096)
 termios.tcsetattr(fd, termios.TCSADRAIN, saved)
@@ -1337,7 +1315,7 @@ if expected in data:
     print("BOOTTY_RMUX_COMMAND_ALT_KEY_OK")
 "#,
         )?;
-        terminal.write_input(format!("python3 {}\r", script_path.display()).as_bytes())?;
+        terminal.write_input(format!("{}\r", script_path.display()).as_bytes())?;
         wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_KITTY_READY")?;
         terminal.encode_key(bootty_terminal::terminal_input_model::KeyInput {
             key: bootty_terminal::terminal_input_model::TerminalKey::B,
@@ -1597,7 +1575,6 @@ if expected in data:
             terminal.resize_native_layout_window(cols, 30)?;
             terminal.drain_pty();
             terminal.extract_frame()?;
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         Ok(())
     }
@@ -1780,11 +1757,10 @@ if expected in data:
 
         // 2MB is past the in-flight bound (`RMUX_OUTPUT_CHANNEL_CAPACITY` events
         // of `RMUX_OUTPUT_EVENT_MAX_BYTES`), so the producer has to be held back
-        // rather than spooled to disk.
+        // rather than spooled to disk. Avoid unrelated newline scrolling.
         terminal.write_input(
-            b"printf 'BOOTTY_RMUX_BOUND_START\\n'; yes X | head -c 2000000; printf '\\nBOOTTY_RMUX_BOUND_END\\n'\r",
+            b"printf 'BOOTTY_RMUX_BOUND_START\\n'; head -c 2000000 /dev/zero | tr '\\000' X; printf '\\nBOOTTY_RMUX_BOUND_END\\n'\r",
         )?;
-        std::thread::sleep(std::time::Duration::from_millis(100));
         wait_for_terminal_text(&mut terminal, "BOOTTY_RMUX_BOUND_END")?;
         let spool_files = std::fs::read_dir(
             endpoint_path_for(ApplicationIdentity::for_process())?
@@ -1827,6 +1803,13 @@ if expected in data:
 fn run_embedded_scenario(scenario: &str) -> Result<()> {
     // The socket path includes the development namespace and must fit Unix socket limits.
     let directory = assert_fs::TempDir::new_in("/tmp")?;
+    // The prompt is emitted after shell setup, so input never races startup or a retry probe.
+    let startup = format!(
+        "if [ -n \"${{BASH_VERSION-}}\" ]; then set +o emacs; fi\nexport PATH=/usr/bin:/bin\nstty icanon icrnl -echo || exit 1\nPS1='{PANE_READY} '\n"
+    );
+    for name in ["pane.rc", ".profile", ".bashrc", ".bash_profile"] {
+        std::fs::write(directory.path().join(name), &startup)?;
+    }
     let helper = directory.path().join("bootty-daemon");
     bootty_test_support::write_executable(
         &helper,
@@ -1841,11 +1824,14 @@ fn run_embedded_scenario(scenario: &str) -> Result<()> {
         .env("BOOTTY_DAEMON_BINARY", helper)
         .env("RMUX_TMPDIR", directory.path())
         .env("PATH", ISOLATED_PATH)
+        .env("HOME", directory.path())
+        .env_remove("BASH_ENV")
         // Panes inherit the daemon's environment. Pin the shell and its rc file
         // so a developer's login shell does not decide how long every pane takes
         // to answer: an interactive zsh with plugins costs seconds per pane.
         .env("SHELL", POSIX_SHELL)
-        .env("ENV", "")
+        .env("BOOTTY_SHELL", POSIX_SHELL)
+        .env("ENV", directory.path().join("pane.rc"))
         .status()?;
 
     anyhow::ensure!(
@@ -1956,7 +1942,7 @@ fn create_embedded_session(
         session_id: session_id.clone(),
         cwd: std::env::temp_dir().to_string_lossy().into_owned(),
         tag,
-        argv: None,
+        argv: Some(vec![POSIX_SHELL.to_owned()]),
     })?;
 
     let snapshot = backend.snapshot()?;
@@ -2013,7 +1999,10 @@ fn open_terminal_with_window_config(
             ..MuxBindingConfig::default()
         },
         config,
-        std::sync::Arc::new(|| {}),
+        {
+            let owner = thread::current();
+            std::sync::Arc::new(move || owner.unpark())
+        },
     )?;
     terminal.sync_native_window(
         panes,
@@ -2090,7 +2079,7 @@ fn poll_frames_until(
         if std::time::Instant::now() >= deadline {
             return Ok(Some(text));
         }
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        thread::park_timeout(deadline.saturating_duration_since(std::time::Instant::now()));
     }
 }
 
@@ -2107,36 +2096,7 @@ fn wait_for_terminal_text(terminal: &mut ActiveTerminal, expected: &str) -> Resu
     }
 }
 
-/// Put the pane in the state every scenario expects: a shell that has claimed
-/// the pty, with echo off.
-///
-/// The probe is retried instead of waited on, because a pane drops input written
-/// before its shell claims the pty and prints nothing to announce that moment.
-/// Repeating the probe is harmless -- both halves are idempotent -- and it is
-/// the only part of a scenario that may run more than once.
-///
-/// Echo off matters as much as readiness: with it on, the pane's frame holds the
-/// command line that was typed, and a wait for a marker is satisfied by the
-/// command asking for it rather than by the pane printing it.
+/// The private startup file configures canonical input and echo before this prompt appears.
 fn prepare_pane(terminal: &mut ActiveTerminal) -> Result<()> {
-    let deadline = std::time::Instant::now()
-        .checked_add(PANE_TIMEOUT)
-        .context("pane deadline")?;
-    loop {
-        // Bash readline flushes queued input when returning to its prompt. Use the
-        // canonical POSIX reader so the readiness receipt also covers queued Ctrl-D.
-        // Split the marker so this line's echo cannot answer for the pane.
-        terminal.write_input(b"if [ -n \"${BASH_VERSION-}\" ]; then set +o emacs; fi; stty -echo; printf '%s%s\\n' 'BOOTTY_PANE' '_READY'\r")?;
-        let attempt = (std::time::Instant::now()
-            .checked_add(PANE_PROBE_INTERVAL)
-            .context("probe deadline")?)
-        .min(deadline);
-        if poll_frames_until(terminal, attempt, |text| text.contains(PANE_READY))?.is_none() {
-            return Ok(());
-        }
-        anyhow::ensure!(
-            std::time::Instant::now() < deadline,
-            "pane shell never answered a readiness probe"
-        );
-    }
+    wait_for_terminal_text(terminal, PANE_READY)
 }

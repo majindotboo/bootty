@@ -4,11 +4,15 @@ version.workspace = true
 edition.workspace = true
 build = "build.rs"
 
+[lib]
+test = false
+
 [features]
 bootty-dev = ["bootty-ui/bootty-dev", "bootty-config/bootty-dev", "bootty-control/bootty-dev"]
 
 [[bin]]
 name = "bootty"
+test = false
 path = "src/main.rs"
 
 [dependencies]

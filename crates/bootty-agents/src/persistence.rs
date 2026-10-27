@@ -189,6 +189,7 @@ struct Shared {
     path: PathBuf,
     slot: Mutex<Slot>,
     wake: Condvar,
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 #[derive(Default)]
@@ -204,11 +205,12 @@ struct Slot {
     /// for the writer to clear it, so it sees a fresh attempt, not one made before it asked.
     flush: bool,
     error: Option<String>,
+    due: Option<Instant>,
 }
 
 impl StateWriter {
-    /// The process's writer for `path`, started on first use.
-    pub fn for_path(path: &Path) -> Self {
+    /// The process writer for `path`, using this clock if the writer is new.
+    pub fn for_path_with_clock(path: &Path, clock: Arc<dyn Fn() -> Instant + Send + Sync>) -> Self {
         lock(writers())
             .entry(path.to_owned())
             .or_insert_with(|| {
@@ -216,6 +218,7 @@ impl StateWriter {
                     path: path.to_owned(),
                     slot: Mutex::default(),
                     wake: Condvar::new(),
+                    clock,
                 });
                 let worker = Arc::clone(&shared);
                 thread::spawn(move || write_forever(&worker));
@@ -224,9 +227,19 @@ impl StateWriter {
             .clone()
     }
 
+    /// Reevaluate the pending write after the injected clock advances.
+    pub fn clock_advanced(&self) {
+        // Pair with the worker lock so a wake cannot be lost before it waits.
+        let _slot = lock(&self.shared.slot);
+        self.shared.wake.notify_all();
+    }
+
     /// Queue `snapshot` as the newest state, replacing anything not yet written.
     pub fn submit(&self, snapshot: Snapshot) {
         let mut slot = lock(&self.shared.slot);
+        if slot.saved >= slot.submitted {
+            slot.due = (self.shared.clock)().checked_add(WRITE_DELAY);
+        }
         slot.latest = Some(Arc::new(snapshot));
         slot.submitted = slot.submitted.saturating_add(1);
         drop(slot);
@@ -284,7 +297,7 @@ fn request_flush(shared: &Shared) -> Option<MutexGuard<'_, Slot>> {
 fn write_forever(shared: &Shared) {
     let mut failures = 0_u32;
     loop {
-        let (snapshot, revision) = next_snapshot(shared, retry_delay(failures));
+        let (snapshot, revision) = next_snapshot(shared);
         let written = write_private(&shared.path, &encode(&snapshot));
         let mut slot = lock(&shared.slot);
         slot.attempted = slot.attempted.max(revision);
@@ -300,6 +313,7 @@ fn write_forever(shared: &Shared) {
                 failures = failures.saturating_add(1);
             }
         }
+        slot.due = (shared.clock)().checked_add(retry_delay(failures));
         if slot.attempted >= slot.submitted {
             slot.flush = false;
         }
@@ -315,17 +329,24 @@ fn retry_delay(failures: u32) -> Duration {
         .min(RETRY_LIMIT)
 }
 
-/// Wait until a snapshot newer than disk exists, let a burst settle for `delay` unless a flush
+/// Wait until a snapshot newer than disk exists, let a burst settle unless a flush
 /// is requested, then take the newest.
-fn next_snapshot(shared: &Shared, delay: Duration) -> (Arc<Snapshot>, u64) {
+fn next_snapshot(shared: &Shared) -> (Arc<Snapshot>, u64) {
+    let mut slot = unsaved(shared);
     loop {
-        let (settled, _) = shared
-            .wake
-            .wait_timeout_while(unsaved(shared), delay, |slot| !slot.flush)
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(snapshot) = settled.latest.clone() {
-            return (snapshot, settled.submitted);
+        let remaining = slot
+            .due
+            .unwrap_or_else(|| (shared.clock)())
+            .saturating_duration_since((shared.clock)());
+        if (slot.flush || remaining.is_zero())
+            && let Some(snapshot) = slot.latest.clone()
+        {
+            return (snapshot, slot.submitted);
         }
+        (slot, _) = shared
+            .wake
+            .wait_timeout(slot, remaining)
+            .unwrap_or_else(PoisonError::into_inner);
     }
 }
 

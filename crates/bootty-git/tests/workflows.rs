@@ -1,4 +1,11 @@
-use bootty_git::Git;
+#[path = "support/repository.rs"]
+mod repository_support;
+#[path = "support/seed.rs"]
+mod seed;
+
+#[path = "support/runner.rs"]
+mod runner;
+
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use std::process::Command;
@@ -13,19 +20,14 @@ fn git(root: &std::path::Path, args: &[&str]) -> anyhow::Result<()> {
 }
 fn fixture() -> anyhow::Result<assert_fs::TempDir> {
     let root = assert_fs::TempDir::new()?;
-    git(root.path(), &["init", "-q", "-b", "main"])?;
-    git(root.path(), &["config", "user.email", "test@example.test"])?;
-    git(root.path(), &["config", "user.name", "Test User"])?;
-    std::fs::write(root.path().join("file.txt"), "one\n")?;
-    git(root.path(), &["add", "file.txt"])?;
-    git(root.path(), &["commit", "-qm", "initial"])?;
+    seed::repository(root.path(), "workflow", false)?;
     Ok(root)
 }
 #[rstest]
 fn overview_branch_history_diff_and_clean_switch_are_consistent() {
     let root = fixture().expect("repository fixture");
     let path = root.path().to_str().unwrap();
-    let client = Git::new();
+    let client = runner::git();
     let overview = client.overview(path, 100).expect("test operation succeeds");
     assert_eq!(overview.history.len(), 1);
     assert_eq!(overview.history[0].subject, "initial");
@@ -75,7 +77,7 @@ fn branch_catalog_identifies_existing_worktree_checkouts() {
         ],
     )
     .expect("linked checkout");
-    let overview = Git::new()
+    let overview = runner::git()
         .overview(root.path().to_str().unwrap(), 1)
         .unwrap();
     for (name, expected, current) in [
@@ -100,7 +102,7 @@ fn branch_catalog_identifies_existing_worktree_checkouts() {
 fn stash_apply_keeps_record_until_explicit_drop_and_includes_untracked() {
     let root = fixture().expect("repository fixture");
     let path = root.path().to_str().unwrap();
-    let client = Git::new();
+    let client = runner::git();
     std::fs::write(root.path().join("file.txt"), "changed\n").unwrap();
     std::fs::write(root.path().join("new.txt"), "new\n").unwrap();
     client
@@ -138,7 +140,7 @@ fn stash_apply_keeps_record_until_explicit_drop_and_includes_untracked() {
 fn references_are_validated_against_current_repository() {
     let root = fixture().expect("repository fixture");
     let path = root.path().to_str().unwrap();
-    let client = Git::new();
+    let client = runner::git();
     assert!(client.checkout_branch(path, "--detach").is_err());
     assert!(client.stash_apply(path, "stash@{99}", "missing").is_err());
     assert!(client.commit_diff(path, "HEAD").is_err());
@@ -149,7 +151,7 @@ fn references_are_validated_against_current_repository() {
 fn checkout_preserves_ignored_files_that_the_destination_tracks() {
     let root = fixture().expect("repository fixture");
     let path = root.path().to_str().unwrap();
-    let client = Git::new();
+    let client = runner::git();
     client
         .create_branch(path, "other", "HEAD")
         .expect("test operation succeeds");

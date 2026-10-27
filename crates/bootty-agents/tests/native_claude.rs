@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/claude_peer.rs"]
+pub mod claude_peer;
+#[path = "support/native_peer.rs"]
+pub mod native_peer;
 pub mod support;
 use std::{fs, path::Path};
 
@@ -16,19 +20,19 @@ use serde_json::{Value, json};
 
 const SESSION: &str = "01234567-89ab-4cde-8123-456789abcdef";
 
-fn fixture(root: &Path) -> std::io::Result<String> {
+fn fixture(root: &Path) -> String {
     let path = root.join("claude-stream.py");
-    bootty_test_support::write_executable(&path, include_str!("support/claude_stream.py"))?;
-    Ok(path.to_string_lossy().into_owned())
+
+    path.to_string_lossy().into_owned()
 }
 
-fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
+fn config(root: &Path) -> NativeSessionConfig {
     let mut config = NativeSessionConfig::new(AgentKind::Claude, root);
-    config.program = fixture(root)?;
+    config.program = fixture(root);
     config.account_directory = Some(root.join("account").to_string_lossy().into_owned());
     config.fresh_session_id = Some(SESSION.to_owned());
     config.arguments = vec!["--permission-mode".to_owned(), "manual".to_owned()];
-    Ok(config)
+    config
 }
 
 fn barrier(session: &NativeAgentSession) -> Result<(), String> {
@@ -99,10 +103,10 @@ fn claude_history_reads_the_session_file() {
             + r#"{"type":"assistant","uuid":"a3","parentU"#,
     )
     .unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.fresh_session_id = None;
     config.session_id = Some(SESSION.to_owned());
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     barrier(&session).unwrap();
     let page = session.read_history("latest").unwrap();
     let rows = page
@@ -128,10 +132,10 @@ fn claude_history_reads_the_session_file() {
 #[rstest]
 fn claude_history_before_the_first_record_is_empty() {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.fresh_session_id = None;
     config.session_id = Some(SESSION.to_owned());
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     barrier(&session).unwrap();
     let page = session.read_history("latest").unwrap();
     assert_eq!(
@@ -157,7 +161,7 @@ fn claude_edits_become_file_changes_from_its_patch() {
             .filter(|tool| tool.name == "fileChange")
             .map(|tool| serde_json::from_str::<Value>(&tool.input).unwrap())
     };
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("edit").unwrap();
     barrier(&session).unwrap();
     assert_eq!(
@@ -208,10 +212,10 @@ fn claude_edits_become_file_changes_from_its_patch() {
             .collect::<String>(),
     )
     .unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.fresh_session_id = None;
     config.session_id = Some(SESSION.to_owned());
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     barrier(&session).unwrap();
     let page = session.read_history("latest").unwrap();
     assert_eq!(
@@ -263,7 +267,7 @@ fn claude_subagent_transcripts_read_their_own_file() {
             .collect::<String>(),
     )
     .unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("subagent-completed").unwrap();
     barrier(&session).unwrap();
     let detail = session.read_subagent("child").unwrap();
@@ -286,7 +290,7 @@ fn claude_subagent_transcripts_read_their_own_file() {
 #[rstest]
 fn stopping_a_claude_subagent_stops_its_task() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("subagent-running").unwrap();
     barrier(&session).unwrap();
     let status = |session: &NativeAgentSession| {
@@ -316,7 +320,7 @@ fn rewinding_asks_claude_to_forget_from_a_message(#[case] refuse: bool) {
     if refuse {
         fs::write(root.path().join("refuse-rewind"), "").unwrap();
     }
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     for prompt in ["first", "second"] {
         session.send_prompt(prompt).unwrap();
         barrier(&session).unwrap();
@@ -362,7 +366,7 @@ fn rewinding_asks_claude_to_forget_from_a_message(#[case] refuse: bool) {
 #[rstest]
 fn claude_tool_arguments_stream_into_the_running_row() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("tool-stream").unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -392,7 +396,7 @@ fn claude_tool_arguments_stream_into_the_running_row() {
 #[rstest]
 fn claude_usage_fills_the_context_meter() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("usage").unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -432,7 +436,7 @@ fn claude_usage_fills_the_context_meter() {
 #[case::past_the_envelope("huge-line", Some("Omitted 18 MiB of oversized output from Claude."))]
 fn large_messages_never_end_the_conversation(#[case] prompt: &str, #[case] notice: Option<&str>) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -482,7 +486,7 @@ fn claude_tool_result_retains_input_and_the_observed_error(
     #[case] status: NativeToolStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -505,9 +509,9 @@ fn claude_tool_result_retains_input_and_the_observed_error(
 #[case(true)]
 fn claude_fast_mode_is_passed_as_a_launch_setting(#[case] fast: bool) {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.fast_mode = fast;
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     let launch: Value =
         serde_json::from_slice(&fs::read(root.path().join("launch.json")).unwrap()).unwrap();
     let arguments = launch["argv"].as_array().unwrap();
@@ -528,8 +532,8 @@ fn exact_session_acknowledgement_and_streaming_settle_only_the_owned_turn(
     #[case] outcome: NativeTurnOutcome,
 ) {
     let root = TempDir::new().unwrap();
-    let config = config(root.path()).unwrap();
-    let session = NativeAgentSession::spawn(config.clone()).unwrap();
+    let config = config(root.path());
+    let session = spawn(config.clone()).unwrap();
     assert_eq!(session.snapshot().status, NativeSessionStatus::Idle);
     assert_eq!(session.snapshot().session_id, None);
     assert_eq!(session.snapshot().first_turn, None);
@@ -585,9 +589,9 @@ fn exact_session_acknowledgement_and_streaming_settle_only_the_owned_turn(
 #[case::deny(false)]
 fn permissions_preserve_exact_request_and_input_without_changing_policy(#[case] allow: bool) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let session = service.resolve(&record.target()).unwrap();
     service.prompt(&record.target(), "permission").unwrap();
@@ -648,7 +652,7 @@ fn reusable_approvals_apply_only_claudes_suggestions(
     #[case] permissions: Option<Value>,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     let request = session.snapshot().requests.remove(0);
@@ -679,7 +683,7 @@ fn denials_can_stop_the_turn_or_say_why(
     #[case] expected: Value,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("permission").unwrap();
     barrier(&session).unwrap();
     let request = session.snapshot().requests.remove(0);
@@ -699,7 +703,7 @@ fn denials_can_stop_the_turn_or_say_why(
 #[rstest]
 fn control_cancellation_and_unacknowledged_results_cannot_invent_completion() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("cancel").unwrap();
     barrier(&session).unwrap();
     assert_eq!(session.snapshot().requests, []);
@@ -716,7 +720,7 @@ fn control_cancellation_and_unacknowledged_results_cannot_invent_completion() {
     barrier(&session).unwrap();
     assert_eq!(session.snapshot().first_turn, Some(receipt));
     session.stop();
-    let unacknowledged = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let unacknowledged = spawn(config(root.path())).unwrap();
     unacknowledged.send_prompt("no-ack").unwrap();
     barrier(&unacknowledged).unwrap();
     assert_eq!(unacknowledged.snapshot().first_turn, None);
@@ -736,9 +740,21 @@ fn control_cancellation_and_unacknowledged_results_cannot_invent_completion() {
 #[case::unterminated("partial")]
 fn invalid_identity_or_frames_end_the_owned_lease_without_accepting_a_turn(#[case] prompt: &str) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
+    let (changed, changes) = std::sync::mpsc::channel();
+    session.set_change_handler(std::sync::Arc::new(move || {
+        let _ = changed.send(());
+    }));
     session.send_prompt(prompt).unwrap();
     assert!(session.rpc("initialize", json!({})).is_err());
+    let deadline = std::time::Instant::now()
+        .checked_add(std::time::Duration::from_secs(30))
+        .unwrap();
+    while session.snapshot().status != NativeSessionStatus::Error {
+        changes
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+    }
     assert_eq!(session.snapshot().status, NativeSessionStatus::Error);
     assert_eq!(session.snapshot().first_turn, None);
     assert!(!session.snapshot().completed_turn);
@@ -749,8 +765,8 @@ fn invalid_identity_or_frames_end_the_owned_lease_without_accepting_a_turn(#[cas
 fn fresh_intent_is_durable_and_resume_preserves_exact_task_account_identity() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
-    let mut config = config(root.path()).unwrap();
+    let service = open(&path).unwrap();
+    let mut config = config(root.path());
     config.fresh_session_id = None;
     let record = service
         .create_for_task("binding", "task", "Claude", config)
@@ -772,7 +788,7 @@ fn fresh_intent_is_durable_and_resume_preserves_exact_task_account_identity() {
     assert_eq!(persisted["records"][0]["config"]["session_id"], intent);
     service.shutdown().unwrap();
     drop(service);
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     assert_eq!(
         service.sessions()[0].config.session_id,
         stopped.config.session_id
@@ -805,7 +821,7 @@ fn fresh_intent_is_durable_and_resume_preserves_exact_task_account_identity() {
     service.stop(&resumed.target()).unwrap();
     service.shutdown().unwrap();
     drop(service);
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let saved = service.sessions().remove(0);
     assert_eq!(saved.config.session_id.as_deref(), Some(intent.as_str()));
     let reopened = service.resume(&saved.target()).unwrap();
@@ -817,9 +833,9 @@ fn fresh_intent_is_durable_and_resume_preserves_exact_task_account_identity() {
 fn claude_receives_only_the_session_attachment_directory_on_launch_and_resume() {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let note = root.path().join("notes.md");
     fs::write(&note, "private file contents").unwrap();
@@ -887,9 +903,9 @@ proptest! {
         option in prop::sample::select(vec!["--input-format", "--output-format", "--session-id", "--resume", "--dangerously-skip-permissions", "--no-session-persistence"]),
     ) {
         let root = TempDir::new().unwrap();
-        let mut config = config(root.path()).unwrap();
+        let mut config = config(root.path());
         config.arguments = vec![option.to_owned(), "foreign".to_owned()];
-        prop_assert!(NativeAgentSession::spawn(config).is_err());
+        prop_assert!(spawn(config).is_err());
         prop_assert!(!root.path().join("launch.json").exists());
         let launch = AgentLaunch {program:"claude".to_owned(),cwd:Some(root.path().to_string_lossy().into_owned()),arguments:vec!["--no-session-persistence".to_owned()],ephemeral:false,account_directory:Some(root.path().to_string_lossy().into_owned())};
         prop_assert!(NativeSessionConfig::from_launch(AgentKind::Claude, launch).is_err());
@@ -903,7 +919,7 @@ fn question_answers_preserve_original_input_and_cannot_change_permission_policy(
     #[case] answer: &str,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("question").unwrap();
     barrier(&session).unwrap();
     let request = session.snapshot().requests.remove(0);
@@ -947,7 +963,11 @@ fn question_answers_preserve_original_input_and_cannot_change_permission_policy(
 #[rstest]
 fn claude_command_discovery_uses_the_control_handshake_without_a_prompt() {
     let root = TempDir::new().unwrap();
-    let catalog = NativeAgentSession::discover_completions(config(root.path()).unwrap()).unwrap();
+    let catalog = NativeAgentSession::discover_completions_with(
+        config(root.path()),
+        &claude_peer::launcher(),
+    )
+    .unwrap();
     assert_eq!(catalog.options.len(), 1);
     assert_eq!(catalog.options[0].name, "review");
     assert_eq!(catalog.options[0].argument_hint.as_deref(), Some("[path]"));
@@ -963,7 +983,7 @@ fn claude_subagent_tasks_preserve_reported_results_and_reject_foreign_sessions(
     #[case] expected: NativeToolStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(&format!("subagent-{status}")).unwrap();
     // This RPC is ordered after all notifications in the provider transport.
     session.rpc("initialize", json!({})).unwrap();
@@ -987,7 +1007,7 @@ fn claude_subagent_tasks_preserve_reported_results_and_reject_foreign_sessions(
 #[test]
 fn self_started_turns_appear_and_settle() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("self-turn").unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -1009,7 +1029,7 @@ fn self_started_turns_appear_and_settle() {
 #[test]
 fn long_turns_keep_their_prompt_and_skip_empty_thinking() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("flood").unwrap();
     barrier(&session).unwrap();
     let transcript = session.snapshot().transcript;
@@ -1034,7 +1054,7 @@ fn long_turns_keep_their_prompt_and_skip_empty_thinking() {
 #[case::unexplained("failed", "Claude reported a failed turn")]
 fn failed_turns_keep_claudes_reason(#[case] prompt: &str, #[case] reason: &str) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -1050,7 +1070,7 @@ fn failed_turns_keep_claudes_reason(#[case] prompt: &str, #[case] reason: &str) 
 #[test]
 fn interrupted_turn_settles_its_running_tool() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let tool_status = || {
         session
             .snapshot()
@@ -1079,9 +1099,9 @@ fn interrupted_turn_settles_its_running_tool() {
 #[test]
 fn running_subagents_outlive_the_turn_but_not_the_process() {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let session = service.resolve(&record.target()).unwrap();
     service
@@ -1118,10 +1138,10 @@ fn claude_launch_uses_the_selected_permission_mode(
     #[case] bypass: bool,
 ) {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.arguments.clear();
     config.permissions = mode.parse().unwrap();
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     let launch: Value =
         serde_json::from_slice(&fs::read(root.path().join("launch.json")).unwrap()).unwrap();
     let arguments = launch["argv"].as_array().unwrap();
@@ -1142,7 +1162,7 @@ fn claude_launch_uses_the_selected_permission_mode(
 #[rstest]
 fn active_follow_up_uses_claudes_live_stream_without_restarting() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("hold").unwrap();
     barrier(&session).unwrap();
     let initial = session.snapshot();
@@ -1173,10 +1193,10 @@ fn queued_followups_wait_for_idle_and_survive_a_conversation_owner_restart() {
     use std::time::Duration;
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let service = Arc::new(open(&path).unwrap());
     service.start_followups().unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     service.prompt(&target, "hold").unwrap();
@@ -1218,7 +1238,7 @@ fn queued_followups_wait_for_idle_and_survive_a_conversation_owner_restart() {
     );
     service.shutdown().unwrap();
     drop(service);
-    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let service = Arc::new(open(&path).unwrap());
     assert_eq!(service.sessions()[0].queued_messages.len(), 2);
     let (sender, receiver) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
@@ -1278,9 +1298,9 @@ fn large_files_attach_up_to_the_conversation_limit(
     #[case] refused: Option<&str>,
 ) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let file = root.path().join("recording.mp4");
     // Sparse, so the test writes nothing it doesn't need to.
@@ -1301,9 +1321,9 @@ fn large_files_attach_up_to_the_conversation_limit(
 #[case("animation.gif")]
 fn image_files_attach_as_png_images(#[case] name: &str) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let file = root.path().join(name);
     image::RgbImage::from_pixel(2, 1, image::Rgb([0, 0, 0]))
@@ -1334,13 +1354,13 @@ fn finished_turns_stay_unread_until_seen() {
     use std::sync::{Arc, mpsc};
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = Arc::new(NativeAgentService::open(&catalog).unwrap());
+    let service = Arc::new(open(&catalog).unwrap());
     let (sender, changes) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = sender.send(());
     }));
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     let unread = |service: &NativeAgentService| service.activities()[0].unread;
@@ -1358,7 +1378,7 @@ fn finished_turns_stay_unread_until_seen() {
     service.shutdown().unwrap();
     drop(service);
 
-    let restored = NativeAgentService::open(&catalog).unwrap();
+    let restored = open(&catalog).unwrap();
     assert!(unread(&restored));
     restored
         .mark_seen(&restored.sessions()[0].target(), true)
@@ -1373,9 +1393,9 @@ fn finished_turns_stay_unread_until_seen() {
 fn drafts_survive_a_restart_and_only_name_held_attachments() {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let file = root.path().join("notes.md");
     fs::write(&file, "Review this note").unwrap();
@@ -1417,7 +1437,7 @@ fn drafts_survive_a_restart_and_only_name_held_attachments() {
     service.shutdown().unwrap();
     drop(service);
 
-    let restored = NativeAgentService::open(&catalog).unwrap();
+    let restored = open(&catalog).unwrap();
     let mut expected = held;
     expected.prompt_ranges = std::iter::once(0..10).collect();
     assert_eq!(
@@ -1444,9 +1464,9 @@ fn queued_preview_retains_attachments_and_hides_only_image_tokens(
 ) {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let file = root.path().join(name);
     if image {
@@ -1485,26 +1505,26 @@ fn queued_preview_retains_attachments_and_hides_only_image_tokens(
     assert_eq!(service.sessions()[0].queued_messages, vec![queued.clone()]);
     service.shutdown().unwrap();
     drop(service);
-    let restored = NativeAgentService::open(&catalog).unwrap();
+    let restored = open(&catalog).unwrap();
     assert_eq!(restored.sessions()[0].queued_messages, vec![queued]);
     restored.shutdown().unwrap();
 }
 
 #[rstest]
 fn an_early_queued_steer_waits_and_sends_with_the_next_turn() {
-    use bootty_agents::{NativeAgentService, NativePrompt, NativeQueuedMessageStatus};
+    use bootty_agents::{NativePrompt, NativeQueuedMessageStatus};
     use std::{
         sync::{Arc, mpsc},
         time::Duration,
     };
     let root = TempDir::new().unwrap();
-    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let service = Arc::new(open(root.path().join("native.json")).unwrap());
     let (sender, receiver) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = sender.send(());
     }));
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let queued = service
         .queue_input(
@@ -1554,13 +1574,13 @@ fn a_message_sent_before_the_previous_one_lands_follows_it_into_the_turn() {
         time::Duration,
     };
     let root = TempDir::new().unwrap();
-    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let service = Arc::new(open(root.path().join("native.json")).unwrap());
     let (sender, changes) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = sender.send(());
     }));
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     service.start_followups().unwrap();
@@ -1588,6 +1608,7 @@ fn a_message_sent_before_the_previous_one_lands_follows_it_into_the_turn() {
     };
     assert_eq!(sending(&waiting), ["slow-ack"]);
     fs::write(root.path().join("ack"), "").unwrap();
+    barrier(&service.resolve(&target).unwrap()).unwrap();
     loop {
         let current = service.sessions().remove(0);
         let users = current
@@ -1630,13 +1651,13 @@ fn interrupt_and_send_goes_ahead_of_the_queue() {
         time::Duration,
     };
     let root = TempDir::new().unwrap();
-    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let service = Arc::new(open(root.path().join("native.json")).unwrap());
     let (sender, changes) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = sender.send(());
     }));
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     service.start_followups().unwrap();
@@ -1677,14 +1698,14 @@ fn a_failed_turn_holds_the_queue_until_resumed_and_messages_trade_places() {
     use bootty_agents::{NativePrompt, NativeQueuedMessageStatus};
     use std::sync::{Arc, mpsc};
     let root = TempDir::new().unwrap();
-    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let service = Arc::new(open(root.path().join("native.json")).unwrap());
     let (sender, changes) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = sender.send(());
     }));
     service.start_followups().unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     service.prompt(&target, "fail-later").unwrap();
@@ -1715,6 +1736,7 @@ fn a_failed_turn_holds_the_queue_until_resumed_and_messages_trade_places() {
         "last already"
     );
     fs::write(root.path().join("fail"), "").unwrap();
+    barrier(&service.resolve(&target).unwrap()).unwrap();
     loop {
         if queued(&service)
             .iter()
@@ -1751,9 +1773,9 @@ fn a_failed_message_waits_without_holding_the_rest() {
     use std::sync::{Arc, mpsc};
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let service = Arc::new(open(&path).unwrap());
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     service.prompt(&target, "hold").unwrap();
@@ -1769,7 +1791,7 @@ fn a_failed_message_waits_without_holding_the_rest() {
     let mut catalog: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     catalog["followups"][0]["status"] = json!("sending");
     fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
-    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let service = Arc::new(open(&path).unwrap());
     let (sender, changes) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = sender.send(());
@@ -1841,14 +1863,14 @@ fn stopping_a_steered_screenshot_turn_settles_and_pauses_the_queue() {
     use bootty_agents::NativePrompt;
     use std::sync::{Arc, mpsc};
     let root = TempDir::new().unwrap();
-    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let service = Arc::new(open(root.path().join("native.json")).unwrap());
     let (sender, changes) = mpsc::channel();
     service.set_change_handler(Arc::new(move || {
         let _ = sender.send(());
     }));
     service.start_followups().unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     service.prompt(&target, "tool-hold").unwrap();
@@ -1921,9 +1943,9 @@ fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
     use bootty_agents::{NativePrompt, NativeQueuedMessageStatus};
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("ignore-interrupt"), "").unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     service.prompt(&target, "tool-hold").unwrap();
@@ -1953,9 +1975,9 @@ fn an_unanswered_stop_keeps_the_session_stopping_and_the_queue_intact() {
 #[test]
 fn background_shells_stay_visible_until_they_finish() {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Claude", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Claude", config(root.path()))
         .unwrap();
     let target = record.target();
     let session = service.resolve(&target).unwrap();
@@ -2020,7 +2042,7 @@ fn large_claude_approvals_are_held_and_oversized_ones_declined(
     #[case] held: bool,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(&format!("write-{bytes}")).unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -2059,7 +2081,7 @@ fn large_claude_approvals_are_held_and_oversized_ones_declined(
 #[test]
 fn an_unconfirmed_message_is_undelivered_once_its_provider_ends() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("no-ack").unwrap();
     barrier(&session).unwrap();
     let undelivered = || {
@@ -2093,7 +2115,7 @@ fn claude_to_do_lists_fill_the_plan(
     #[case] expected: &[(&str, NativeTodoStatus)],
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     assert_eq!(
@@ -2113,7 +2135,7 @@ fn claude_to_do_lists_fill_the_plan(
 #[rstest]
 fn claude_compaction_shows_and_resets_the_context_meter() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("compact").unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -2140,7 +2162,7 @@ fn claude_compaction_shows_and_resets_the_context_meter() {
 #[rstest]
 fn claude_compact_shows_its_progress_and_answer() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let compactions = |session: &NativeAgentSession| {
         session
             .snapshot()
@@ -2175,7 +2197,7 @@ fn claude_compact_shows_its_progress_and_answer() {
 #[rstest]
 fn claude_rate_limits_keep_each_window() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("limits").unwrap();
     barrier(&session).unwrap();
     let limits = session.snapshot().rate_limits.unwrap();
@@ -2192,4 +2214,11 @@ fn claude_rate_limits_keep_each_window() {
     );
     assert_eq!(limits.reached_until(), Some(1_760_500_000));
     session.stop();
+}
+
+fn open(path: impl Into<std::path::PathBuf>) -> Result<NativeAgentService, String> {
+    NativeAgentService::open_with(path, native_peer::clock(), claude_peer::launcher())
+}
+fn spawn(config: NativeSessionConfig) -> Result<NativeAgentSession, String> {
+    NativeAgentSession::spawn_with(config, native_peer::clock(), &claude_peer::launcher())
 }

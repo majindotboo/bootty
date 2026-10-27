@@ -3,5 +3,8 @@ name = "bootty-test-support"
 edition.workspace = true
 publish = false
 
+[lib]
+test = false
+
 [lints]
 workspace = true

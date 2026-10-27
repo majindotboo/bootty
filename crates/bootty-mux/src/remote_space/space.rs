@@ -13,39 +13,61 @@ use bootty_host::{CommandRunner, SystemCommandRunner};
 
 const REMOTE_SPACE_SUBCOMMAND: &str = "remote-space";
 
-pub struct RemoteSpaceBackend {
-    remote: RemoteHost,
+/// Executes versioned remote Space requests on an execution host.
+pub trait RemoteSpaceTransport {
+    /// # Errors
+    /// Returns transport or daemon errors without inventing a successful response.
+    fn run(&self, args: &[String], input: Option<Vec<u8>>) -> Result<String>;
+}
+
+impl RemoteSpaceTransport for RemoteHost {
+    fn run(&self, args: &[String], input: Option<Vec<u8>>) -> Result<String> {
+        self.ensure_daemon()?;
+        let (program, args) = self.proxy_command(REMOTE_DAEMON_PROGRAM, args)?;
+        let output = input.map_or_else(
+            || SystemCommandRunner.run(&program, &args),
+            |input| SystemCommandRunner.run_with_input(&program, &args, input),
+        )?;
+        if output.success {
+            Ok(output.stdout)
+        } else {
+            bail!("{}", remote_daemon_failure(self.host(), &output.stderr))
+        }
+    }
+}
+
+pub struct RemoteSpaceBackend<T = RemoteHost> {
+    transport: T,
     space_id: String,
     backend: MuxBackendKind,
 }
 
 impl RemoteSpaceBackend {
     pub fn new(remote: RemoteHost, space_id: impl Into<String>, backend: MuxBackendKind) -> Self {
+        Self::with_transport(remote, space_id, backend)
+    }
+}
+
+impl<T: RemoteSpaceTransport> RemoteSpaceBackend<T> {
+    /// Uses the selected host transport for the same versioned command and pane protocol.
+    pub fn with_transport(
+        transport: T,
+        space_id: impl Into<String>,
+        backend: MuxBackendKind,
+    ) -> Self {
         Self {
-            remote,
+            transport,
             space_id: space_id.into(),
             backend,
         }
     }
 
     fn run(&self, args: &[String], input: Option<Vec<u8>>) -> Result<String> {
-        self.remote.ensure_daemon()?;
-        let (program, args) = self.remote.proxy_command(REMOTE_DAEMON_PROGRAM, args)?;
-        let output = input.map_or_else(
-            || SystemCommandRunner.run(&program, &args),
-            |input| SystemCommandRunner.run_with_input(&program, &args, input),
-        )?;
-        if output.success {
-            return Ok(output.stdout);
-        }
-        bail!(
-            "{}",
-            remote_daemon_failure(self.remote.host(), &output.stderr)
-        )
+        self.transport.run(args, input)
     }
 }
 
-impl MuxBackend for RemoteSpaceBackend {
+impl<T: RemoteSpaceTransport> MuxBackend for RemoteSpaceBackend<T> {
     fn snapshot(&self) -> Result<MuxSnapshot> {
         let output = self.run(
             &[
@@ -96,12 +118,11 @@ impl MuxBackend for RemoteSpaceBackend {
     }
 }
 
-impl RemoteSpaceBackend {
+impl<T: RemoteSpaceTransport> RemoteSpaceBackend<T> {
     /// The daemon checks that the pane belongs to a session this Space holds, then runs the
     /// request with the same backend implementation a local binding uses.
     fn pane(&self, request: &PaneRequest) -> Result<Option<PaneText>> {
-        request.send(
-            &self.remote,
+        let output = self.run(
             &[
                 REMOTE_SPACE_SUBCOMMAND.to_owned(),
                 "pane".to_owned(),
@@ -110,7 +131,9 @@ impl RemoteSpaceBackend {
                 "--backend".to_owned(),
                 backend_name(self.backend).to_owned(),
             ],
-        )
+            Some(serde_json::to_vec(request).context("encode remote pane request")?),
+        )?;
+        request.reply(&output)
     }
 }
 

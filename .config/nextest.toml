@@ -1,8 +1,15 @@
+# Older runners can inherit sibling capture pipes on macOS and report false leaks.
+nextest-version = "0.9.145"
+
 # Tests that talk to a real tmux server or the filesystem can wedge instead of
 # failing, and an unbounded test stalls the whole run — one hung test held a
 # workspace run open for 22 minutes. Report a test as slow after 30s and kill it
 # once it has been slow four times over, so a wedge costs two minutes, not a run.
 [profile.default]
-# Provider fixtures start child processes; more workers saturate macOS executable assessment.
-test-threads = 8
 slow-timeout = { period = "30s", terminate-after = 4 }
+leak-timeout = { period = "100ms", result = "fail" }
+
+# Concurrent fixture startup can consume the real query's five-second deadline on macOS.
+[[profile.default.overrides]]
+filter = "test(stopping_the_real_claude_query_cancels_and_reaps_its_process)"
+threads-required = "num-test-threads"

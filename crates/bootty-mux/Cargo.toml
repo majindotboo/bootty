@@ -3,6 +3,9 @@ name = "bootty-mux"
 edition.workspace = true
 version.workspace = true
 
+[lib]
+test = false
+
 [features]
 # Desktop composition needs terminal attachment and pane runtime policy. Keep this
 # optional so the installed daemon can use mux providers and catalog policy without

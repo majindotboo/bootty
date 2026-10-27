@@ -176,6 +176,7 @@ pub fn run_remote_command(payload: &str) -> Result<i32> {
 }
 
 // Preserve explicit wire caller identities; otherwise inherit the invoking app.
+#[must_use]
 pub fn daemon_program_args<'a>(
     program: &str,
     args: &'a [String],

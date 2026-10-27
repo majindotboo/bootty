@@ -1,38 +1,23 @@
 #![cfg(unix)]
-use std::{fs, path::Path};
+#![cfg(test)]
+
+#[path = "support/quick_query.rs"]
+pub mod quick_query;
 
 use assert_fs::TempDir;
 use bootty_agents::{
-    AgentKind, GeneratedPullRequest, NativeSessionConfig, generate_commit_message,
-    generate_pull_request,
+    AgentKind, GeneratedPullRequest, QuickQuery, generate_commit_message_using,
+    generate_pull_request_using,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use serde_json::json;
 
-/// A Codex stand-in that checks the query is the quick, tool-free one about the changes, and
-/// answers with `answer.json`.
-fn codex(root: &Path, answer: &serde_json::Value) -> std::io::Result<NativeSessionConfig> {
-    let script = root.join("codex.py");
-    bootty_test_support::write_executable(
-        &script,
-        r"#!/usr/bin/env python3
-import os,pathlib,sys
-args=sys.argv[1:]
-assert 'exec' in args and '--ephemeral' in args
-assert args[args.index('--sandbox')+1]=='read-only'
-assert args[args.index('--model')+1]=='quick-model'
-assert 'features.shell_tool=false' in args
-assert '+second line' in args[-1]
-account=pathlib.Path(os.environ['CODEX_HOME'])
-pathlib.Path(args[args.index('--output-last-message')+1]).write_text((account/'answer.json').read_text())
-",
-    )?;
-    fs::write(root.join("answer.json"), answer.to_string())?;
-    let mut config = NativeSessionConfig::new(AgentKind::Codex, root);
-    config.program = script.to_string_lossy().into_owned();
-    config.account_directory = Some(root.to_string_lossy().into_owned());
-    Ok(config)
+fn query() -> QuickQuery<'static> {
+    QuickQuery {
+        cancelled: &|| false,
+        output: &|command, _| Ok(quick_query::output(&command, "+second line")),
+    }
 }
 
 const CHANGES: &str = "Staged changes:\n+second line\n";
@@ -49,8 +34,8 @@ fn commit_messages_come_from_the_staged_changes(
     #[case] expected: Result<&str, &str>,
 ) {
     let root = TempDir::new().unwrap();
-    let config = codex(root.path(), &answer).unwrap();
-    let written = generate_commit_message(&config, "quick-model", CHANGES, || false)
+    let config = quick_query::config(root.path(), &answer);
+    let written = generate_commit_message_using(&config, "quick-model", CHANGES, &query())
         .map(|message| message.message());
     assert_eq!(written, expected.map(str::to_owned).map_err(str::to_owned));
 }
@@ -64,8 +49,8 @@ fn pull_request_text_comes_from_the_branch(
     #[case] accepted: bool,
 ) {
     let root = TempDir::new().unwrap();
-    let config = codex(root.path(), &answer).unwrap();
-    let written = generate_pull_request(&config, "quick-model", CHANGES, || false);
+    let config = quick_query::config(root.path(), &answer);
+    let written = generate_pull_request_using(&config, "quick-model", CHANGES, &query());
     if accepted {
         assert_eq!(
             written,
@@ -83,10 +68,10 @@ fn pull_request_text_comes_from_the_branch(
 #[rstest]
 fn writing_needs_codex() {
     let root = TempDir::new().unwrap();
-    let mut config = codex(root.path(), &json!({})).unwrap();
+    let mut config = quick_query::config(root.path(), &json!({}));
     config.provider = AgentKind::Pi;
     assert_eq!(
-        generate_commit_message(&config, "quick-model", CHANGES, || false),
+        generate_commit_message_using(&config, "quick-model", CHANGES, &query()),
         Err("Writing a commit message requires a Codex quick model".to_owned())
     );
 }

@@ -1,9 +1,9 @@
 use std::ffi::OsStr;
 use std::path::PathBuf;
 
+use crate::catalog::{Backend, Catalog, LegacyCatalogPaths};
 use anyhow::{Context, Result, bail};
 use bootty_config::{APPLICATION_IDENTITY_ENV, ApplicationIdentity};
-use bootty_daemon::catalog::{Backend, Catalog, LegacyCatalogPaths};
 
 pub fn run_remote_ping() {
     println!(
@@ -13,12 +13,16 @@ pub fn run_remote_ping() {
     );
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn run_remote_exec(args: &[String]) -> Result<i32> {
     let payload = args.first().context("remote-exec requires a payload")?;
     reject_extra(args.iter().skip(1))?;
     bootty_host::run_remote_command(payload)
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn run_remote_rmux(args: &[String]) -> Result<i32> {
     let payload = args.first().context("remote-rmux requires a payload")?;
     reject_extra(args.iter().skip(1))?;
@@ -30,7 +34,26 @@ pub struct RemoteSpacePaths {
     legacy: Option<LegacyCatalogPaths>,
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn run_remote_space(args: &[String], paths: &RemoteSpacePaths) -> Result<()> {
+    run_remote_space_with_io(
+        args,
+        paths,
+        &mut std::io::stdin().lock(),
+        &mut std::io::stdout().lock(),
+    )
+}
+
+/// Dispatches the remote Space protocol using explicit streams and persisted catalog paths.
+/// # Errors
+/// Returns argument, protocol, catalog, backend, or stream errors.
+pub fn run_remote_space_with_io(
+    args: &[String],
+    paths: &RemoteSpacePaths,
+    input: &mut impl std::io::BufRead,
+    output: &mut impl std::io::Write,
+) -> Result<()> {
     let Some((command, arguments)) = args.split_first() else {
         bail!("remote-space requires a command")
     };
@@ -44,30 +67,32 @@ pub fn run_remote_space(args: &[String], paths: &RemoteSpacePaths) -> Result<()>
             if !arguments.is_empty() {
                 bail!("remote-space list takes no arguments")
             }
-            println!("{}", serde_json::to_string(&catalog.list()?)?);
+            writeln!(output, "{}", serde_json::to_string(&catalog.list()?)?)?;
         }
         "create" => {
             let name = required_option(arguments, "--name")?;
             let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
-            println!(
+            writeln!(
+                output,
                 "{}",
                 serde_json::to_string(&catalog.create(&name, backend)?)?
-            );
+            )?;
         }
         "snapshot" => {
             let id = required_option(arguments, "--id")?;
             let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
-            println!(
+            writeln!(
+                output,
                 "{}",
                 serde_json::to_string(&catalog.snapshot(&id, backend)?)?
-            );
+            )?;
         }
         "execute" => {
             let id = required_option(arguments, "--id")?;
             let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
             let payload = required_option(arguments, "--payload")?;
             let command = if payload == "-" {
-                bootty_mux::remote_space::read_stream_command(std::io::stdin().lock())?
+                bootty_mux::remote_space::read_stream_command(&mut *input)?
             } else {
                 bootty_mux::remote_space::decode_command(&payload)?
             };
@@ -76,17 +101,20 @@ pub fn run_remote_space(args: &[String], paths: &RemoteSpacePaths) -> Result<()>
         "pane" => {
             let id = required_option(arguments, "--id")?;
             let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
-            let request = bootty_mux::remote_space::PaneRequest::read(std::io::stdin().lock())?;
-            println!(
+            let request = bootty_mux::remote_space::PaneRequest::read(&mut *input)?;
+            writeln!(
+                output,
                 "{}",
                 serde_json::to_string(&catalog.pane(&id, backend, &request)?)?
-            );
+            )?;
         }
         _ => bail!("unknown remote-space command {command:?}"),
     }
     Ok(())
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn run_remote_project(args: &[String]) -> Result<()> {
     let Some((command, arguments)) = args.split_first() else {
         bail!("remote-project requires a command")
@@ -123,6 +151,8 @@ pub fn run_remote_project(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn run_remote_worktree(args: &[String]) -> Result<()> {
     let Some((command, arguments)) = args.split_first() else {
         bail!("remote-worktree requires a command")
@@ -183,6 +213,8 @@ pub fn run_remote_worktree(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn parse_application_identity(args: Vec<String>) -> Result<(ApplicationIdentity, Vec<String>)> {
     let inherited = std::env::var_os(APPLICATION_IDENTITY_ENV);
     parse_application_identity_with_inherited(args, inherited.as_deref())
@@ -225,14 +257,26 @@ fn inherited_application_identity(value: Option<&OsStr>) -> Result<ApplicationId
         .with_context(|| format!("unknown application identity {value:?}"))
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn remote_space_paths_from_environment(
     identity: ApplicationIdentity,
 ) -> Result<RemoteSpacePaths> {
-    let explicit = std::env::var_os("BOOTTY_DAEMON_STATE").map(PathBuf::from);
+    remote_space_paths_from(identity, |name| std::env::var_os(name))
+}
+
+/// Resolves catalog paths from a captured host environment.
+/// # Errors
+/// Returns an error when the daemon state directory cannot be resolved.
+pub fn remote_space_paths_from(
+    identity: ApplicationIdentity,
+    mut var: impl FnMut(&str) -> Option<std::ffi::OsString>,
+) -> Result<RemoteSpacePaths> {
+    let explicit = var("BOOTTY_DAEMON_STATE").map(PathBuf::from);
     #[cfg(windows)]
-    let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let local_app_data = var("LOCALAPPDATA").map(PathBuf::from);
     #[cfg(windows)]
-    let app_data = std::env::var_os("APPDATA").map(PathBuf::from);
+    let app_data = var("APPDATA").map(PathBuf::from);
     #[cfg(windows)]
     let path = bootty_config::windows_daemon_state_path(
         identity,
@@ -241,9 +285,9 @@ pub fn remote_space_paths_from_environment(
         app_data.as_deref(),
     );
     #[cfg(not(windows))]
-    let xdg_state_home = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+    let xdg_state_home = var("XDG_STATE_HOME").map(PathBuf::from);
     #[cfg(not(windows))]
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let home = var("HOME").map(PathBuf::from);
     #[cfg(not(windows))]
     let path = bootty_config::unix_daemon_state_path(
         identity,
@@ -252,8 +296,8 @@ pub fn remote_space_paths_from_environment(
         home.as_deref(),
     );
     let state = path.context("daemon state root is unavailable")?;
-    let xdg_config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
-    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let xdg_config_home = var("XDG_CONFIG_HOME").map(PathBuf::from);
+    let home = var("HOME").map(PathBuf::from);
     let legacy = bootty_config::legacy_config_path_from_env(
         identity,
         xdg_config_home.as_deref(),
@@ -301,6 +345,8 @@ fn reject_extra<'a>(mut args: impl Iterator<Item = &'a String>) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn run_clipboard_upload(args: &[String]) -> Result<()> {
     use std::io::Write as _;
     let [length, digest] = args else {
@@ -320,6 +366,8 @@ pub fn run_clipboard_upload(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// # Errors
+/// Returns argument, host, or command execution errors.
 pub fn run_file(args: &[String]) -> Result<()> {
     use std::io::Write as _;
     if !args.is_empty() {

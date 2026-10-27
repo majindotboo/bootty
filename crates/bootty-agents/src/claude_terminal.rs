@@ -1,7 +1,7 @@
 use std::{
-    sync::{Arc, Condvar, Mutex, PoisonError},
+    sync::{Arc, Condvar, Mutex, PoisonError, Weak},
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Deserialize;
@@ -68,12 +68,30 @@ pub struct ClaudeTerminalObserver {
     arguments: Vec<String>,
     stop: Arc<(Mutex<bool>, Condvar)>,
     worker: Option<JoinHandle<()>>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 
 impl ClaudeTerminalObserver {
     /// # Errors
     /// Returns unsupported ambiguous session selectors or invalid explicit UUIDs.
     pub fn prepare(launch: &AgentLaunch, sink: ObservationSink) -> Result<Self, String> {
+        Self::prepare_with_transport(
+            launch,
+            sink,
+            &crate::TerminalProviderTransport::default(),
+            Arc::new(Instant::now),
+        )
+    }
+
+    /// Observe the exact session through a captured query transport and monotonic clock.
+    /// # Errors
+    /// Returns unsupported ambiguous session selectors or invalid explicit UUIDs.
+    pub fn prepare_with_transport(
+        launch: &AgentLaunch,
+        sink: ObservationSink,
+        transport: &crate::TerminalProviderTransport,
+        clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Result<Self, String> {
         let mut arguments = launch.arguments.clone();
         let selector = |name: &str| {
             arguments.windows(2).find_map(|pair| {
@@ -110,7 +128,13 @@ impl ClaudeTerminalObserver {
             return Err("Claude observation requires a full session UUID".to_owned());
         }
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
+        let wake_stop = stop.clone();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+            let _guard = wake_stop.0.lock().unwrap_or_else(PoisonError::into_inner);
+            wake_stop.1.notify_all();
+        });
         let stopping = stop.clone();
+        let transport = transport.clone();
         let program = launch.program.clone();
         let account_directory = launch.account_directory.clone();
         let worker = thread::spawn(move || {
@@ -118,10 +142,13 @@ impl ClaudeTerminalObserver {
                 if *stopping.0.lock().unwrap_or_else(PoisonError::into_inner) {
                     break;
                 }
-                let queried =
-                    query_observation(&program, account_directory.as_deref(), &session_id, || {
-                        *stopping.0.lock().unwrap_or_else(PoisonError::into_inner)
-                    });
+                let queried = query_observation(
+                    &program,
+                    account_directory.as_deref(),
+                    &session_id,
+                    &transport,
+                    || *stopping.0.lock().unwrap_or_else(PoisonError::into_inner),
+                );
                 let observation = match queried {
                     Ok(Some(observation)) => observation,
                     Ok(None) => AgentObservation {
@@ -134,18 +161,23 @@ impl ClaudeTerminalObserver {
                         ..Default::default()
                     },
                 };
+                // Establish the deadline before publication: a consumer may advance the clock in its callback.
+                let queried_at = clock();
                 sink(observation);
-                let (guard, _) = stopping
-                    .1
-                    .wait_timeout_while(
-                        stopping.0.lock().unwrap_or_else(PoisonError::into_inner),
-                        Duration::from_millis(750),
-                        |stop| !*stop,
-                    )
-                    .unwrap_or_else(PoisonError::into_inner);
-                let stopped = *guard;
-                drop(guard);
-                if stopped {
+                let mut stopped = stopping.0.lock().unwrap_or_else(PoisonError::into_inner);
+                while !*stopped {
+                    let remaining = Duration::from_millis(750)
+                        .saturating_sub(clock().saturating_duration_since(queried_at));
+                    if remaining.is_zero() {
+                        break;
+                    }
+                    stopped = stopping
+                        .1
+                        .wait_timeout(stopped, remaining)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0;
+                }
+                if *stopped {
                     break;
                 }
             }
@@ -154,7 +186,17 @@ impl ClaudeTerminalObserver {
             arguments,
             stop,
             worker: Some(worker),
+            wake,
         })
+    }
+
+    /// Recheck the next poll deadline after the injected clock advances.
+    pub fn clock_advanced(&self) {
+        (self.wake)();
+    }
+
+    pub(super) fn clock_wake(&self) -> Weak<dyn Fn() + Send + Sync> {
+        Arc::downgrade(&self.wake)
     }
 
     #[must_use]
@@ -207,12 +249,14 @@ fn query_observation(
     program: &str,
     directory: Option<&str>,
     session_id: &str,
+    transport: &crate::TerminalProviderTransport,
     cancelled: impl Fn() -> bool,
 ) -> Result<Option<AgentObservation>, String> {
-    let output = crate::terminal_process::query_output_in(
+    let output = crate::terminal_process::query_output_using(
         program,
         &["agents", "--json", "--all"],
         directory.map(|directory| ("CLAUDE_CONFIG_DIR", directory)),
+        transport,
         cancelled,
     )?;
     if !output.successful {

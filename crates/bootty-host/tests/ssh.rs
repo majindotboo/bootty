@@ -2,10 +2,9 @@ use std::{
     cell::RefCell,
     rc::Rc,
     sync::{
-        Arc,
+        Arc, Barrier,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 use anyhow::Result;
@@ -140,7 +139,6 @@ fn cloned_remote_serializes_daemon_readiness() {
                 "expected daemon readiness ping"
             );
             self.0.fetch_add(1, Ordering::SeqCst);
-            std::thread::sleep(Duration::from_millis(10));
             Ok(CommandOutput {
                 success: true,
                 stdout: format!(
@@ -155,13 +153,19 @@ fn cloned_remote_serializes_daemon_readiness() {
 
     let remote = remote();
     let calls = Arc::new(AtomicUsize::new(0));
+    let ready = Arc::new(Barrier::new(5));
     let handles = (0..4)
         .map(|_| {
             let remote = remote.clone();
             let runner = PingRunner(calls.clone());
-            std::thread::spawn(move || remote.ensure_daemon_with(&runner))
+            let ready = Arc::clone(&ready);
+            std::thread::spawn(move || {
+                ready.wait();
+                remote.ensure_daemon_with(&runner)
+            })
         })
         .collect::<Vec<_>>();
+    ready.wait();
     for handle in handles {
         handle.join().unwrap().unwrap();
     }

@@ -1,6 +1,6 @@
+use crate::cli::{Cli, RunArgs};
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use bootty::cli::{Cli, RunArgs};
 use bootty_control::{Caller, CommandInvocation, CommandOutcome, InstanceDescriptor};
 use bootty_host::jobs::{JobRead, JobSpec, JobStatus, JobStream, JobSummary};
 use std::{
@@ -43,6 +43,9 @@ impl Drop for OwnedJob {
     }
 }
 
+/// Starts a job on the selected application owner and optionally follows its output.
+/// # Errors
+/// Returns transport, command, output, or cancellation failures.
 pub fn run_job(cli: &Cli, args: &RunArgs) -> Result<()> {
     let instance = bootty_control::select_or_start(cli.start())
         .map_err(|error| super::transport_failure(&error))?;

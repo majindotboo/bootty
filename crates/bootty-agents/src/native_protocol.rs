@@ -1948,13 +1948,20 @@ pub fn file_change_input(path: &str, diff: &str) -> String {
 fn transcript_text(role: &str, text: String) -> String {
     if matches!(role, "user" | "assistant" | "thinking" | "plan") {
         // Conversation text uses the aggregate transcript budget; tool output has its own cap.
-        presentation_text(&text)
+        presentation_text(text)
     } else {
         bounded_text(text)
     }
 }
 
-fn presentation_text(text: &str) -> String {
+fn presentation_text(text: String) -> String {
+    // Plain conversation text needs neither terminal parsing nor another allocation.
+    if text
+        .chars()
+        .all(|character| !character.is_control() || matches!(character, '\n' | '\r' | '\t'))
+    {
+        return text;
+    }
     let mut parser = anstyle_parse::Parser::<anstyle_parse::Utf8Parser>::default();
     let mut presentation = TranscriptText(String::with_capacity(text.len()));
     for byte in text.bytes() {
@@ -1965,7 +1972,7 @@ fn presentation_text(text: &str) -> String {
 
 pub fn bounded_text(mut text: String) -> String {
     const LIMIT: usize = 16 * 1024;
-    text = presentation_text(&text);
+    text = presentation_text(text);
     if text.len() > LIMIT {
         let mut end = LIMIT;
         while !text.is_char_boundary(end) {

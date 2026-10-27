@@ -1,11 +1,7 @@
 #![cfg(test)]
 #![cfg(unix)]
 
-use std::{
-    io::Write as _,
-    os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use assert_fs::prelude::*;
@@ -81,6 +77,29 @@ fn a_real_daemon_autostarts_rmux_and_round_trips_session_tags(
         )
         .env("RMUX_TMPDIR", rmux_root)
         .env("BOOTTY_DAEMON_RECOVERY_ROOT", directory.path())
+        .env(
+            "BOOTTY_DAEMON_BINARY",
+            directory.path().join("daemon-launcher"),
+        )
+        .env(
+            "BOOTTY_TEST_DAEMON_BINARY",
+            env!("CARGO_BIN_EXE_bootty-daemon"),
+        )
+        .env(
+            "BOOTTY_TEST_DAEMON_LAUNCH_ENV",
+            directory.path().join("daemon-launch-environment"),
+        )
+        .env(
+            "BOOTTY_DAEMON_STATE",
+            directory.path().join("daemon.sqlite"),
+        )
+        .env("XDG_CONFIG_HOME", directory.path().join("config"))
+        .env("HOME", directory.path())
+        .env("PATH", directory.path().join("empty-path"))
+        .env("SHELL", "/bin/sh")
+        .env("BOOTTY_SHELL", "/bin/sh")
+        .env("ENV", "")
+        .env_remove("BASH_ENV")
         .status()?;
 
     anyhow::ensure!(status.success(), "the daemon round-trip helper failed");
@@ -93,6 +112,7 @@ fn a_real_daemon_round_trips_a_session_tag_through_rmux_helper() -> Result<()> {
         return Ok(());
     };
     let application_identity = ApplicationIdentity::parse(&identity).expect("fixture identity");
+    application_identity.initialize_process()?;
     let root = std::path::PathBuf::from(
         std::env::var_os("BOOTTY_DAEMON_RECOVERY_ROOT").expect("recovery root"),
     );
@@ -122,31 +142,20 @@ fn a_real_daemon_round_trips_a_session_tag_through_rmux_helper() -> Result<()> {
 
     // Observe the launcher's child environment, then run the actual embedded daemon.
     let launcher = root.join("daemon-launcher");
-    assert_fs::fixture::ChildPath::new(&launcher).write_str(
+    bootty_test_support::write_executable(
+        &launcher,
         "#!/bin/sh\nprintf '%s\\n' \"$BOOTTY_APPLICATION_IDENTITY\" \"$BOOTTY_DEVELOPMENT_NAMESPACE\" >> \"$BOOTTY_TEST_DAEMON_LAUNCH_ENV\"\nexec \"$BOOTTY_TEST_DAEMON_BINARY\" \"$@\"\n",
     )?;
-    std::fs::set_permissions(&launcher, std::fs::Permissions::from_mode(0o700))?;
     let launch_environment = root.join("daemon-launch-environment");
     let inherited_identity = if identity == "bootty" {
         "bootty-dev"
     } else {
         "bootty"
     };
+    let real_boundary = std::cell::Cell::new(false);
     let run = |args: &[String]| -> std::io::Result<std::process::Output> {
-        // Exercise stdin for rename while retaining legacy encoded requests for create/close.
-        let payload = args
-            .iter()
-            .position(|arg| arg == "--payload")
-            .and_then(|index| args.get(index.saturating_add(1)))
-            .and_then(|payload| bootty_mux::remote_space::decode_command(payload).ok())
-            .filter(|command| matches!(command, MuxCommand::RenameSession { .. }))
-            .map(|command| serde_json::to_vec(&command))
-            .transpose()?;
-        let mut args = args.to_vec();
-        if payload.is_some()
-            && let Some(last) = args.last_mut()
-        {
-            "-".clone_into(last);
+        if let Some(output) = in_process_request(args, application_identity, &real_boundary)? {
+            return Ok(output);
         }
         let mut process = std::process::Command::new(daemon);
         process
@@ -161,8 +170,8 @@ fn a_real_daemon_round_trips_a_session_tag_through_rmux_helper() -> Result<()> {
             .env("PATH", &empty_path)
             .env("SHELL", "/bin/sh")
             .env("BOOTTY_SHELL", "/bin/sh")
-            .args(&args);
-        run_with_payload(&mut process, payload)
+            .args(args);
+        process.output()
     };
     let remote_space = |command: &str, options: &[(&str, &str)]| {
         let mut args = vec!["remote-space".to_owned(), command.to_owned()];
@@ -192,25 +201,48 @@ fn a_real_daemon_round_trips_a_session_tag_through_rmux_helper() -> Result<()> {
     Ok(())
 }
 
-fn run_with_payload(
-    process: &mut std::process::Command,
-    payload: Option<Vec<u8>>,
-) -> std::io::Result<std::process::Output> {
-    let Some(payload) = payload else {
-        return process.output();
-    };
-    let mut child = process
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()?;
-    let mut stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| std::io::Error::other("fixture stdin is unavailable"))?;
-    stdin.write_all(&payload)?;
-    drop(stdin);
-    child.wait_with_output()
+fn in_process_request(
+    args: &[String],
+    identity: ApplicationIdentity,
+    real_boundary: &std::cell::Cell<bool>,
+) -> std::io::Result<Option<std::process::Output>> {
+    let execute = args
+        .first()
+        .is_some_and(|command| command == "remote-space")
+        && args.get(1).is_some_and(|command| command == "execute");
+    if execute && !real_boundary.replace(true) {
+        return Ok(None);
+    }
+    // Keep encoded create/close and streamed rename on the same parser used by the binary.
+    let payload = args
+        .iter()
+        .position(|arg| arg == "--payload")
+        .and_then(|index| args.get(index.saturating_add(1)))
+        .and_then(|payload| bootty_mux::remote_space::decode_command(payload).ok())
+        .filter(|command| matches!(command, MuxCommand::RenameSession { .. }))
+        .map(|command| serde_json::to_vec(&command))
+        .transpose()?;
+    let mut args = args.to_vec();
+    if payload.is_some()
+        && let Some(last) = args.last_mut()
+    {
+        "-".clone_into(last);
+    }
+    let paths = bootty_daemon::command_runtime::remote_space_paths_from_environment(identity)
+        .map_err(std::io::Error::other)?;
+    let mut output = Vec::new();
+    bootty_daemon::command_runtime::run_remote_space_with_io(
+        &args[1..],
+        &paths,
+        &mut std::io::Cursor::new(payload.unwrap_or_default()),
+        &mut output,
+    )
+    .map_err(std::io::Error::other)?;
+    Ok(Some(std::process::Output {
+        status: std::process::ExitStatus::default(),
+        stdout: output,
+        stderr: Vec::new(),
+    }))
 }
 
 fn round_trip_session(

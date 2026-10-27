@@ -2,23 +2,20 @@
 
 use std::process::Command;
 
+#[path = "support/repository.rs"]
+mod repository_support;
+#[path = "support/runner.rs"]
+mod runner;
+
 use assert_fs::{TempDir, prelude::*};
-use bootty_git::{
-    Git,
-    changes::{ChangeGroup, LineCounts},
-};
+use bootty_git::changes::{ChangeGroup, LineCounts};
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
 #[fixture]
 fn repository() -> anyhow::Result<TempDir> {
     let dir = TempDir::new()?;
-    run(&dir, &["init", "--quiet"])?;
-    run(&dir, &["config", "user.name", "Bootty Test"])?;
-    run(&dir, &["config", "user.email", "test@example.invalid"])?;
-    run(&dir, &["config", "commit.gpgsign", "false"])?;
-    // Keep machine-global hooks out of the temporary repository.
-    run(&dir, &["config", "core.hooksPath", "/dev/null"])?;
+    repository_support::init(dir.path(), false)?;
     Ok(dir)
 }
 
@@ -39,7 +36,7 @@ fn run(dir: &TempDir, args: &[&str]) -> anyhow::Result<String> {
 #[rstest]
 fn index_changes_leave_worktree_content_intact(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     repository.child("a.txt").write_str("first\n").unwrap();
     assert_eq!(
@@ -93,7 +90,7 @@ fn index_changes_leave_worktree_content_intact(repository: anyhow::Result<TempDi
 #[rstest]
 fn filenames_are_literal_and_renames_unstage_both_paths(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     let special = if cfg!(windows) {
         "file [one] & name.txt"
@@ -139,7 +136,7 @@ fn filenames_are_literal_and_renames_unstage_both_paths(repository: anyhow::Resu
 #[rstest]
 fn changes_count_each_sides_lines(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     repository
         .child("notes.txt")
@@ -204,28 +201,17 @@ fn commit_file(clone: &std::path::Path, name: &str) {
 #[rstest]
 fn sync_reports_and_closes_the_distance_to_the_upstream() {
     let dir = TempDir::new().unwrap();
-    git_in(
-        dir.path(),
-        &["init", "-q", "--bare", "-b", "main", "origin.git"],
-    );
+    repository_support::init(&dir.path().join("origin.git"), true).unwrap();
     let clones = ["mine", "theirs"].map(|name| dir.path().join(name));
     for clone in &clones {
         git_in(
             dir.path(),
             &["clone", "-q", "origin.git", clone.to_str().unwrap()],
         );
-        for (key, value) in [
-            ("user.name", "Bootty Test"),
-            ("user.email", "test@example.invalid"),
-            ("commit.gpgsign", "false"),
-            ("core.hooksPath", "/dev/null"),
-            ("init.defaultBranch", "main"),
-        ] {
-            git_in(clone, &["config", key, value]);
-        }
+        configure(clone).unwrap();
     }
     let [mine, theirs] = clones.map(|clone| clone.to_str().unwrap().to_owned());
-    let git = Git::new();
+    let git = runner::git();
     let distance = |clone: &str| {
         git.changes(clone)
             .unwrap()
@@ -275,7 +261,7 @@ fn sync_reports_and_closes_the_distance_to_the_upstream() {
 #[rstest]
 fn changes_stage_together_by_hunk_and_discard(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     let lines = |changed: &[usize]| {
         (1..=30)
@@ -343,7 +329,7 @@ fn changes_stage_together_by_hunk_and_discard(repository: anyhow::Result<TempDir
 #[rstest]
 fn all_changes_diff_together_and_can_hide_whitespace(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     repository
         .child("spaced.txt")
@@ -375,7 +361,7 @@ fn all_changes_diff_together_and_can_hide_whitespace(repository: anyhow::Result<
 #[rstest]
 fn commit_messages_describe_only_what_is_staged(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     repository.child("notes.txt").write_str("one\n").unwrap();
     run(&repository, &["add", "notes.txt"]).unwrap();
@@ -411,7 +397,7 @@ fn commit_messages_describe_only_what_is_staged(repository: anyhow::Result<TempD
 #[rstest]
 fn pull_requests_describe_the_branch_since_its_base(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     repository.child("notes.txt").write_str("one\n").unwrap();
     run(&repository, &["add", "notes.txt"]).unwrap();
@@ -451,7 +437,7 @@ fn pull_requests_describe_the_branch_since_its_base(repository: anyhow::Result<T
 #[rstest]
 fn branches_report_their_distance_and_switch_by_stashing(repository: anyhow::Result<TempDir>) {
     let repository = repository.expect("repository fixture");
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     repository.child("notes.txt").write_str("one\n").unwrap();
     run(&repository, &["add", "notes.txt"]).unwrap();
@@ -510,7 +496,7 @@ fn hunk_staging_preserves_file_headers_and_eof(
 ) {
     use bootty_git::diff::{DiffAnchor, DiffSide, FileDiff};
     let repository = repository.unwrap();
-    let git = Git::new();
+    let git = runner::git();
     let root = repository.path().to_str().unwrap();
     let path = "my notes.txt";
     repository.child("kept.txt").write_str("kept\n").unwrap();
@@ -550,4 +536,11 @@ fn hunk_staging_preserves_file_headers_and_eof(
     }
     git.apply_to_index(root, &patch, true).unwrap();
     assert_eq!(run(&repository, &["diff", "--cached"]).unwrap(), "");
+}
+
+fn configure(path: &std::path::Path) -> std::io::Result<()> {
+    use std::io::Write as _;
+    std::fs::OpenOptions::new().append(true).open(path.join(".git/config"))?.write_all(
+        b"\n[core]\nhooksPath = /dev/null\n[user]\nname = Bootty Test\nemail = test@example.invalid\n[commit]\ngpgsign = false\n[init]\ndefaultBranch = main\n",
+    )
 }

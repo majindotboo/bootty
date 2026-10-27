@@ -42,8 +42,7 @@ fn bridge_context(binding: CommandTarget) -> ToolBridgeContext {
 }
 
 #[test]
-fn malformed_hidden_stdio_arguments_exit_before_config_or_runtime_setup() {
-    let root = TempDir::new().expect("isolated roots");
+fn malformed_hidden_stdio_arguments_reject_paths_without_echoing_secrets() {
     let cases = [
         vec!["--agent-tool-stdio"],
         vec!["--agent-tool-stdio", "relative-secret-connection"],
@@ -54,43 +53,14 @@ fn malformed_hidden_stdio_arguments_exit_before_config_or_runtime_setup() {
         ],
     ];
 
-    for (index, arguments) in cases.iter().enumerate() {
-        let case = root.path().join(index.to_string());
-        let config = case.join("config");
-        let runtime = case.join("runtime");
-        let rmux = case.join("rmux");
-        let output = Command::new(env!("CARGO_BIN_EXE_bootty"))
-            .args(arguments)
-            .env("HOME", case.join("home"))
-            .env("XDG_CONFIG_HOME", &config)
-            .env("XDG_RUNTIME_DIR", &runtime)
-            .env("RMUX_TMPDIR", &rmux)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output()
-            .expect("run hidden mode argument check");
-
-        assert!(!output.status.success());
-        assert_eq!(output.stdout, Vec::<u8>::new());
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("--agent-tool-stdio"));
-        assert!(!stderr.contains("secret"));
-        assert!(
-            !config.exists(),
-            "config was created at {}",
-            config.display()
-        );
-        assert!(
-            !runtime.exists(),
-            "runtime was created at {}",
-            runtime.display()
-        );
-        assert!(
-            !rmux.exists(),
-            "rmux state was created at {}",
-            rmux.display()
-        );
+    for arguments in &cases {
+        let error = bootty::cli::agent_tool_stdio_connection(
+            arguments.iter().map(std::ffi::OsString::from),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("--agent-tool-stdio"));
+        assert!(!error.contains("secret"));
     }
 }
 

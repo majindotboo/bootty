@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use bootty_terminal::geometry::{DEFAULT_FONT_SIZE, SurfaceRect};
 use bootty_ui::{
@@ -16,6 +16,33 @@ use bootty_ui::{
 use num_traits::ToPrimitive as _;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
+
+fn bundled_atlas(width: u32, height: u32) -> TextAtlasBuilder {
+    bundled_atlas_with_format(width, height, GlyphAtlasFormat::Rgba)
+}
+
+fn bundled_atlas_with_format(
+    width: u32,
+    height: u32,
+    format: GlyphAtlasFormat,
+) -> TextAtlasBuilder {
+    static FONTS: LazyLock<fontdb::Database> = LazyLock::new(|| {
+        let mut database = fontdb::Database::new();
+        for bytes in [
+            bootty_ui::assets::MAPLE_MONO_NF_REGULAR,
+            bootty_ui::assets::LILEX_REGULAR,
+            bootty_ui::assets::LILEX_BOLD,
+            bootty_ui::assets::LILEX_ITALIC,
+            bootty_ui::assets::LILEX_BOLD_ITALIC,
+        ] {
+            database.load_font_data(bytes.to_vec());
+        }
+        database.set_monospace_family("Maple Mono NF");
+        database
+    });
+    TextAtlasBuilder::with_font_database(width, height, format, &FONTS)
+        .expect("bounded bundled-font atlas")
+}
 
 fn cluster_layout(clusters: &[ShapedCluster]) -> Vec<(&str, u16, u16, bool)> {
     clusters
@@ -386,12 +413,12 @@ fn text_atlas_builder_appends_textured_quads_without_replacing_existing_batch() 
 #[test]
 fn atlas_keys_separate_same_glyph_at_different_pixel_scales() {
     let command = text_command("A", 10.0);
-    let mut builder = TextAtlasBuilder::new(128, 128).expect("bounded test atlas");
-
-    command_quads(&mut builder, &command, 1.0);
-    command_quads(&mut builder, &command, 2.0);
-
-    assert_eq!(builder.atlas_len(), 2);
+    for format in [GlyphAtlasFormat::Alpha, GlyphAtlasFormat::Rgba] {
+        let mut builder = bundled_atlas_with_format(128, 128, format);
+        command_quads(&mut builder, &command, 1.0);
+        command_quads(&mut builder, &command, 2.0);
+        assert_eq!(builder.atlas_len(), 2);
+    }
 }
 
 #[rstest]
@@ -460,7 +487,7 @@ fn maple_outline_uses_the_same_em_size_as_shaping(
         style: FontStyle::Regular,
     });
     command.font_features = Arc::from([]);
-    let mut atlas = TextAtlasBuilder::new_rgba(256, 256).expect("bounded test atlas");
+    let mut atlas = bundled_atlas(256, 256);
     let quads = command_quads(&mut atlas, &command, device_scale);
     let quad = &quads[0];
     let tile = atlas.bgra_tile(quad).unwrap();
@@ -665,25 +692,83 @@ fn pixel(bgra: &[u8], width: u32, (x, y): (u32, u32)) -> [u8; 4] {
 }
 
 #[rstest]
-#[case("Lilex", FontStyle::Bold, bootty_ui::assets::LILEX_BOLD)]
-#[case("Lilex", FontStyle::Italic, bootty_ui::assets::LILEX_ITALIC)]
-#[case("Lilex", FontStyle::BoldItalic, bootty_ui::assets::LILEX_BOLD_ITALIC)]
-#[case("Lilex Bold", FontStyle::Regular, bootty_ui::assets::LILEX_BOLD)]
-#[case("Lilex-Bold", FontStyle::Regular, bootty_ui::assets::LILEX_BOLD)]
-#[case(
-    "Maple Mono NF Regular",
-    FontStyle::Regular,
-    bootty_ui::assets::MAPLE_MONO_NF_REGULAR
-)]
-fn selected_face_preserves_natural_ink_and_bearings(
-    #[case] family: &str,
-    #[case] style: FontStyle,
-    #[case] bytes: &'static [u8],
-    #[values('H', 'f', 'j', 'é')] ch: char,
-    #[values(1.0, 1.5, 2.0)] scale: f32,
-) {
-    use ab_glyph::{Font, FontArc, point};
-    let font = FontArc::try_from_slice(bytes).unwrap();
+fn selected_face_preserves_natural_ink_and_bearings() {
+    use ab_glyph::FontArc;
+    let faces = [
+        ("Lilex", FontStyle::Bold, bootty_ui::assets::LILEX_BOLD),
+        ("Lilex", FontStyle::Italic, bootty_ui::assets::LILEX_ITALIC),
+        (
+            "Lilex",
+            FontStyle::BoldItalic,
+            bootty_ui::assets::LILEX_BOLD_ITALIC,
+        ),
+        (
+            "Lilex Bold",
+            FontStyle::Regular,
+            bootty_ui::assets::LILEX_BOLD,
+        ),
+        (
+            "Lilex-Bold",
+            FontStyle::Regular,
+            bootty_ui::assets::LILEX_BOLD,
+        ),
+        (
+            "Maple Mono NF Regular",
+            FontStyle::Regular,
+            bootty_ui::assets::MAPLE_MONO_NF_REGULAR,
+        ),
+    ]
+    .map(|(family, style, bytes)| (family, style, FontArc::try_from_slice(bytes).unwrap()));
+
+    // The original boundary matrix stays exact.
+    for (family, style, font) in &faces {
+        for ch in ['H', 'f', 'j', 'é'] {
+            for scale in [1.0, 1.5, 2.0] {
+                let (actual, expected) = selected_face_ink(family, *style, font, ch, scale);
+                assert_eq!(actual, expected, "{family} {style:?} {ch} at {scale}");
+            }
+        }
+    }
+    // Every printable glyph keeps its ink and bearings. The atlas reaches the glyph position
+    // through different float operations than this reference, so a pixel on a rounding
+    // boundary may differ by one alpha step.
+    for (family, style, font) in &faces {
+        for ch in '!'..='~' {
+            for scale in [1.0, 1.5, 2.0] {
+                let (actual, expected) = selected_face_ink(family, *style, font, ch, scale);
+                let off = actual
+                    .keys()
+                    .chain(expected.keys())
+                    .filter(|pixel| {
+                        actual
+                            .get(pixel)
+                            .copied()
+                            .unwrap_or_default()
+                            .abs_diff(expected.get(pixel).copied().unwrap_or_default())
+                            > 1
+                    })
+                    .collect::<Vec<_>>();
+                assert!(
+                    off.is_empty(),
+                    "{family} {style:?} {ch} at {scale}: {off:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Alpha by device pixel.
+type Ink = std::collections::BTreeMap<(i32, i32), u8>;
+
+/// The atlas's ink for `ch`, and the ink of the face's own outline at the same baseline.
+fn selected_face_ink(
+    family: &str,
+    style: FontStyle,
+    font: &ab_glyph::FontArc,
+    ch: char,
+    scale: f32,
+) -> (Ink, Ink) {
+    use ab_glyph::{Font, point};
     let mut command = text_command(&ch.to_string(), 7.0);
     command.rect = SurfaceRect::from_min_size(0.0, 0.0, 7.0, 22.0);
     command.font_size = 11.75;
@@ -694,7 +779,7 @@ fn selected_face_preserves_natural_ink_and_bearings(
         style,
     });
     command.font_features = Arc::from([FontFeature::new(*b"liga", 0)]);
-    let actual = command_ink(&command, scale);
+    let actual = command_ink_with_builder(&mut bundled_atlas(256, 256), &command, scale);
     let units = command.font_size * scale / font.units_per_em().unwrap();
     let height = font.height_unscaled() * units;
     let baseline = font
@@ -733,7 +818,7 @@ fn selected_face_preserves_natural_ink_and_bearings(
             );
         }
     });
-    assert_eq!(actual, expected, "{family} {style:?} {ch} at {scale}");
+    (actual, expected)
 }
 
 // Geometry assertions can retain quads; tests that inspect pixels copy them in the visitor.
@@ -775,11 +860,11 @@ fn missing_nerd_icons_use_the_bundled_face_before_system_fallback(
 #[rstest]
 fn streamed_glyph_pixels_survive_atlas_recycling_inside_one_text_run() {
     let command = text_command("AB", 40.0);
-    let mut fresh = TextAtlasBuilder::new_rgba(40, 4096).expect("bounded test atlas");
+    let mut fresh = bundled_atlas(40, 4096);
     let expected = command_ink_with_builder(&mut fresh, &command, 1.0);
     assert!(!expected.is_empty());
 
-    let mut saturated = TextAtlasBuilder::new_rgba(40, 4096).expect("bounded test atlas");
+    let mut saturated = bundled_atlas(40, 4096);
     saturated.prepare_sprite_command(
         &SpriteCommandBatch {
             glyph: SpriteGlyph::from_char('█').unwrap(),
@@ -927,11 +1012,11 @@ fn changing_ascii_font_features_matches_a_fresh_atlas(#[case] family: &str) {
         fallback_families: vec![],
         style: FontStyle::Regular,
     });
-    let mut builder = TextAtlasBuilder::new_rgba(256, 256).expect("bounded test atlas");
+    let mut builder = bundled_atlas(256, 256);
     let mut previous_ink = None;
     for value in [0, 1, 0] {
         command.font_features = Arc::from([FontFeature::new(*b"zero", value)]);
-        let expected = command_ink(&command, 2.0);
+        let expected = command_ink_with_builder(&mut bundled_atlas(256, 256), &command, 2.0);
         assert!(!expected.is_empty());
         if let Some(previous) = previous_ink {
             pretty_assertions::assert_ne!(expected, previous, "{family} zero={value}");

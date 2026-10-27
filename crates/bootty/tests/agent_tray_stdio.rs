@@ -10,6 +10,11 @@ use rstest::rstest;
 #[case::malformed_snapshot(b"not-json\n".as_slice(), 1)]
 #[case::truncated_snapshot(b"{}".as_slice(), 1)]
 fn tray_helper_ends_with_its_parent_input(#[case] input: &[u8], #[case] expected: i32) {
+    if expected != 0 {
+        assert!(bootty_ui::read_agent_tray_snapshot(&mut std::io::Cursor::new(input)).is_err());
+        return;
+    }
+
     let mut helper = Command::new(env!("CARGO_BIN_EXE_bootty"))
         .arg("--agent-tray-stdio")
         .stdin(Stdio::piped())

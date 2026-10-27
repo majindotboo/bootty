@@ -1,8 +1,16 @@
+#[path = "support/repository.rs"]
+mod repository_support;
+#[path = "support/seed.rs"]
+mod seed;
+
+#[path = "support/process.rs"]
+mod runner;
+
 use anyhow::Context as _;
 use assert_fs::{TempDir, prelude::*};
 use bootty_git::{
     Git,
-    runner::{CommandOutput, CommandRunner, SystemCommandRunner},
+    runner::{CommandOutput, CommandRunner},
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -68,7 +76,7 @@ impl CommandRunner for Host<'_> {
             // Only the network dependency is replaced; real Git fetch/switch protects the files.
             *args.get_mut(6).context("Git fetch remote")? = self.root.into();
         }
-        SystemCommandRunner.run(program, &args)
+        runner::RepositoryRunner.run(program, &args)
     }
 }
 
@@ -78,7 +86,7 @@ fn git(root: &str, args: &[&str]) -> anyhow::Result<String> {
         .chain(args.iter().copied())
         .map(str::to_owned)
         .collect::<Vec<_>>();
-    let output = SystemCommandRunner.run("git", &args)?;
+    let output = runner::RepositoryRunner.run("git", &args)?;
     anyhow::ensure!(output.success, "{}", output.stderr);
     Ok(output.stdout.trim().into())
 }
@@ -95,22 +103,14 @@ fn checkout_preserves_files_and_branches_across_changed_state(
 ) -> anyhow::Result<()> {
     let directory = TempDir::new()?;
     let root = directory.path().to_str().context("UTF-8 checkout")?;
-    git(root, &["init", "--initial-branch=main"])?;
-    git(root, &["config", "user.name", "Checkout test"])?;
-    git(root, &["config", "user.email", "checkout@example.test"])?;
-    directory.child(".gitignore").write_str("ignored.txt\n")?;
-    directory.child("source.txt").write_str("original\n")?;
-    git(root, &["add", "."])?;
-    git(root, &["commit", "-m", "Initial"])?;
-    let base = git(root, &["rev-parse", "HEAD"])?;
-    directory.child("ignored.txt").write_str("PR content\n")?;
-    directory.child("source.txt").write_str("PR source\n")?;
-    git(root, &["add", "--force", "ignored.txt", "source.txt"])?;
-    git(root, &["commit", "-m", "PR revision"])?;
-    let head = git(root, &["rev-parse", "HEAD"])?;
-    git(root, &["update-ref", "refs/pull/12/head", &head])?;
-    git(root, &["switch", "--detach", &base])?;
-    let original_branch = git(root, &["rev-parse", "refs/heads/main"])?;
+    seed::repository(directory.path(), "pull-request", false)?;
+    let base = std::fs::read_to_string(directory.path().join(".git/HEAD"))?
+        .trim()
+        .to_owned();
+    let head = std::fs::read_to_string(directory.path().join(".git/refs/pull/12/head"))?
+        .trim()
+        .to_owned();
+    let original_branch = head.clone();
     let host = Host {
         root,
         head: &head,

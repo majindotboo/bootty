@@ -1,6 +1,4 @@
 use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
-#[cfg(unix)]
-use std::process::Child;
 use std::{
     io::{self, Read},
     process::{Command, Stdio},
@@ -57,22 +55,6 @@ exit "$result"
     command
 }
 
-/// Worker-only cleanup; never signal the application's inherited process group.
-#[cfg(unix)]
-pub fn terminate_group(child: &mut Child) {
-    #[cfg(unix)]
-    {
-        let _ = Command::new("/bin/kill")
-            .args(["-KILL", "--", &format!("-{}", child.id())])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-    }
-    let _ = child.kill();
-    let _ = child.wait();
-}
-
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 
 fn drain(mut pipe: impl Read) -> io::Result<Vec<u8>> {
@@ -100,18 +82,11 @@ pub struct QueryOutput {
     pub successful: bool,
 }
 
-pub fn query_output(
-    program: &str,
-    arguments: &[&str],
-    cancelled: impl Fn() -> bool,
-) -> Result<QueryOutput, String> {
-    query_output_in(program, arguments, None, cancelled)
-}
-
-pub fn query_output_in(
+pub fn query_output_using(
     program: &str,
     arguments: &[&str],
     environment: Option<(&str, &str)>,
+    transport: &crate::TerminalProviderTransport,
     cancelled: impl Fn() -> bool,
 ) -> Result<QueryOutput, String> {
     let _provider_use = crate::ProviderUse::acquire(program)?;
@@ -120,7 +95,7 @@ pub fn query_output_in(
         command.env(name, value);
     }
     command.args(arguments);
-    query_output_command(command, Duration::from_secs(5), cancelled)
+    (transport.output)(command, &cancelled)
 }
 
 pub fn query_output_command(

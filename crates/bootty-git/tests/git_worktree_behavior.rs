@@ -1,3 +1,8 @@
+#[path = "support/repository.rs"]
+mod repository_support;
+#[path = "support/seed.rs"]
+mod seed;
+
 use anyhow::Context as _;
 use std::{fs, path::Path, process::Command};
 
@@ -36,14 +41,7 @@ fn repository() -> anyhow::Result<Repository> {
     let root = TempDir::new()?;
     let main = root.path().join("main");
     root.child("main").create_dir_all()?;
-    git_ok(&main, &["init", "-q", "-b", "main"])?;
-    git_ok(&main, &["config", "user.email", "test@bootty.dev"])?;
-    git_ok(&main, &["config", "user.name", "Bootty Test"])?;
-    git_ok(&main, &["config", "commit.gpgsign", "false"])?;
-    git_ok(&main, &["config", "core.hooksPath", "/dev/null"])?;
-    fs::write(main.join("README"), "hello")?;
-    git_ok(&main, &["add", "."])?;
-    git_ok(&main, &["commit", "-q", "-m", "init"])?;
+    seed::repository(&main, "project", false)?;
     let worktree = root.path().join("wt");
     git_ok(
         &main,

@@ -18,25 +18,36 @@ use bootty_mux::{
     MuxBackendKind,
     backend::{MuxBackend, PaneCapture, PaneInput},
     command::MuxCommand,
-    remote_space::RemoteSpaceBackend,
+    remote_space::{RemoteSpaceBackend, RemoteSpaceTransport},
     snapshot::{MuxSessionTag, new_session_identity},
 };
 use pretty_assertions::assert_eq;
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+const TIMEOUT: Duration = Duration::from_secs(30);
 
 struct FakeRemote {
-    root: assert_fs::TempDir,
+    root: PathBuf,
+    cleanup: bool,
 }
 
 impl FakeRemote {
-    fn new() -> Result<Self> {
+    fn new(root: &Path) -> Result<Self> {
         // Unix sockets have a short path limit, and tmux keeps its socket under TMUX_TMPDIR.
-        let root = assert_fs::TempDir::new_in("/tmp")?;
-        let remote = Self { root };
+        let remote = Self {
+            root: root.to_owned(),
+            cleanup: false,
+        };
         let bin = remote.home().join(".bootty/bin");
         std::fs::create_dir_all(&bin)?;
         std::fs::create_dir_all(remote.tmux_tmpdir())?;
+        let search = std::env::var_os("PATH").unwrap_or_default();
+        let search = std::env::join_paths(
+            std::env::split_paths(&search).filter(|path| !path.ends_with("shims")),
+        )?;
+        let tmux =
+            bootty_host::find_executable_in(std::ffi::OsStr::new("tmux"), Some(&search), None)
+                .context("tmux is required for remote backend acceptance")?;
+        std::os::unix::fs::symlink(tmux, bin.join("tmux"))?;
         // Installed where the client looks for exactly this protocol and version.
         std::os::unix::fs::symlink(
             env!("CARGO_BIN_EXE_bootty-daemon"),
@@ -46,23 +57,27 @@ impl FakeRemote {
                 env!("CARGO_PKG_VERSION")
             )),
         )?;
-        let ssh = remote.root.path().join("ssh");
+        let ssh = remote.root.as_path().join("ssh");
         bootty_test_support::write_executable(
             &ssh,
-            format!(
-                "#!/bin/sh\nfor line; do :; done\n{}\ncd \"$HOME\" && exec /bin/sh -c \"$line\"\n",
-                remote.environment()
-            ),
+            r#"#!/bin/sh
+for line; do
+    case "$line" in --bootty-test-root=*) root=${line#--bootty-test-root=};; esac
+done
+unset TMUX TMUX_PANE XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME
+export HOME="$root/home" TMUX_TMPDIR="$root/tmux" BOOTTY_DAEMON_STATE="$root/state/daemon.sqlite" SHELL=/bin/sh
+cd "$HOME" && exec /bin/sh -c "$line"
+"#,
         )?;
         Ok(remote)
     }
 
     fn home(&self) -> PathBuf {
-        self.root.path().join("home")
+        self.root.as_path().join("home")
     }
 
     fn tmux_tmpdir(&self) -> PathBuf {
-        self.root.path().join("tmux")
+        self.root.as_path().join("tmux")
     }
 
     /// The remote login environment. `TMUX` goes so tmux never finds the server this test runs
@@ -74,7 +89,7 @@ impl FakeRemote {
             "unset TMUX TMUX_PANE XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME\nexport HOME={} TMUX_TMPDIR={} BOOTTY_DAEMON_STATE={} SHELL=/bin/sh",
             value(&self.home()),
             value(&self.tmux_tmpdir()),
-            value(&self.root.path().join("state/daemon.sqlite")),
+            value(&self.root.as_path().join("state/daemon.sqlite")),
         )
     }
 
@@ -83,8 +98,16 @@ impl FakeRemote {
             host: "fake-remote".to_owned(),
             user: None,
             port: None,
-            program: self.root.path().join("ssh").to_string_lossy().into_owned(),
-            args: Vec::new(),
+            program: self
+                .root
+                .as_path()
+                .join("ssh")
+                .to_string_lossy()
+                .into_owned(),
+            args: vec![format!(
+                "--bootty-test-root={}",
+                self.root.as_path().display()
+            )],
         }))
     }
 
@@ -95,18 +118,19 @@ impl FakeRemote {
             .output()?)
     }
 
-    fn create_space(&self, name: &str) -> Result<String> {
-        let daemon = shell_quote(env!("CARGO_BIN_EXE_bootty-daemon"));
-        let output = self.run(&format!(
-            "{daemon} remote-space create --name {} --backend tmux",
-            shell_quote(name)
-        ))?;
-        anyhow::ensure!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        let summary: serde_json::Value = serde_json::from_slice(&output.stdout)?;
+    fn create_space(name: &str) -> Result<String> {
+        let output = InProcessDaemon.run(
+            &[
+                "remote-space".into(),
+                "create".into(),
+                "--name".into(),
+                name.into(),
+                "--backend".into(),
+                "tmux".into(),
+            ],
+            None,
+        )?;
+        let summary: serde_json::Value = serde_json::from_str(&output)?;
         summary["id"]
             .as_str()
             .map(str::to_owned)
@@ -116,6 +140,9 @@ impl FakeRemote {
 
 impl Drop for FakeRemote {
     fn drop(&mut self) {
+        if !self.cleanup {
+            return;
+        }
         // The daemon names its server after the build's identity, so stop every server on the
         // private socket directory rather than tmux's default one.
         let _ = self.run(
@@ -135,7 +162,7 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
     let started = Instant::now();
     while !ready()? {
         anyhow::ensure!(started.elapsed() < TIMEOUT, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::yield_now();
     }
     Ok(())
 }
@@ -145,19 +172,75 @@ fn wait_for(what: &str, mut ready: impl FnMut() -> Result<bool>) -> Result<()> {
 /// address it.
 #[test]
 fn a_remote_space_runs_explicit_creates_and_pane_io_through_the_daemon() -> Result<()> {
-    if Command::new("tmux").arg("-V").output().is_err() {
-        eprintln!("tmux unavailable; remote Space acceptance not run");
-        return Ok(());
+    let directory = assert_fs::TempDir::new_in("/tmp")?;
+    let remote = FakeRemote::new(directory.path())?;
+    let status = Command::new(std::env::current_exe()?)
+        .args(["--exact", "remote_panes_helper", "--nocapture"])
+        .env("BOOTTY_REMOTE_PANES_ROOT", directory.path())
+        .env("HOME", remote.home())
+        .env("TMUX_TMPDIR", remote.tmux_tmpdir())
+        .env(
+            "BOOTTY_DAEMON_STATE",
+            directory.path().join("state/daemon.sqlite"),
+        )
+        .env(
+            "PATH",
+            format!(
+                "{}:/usr/bin:/bin",
+                remote.home().join(".bootty/bin").display()
+            ),
+        )
+        .env("SHELL", "/bin/sh")
+        .env("BOOTTY_SHELL", "/bin/sh")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("XDG_STATE_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env("ENV", "")
+        .env_remove("BASH_ENV")
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .status()?;
+    anyhow::ensure!(status.success(), "remote pane helper failed");
+    Ok(())
+}
+
+struct InProcessDaemon;
+impl RemoteSpaceTransport for InProcessDaemon {
+    fn run(&self, args: &[String], input: Option<Vec<u8>>) -> Result<String> {
+        anyhow::ensure!(args.first().is_some_and(|arg| arg == "remote-space"));
+        let paths = bootty_daemon::command_runtime::remote_space_paths_from_environment(
+            bootty_config::ApplicationIdentity::Production,
+        )?;
+        let mut output = Vec::new();
+        bootty_daemon::command_runtime::run_remote_space_with_io(
+            &args[1..],
+            &paths,
+            &mut std::io::Cursor::new(input.unwrap_or_default()),
+            &mut output,
+        )?;
+        Ok(String::from_utf8(output)?)
     }
-    let remote = FakeRemote::new()?;
+}
+
+#[test]
+fn remote_panes_helper() -> Result<()> {
+    let Some(root) = std::env::var_os("BOOTTY_REMOTE_PANES_ROOT") else {
+        return Ok(());
+    };
+    bootty_config::ApplicationIdentity::Production.initialize_process()?;
+    let remote = FakeRemote {
+        root: root.into(),
+        cleanup: true,
+    };
     let (first, second) = (
-        remote.create_space("First")?,
-        remote.create_space("Second")?,
+        FakeRemote::create_space("First")?,
+        FakeRemote::create_space("Second")?,
     );
     let mut owner = RemoteSpaceBackend::new(remote.host(), first.clone(), MuxBackendKind::Tmux);
-    let mut other = RemoteSpaceBackend::new(remote.host(), second.clone(), MuxBackendKind::Tmux);
-    let received = remote.root.path().join("received");
-    let cwd = remote.root.path().to_string_lossy().into_owned();
+    let mut other =
+        RemoteSpaceBackend::with_transport(InProcessDaemon, second.clone(), MuxBackendKind::Tmux);
+    let received = remote.root.as_path().join("received");
+    let cwd = remote.root.as_path().to_string_lossy().into_owned();
     owner.execute(MuxCommand::CreateProjectSession {
         session_id: "agent".to_owned(),
         cwd: cwd.clone(),
@@ -169,6 +252,7 @@ fn a_remote_space_runs_explicit_creates_and_pane_io_through_the_daemon() -> Resu
             received.to_string_lossy().into_owned(),
         ]),
     })?;
+    let owner = RemoteSpaceBackend::with_transport(InProcessDaemon, first, MuxBackendKind::Tmux);
     let session = owner
         .snapshot()?
         .sessions

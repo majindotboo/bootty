@@ -1,11 +1,11 @@
 use std::io::Read;
 
+#[cfg(feature = "terminal-runtime")]
+use super::space::RemoteSpaceTransport as _;
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use bootty_host::{
-    CommandRunner, SystemCommandRunner,
-    remote::{REMOTE_DAEMON_PROGRAM, RemoteHost, remote_daemon_failure},
-};
+#[cfg(feature = "terminal-runtime")]
+use bootty_host::remote::RemoteHost;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -112,20 +112,17 @@ impl PaneRequest {
         serde_json::from_slice(&bytes).context("parse remote pane request")
     }
 
-    /// Run this request through the remote daemon command `args`, which reads it from stdin.
-    /// # Errors
-    /// Returns daemon installation, transport, or backend errors, and a reply that does not
-    /// answer the request. A daemon that predates the command reports it as unknown.
+    /// Sends the framed pane request through the host's daemon transport.
+    #[cfg(feature = "terminal-runtime")]
     pub(crate) fn send(&self, remote: &RemoteHost, args: &[String]) -> Result<Option<PaneText>> {
-        remote.ensure_daemon()?;
-        let (program, args) = remote.proxy_command(REMOTE_DAEMON_PROGRAM, args)?;
-        let request = serde_json::to_vec(self).context("encode remote pane request")?;
-        let output = SystemCommandRunner.run_with_input(&program, &args, request)?;
-        if !output.success {
-            bail!("{}", remote_daemon_failure(remote.host(), &output.stderr));
-        }
+        let input = serde_json::to_vec(self).context("encode remote pane request")?;
+        let output = remote.run(args, Some(input))?;
+        self.reply(&output)
+    }
+
+    pub(crate) fn reply(&self, output: &str) -> Result<Option<PaneText>> {
         let reply: Option<PaneText> =
-            serde_json::from_str(output.stdout.trim()).context("decode remote pane reply")?;
+            serde_json::from_str(output.trim()).context("decode remote pane reply")?;
         match (self, &reply) {
             (Self::Input { .. }, None) | (Self::Capture { .. }, Some(_)) => Ok(reply),
             _ => bail!("the remote daemon did not answer the pane request"),

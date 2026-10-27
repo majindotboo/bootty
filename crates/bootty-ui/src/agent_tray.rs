@@ -18,7 +18,7 @@ use native as platform;
 #[path = "agent_tray/macos.rs"]
 mod platform;
 #[cfg(target_os = "macos")]
-pub use platform::run_helper;
+pub use platform::{read_snapshot, run_helper};
 #[cfg(target_os = "linux")]
 #[path = "agent_tray/linux.rs"]
 mod platform;
@@ -56,8 +56,9 @@ pub fn dispatch(id: &str) -> bool {
     true
 }
 
+/// A serialized update for the stateless attention-tray helper.
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-struct Snapshot {
+pub struct Snapshot {
     #[serde(default)]
     config: TrayConfig,
     unread: usize,

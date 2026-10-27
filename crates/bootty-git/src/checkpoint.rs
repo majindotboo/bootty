@@ -23,6 +23,17 @@ pub fn namespace(conversation: &str) -> String {
     format!("refs/bootty/checkpoints/{safe}")
 }
 
+/// Whether Git could find a work tree at `directory` on this computer.
+///
+/// An ancestor must hold `.git`, or the environment must name the Git directory. Elsewhere
+/// [`capture`] records nothing, so a caller can skip starting Git there.
+#[must_use]
+pub fn may_capture_locally(directory: &std::path::Path) -> bool {
+    directory.is_relative()
+        || std::env::var_os("GIT_DIR").is_some()
+        || directory.ancestors().any(|dir| dir.join(".git").exists())
+}
+
 /// Records the work tree at `directory` as a commit kept at `reference`, and returns it. Outside
 /// a Git work tree there is nothing to record.
 /// # Errors

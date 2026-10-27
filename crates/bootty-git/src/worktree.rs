@@ -543,22 +543,31 @@ pub fn delete_branch(repo_dir: &str, branch: &str, force: bool) -> Result<(), St
 
 #[must_use]
 pub fn worktree_root(cwd: &str) -> Option<String> {
-    Git::new().worktree_root(cwd)
+    local(cwd)?.worktree_root(cwd)
 }
 
 #[must_use]
 pub fn head_branch(cwd: &str) -> Option<String> {
-    Git::new().head_branch(cwd)
+    local(cwd)?.head_branch(cwd)
 }
 
 #[must_use]
 pub fn diff_counts(cwd: &str) -> Option<(u64, u64)> {
-    Git::new().diff_counts(cwd)
+    local(cwd)?.diff_counts(cwd)
 }
 
 #[must_use]
 pub fn suggested_session_name(cwd: &str) -> String {
-    Git::new().suggested_session_name(cwd)
+    local(cwd).map_or_else(
+        || session_name_for_path(cwd).to_owned(),
+        |git| git.suggested_session_name(cwd),
+    )
+}
+
+/// Local Git for `cwd`, or `None` where Git could find no work tree, so plain directories on
+/// the frame path start no process.
+fn local(cwd: &str) -> Option<Git> {
+    crate::checkpoint::may_capture_locally(Path::new(cwd)).then(Git::new)
 }
 
 #[must_use]

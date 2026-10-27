@@ -1,10 +1,12 @@
 #![cfg(unix)]
+#![cfg(test)]
+
+#[path = "support/quick_query.rs"]
+pub mod quick_query;
 use std::fs;
 
 use assert_fs::TempDir;
-use bootty_agents::{
-    AgentKind, GeneratedSessionNames, NativeSessionConfig, generate_session_names,
-};
+use bootty_agents::{GeneratedSessionNames, QuickQuery, generate_session_names_using};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -29,34 +31,20 @@ fn naming_uses_a_private_ephemeral_query_and_rejects_invalid_output(
     #[case] accepted: bool,
 ) {
     let root = TempDir::new().expect("temporary account");
-    let script = root.path().join("provider.py");
-    bootty_test_support::write_executable(
-        &script,
-        r"#!/usr/bin/env python3
-import json,os,pathlib,sys
-account=pathlib.Path(os.environ['CODEX_HOME'])
-args=sys.argv[1:]
-assert 'exec' in args and '--ephemeral' in args
-assert args[args.index('--sandbox')+1]=='read-only'
-assert args[args.index('--model')+1]=='quick-model'
-assert args.count('--model')==1
-assert 'features.shell_tool=false' in args and 'mcp_servers={}' in args
-assert 'Fix the composer' in args[-1]
-assert pathlib.Path.cwd()!=account
-schema=pathlib.Path(args[args.index('--output-schema')+1])
-assert json.loads(schema.read_text())['additionalProperties']==False
-(account/'query-directory').write_text(str(pathlib.Path.cwd()))
-output=pathlib.Path(args[args.index('--output-last-message')+1])
-output.write_text(json.dumps({'title':'Fix composer','slug':(account/'slug').read_text()}))
-",
-    )
-    .expect("provider script");
-    fs::write(root.path().join("slug"), slug).expect("response slug");
-    let mut config = NativeSessionConfig::new(AgentKind::Codex, root.path());
-    config.program = script.to_string_lossy().into_owned();
-    config.account_directory = Some(root.path().to_string_lossy().into_owned());
+    let mut config = quick_query::config(
+        root.path(),
+        &serde_json::json!({"title":"Fix composer","slug":slug}),
+    );
     config.arguments = vec!["--model".into(), "conversation-model".into()];
-    let result = generate_session_names(&config, "quick-model", "Fix the composer", || cancelled);
+    let result = generate_session_names_using(
+        &config,
+        "quick-model",
+        "Fix the composer",
+        &QuickQuery {
+            cancelled: &|| cancelled,
+            output: &|command, _| Ok(quick_query::output(&command, "Fix the composer")),
+        },
+    );
     assert_eq!(result.is_ok(), accepted);
     if cancelled {
         assert!(

@@ -33,19 +33,20 @@ const APP_BENCHMARKS: &[&str] = &[
 pub struct Args {
     /// Run only the fast benchmark gate for blocking CI.
     #[arg(long)]
-    ci_smoke: bool,
+    pub ci_smoke: bool,
 
     /// Also run a small representative measured subset.
     #[arg(long)]
-    quick: bool,
+    pub quick: bool,
 
     /// Write logs and summary.jsonl under this directory.
     #[arg(long)]
-    output: Option<PathBuf>,
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
-struct Metadata {
+/// Captured host and tool versions written with benchmark reproduction evidence.
+pub struct Metadata {
     schema_version: u8,
     event: &'static str,
     recorded_at_utc: String,
@@ -53,6 +54,27 @@ struct Metadata {
     uname: String,
     rustc: String,
     cargo: String,
+}
+
+impl Metadata {
+    #[must_use]
+    pub const fn new(
+        recorded_at_utc: String,
+        commit: String,
+        uname: String,
+        rustc: String,
+        cargo: String,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            event: "benchmark_reproduction_metadata",
+            recorded_at_utc,
+            commit,
+            uname,
+            rustc,
+            cargo,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -68,10 +90,11 @@ struct CommandRecord<'a> {
     log: String,
 }
 
-struct PlannedCommand {
-    name: String,
-    program: &'static str,
-    args: Vec<String>,
+/// One executable step in a benchmark reproduction plan.
+pub struct PlannedCommand {
+    pub name: String,
+    pub program: &'static str,
+    pub args: Vec<String>,
 }
 
 impl PlannedCommand {
@@ -109,6 +132,25 @@ impl PlannedCommand {
 /// # Errors
 /// Returns an error if a benchmark command fails or reproduction evidence cannot be written.
 pub fn run(args: Args) -> Result<()> {
+    run_plan(args, metadata, |command, _log| command.status())
+}
+
+/// Runs a reproduction plan using captured metadata and the execution host's log writer.
+/// # Errors
+/// Returns command execution or evidence output errors.
+pub fn run_with(
+    args: Args,
+    metadata: Metadata,
+    execute: impl FnMut(&mut Command, &Path) -> std::io::Result<std::process::ExitStatus>,
+) -> Result<()> {
+    run_plan(args, || Ok(metadata), execute)
+}
+
+fn run_plan(
+    args: Args,
+    metadata: impl FnOnce() -> Result<Metadata>,
+    mut execute: impl FnMut(&mut Command, &Path) -> std::io::Result<std::process::ExitStatus>,
+) -> Result<()> {
     let output_dir = match args.output {
         Some(path) => path,
         None => PathBuf::from("artifacts/benchmark-reproduction").join(utc_timestamp()?),
@@ -122,7 +164,7 @@ pub fn run(args: Args) -> Result<()> {
 
     let mut failures = 0_usize;
     for planned in plan(args.ci_smoke, args.quick) {
-        if !run_logged(&planned, &output_dir, &mut summary)? {
+        if !run_logged(&planned, &output_dir, &mut summary, &mut execute)? {
             failures = failures.saturating_add(1);
         }
     }
@@ -143,15 +185,13 @@ pub fn run(args: Args) -> Result<()> {
 }
 
 fn metadata() -> Result<Metadata> {
-    Ok(Metadata {
-        schema_version: 1,
-        event: "benchmark_reproduction_metadata",
-        recorded_at_utc: utc_datetime()?,
-        commit: command_stdout("git", &["rev-parse", "HEAD"]),
-        uname: command_stdout("uname", &["-a"]),
-        rustc: command_stdout("rustc", &["--version"]),
-        cargo: command_stdout("cargo", &["--version"]),
-    })
+    Ok(Metadata::new(
+        utc_datetime()?,
+        command_stdout("git", &["rev-parse", "HEAD"]),
+        command_stdout("uname", &["-a"]),
+        command_stdout("rustc", &["--version"]),
+        command_stdout("cargo", &["--version"]),
+    ))
 }
 
 fn command_stdout(program: &str, args: &[&str]) -> String {
@@ -163,7 +203,9 @@ fn command_stdout(program: &str, args: &[&str]) -> String {
     )
 }
 
-fn plan(ci_smoke: bool, quick: bool) -> Vec<PlannedCommand> {
+/// The ordered validation and compilation steps for a reproduction run.
+#[must_use]
+pub fn plan(ci_smoke: bool, quick: bool) -> Vec<PlannedCommand> {
     let mut commands = vec![
         PlannedCommand::new(
             "validate_benchmark_manifests",
@@ -274,7 +316,12 @@ fn quick_measurements() -> [PlannedCommand; 2] {
     ]
 }
 
-fn run_logged(planned: &PlannedCommand, output_dir: &Path, summary: &mut File) -> Result<bool> {
+fn run_logged(
+    planned: &PlannedCommand,
+    output_dir: &Path,
+    summary: &mut File,
+    execute: &mut impl FnMut(&mut Command, &Path) -> std::io::Result<std::process::ExitStatus>,
+) -> Result<bool> {
     let log_path = output_dir.join(format!("{}.log", planned.name));
     let log = File::create(&log_path)
         .with_context(|| format!("failed to create {}", log_path.display()))?;
@@ -286,7 +333,7 @@ fn run_logged(planned: &PlannedCommand, output_dir: &Path, summary: &mut File) -
     process.stdout(log).stderr(stderr);
 
     let timer = Timer::start();
-    let status = process.status();
+    let status = execute(&mut process, &log_path);
     let success = status.as_ref().is_ok_and(std::process::ExitStatus::success);
     let detail = match &status {
         Ok(_) if success => "ok".to_owned(),

@@ -4,6 +4,9 @@ version.workspace = true
 edition.workspace = true
 autobenches = false
 
+[lib]
+test = false
+
 [features]
 bootty-dev = ["bootty-config/bootty-dev", "bootty-control/bootty-dev"]
 

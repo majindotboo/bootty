@@ -39,16 +39,7 @@ pub fn run(args: Args) -> Result<()> {
         output_root,
         command,
     } = args;
-    ensure!(
-        matches!(
-            Path::new(&fixture_name)
-                .components()
-                .collect::<Vec<_>>()
-                .as_slice(),
-            [std::path::Component::Normal(_)]
-        ),
-        "fixture name must be one path component"
-    );
+    validate_fixture_name(&fixture_name)?;
     let script = find_program("script").context("record-replay-fixture: script(1) is required")?;
     let output_dir = output_root.join(&fixture_name);
     fs::create_dir_all(&output_dir)
@@ -89,6 +80,23 @@ pub fn run(args: Args) -> Result<()> {
 
     write_checksums(&output_dir)?;
     println!("Recorded fixture bundle: {}", output_dir.display());
+    Ok(())
+}
+
+/// Checks that a recording stays in one child directory of its output root.
+/// # Errors
+/// Returns an error for absolute, nested, or parent-directory fixture names.
+pub fn validate_fixture_name(fixture_name: &str) -> Result<()> {
+    ensure!(
+        matches!(
+            Path::new(fixture_name)
+                .components()
+                .collect::<Vec<_>>()
+                .as_slice(),
+            [std::path::Component::Normal(_)]
+        ),
+        "fixture name must be one path component"
+    );
     Ok(())
 }
 

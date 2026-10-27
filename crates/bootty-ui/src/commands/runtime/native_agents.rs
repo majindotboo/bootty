@@ -29,12 +29,22 @@ use crate::{
 };
 
 struct NativeLaunch {
+    launcher: bootty_agents::NativeLauncher,
     remote: Option<bootty_config::config::RemoteConfig>,
     context: super::terminal_agents::LaunchContext,
     quick_model: String,
     terminal: Option<CommandTarget>,
     split: Option<bootty_mux::pane_layout::SplitDirection>,
     tools_owner: Arc<TerminalAgentService>,
+}
+
+impl NativeLaunch {
+    fn models(
+        &self,
+        config: NativeSessionConfig,
+    ) -> Result<Vec<bootty_agents::NativeModelOption>, String> {
+        bootty_agents::NativeAgentSession::discover_models_with(config, &self.launcher)
+    }
 }
 
 struct PreparedNativeLaunch {
@@ -1686,6 +1696,7 @@ impl AppState {
         // Restoring an agent keeps its captured directory even when another task is selected.
         context.cwd = Some(record.config.cwd.to_string_lossy().into_owned());
         Ok(NativeLaunch {
+            launcher: Arc::clone(&self.commands.native_launcher),
             remote: binding.multiplexer().remote.clone(),
             context,
             quick_model: self.config().agents.quick_model.clone(),
@@ -1787,6 +1798,7 @@ impl AppState {
         );
         context.preferences = preferences.clone();
         Ok(NativeLaunch {
+            launcher: Arc::clone(&self.commands.native_launcher),
             remote: binding.multiplexer().remote.clone(),
             context,
             quick_model: self.config().agents.quick_model.clone(),
@@ -2622,10 +2634,9 @@ fn discover_launch_models(
 ) -> Result<Vec<bootty_agents::NativeModelOption>, String> {
     let config = discover_launch_config(invocation, captured)?;
     let favorite = invocation.command == "agents.native.catalog-favorite";
-    let mut models = service.cached_model_catalog(&config).map_or_else(
-        || bootty_agents::NativeAgentSession::discover_models(config.clone()),
-        Ok,
-    )?;
+    let mut models = service
+        .cached_model_catalog(&config)
+        .map_or_else(|| captured.models(config.clone()), Ok)?;
     if favorite {
         let model = invocation
             .arguments
@@ -2681,7 +2692,7 @@ fn prepare_native_launch(
         let options = if let Some(options) = service.cached_model_catalog(&config) {
             options
         } else {
-            let options = bootty_agents::NativeAgentSession::discover_models(config.clone())?;
+            let options = captured.models(config.clone())?;
             service.cache_model_catalog(&config, &options)?;
             options
         };
@@ -3517,7 +3528,12 @@ fn query_launch_metadata(
             serde_json::to_value(names).map_err(|error| error.to_string())
         } else if invocation.command == "agents.native.catalog-completions" {
             discover_launch_config(invocation, captured)
-                .and_then(bootty_agents::NativeAgentSession::discover_completions)
+                .and_then(|config| {
+                    bootty_agents::NativeAgentSession::discover_completions_with(
+                        config,
+                        &captured.launcher,
+                    )
+                })
                 .and_then(|catalog| serde_json::to_value(catalog).map_err(|e| e.to_string()))
         } else {
             discover_launch_models(service, invocation, captured)
@@ -3553,7 +3569,10 @@ fn query_provider_catalog(
             .map_or_else(|| service.cached_provider_catalog(&config), |_| None)
         {
             Some(catalog) => catalog,
-            None => bootty_agents::NativeAgentSession::discover_catalog(config.clone())?,
+            None => bootty_agents::NativeAgentSession::discover_catalog_with(
+                config.clone(),
+                &captured.launcher,
+            )?,
         };
         service.mark_model_favorites(&config, &mut catalog.models);
         service.cache_provider_catalog_for_invocation(

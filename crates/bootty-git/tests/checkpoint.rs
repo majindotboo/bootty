@@ -1,12 +1,18 @@
 #![cfg(test)]
 //! Snapshots around an agent's turns: what a turn changed, and putting files back.
 
+#[path = "support/repository.rs"]
+mod repository_support;
+
+#[path = "support/process.rs"]
+mod runner;
+
 use std::process::Command;
 
 use std::cell::Cell;
 
 use assert_fs::{TempDir, prelude::*};
-use bootty_git::{CommandOutput, CommandRunner, SystemCommandRunner, checkpoint};
+use bootty_git::{CommandOutput, CommandRunner, checkpoint};
 use pretty_assertions::assert_eq;
 
 fn run(dir: &TempDir, args: &[&str]) -> String {
@@ -27,15 +33,7 @@ fn run(dir: &TempDir, args: &[&str]) -> String {
 /// A repository that commits as a test user and runs no hooks.
 fn repository() -> TempDir {
     let dir = TempDir::new().unwrap();
-    for args in [
-        ["init", "--quiet"].as_slice(),
-        &["config", "user.name", "Bootty Test"],
-        &["config", "user.email", "test@example.invalid"],
-        &["config", "commit.gpgsign", "false"],
-        &["config", "core.hooksPath", "/dev/null"],
-    ] {
-        run(&dir, args);
-    }
+    repository_support::init(dir.path(), false).unwrap();
     dir
 }
 
@@ -60,15 +58,15 @@ impl CommandRunner for VanishingFile {
                     .to_owned(),
             });
         }
-        SystemCommandRunner.run_with_env(program, args, env)
+        runner::RepositoryRunner.run_with_env(program, args, env)
     }
 
     fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
-        SystemCommandRunner.run(program, args)
+        runner::RepositoryRunner.run(program, args)
     }
 
     fn remove_file(&self, path: &str) -> anyhow::Result<()> {
-        SystemCommandRunner.remove_file(path)
+        runner::RepositoryRunner.remove_file(path)
     }
 }
 
@@ -83,7 +81,7 @@ fn snapshots_show_a_turns_changes_and_put_files_back() {
     dir.child("kept.txt").write_str("staged\n").unwrap();
     run(&dir, &["add", "kept.txt"]);
     dir.child("untracked.txt").write_str("loose\n").unwrap();
-    let runner = SystemCommandRunner;
+    let runner = runner::RepositoryRunner;
     let root = dir.path().to_str().unwrap();
     let space = checkpoint::namespace("conversation 1");
     let before = checkpoint::capture(&runner, root, &format!("{space}/before"))
@@ -133,7 +131,11 @@ fn directories_outside_git_have_no_snapshots() {
     let dir = TempDir::new().unwrap();
     let root = dir.path().to_str().unwrap();
     assert_eq!(
-        checkpoint::capture(&SystemCommandRunner, root, "refs/bootty/checkpoints/x/y"),
+        checkpoint::capture(
+            &runner::RepositoryRunner,
+            root,
+            "refs/bootty/checkpoints/x/y"
+        ),
         Ok(None)
     );
 }

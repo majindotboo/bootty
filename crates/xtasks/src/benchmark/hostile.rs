@@ -33,6 +33,23 @@ struct Record<'a> {
 /// Returns capture, fixture, subprocess, or output errors from the hostile terminal probes.
 pub fn run(args: Args) -> Result<()> {
     crate::cancellation::install()?;
+    run_with(
+        args,
+        environment_u64("BOOTTY_HOSTILE_SOAK_SECONDS", 10)?,
+        environment_u64("BOOTTY_HOSTILE_SOAK_SAMPLE_SIZE", 10)?,
+        wait_with_deadline,
+    )
+}
+
+/// Records the hostile workloads using an execution host with an explicit deadline policy.
+/// # Errors
+/// Returns execution, cancellation, or evidence errors.
+pub fn run_with(
+    args: Args,
+    timeout: u64,
+    sample_size: u64,
+    mut execute: impl FnMut(&mut Command, Duration) -> Result<Outcome>,
+) -> Result<()> {
     let output_dir = match args.output_dir {
         Some(path) => path,
         None => PathBuf::from("artifacts/hostile-soak").join(utc_timestamp()?),
@@ -40,15 +57,20 @@ pub fn run(args: Args) -> Result<()> {
     fs::create_dir_all(&output_dir)
         .with_context(|| format!("failed to create {}", output_dir.display()))?;
     let mut summary = File::create(output_dir.join("summary.jsonl"))?;
-    let timeout = environment_u64("BOOTTY_HOSTILE_SOAK_SECONDS", 10)?;
-    let sample_size = environment_u64("BOOTTY_HOSTILE_SOAK_SAMPLE_SIZE", 10)?;
 
     for name in [
         "hostile_mixed_soak_256_rounds",
         "hostile_extended_recovery_ladder",
         "hostile_long_line_16mb_write",
     ] {
-        run_case(&output_dir, &mut summary, name, timeout, sample_size)?;
+        run_case(
+            &output_dir,
+            &mut summary,
+            name,
+            timeout,
+            sample_size,
+            &mut execute,
+        )?;
     }
 
     println!("Wrote hostile soak evidence: {}", output_dir.display());
@@ -71,6 +93,7 @@ fn run_case(
     name: &str,
     timeout_seconds: u64,
     sample_size: u64,
+    execute: &mut impl FnMut(&mut Command, Duration) -> Result<Outcome>,
 ) -> Result<()> {
     let log_path = output_dir.join(format!("{name}.log"));
     let log = File::create(&log_path)?;
@@ -93,7 +116,7 @@ fn run_case(
     command.stdout(log.try_clone()?).stderr(log);
 
     let timer = Timer::start();
-    let outcome = wait_with_deadline(&mut command, Duration::from_secs(timeout_seconds))?;
+    let outcome = execute(&mut command, Duration::from_secs(timeout_seconds))?;
     let (status, detail, exit_code) = match outcome {
         Outcome::Exited(status) if status.success() => ("pass", "ok".into(), 0),
         Outcome::Exited(status) => (
@@ -126,7 +149,8 @@ fn run_case(
     Ok(())
 }
 
-enum Outcome {
+/// An observed workload result, including host deadline and cancellation outcomes.
+pub enum Outcome {
     Exited(ExitStatus),
     TimedOut,
     StartFailed(String),

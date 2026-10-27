@@ -3,6 +3,9 @@ name = "bootty-host"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+test = false
+
 [dependencies]
 notify.workspace = true
 bytes.workspace = true

@@ -247,6 +247,8 @@ struct ToolAttachmentPolicy {
 /// Owns only native observation and retained metadata. Backend panes own the interactive TUIs.
 pub struct TerminalAgentService {
     path: PathBuf,
+    provider_transport: crate::TerminalProviderTransport,
+    observer_wakes: Mutex<Vec<Weak<dyn Fn() + Send + Sync>>>,
     retiring: Mutex<std::collections::BTreeSet<(String, u64)>>,
     retirement_error: Mutex<Option<String>>,
     runtime_directory: PathBuf,
@@ -264,6 +266,26 @@ pub struct TerminalAgentService {
 }
 
 impl TerminalAgentService {
+    /// Reevaluate every active or prepared Claude observer after the injected clock advances.
+    pub fn clock_advanced(&self) {
+        self.observer_wakes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|wake| {
+                wake.upgrade().is_some_and(|wake| {
+                    wake();
+                    true
+                })
+            });
+    }
+
+    /// Select the query transport before sharing this observation owner.
+    #[must_use]
+    pub fn with_provider_transport(mut self, transport: crate::TerminalProviderTransport) -> Self {
+        self.provider_transport = transport;
+        self
+    }
+
     /// # Errors
     /// Returns malformed, oversized or invalid retained catalog errors.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
@@ -319,6 +341,8 @@ impl TerminalAgentService {
         #[cfg(not(unix))]
         fs::create_dir(&runtime_directory).map_err(|error| error.to_string())?;
         Ok(Self {
+            provider_transport: crate::TerminalProviderTransport::default(),
+            observer_wakes: Mutex::new(Vec::new()),
             path,
             retiring: Mutex::new(std::collections::BTreeSet::new()),
             retirement_error: Mutex::new(None),
@@ -502,8 +526,12 @@ impl TerminalAgentService {
                 message: Some("Checking…".to_owned()),
             },
         });
-        let status = crate::terminal_provider_status_with_pi_selector(
-            provider, program, directory, selector,
+        let status = crate::terminal_provider_status_using(
+            provider,
+            program,
+            directory,
+            selector,
+            &self.provider_transport,
         );
         self.publish_provider_status(provider, &request, status.clone());
         status
@@ -775,13 +803,19 @@ impl TerminalAgentService {
             Arc::new(move |observation| publish(&weak, &pending, observation));
         let observer = match provider {
             AgentKind::Claude => TerminalObserver::Claude(
-                crate::claude_terminal::ClaudeTerminalObserver::prepare(&launch, sink)?,
+                crate::claude_terminal::ClaudeTerminalObserver::prepare_with_transport(
+                    &launch,
+                    sink,
+                    &self.provider_transport,
+                    self.clock.clone(),
+                )?,
             ),
             AgentKind::Codex => TerminalObserver::Codex(
-                crate::codex_terminal::CodexTerminalObserver::prepare(
+                crate::codex_terminal::CodexTerminalObserver::prepare_with_launcher(
                     &launch,
                     &self.runtime_directory,
                     sink,
+                    &self.provider_transport.observer_launch,
                 )
                 .map_err(|error| error.to_string())?,
             ),
@@ -794,6 +828,14 @@ impl TerminalAgentService {
                 .map_err(|error| error.to_string())?,
             ),
         };
+        if let TerminalObserver::Claude(observer) = &observer {
+            let mut wakes = self
+                .observer_wakes
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            wakes.retain(|wake| wake.strong_count() > 0);
+            wakes.push(observer.clock_wake());
+        }
         Ok(PreparedTerminalAgent {
             provider_use,
             launch,

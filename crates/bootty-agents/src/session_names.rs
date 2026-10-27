@@ -44,19 +44,36 @@ pub fn generate_session_names(
     prompt: &str,
     cancelled: impl Fn() -> bool,
 ) -> Result<GeneratedSessionNames, String> {
+    generate_session_names_using(
+        config,
+        model,
+        prompt,
+        &crate::QuickQuery::system(&cancelled),
+    )
+}
+
+/// Generate names through the selected bounded query transport.
+/// # Errors
+/// Reports validation, transport, cancellation, or unusable output errors.
+pub fn generate_session_names_using(
+    config: &NativeSessionConfig,
+    model: &str,
+    prompt: &str,
+    query: &crate::QuickQuery<'_>,
+) -> Result<GeneratedSessionNames, String> {
     if prompt.trim().is_empty() {
         return Err("Session naming requires a prompt".to_owned());
     }
     // Bound the quick query independently of the conversation. Increase this prefix only
     // if naming needs context beyond the first 8192 characters; the submitted prompt stays intact.
     let prompt = prompt.chars().take(8192).collect::<String>();
-    let bytes = crate::quick_text::quick_json(
+    let bytes = crate::quick_text::quick_json_using(
         config,
         model,
         r#"{"type":"object","properties":{"title":{"type":"string"},"slug":{"type":"string"}},"required":["title","slug"],"additionalProperties":false}"#,
         &naming_prompt(&prompt),
         "names",
-        cancelled,
+        query,
     )?;
     decode_names(&bytes)
 }

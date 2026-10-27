@@ -1,6 +1,10 @@
 #![cfg(test)]
 #![cfg(unix)]
 
+#[path = "support/codex_peer.rs"]
+pub mod codex_peer;
+#[path = "support/native_peer.rs"]
+pub mod native_peer;
 pub mod support;
 use std::{
     fs,
@@ -25,17 +29,17 @@ use rstest::rstest;
 use serde_json::{Value, json};
 
 // This process speaks app-server JSON-RPC. Barriers order protocol events without clock sleeps.
-fn fixture(root: &Path) -> std::io::Result<String> {
+fn fixture(root: &Path) -> String {
     let path = root.join("provider.py");
-    bootty_test_support::write_executable(&path, include_str!("support/codex_app_server.py"))?;
-    Ok(path.to_string_lossy().into_owned())
+
+    path.to_string_lossy().into_owned()
 }
 
-fn config(root: &Path) -> std::io::Result<NativeSessionConfig> {
+fn config(root: &Path) -> NativeSessionConfig {
     let mut config = NativeSessionConfig::new(AgentKind::Codex, root);
-    config.program = fixture(root)?;
+    config.program = fixture(root);
     config.account_directory = Some(root.join("account").to_string_lossy().into_owned());
-    Ok(config)
+    config
 }
 
 #[rstest]
@@ -48,13 +52,9 @@ fn interrupted_work_resumes_once_without_replaying_the_original_prompt(
 ) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create(
-            "captured-binding",
-            "Interrupted work",
-            config(root.path()).unwrap(),
-        )
+        .create("captured-binding", "Interrupted work", config(root.path()))
         .unwrap();
     service.prompt(&record.target(), "active").unwrap();
     assert_eq!(
@@ -76,7 +76,7 @@ fn interrupted_work_resumes_once_without_replaying_the_original_prompt(
         catalog["records"][0]["snapshot"]["turn_id"] = json!("interrupted-turn");
         fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
     }
-    let service = Arc::new(NativeAgentService::open(&path).unwrap());
+    let service = Arc::new(open(&path).unwrap());
     let saved = service.sessions().remove(0);
     assert_eq!(saved.restart.needs_resume(), !stopped);
     let resumed = service.resume(&saved.target()).unwrap();
@@ -139,15 +139,15 @@ fn interrupted_work_resumes_once_without_replaying_the_original_prompt(
 fn repeated_restart_failures_stop_automatic_retries_but_allow_a_manual_resume() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create("binding", "Interrupted", config(root.path()).unwrap())
+        .create("binding", "Interrupted", config(root.path()))
         .unwrap();
     service.prompt(&record.target(), "active").unwrap();
     service.shutdown().unwrap();
     drop(service);
     fs::write(root.path().join("fail-launch"), "").unwrap();
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     for attempt in 0..3 {
         let record = service.sessions().remove(0);
         assert!(record.restart.needs_resume());
@@ -178,8 +178,8 @@ fn archived_conversation_can_unarchive_the_same_provider_identity(
 ) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
-    let mut launch = config(root.path()).unwrap();
+    let service = open(&path).unwrap();
+    let mut launch = config(root.path());
     launch.session_id = Some("native-thread".into());
     let record = service
         .create("binding", "Saved conversation", launch)
@@ -202,7 +202,7 @@ fn archived_conversation_can_unarchive_the_same_provider_identity(
         catalog["records"][0]["snapshot"]["error"] = json!(json!({"code":-32600,"message":"session native-thread is archived. Run `codex unarchive native-thread` to unarchive it first."}).to_string());
         fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
     }
-    let restored = NativeAgentService::open(&path).unwrap();
+    let restored = open(&path).unwrap();
     let mut saved = restored.sessions().remove(0);
     assert!(saved.snapshot.provider_archived());
     if fail_first {
@@ -267,10 +267,14 @@ fn provider_pages_visit_every_item_without_overwriting_live_state(
         serde_json::to_vec(&items).unwrap(),
     )
     .unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let live = session.snapshot();
     let mut page = session.read_history("latest").unwrap();
     assert!(page.at_latest && !page.has_newer);
+    let first_limits = barrier(&session).unwrap()["historyLimits"]
+        .as_array()
+        .unwrap()
+        .clone();
     let mut visited = std::collections::BTreeSet::new();
     loop {
         assert!(serde_json::to_vec(&page).unwrap().len() < 600 * 1024);
@@ -319,6 +323,20 @@ fn provider_pages_visit_every_item_without_overwriting_live_state(
         live,
         "history reads preserve the live transcript, clock and turn receipts"
     );
+    if !legacy {
+        let accepted = first_limits.last().unwrap().as_u64().unwrap();
+        let limits = barrier(&session).unwrap()["historyLimits"]
+            .as_array()
+            .unwrap()
+            .clone();
+        assert!(
+            limits
+                .iter()
+                .skip(first_limits.len())
+                .all(|limit| limit.as_u64().unwrap() <= accepted),
+            "adjacent pages retried a capacity the first page already rejected: {limits:?}"
+        );
+    }
     fs::write(root.path().join("malformed-history"), "").unwrap();
     assert!(session.read_history("latest").is_err());
     assert_eq!(session.snapshot(), live);
@@ -348,9 +366,9 @@ fn side_chat_from_an_older_provider_page_keeps_context_and_the_displayed_page(
         serde_json::to_vec(&items).unwrap(),
     )
     .unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     let session = service.resolve(&parent.target()).unwrap();
     let before = session.snapshot();
@@ -416,9 +434,9 @@ fn unsupported_older_forks_leave_the_catalog_and_displayed_history_unchanged(
         serde_json::to_vec(&items).unwrap(),
     )
     .unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     let session = service.resolve(&parent.target()).unwrap();
     let before = session.snapshot();
@@ -448,9 +466,9 @@ fn quoting_an_earlier_page_keeps_the_exact_live_conversation() {
         serde_json::to_vec(&items).unwrap(),
     )
     .unwrap();
-    let service = NativeAgentService::open(root.path().join("catalog.json")).unwrap();
+    let service = open(root.path().join("catalog.json")).unwrap();
     let record = service
-        .create("captured-binding", "History", config(root.path()).unwrap())
+        .create("captured-binding", "History", config(root.path()))
         .unwrap();
     let target = record.target();
     let live = service.resolve(&target).unwrap();
@@ -493,8 +511,8 @@ fn cached_provider_catalog_retains_permissions_and_uses_exact_account_and_projec
     use bootty_agents::{NativeModelOption, NativePermissionMode, NativeProviderCatalog};
 
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("catalog-cache.json")).unwrap();
-    let captured = config(root.path()).unwrap();
+    let service = open(root.path().join("catalog-cache.json")).unwrap();
+    let captured = config(root.path());
     let catalog = NativeProviderCatalog {
         models: vec![NativeModelOption {
             id: "model-a".to_owned(),
@@ -598,7 +616,7 @@ fn cached_provider_catalog_retains_permissions_and_uses_exact_account_and_projec
 
     let stored = fs::read_to_string(root.path().join("catalog-cache.json")).unwrap();
     assert!(!stored.contains(&captured.account_directory.clone().unwrap()));
-    let reopened = NativeAgentService::open(root.path().join("catalog-cache.json")).unwrap();
+    let reopened = open(root.path().join("catalog-cache.json")).unwrap();
     let restored = reopened.cached_provider_catalog(&captured).unwrap();
     assert_eq!(restored.permissions, catalog.permissions);
     assert_eq!(restored.models[0].id, "model-a");
@@ -620,7 +638,7 @@ fn codex_errors_end_the_turn_only_when_not_retried(
     #[case] error: Option<&str>,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -644,7 +662,7 @@ fn codex_turn_completion_and_next_prompt_replace_prior_errors(
     #[case] error: Option<&str>,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     fs::write(
         root.path().join("events.json"),
@@ -684,7 +702,7 @@ fn codex_tool_projection_keeps_command_streams_and_actual_tool_status(
     #[case] status: NativeToolStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -750,7 +768,7 @@ fn codex_tool_projection_keeps_command_streams_and_actual_tool_status(
 #[rstest]
 fn codex_mcp_apps_reach_their_server_through_the_thread() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     assert_eq!(
         session.read_mcp_app_resource("fixture", "ui://fixture/inspect.html", "typed-mcp"),
         Ok(json!({"contents":[{
@@ -814,9 +832,9 @@ fn completion_requires_an_observed_successful_turn(
     #[case] outcome: NativeTurnOutcome,
 ) {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create("binding-captured", "Codex", config(root.path()).unwrap())
+        .create("binding-captured", "Codex", config(root.path()))
         .unwrap();
     assert_eq!(record.snapshot.completed_turn, false);
     assert_eq!(record.snapshot.first_turn, None);
@@ -837,9 +855,9 @@ fn completion_requires_an_observed_successful_turn(
 fn legacy_accountless_history_remains_readable_without_resuming_under_another_account() {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create("binding", "Saved Codex", config(root.path()).unwrap())
+        .create("binding", "Saved Codex", config(root.path()))
         .unwrap();
     service.prompt(&record.target(), "completed").unwrap();
     service.stop(&record.target()).unwrap();
@@ -852,7 +870,7 @@ fn legacy_accountless_history_remains_readable_without_resuming_under_another_ac
         .unwrap()
         .remove("account_directory");
     fs::write(&catalog, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let retained = service.sessions().remove(0);
     assert_eq!(retained.snapshot.transcript, transcript);
     assert!(
@@ -871,7 +889,7 @@ fn legacy_accountless_history_remains_readable_without_resuming_under_another_ac
     );
     assert_eq!(service.sessions()[0].target(), retained.target());
     service
-        .create("binding", "New Codex", config(root.path()).unwrap())
+        .create("binding", "New Codex", config(root.path()))
         .unwrap();
     assert_eq!(service.sessions().len(), 2);
     service.shutdown().unwrap();
@@ -883,9 +901,9 @@ fn legacy_accountless_history_remains_readable_without_resuming_under_another_ac
 fn completion_survives_attachment_resume_without_inference_from_history(#[case] completed: bool) {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create("binding-captured", "Codex", config(root.path()).unwrap())
+        .create("binding-captured", "Codex", config(root.path()))
         .unwrap();
     if completed {
         service.prompt(&record.target(), "completed").unwrap();
@@ -907,7 +925,7 @@ fn completion_survives_attachment_resume_without_inference_from_history(#[case] 
             .remove("first_turn");
         fs::write(&catalog, serde_json::to_vec(&legacy).unwrap()).unwrap();
     }
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     assert_eq!(service.activities()[0].completed_turn, completed);
     let restored = service.sessions().remove(0);
     assert_eq!(
@@ -934,7 +952,7 @@ fn completion_survives_attachment_resume_without_inference_from_history(#[case] 
 fn captures_account_and_launch_arguments_and_resumes_exact_thread() {
     let root = TempDir::new().unwrap();
     let launch = AgentLaunch {
-        program: fixture(root.path()).unwrap(),
+        program: fixture(root.path()),
         cwd: Some(root.path().to_string_lossy().into_owned()),
         arguments: vec!["--model".to_owned(), "chosen-model".to_owned()],
         ephemeral: false,
@@ -948,7 +966,7 @@ fn captures_account_and_launch_arguments_and_resumes_exact_thread() {
     let config = NativeSessionConfig::from_launch(AgentKind::Codex, launch).unwrap();
     let account = config.account_directory.clone();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service.create("binding-captured", "Codex", config).unwrap();
     assert_eq!(record.snapshot.session_id.as_deref(), Some("native-thread"));
     let launched: Value =
@@ -968,7 +986,7 @@ fn captures_account_and_launch_arguments_and_resumes_exact_thread() {
     );
     service.shutdown().unwrap();
     drop(service);
-    let restored = NativeAgentService::open(&catalog).unwrap();
+    let restored = open(&catalog).unwrap();
     let stopped = restored.sessions().remove(0);
     assert_eq!(stopped.snapshot.status, NativeSessionStatus::Stopped);
     assert_eq!(stopped.config.account_directory, account);
@@ -992,7 +1010,7 @@ fn captures_account_and_launch_arguments_and_resumes_exact_thread() {
 #[rstest]
 fn external_saved_session_resumes_its_provider_identity_and_transcript() {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     let entry = bootty_agents::TerminalHistoryEntry {
         provider: AgentKind::Codex,
         session_id: "external-conversation".into(),
@@ -1004,7 +1022,7 @@ fn external_saved_session_resumes_its_provider_identity_and_transcript() {
         account_directory: config.account_directory.as_deref().unwrap().into(),
     };
     config.resume_saved(&entry).unwrap();
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     let before = session.snapshot();
     assert_eq!(before.session_id.as_deref(), Some("external-conversation"));
     assert!(
@@ -1022,13 +1040,13 @@ fn external_saved_session_resumes_its_provider_identity_and_transcript() {
 #[rstest]
 fn resume_publishes_starting_then_idle_with_monotonic_generation_revisions() {
     let root = TempDir::new().unwrap();
-    let service = Arc::new(NativeAgentService::open(root.path().join("native.json")).unwrap());
+    let service = Arc::new(open(root.path().join("native.json")).unwrap());
     let record = service
         .create_for_task(
             "binding-captured",
             "task-captured",
             "Codex",
-            config(root.path()).unwrap(),
+            config(root.path()),
         )
         .unwrap();
     service.prompt(&record.target(), "first history").unwrap();
@@ -1090,19 +1108,19 @@ fn resume_publishes_starting_then_idle_with_monotonic_generation_revisions() {
 fn retains_exact_task_membership_when_reopened() {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
         .create_for_task(
             "binding-captured",
             "task-captured",
             "Codex",
-            config(root.path()).unwrap(),
+            config(root.path()),
         )
         .unwrap();
     assert_eq!(record.task_identity.as_deref(), Some("task-captured"));
     service.shutdown().unwrap();
     drop(service);
-    let restored = NativeAgentService::open(&catalog).unwrap();
+    let restored = open(&catalog).unwrap();
     let record = restored.sessions().remove(0);
     assert_eq!(record.binding_id, "binding-captured");
     assert_eq!(record.task_identity.as_deref(), Some("task-captured"));
@@ -1111,16 +1129,22 @@ fn retains_exact_task_membership_when_reopened() {
 }
 
 #[rstest]
-fn stopping_session_reaps_provider_and_closes_descendant_transport_pipes() {
+#[case::stop(false)]
+#[case::owner_loss(true)]
+fn stopping_session_reaps_provider_and_closes_descendant_transport_pipes(#[case] owner_loss: bool) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = NativeAgentSession::spawn(real_config(root.path()).unwrap()).unwrap();
     let descendants = session.rpc("__descendant", json!({})).unwrap();
     let provider_pid = descendants["providerPid"].as_u64().unwrap();
     assert!(descendants["descendantPid"].as_u64().is_some());
-    session.stop();
-    assert_eq!(session.snapshot().status, NativeSessionStatus::Stopped);
-    // A surviving descendant would retain stdout/stderr and make owned transport teardown fail.
-    assert_eq!(session.snapshot().error, None);
+    if owner_loss {
+        drop(session);
+    } else {
+        session.stop();
+        assert_eq!(session.snapshot().status, NativeSessionStatus::Stopped);
+        // A surviving descendant would retain stdout/stderr and make owned teardown fail.
+        assert_eq!(session.snapshot().error, None);
+    }
     let still_exists = std::process::Command::new("/bin/kill")
         .args(["-0", &provider_pid.to_string()])
         .stdin(std::process::Stdio::null())
@@ -1134,7 +1158,7 @@ fn stopping_session_reaps_provider_and_closes_descendant_transport_pipes() {
 #[rstest]
 fn protocol_callback_can_stop_its_own_session_without_joining_itself() {
     let root = TempDir::new().unwrap();
-    let session = Arc::new(NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap());
+    let session = Arc::new(spawn(config(root.path())).unwrap());
     let weak = Arc::downgrade(&session);
     let (done, completed) = mpsc::channel();
     session.set_change_handler(Arc::new(move || {
@@ -1152,7 +1176,7 @@ fn protocol_callback_can_stop_its_own_session_without_joining_itself() {
 #[rstest]
 fn streams_command_output_and_filters_exact_thread_and_turn() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("same").unwrap();
     barrier(&session).unwrap();
     session.send_prompt("same").unwrap();
@@ -1184,7 +1208,7 @@ fn streams_command_output_and_filters_exact_thread_and_turn() {
 #[rstest]
 fn active_followup_steers_the_existing_turn_and_rejection_preserves_work() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     barrier(&session).unwrap();
     let active = session.snapshot();
@@ -1225,7 +1249,7 @@ fn active_followup_steers_the_existing_turn_and_rejection_preserves_work() {
 #[rstest]
 fn a_started_steer_never_flashes_as_undelivered() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     session.send_prompt("pending-steer").unwrap();
     barrier(&session).unwrap();
@@ -1275,7 +1299,7 @@ fn codex_history_marks_messages_that_steered_a_turn() {
         .unwrap(),
     )
     .unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let page = session.read_history("latest").unwrap();
     let steered = page
         .transcript
@@ -1295,7 +1319,7 @@ fn codex_history_marks_messages_that_steered_a_turn() {
 #[rstest]
 fn interrupted_codex_turns_stay_marked() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     session.interrupt().unwrap();
     barrier(&session).unwrap();
@@ -1316,9 +1340,9 @@ fn interrupted_codex_turns_stay_marked() {
             .to_string(),
     )
     .unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.session_id = Some("native-thread".to_owned());
-    let resumed = NativeAgentSession::spawn(config).unwrap();
+    let resumed = spawn(config).unwrap();
     assert_eq!(notices(resumed.snapshot()), ["Interrupted"]);
     resumed.stop();
 }
@@ -1335,18 +1359,19 @@ fn interrupt_does_not_wait_for_prompt_acknowledgement(
     let origin = Instant::now();
     let clock = Arc::clone(&seconds);
     let service = Arc::new(
-        NativeAgentService::open_with_clock(
+        NativeAgentService::open_with(
             root.path().join("native.json"),
             Arc::new(move || {
                 origin
                     .checked_add(Duration::from_secs(clock.load(Ordering::Acquire)))
                     .unwrap()
             }),
+            codex_peer::launcher(),
         )
         .unwrap(),
     );
     let record = service
-        .create("captured-binding", "Codex", config(root.path()).unwrap())
+        .create("captured-binding", "Codex", config(root.path()))
         .unwrap();
     service.prompt(&record.target(), "completed").unwrap();
     assert_eq!(service.activities()[0].completed_turn, true);
@@ -1416,17 +1441,18 @@ fn working_duration_keeps_one_turn_origin_through_approval_and_clears_when_inact
     let seconds = Arc::new(AtomicU64::new(100));
     let origin = Instant::now();
     let clock = Arc::clone(&seconds);
-    let service = NativeAgentService::open_with_clock(
+    let service = NativeAgentService::open_with(
         &catalog,
         Arc::new(move || {
             origin
                 .checked_add(Duration::from_secs(clock.load(Ordering::Acquire)))
                 .unwrap()
         }),
+        codex_peer::launcher(),
     )
     .unwrap();
     let record = service
-        .create("binding", "Codex", config(root.path()).unwrap())
+        .create("binding", "Codex", config(root.path()))
         .unwrap();
     let session = service.resolve(&record.target()).unwrap();
     assert_eq!(service.activities()[0].working_elapsed, None);
@@ -1473,7 +1499,7 @@ fn working_duration_keeps_one_turn_origin_through_approval_and_clears_when_inact
     );
     service.shutdown().unwrap();
     drop(service);
-    let restored = NativeAgentService::open(catalog).unwrap();
+    let restored = open(catalog).unwrap();
     assert_eq!(restored.activities()[0].working_elapsed, None);
     assert_eq!(
         restored.activities()[0].status,
@@ -1484,7 +1510,7 @@ fn working_duration_keeps_one_turn_origin_through_approval_and_clears_when_inact
 #[rstest]
 fn approves_only_first_hand_current_requests_without_durable_grants() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("approval").unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -1518,7 +1544,7 @@ fn approval_scopes_use_only_the_exact_advertised_provider_grant(
     #[case] expected: Value,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("approval-scopes").unwrap();
     barrier(&session).unwrap();
     let request = session.snapshot().requests.remove(0);
@@ -1549,7 +1575,7 @@ fn mcp_confirmations_are_first_hand_once_only_decisions(
     #[case] expected: Value,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("mcp-approval").unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -1586,7 +1612,7 @@ fn mcp_input_requests_remain_pending_without_fabricating_content(
     #[values("active", "complete")] initial_prompt: &str,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(initial_prompt).unwrap();
     let mut parameters = parameters;
     parameters["threadId"] = session.snapshot().session_id.into();
@@ -1659,7 +1685,7 @@ fn mcp_forms_and_sign_in_pages_send_only_checked_answers(
     #[case] accepted: Value,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let request = pending_elicitation(root.path(), &session, parameters);
     for response in rejected {
@@ -1676,7 +1702,7 @@ fn mcp_forms_and_sign_in_pages_send_only_checked_answers(
 #[rstest]
 fn mcp_tool_approvals_grant_the_offered_scope() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let request = pending_elicitation(
         root.path(),
@@ -1710,7 +1736,7 @@ fn mcp_tool_approvals_grant_the_offered_scope() {
 #[rstest]
 fn codex_reasoning_search_image_and_compaction_items_reach_the_transcript() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let snapshot = session.snapshot();
     let scope = json!({"threadId":snapshot.session_id,"turnId":snapshot.turn_id});
@@ -1865,7 +1891,7 @@ fn codex_reasoning_search_image_and_compaction_items_reach_the_transcript() {
 #[rstest]
 fn codex_plans_keep_their_steps_for_the_turn_and_the_proposed_plan_in_the_transcript() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let snapshot = session.snapshot();
     let scope = json!({"threadId":snapshot.session_id,"turnId":snapshot.turn_id});
@@ -1944,9 +1970,9 @@ fn codex_plans_keep_their_steps_for_the_turn_and_the_proposed_plan_in_the_transc
             .to_string(),
     )
     .unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.session_id = Some("native-thread".to_owned());
-    let resumed = NativeAgentSession::spawn(config).unwrap();
+    let resumed = spawn(config).unwrap();
     assert_eq!(
         plan(&resumed.snapshot()),
         Some(("plan".into(), "Saved plan".into(), true))
@@ -1957,9 +1983,9 @@ fn codex_plans_keep_their_steps_for_the_turn_and_the_proposed_plan_in_the_transc
 #[rstest]
 fn mcp_approval_is_reported_as_attention_without_a_provider_failure() {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Codex", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Codex", config(root.path()))
         .unwrap();
     service.prompt(&record.target(), "mcp-approval").unwrap();
     let activity = service.activity(&record.target()).unwrap();
@@ -1973,13 +1999,13 @@ fn mcp_approval_is_reported_as_attention_without_a_provider_failure() {
 #[rstest]
 fn activity_reports_first_hand_attention_and_clears_it_when_stopped() {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let record = service
         .create_for_task(
             "binding-captured",
             "task-captured",
             "Codex",
-            config(root.path()).unwrap(),
+            config(root.path()),
         )
         .unwrap();
     service.prompt(&record.target(), "approval").unwrap();
@@ -2006,9 +2032,9 @@ fn activity_reports_first_hand_attention_and_clears_it_when_stopped() {
 fn recent_activity_is_bounded_and_remains_readable_after_stop(#[case] limit: usize) {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create("captured", "Bounded activity", config(root.path()).unwrap())
+        .create("captured", "Bounded activity", config(root.path()))
         .unwrap();
     service.prompt(&record.target(), "bounded").unwrap();
     let observed = service.sessions().remove(0);
@@ -2042,7 +2068,7 @@ fn recent_activity_is_bounded_and_remains_readable_after_stop(#[case] limit: usi
     assert!(service.recent_activity(&stale, limit).is_err());
     service.stop(&record.target()).unwrap();
     drop(service);
-    let restored = NativeAgentService::open(&path).unwrap();
+    let restored = open(&path).unwrap();
     assert_eq!(
         restored
             .recent_activity(&record.target(), limit)
@@ -2056,9 +2082,9 @@ fn recent_activity_is_bounded_and_remains_readable_after_stop(#[case] limit: usi
 #[rstest]
 fn failed_launch_retries_same_host_identity_and_preserves_provider_selector() {
     let root = TempDir::new().unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     fs::write(root.path().join("fail-launch"), "").unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.session_id = Some("retained-provider-thread".to_owned());
     assert!(service.create("captured-binding", "Codex", config).is_err());
     let failed = service.sessions().remove(0);
@@ -2086,9 +2112,9 @@ fn failed_launch_retries_same_host_identity_and_preserves_provider_selector() {
 fn failed_catalog_commit_keeps_prior_publication() {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create("binding", "Original", config(root.path()).unwrap())
+        .create("binding", "Original", config(root.path()))
         .unwrap();
     support::break_catalog(&catalog).unwrap();
     let revision = service.revision();
@@ -2123,12 +2149,12 @@ fn generated_titles_preserve_explicit_names_and_exact_conversation_membership(
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let first = service
-        .create_for_task("binding", "task", "Initial", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Initial", config(root.path()))
         .unwrap();
     let sibling = service
-        .create_for_task("binding", "task", "Sibling", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Sibling", config(root.path()))
         .unwrap();
     service.rename(&first.target(), current).unwrap();
     assert_eq!(
@@ -2161,14 +2187,14 @@ fn generated_titles_preserve_explicit_names_and_exact_conversation_membership(
     );
     service.shutdown().unwrap();
     drop(service);
-    let reopened = NativeAgentService::open(&catalog).unwrap();
+    let reopened = open(&catalog).unwrap();
     assert_eq!(titles(&reopened), expected);
 }
 
 #[rstest]
 fn bounds_recent_transcript_across_all_stream_items() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("bounded").unwrap();
     barrier(&session).unwrap();
     let snapshot = session.snapshot();
@@ -2211,7 +2237,7 @@ proptest! {
         config.account_directory = Some(root.path().to_string_lossy().into_owned());
         config.profile = Some(format!("{prefix}{invalid}"));
         prop_assert_eq!(
-            NativeAgentSession::spawn(config).err().unwrap(),
+            spawn(config).err().unwrap(),
             "Captured profile requires a simple bounded ID",
         );
     }
@@ -2237,7 +2263,7 @@ fn captured_profile_ids_are_nonempty_and_bounded(#[case] profile: String) {
     config.account_directory = Some(root.path().to_string_lossy().into_owned());
     config.profile = Some(profile);
     assert_eq!(
-        NativeAgentSession::spawn(config).err().unwrap(),
+        spawn(config).err().unwrap(),
         "Captured profile requires a simple bounded ID",
     );
 }
@@ -2249,9 +2275,9 @@ fn invalid_captured_provider_configuration_does_not_launch_a_terminal_fallback(
     #[case] provider: AgentKind,
 ) {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.provider = provider;
-    assert!(NativeAgentSession::spawn(config).is_err());
+    assert!(spawn(config).is_err());
     assert!(!root.path().join("launch.json").exists());
 }
 
@@ -2259,9 +2285,9 @@ fn invalid_captured_provider_configuration_does_not_launch_a_terminal_fallback(
 fn interrupted_first_turn_cannot_be_released_by_later_success_or_resume_history() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let record = service
-        .create_for_task("binding", "task", "Codex", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Codex", config(root.path()))
         .unwrap();
     assert_eq!(record.snapshot.first_turn, None);
     service.prompt(&record.target(), "interrupted").unwrap();
@@ -2283,7 +2309,7 @@ fn interrupted_first_turn_cannot_be_released_by_later_success_or_resume_history(
     service.stop(&record.target()).unwrap();
     service.shutdown().unwrap();
     drop(service);
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let restored = service.sessions().remove(0);
     assert_eq!(restored.snapshot.first_turn, first);
     let resumed = service.resume(&restored.target()).unwrap();
@@ -2304,7 +2330,7 @@ fn interrupted_first_turn_cannot_be_released_by_later_success_or_resume_history(
 #[rstest]
 fn completed_first_turn_events_cannot_hide_a_mismatched_acceptance_acknowledgement() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let result = session.send_prompt("mismatched-ack");
     assert!(result.is_err());
     assert_eq!(session.snapshot().status, NativeSessionStatus::Error);
@@ -2328,14 +2354,9 @@ fn prompt_failure_persists_observed_state_without_inventing_an_accepted_turn(
 ) {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create_for_task(
-            "binding",
-            "task",
-            "Captured title",
-            config(root.path()).unwrap(),
-        )
+        .create_for_task("binding", "task", "Captured title", config(root.path()))
         .unwrap();
     let error = service.prompt(&record.target(), prompt).unwrap_err();
     let observed = service.resolve(&record.target()).unwrap().snapshot();
@@ -2365,7 +2386,7 @@ fn prompt_failure_persists_observed_state_without_inventing_an_accepted_turn(
         "native-thread"
     );
     drop(service);
-    let reopened = NativeAgentService::open(&catalog).unwrap();
+    let reopened = open(&catalog).unwrap();
     let saved = reopened.sessions().remove(0);
     assert_eq!(saved.target(), record.target());
     assert_eq!(saved.snapshot.error, published.snapshot.error);
@@ -2401,9 +2422,9 @@ fn restored_codex_times_come_from_the_saved_turn(
         history.to_string(),
     )
     .unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.session_id = Some("native-thread".to_owned());
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     let snapshot = session.snapshot();
     assert_eq!(snapshot.transcript.len(), 1);
     assert_eq!(
@@ -2424,9 +2445,9 @@ fn side_chat_placement_precedes_provider_start_and_retains_failed_identity(
 ) {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     service
         .prompt(&parent.target(), "Completed response")
@@ -2471,9 +2492,9 @@ fn side_chat_copies_a_completed_response_without_reusing_the_parent_provider_ses
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     assert!(
         service
@@ -2570,7 +2591,7 @@ fn side_chat_copies_a_completed_response_without_reusing_the_parent_provider_ses
     assert_eq!(after.snapshot.transcript, before.snapshot.transcript);
     assert_eq!(after.snapshot.session_id, before.snapshot.session_id);
     service.shutdown().unwrap();
-    let restored = NativeAgentService::open(&path).unwrap();
+    let restored = open(&path).unwrap();
     let saved = restored
         .sessions()
         .into_iter()
@@ -2604,14 +2625,14 @@ fn side_chat_copies_a_completed_response_without_reusing_the_parent_provider_ses
 fn a_side_chat_on_another_launch_carries_the_conversation() {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     service
         .prompt(&parent.target(), "Original context")
         .unwrap();
-    let mut other = config(root.path()).unwrap();
+    let mut other = config(root.path());
     other.account_directory = Some(
         root.path()
             .join("other-account")
@@ -2650,9 +2671,9 @@ fn nested_side_chat_retains_copied_context_after_live_history_eviction(
 ) {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     service
         .prompt(&parent.target(), "Original context")
@@ -2728,9 +2749,9 @@ fn copied_response_quotes_validate_after_live_history_eviction(
 ) {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
-    let service = NativeAgentService::open(root.path().join("native.json")).unwrap();
+    let service = open(root.path().join("native.json")).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     service
         .prompt(&parent.target(), "Original context")
@@ -2782,7 +2803,7 @@ fn copied_response_quotes_validate_after_live_history_eviction(
 #[rstest]
 fn codex_child_lifecycle_outlives_parent_turn_and_history_reads_do_not_take_a_writer() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let event = |thread: &str, kind: &str, item: Value| json!({"method":kind,"params":{"threadId":thread,"turnId":"turn-1","item":item}});
     fs::write(root.path().join("events.json"), json!([
@@ -2835,7 +2856,7 @@ fn codex_child_lifecycle_outlives_parent_turn_and_history_reads_do_not_take_a_wr
 #[rstest]
 fn spawned_codex_subagents_ask_through_their_parent() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let approval = |id: &str, thread: &str| {
         json!({"id":id,"method":"item/commandExecution/requestApproval","params":{
@@ -2887,7 +2908,7 @@ fn spawned_codex_subagents_ask_through_their_parent() {
 #[rstest]
 fn stopping_a_codex_subagent_interrupts_its_running_turn() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let spawn = |status: &str| {
         json!([{"method":"item/started","params":{"threadId":"native-thread","turnId":"turn-1","item":{
@@ -2946,7 +2967,7 @@ fn child_reads_reconcile_status_without_claiming_its_writer(
     #[case] expected: NativeToolStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     fs::write(root.path().join("events.json"), json!([{
         "method":"item/started", "params":{"threadId":"native-thread", "turnId":"turn-1", "item":{
@@ -3018,7 +3039,7 @@ fn codex_compaction_uses_the_provider_operation_and_waits_for_completion(
     #[case] operation: NativeToolStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("/compact").unwrap();
     barrier(&session).unwrap();
     assert_eq!(session.snapshot().status, NativeSessionStatus::Working);
@@ -3060,7 +3081,7 @@ fn codex_compaction_uses_the_provider_operation_and_waits_for_completion(
 #[rstest]
 fn codex_compaction_rejects_additional_instructions_without_starting_work() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     assert!(
         session
             .send_prompt("/compact focus on tests")
@@ -3084,9 +3105,9 @@ fn missing_codex_rollouts_recreate_only_empty_reservations(
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let parent = service
-        .create_for_task("binding", "task", "Parent", config(root.path()).unwrap())
+        .create_for_task("binding", "task", "Parent", config(root.path()))
         .unwrap();
     let selected = if fork {
         service.prompt(&parent.target(), "Source context").unwrap();
@@ -3103,7 +3124,7 @@ fn missing_codex_rollouts_recreate_only_empty_reservations(
     }
     service.shutdown().unwrap();
     fs::write(root.path().join("missing-rollout"), "").unwrap();
-    let reopened = NativeAgentService::open(&path).unwrap();
+    let reopened = open(&path).unwrap();
     let result = reopened.resume(&selected.target());
     let saved = reopened
         .sessions()
@@ -3137,9 +3158,9 @@ fn missing_codex_rollouts_recreate_only_empty_reservations(
 #[case("full-access", json!({"approvalPolicy":"never","approvalsReviewer":"user","sandboxPolicy":{"type":"dangerFullAccess"}}))]
 fn codex_receives_the_selected_permission_policy(#[case] mode: &str, #[case] expected: Value) {
     let root = TempDir::new().unwrap();
-    let mut config = config(root.path()).unwrap();
+    let mut config = config(root.path());
     config.permissions = mode.parse().unwrap();
-    let session = NativeAgentSession::spawn(config).unwrap();
+    let session = spawn(config).unwrap();
     session.send_prompt("hello").unwrap();
     barrier(&session).unwrap();
     let parameters: Value =
@@ -3153,9 +3174,9 @@ fn codex_receives_the_selected_permission_policy(#[case] mode: &str, #[case] exp
 fn changing_permissions_preserves_identity_without_replaying_a_prompt() {
     let root = TempDir::new().unwrap();
     let catalog = root.path().join("native.json");
-    let service = NativeAgentService::open(&catalog).unwrap();
+    let service = open(&catalog).unwrap();
     let record = service
-        .create("binding", "Task", config(root.path()).unwrap())
+        .create("binding", "Task", config(root.path()))
         .unwrap();
     service.prompt(&record.target(), "active").unwrap();
     let before = service.sessions().remove(0);
@@ -3190,7 +3211,7 @@ fn changing_permissions_preserves_identity_without_replaying_a_prompt() {
             .is_err()
     );
     service.stop(&resumed.target()).unwrap();
-    let reopened = NativeAgentService::open(&catalog).unwrap();
+    let reopened = open(&catalog).unwrap();
     assert_eq!(reopened.sessions()[0].config.permissions.id(), "supervised");
 }
 
@@ -3199,8 +3220,7 @@ fn changing_permissions_preserves_identity_without_replaying_a_prompt() {
 fn codex_voice_cancellation_ignores_late_answers_and_waits_for_close_before_retrying() {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("defer-voice-close"), "").unwrap();
-    let session =
-        std::sync::Arc::new(NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap());
+    let session = std::sync::Arc::new(spawn(config(root.path())).unwrap());
     let connecting = session.clone();
     let call = std::thread::spawn(move || connecting.start_voice("hold"));
     session.rpc("__await_voice_start", json!({})).unwrap();
@@ -3231,9 +3251,9 @@ fn codex_voice_cancellation_ignores_late_answers_and_waits_for_close_before_retr
 #[rstest]
 fn codex_voice_calls_answer_the_offer_and_show_delegated_turns() {
     let root = TempDir::new().unwrap();
-    let mut launch = config(root.path()).unwrap();
+    let mut launch = config(root.path());
     launch.session_id = Some("native-thread".into());
-    let session = NativeAgentSession::spawn(launch).unwrap();
+    let session = spawn(launch).unwrap();
     barrier(&session).unwrap();
     assert_eq!(
         session.start_voice("refuse"),
@@ -3297,7 +3317,7 @@ fn codex_voice_calls_answer_the_offer_and_show_delegated_turns() {
 #[rstest]
 fn oversized_file_changes_keep_their_paths() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let snapshot = session.snapshot();
     let changes = json!([{
@@ -3338,7 +3358,7 @@ proptest! {
     #[test]
     fn file_changes_preserve_large_unicode_patch_json(payload in "[a-z界🦀]{18000,22000}") {
         let root = TempDir::new().unwrap();
-        let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+        let session = spawn(config(root.path())).unwrap();
         session.send_prompt("active").unwrap();
         let snapshot = session.snapshot();
         let changes = json!([{
@@ -3367,8 +3387,8 @@ proptest! {
 fn writer_owned_elsewhere_is_readable_and_can_retry_without_changing_identity() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
-    let mut launch = config(root.path()).unwrap();
+    let service = open(&path).unwrap();
+    let mut launch = config(root.path());
     launch.session_id = Some("native-thread".into());
     let record = service
         .create("binding", "Saved conversation", launch)
@@ -3383,7 +3403,7 @@ fn writer_owned_elsewhere_is_readable_and_can_retry_without_changing_identity() 
     assert_eq!(saved.snapshot.transcript, record.snapshot.transcript);
     service.shutdown().unwrap();
     drop(service);
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     assert!(service.sessions()[0].snapshot.provider_writer_blocked());
     fs::remove_file(root.path().join("writer-blocked")).unwrap();
     let resumed = service.resume(&saved.target()).unwrap();
@@ -3398,7 +3418,7 @@ fn writer_owned_elsewhere_is_readable_and_can_retry_without_changing_identity() 
 #[rstest]
 fn unknown_codex_requests_are_declined_without_ending_the_conversation() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("unknown-request").unwrap();
     let result = barrier(&session).unwrap();
     assert_eq!(
@@ -3418,7 +3438,7 @@ fn unknown_codex_requests_are_declined_without_ending_the_conversation() {
 #[case::free_text(Value::Null)]
 fn codex_async_questions_survive_live_updates_history_and_serialization(#[case] options: Value) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let scope = session.snapshot();
     let item = json!({"id":"async-question","type":"agentMessage","text":"","delivery":"async",
@@ -3483,7 +3503,7 @@ fn codex_user_input_requests_only_pause_work_when_blocking(
     #[case] expected: NativeSessionStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let snapshot = session.snapshot();
     let mut params = json!({"threadId":snapshot.session_id,"turnId":snapshot.turn_id,"itemId":"question",
@@ -3517,7 +3537,7 @@ fn codex_file_change_output_survives_settlement_and_history(
     #[case] expected: NativeToolStatus,
 ) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let item = json!({"id":"patch", "type":"fileChange", "status":status,
         "changes":[{"path":"/tmp/project/file.rs","diff":"@@ -1 +1 @@\n-old\n+new\n"}]});
@@ -3556,10 +3576,10 @@ fn codex_file_change_output_survives_settlement_and_history(
 fn conversations_are_found_by_what_was_said() {
     let root = TempDir::new().unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     for title in ["Scrolling", "Unrelated"] {
         let record = service
-            .create("binding", title, config(root.path()).unwrap())
+            .create("binding", title, config(root.path()))
             .unwrap();
         service.stop(&record.target()).unwrap();
     }
@@ -3588,7 +3608,7 @@ fn conversations_are_found_by_what_was_said() {
         item("a2", "assistant", &essay),
     ]);
     fs::write(&path, serde_json::to_vec(&catalog).unwrap()).unwrap();
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let scrolling = service
         .sessions()
         .into_iter()
@@ -3668,7 +3688,7 @@ fn conversations_are_found_by_what_was_said() {
 #[rstest]
 fn codex_turn_usage_is_the_turns_share_of_the_thread_totals() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt("active").unwrap();
     let (thread, turn) = (session.snapshot().session_id, session.snapshot().turn_id);
     let breakdown = |input: u64, cached: u64, output: u64, reasoning: u64| {
@@ -3718,7 +3738,7 @@ fn codex_turn_usage_is_the_turns_share_of_the_thread_totals() {
 #[rstest]
 fn codex_goal_notifications_follow_the_threads_goal() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let thread = session.snapshot().session_id;
     let notify = |events: Value| {
         fs::write(root.path().join("events.json"), events.to_string()).unwrap();
@@ -3752,7 +3772,7 @@ fn codex_goal_notifications_follow_the_threads_goal() {
 #[rstest]
 fn codex_rate_limits_say_when_a_reached_limit_resets() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let report = |limits: Value| json!({"method": "account/rateLimits/updated", "params": {"rateLimits": limits}});
     fs::write(
         root.path().join("events.json"),
@@ -3788,7 +3808,7 @@ fn codex_rate_limits_say_when_a_reached_limit_resets() {
 #[case::custom("/review the error handling", json!({"type": "custom", "instructions": "the error handling"}))]
 fn codex_review_runs_the_reviewer(#[case] prompt: &str, #[case] target: Value) {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     session.send_prompt(prompt).unwrap();
     barrier(&session).unwrap();
     let request: Value =
@@ -3823,7 +3843,7 @@ fn codex_review_runs_the_reviewer(#[case] prompt: &str, #[case] target: Value) {
 #[rstest]
 fn codex_terminal_commands_are_refused() {
     let root = TempDir::new().unwrap();
-    let session = NativeAgentSession::spawn(config(root.path()).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
     let error = session.send_prompt("/init the project").unwrap_err();
     assert!(
         error.contains("/init runs only in Codex's terminal app"),
@@ -3841,12 +3861,12 @@ fn conversations_keep_their_own_files_and_old_catalogs_still_open() {
     let root = TempDir::new().unwrap();
     fs::write(root.path().join("unique-threads"), "").unwrap();
     let path = root.path().join("native.json");
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let first = service
-        .create("binding", "First", config(root.path()).unwrap())
+        .create("binding", "First", config(root.path()))
         .unwrap();
     let second = service
-        .create("binding", "Second", config(root.path()).unwrap())
+        .create("binding", "Second", config(root.path()))
         .unwrap();
     let files = path.with_extension("d");
     // The catalog doesn't write the newline; a rewrite would drop it.
@@ -3865,7 +3885,7 @@ fn conversations_keep_their_own_files_and_old_catalogs_still_open() {
     let legacy = support::stored_catalog(&path).unwrap();
     fs::remove_dir_all(&files).unwrap();
     fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
-    let service = NativeAgentService::open(&path).unwrap();
+    let service = open(&path).unwrap();
     let titles = service
         .sessions()
         .into_iter()
@@ -3880,4 +3900,125 @@ fn conversations_keep_their_own_files_and_old_catalogs_still_open() {
             .get("record_ids")
             .is_some()
     );
+}
+
+fn open(path: impl Into<std::path::PathBuf>) -> Result<NativeAgentService, String> {
+    NativeAgentService::open_with(path, native_peer::clock(), codex_peer::launcher())
+}
+
+fn spawn(config: NativeSessionConfig) -> Result<NativeAgentSession, String> {
+    NativeAgentSession::spawn_with(config, native_peer::clock(), &codex_peer::launcher())
+}
+
+fn real_config(root: &Path) -> std::io::Result<NativeSessionConfig> {
+    let mut config = config(root);
+    let path = root.join("real-provider.py");
+    bootty_test_support::write_executable(&path, include_str!("support/codex_app_server.py"))?;
+    config.program = path.to_string_lossy().into_owned();
+    Ok(config)
+}
+
+#[rstest]
+fn streamed_changes_commit_at_the_injected_deadline() {
+    let root = TempDir::new().unwrap();
+    let origin = Instant::now();
+    let millis = Arc::new(AtomicU64::new(0));
+    let time = Arc::clone(&millis);
+    let service = NativeAgentService::open_with(
+        root.path().join("native.json"),
+        Arc::new(move || {
+            origin
+                .checked_add(Duration::from_millis(time.load(Ordering::Acquire)))
+                .unwrap()
+        }),
+        codex_peer::launcher(),
+    )
+    .unwrap();
+    let record = service
+        .create("binding", "Stream", config(root.path()))
+        .unwrap();
+    service.prompt(&record.target(), "active").unwrap();
+    let session = service.resolve(&record.target()).unwrap();
+    let (changed, changes) = mpsc::channel();
+    service.set_change_handler(Arc::new(move || {
+        let _ = changed.send(());
+    }));
+    let deadline = Instant::now().checked_add(Duration::from_secs(30)).unwrap();
+    let saved_text = || {
+        service.sessions()[0]
+            .snapshot
+            .transcript
+            .iter()
+            .filter(|item| item.role == "assistant")
+            .map(|item| item.text.as_str())
+            .collect::<String>()
+    };
+    for (time, delta, expected) in [(100, "first", "first"), (200, " second", "first second")] {
+        fs::write(root.path().join("events.json"), serde_json::to_vec(&json!([
+            {"method":"item/agentMessage/delta","params":{"threadId":"native-thread","turnId":"turn-1","itemId":"stream-answer","delta":delta}}
+        ])).unwrap()).unwrap();
+        barrier(&session).unwrap();
+        if time == 200 {
+            assert_eq!(saved_text(), "first");
+        }
+        millis.store(time, Ordering::Release);
+        service.clock_advanced();
+        while saved_text() != expected {
+            changes
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
+        }
+    }
+    service.shutdown().unwrap();
+}
+
+#[rstest]
+#[case::success("/usr/bin/true", "exit status: 0")]
+#[case::failure("/usr/bin/false", "exit status: 1")]
+fn production_stdio_peers_report_the_observed_exit(#[case] program: &str, #[case] expected: &str) {
+    let root = TempDir::new().unwrap();
+    let mut config = NativeSessionConfig::new(AgentKind::Codex, root.path());
+    config.program = program.into();
+    let mut child = bootty_agents::NativeChild::spawn(&bootty_agents::NativeLaunch {
+        config: &config,
+        tool_arguments: &[],
+        attachment_directory: None,
+    })
+    .unwrap();
+    assert_eq!(child.control.wait().unwrap(), expected);
+}
+
+#[rstest]
+#[case::paged(false)]
+#[case::legacy(true)]
+fn an_evicted_history_item_cannot_be_returned_as_an_empty_page(#[case] legacy: bool) {
+    let root = TempDir::new().unwrap();
+    if legacy {
+        fs::write(root.path().join("legacy-history"), "").unwrap();
+    }
+    fs::write(root.path().join("paged-history.json"), serde_json::to_vec(&json!([
+        {"turnId":"large-turn","item":{"id":"large-item","type":"agentMessage","text":"x".repeat(1024 * 1024 + 1)}}
+    ])).unwrap()).unwrap();
+    let session = spawn(config(root.path())).unwrap();
+    let before = session.snapshot();
+    assert!(
+        session
+            .read_history("latest")
+            .unwrap_err()
+            .contains("exceeds the bounded transcript view")
+    );
+    assert_eq!(session.snapshot(), before);
+}
+
+#[rstest]
+fn native_spawn_failure_reports_the_selected_missing_executable() {
+    let root = TempDir::new().unwrap();
+    let mut config = config(root.path());
+    config.program = root
+        .path()
+        .join("missing-native-provider")
+        .to_string_lossy()
+        .into_owned();
+    let error = NativeAgentSession::spawn(config).err().unwrap();
+    assert!(error.starts_with("Cannot start codex:"), "{error}");
 }

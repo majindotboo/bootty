@@ -66,9 +66,11 @@ impl Drop for OwnedChild {
         let Some(mut child) = self.child.take() else {
             return;
         };
-        let _ = child.kill();
         let integration = self.integration.take();
+        // portable_pty's kill gives SIGHUP a grace period of up to 200 ms before SIGKILL, so it
+        // runs off the dropping thread, which may be the UI thread.
         thread::spawn(move || {
+            let _ = child.kill();
             let _ = child.wait();
             drop(integration);
         });
@@ -263,16 +265,13 @@ fn is_macos_c_locale(value: &str) -> bool {
 const fn normalize_locale_entries(_entries: &mut Vec<(String, String)>) {}
 
 fn shell_command_path(configured: Option<String>) -> String {
-    [
-        env::var(BOOTTY_SHELL_ENV).ok(),
-        configured,
-        configured_user_shell(),
-        env::var("SHELL").ok(),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(|shell| normalize_shell_path(&shell))
-    .unwrap_or_else(|| DEFAULT_SHELL.to_string())
+    // Candidates are tried in order; the user's record costs processes, so it is read last.
+    let valid = |shell: Option<String>| shell.as_deref().and_then(normalize_shell_path);
+    valid(env::var(BOOTTY_SHELL_ENV).ok())
+        .or_else(|| valid(configured))
+        .or_else(|| valid(configured_user_shell()))
+        .or_else(|| valid(env::var("SHELL").ok()))
+        .unwrap_or_else(|| DEFAULT_SHELL.to_string())
 }
 
 fn normalize_shell_path(shell: &str) -> Option<String> {
@@ -286,15 +285,11 @@ fn normalize_shell_path(shell: &str) -> Option<String> {
 #[cfg(target_os = "macos")]
 #[must_use]
 pub fn configured_user_shell() -> Option<String> {
-    [
-        env::var("USER").ok(),
-        env::var("LOGNAME").ok(),
-        current_username(),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(|user| normalize_username(&user))
-    .and_then(|user| read_login_shell_for_user(&user))
+    let valid = |user: Option<String>| user.as_deref().and_then(normalize_username);
+    valid(env::var("USER").ok())
+        .or_else(|| valid(env::var("LOGNAME").ok()))
+        .or_else(|| valid(current_username()))
+        .and_then(|user| read_login_shell_for_user(&user))
 }
 
 #[cfg(target_os = "macos")]

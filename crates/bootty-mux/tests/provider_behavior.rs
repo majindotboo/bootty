@@ -370,25 +370,19 @@ fn empty_sessions_are_not_authoritative_until_a_provider_has_replied() {
 fn refresh_outcome_fields_are_independent() {
     let provider = Provider::new(MuxBackendKind::Tmux, 1);
     let mut controller = controller(Arc::clone(&provider), 2).expect("provider controller");
-    let repaint: RepaintHandle = Arc::new(|| {});
+    let (wake, wakes) = mpsc::channel();
+    let repaint: RepaintHandle = Arc::new(move || {
+        let _ = wake.send(());
+    });
 
     let queued = controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
     assert!(!queued.applied);
+    receive(&wakes);
     provider.caller_thread.store(true, Ordering::SeqCst);
-    let mut applied = false;
-    let mut error = None;
-    for _ in 0..100 {
-        std::thread::sleep(Duration::from_millis(1));
-        let outcome = controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
-        applied |= outcome.applied;
-        error = error.or(outcome.error);
-        if applied && error.is_some() {
-            break;
-        }
-    }
+    let outcome = controller.refresh_sessions(&repaint, &config(), Duration::ZERO);
 
     assert_eq!(
-        (applied, error.as_deref()),
+        (outcome.applied, outcome.error.as_deref()),
         (true, Some("dynamic refresh failure"))
     );
     assert_eq!(controller.last_error(), Some("dynamic refresh failure"));

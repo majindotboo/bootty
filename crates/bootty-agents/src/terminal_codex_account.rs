@@ -59,7 +59,11 @@ fn send(writer: &mut impl Write, message: &Value) -> Result<(), String> {
         .map_err(|_| "Codex account transport failed".to_owned())
 }
 
-pub fn query(program: &str, directory: Option<&str>) -> Result<TerminalAccountStatus, String> {
+pub fn query(
+    program: &str,
+    directory: Option<&str>,
+    transport: &crate::TerminalProviderTransport,
+) -> Result<TerminalAccountStatus, String> {
     let _provider_use = crate::ProviderUse::acquire(program)?;
     let mut command = bootty_host::local_command(program);
     command
@@ -70,13 +74,13 @@ pub fn query(program: &str, directory: Option<&str>) -> Result<TerminalAccountSt
     if let Some(directory) = directory {
         command.env("CODEX_HOME", directory);
     }
-    let mut child = crate::terminal_process::spawn_query(command)?;
-    let pipes = child
-        .child_mut()
-        .stdin
-        .take()
-        .zip(child.child_mut().stdout.take());
-    let result = if let Some((mut writer, stdout)) = pipes {
+    let crate::NativeChild {
+        stdout,
+        stdin: mut writer,
+        control: mut owner,
+        ..
+    } = (transport.launch)(command)?;
+    let result = {
         let (sender, receiver) = mpsc::sync_channel(1);
         thread::spawn(move || {
             let result = (|| {
@@ -109,10 +113,8 @@ pub fn query(program: &str, directory: Option<&str>) -> Result<TerminalAccountSt
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| "Codex account query timed out".to_owned())
             .and_then(std::convert::identity)
-    } else {
-        Err("Codex account transport is unavailable".to_owned())
     };
-    // The status query owns this server; it never adopts or alters a running session.
-    crate::terminal_process::terminate_query(&mut child);
+    let _ = owner.terminate();
+    let _ = owner.wait();
     result
 }

@@ -223,6 +223,24 @@ pub fn terminal_provider_status_with_pi_selector(
     directory: Option<&str>,
     selector: Option<&PiAccountSelector>,
 ) -> TerminalProviderStatus {
+    terminal_provider_status_using(
+        provider,
+        program,
+        directory,
+        selector,
+        &crate::TerminalProviderTransport::default(),
+    )
+}
+
+/// Inspect a provider through its captured query transport.
+#[must_use]
+pub fn terminal_provider_status_using(
+    provider: AgentKind,
+    program: &str,
+    directory: Option<&str>,
+    selector: Option<&PiAccountSelector>,
+    transport: &crate::TerminalProviderTransport,
+) -> TerminalProviderStatus {
     let executable = executable(program);
     let mut status = TerminalProviderStatus {
         executable: executable.clone(),
@@ -247,7 +265,13 @@ pub fn terminal_provider_status_with_pi_selector(
             Some("Executable not found. Set its path or install the provider.".to_owned());
         return status;
     }
-    match crate::terminal_process::query_output(program, &["--version"], || false) {
+    match crate::terminal_process::query_output_using(
+        program,
+        &["--version"],
+        None,
+        transport,
+        || false,
+    ) {
         Ok(output) if output.successful => {
             status.version = String::from_utf8(output.stdout).ok().and_then(|text| {
                 text.lines()
@@ -259,8 +283,7 @@ pub fn terminal_provider_status_with_pi_selector(
         Ok(_) => status.message = Some("The executable did not report a version.".to_owned()),
         Err(error) => status.message = Some(error),
     }
-    match crate::terminal_account_status_with_pi_selector_in(provider, program, selector, directory)
-    {
+    match crate::terminal_account_status_using(provider, program, selector, directory, transport) {
         Ok(account) => {
             status.authenticated = account.authenticated;
             status.account = account.account;

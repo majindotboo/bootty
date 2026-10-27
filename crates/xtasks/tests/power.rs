@@ -1,8 +1,11 @@
 #![cfg(unix)]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::process::{Command, Stdio};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -41,36 +44,47 @@ fn power_preserves_measured_command_failure_in_evidence() {
 #[test]
 fn power_stops_continuous_nvidia_sampler_at_the_deadline() {
     let temp = TempDir::new().unwrap();
-    let bin = temp.child("bin");
-    bin.create_dir_all().unwrap();
-    let nvidia_smi = bin.child("nvidia-smi");
-    bootty_test_support::write_executable(nvidia_smi.path(), "#!/bin/sh\nwhile :; do :; done\n")
-        .unwrap();
-    let mut permissions = fs::metadata(nvidia_smi.path()).unwrap().permissions();
-    permissions.set_mode(0o755);
-    let output = temp.child("power");
-
-    let started = Instant::now();
-    let status = Command::new(env!("CARGO_BIN_EXE_xtasks"))
-        .args(["benchmark", "power-thermal"])
-        .arg(output.path())
-        .args(["--", "/usr/bin/true"])
-        .env_clear()
-        .env("PATH", bin.path())
-        .env("BOOTTY_POWER_SECONDS", "0")
-        .env("BOOTTY_POWER_INTERVAL_MS", "1")
-        .status()
-        .unwrap();
-
-    assert!(status.success());
-    assert!(started.elapsed() < Duration::from_secs(3));
-    let records = fs::read_to_string(output.child("summary.jsonl").path())
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str::<Value>(line).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(records[1]["tool"], "nvidia-smi");
-    assert_eq!(records[2]["status"], "pass");
+    let plan = xtasks::benchmark::power::sampler_plan(temp.path(), 0, 1, |program| {
+        program == "nvidia-smi"
+    })
+    .unwrap();
+    assert_eq!(plan.command.get_program(), "nvidia-smi");
+    let log = plan.log.clone();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "continuous_sampler_helper", "--nocapture"])
+        .env("BOOTTY_CONTINUOUS_SAMPLER_HELPER", "1");
+    let base = Instant::now();
+    let elapsed = Arc::new(AtomicU64::new(0));
+    let time = Arc::clone(&elapsed);
+    let mut sampler = xtasks::benchmark::power::RunningSampler::start(
+        command,
+        plan.tool,
+        log.clone(),
+        Duration::from_secs(1),
+        Arc::new(move || base + Duration::from_secs(time.load(Ordering::SeqCst))),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut record = Vec::new();
+    sampler.write_started(&mut record).unwrap();
+    let record: Value = serde_json::from_slice(&record).unwrap();
+    assert_eq!(record["tool"], "nvidia-smi");
+    assert_eq!(record["status"], "started");
+    while !fs::read_to_string(&log)
+        .unwrap_or_default()
+        .contains("sampler-ready")
+    {
+        assert!(Instant::now() < deadline, "sampler did not start");
+        thread::yield_now();
+    }
+    elapsed.store(1, Ordering::SeqCst);
+    let stopped = sampler.finish().unwrap();
+    assert!(
+        !stopped.success(),
+        "the deadline must terminate the continuous sampler"
+    );
+    assert!(fs::read_to_string(log).unwrap().contains("sampler-ready"));
 }
 
 #[test]
@@ -79,7 +93,7 @@ fn power_terminates_the_measured_process_group_on_sigterm() {
     let descendant_pid = temp.child("descendant.pid");
     let output = temp.child("power");
     let command = format!(
-        "trap '' TERM; (trap '' TERM; while :; do sleep 1; done) & echo $! > '{}'; wait",
+        "trap '' TERM; exec 3<&0; (trap '' TERM; read hold <&3) & echo $! > '{}'; wait",
         descendant_pid.path().display()
     );
     let mut xtasks = Command::new(env!("CARGO_BIN_EXE_xtasks"))
@@ -88,16 +102,19 @@ fn power_terminates_the_measured_process_group_on_sigterm() {
         .args(["--", "/bin/sh", "-c", &command])
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
 
-    for _ in 0..100 {
+    let _input = xtasks.stdin.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline {
         if descendant_pid.path().is_file() {
             break;
         }
-        thread::sleep(Duration::from_millis(10));
+        thread::yield_now();
     }
     assert!(descendant_pid.path().is_file());
     assert!(
@@ -120,4 +137,16 @@ fn power_terminates_the_measured_process_group_on_sigterm() {
             .success(),
         "descendant {pid} survived xtasks cancellation"
     );
+}
+
+#[test]
+fn continuous_sampler_helper() {
+    if std::env::var_os("BOOTTY_CONTINUOUS_SAMPLER_HELPER").is_some() {
+        use std::io::Write as _;
+        print!("sampler-ready");
+        std::io::stdout().flush().unwrap();
+        loop {
+            thread::park();
+        }
+    }
 }

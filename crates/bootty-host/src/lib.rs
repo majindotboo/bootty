@@ -15,8 +15,8 @@ pub mod ssh_forward;
 pub mod text_file;
 
 pub use exec::{
-    REMOTE_DAEMON_PROGRAM, REMOTE_DAEMON_PROTOCOL_VERSION, remote_exec_program, run_remote_command,
-    windows_terminal_argv,
+    REMOTE_DAEMON_PROGRAM, REMOTE_DAEMON_PROTOCOL_VERSION, daemon_program_args,
+    remote_exec_program, run_remote_command, windows_terminal_argv,
 };
 pub use executable::{find_executable, find_executable_in, local_command};
 pub use process::{

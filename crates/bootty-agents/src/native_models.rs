@@ -75,7 +75,18 @@ impl NativeAgentSession {
     pub fn discover_models(
         config: crate::NativeSessionConfig,
     ) -> Result<Vec<NativeModelOption>, String> {
-        Self::start_discovery(config)?.model_catalog(false)
+        let launcher: crate::NativeLauncher = std::sync::Arc::new(crate::NativeChild::spawn);
+        Self::discover_models_with(config, &launcher)
+    }
+
+    /// Discover model choices through the supplied stdio peer.
+    /// # Errors
+    /// Returns invalid launch configuration or provider errors.
+    pub fn discover_models_with(
+        config: crate::NativeSessionConfig,
+        launcher: &crate::NativeLauncher,
+    ) -> Result<Vec<NativeModelOption>, String> {
+        Self::start_discovery(config, launcher)?.model_catalog(false)
     }
 
     /// Read model choices and inherited permissions without starting a conversation.
@@ -84,18 +95,38 @@ impl NativeAgentSession {
     pub fn discover_catalog(
         config: crate::NativeSessionConfig,
     ) -> Result<NativeProviderCatalog, String> {
-        let session = Self::start_discovery(config)?;
+        let launcher: crate::NativeLauncher = std::sync::Arc::new(crate::NativeChild::spawn);
+        Self::discover_catalog_with(config, &launcher)
+    }
+
+    /// Discover model and permission metadata through the supplied stdio peer.
+    /// # Errors
+    /// Returns invalid launch configuration or provider errors.
+    pub fn discover_catalog_with(
+        config: crate::NativeSessionConfig,
+        launcher: &crate::NativeLauncher,
+    ) -> Result<NativeProviderCatalog, String> {
+        let session = Self::start_discovery(config, launcher)?;
         Ok(NativeProviderCatalog {
             models: session.model_catalog(false)?,
             permissions: session.configured_permissions(),
         })
     }
 
-    fn start_discovery(mut config: crate::NativeSessionConfig) -> Result<Self, String> {
+    pub(crate) fn start_discovery(
+        mut config: crate::NativeSessionConfig,
+        launcher: &crate::NativeLauncher,
+    ) -> Result<Self, String> {
         // Discovery inherits the selected account and submits no turns or permission extensions.
         config.permissions = NativePermissionMode::ProviderDefault;
         config.prepare_fresh_identity()?;
-        let session = Self::start_with_clock(config, std::sync::Arc::new(std::time::Instant::now))?;
+        let session = Self::start_with_tools(
+            config,
+            std::sync::Arc::new(std::time::Instant::now),
+            None,
+            None,
+            launcher,
+        )?;
         match session.config.provider {
             AgentKind::Codex => session.initialize_codex_transport()?,
             AgentKind::Claude => session.initialize()?,

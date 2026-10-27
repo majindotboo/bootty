@@ -43,18 +43,38 @@ pub fn terminal_account_status_with_pi_selector_in(
     selector: Option<&PiAccountSelector>,
     directory: Option<&str>,
 ) -> Result<TerminalAccountStatus, String> {
+    terminal_account_status_using(
+        provider,
+        program,
+        selector,
+        directory,
+        &crate::TerminalProviderTransport::default(),
+    )
+}
+
+/// Query account metadata through the selected provider transport.
+/// # Errors
+/// Returns scope, transport or redacted protocol errors.
+pub fn terminal_account_status_using(
+    provider: AgentKind,
+    program: &str,
+    selector: Option<&PiAccountSelector>,
+    directory: Option<&str>,
+    transport: &crate::TerminalProviderTransport,
+) -> Result<TerminalAccountStatus, String> {
     let environment = directory.map(|directory| (provider.account_directory_variable(), directory));
     match provider {
         AgentKind::Claude => {
-            let output = crate::terminal_process::query_output_in(
+            let output = crate::terminal_process::query_output_using(
                 program,
                 &["auth", "status", "--json"],
                 environment,
+                transport,
                 || false,
             )?;
             crate::terminal_account_response::claude(&output.stdout, output.successful)
         }
-        AgentKind::Codex => crate::terminal_codex_account::query(program, directory),
+        AgentKind::Codex => crate::terminal_codex_account::query(program, directory, transport),
         AgentKind::Pi => {
             let scope = crate::terminal_pi_account::scope(selector, directory)?;
             let mut arguments = vec!["auth", "check"];
@@ -65,10 +85,11 @@ pub fn terminal_account_status_with_pi_selector_in(
                 arguments.extend(["--model", model]);
             }
             arguments.extend(["--json", "--no-refresh"]);
-            let output = crate::terminal_process::query_output_in(
+            let output = crate::terminal_process::query_output_using(
                 program,
                 &arguments,
                 Some((provider.account_directory_variable(), &scope.directory)),
+                transport,
                 || false,
             )?;
             let mut result = crate::terminal_account_response::pi(

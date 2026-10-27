@@ -459,6 +459,28 @@ impl TerminalSession {
         config: TerminalSessionConfig,
         repaint_wakeup: RepaintWakeup,
     ) -> Result<Self> {
+        Self::new_with_config_and_host_metrics_and_clock(
+            geometry,
+            display_scale,
+            render_cell,
+            config,
+            repaint_wakeup,
+            Arc::new(Instant::now),
+        )
+    }
+
+    /// Start a terminal with an explicit monotonic clock for frame scheduling.
+    ///
+    /// # Errors
+    /// Returns an error if the shell PTY, process, I/O handles, or terminal worker cannot be started.
+    pub fn new_with_config_and_host_metrics_and_clock(
+        geometry: TerminalGeometry,
+        display_scale: f32,
+        render_cell: CellMetrics,
+        config: TerminalSessionConfig,
+        repaint_wakeup: RepaintWakeup,
+        clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Result<Self> {
         let restored_history = config
             .restored_history
             .as_deref()
@@ -511,6 +533,7 @@ impl TerminalSession {
             None => BenchmarkTrace::from_env().context("open benchmark trace")?,
         };
         spawn_terminal_worker(TerminalWorkerConfig {
+            clock,
             geometry,
             display_scale,
             render_cell,
@@ -926,6 +949,7 @@ impl TerminalSession {
 }
 
 struct TerminalWorkerConfig {
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     geometry: TerminalGeometry,
     display_scale: f32,
     render_cell: CellMetrics,
@@ -1000,7 +1024,9 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             return;
         }
         let _ = startup_tx.send(Ok(()));
+        let now = (config.clock)();
         let mut worker = TerminalWorker {
+            clock: config.clock,
             shell_prompt: ShellPrompt::default(),
             engine,
             pty_master: config.pty_master,
@@ -1022,9 +1048,7 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             output_buf: Vec::with_capacity(1024),
             pending_pty: PtyBacklog::with_capacity(MAX_COLLECT_CHUNKS_PER_TICK),
             pending_resize_ack: None,
-            last_frame_publish: Instant::now()
-                .checked_sub(WORKER_READY_FRAME_INTERVAL)
-                .unwrap_or_else(Instant::now),
+            last_frame_publish: now.checked_sub(WORKER_READY_FRAME_INTERVAL).unwrap_or(now),
             has_unpublished_frame: false,
             sync_output_since: None,
             sync_output_batch_pending: false,
@@ -1055,6 +1079,7 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
 }
 
 struct TerminalWorker {
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     shell_prompt: ShellPrompt,
     engine: TerminalEngine,
     pty_master: Box<dyn MasterPty + Send>,
@@ -1120,7 +1145,7 @@ impl TerminalWorker {
             }
             if self.should_publish_frame() {
                 self.publish_frame();
-                self.last_frame_publish = Instant::now();
+                self.last_frame_publish = (self.clock)();
                 if !did_work {
                     continue;
                 }
@@ -1171,30 +1196,32 @@ impl TerminalWorker {
             PublishHold::None
         };
         self.last_hold = hold;
+        let now = (self.clock)();
         should_publish_frame_after_work(
             self.has_unpublished_frame,
             self.force_next_frame_publish,
             hold,
             self.pending_pty.len(),
             self.last_terminal_change
-                .map_or(Duration::ZERO, |instant| instant.elapsed()),
-            self.last_frame_publish.elapsed(),
-        ) || self.cursor_hold.commit_due(Instant::now())
+                .map_or(Duration::ZERO, |instant| now.duration_since(instant)),
+            now.duration_since(self.last_frame_publish),
+        ) || self.cursor_hold.commit_due(now)
     }
 
     fn settling(&mut self) -> bool {
+        let now = (self.clock)();
         self.settle.holds(
+            now,
             self.last_terminal_change
-                .map_or(Duration::ZERO, |instant| instant.elapsed()),
+                .map_or(Duration::ZERO, |instant| now.duration_since(instant)),
         )
     }
 
     fn sync_output_suppressed(&mut self) -> bool {
         let active = synchronized_output_state(&self.engine, &self.worker_health);
+        let now = (self.clock)();
         let elapsed = if active {
-            self.sync_output_since
-                .get_or_insert_with(Instant::now)
-                .elapsed()
+            now.duration_since(*self.sync_output_since.get_or_insert(now))
         } else {
             self.sync_output_since = None;
             Duration::ZERO
@@ -1214,12 +1241,12 @@ impl TerminalWorker {
             return;
         }
         self.publish_frame();
-        self.last_frame_publish = Instant::now();
+        self.last_frame_publish = (self.clock)();
     }
 
     fn mark_unpublished_frame(&mut self) {
         self.has_unpublished_frame = true;
-        self.last_terminal_change = Some(Instant::now());
+        self.last_terminal_change = Some((self.clock)());
     }
 
     const fn mark_input_fast_path(&mut self) {
@@ -1839,7 +1866,7 @@ impl TerminalWorker {
                 ],
             );
         }
-        let shown = self.cursor_hold.resolve(frame.cursor, Instant::now());
+        let shown = self.cursor_hold.resolve(frame.cursor, (self.clock)());
         if let Err(error) = self.latest_frame.publish_with_cursor(frame, shown) {
             self.worker_health.record("publish_frame", error);
             self.acknowledge_resize();
@@ -1947,14 +1974,14 @@ pub struct OutputSettle {
 
 impl OutputSettle {
     /// Whether to keep holding; the hold clock starts the first time this says yes.
-    pub fn holds(&mut self, since_last_terminal_change: Duration) -> bool {
+    pub fn holds(&mut self, now: Instant, since_last_terminal_change: Duration) -> bool {
         let hold = output_settling(
             since_last_terminal_change,
             self.since
-                .map_or(Duration::ZERO, |instant| instant.elapsed()),
+                .map_or(Duration::ZERO, |instant| now.duration_since(instant)),
         );
         if hold {
-            self.since.get_or_insert_with(Instant::now);
+            self.since.get_or_insert(now);
         }
         hold
     }

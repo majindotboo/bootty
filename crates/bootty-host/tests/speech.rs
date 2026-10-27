@@ -1,28 +1,14 @@
 #![cfg(unix)]
+#![cfg(test)]
 use assert_fs::TempDir;
-use bootty_host::speech::{SpeechCommand, SpeechEvent, SpeechSession};
+use bootty_host::speech::{SpeechCommand, SpeechEvent, SpeechPeer, SpeechSession};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
 #[rstest]
 fn dictation_and_voice_deliver_events_without_recording_audio() {
-    let root = TempDir::new().unwrap();
-    let program = root.path().join("speech.py");
-    bootty_test_support::write_executable(
-        &program,
-        r"#!/usr/bin/env python3
-import json,sys
-def emit(event,**fields): print(json.dumps({'event':event,**fields}),flush=True)
-emit('ready')
-for line in sys.stdin:
- command=json.loads(line)
- if command['action']=='listen': emit('listening'); emit('level',rms=1200); emit('partial',text='Recognized words')
- elif command['action']=='stop': emit('final',text='Recognized words'); emit('stopped')
- elif command['action']=='answer': emit('listening')
-",
-    )
-    .unwrap();
-    let (session, mut events) = SpeechSession::start(program);
+    let (session, mut events) =
+        SpeechSession::start_with("fixture-speech".into(), |program| Ok(peer(&program)));
     assert_eq!(events.blocking_recv(), Some(SpeechEvent::Ready));
     session
         .send(SpeechCommand::Listen { voice: false })
@@ -63,21 +49,80 @@ for line in sys.stdin:
 }
 
 #[rstest]
-#[case("print('invalid-json',flush=True)")]
-#[case("print('x'*65537,flush=True)")]
-fn invalid_speech_frames_are_reported_and_the_stream_closes(#[case] response: &str) {
-    let root = TempDir::new().unwrap();
-    let program = root.path().join("speech.py");
-    bootty_test_support::write_executable(
-        &program,
-        format!("#!/usr/bin/env python3\n{response}\n"),
-    )
-    .unwrap();
-    let (session, mut events) = SpeechSession::start(program);
+#[case::invalid_json(b"invalid-json\n".to_vec())]
+#[case::oversized(format!("{}\n", "x".repeat(65_537)).into_bytes())]
+fn invalid_speech_frames_are_reported_and_the_stream_closes(#[case] response: Vec<u8>) {
+    let (session, mut events) = SpeechSession::start_with("fixture-speech".into(), move |_| {
+        Ok(SpeechPeer::new(
+            std::io::sink(),
+            std::io::Cursor::new(response),
+            || {},
+        ))
+    });
     assert!(matches!(
         events.blocking_recv(),
         Some(SpeechEvent::Error { .. })
     ));
     assert_eq!(events.blocking_recv(), Some(SpeechEvent::Closed));
     drop(session);
+}
+
+#[rstest]
+fn a_missing_speech_helper_reports_spawn_failure_and_closes() {
+    let root = TempDir::new().unwrap();
+    let (session, mut events) = SpeechSession::start(root.path().join("missing-speech-helper"));
+    assert!(matches!(
+        events.blocking_recv(),
+        Some(SpeechEvent::Error { .. })
+    ));
+    assert_eq!(events.blocking_recv(), Some(SpeechEvent::Closed));
+    drop(session);
+}
+
+fn peer(program: &std::path::Path) -> SpeechPeer {
+    use std::{
+        io::{BufRead as _, BufReader, Write as _},
+        net::Shutdown,
+        os::unix::net::UnixStream,
+    };
+    assert_eq!(program, std::path::Path::new("fixture-speech"));
+    let (host, mut provider) = UnixStream::pair().unwrap();
+    let input = host.try_clone().unwrap();
+    let control = host.try_clone().unwrap();
+    let worker = std::thread::spawn(move || {
+        let mut requests = BufReader::new(provider.try_clone().unwrap());
+        let mut emit = |event| {
+            serde_json::to_writer(&mut provider, &event).unwrap();
+            provider.write_all(b"\n").unwrap();
+        };
+        emit(SpeechEvent::Ready);
+        loop {
+            let mut line = String::new();
+            match requests.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            match serde_json::from_str::<SpeechCommand>(&line).unwrap() {
+                SpeechCommand::Listen { .. } => {
+                    emit(SpeechEvent::Listening);
+                    emit(SpeechEvent::Level { rms: 1200 });
+                    emit(SpeechEvent::Partial {
+                        text: "Recognized words".into(),
+                    });
+                }
+                SpeechCommand::Stop => {
+                    emit(SpeechEvent::Final {
+                        text: "Recognized words".into(),
+                    });
+                    emit(SpeechEvent::Stopped);
+                }
+                SpeechCommand::Answer { .. } => emit(SpeechEvent::Listening),
+                command => panic!("unexpected fixture command: {command:?}"),
+            }
+        }
+    });
+    SpeechPeer::new(input, host, move || {
+        control.shutdown(Shutdown::Both).unwrap();
+        worker.join().unwrap();
+    })
 }

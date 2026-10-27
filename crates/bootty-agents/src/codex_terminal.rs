@@ -10,7 +10,7 @@ use std::path::Path;
 #[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
-use std::process::{Child, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::Mutex;
@@ -49,6 +49,23 @@ impl CodexTerminalObserver {
         runtime_directory: &Path,
         sink: ObservationSink,
     ) -> io::Result<Self> {
+        Self::prepare_with_launcher(
+            launch,
+            runtime_directory,
+            sink,
+            &crate::TerminalProviderTransport::default().observer_launch,
+        )
+    }
+
+    /// Prepare an active observer with its captured provider launcher.
+    /// # Errors
+    /// Returns invalid launch, endpoint, provider, or unsupported-platform errors.
+    pub fn prepare_with_launcher(
+        launch: &AgentLaunch,
+        runtime_directory: &Path,
+        sink: ObservationSink,
+        launcher: &crate::TerminalLauncher,
+    ) -> io::Result<Self> {
         launch
             .validate()
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
@@ -64,11 +81,11 @@ impl CodexTerminalObserver {
         }
         #[cfg(unix)]
         {
-            Self::prepare_unix(launch, runtime_directory, sink)
+            Self::prepare_unix(launch, runtime_directory, sink, launcher)
         }
         #[cfg(not(unix))]
         {
-            let _ = (runtime_directory, sink);
+            let _ = (runtime_directory, sink, launcher);
             Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "Codex terminal observation requires a private Unix transport",
@@ -105,6 +122,7 @@ impl CodexTerminalObserver {
         launch: &AgentLaunch,
         runtime_directory: &Path,
         sink: ObservationSink,
+        launcher: &crate::TerminalLauncher,
     ) -> io::Result<Self> {
         use std::os::unix::fs::DirBuilderExt as _;
         use std::os::unix::net::UnixListener;
@@ -125,7 +143,7 @@ impl CodexTerminalObserver {
         let setup = (|| {
             let listener = UnixListener::bind(&endpoint)?;
             listener.set_nonblocking(true)?;
-            let mut command = crate::terminal_process::parent_bound_command(&launch.program);
+            let mut command = Command::new(&launch.program);
             command
                 .args(["app-server", "--listen"])
                 .arg(format!("unix://{}", provider_endpoint.display()))
@@ -138,7 +156,7 @@ impl CodexTerminalObserver {
             if let Some(cwd) = &launch.cwd {
                 command.current_dir(cwd);
             }
-            let child = command.spawn()?;
+            let child = launcher(command).map_err(io::Error::other)?;
             Ok::<_, io::Error>((listener, child))
         })();
         let (listener, child) = match setup {
@@ -184,13 +202,19 @@ fn run_provider(
     let disconnected = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
     let result = (|| {
-        let Some(terminal) = accept_terminal(&listener, &mut provider.child, worker_stop)? else {
+        let Some(terminal) =
+            accept_terminal(&listener, provider.child.control.as_mut(), worker_stop)?
+        else {
             return Ok(());
         };
         // One launch owns one connection. Reconnect needs an explicit new launch.
         drop(listener);
-        let Some(provider_stream) =
-            connect_provider(provider_endpoint, &mut provider.child, worker_stop, started)?
+        let Some(provider_stream) = connect_provider(
+            provider_endpoint,
+            provider.child.control.as_mut(),
+            worker_stop,
+            started,
+        )?
         else {
             return Ok(());
         };
@@ -232,7 +256,8 @@ fn run_provider(
             .map_err(|_| io::Error::other("Codex transport worker panicked"))?;
         outbound.and(inbound)
     })();
-    crate::terminal_process::terminate_group(&mut provider.child);
+    let _ = provider.child.control.terminate();
+    let _ = provider.child.control.wait();
     provider.terminated = true;
     // A closed transport cannot authorize another prompt, unlike an interrupted live turn.
     let detail = result.err().map_or_else(
@@ -247,14 +272,14 @@ fn run_provider(
 #[cfg(unix)]
 fn accept_terminal(
     listener: &std::os::unix::net::UnixListener,
-    child: &mut Child,
+    child: &mut dyn crate::NativeChildControl,
     stopping: &AtomicBool,
 ) -> io::Result<Option<UnixStream>> {
     loop {
         if stopping.load(Ordering::Acquire) {
             return Ok(None);
         }
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.try_wait().map_err(io::Error::other)? {
             return Err(io::Error::other(format!(
                 "Codex app-server exited before its terminal connected: {status}"
             )));
@@ -270,7 +295,7 @@ fn accept_terminal(
 #[cfg(unix)]
 fn connect_provider(
     endpoint: &Path,
-    child: &mut Child,
+    child: &mut dyn crate::NativeChildControl,
     stopping: &AtomicBool,
     started: Instant,
 ) -> io::Result<Option<UnixStream>> {
@@ -278,7 +303,7 @@ fn connect_provider(
         if stopping.load(Ordering::Acquire) {
             return Ok(None);
         }
-        if let Some(status) = child.try_wait()? {
+        if let Some(status) = child.try_wait().map_err(io::Error::other)? {
             return Err(io::Error::other(format!(
                 "Codex app-server exited during startup: {status}"
             )));
@@ -300,7 +325,7 @@ fn connect_provider(
 
 #[cfg(unix)]
 struct OwnedProvider {
-    child: Child,
+    child: crate::NativeChild,
     directory: PathBuf,
     terminated: bool,
     _provider_use: Option<crate::ProviderUse>,
@@ -311,7 +336,8 @@ impl Drop for OwnedProvider {
     fn drop(&mut self) {
         // Keep ownership on early returns, worker panics, and failed thread startup.
         if !self.terminated {
-            crate::terminal_process::terminate_group(&mut self.child);
+            let _ = self.child.control.terminate();
+            let _ = self.child.control.wait();
         }
         cleanup(&self.directory);
     }

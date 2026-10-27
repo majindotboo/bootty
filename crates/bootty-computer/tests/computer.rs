@@ -1,6 +1,9 @@
+#![cfg(test)]
+
 use std::{
+    collections::HashMap,
     io::Cursor,
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, LazyLock, Mutex, PoisonError},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -377,9 +380,27 @@ impl Desktop for Fake {
         height: u32,
         _: bool,
     ) -> Result<Image, ComputerError> {
-        let rgba = (0..height)
-            .flat_map(|row| (0..width).flat_map(move |column| pixel(column, row)))
-            .collect();
+        type Captures = HashMap<(u32, u32), Vec<u8>>;
+        static CAPTURES: LazyLock<Mutex<Captures>> = LazyLock::new(Mutex::default);
+        let rgba = CAPTURES
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry((width, height))
+            .or_insert_with(|| {
+                let bytes = usize::try_from(width)
+                    .unwrap()
+                    .checked_mul(usize::try_from(height).unwrap())
+                    .and_then(|pixels| pixels.checked_mul(4))
+                    .expect("capture fixture fits in memory");
+                let mut pixels = Vec::with_capacity(bytes);
+                for row in 0..height {
+                    for column in 0..width {
+                        pixels.extend_from_slice(&pixel(column, row));
+                    }
+                }
+                pixels
+            })
+            .clone();
         Ok(Image {
             width,
             height,

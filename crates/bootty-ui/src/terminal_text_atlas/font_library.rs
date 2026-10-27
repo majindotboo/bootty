@@ -5,7 +5,7 @@ use super::shaping;
 use super::shaping::font_has_ligature_features;
 use ab_glyph::{Font, FontArc, GlyphId, PxScale, ScaleFont, point};
 use num_traits::ToPrimitive as _;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use crate::font_database::{
     font_style, font_weight, load_font_id, query_assigned_font_id, query_font_id,
@@ -16,7 +16,7 @@ use crate::terminal_text::{FontFeature, ResolvedFontFace};
 
 #[derive(Clone, Debug)]
 pub(super) struct FontLibrary {
-    database: &'static fontdb::Database,
+    database: OnceLock<&'static fontdb::Database>,
     font_ids: HashMap<ResolvedFontFace, Option<fontdb::ID>>,
     fonts_by_id: HashMap<fontdb::ID, Option<FontArc>>,
     fallback_font_ids: HashMap<FallbackFontKey, Option<fontdb::ID>>,
@@ -45,7 +45,7 @@ struct FontMetricsKey {
 impl FontLibrary {
     pub(super) fn new() -> Self {
         Self {
-            database: system_font_database(),
+            database: OnceLock::new(),
             font_ids: HashMap::new(),
             fonts_by_id: HashMap::new(),
             fallback_font_ids: HashMap::new(),
@@ -53,6 +53,17 @@ impl FontLibrary {
             shaping_capable: HashMap::new(),
             bold_synthesis: HashMap::new(),
         }
+    }
+
+    pub(super) fn with_database(database: &'static fontdb::Database) -> Self {
+        Self {
+            database: OnceLock::from(database),
+            ..Self::new()
+        }
+    }
+
+    fn database(&self) -> &'static fontdb::Database {
+        self.database.get_or_init(system_font_database)
     }
 
     /// Shapes text after `FontLibrary` resolves the primary face and caches its capability.
@@ -76,7 +87,7 @@ impl FontLibrary {
         }
         let font = self.font_for_id(id)?;
         shaping::shape_clusters(
-            self.database,
+            self.database(),
             id,
             &font,
             text,
@@ -95,7 +106,7 @@ impl FontLibrary {
                     fontdb::Family::Name(family)
                 };
                 if let Some(found) = query_assigned_font_id(
-                    self.database,
+                    self.database(),
                     &[query_family],
                     face.style,
                     &face.assignment,
@@ -106,7 +117,7 @@ impl FontLibrary {
             }
             let id = id.or_else(|| {
                 query_assigned_font_id(
-                    self.database,
+                    self.database(),
                     &[fontdb::Family::Monospace],
                     face.style,
                     &face.assignment,
@@ -118,7 +129,7 @@ impl FontLibrary {
     }
 
     fn font_has_shaping_features(&mut self, id: fontdb::ID) -> bool {
-        let database = self.database;
+        let database = self.database();
         *self.shaping_capable.entry(id).or_insert_with(|| {
             database
                 .with_face_data(id, font_has_ligature_features)
@@ -145,7 +156,7 @@ impl FontLibrary {
         physical_font_size: f32,
     ) -> Option<Vec<super::clusters::ShapedGlyph>> {
         let id = self.font_id_for_cluster(face, cluster, physical_font_size, true)?;
-        self.database
+        self.database()
             .with_face_data(id, |data, index| {
                 shaping::shape_run(data, index, &cluster.text, font_size, &[])
             })
@@ -157,7 +168,7 @@ impl FontLibrary {
         face: &ResolvedFontFace,
     ) -> Option<gpui_kit::Font> {
         let id = self.primary_font_id(face)?;
-        self.database
+        self.database()
             .face(id)
             .map(crate::font_database::native_font)
     }
@@ -169,7 +180,7 @@ impl FontLibrary {
         physical_font_size: f32,
     ) -> Option<(gpui_kit::Font, bool)> {
         let id = self.font_id_for_cluster(face, cluster, physical_font_size, true)?;
-        let info = self.database.face(id)?;
+        let info = self.database().face(id)?;
         let font = crate::font_database::native_font(info);
         Some((font, self.synthesize_bold(id, face)))
     }
@@ -216,7 +227,7 @@ impl FontLibrary {
         let fallback_id = if let Some(id) = self.fallback_font_ids.get(&fallback_key) {
             *id
         } else {
-            let id = font_id_supporting_cluster(self.database, face, cluster, physical_font_size);
+            let id = font_id_supporting_cluster(self.database(), face, cluster, physical_font_size);
             // Terminal output can supply unlimited distinct clusters. Keep font fallback
             // decisions bounded like shaped text; eviction only requires resolving again.
             if self.fallback_font_ids.len() >= super::SHAPED_RUN_CACHE_CAP {
@@ -250,14 +261,15 @@ impl FontLibrary {
         {
             return false;
         }
+        let database = self.database();
         *self
             .bold_synthesis
             .entry((id, face.clone()))
-            .or_insert_with(|| needs_synthetic_bold(self.database, id, face))
+            .or_insert_with(|| needs_synthetic_bold(database, id, face))
     }
 
     fn font_for_id(&mut self, id: fontdb::ID) -> Option<FontArc> {
-        let database = self.database;
+        let database = self.database();
         self.fonts_by_id
             .entry(id)
             .or_insert_with(|| load_font_id(database, id))

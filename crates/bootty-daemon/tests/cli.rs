@@ -1,5 +1,10 @@
 #![cfg(test)]
 
+#[path = "../../bootty-git/tests/support/repository.rs"]
+mod repository_support;
+#[path = "../../bootty-git/tests/support/seed.rs"]
+mod seed;
+
 use std::process::Command;
 
 use assert_fs::prelude::*;
@@ -24,26 +29,60 @@ fn write_fixture(
 }
 
 fn run_daemon(
-    daemon: &str,
+    _daemon: &str,
     config_root: &std::path::Path,
     state_root: &std::path::Path,
     identity: Option<&str>,
     args: &[&str],
 ) -> std::process::Output {
-    let mut command = Command::new(daemon);
-    command
-        .env_remove("BOOTTY_DAEMON_STATE")
-        .env_remove(bootty_config::APPLICATION_IDENTITY_ENV)
-        .env("XDG_CONFIG_HOME", config_root)
-        .env("XDG_STATE_HOME", state_root)
-        .env("LOCALAPPDATA", state_root)
-        .env("APPDATA", state_root)
-        .env("HOME", config_root)
-        .env("USERPROFILE", config_root);
+    let mut arguments = Vec::new();
     if let Some(identity) = identity {
-        command.args(["--application-identity", identity]);
+        arguments.extend(["--application-identity".to_owned(), identity.to_owned()]);
     }
-    command.args(args).output().expect("run daemon")
+    arguments.extend(args.iter().map(|arg| (*arg).to_owned()));
+    let mut output = Vec::new();
+    let result = (|| -> anyhow::Result<()> {
+        let (identity, arguments) =
+            bootty_daemon::command_runtime::parse_application_identity(arguments)?;
+        assert_eq!(arguments[0], "remote-space");
+        let paths =
+            bootty_daemon::command_runtime::remote_space_paths_from(identity, |name| match name {
+                "XDG_CONFIG_HOME" | "HOME" | "USERPROFILE" => {
+                    Some(config_root.as_os_str().to_owned())
+                }
+                "XDG_STATE_HOME" | "LOCALAPPDATA" | "APPDATA" => {
+                    Some(state_root.as_os_str().to_owned())
+                }
+                _ => None,
+            })?;
+        bootty_daemon::command_runtime::run_remote_space_with_io(
+            &arguments[1..],
+            &paths,
+            &mut std::io::Cursor::new(Vec::new()),
+            &mut output,
+        )
+    })();
+    let (status, stderr) = match result {
+        Ok(()) => (std::process::ExitStatus::default(), Vec::new()),
+        Err(error) => {
+            #[cfg(unix)]
+            let status = {
+                use std::os::unix::process::ExitStatusExt as _;
+                std::process::ExitStatus::from_raw(1 << 8)
+            };
+            #[cfg(windows)]
+            let status = {
+                use std::os::windows::process::ExitStatusExt as _;
+                std::process::ExitStatus::from_raw(1)
+            };
+            (status, format!("Error: {error:#}\n").into_bytes())
+        }
+    };
+    std::process::Output {
+        status,
+        stdout: output,
+        stderr,
+    }
 }
 
 fn assert_success(output: &std::process::Output) {
@@ -204,10 +243,7 @@ fn cli_rejects_malformed_options_and_application_identities() {
             "Error: unknown application identity \"other\"\n",
         ),
     ] {
-        let output = Command::new(daemon)
-            .args(arguments)
-            .output()
-            .expect("run daemon");
+        let output = run_daemon(daemon, &config, &state, None, &arguments);
         assert!(!output.status.success());
         assert_eq!(String::from_utf8(output.stderr).expect("UTF-8"), expected);
     }
@@ -948,29 +984,12 @@ fn remote_worktree_create_resolves_options_on_the_daemon_host(#[case] request_js
     let directory = assert_fs::TempDir::new().unwrap();
     let project = directory.child("repo");
     project.create_dir_all().unwrap();
-    for args in [
-        vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ],
-        vec!["tag", "starting-tag"],
-    ] {
-        assert_success(
-            &Command::new("git")
-                .arg("-C")
-                .arg(project.path())
-                .args(args)
-                .output()
-                .unwrap(),
-        );
-    }
+    seed::repository(project.path(), "project", false).unwrap();
+    std::fs::write(
+        project.path().join(".git/refs/tags/starting-tag"),
+        std::fs::read(project.path().join(".git/refs/heads/main")).unwrap(),
+    )
+    .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"));
     // The default worktree directory belongs to the daemon host's home and the client's identity.
     let host_home = directory.child("home");
@@ -1037,36 +1056,22 @@ fn remote_worktree_clean_runs_on_the_daemon_host() {
     project.create_dir_all().unwrap();
     let host_home = directory.child("home");
     let checkout = host_home.path().join("worktrees").join("repo").join("old");
-    for args in [
-        vec!["init", "-q"],
-        vec![
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "initial",
-        ],
-        vec![
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "old",
-            checkout.to_str().unwrap(),
-        ],
-    ] {
-        assert_success(
-            &Command::new("git")
-                .arg("-C")
-                .arg(project.path())
-                .args(args)
-                .output()
-                .unwrap(),
-        );
-    }
+    seed::repository(project.path(), "project", false).unwrap();
+    assert_success(
+        &Command::new("git")
+            .arg("-C")
+            .arg(project.path())
+            .args([
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "old",
+                checkout.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap(),
+    );
     let request = serde_json::json!({
         "directory": "~/worktrees", "limit": 10, "sessions": [], "now": i64::MAX / 2,
     });

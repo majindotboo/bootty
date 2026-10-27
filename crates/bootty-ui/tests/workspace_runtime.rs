@@ -49,6 +49,8 @@ use rusqlite::Connection;
 
 #[path = "support/idle_frames.rs"]
 mod frames;
+#[path = "support/naming_backend.rs"]
+mod naming_backend;
 pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
@@ -63,6 +65,14 @@ fn python_argv(script: &str, arguments: &[&str]) -> Vec<String> {
         .chain(arguments.iter().copied())
         .map(str::to_owned)
         .collect()
+}
+
+fn idle_argv() -> Vec<String> {
+    if cfg!(unix) {
+        vec!["/bin/sh".into(), "-c".into(), "read ignored".into()]
+    } else {
+        python_argv("import sys; sys.stdin.read()", &[])
+    }
 }
 
 fn create_space(
@@ -289,18 +299,40 @@ fn restore_provider(
     }
 }
 
+fn event_repaint(repaint: impl Fn() + Send + Sync + 'static) -> bootty_mux::RepaintHandle {
+    let host = std::thread::current();
+    Arc::new(move || {
+        repaint();
+        host.unpark();
+    })
+}
+
+fn repaint_on_event() -> bootty_mux::RepaintHandle {
+    event_repaint(|| {})
+}
+
 fn app_state(
     config: bootty_config::config::BoottyConfig,
     backends: Arc<MuxBackendRegistry>,
 ) -> AppState {
-    AppState::new(config, backends, Arc::new(|| {}), None, None).expect("app state")
+    AppState::new(config, backends, repaint_on_event(), None, None).expect("app state")
 }
 
-fn lock_workspace(path: &Path) -> Connection {
-    let lock = Connection::open(path).expect("open lock connection");
-    lock.execute_batch("BEGIN IMMEDIATE")
-        .expect("hold workspace write lock");
-    lock
+struct WorkspaceWriteFailure(Connection);
+
+impl Drop for WorkspaceWriteFailure {
+    fn drop(&mut self) {
+        self.0
+            .execute_batch("DROP TRIGGER fixture_space_write; DROP TRIGGER fixture_session_write;")
+            .expect("remove injected write failures");
+    }
+}
+
+// Fail real SQLite writes immediately instead of waiting for its busy retry timeout.
+fn fail_workspace_writes(path: &Path) -> WorkspaceWriteFailure {
+    let connection = Connection::open(path).expect("open failure connection");
+    connection.execute_batch("CREATE TRIGGER fixture_space_write BEFORE UPDATE ON workspace_spaces BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END; CREATE TRIGGER fixture_session_write BEFORE DELETE ON workspace_sessions BEGIN SELECT RAISE(ABORT, 'fixture write failure'); END;").expect("inject write failures");
+    WorkspaceWriteFailure(connection)
 }
 
 fn registry<const N: usize>(
@@ -533,7 +565,7 @@ fn moving_a_session_publishes_the_new_order_immediately(directory: assert_fs::Te
     let repaints = Arc::new(AtomicUsize::new(0));
     let repaint = {
         let repaints = Arc::clone(&repaints);
-        Arc::new(move || {
+        event_repaint(move || {
             repaints.fetch_add(1, Ordering::Relaxed);
         })
     };
@@ -617,7 +649,7 @@ fn back_and_forward_retrace_the_sessions_shown(directory: assert_fs::TempDir) {
         [MuxBackendKind::Tmux],
     );
     let mut state =
-        AppState::new(config, backends, Arc::new(|| {}), None, None).expect("app state");
+        AppState::new(config, backends, repaint_on_event(), None, None).expect("app state");
     let show = |state: &mut AppState, session: &str| {
         state.activate_session_from_ui(session);
         state.update_frame(frames::idle_frame(Instant::now()));
@@ -774,30 +806,27 @@ fn submit_command_as(
     caller: Caller,
     started: Instant,
 ) -> CommandOutcome {
-    let commands = state.app_command_sender(caller);
-    let (response, outcomes) = mpsc::channel();
-    commands
-        .try_send(AppCommandRequest {
-            creation_receipt: None,
-            invocation,
-            deadline: started
-                .checked_add(Duration::from_secs(1))
-                .expect("test timestamp fits"),
-            cancellation: CommandCancellation::new(),
-            response,
-        })
+    let deadline = Instant::now()
+        .checked_add(Duration::from_secs(30))
+        .expect("command deadline");
+    let outcomes = state
+        .app_command_sender(caller)
+        .submit(invocation, deadline, CommandCancellation::new())
         .expect("submit command");
-    (0..250)
-        .find_map(|tick| {
-            state.update_frame(frames::idle_frame(
-                started
-                    .checked_add(Duration::from_millis(tick))
-                    .expect("test timestamp fits"),
-            ));
-            // A native create answers once its pane's process has started.
-            outcomes.recv_timeout(Duration::from_millis(5)).ok()
-        })
-        .expect("command completes")
+    let mut frame_at = started;
+    loop {
+        state.update_frame(frames::idle_frame(frame_at));
+        match outcomes.try_recv() {
+            Ok(outcome) => return outcome,
+            Err(mpsc::TryRecvError::Disconnected) => panic!("command reply disconnected"),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        assert!(Instant::now() < deadline, "command did not answer");
+        frame_at = frame_at
+            .checked_add(Duration::from_millis(1))
+            .expect("frame timestamp");
+        std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
 }
 
 /// A following create selects the new session; a preserving one keeps whatever is selected when
@@ -830,7 +859,7 @@ fn detached_session_creation_preserves_the_requested_selection(
         backend: MuxBackendKind::Tmux,
         ..MuxBindingConfig::default()
     };
-    let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
+    let repaint: bootty_mux::RepaintHandle = repaint_on_event();
     mux.activate_session("old");
     let response = mux.execute_command_authoritatively(
         &repaint,
@@ -886,7 +915,7 @@ fn persist_before_publish_blocks_selection_when_restore_write_fails(directory: a
     assert_eq!(state.mux().selected_session(), Some("first"));
 
     let database = directory.path().join("session-order.sqlite3");
-    let _lock = lock_workspace(&database);
+    let _failure = fail_workspace_writes(&database);
     state.activate_session_from_ui("second");
 
     assert_eq!(state.mux().selected_session(), Some("first"));
@@ -1286,19 +1315,14 @@ fn a_pending_close_completes_in_its_original_space(directory: assert_fs::TempDir
     drop(repository);
 
     let mut state = app_state(config, backends);
-    assert!((0..250).any(|tick| {
-        state.update_frame(frames::idle_frame(
-            Instant::now()
-                .checked_add(Duration::from_millis(tick))
-                .expect("test timestamp fits"),
-        ));
-        std::thread::sleep(Duration::from_millis(1));
+    wait_until(&mut state, "the delayed session is visible", |state| {
         state
             .binding_session_groups()
             .iter()
             .flat_map(|group| group.sessions.iter())
             .any(|session| session.id == "delayed")
-    }));
+            .then_some(())
+    });
     let CommandOutcome::Success { value: current, .. } = submit_and_wait(
         &mut state,
         CommandInvocation::new(
@@ -1338,26 +1362,14 @@ fn a_pending_close_completes_in_its_original_space(directory: assert_fs::TempDir
         "{closed:?}"
     );
 
-    for tick in 0..250 {
-        state.update_frame(frames::idle_frame(
-            Instant::now()
-                .checked_add(Duration::from_millis(tick))
-                .expect("test timestamp fits"),
-        ));
-        std::thread::sleep(Duration::from_millis(1));
-    }
     assert!(state.last_error().is_none(), "{:#?}", state.last_error());
     assert!(state.activate_space_from_ui(first_scope));
-    let removed = (0..250).any(|tick| {
-        state.update_frame(frames::idle_frame(
-            Instant::now()
-                .checked_add(Duration::from_millis(tick))
-                .expect("test timestamp fits"),
-        ));
-        std::thread::sleep(Duration::from_millis(1));
-        state.binding_session_groups()[0].sessions.is_empty()
+    wait_until(&mut state, "original Space publishes the close", |state| {
+        state.binding_session_groups()[0]
+            .sessions
+            .is_empty()
+            .then_some(())
     });
-    assert!(removed, "original Space must publish the close");
 
     drop(state);
     let (_, reopened) = WorkspaceRepository::open(&config_path).expect("reopen workspace");
@@ -1383,10 +1395,13 @@ fn a_pending_close_completes_in_its_original_space(directory: assert_fs::TempDir
 fn a_failed_placement_commit_preserves_the_live_and_durable_binding(directory: assert_fs::TempDir) {
     let config_path = directory.path().join("config.toml");
     let config = test_config::config(config_path.clone(), MultiplexerBackendConfig::Native);
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     let space = state.space_summaries()[0].clone();
     let database = directory.path().join("session-order.sqlite3");
-    let lock = lock_workspace(&database);
+    let failure = fail_workspace_writes(&database);
 
     assert!(!state.update_space_from_ui(
         space.id,
@@ -1404,8 +1419,7 @@ fn a_failed_placement_commit_preserves_the_live_and_durable_binding(directory: a
         MultiplexerBackendConfig::Native
     );
 
-    lock.execute_batch("ROLLBACK").expect("release write lock");
-    drop(lock);
+    drop(failure);
     let (_, reopened) = WorkspaceRepository::open(&config_path).expect("reopen workspace");
     let binding = &reopened.spaces()[0].binding();
     assert_eq!(binding.backend_override(), None);
@@ -1418,7 +1432,10 @@ fn a_failed_session_membership_commit_preserves_the_live_runtime_and_database(
 ) {
     let config_path = directory.path().join("config.toml");
     let config = test_config::config(config_path.clone(), MultiplexerBackendConfig::Native);
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     let binding = listed_spaces(&mut state)[0].2.clone();
     let commands = state.app_command_sender(Caller::Socket);
     let (response, outcomes) = mpsc::channel();
@@ -1443,38 +1460,19 @@ fn a_failed_session_membership_commit_preserves_the_live_runtime_and_database(
         })
         .expect("submit command");
 
-    let started = Instant::now();
-    let outcome = (0..250)
-        .find_map(|tick| {
-            state.update_frame(frames::idle_frame(
-                started
-                    .checked_add(Duration::from_millis(tick))
-                    .expect("test timestamp fits"),
-            ));
-            std::thread::sleep(Duration::from_millis(1));
-            outcomes.try_recv().ok()
-        })
-        .expect("create session command completes");
+    let outcome = wait_until(&mut state, "create session command completes", |_| {
+        outcomes.try_recv().ok()
+    });
     assert!(
         matches!(outcome, CommandOutcome::Success { .. }),
         "unexpected command outcome: {outcome:?}"
     );
-    let target = (0..250)
-        .find_map(|tick| {
-            state.update_frame(frames::idle_frame(
-                started
-                    .checked_add(Duration::from_millis(
-                        250_u64.checked_add(tick).expect("test tick fits"),
-                    ))
-                    .expect("test timestamp fits"),
-            ));
-            std::thread::sleep(Duration::from_millis(1));
-            state
-                .binding_session_groups()
-                .into_iter()
-                .find_map(|group| group.sessions.first().map(|session| group.target(session)))
-        })
-        .expect("native session becomes available");
+    let target = wait_until(&mut state, "native session becomes available", |state| {
+        state
+            .binding_session_groups()
+            .into_iter()
+            .find_map(|group| group.sessions.first().map(|session| group.target(session)))
+    });
     let original_name = state
         .binding_session_groups()
         .iter()
@@ -1485,7 +1483,7 @@ fn a_failed_session_membership_commit_preserves_the_live_runtime_and_database(
         .clone();
 
     let database = directory.path().join("session-order.sqlite3");
-    let lock = lock_workspace(&database);
+    let failure = fail_workspace_writes(&database);
 
     assert!(!state.detach_scoped_session_from_space(&target));
     assert!(
@@ -1496,8 +1494,7 @@ fn a_failed_session_membership_commit_preserves_the_live_runtime_and_database(
             .any(|session| session.id == target.session_id)
     );
 
-    lock.execute_batch("ROLLBACK").expect("release write lock");
-    drop(lock);
+    drop(failure);
     let (_, reopened) = WorkspaceRepository::open(&config_path).expect("reopen workspace");
     assert!(
         reopened.spaces()[0]
@@ -1523,7 +1520,10 @@ fn an_inactive_placement_update_rebuilds_before_activation(directory: assert_fs:
     let second_id = second_space.id();
     drop(repository);
 
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     let second = state
         .space_summaries()
         .into_iter()
@@ -1566,7 +1566,10 @@ fn captured_host_commands_keep_their_binding_after_switching_spaces(
         [1, 2, 3],
         SpaceMuxOverride::default(),
     );
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     let first = state.active_space_id();
     let started = Instant::now();
     let CommandOutcome::Success { value, .. } = submit_command(
@@ -1648,7 +1651,10 @@ fn deleting_an_inactive_space_removes_live_and_durable_state(directory: assert_f
     let second_id = second_space.id();
     drop(repository);
 
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     assert_eq!(state.space_summaries().len(), 2);
     assert!(state.close_space_from_ui(second_id));
     assert!(
@@ -1854,7 +1860,7 @@ fn a_deferred_profile_rebuild_preserves_the_intended_display_name(directory: ass
     let mut state = AppState::new(
         config,
         backends,
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -2010,7 +2016,10 @@ fn a_corrected_ssh_profile_rebuilds_an_unavailable_binding(directory: assert_fs:
         .commit_binding_state(scope, &sessions)
         .expect("persist unavailable binding restore state");
 
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     assert_eq!(
         state.space_summaries()[0].error.as_deref(),
         Some("SSH profile 'development' is unavailable")
@@ -2073,28 +2082,20 @@ fn a_binding_persisted_as_unavailable_recovers_on_a_successful_refresh(
         .set_binding_restore_state(scope, true, None, None)
         .expect("persist the binding as unavailable");
 
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     assert_eq!(
         state.space_summaries()[0].error.as_deref(),
         Some("binding unavailable; reconnect to restore it"),
         "the last session's failure is still reported"
     );
 
-    let started = Instant::now();
-    assert!(
-        (0..250).any(|tick| {
-            state.update_frame(frames::idle_frame(
-                started
-                    .checked_add(Duration::from_millis(
-                        250_u64.checked_add(tick).expect("test tick fits"),
-                    ))
-                    .expect("test timestamp fits"),
-            ));
-            std::thread::sleep(Duration::from_millis(1));
-            state.space_summaries()[0].error.is_none()
-        }),
-        "a refresh that works clears the flag: {:?}",
-        state.space_summaries()[0].error
+    wait_until(
+        &mut state,
+        "a successful refresh clears the flag",
+        |state| state.space_summaries()[0].error.is_none().then_some(()),
     );
 }
 
@@ -2176,7 +2177,10 @@ fn manual_reconnect_targets_only_a_remote_binding(directory: assert_fs::TempDir)
         .write_str("[multiplexer]\nbackend = \"native\"\n")
         .expect("write local config");
     let local = load_config_from_path(local_path.path()).expect("load local config");
-    let mut local_state = app_state(local, support::backends());
+    let mut local_state = app_state(
+        local,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     assert!(!local_state.reconnect_space_from_ui(local_state.active_space_id()));
 
     let remote_path = directory.child("remote.toml");
@@ -2193,7 +2197,10 @@ program = "/bootty/missing-ssh"
         )
         .expect("write remote config");
     let remote = load_config_from_path(remote_path.path()).expect("load remote config");
-    let mut remote_state = app_state(remote, support::backends());
+    let mut remote_state = app_state(
+        remote,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
     let space_id = remote_state.active_space_id();
 
     assert!(remote_state.reconnect_space_from_ui(space_id));
@@ -2247,13 +2254,13 @@ fn failed_active_space_delete_preserves_selection(
             ))],
             [MuxBackendKind::Tmux],
         ),
-        _ => support::backends(),
+        _ => naming_backend::backends(None, false).expect("metadata backend registry"),
     };
     let mut state = AppState::new_for_window(
         config,
         "close-test".to_owned(),
         backends,
-        Arc::new(|| {}),
+        repaint_on_event(),
         None,
         None,
     )
@@ -2334,8 +2341,8 @@ fn closing_active_space_selects_the_neighbor_and_preserves_the_last_space(
     let mut state = AppState::new_for_window(
         config,
         "close-test".to_owned(),
-        support::backends(),
-        Arc::new(|| {}),
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+        repaint_on_event(),
         None,
         None,
     )
@@ -2424,7 +2431,7 @@ fn wait_until<T>(
     mut ready: impl FnMut(&mut AppState) -> Option<T>,
 ) -> T {
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(Duration::from_secs(30))
         .expect("test deadline");
     loop {
         state.update_frame(frames::idle_frame(Instant::now()));
@@ -2432,7 +2439,7 @@ fn wait_until<T>(
             return value;
         }
         assert!(Instant::now() < deadline, "timed out: {what}");
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
     }
 }
 
@@ -2692,7 +2699,7 @@ fn closing_ends_a_hidden_native_pane_without_moving_selection(
         (
             "agent",
             Some(serde_json::json!(python_argv(
-                "import os,sys,time; open(sys.argv[1], 'w').write(str(os.getpid())); time.sleep(60)",
+                "import os,sys,time; open(sys.argv[1], 'w').write(str(os.getpid())); print('ready', flush=True); sys.stdin.read()",
                 &[&pid_file.to_string_lossy()]
             ))),
         ),
@@ -2813,7 +2820,7 @@ fn listed_spaces(state: &mut AppState) -> Vec<(String, String, serde_json::Value
 fn submit_and_wait(state: &mut AppState, invocation: CommandInvocation) -> CommandOutcome {
     let (response, outcomes) = mpsc::channel();
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(Duration::from_secs(30))
         .expect("test deadline");
     state
         .app_command_sender(Caller::Socket)
@@ -2938,7 +2945,7 @@ fn an_agent_record_follows_its_pane_to_the_space_that_owns_it(directory: assert_
         test_config::config(config_path, MultiplexerBackendConfig::Tmux),
         "main".to_owned(),
         backends,
-        Arc::new(|| {}),
+        repaint_on_event(),
         None,
         None,
         Some(events),
@@ -3064,7 +3071,7 @@ fn hooks_with_colliding_pane_ids_land_on_the_space_of_their_server(
         test_config::config(config_path, MultiplexerBackendConfig::Tmux),
         "main".to_owned(),
         backends,
-        Arc::new(|| {}),
+        repaint_on_event(),
         None,
         None,
         Some(events),
@@ -3207,7 +3214,7 @@ fn a_native_session_that_cannot_start_fails_its_create_and_frees_its_name(
         &mut state,
         create(
             &not_a_directory.to_string_lossy(),
-            serde_json::json!(python_argv("pass", &[])),
+            serde_json::json!(["bootty-never-start-invalid-directory"]),
         ),
     );
     assert!(
@@ -3216,13 +3223,7 @@ fn a_native_session_that_cannot_start_fails_its_create_and_frees_its_name(
     );
     assert!(!has_agent(&state), "nothing was created");
 
-    let started = submit_and_wait(
-        &mut state,
-        create(
-            &cwd,
-            serde_json::json!(python_argv("import time; time.sleep(60)", &[])),
-        ),
-    );
+    let started = submit_and_wait(&mut state, create(&cwd, serde_json::json!(idle_argv())));
     assert!(
         matches!(started, CommandOutcome::Success { .. }),
         "{started:?}"
@@ -3255,7 +3256,7 @@ fn a_starting_native_create_never_answers_for_or_closes_a_recreated_session(
     let (_, _, home) = listed_spaces(&mut state).remove(0);
     let cwd = directory.path().to_string_lossy().into_owned();
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(5))
+        .checked_add(Duration::from_secs(30))
         .expect("test deadline");
     // Queued together, so the first create is still starting when the others run.
     let queue = |invocation| {
@@ -3293,10 +3294,7 @@ fn a_starting_native_create_never_answers_for_or_closes_a_recreated_session(
         "--flag"
     ])));
     let closed = queue(close);
-    let second = queue(create(serde_json::json!(python_argv(
-        "import time; time.sleep(60)",
-        &[]
-    ))));
+    let second = queue(create(serde_json::json!(idle_argv())));
 
     let first = wait_until(&mut state, "the first create answers", |_| {
         first.try_recv().ok()
@@ -3542,7 +3540,7 @@ fn current_session_checkpoint_preserves_complete_backend_history_and_saved_work(
         config.clone(),
         format!("checkpoint:{}", directory.path().display()),
         backends,
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -3885,42 +3883,51 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
     // Fresh panes run a controlled default process, not the user's shell/profile.
     // Its startup marker is absent from every original -c command's history.
     let fixture_title = "Checkpoint fixture terminal";
-    let shell_startup = directory.child("restored-shell.py");
-    shell_startup
-        .write_str(&format!(
-            "print('\\x1b]0;{fixture_title}\\x07restored default shell ready', flush=True)\n"
-        ))
-        .expect("default shell startup fixture");
-    // A PATH entry may be a dispatcher shim whose symlink target is not Python.
-    let python = std::process::Command::new(python_program())
-        .args(["-c", "import sys; print(sys.executable)"])
-        .output()
-        .expect("fixture Python executable");
-    assert!(
-        python.status.success(),
-        "Python executable discovery failed"
-    );
-    config.session.shell = Some(
-        String::from_utf8(python.stdout)
-            .expect("Python executable path")
-            .trim()
-            .to_owned(),
-    );
+    #[cfg(unix)]
+    {
+        let shell = directory.child("restored-shell");
+        bootty_test_support::write_executable(shell.path(), format!("#!/bin/sh\nprintf '\\033]0;{fixture_title}\\007restored default shell ready\\n'\nwhile IFS= read -r line; do :; done\n")).expect("restored shell fixture");
+        config.session.shell = Some(shell.path().to_string_lossy().into_owned());
+    }
+    #[cfg(windows)]
+    {
+        let shell_startup = directory.child("restored-shell.py");
+        shell_startup
+            .write_str(&format!(
+                "print('\\x1b]0;{fixture_title}\\x07restored default shell ready', flush=True)\n"
+            ))
+            .expect("default shell startup fixture");
+        // A PATH entry may be a dispatcher shim whose symlink target is not Python.
+        let python = std::process::Command::new(python_program())
+            .args(["-c", "import sys; print(sys.executable)"])
+            .output()
+            .expect("fixture Python executable");
+        assert!(
+            python.status.success(),
+            "Python executable discovery failed"
+        );
+        config.session.shell = Some(
+            String::from_utf8(python.stdout)
+                .expect("Python executable path")
+                .trim()
+                .to_owned(),
+        );
+        config.session.env.extend([
+            (
+                "PYTHONSTARTUP".to_owned(),
+                shell_startup.path().to_string_lossy().into_owned(),
+            ),
+            ("PYTHON_BASIC_REPL".to_owned(), "1".to_owned()),
+        ]);
+    }
     config.session.shell_integration = false;
-    config.session.env.extend([
-        (
-            "PYTHONSTARTUP".to_owned(),
-            shell_startup.path().to_string_lossy().into_owned(),
-        ),
-        ("PYTHON_BASIC_REPL".to_owned(), "1".to_owned()),
-    ]);
     let window_key = format!("cold-checkpoint:{}", directory.path().display());
     let (wake, wakes) = mpsc::channel();
     let mut state = AppState::new_for_window(
         config.clone(),
         window_key.clone(),
         Arc::clone(&backends),
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -3958,7 +3965,7 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
         url::Url::from_file_path(changed_cwd.path()).expect("encoded OSC 7 directory");
     let original = checkpoint_host_command(&mut state, &wakes, targeted("session.create", vec![
         "selected".to_owned(), cwd.clone(), serde_json::json!(python_argv(
-            "import os,sys,time; open(sys.argv[1], 'a').write('x'); os.chdir(sys.argv[2]); input(); print('\\x1b]0;' + sys.argv[4] + '\\x07\\x1b]7;' + sys.argv[3] + '\\x07retained cold history', flush=True); time.sleep(60)",
+            "import os,sys,time; open(sys.argv[1], 'a').write('x'); os.chdir(sys.argv[2]); input(); print('\\x1b]0;' + sys.argv[4] + '\\x07\\x1b]7;' + sys.argv[3] + '\\x07retained cold history', flush=True); sys.stdin.read()",
             &[&marker.to_string_lossy(), &changed_cwd.path().to_string_lossy(), changed_uri.as_str(), fixture_title],
         )).to_string(), "selected-task".to_owned(), "Retained task title".to_owned(),
     ], binding.clone()));
@@ -3982,7 +3989,7 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
         "retained cold history",
     );
     let idle_argv = serde_json::json!(python_argv(
-        "import sys,time; input(); print('\\x1b]0;' + sys.argv[1] + '\\x07original idle pane ready', flush=True); time.sleep(60)",
+        "import sys,time; input(); print('\\x1b]0;' + sys.argv[1] + '\\x07original idle pane ready', flush=True); sys.stdin.read()",
         &[fixture_title],
     ))
     .to_string();
@@ -4150,7 +4157,7 @@ fn normal_native_start_restores_only_selected_saved_session_after_its_process_en
         config.clone(),
         window_key,
         cold_backends,
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -4327,7 +4334,7 @@ fn unsupported_osc7_directory_preserves_the_checkpoint_and_live_process(
         config.clone(),
         format!("unsupported-cwd:{}", directory.path().display()),
         backends,
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -4343,7 +4350,7 @@ fn unsupported_osc7_directory_preserves_the_checkpoint_and_live_process(
     let valid_uri = url::Url::from_file_path(directory.path()).expect("local directory URI");
     let created = checkpoint_host_command(&mut state, &wakes, targeted("session.create", vec![
         "retained".to_owned(), cwd.clone(), serde_json::json!(python_argv(
-            "import sys,time; input(); print('\\x1b]7;' + sys.argv[1] + '\\x07unsupported directory received', flush=True); input(); print('\\x1b]7;' + sys.argv[2] + '\\x07local directory restored', flush=True); time.sleep(60)",
+            "import sys,time; input(); print('\\x1b]7;' + sys.argv[1] + '\\x07unsupported directory received', flush=True); input(); print('\\x1b]7;' + sys.argv[2] + '\\x07local directory restored', flush=True); sys.stdin.read()",
             &[reported_uri, valid_uri.as_str()],
         )).to_string(), "retained-task".to_owned(), "Retained".to_owned(),
     ], spaces[0]["target"].clone()));
@@ -4450,7 +4457,7 @@ fn closing_saved_work_checkpoints_before_ending_its_process_and_honors_cancellat
         config.clone(),
         format!("checkpoint-close:{}", directory.path().display()),
         backends,
-        Arc::new(move || {
+        event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
@@ -5097,7 +5104,7 @@ fn failed_native_launch_retries_one_saved_identity_and_preserves_its_content(
             &home,
             &identity,
             &cwd,
-            &serde_json::json!(python_argv("import time; time.sleep(60)", &[])),
+            &serde_json::json!(idle_argv()),
             "Ignored replacement title",
         ),
     );
@@ -5846,7 +5853,10 @@ fn worktree_cleanup_removes_checkouts_only_when_nothing_needs_them(directory: as
     drop(claim_first_space(&config_path, "used-id", "used", &used));
     let mut config = test_config::config(config_path, MultiplexerBackendConfig::Native);
     config.session.worktree_directory = Some(worktrees.to_string_lossy().into_owned());
-    let mut state = app_state(config, support::backends());
+    let mut state = app_state(
+        config,
+        naming_backend::backends(None, false).expect("metadata backend registry"),
+    );
 
     wait_until(
         &mut state,

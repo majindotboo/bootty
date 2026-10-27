@@ -10,12 +10,8 @@ use std::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    terminal_history::{
-        TerminalHistoryEntry, TerminalHistoryQuery, before, preview_title, title, valid_id,
-        valid_path,
-    },
-    terminal_process,
+use crate::terminal_history::{
+    TerminalHistoryEntry, TerminalHistoryQuery, before, preview_title, title, valid_id, valid_path,
 };
 
 // A thread without a name is titled by its preview, the first prompt, cut like other titles.
@@ -183,7 +179,10 @@ fn list(
     Err("Codex history listing exceeds eight pages".to_owned())
 }
 
-pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntry>, String> {
+pub fn query(
+    query: &TerminalHistoryQuery<'_>,
+    transport: &crate::TerminalProviderTransport,
+) -> Result<Vec<TerminalHistoryEntry>, String> {
     let _provider_use = crate::ProviderUse::acquire(query.program)?;
     let mut command = bootty_host::local_command(query.program);
     command
@@ -195,14 +194,13 @@ pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntr
     if let Some(cwd) = query.cwd {
         command.current_dir(cwd);
     }
-    let mut child = terminal_process::spawn_query(command)
-        .map_err(|_| "Codex history executable could not be started")?;
-    let pipes = child
-        .child_mut()
-        .stdin
-        .take()
-        .zip(child.child_mut().stdout.take());
-    let result = if let Some((mut writer, stdout)) = pipes {
+    let crate::NativeChild {
+        stdout,
+        stdin: mut writer,
+        control: mut owner,
+        ..
+    } = (transport.launch)(command).map_err(|_| "Codex history executable could not be started")?;
+    let result = {
         let provider = query.provider;
         let account_directory = query.account_directory.to_owned();
         let cwd = query.cwd.map(std::path::Path::to_owned);
@@ -225,9 +223,8 @@ pub fn query(query: &TerminalHistoryQuery<'_>) -> Result<Vec<TerminalHistoryEntr
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| "Codex history query timed out".to_owned())
             .and_then(std::convert::identity)
-    } else {
-        Err("Codex history transport is unavailable".to_owned())
     };
-    terminal_process::terminate_query(&mut child);
+    let _ = owner.terminate();
+    let _ = owner.wait();
     result
 }

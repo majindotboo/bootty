@@ -26,6 +26,12 @@ impl CheckpointHost {
     /// Records the files now, under the conversation `owner`, as `name`. Nothing is recorded
     /// outside Git or when Git fails; the turn goes on without a snapshot.
     pub fn capture(&self, owner: &str, name: &str) -> Option<String> {
+        // Each turn records twice; outside a repository, starting Git only learns there is none.
+        if self.remote.is_none()
+            && !bootty_git::checkpoint::may_capture_locally(std::path::Path::new(&self.directory))
+        {
+            return None;
+        }
         let reference = format!("{}/{name}", bootty_git::checkpoint::namespace(owner));
         self.with_runner(|runner, directory| {
             bootty_git::checkpoint::capture(&runner, directory, &reference)

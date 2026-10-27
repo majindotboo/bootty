@@ -60,6 +60,58 @@ pub enum SpeechCommand {
     },
 }
 
+/// The helper's stdio streams and worker-owned teardown.
+pub struct SpeechPeer {
+    input: Box<dyn std::io::Write + Send>,
+    output: Box<dyn std::io::Read + Send>,
+    close: CloseOnDrop,
+}
+
+impl SpeechPeer {
+    /// Capture streams and their teardown, which runs once when the peer is released.
+    #[must_use]
+    pub fn new(
+        input: impl std::io::Write + Send + 'static,
+        output: impl std::io::Read + Send + 'static,
+        close: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        Self {
+            input: Box::new(input),
+            output: Box::new(output),
+            close: CloseOnDrop(Some(Box::new(close))),
+        }
+    }
+
+    /// Start the selected local process with private stdio pipes.
+    /// # Errors
+    /// Returns spawn or missing-pipe errors after reaping any started process.
+    pub fn spawn(program: PathBuf) -> anyhow::Result<Self> {
+        let mut child = Command::new(program)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let Some((input, output)) = child.stdin.take().zip(child.stdout.take()) else {
+            _ = child.kill();
+            _ = child.wait();
+            anyhow::bail!("The speech helper transport is unavailable");
+        };
+        Ok(Self::new(input, output, move || {
+            _ = child.kill();
+            _ = child.wait();
+        }))
+    }
+}
+
+struct CloseOnDrop(Option<Box<dyn FnOnce() + Send>>);
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        if let Some(close) = self.0.take() {
+            close();
+        }
+    }
+}
+
 pub struct SpeechSession {
     commands: mpsc::SyncSender<SpeechCommand>,
     closing: Arc<AtomicBool>,
@@ -69,12 +121,23 @@ impl SpeechSession {
     /// Start an explicitly selected local helper without blocking the calling thread.
     #[must_use]
     pub fn start(program: PathBuf) -> (Self, tokio::sync::mpsc::Receiver<SpeechEvent>) {
+        Self::start_with(program, SpeechPeer::spawn)
+    }
+
+    /// Start the helper using the selected stdio peer constructor.
+    #[must_use]
+    pub fn start_with(
+        program: PathBuf,
+        launcher: impl FnOnce(PathBuf) -> anyhow::Result<SpeechPeer> + Send + 'static,
+    ) -> (Self, tokio::sync::mpsc::Receiver<SpeechEvent>) {
         let (commands, requests) = mpsc::sync_channel::<SpeechCommand>(8);
         let (events, receiver) = tokio::sync::mpsc::channel(32);
         let closing = Arc::new(AtomicBool::new(false));
         let worker_closing = Arc::clone(&closing);
         thread::spawn(move || {
-            if let Err(error) = run(program, requests, &events, worker_closing) {
+            if let Err(error) =
+                launcher(program).map(|peer| run(peer, requests, &events, worker_closing))
+            {
                 _ = events.blocking_send(SpeechEvent::Error {
                     message: error.to_string(),
                 });
@@ -104,21 +167,16 @@ impl Drop for SpeechSession {
 }
 
 fn run(
-    program: PathBuf,
+    peer: SpeechPeer,
     requests: mpsc::Receiver<SpeechCommand>,
     events: &tokio::sync::mpsc::Sender<SpeechEvent>,
     closing: Arc<AtomicBool>,
-) -> anyhow::Result<()> {
-    let mut child = Command::new(program)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let Some((mut input, output)) = child.stdin.take().zip(child.stdout.take()) else {
-        _ = child.kill();
-        _ = child.wait();
-        anyhow::bail!("The speech helper transport is unavailable");
-    };
+) {
+    let SpeechPeer {
+        mut input,
+        output,
+        close: _close,
+    } = peer;
     let published = events.clone();
     thread::spawn(move || {
         let mut output = BufReader::new(output);
@@ -170,7 +228,4 @@ fn run(
     }
     // Last control handle dropped: close recording and playback, then reap off the UI thread.
     drop(input);
-    _ = child.kill();
-    _ = child.wait();
-    Ok(())
 }

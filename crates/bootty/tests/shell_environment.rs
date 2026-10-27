@@ -3,7 +3,6 @@
 
 use std::{
     env,
-    os::unix::fs::PermissionsExt as _,
     path::Path,
     process::{Command, Output},
 };
@@ -44,23 +43,35 @@ fn initialize_shell_environment_advertises_the_configured_shell(shell_dir: TempD
 }
 
 #[rstest]
-#[case("")]
-#[case("Welcome to the shell\n")]
+#[case("", true)]
+#[case("Welcome to the shell\n", false)]
 fn finder_launch_loads_interactive_tool_paths_and_ignores_greetings(
     shell_dir: TempDir,
     #[case] greeting: &str,
+    #[case] executable: bool,
 ) {
     let shell = shell_dir.child("login-shell");
     let bin = shell_dir.child("tools");
     std::fs::create_dir(bin.path()).expect("tool directory");
-    let script = format!(
-        "#!/bin/sh\n[ \"$1:$2:$3\" = '-l:-i:-c' ] || exit 27\nprintf '%s' '{}'\nexport PATH='{}:/usr/bin:/bin'\nexec /bin/sh -c \"$4\"\n",
-        greeting,
-        bin.path().display()
-    );
-    std::fs::write(shell.path(), script).expect("interactive login shell");
-    std::fs::set_permissions(shell.path(), std::fs::Permissions::from_mode(0o700))
-        .expect("executable shell");
+    if !executable {
+        let expected = format!("{}:/usr/bin:/bin", bin.path().display());
+        let captured = format!(
+            "{greeting}\u{001e}BOOTTY_ENV\u{001f}PATH={expected}\0MULTILINE=first\nsecond\0"
+        );
+        let parsed = bootty::shell_env::parse_login_environment(captured.as_bytes()).unwrap();
+        assert_eq!(
+            parsed,
+            vec![
+                ("PATH".to_owned(), expected),
+                ("MULTILINE".to_owned(), "first\nsecond".to_owned())
+            ]
+        );
+        assert!(bootty::shell_env::parse_login_environment(greeting.as_bytes()).is_none());
+        return;
+    }
+    bootty_test_support::write_executable(shell.path(),
+        "#!/bin/sh\n[ \"$1:$2:$3\" = '-l:-i:-c' ] || exit 27\nexport PATH=\"$BOOTTY_SHELL_TEST_TOOLS:/usr/bin:/bin\"\nexec /bin/sh -c \"$4\"\n",
+    ).expect("interactive login shell");
     let output = run_child("path", shell.path());
     assert!(
         output.status.success(),
@@ -104,6 +115,7 @@ fn run_child(mode: &str, shell: &Path) -> Output {
         .args(["--exact", "shell_environment_child", "--nocapture"])
         .env(CHILD_MODE, mode)
         .env("BOOTTY_SHELL", shell)
+        .env("BOOTTY_SHELL_TEST_TOOLS", shell.with_file_name("tools"))
         .env("SHELL", "/bin/sh")
         .env("PATH", "/usr/bin:/bin")
         .output()

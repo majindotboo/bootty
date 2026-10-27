@@ -65,19 +65,23 @@ impl NativeAgentSession {
     /// # Errors
     /// Returns invalid launch, malformed capabilities or provider transport failures.
     pub fn discover_completions(
+        config: NativeSessionConfig,
+    ) -> Result<NativeCompletionCatalog, String> {
+        let launcher: crate::NativeLauncher = std::sync::Arc::new(crate::NativeChild::spawn);
+        Self::discover_completions_with(config, &launcher)
+    }
+
+    /// Discover commands and skills through the supplied stdio peer.
+    /// # Errors
+    /// Returns invalid launch configuration or provider errors.
+    pub fn discover_completions_with(
         mut config: NativeSessionConfig,
+        launcher: &crate::NativeLauncher,
     ) -> Result<NativeCompletionCatalog, String> {
         if config.remote.is_none() {
             config.cwd = std::fs::canonicalize(&config.cwd).map_err(|e| e.to_string())?;
         }
-        config.permissions = crate::NativePermissionMode::ProviderDefault;
-        config.prepare_fresh_identity()?;
-        let session = Self::start_with_clock(config, std::sync::Arc::new(std::time::Instant::now))?;
-        match session.config.provider {
-            AgentKind::Codex => session.initialize_codex_transport()?,
-            AgentKind::Claude => session.initialize()?,
-            AgentKind::Pi => {}
-        }
+        let session = Self::start_discovery(config, launcher)?;
         session.completion_catalog(false)
     }
 

@@ -1,51 +1,21 @@
+#![cfg(test)]
+
+#[path = "support/native_peer.rs"]
+pub mod native_peer;
+pub mod support;
+
 use assert_fs::TempDir;
 use bootty_agents::{AgentKind, NativeAgentSession, NativeProviderCatalog, NativeSessionConfig};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use serde_json::{Value, json};
 
-const PROVIDER: &str = r"#!/usr/bin/env python3
-import json, pathlib, sys
-for line in sys.stdin:
-    request = json.loads(line)
-    method = request['request']['subtype']
-    if method == 'initialize':
-        response = json.loads(pathlib.Path('catalog.json').read_text(encoding='utf-8'))
-    elif method == 'get_settings':
-        response = {'effective': {}}
-    else:
-        raise RuntimeError('unexpected discovery request')
-    print(json.dumps({'type': 'control_response', 'response': {
-        'subtype': 'success', 'request_id': request['request_id'], 'response': response
-    }}), flush=True)
-";
-
 fn discover(catalog: &Value) -> Result<NativeProviderCatalog, Box<dyn std::error::Error>> {
     let root = TempDir::new()?;
-    std::fs::write(
-        root.path().join("catalog.json"),
-        serde_json::to_vec(catalog)?,
-    )?;
-    #[cfg(unix)]
-    let program = {
-        let program = root.path().join("provider");
-        bootty_test_support::write_executable(&program, PROVIDER)?;
-        program
-    };
-    #[cfg(windows)]
-    let program = {
-        std::fs::write(root.path().join("provider.py"), PROVIDER)?;
-        let program = root.path().join("provider.cmd");
-        std::fs::write(
-            &program,
-            "@echo off\r\n@python -u \"%~dp0provider.py\" %*\r\n",
-        )?;
-        program
-    };
     let mut config = NativeSessionConfig::new(AgentKind::Claude, root.path());
-    config.program = program.to_string_lossy().into_owned();
     config.account_directory = Some(root.path().join("account").to_string_lossy().into_owned());
-    NativeAgentSession::discover_catalog(config).map_err(Into::into)
+    let launcher = catalog_launcher(catalog.clone());
+    NativeAgentSession::discover_catalog_with(config, &launcher).map_err(Into::into)
 }
 
 // Model-only metadata from Claude Code 2.1.168's initialize response. No account data.
@@ -155,4 +125,20 @@ fn malformed_advertised_selectors_remain_rejected(#[case] field: &str, #[case] v
         discover(&response).unwrap_err().to_string(),
         "Provider returned an invalid model selector"
     );
+}
+
+fn catalog_launcher(catalog: Value) -> bootty_agents::NativeLauncher {
+    std::sync::Arc::new(move |_launch: &bootty_agents::NativeLaunch<'_>| {
+        let catalog = catalog.clone();
+        Ok(native_peer::peer(move |request| {
+            let response = match request["request"]["subtype"].as_str().unwrap() {
+                "initialize" => catalog.clone(),
+                "get_settings" => json!({"effective": {}}),
+                method => panic!("unexpected discovery request: {method}"),
+            };
+            vec![json!({"type":"control_response","response":{
+                "subtype":"success","request_id":request["request_id"],"response":response
+            }})]
+        }))
+    })
 }

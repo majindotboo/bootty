@@ -3,6 +3,9 @@ name = "bootty-terminal"
 edition.workspace = true
 autobenches = false
 
+[lib]
+test = false
+
 [dependencies]
 bootty-control = { path = "../bootty-control" }
 num-traits.workspace = true

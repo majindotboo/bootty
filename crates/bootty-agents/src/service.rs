@@ -134,7 +134,17 @@ impl AgentService {
     /// backend reuses that id after its own server restarts, the entry shows until the new
     /// occupant reports or the pane closes.
     #[must_use]
-    pub fn persisted_at(mut self, path: &Path) -> Self {
+    pub fn persisted_at(self, path: &Path) -> Self {
+        self.persisted_at_with_clock(path, Arc::new(Instant::now))
+    }
+
+    /// Restore and persist hook state using an injected monotonic clock.
+    #[must_use]
+    pub fn persisted_at_with_clock(
+        mut self,
+        path: &Path,
+        clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    ) -> Self {
         if let Some(restored) = persistence::load(path)
             && let Ok(store) = self.state.get_mut()
         {
@@ -143,8 +153,15 @@ impl AgentService {
                 store.panes.entry(provider).or_default().insert(key, state);
             }
         }
-        self.writer = Some(StateWriter::for_path(path));
+        self.writer = Some(StateWriter::for_path_with_clock(path, clock));
         self
+    }
+
+    /// Reevaluate pending persistence after the injected clock advances.
+    pub fn clock_advanced(&self) {
+        if let Some(writer) = &self.writer {
+            writer.clock_advanced();
+        }
     }
 
     /// Forget panes proven gone: those of a Space no longer in `spaces`, and those missing from

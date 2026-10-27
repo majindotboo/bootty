@@ -3,8 +3,8 @@ pub use jobs::run_job;
 
 use std::io::Read;
 
+use crate::cli::{Cli, Command};
 use anyhow::{Context, Result};
-use bootty::cli::Cli;
 use bootty_control as control;
 use bootty_control::{
     Caller, CommandDescriptor, CommandInvocation, CommandOutcome, CommandTarget, MutationClass,
@@ -27,13 +27,58 @@ struct CliFailure {
     message: String,
 }
 
+/// The process status for a control command failure.
+#[must_use]
 pub fn exit_code(error: &anyhow::Error) -> u8 {
     error
         .downcast_ref::<CliFailure>()
         .map_or(1, |failure| failure.code)
 }
 
-pub fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
+/// Executes an explicit or discovered control command without starting the GUI.
+/// Returns `false` for commands handled by another runtime.
+/// # Errors
+/// Returns argument, transport, or command execution failures.
+pub fn invoke(cli: &Cli) -> Result<bool> {
+    invoke_with_input(cli, &mut std::io::stdin().lock())
+}
+
+/// Executes a control command with an explicit input stream.
+/// # Errors
+/// Returns argument, input, transport, or command execution failures.
+pub fn invoke_with_input(cli: &Cli, source: &mut dyn Read) -> Result<bool> {
+    match cli.subcommand() {
+        Some(Command::Invoke {
+            name,
+            arguments,
+            stdin,
+            stdin_json,
+            target,
+            yes,
+            detached,
+        }) => {
+            let invocation = command_invocation(
+                cli,
+                name,
+                arguments,
+                (*stdin, *stdin_json),
+                target.as_deref(),
+                source,
+            )?;
+            let response = invoke_control_command(cli, invocation, *yes, *detached)?;
+            if *detached {
+                print_control_response(response, cli.json())?;
+            } else {
+                print_command_response(response, cli.json())?;
+            }
+        }
+        Some(Command::Dynamic(arguments)) => invoke_dynamic_command(cli, arguments, source)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+fn invoke_dynamic_command(cli: &Cli, raw: &[String], source: &mut dyn Read) -> Result<()> {
     let (path, raw_arguments) = raw.split_first().context("missing command path")?;
     let name = path
         .split('.')
@@ -78,7 +123,7 @@ pub fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
         return Ok(());
     }
     let (arguments, target, confirmed, detached) =
-        parse_dynamic_arguments(&descriptor, raw_arguments)?;
+        parse_dynamic_arguments(&descriptor, raw_arguments, source)?;
     let invocation = CommandInvocation {
         command: descriptor.id,
         arguments,
@@ -98,12 +143,13 @@ pub fn invoke_dynamic_command(cli: &Cli, raw: &[String]) -> Result<()> {
 /// follow the arguments and takes its kind from the command's descriptor; stdin stays data.
 /// # Errors
 /// Returns transport errors, unknown commands, unreadable stdin, or an invalid target.
-pub fn command_invocation(
+fn command_invocation(
     cli: &Cli,
     name: &str,
     raw: &[String],
     stdin: (bool, bool),
     target: Option<&str>,
+    source: &mut dyn Read,
 ) -> Result<CommandInvocation> {
     let mut target = target.map(str::to_owned);
     let mut arguments = Vec::new();
@@ -122,8 +168,10 @@ pub fn command_invocation(
         }
     }
     let arguments = match stdin {
-        (_, true) => read_stdin_arguments()?,
-        (true, _) => std::iter::once(read_stdin()?).chain(arguments).collect(),
+        (_, true) => read_stdin_arguments(source)?,
+        (true, _) => std::iter::once(read_stdin(source)?)
+            .chain(arguments)
+            .collect(),
         _ => arguments,
     };
     let target = target
@@ -175,6 +223,9 @@ fn command_target(descriptor: &CommandDescriptor, value: &str) -> Result<Command
     })
 }
 
+/// Submits a command to the selected live application owner.
+/// # Errors
+/// Returns discovery, transport, confirmation, or command failures.
 pub fn invoke_control_command(
     cli: &Cli,
     invocation: CommandInvocation,
@@ -227,6 +278,9 @@ fn control_instance_request(
     control::invoke_instance(descriptor, method, params).map_err(|error| transport_failure(&error))
 }
 
+/// Sends a control request to the selected application owner.
+/// # Errors
+/// Returns discovery or transport failures.
 pub fn control_request(
     start: bool,
     method: &str,
@@ -259,6 +313,7 @@ fn rpc_failure(error: &control::RpcError) -> anyhow::Error {
 fn parse_dynamic_arguments(
     descriptor: &CommandDescriptor,
     raw: &[String],
+    source: &mut dyn Read,
 ) -> Result<(Vec<String>, Option<CommandTarget>, bool, bool)> {
     let mut arguments = Vec::new();
     let mut target = None;
@@ -276,7 +331,7 @@ fn parse_dynamic_arguments(
                 target = Some(command_target(descriptor, value)?);
             }
             "--stdin-json" => {
-                arguments.extend(read_stdin_arguments()?);
+                arguments.extend(read_stdin_arguments(source)?);
             }
             option if option.starts_with("--") => {
                 let expected = descriptor
@@ -315,21 +370,19 @@ fn parse_dynamic_arguments(
     Ok((arguments, target, confirmed, detached))
 }
 
-pub fn read_stdin() -> Result<String> {
+fn read_stdin(source: &mut dyn Read) -> Result<String> {
     const INPUT_LIMIT: usize = 1024 * 1024;
     let mut json = String::new();
     let read_limit = u64::try_from(INPUT_LIMIT)
         .context("stdin input limit does not fit the stream read size")?
         .saturating_add(1);
-    std::io::stdin()
-        .take(read_limit)
-        .read_to_string(&mut json)?;
+    source.take(read_limit).read_to_string(&mut json)?;
     anyhow::ensure!(json.len() <= INPUT_LIMIT, "command stdin exceeds 1 MiB");
     Ok(json)
 }
 
-pub fn read_stdin_arguments() -> Result<Vec<String>> {
-    serde_json::from_str::<Vec<serde_json::Value>>(&read_stdin()?)?
+fn read_stdin_arguments(source: &mut dyn Read) -> Result<Vec<String>> {
+    serde_json::from_str::<Vec<serde_json::Value>>(&read_stdin(source)?)?
         .into_iter()
         .map(json_argument)
         .collect()
@@ -371,7 +424,7 @@ fn print_dynamic_help(path: &str, descriptor: &CommandDescriptor) {
     println!("  --detach");
 }
 
-pub fn print_command_response(response: control::RpcResponse, json_output: bool) -> Result<()> {
+fn print_command_response(response: control::RpcResponse, json_output: bool) -> Result<()> {
     let outcome = response
         .result
         .as_ref()
@@ -399,6 +452,9 @@ fn command_result(outcome: Option<CommandOutcome>) -> Result<Option<serde_json::
     Err(CliFailure { code, message }.into())
 }
 
+/// Prints a successful control response.
+/// # Errors
+/// Returns RPC errors or response serialization failures.
 pub fn print_control_response(response: control::RpcResponse, json_output: bool) -> Result<()> {
     if json_output {
         println!("{}", serde_json::to_string(&response)?);
@@ -427,7 +483,10 @@ pub fn print_control_response(response: control::RpcResponse, json_output: bool)
     Ok(())
 }
 
-pub fn wait_for_snapshot(cli: &Cli, args: &bootty::cli::WaitArgs) -> Result<()> {
+/// Waits until the requested snapshot state is observed.
+/// # Errors
+/// Returns transport, snapshot decoding, or deadline failures.
+pub fn wait_for_snapshot(cli: &Cli, args: &crate::cli::WaitArgs) -> Result<()> {
     use std::{
         sync::{
             Arc,
@@ -492,6 +551,9 @@ pub fn wait_for_snapshot(cli: &Cli, args: &bootty::cli::WaitArgs) -> Result<()> 
     }
 }
 
+/// Reports application and configuration diagnostics.
+/// # Errors
+/// Returns failures reading configuration or serializing diagnostics.
 pub fn doctor(cli: &Cli) -> Result<()> {
     let instance =
         control::select_or_start(cli.start()).map_err(|error| transport_failure(&error))?;

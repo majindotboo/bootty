@@ -7,8 +7,9 @@ mod transport;
 
 use std::{
     io::{BufRead as _, BufReader, Read as _, Write as _},
-    process::{Child, ChildStdin, Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc,
+    sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -57,33 +58,27 @@ const fn on_device_available() -> bool {
 }
 
 #[cfg(target_os = "macos")]
-fn on_device_dictation() -> Result<transport::Session, String> {
-    transport::Session::on_device()
+fn on_device_dictation(context: &VoiceContext) -> Result<transport::Session, String> {
+    transport::Session::on_device(context)
 }
 
 #[cfg(not(target_os = "macos"))]
-fn on_device_dictation() -> Result<transport::Session, String> {
+fn on_device_dictation(_context: &VoiceContext) -> Result<transport::Session, String> {
     Err("On-device dictation needs macOS".into())
 }
 
-struct AudioHost {
-    child: Child,
-    input: ChildStdin,
+/// Owns the bounded framed input and command output of an audio host.
+pub struct AudioHost {
+    child: Option<Child>,
+    input: Box<dyn std::io::Write + Send>,
     events: mpsc::Receiver<Result<Value, String>>,
 }
 
 impl AudioHost {
-    fn start() -> Result<Self, String> {
-        let executable = std::env::current_exe().map_err(|_| "The audio host is unavailable")?;
-        let path = executable
-            .parent()
-            .ok_or("The audio host is unavailable")?
-            .join(if cfg!(windows) {
-                "voice-host.exe"
-            } else {
-                "voice-host"
-            });
-        let mut child = Command::new(path)
+    fn start(command: &Mutex<Command>) -> Result<Self, String> {
+        let mut child = command
+            .lock()
+            .map_err(|_| "The audio host is unavailable")?
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -94,13 +89,26 @@ impl AudioHost {
             _ = child.wait();
             return Err("The audio host transport is unavailable".into());
         };
+        let mut host = Self::from_io(BufReader::new(output), input);
+        host.child = Some(child);
+        Ok(host)
+    }
+
+    /// Attaches a framed audio transport on the thread that owns its speech session.
+    /// Input frames wake that owner; output commands retain the audio host protocol.
+    #[must_use]
+    pub fn from_io(
+        input: impl std::io::BufRead + Send + 'static,
+        output: impl std::io::Write + Send + 'static,
+    ) -> Self {
         let (sender, events) = mpsc::sync_channel(64);
-        thread::spawn(move || read_frames(BufReader::new(output), &sender));
-        Ok(Self {
-            child,
-            input,
+        let wake = thread::current();
+        thread::spawn(move || read_frames(input, sender, &wake));
+        Self {
+            child: None,
+            input: Box::new(output),
             events,
-        })
+        }
     }
 
     fn send(&mut self, value: &Value) -> Result<(), String> {
@@ -114,14 +122,17 @@ impl AudioHost {
 impl Drop for AudioHost {
     fn drop(&mut self) {
         _ = self.send(&json!({"type":"shutdown"}));
-        _ = self.child.kill();
-        _ = self.child.wait();
+        if let Some(child) = &mut self.child {
+            _ = child.kill();
+            _ = child.wait();
+        }
     }
 }
 
 fn read_frames(
     mut reader: impl std::io::BufRead,
-    sender: &mpsc::SyncSender<Result<Value, String>>,
+    sender: mpsc::SyncSender<Result<Value, String>>,
+    wake: &thread::Thread,
 ) {
     loop {
         let mut frame = Vec::new();
@@ -136,39 +147,93 @@ fn read_frames(
             _ => Err("Oversized voice frame".into()),
         };
         let failed = result.is_err();
-        if sender.send(result).is_err() || failed {
+        let disconnected = sender.send(result).is_err();
+        wake.unpark();
+        if disconnected || failed {
             break;
         }
     }
+    drop(sender);
+    wake.unpark();
 }
 
-fn publish(event: &SpeechEvent) -> Result<(), String> {
-    let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer(&mut stdout, event)
-        .and_then(|()| stdout.write_all(b"\n").map_err(serde_json::Error::io))
-        .and_then(|()| stdout.flush().map_err(serde_json::Error::io))
-        .map_err(|_| "The composer disconnected".into())
+type Publisher = Arc<dyn Fn(&SpeechEvent) -> Result<(), String> + Send + Sync>;
+
+#[derive(Clone)]
+struct VoiceContext {
+    audio_host: Arc<dyn Fn() -> Result<AudioHost, String> + Send + Sync>,
+    publish: Publisher,
 }
 
 /// Own a bounded stdio session. Credentials never enter the GUI or helper arguments.
 /// # Errors
 /// Returns transport failures after releasing recording and playback.
 pub fn run() -> anyhow::Result<()> {
+    let executable = std::env::current_exe()?;
+    let audio_host = executable
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("The audio host is unavailable"))?
+        .join(if cfg!(windows) {
+            "voice-host.exe"
+        } else {
+            "voice-host"
+        });
+    run_with_io(
+        BufReader::new(std::io::stdin()),
+        std::io::stdout(),
+        Command::new(audio_host),
+    )
+}
+
+/// Own a bounded speech protocol using the supplied input, output, and bundled audio host.
+/// # Errors
+/// Returns transport failures after releasing recording and playback.
+pub fn run_with_io(
+    input: impl std::io::BufRead + Send + 'static,
+    output: impl std::io::Write + Send + 'static,
+    audio_host: Command,
+) -> anyhow::Result<()> {
+    let command = Mutex::new(audio_host);
+    run_with_audio(input, output, move || AudioHost::start(&command))
+}
+
+/// Own a speech protocol with an audio transport factory. Each recording or call owns its host.
+/// # Errors
+/// Returns transport failures after releasing recording and playback.
+pub fn run_with_audio(
+    input: impl std::io::BufRead + Send + 'static,
+    output: impl std::io::Write + Send + 'static,
+    audio_host: impl Fn() -> Result<AudioHost, String> + Send + Sync + 'static,
+) -> anyhow::Result<()> {
+    let output = Arc::new(Mutex::new(output));
+    let publish: Publisher = Arc::new(move |event| {
+        let mut output = output.lock().map_err(|_| "The composer disconnected")?;
+        serde_json::to_writer(&mut *output, event)
+            .and_then(|()| output.write_all(b"\n").map_err(serde_json::Error::io))
+            .and_then(|()| output.flush().map_err(serde_json::Error::io))
+            .map_err(|_| "The composer disconnected".into())
+    });
+    let context = VoiceContext {
+        audio_host: Arc::new(audio_host),
+        publish: Arc::clone(&publish),
+    };
     _ = rustls::crypto::ring::default_provider().install_default();
     let (sender, requests) = mpsc::sync_channel(8);
-    thread::spawn(move || read_frames(std::io::stdin().lock(), &sender));
+    let wake = thread::current();
+    thread::spawn(move || read_frames(input, sender, &wake));
     publish(&SpeechEvent::Ready).map_err(anyhow::Error::msg)?;
     let mut account = None;
     let mut active: Option<transport::Session> = None;
     loop {
-        let command = match requests.recv_timeout(Duration::from_millis(10)) {
+        let command = match requests.try_recv() {
             Ok(value) => Some(value.and_then(|value| {
                 serde_json::from_value::<SpeechCommand>(value)
                     .map_err(|_| "Invalid speech command".into())
             })),
-            Err(mpsc::RecvTimeoutError::Timeout) => None,
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(mpsc::TryRecvError::Disconnected) => break,
         };
+        let received = command.is_some();
         let result = (|| {
             if let Some(command) = command {
                 match command? {
@@ -185,17 +250,17 @@ pub fn run() -> anyhow::Result<()> {
                             active = None;
                             active = Some(if voice {
                                 // The conversation's Codex session authenticates the call.
-                                transport::Session::voice_call()?
+                                transport::Session::voice_call(&context)?
                             } else {
                                 let account = account.as_ref().ok_or(account::SIGN_IN)?;
-                                transport::Session::dictation(&account.authenticate()?)?
+                                transport::Session::dictation(&account.authenticate()?, &context)?
                             });
                         }
                     }
                     // The composer chose this after finding no Codex sign-in.
                     SpeechCommand::ListenOnDevice => {
                         active = None;
-                        active = Some(on_device_dictation()?);
+                        active = Some(on_device_dictation(&context)?);
                     }
                     SpeechCommand::Stop => {
                         if let Some(session) = active.as_mut() {
@@ -222,6 +287,16 @@ pub fn run() -> anyhow::Result<()> {
             active = None;
             publish(&SpeechEvent::Error { message }).map_err(anyhow::Error::msg)?;
             publish(&SpeechEvent::Stopped).map_err(anyhow::Error::msg)?;
+        }
+        if received {
+            continue;
+        }
+        // Calls and idle sessions advance only on input or media. Dictation also polls
+        // its network socket and platform recognizer, which do not share this wakeup.
+        if active.as_ref().is_some_and(|session| !session.voice()) {
+            thread::park_timeout(Duration::from_millis(10));
+        } else {
+            thread::park();
         }
     }
     Ok(())

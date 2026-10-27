@@ -1,11 +1,18 @@
 #![cfg(test)]
 //! Bootty's worktree retention on the host that holds the checkouts.
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, io::Write as _, path::Path, process::Command};
+
+#[path = "support/repository.rs"]
+mod repository_support;
+#[path = "support/runner.rs"]
+mod runner;
+#[path = "support/seed.rs"]
+mod seed;
 
 use assert_fs::TempDir;
 use bootty_git::{
-    CleanupRequest, Git, KeptWorktree, Retention, SessionCheckout,
+    CleanupRequest, KeptWorktree, Retention, SessionCheckout,
     cleanup::{Claim, OwnedWorktree, removal_order},
 };
 use pretty_assertions::assert_eq;
@@ -47,27 +54,18 @@ impl Host {
         let origin = root.path().join("origin.git");
         let main = root.path().join("project");
         fs::create_dir_all(&main).unwrap();
-        git(
-            root.path(),
-            &["init", "-q", "--bare", "-b", "main", "origin.git"],
-        );
-        git(&main, &["init", "-q", "-b", "main"]);
-        for (key, value) in [
-            ("user.email", "test@bootty.dev"),
-            ("user.name", "Bootty Test"),
-            ("commit.gpgsign", "false"),
-            ("core.hooksPath", "/dev/null"),
-        ] {
-            git(&main, &["config", key, value]);
-        }
-        fs::write(main.join("README"), "hello").unwrap();
-        git(&main, &["add", "."]);
-        git(&main, &["commit", "-q", "-m", "init"]);
-        git(
-            &main,
-            &["remote", "add", "origin", origin.to_str().unwrap()],
-        );
-        git(&main, &["push", "-q", "-u", "origin", "main"]);
+        seed::repository(&origin, "project", true).unwrap();
+        seed::repository(&main, "project", false).unwrap();
+        let head = fs::read_to_string(main.join(".git/refs/heads/main")).unwrap();
+        fs::create_dir_all(main.join(".git/refs/remotes/origin")).unwrap();
+        fs::write(main.join(".git/refs/remotes/origin/main"), head).unwrap();
+        let url = origin
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        writeln!(fs::OpenOptions::new().append(true).open(main.join(".git/config")).unwrap(),
+            "\n[remote \"origin\"]\nurl = \"{url}\"\nfetch = +refs/heads/*:refs/remotes/origin/*\n[branch \"main\"]\nremote = origin\nmerge = refs/heads/main"
+        ).unwrap();
         Self { root }
     }
 
@@ -86,7 +84,25 @@ impl Host {
             &self.main(),
             &["worktree", "add", "-q", "-b", name, path.to_str().unwrap()],
         );
-        git(&path, &["push", "-q", "-u", "origin", name]);
+        let head = fs::read_to_string(self.main().join(".git/refs/heads/main")).unwrap();
+        fs::write(
+            self.root.path().join("origin.git/refs/heads").join(name),
+            &head,
+        )
+        .unwrap();
+        fs::write(
+            self.main().join(".git/refs/remotes/origin").join(name),
+            head,
+        )
+        .unwrap();
+        writeln!(
+            fs::OpenOptions::new()
+                .append(true)
+                .open(self.main().join(".git/config"))
+                .unwrap(),
+            "\n[branch \"{name}\"]\nremote = origin\nmerge = refs/heads/{name}"
+        )
+        .unwrap();
         if local_commit {
             fs::write(path.join(name), "work").unwrap();
             git(&path, &["add", "."]);
@@ -148,7 +164,7 @@ fn orphaned_checkouts_go_unless_they_hold_unsaved_work(
     if dirty {
         fs::write(Path::new(&path).join("README"), "edited").unwrap();
     }
-    let report = Git::new()
+    let report = runner::git()
         .clean_worktrees(&host.request(10, Vec::new()))
         .unwrap();
     match kept {
@@ -195,7 +211,7 @@ fn teardown_runs_before_a_checkout_goes(#[case] command: &str, #[case] kept: Opt
         host.main().to_string_lossy().into_owned(),
         command.to_owned(),
     );
-    let report = Git::new().clean_worktrees(&request).unwrap();
+    let report = runner::git().clean_worktrees(&request).unwrap();
     match kept {
         None => {
             assert_eq!(report.removed, vec![path]);
@@ -221,7 +237,7 @@ fn a_new_checkout_waits_for_its_session() {
     let path = host.checkout("fresh", false);
     let mut request = host.request(10, Vec::new());
     request.now = chrono_now();
-    let report = Git::new().clean_worktrees(&request).unwrap();
+    let report = runner::git().clean_worktrees(&request).unwrap();
     assert_eq!((report.removed.len(), report.remaining), (0, 1));
     assert!(Path::new(&path).exists());
 }
@@ -243,14 +259,14 @@ fn the_limit_removes_the_oldest_settled_and_archived_checkouts_first() {
         session(&settled_new, Retention::Settled, 20, false),
         session(&archived, Retention::Archived, 30, false),
     ];
-    let report = Git::new()
+    let report = runner::git()
         .clean_worktrees(&host.request(3, sessions.clone()))
         .unwrap();
     assert_eq!(
         (report.removed, report.remaining),
         (vec![archived, settled_old], 3)
     );
-    let report = Git::new()
+    let report = runner::git()
         .clean_worktrees(&host.request(1, sessions))
         .unwrap();
     assert_eq!((report.removed, report.remaining), (vec![settled_new], 2));

@@ -144,6 +144,21 @@ impl TextAtlasBuilder {
         Self::with_format(width, height, GlyphAtlasFormat::Rgba)
     }
 
+    /// Use a captured immutable font collection for face selection and shaping.
+    ///
+    /// # Errors
+    /// Returns `CapacityExceeded` when atlas dimensions exceed supported storage.
+    pub fn with_font_database(
+        width: u32,
+        height: u32,
+        format: GlyphAtlasFormat,
+        database: &'static fontdb::Database,
+    ) -> Result<Self, GlyphAtlasError> {
+        let mut builder = Self::with_format(width, height, format)?;
+        builder.fonts = FontLibrary::with_database(database);
+        Ok(builder)
+    }
+
     /// Use the host's text service for native text coverage and color-glyph rasterization.
     ///
     /// # Errors

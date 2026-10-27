@@ -114,22 +114,24 @@ fn capture_login_env(shell: &str) -> Option<Vec<(String, String)>> {
         return None;
     }
 
-    let output = String::from_utf8_lossy(&output.stdout);
-    let (_, environment) = output.split_once("\u{001e}BOOTTY_ENV\u{001f}")?;
-    Some(parse_login_environment(environment))
+    parse_login_environment(&output.stdout)
 }
 
+/// Reads the framed login environment, ignoring greetings and preserving multiline values.
 #[cfg(target_os = "macos")]
-fn parse_login_environment(raw: &str) -> Vec<(String, String)> {
-    raw.split('\0')
-        .filter_map(|entry| {
-            let (key, value) = entry.split_once('=')?;
-            if key.is_empty() {
-                return None;
-            }
-            Some((key.to_string(), value.to_string()))
-        })
-        .collect()
+#[must_use]
+pub fn parse_login_environment(output: &[u8]) -> Option<Vec<(String, String)>> {
+    let output = String::from_utf8_lossy(output);
+    let (_, environment) = output.split_once("\u{001e}BOOTTY_ENV\u{001f}")?;
+    Some(
+        environment
+            .split('\0')
+            .filter_map(|entry| {
+                let (key, value) = entry.split_once('=')?;
+                (!key.is_empty()).then(|| (key.to_owned(), value.to_owned()))
+            })
+            .collect(),
+    )
 }
 
 #[cfg(target_os = "macos")]

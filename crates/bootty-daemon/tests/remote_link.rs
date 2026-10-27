@@ -15,10 +15,9 @@ fn unavailable_direct_transport_falls_back_without_repeated_bootstrap() {
     let root = assert_fs::TempDir::new_in("/tmp").expect("private fixture");
     let ssh = root.path().join("ssh");
     let log = root.path().join("calls");
-    bootty_test_support::write_executable(&ssh, format!(
-        "#!/bin/sh\nfor line; do :; done\ncase \"$line\" in\n*remote-link-bootstrap*) printf 'bootstrap\\n' >> {}; exit 1;;\n*remote-exec*) printf 'exec\\n' >> {}; cat; exit 9;;\n*) exit 1;;\nesac\n",
-        bootty_host::shell_quote(&log.to_string_lossy()), bootty_host::shell_quote(&log.to_string_lossy()),
-    )).expect("SSH fixture");
+    bootty_test_support::write_executable(&ssh,
+        "#!/bin/sh\nfor line; do :; done\ncase \"$line\" in\n*remote-link-bootstrap*) printf 'bootstrap\n' >> \"$BOOTTY_REMOTE_LINK_LOG\"; exit 1;;\n*remote-exec*) printf 'exec\n' >> \"$BOOTTY_REMOTE_LINK_LOG\"; cat; exit 9;;\n*) exit 1;;\nesac\n",
+    ).expect("SSH fixture");
     let mut config = SshRemoteConfig::for_host("fixture");
     config.program = ssh.to_string_lossy().into_owned();
     let request = RemoteProcessRequest {
@@ -32,6 +31,7 @@ fn unavailable_direct_transport_falls_back_without_repeated_bootstrap() {
     let bytes: Vec<u8> = (0..=255).cycle().take(1024).collect();
     for _ in 0..2 {
         let mut child = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
+            .env("BOOTTY_REMOTE_LINK_LOG", &log)
             .args([
                 "--application-identity",
                 "bootty-dev",
@@ -76,21 +76,37 @@ fn shared_transport_inherits_development_identity_and_preserves_explicit_callers
     #[case] explicit: Option<&str>,
     #[case] namespace: &str,
 ) {
-    let root = assert_fs::TempDir::new_in("/tmp").expect("private fixture");
-    let daemon = env!("CARGO_BIN_EXE_bootty-daemon");
-    let ssh = root.path().join("ssh");
-    let broker_pid = root.path().join("broker.pid");
-    bootty_test_support::write_executable(&ssh, format!(
-        "#!/bin/sh\nprintf '%s' \"$PPID\" > {}\nexec {} --application-identity bootty-dev remote-link-bootstrap\n",
-        bootty_host::shell_quote(&broker_pid.to_string_lossy()), bootty_host::shell_quote(daemon),
-    )).expect("SSH bootstrap fixture");
-    let mut config = SshRemoteConfig::for_host("fixture");
-    config.program = ssh.to_string_lossy().into_owned();
     let mut args = Vec::new();
     if let Some(identity) = explicit {
         args.extend(["--application-identity".into(), identity.into()]);
     }
     args.extend(["remote-space".into(), "list".into()]);
+    let effective = bootty_host::daemon_program_args(
+        bootty_host::REMOTE_DAEMON_PROGRAM,
+        &args,
+        bootty_config::ApplicationIdentity::Development,
+    );
+    assert_eq!(
+        effective.as_ref(),
+        &[
+            "--application-identity".to_owned(),
+            explicit.unwrap_or("bootty-dev").to_owned(),
+            "remote-space".to_owned(),
+            "list".to_owned(),
+        ]
+    );
+    if explicit.is_some() {
+        return;
+    }
+    let root = assert_fs::TempDir::new_in("/tmp").expect("private fixture");
+    let daemon = env!("CARGO_BIN_EXE_bootty-daemon");
+    let ssh = root.path().join("ssh");
+    let broker_pid = root.path().join("broker.pid");
+    bootty_test_support::write_executable(&ssh,
+        "#!/bin/sh\nprintf '%s' \"$PPID\" > \"$BOOTTY_REMOTE_LINK_BROKER_PID\"\nexec \"$BOOTTY_REMOTE_LINK_DAEMON\" --application-identity bootty-dev remote-link-bootstrap\n",
+    ).expect("SSH bootstrap fixture");
+    let mut config = SshRemoteConfig::for_host("fixture");
+    config.program = ssh.to_string_lossy().into_owned();
     let request = RemoteProcessRequest {
         program: bootty_host::REMOTE_DAEMON_PROGRAM.into(),
         args,
@@ -98,6 +114,8 @@ fn shared_transport_inherits_development_identity_and_preserves_explicit_callers
         terminal: None,
     };
     let output = Command::new(daemon)
+        .env("BOOTTY_REMOTE_LINK_BROKER_PID", &broker_pid)
+        .env("BOOTTY_REMOTE_LINK_DAEMON", daemon)
         .args([
             "--application-identity",
             "bootty-dev",

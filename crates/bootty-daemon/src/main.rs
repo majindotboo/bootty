@@ -1,6 +1,6 @@
 #![cfg_attr(windows, feature(windows_process_exit_code_from))]
 
-mod command_runtime;
+use bootty_daemon::command_runtime;
 
 use std::process::ExitCode;
 

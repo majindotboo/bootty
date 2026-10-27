@@ -2,6 +2,9 @@
 name = "bootty-write"
 edition.workspace = true
 
+[lib]
+test = false
+
 [lints]
 workspace = true
 

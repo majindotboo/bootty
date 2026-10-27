@@ -82,7 +82,7 @@ impl TmuxControlRunner {
             return Ok(());
         }
 
-        let (program, args) = self.spawned(program, &args)?;
+        let (program, args) = self.command(program, &args)?;
         let output = SystemCommandRunner.run(&program, &args)?;
         if output.success {
             Ok(())
@@ -107,7 +107,7 @@ impl CommandRunner for TmuxControlRunner {
     fn run(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
         self.control_query(program, args).map_or_else(
             || {
-                let (program, args) = self.spawned(program, args)?;
+                let (program, args) = self.command(program, args)?;
                 SystemCommandRunner.run(&program, &args)
             },
             Ok,
@@ -115,7 +115,7 @@ impl CommandRunner for TmuxControlRunner {
     }
 
     fn run_disowned(&self, program: &str, args: &[String]) -> Result<CommandOutput> {
-        let (program, args) = self.spawned(program, args)?;
+        let (program, args) = self.command(program, args)?;
         SystemCommandRunner.run_disowned(&program, &args)
     }
 
@@ -126,7 +126,7 @@ impl CommandRunner for TmuxControlRunner {
         args: &[String],
         input: Vec<u8>,
     ) -> Result<CommandOutput> {
-        let (program, args) = self.spawned(program, args)?;
+        let (program, args) = self.command(program, args)?;
         SystemCommandRunner.run_with_input(&program, &args, input)
     }
 }
@@ -262,9 +262,10 @@ struct ClientSlot {
 }
 
 impl TmuxControlRunner {
-    /// argv for running `program args...` as its own process: an SSH invocation for a remote
-    /// server, and the command itself for a local one.
-    fn spawned(&self, program: &str, args: &[String]) -> Result<(String, Vec<String>)> {
+    /// The process argv for this backend, including its server namespace and remote transport.
+    /// # Errors
+    /// Returns remote daemon discovery, installation, or argument encoding failures.
+    pub fn command(&self, program: &str, args: &[String]) -> Result<(String, Vec<String>)> {
         let args = self
             .prefix_args
             .iter()

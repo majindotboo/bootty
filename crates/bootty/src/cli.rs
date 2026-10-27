@@ -330,3 +330,28 @@ fn create_parent_dir_for_defaults(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// Resolves the private stdio connection before any application state is opened.
+/// # Errors
+/// Returns a redacted usage error for missing, extra, or relative connection paths.
+pub fn agent_tool_stdio_connection(
+    arguments: impl IntoIterator<Item = std::ffi::OsString>,
+) -> anyhow::Result<Option<std::path::PathBuf>> {
+    let mut arguments = arguments.into_iter();
+    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--agent-tool-stdio")) {
+        return Ok(None);
+    }
+    let connection = arguments.next().ok_or_else(|| {
+        anyhow::anyhow!("--agent-tool-stdio requires an absolute connection path")
+    })?;
+    anyhow::ensure!(
+        arguments.next().is_none(),
+        "--agent-tool-stdio accepts exactly one connection path"
+    );
+    let connection = std::path::PathBuf::from(connection);
+    anyhow::ensure!(
+        connection.is_absolute(),
+        "--agent-tool-stdio requires an absolute connection path"
+    );
+    Ok(Some(connection))
+}

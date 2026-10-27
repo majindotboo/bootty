@@ -323,6 +323,7 @@ pub struct NativeAgentService {
     publication: mpsc::SyncSender<()>,
     shutdown: Arc<AtomicBool>,
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+    launcher: crate::NativeLauncher,
     followup_wake: Arc<followups::Wake>,
 }
 
@@ -330,15 +331,20 @@ impl NativeAgentService {
     /// # Errors
     /// Returns malformed/oversized state or inability to create the private storage directory.
     pub fn open(path: impl Into<PathBuf>) -> Result<Self, String> {
-        Self::open_with_clock(path, Arc::new(Instant::now))
+        Self::open_with(
+            path,
+            Arc::new(Instant::now),
+            Arc::new(crate::NativeChild::spawn),
+        )
     }
 
-    /// Open the native session owner with an injected monotonic clock.
+    /// Open the native session owner with injected time and provider stdio ownership.
     /// # Errors
     /// Returns malformed/oversized state or inability to create the private storage directory.
-    pub fn open_with_clock(
+    pub fn open_with(
         path: impl Into<PathBuf>,
         clock: Arc<dyn Fn() -> Instant + Send + Sync>,
+        launcher: crate::NativeLauncher,
     ) -> Result<Self, String> {
         let path = path.into();
         let mut store = match fs::File::open(&path) {
@@ -386,6 +392,7 @@ impl NativeAgentService {
                 revision: Arc::clone(&revision),
                 shutdown: Arc::clone(&shutdown),
                 followup_wake: Arc::clone(&followup_wake),
+                clock: Arc::clone(&clock),
             },
             receiver,
         )?;
@@ -400,8 +407,14 @@ impl NativeAgentService {
             publication,
             shutdown,
             clock,
+            launcher,
             followup_wake,
         })
+    }
+
+    /// Reevaluate pending stream commits after the injected clock advances.
+    pub fn clock_advanced(&self) {
+        let _ = self.publication.try_send(());
     }
 
     pub fn set_change_handler(&self, handler: NativeChangeHandler) {
@@ -1768,6 +1781,7 @@ impl NativeAgentService {
             Arc::clone(&self.clock),
             tools,
             attachment_directory.as_deref(),
+            &self.launcher,
         )
         .map(Arc::new)
         .and_then(|session| {
@@ -2674,6 +2688,7 @@ struct PublicationState {
     revision: Arc<AtomicU64>,
     shutdown: Arc<AtomicBool>,
     followup_wake: Arc<followups::Wake>,
+    clock: Arc<dyn Fn() -> Instant + Send + Sync>,
 }
 
 /// Deliberate limit: while a reply streams, the catalog commits at most ten times a second,
@@ -2734,8 +2749,11 @@ impl PublicationState {
             return None;
         }
         if !settled
-            && let Some(wait) =
-                committed.and_then(|at| STREAM_COMMIT_INTERVAL.checked_sub(at.elapsed()))
+            && let Some(wait) = committed
+                .and_then(|at| {
+                    STREAM_COMMIT_INTERVAL.checked_sub((self.clock)().saturating_duration_since(at))
+                })
+                .filter(|wait| !wait.is_zero())
         {
             return Some(wait);
         }
@@ -2750,7 +2768,7 @@ impl PublicationState {
         }
         forget_saved_tool_images(&self.live, &saved);
         *lock(&self.store) = candidate;
-        *committed = Some(Instant::now());
+        *committed = Some((self.clock)());
         drop(mutation);
         publish(&self.revision, &self.change_handler);
         self.followup_wake.notify();

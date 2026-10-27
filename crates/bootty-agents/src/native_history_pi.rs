@@ -97,7 +97,7 @@ impl NativeAgentSession {
             return Err("Pi changed its history branch; return to the latest turns".into());
         }
         let branch = history_branch(&entries, leaf.as_deref())?;
-        let mut limit = PAGE_SIZE;
+        let mut limit = HistoryPosition::page_limit(previous, direction);
         let (start, end, mut history) = loop {
             let (start, end) = page_range(&branch, previous, direction, limit)?;
             if let Some(history) = project_branch(
@@ -133,6 +133,7 @@ impl NativeAgentSession {
             at_latest: end == branch.len(),
             pi_leaf: leaf,
             codex_legacy: false,
+            limit: Some(limit),
         };
         let page = NativeHistoryPage {
             transcript: history.transcript,
@@ -447,7 +448,6 @@ fn project_branch(
     entries: &[&IndexedEntry],
 ) -> Result<Option<NativeSessionSnapshot>, String> {
     let mut history = NativeSessionSnapshot::new(AgentKind::Pi);
-    let mut expected = BTreeSet::new();
     for entry in entries {
         reader
             .seek(SeekFrom::Start(entry.offset))
@@ -457,14 +457,9 @@ fn project_branch(
             return Err("Pi history changed during the read".into());
         }
         let value: Value = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
-        let mut single = NativeSessionSnapshot::new(AgentKind::Pi);
-        project_entry(&mut single, &value);
-        expected.extend(single.transcript.into_iter().map(|item| item.id));
         project_entry(&mut history, &value);
     }
-    if expected
-        .iter()
-        .any(|id| !history.transcript.iter().any(|item| &item.id == id))
+    if history.evicted != 0
         || serde_json::to_vec(&history.transcript)
             .map_err(|error| error.to_string())?
             .len()

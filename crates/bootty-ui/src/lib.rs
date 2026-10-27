@@ -2,7 +2,10 @@ pub mod action_catalog;
 mod agent_cursor;
 mod agent_tray;
 #[cfg(target_os = "macos")]
-pub use agent_tray::run_helper as run_agent_tray_helper;
+pub use agent_tray::{
+    Snapshot as AgentTraySnapshot, read_snapshot as read_agent_tray_snapshot,
+    run_helper as run_agent_tray_helper,
+};
 pub mod ansi_palette;
 pub mod app_actions;
 pub mod assets;

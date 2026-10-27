@@ -7,5 +7,9 @@ pub fn config(
         ..Default::default()
     };
     config.multiplexer.backend = backend;
+    // Fixture clocks pass the updater's first delay, which would run the real installers on PATH.
+    config.agents.auto_update = false;
+    // The user's login shell and its startup files are outside the fixture.
+    config.session.shell = Some("/bin/sh".to_owned());
     config
 }

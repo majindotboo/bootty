@@ -95,6 +95,16 @@ pub fn timestamp(value: Option<&str>) -> Option<i64> {
 pub fn terminal_provider_history(
     query: &TerminalHistoryQuery<'_>,
 ) -> Result<Vec<TerminalHistoryEntry>, String> {
+    terminal_provider_history_using(query, &crate::TerminalProviderTransport::default())
+}
+
+/// Read saved metadata through a captured provider transport.
+/// # Errors
+/// Returns invalid scope, metadata or bounded provider query errors.
+pub fn terminal_provider_history_using(
+    query: &TerminalHistoryQuery<'_>,
+    transport: &crate::TerminalProviderTransport,
+) -> Result<Vec<TerminalHistoryEntry>, String> {
     if !valid_path(query.account_directory) || query.cwd.is_some_and(|cwd| !valid_path(cwd)) {
         return Err("Provider history requires absolute account and project paths".to_owned());
     }
@@ -102,7 +112,7 @@ pub fn terminal_provider_history(
         return Err("Provider history limit must be between 1 and 200".to_owned());
     }
     let mut entries = match query.provider {
-        AgentKind::Codex => crate::terminal_history_codex::query(query)?,
+        AgentKind::Codex => crate::terminal_history_codex::query(query, transport)?,
         AgentKind::Claude | AgentKind::Pi => crate::terminal_history_files::query(query)?,
     };
     entries.retain(|entry| before(entry.updated_at, query.before));

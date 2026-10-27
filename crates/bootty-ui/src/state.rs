@@ -467,6 +467,30 @@ impl AppState {
         modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
         agent_events: Option<ControlEventSender>,
     ) -> Result<Self> {
+        Self::new_for_window_with_agent_runtime(
+            config,
+            window_state_key,
+            backends,
+            repaint,
+            direct_input_rx,
+            modifier_side_rx,
+            agent_events.map(crate::commands::AgentRuntimeConfig::new),
+        )
+    }
+
+    /// Construct a window with host-owned agent time and provider transports.
+    ///
+    /// # Errors
+    /// Returns errors from workspace restoration, backend attachment, or recovery initialization.
+    pub fn new_for_window_with_agent_runtime(
+        config: BoottyConfig,
+        window_state_key: String,
+        backends: Arc<MuxBackendRegistry>,
+        repaint: RepaintHandle,
+        direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
+        modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
+        agent_runtime: Option<crate::commands::AgentRuntimeConfig>,
+    ) -> Result<Self> {
         let config_runtime = AppConfigRuntime::new(config)?;
         let agent_state =
             agent_state_path(&config_runtime.current().config_path, &window_state_key);
@@ -482,9 +506,9 @@ impl AppState {
                 legacy_draft.as_deref(),
                 repaint.clone(),
             )?;
-        let commands = agent_events.map_or_else(
+        let commands = agent_runtime.map_or_else(
             || CommandRuntime::new(repaint.clone()),
-            |events| CommandRuntime::new_with_agents(repaint.clone(), events, &agent_state),
+            |services| CommandRuntime::new_with_agents(repaint.clone(), services, &agent_state),
         );
         let keymap_runtime = KeymapRuntime::new(config_runtime.current(), commands.catalog());
         let keymap_diagnostic = keymap_runtime.snapshot().diagnostic_summary();
