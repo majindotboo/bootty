@@ -71,53 +71,237 @@ fn shortcuts_use_one_typed_command_for_all_callers(
     Ok(())
 }
 
-#[rstest]
-#[case("computer.snapshot", vec!["relative.png".into()])]
-#[case("computer.move", vec!["NaN".into(), "0".into()])]
-#[case("computer.move", vec!["800".into(), "0".into()])]
-#[case("computer.click", vec!["0".into(), "0".into(), "unknown".into()])]
-#[case("computer.scroll", vec!["0".into(), "0".into(), "10001".into(), "0".into()])]
-#[case("computer.type", vec![String::new()])]
-#[case("computer.type", vec!["a".repeat(4097)])]
-#[case("computer.key", vec!["return".into(), "command,command,command,command,command".into()])]
-#[case("computer.elements", vec!["extra".into()])]
-#[case("computer.press", vec!["{}".into()])]
-#[case("computer.press", vec![element_json(900.0)])]
-#[case("computer.press", vec![element_json(10.0), "maybe".into()])]
-#[case("computer.set-value", vec![element_json(10.0), "a".repeat(4097)])]
-#[case("computer.set-value", vec![element_json(10.0), "a\0b".into()])]
-#[case("computer.set-value", vec![element_json(900.0), "text".into()])]
-fn malformed_actions_are_refused_at_public_command_resolution(
-    target: ComputerTarget,
-    #[case] command: &str,
-    #[case] arguments: Vec<String>,
+/// Asserts an `invalid_arguments` failure whose message starts with `reason`. Parser details may
+/// follow the reason.
+fn assert_refused(
+    invocation: CommandInvocation,
+    reason: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut values = vec![serde_json::to_string(&target)?];
-    values.extend(arguments);
-    let result =
-        CommandCatalog::default().resolve(CommandInvocation::new(command, values, Caller::Socket));
-    let CommandOutcome::Failed { code, .. } = result.err().ok_or("invalid action was accepted")?
-    else {
-        return Err("invalid action did not produce an argument failure".into());
+    let outcome = CommandCatalog::default().resolve(invocation).err();
+    let Some(CommandOutcome::Failed { code, message }) = &outcome else {
+        return Err(format!("expected an argument failure, got {outcome:?}").into());
     };
-    assert_eq!(code, "invalid_arguments");
+    let head = message.get(..reason.len()).unwrap_or(message);
+    assert_eq!(
+        (code.as_str(), head),
+        ("invalid_arguments", reason),
+        "full message: {message}"
+    );
     Ok(())
 }
 
+/// The fixture target's bounds, as refusals report them.
+const OUTSIDE: &str = "outside the target bounds {x: 0, y: 0, width: 800, height: 600}";
+
 #[rstest]
-#[case("{}")]
 #[case(
+    "computer.snapshot",
+    vec!["relative.png".into()],
+    "Invalid arguments for computer.snapshot: destination must be an absolute file path".into()
+)]
+#[case(
+    "computer.snapshot",
+    vec![
+        std::env::temp_dir().join("bootty-crop.png").to_string_lossy().into_owned(),
+        r#"{"x":700,"y":0,"width":200,"height":100}"#.into(),
+    ],
+    format!(
+        "Invalid arguments for computer.snapshot: invalid computer action: \
+         capture rectangle {{x: 700, y: 0, width: 200, height: 100}} is {OUTSIDE}"
+    )
+)]
+#[case("computer.move", vec!["NaN".into(), "0".into()], "invalid x argument for computer.move".into())]
+#[case(
+    "computer.move",
+    vec!["800".into(), "0".into()],
+    format!(
+        "Invalid arguments for computer.move: invalid computer action: coordinates (800, 0) \
+         are {OUTSIDE}; x and y are screen points, not window-relative points"
+    )
+)]
+#[case(
+    "computer.click",
+    vec!["0".into(), "0".into(), "unknown".into()],
+    "invalid button argument for computer.click".into()
+)]
+#[case(
+    "computer.scroll",
+    vec!["0".into(), "0".into(), "10001".into(), "0".into()],
+    "invalid delta-x argument for computer.scroll".into()
+)]
+#[case(
+    "computer.type",
+    vec![String::new()],
+    "Invalid arguments for computer.type: invalid computer action: text must contain 1–4096 bytes".into()
+)]
+#[case(
+    "computer.type",
+    vec!["a".repeat(4097)],
+    "Invalid arguments for computer.type: invalid computer action: text must contain 1–4096 bytes".into()
+)]
+#[case(
+    "computer.key",
+    vec!["return".into(), "command,command,command,command,command".into()],
+    "Invalid arguments for computer.key: invalid computer action: at most four modifiers are allowed".into()
+)]
+#[case(
+    "computer.key",
+    vec!["return".into(), "hyper".into()],
+    "Invalid arguments for computer.key: unknown modifier `hyper`; use command, control, option or shift".into()
+)]
+#[case(
+    "computer.elements",
+    vec!["extra".into()],
+    "invalid root argument for computer.elements".into()
+)]
+#[case(
+    "computer.press",
+    vec!["{}".into()],
+    "Invalid arguments for computer.press: element must be one entry from computer.elements, passed as JSON: ".into()
+)]
+#[case(
+    "computer.press",
+    vec![element_json(900.0)],
+    format!("Invalid arguments for computer.press: invalid computer action: the element center (910, 20) is {OUTSIDE}")
+)]
+#[case(
+    "computer.press",
+    vec![element_json(10.0), "maybe".into()],
+    "invalid allow-click argument for computer.press".into()
+)]
+#[case(
+    "computer.set-value",
+    vec![element_json(10.0), "a".repeat(4097)],
+    "Invalid arguments for computer.set-value: invalid computer action: value must contain at most 4096 bytes and no NUL".into()
+)]
+#[case(
+    "computer.set-value",
+    vec![element_json(10.0), "a\0b".into()],
+    "Invalid arguments for computer.set-value: invalid computer action: value must contain at most 4096 bytes and no NUL".into()
+)]
+#[case(
+    "computer.set-value",
+    vec![element_json(900.0), "text".into()],
+    format!("Invalid arguments for computer.set-value: invalid computer action: the element center (910, 20) is {OUTSIDE}")
+)]
+#[case(
+    "computer.set-value",
+    vec![MENU_ITEM.into(), "text".into()],
+    "Invalid arguments for computer.set-value: invalid computer action: \
+     menu bar items can only be pressed"
+        .into()
+)]
+fn malformed_actions_are_refused_with_their_reason(
+    target: ComputerTarget,
+    #[case] command: &str,
+    #[case] arguments: Vec<String>,
+    #[case] reason: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut values = vec![serde_json::to_string(&target)?];
+    values.extend(arguments);
+    assert_refused(
+        CommandInvocation::new(command, values, Caller::Socket),
+        &reason,
+    )
+}
+
+#[rstest]
+#[case::window_id("4036")]
+#[case::empty("{}")]
+#[case::fake_permission(
     "{\"window_id\":42,\"process_id\":123,\"bundle_id\":\"dev.bootty.test-target\",\"launch_time\":1000,\"bounds\":{\"x\":0,\"y\":0,\"width\":800,\"height\":600},\"accessibility_granted\":true}"
 )]
-fn missing_target_identity_or_fake_permission_token_is_refused(#[case] target: &str) {
-    let result = CommandCatalog::default().resolve(CommandInvocation::new(
-        "computer.type",
-        vec![target.into(), "hello".into()],
-        Caller::Socket,
-    ));
+fn targets_other_than_listed_window_objects_are_refused(
+    #[case] target: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    assert_refused(
+        CommandInvocation::new(
+            "computer.type",
+            vec![target.into(), "hello".into()],
+            Caller::Socket,
+        ),
+        "Invalid arguments for computer.type: \
+         target must be one window object from computer.targets, passed as JSON: ",
+    )
+}
+
+/// `describe` says where targets and elements come from, and which space points use.
+#[rstest]
+#[case(
+    "computer.type",
+    "Pass target as one window object from computer.targets, as JSON."
+)]
+#[case(
+    "computer.click",
+    "x and y are screen points inside the target's bounds"
+)]
+#[case(
+    "computer.move",
+    "x and y are screen points inside the target's bounds"
+)]
+#[case(
+    "computer.scroll",
+    "x and y are screen points inside the target's bounds"
+)]
+#[case(
+    "computer.snapshot",
+    "region is a JSON {x, y, width, height} rectangle in screen points"
+)]
+#[case(
+    "computer.press",
+    "Pass element as one entry from computer.elements, as JSON."
+)]
+fn descriptions_explain_argument_formats(#[case] id: &str, #[case] note: &str) {
+    let descriptor = CommandCatalog::default()
+        .describe(id)
+        .expect("computer command descriptor");
     assert!(
-        matches!(result, Err(CommandOutcome::Failed { code, .. }) if code == "invalid_arguments")
+        descriptor.description.contains(note),
+        "{id} description lacks {note:?}: {}",
+        descriptor.description
     );
+}
+
+/// A menu item as `computer.elements <target> menu_bar` returns it, without a frame.
+const MENU_ITEM: &str = r#"{"path":[2,0,1],"root":"menu_bar","role":"MenuItem","name":"New Tab"}"#;
+
+/// The menu bar listing and its items go through the same commands as window elements.
+#[rstest]
+#[case(vec!["menu_bar".into()], "computer.elements", MutationClass::Read)]
+#[case(vec!["window".into()], "computer.elements", MutationClass::Read)]
+#[case(vec![MENU_ITEM.into()], "computer.press", MutationClass::Write)]
+fn menu_bar_commands_share_the_typed_computer_executor(
+    target: ComputerTarget,
+    #[case] arguments: Vec<String>,
+    #[case] id: &str,
+    #[case] mutation: MutationClass,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut values = vec![serde_json::to_string(&target)?];
+    values.extend(arguments.clone());
+    let resolved = CommandCatalog::default()
+        .resolve(CommandInvocation::new(id, values, Caller::Cli))
+        .map_err(|outcome| format!("{outcome:?}"))?;
+    assert_eq!(resolved.descriptor.mutation, mutation);
+    let action = match arguments[0].as_str() {
+        "menu_bar" => ComputerAction::MenuBar,
+        "window" => ComputerAction::Elements,
+        element => ComputerAction::Press {
+            element: Box::new(serde_json::from_str(element)?),
+            allow_click: true,
+        },
+    };
+    let CommandExecutor::Core(CoreCommandExecutor::Computer(actual)) = resolved.executor else {
+        return Err("menu bar command did not resolve to the shared computer executor".into());
+    };
+    assert_eq!(
+        actual,
+        ComputerCommand::Execute {
+            target,
+            action,
+            destination: None,
+        }
+    );
+    Ok(())
 }
 
 /// A listed element as `computer.elements` returns it; `x` places its frame.

@@ -1,8 +1,8 @@
 //! The platform seam. Each OS lists windows, reports focus, captures and posts input; the shared
 //! control rules decide what is allowed, so every platform enforces the same window identity.
 use crate::{
-    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier,
-    MouseButton,
+    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, ElementRoot,
+    Key, Modifier, MouseButton,
 };
 
 /// One observed window.
@@ -173,25 +173,28 @@ pub trait Desktop: Send + Sync {
     /// A square icon for an application, `side` pixels wide, when the OS has one.
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image>;
 
-    /// The window's accessibility elements in screen order: at most `limit`, and whether any were
-    /// left out.
+    /// The accessibility elements under `root`: at most `limit`, and whether any were left out.
+    /// The window's are in screen order; the menu bar's are in menu order, read without opening a
+    /// menu.
     ///
     /// # Errors
     /// Returns unsupported, availability or platform errors.
     fn elements(
         &self,
         _window: &NativeWindow,
+        _root: ElementRoot,
         _limit: usize,
     ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
         Err(ComputerError::Unsupported)
     }
-    /// The element at `path` as it is now, or `None` when the window has none there.
+    /// The element at `path` under `root` as it is now, or `None` when there is none there.
     ///
     /// # Errors
     /// Returns unsupported, availability or platform errors.
     fn element(
         &self,
         _window: &NativeWindow,
+        _root: ElementRoot,
         _path: &[u16],
     ) -> Result<Option<ComputerElement>, ComputerError> {
         Err(ComputerError::Unsupported)
@@ -210,11 +213,31 @@ pub trait Desktop: Send + Sync {
     ) -> Result<Option<Vec<u16>>, ComputerError> {
         Err(ComputerError::Unsupported)
     }
-    /// Perform the element's press action. `false` means it has none, so the caller clicks it.
+    /// Perform the element's press action. `false` means it has none, so the caller clicks it if
+    /// it has a frame.
     ///
     /// # Errors
     /// Returns unsupported, availability or platform errors; a press is never retried.
-    fn press(&self, _window: &NativeWindow, _path: &[u16]) -> Result<bool, ComputerError> {
+    fn press(
+        &self,
+        _window: &NativeWindow,
+        _root: ElementRoot,
+        _path: &[u16],
+    ) -> Result<bool, ComputerError> {
+        Err(ComputerError::Unsupported)
+    }
+    /// The menu bar item whose keyboard shortcut is `key` with `modifiers`, as
+    /// [`Desktop::element`] reports it: the first enabled one in menu order, else the first one.
+    /// `None` when no menu item has that shortcut.
+    ///
+    /// # Errors
+    /// Returns unsupported, availability or platform errors.
+    fn menu_shortcut(
+        &self,
+        _window: &NativeWindow,
+        _key: Key,
+        _modifiers: &[Modifier],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
         Err(ComputerError::Unsupported)
     }
 
@@ -229,5 +252,16 @@ pub trait Desktop: Send + Sync {
         _value: &str,
     ) -> Result<(), ComputerError> {
         Err(ComputerError::Unsupported)
+    }
+}
+
+/// Platforms without a readable menu bar answer `Unsupported` for it.
+///
+/// # Errors
+/// Returns unsupported for the menu bar.
+pub const fn window_only(root: ElementRoot) -> Result<(), ComputerError> {
+    match root {
+        ElementRoot::Window => Ok(()),
+        ElementRoot::MenuBar => Err(ComputerError::Unsupported),
     }
 }

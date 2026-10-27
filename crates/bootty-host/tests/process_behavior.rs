@@ -131,47 +131,6 @@ const HELPER_ENV: &str = "BOOTTY_MUX_PROCESS_HELPER";
 #[rstest::rstest]
 #[case(0)]
 #[case(7)]
-fn queued_launchd_jobs_wait_for_their_reported_exit_status(#[case] status: i32) {
-    let directory = TempDir::new().unwrap();
-    let launcher = directory.child("launchctl");
-    let counter = bootty_host::shell_quote(&directory.child("polls").path().to_string_lossy());
-    bootty_test_support::write_executable(launcher.path(), format!(
-        "#!/bin/sh\nn=$(cat {counter} 2>/dev/null || printf 0)\nn=$((n + 1))\nprintf '%s' \"$n\" > {counter}\nif [ \"$n\" -le 7 ]; then printf '{{\\n\"Label\" = \"queued\";\\n}}\\n'; else printf '{{\\n\"LastExitStatus\" = {status};\\n}}\\n'; fi\n"
-    )).unwrap();
-    let result = bootty_host::wait_for_launchd_exit(
-        launcher.path().to_str().unwrap(),
-        "queued",
-        Duration::from_secs(5),
-    )
-    .unwrap();
-    assert_eq!(result, status);
-}
-
-#[cfg(target_os = "macos")]
-#[rstest::rstest]
-fn launchd_inspection_errors_include_the_system_diagnostic() {
-    let directory = TempDir::new().unwrap();
-    let launcher = directory.child("launchctl");
-    bootty_test_support::write_executable(
-        launcher.path(),
-        "#!/bin/sh\nprintf 'Service not found in domain' >&2\nexit 3\n",
-    )
-    .unwrap();
-    let error = bootty_host::wait_for_launchd_exit(
-        launcher.path().to_str().unwrap(),
-        "missing-job",
-        Duration::from_secs(1),
-    )
-    .unwrap_err();
-    let message = format!("{error:#}");
-    assert!(message.contains("Service not found in domain"), "{message}");
-    assert!(message.contains("missing-job"), "{message}");
-}
-
-#[cfg(target_os = "macos")]
-#[rstest::rstest]
-#[case(0)]
-#[case(7)]
 fn disowned_commands_return_their_output_and_exit_status(#[case] code: i32) {
     let output = SystemCommandRunner
         .run_disowned(
@@ -279,6 +238,72 @@ fn process_behavior_helper() {
         .run_disowned("bootty-env-probe", &[captured_path, captured_custom])
         .expect("run disowned environment probe");
     assert!(output.success, "probe failed: {}", output.stderr);
+}
+
+#[cfg(target_os = "macos")]
+const RESTART_HELPER_ENV: &str = "BOOTTY_RESTARTED_JOB_RUNS";
+
+/// launchd starts a submitted job again each time it exits until the job is removed. The fake
+/// `launchctl` starts it twice at once, as launchd does when the removal comes late.
+#[cfg(target_os = "macos")]
+#[test]
+fn disowned_commands_run_once_when_launchd_restarts_them() {
+    let directory = TempDir::new().expect("temporary launchd directory");
+    bootty_test_support::write_executable(
+        directory.child("launchctl").path(),
+        "#!/bin/sh\nif [ \"$1\" = submit ]; then shift 4; \"$@\"; \"$@\"; fi\n",
+    )
+    .expect("write fake launchctl");
+    let runs = directory.child("runs");
+    let path = std::env::join_paths(std::iter::once(directory.path().to_path_buf()).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .expect("join PATH");
+
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args(["--exact", "restarted_job_helper", "--nocapture"])
+        .env(RESTART_HELPER_ENV, runs.path())
+        .env("PATH", path)
+        .output()
+        .expect("run isolated restarted job test");
+
+    assert!(
+        output.status.success(),
+        "stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(runs.path()).expect("job runs"),
+        "run\n"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn restarted_job_helper() {
+    let Some(runs) = std::env::var_os(RESTART_HELPER_ENV) else {
+        return;
+    };
+    let output = SystemCommandRunner
+        .run_disowned(
+            "/bin/sh",
+            &[
+                "-c".into(),
+                "echo run >> \"$1\"; echo first; exit 3".into(),
+                "probe".into(),
+                runs.to_string_lossy().into_owned(),
+            ],
+        )
+        .expect("restarted job");
+    assert_eq!(
+        (
+            output.success,
+            output.stdout.as_str(),
+            output.stderr.as_str()
+        ),
+        (false, "first\n", "process exited with status 3")
+    );
 }
 
 #[test]

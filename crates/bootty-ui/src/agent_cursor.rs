@@ -33,12 +33,15 @@ pub fn pointing<T, E>(
     repaint: &dyn Fn(),
     act: impl FnOnce() -> Result<T, E>,
 ) -> Result<T, E> {
-    let (x, y) = match action {
+    let point = match action {
         ComputerAction::Click { x, y, .. }
         | ComputerAction::Move { x, y }
-        | ComputerAction::Scroll { x, y, .. } => (*x, *y),
+        | ComputerAction::Scroll { x, y, .. } => Some((*x, *y)),
         ComputerAction::Press { element, .. } => element.center(),
-        _ => return act(),
+        _ => None,
+    };
+    let Some((x, y)) = point else {
+        return act();
     };
     if !cfg!(target_os = "macos") {
         return act();

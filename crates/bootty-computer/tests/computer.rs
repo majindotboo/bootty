@@ -6,8 +6,8 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use bootty_computer::{
     Computer, ComputerAccess, ComputerAction, ComputerElement, ComputerError, ComputerResult,
-    ComputerStatus, ComputerTarget, DisplayBounds, ElementState, HostCaptureRegion, Key,
-    MouseButton, PermissionStatus, PressMethod,
+    ComputerStatus, ComputerTarget, DisplayBounds, ElementRoot, ElementState, HostCaptureRegion,
+    Key, Modifier, MouseButton, PermissionStatus, PressMethod,
     control::{MAX_TEXT_UNITS, text_pieces},
     desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow},
 };
@@ -238,6 +238,9 @@ struct Fake {
     recording: Option<PermissionStatus>,
     secure: bool,
     elements: Vec<ComputerElement>,
+    menu_bar: Vec<ComputerElement>,
+    /// The menu item with this key and these modifiers as its shortcut.
+    shortcut: Option<(Key, Vec<Modifier>, ComputerElement)>,
     /// Whether elements have their own press action.
     pressable: bool,
     posted: Mutex<Vec<InputEvent>>,
@@ -254,8 +257,16 @@ impl Fake {
             focus: Some((target.process_id, target.bounds.clone())),
             frontmost: Some(target.process_id),
             elements: vec![button()],
+            menu_bar: vec![menu_item()],
             ..Self::default()
         })
+    }
+
+    fn listed(&self, root: ElementRoot) -> &[ComputerElement] {
+        match root {
+            ElementRoot::Window => &self.elements,
+            ElementRoot::MenuBar => &self.menu_bar,
+        }
     }
 
     fn computer(self: &Arc<Self>) -> Computer {
@@ -281,16 +292,31 @@ impl Fake {
 fn button() -> ComputerElement {
     ComputerElement {
         path: vec![0, 2],
+        root: ElementRoot::Window,
         role: "Button".into(),
         name: None,
         value: None,
         identifier: Some("back".into()),
-        frame: DisplayBounds {
+        frame: Some(DisplayBounds {
             x: 0.0,
             y: 0.0,
             width: 20.0,
             height: 20.0,
-        },
+        }),
+        states: Vec::new(),
+    }
+}
+
+/// An item of the app's File menu, as a menu bar listing returns it.
+fn menu_item() -> ComputerElement {
+    ComputerElement {
+        path: vec![2, 0, 1],
+        root: ElementRoot::MenuBar,
+        role: "MenuItem".into(),
+        name: Some("New Tab".into()),
+        value: None,
+        identifier: None,
+        frame: None,
         states: Vec::new(),
     }
 }
@@ -380,21 +406,24 @@ impl Desktop for Fake {
     fn elements(
         &self,
         _: &NativeWindow,
+        root: ElementRoot,
         limit: usize,
     ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        let listed = self.listed(root);
         Ok((
-            self.elements.iter().take(limit).cloned().collect(),
-            self.elements.len() > limit,
+            listed.iter().take(limit).cloned().collect(),
+            listed.len() > limit,
         ))
     }
 
     fn element(
         &self,
         _: &NativeWindow,
+        root: ElementRoot,
         path: &[u16],
     ) -> Result<Option<ComputerElement>, ComputerError> {
         Ok(self
-            .elements
+            .listed(root)
             .iter()
             .find(|element| element.path == path)
             .cloned())
@@ -411,13 +440,15 @@ impl Desktop for Fake {
             .iter()
             .find(|element| {
                 self.pressable
-                    && (element.frame.x..element.frame.x + element.frame.width).contains(&x)
-                    && (element.frame.y..element.frame.y + element.frame.height).contains(&y)
+                    && element.frame.as_ref().is_some_and(|frame| {
+                        (frame.x..frame.x + frame.width).contains(&x)
+                            && (frame.y..frame.y + frame.height).contains(&y)
+                    })
             })
             .map(|element| element.path.clone()))
     }
 
-    fn press(&self, _: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
+    fn press(&self, _: &NativeWindow, _: ElementRoot, path: &[u16]) -> Result<bool, ComputerError> {
         if self.pressable {
             self.pressed
                 .lock()
@@ -425,6 +456,19 @@ impl Desktop for Fake {
                 .push(path.to_vec());
         }
         Ok(self.pressable)
+    }
+
+    fn menu_shortcut(
+        &self,
+        _: &NativeWindow,
+        key: Key,
+        modifiers: &[Modifier],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
+        Ok(self
+            .shortcut
+            .as_ref()
+            .filter(|(shortcut, held, _)| *shortcut == key && held == modifiers)
+            .map(|(_, _, item)| item.clone()))
     }
 
     fn set_value(&self, _: &NativeWindow, path: &[u16], value: &str) -> Result<(), ComputerError> {
@@ -783,7 +827,9 @@ async fn press_uses_the_element_action_or_clicks_its_center(
 }
 
 const fn move_element(element: &mut ComputerElement) {
-    element.frame.x = 4.0;
+    if let Some(frame) = element.frame.as_mut() {
+        frame.x = 4.0;
+    }
 }
 fn rename_element(element: &mut ComputerElement) {
     element.name = Some("Forward".into());
@@ -1065,4 +1111,207 @@ async fn set_value_refuses_stale_or_disabled_elements(
     }
     assert!(fake.values.lock().unwrap().is_empty());
     assert_eq!(fake.posted(), Vec::<InputEvent>::new());
+}
+
+/// The menu bar of a background app is listed and its items pressed through accessibility, with
+/// no focus, raise or pointer input on any route.
+#[rstest]
+#[tokio::test]
+async fn menu_bar_items_are_pressed_without_focus_or_pointer_input(
+    target: ComputerTarget,
+    #[values(InputRoute::Window, InputRoute::Shared)] route: InputRoute,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(route);
+    fake.pressable = true;
+    bring_other_app_to_front(&mut fake, &target);
+    focus_nothing(&mut fake, &target);
+    let fake = Arc::new(fake);
+    assert_eq!(
+        run(&fake, &target, &ComputerAction::MenuBar).await.unwrap(),
+        ComputerResult::Elements {
+            elements: vec![menu_item()],
+            omitted: false,
+            target: Box::new(target.clone()),
+        }
+    );
+    let press = ComputerAction::Press {
+        element: Box::new(menu_item()),
+        allow_click: true,
+    };
+    assert_eq!(
+        run(&fake, &target, &press).await.unwrap(),
+        ComputerResult::Pressed {
+            method: PressMethod::Action
+        }
+    );
+    assert_eq!(fake.pressed(), [menu_item().path]);
+    assert_eq!(fake.posted(), []);
+    assert!(fake.raised.lock().unwrap().is_empty());
+}
+
+/// A background app's menus ignore posted shortcuts, so a Command shortcut for an app that is not
+/// frontmost presses the menu item with that shortcut. Keys without Command, shortcuts in no menu,
+/// keys for the frontmost app, and shared input are posted.
+#[rstest]
+#[case::app_in_background(bring_other_app_to_front, &[Modifier::Command], true, InputRoute::Window, true)]
+#[case::frontmost_app(leave_in_front, &[Modifier::Command], true, InputRoute::Window, false)]
+#[case::without_command(bring_other_app_to_front, &[Modifier::Control], true, InputRoute::Window, false)]
+#[case::shortcut_in_no_menu(bring_other_app_to_front, &[Modifier::Command], false, InputRoute::Window, false)]
+#[case::shared_input(bring_other_app_to_front, &[Modifier::Command], true, InputRoute::Shared, false)]
+#[tokio::test]
+async fn background_command_shortcuts_press_their_menu_item(
+    target: ComputerTarget,
+    #[case] change: fn(&mut Fake, &ComputerTarget),
+    #[case] modifiers: &[Modifier],
+    #[case] in_menu: bool,
+    #[case] route: InputRoute,
+    #[case] pressed: bool,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.route = Some(route);
+    fake.pressable = true;
+    fake.shortcut = in_menu.then(|| (Key::N, modifiers.to_vec(), menu_item()));
+    change(&mut fake, &target);
+    let fake = Arc::new(fake);
+    let key = InputEvent::Key {
+        key: Key::N,
+        modifiers: modifiers.to_vec(),
+    };
+    let action = ComputerAction::Key {
+        key: Key::N,
+        modifiers: modifiers.to_vec(),
+    };
+    let result = run(&fake, &target, &action).await.unwrap();
+    if pressed {
+        assert_eq!(
+            result,
+            ComputerResult::Pressed {
+                method: PressMethod::Action
+            }
+        );
+        assert_eq!(fake.pressed(), [menu_item().path]);
+        assert_eq!(fake.posted(), []);
+    } else {
+        assert_eq!(result, ComputerResult::Posted);
+        assert_eq!(fake.pressed(), Vec::<Vec<u16>>::new());
+        assert_eq!(fake.posted(), [key]);
+    }
+}
+
+/// A background app disables the menu commands that act on a window, and a disabled item or one
+/// without a press action fails rather than posting a shortcut the menus would ignore.
+#[rstest]
+#[case::disabled(
+    true,
+    true,
+    "invalid computer action: the shortcut's menu command `New Tab` is disabled; apps in the \
+     background disable commands that act on a window, so press the window's own control instead"
+)]
+#[case::without_press_action(
+    false,
+    false,
+    "invalid computer action: the shortcut's menu command `New Tab` has no supported accessibility \
+     action"
+)]
+#[tokio::test]
+async fn background_shortcuts_fail_when_their_menu_item_cannot_be_pressed(
+    target: ComputerTarget,
+    #[case] disabled: bool,
+    #[case] pressable: bool,
+    #[case] message: &str,
+) {
+    let mut item = menu_item();
+    if disabled {
+        item.states.push(ElementState::Disabled);
+    }
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.pressable = pressable;
+    fake.shortcut = Some((Key::W, vec![Modifier::Command], item));
+    bring_other_app_to_front(&mut fake, &target);
+    let fake = Arc::new(fake);
+    let action = ComputerAction::Key {
+        key: Key::W,
+        modifiers: vec![Modifier::Command],
+    };
+    let error = run(&fake, &target, &action).await.unwrap_err();
+    assert_eq!(error.to_string(), message);
+    assert_eq!(fake.pressed(), Vec::<Vec<u16>>::new());
+    assert_eq!(fake.posted(), []);
+}
+
+/// A menu item has no frame to click, so one without a press action is refused even when clicks
+/// are allowed.
+#[rstest]
+#[tokio::test]
+async fn menu_items_without_an_action_are_never_clicked(
+    target: ComputerTarget,
+    #[values(true, false)] allow_click: bool,
+) {
+    let fake = Fake::focused(&target);
+    let press = ComputerAction::Press {
+        element: Box::new(menu_item()),
+        allow_click,
+    };
+    let result = run(&fake, &target, &press).await;
+    assert!(
+        matches!(result, Err(ComputerError::InvalidAction(_))),
+        "{result:?}"
+    );
+    assert_eq!(fake.posted(), []);
+}
+
+/// Window elements carry a frame and menu bar elements never do; menu bar elements can only be
+/// pressed. Anything else is refused before it reaches the desktop.
+#[rstest]
+#[case::window_element_without_frame(ComputerAction::Press {
+    element: Box::new(ComputerElement { frame: None, ..button() }),
+    allow_click: true,
+})]
+#[case::menu_item_with_frame(ComputerAction::Press {
+    element: Box::new(ComputerElement { frame: button().frame, ..menu_item() }),
+    allow_click: true,
+})]
+#[case::menu_item_value(ComputerAction::SetValue {
+    element: Box::new(menu_item()),
+    value: "text".into(),
+})]
+#[tokio::test]
+async fn element_roots_and_frames_must_agree(
+    target: ComputerTarget,
+    #[case] action: ComputerAction,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.pressable = true;
+    let fake = Arc::new(fake);
+    let result = run(&fake, &target, &action).await;
+    assert!(
+        matches!(result, Err(ComputerError::InvalidAction(_))),
+        "{result:?}"
+    );
+    assert_eq!(fake.pressed(), Vec::<Vec<u16>>::new());
+    assert!(fake.values.lock().unwrap().is_empty());
+    assert_eq!(fake.posted(), []);
+}
+
+/// A listing returns only elements under the root it asked for.
+#[rstest]
+#[case::window_element_in_menu_bar(ComputerAction::MenuBar, vec![button()], vec![button()])]
+#[case::menu_item_in_window(ComputerAction::Elements, vec![button(), menu_item()], vec![menu_item()])]
+#[tokio::test]
+async fn listings_refuse_elements_from_another_root(
+    target: ComputerTarget,
+    #[case] action: ComputerAction,
+    #[case] elements: Vec<ComputerElement>,
+    #[case] menu_bar: Vec<ComputerElement>,
+) {
+    let mut fake = Arc::into_inner(Fake::focused(&target)).unwrap_or_default();
+    fake.elements = elements;
+    fake.menu_bar = menu_bar;
+    let fake = Arc::new(fake);
+    let result = run(&fake, &target, &action).await;
+    assert!(
+        matches!(result, Err(ComputerError::Platform(_))),
+        "{result:?}"
+    );
 }

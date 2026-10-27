@@ -10,7 +10,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 
 use crate::{
     ComputerAction, ComputerElement, ComputerError, ComputerResult, ComputerTarget, DisplayBounds,
-    ElementState, MAX_ELEMENTS, MouseButton, Permission, PermissionStatus, PressMethod,
+    ElementRoot, ElementState, Key, MAX_ELEMENTS, Modifier, MouseButton, Permission,
+    PermissionStatus, PressMethod,
     desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count, pixel_edge},
 };
 
@@ -88,11 +89,12 @@ pub fn execute(
             },
         ),
         ComputerAction::TypeText { text } => type_text(desktop, target, text),
-        ComputerAction::Elements => elements(desktop, target),
+        ComputerAction::Elements => elements(desktop, target, ElementRoot::Window),
+        ComputerAction::MenuBar => elements(desktop, target, ElementRoot::MenuBar),
         ComputerAction::SetValue { element, value } => {
             let window = validate(desktop, target, Need::Element)?;
             let current = desktop
-                .element(&window, &element.path)?
+                .element(&window, element.root, &element.path)?
                 .filter(|current| current.same_as(element))
                 .ok_or(ComputerError::StaleElement)?;
             if current.states.contains(&ElementState::Disabled) {
@@ -107,17 +109,7 @@ pub fn execute(
             element,
             allow_click,
         } => press(desktop, target, element, *allow_click),
-        ComputerAction::Key { key, modifiers } => {
-            let window = validate(desktop, target, Need::Keys)?;
-            desktop.post(
-                &window,
-                &InputEvent::Key {
-                    key: *key,
-                    modifiers: modifiers.clone(),
-                },
-            )?;
-            Ok(ComputerResult::Posted)
-        }
+        ComputerAction::Key { key, modifiers } => press_key(desktop, target, *key, modifiers),
     }
 }
 
@@ -276,7 +268,7 @@ fn click(
         && desktop.route() == InputRoute::Window
         && desktop.frontmost() != Some(target.process_id)
         && let Some(path) = desktop.pressable_at(&window, x, y)?
-        && desktop.press(&window, &path)?
+        && desktop.press(&window, ElementRoot::Window, &path)?
     {
         return Ok(ComputerResult::Posted);
     }
@@ -287,11 +279,12 @@ fn click(
 fn elements(
     desktop: &dyn Desktop,
     target: &ComputerTarget,
+    root: ElementRoot,
 ) -> Result<ComputerResult, ComputerError> {
     require(desktop.status().accessibility, Permission::Accessibility)?;
     let window = validate(desktop, target, Need::Read)?;
     let token = window.app.clone().ok_or(ComputerError::TargetUnavailable)?;
-    let (elements, omitted) = desktop.elements(&window, MAX_ELEMENTS)?;
+    let (elements, omitted) = desktop.elements(&window, root, MAX_ELEMENTS)?;
     // The elements describe the window as it was listed; a move or resize makes them stale.
     validate(desktop, target, Need::Read)?;
     Ok(ComputerResult::Elements {
@@ -302,7 +295,8 @@ fn elements(
 }
 
 /// The element's own press action first. Apps that draw their own controls often have none, so
-/// those get a click at the element's center under the usual pointer rules.
+/// those get a click at the element's center under the usual pointer rules. Menu bar elements have
+/// no center and are never clicked.
 fn press(
     desktop: &dyn Desktop,
     target: &ComputerTarget,
@@ -311,7 +305,7 @@ fn press(
 ) -> Result<ComputerResult, ComputerError> {
     let window = validate(desktop, target, Need::Element)?;
     let current = desktop
-        .element(&window, &element.path)?
+        .element(&window, element.root, &element.path)?
         .filter(|current| current.same_as(element))
         .ok_or(ComputerError::StaleElement)?;
     if current.states.contains(&ElementState::Disabled) {
@@ -319,22 +313,68 @@ fn press(
             "the element is disabled".into(),
         ));
     }
-    if desktop.press(&window, &element.path)? {
+    if desktop.press(&window, element.root, &element.path)? {
         return Ok(ComputerResult::Pressed {
             method: PressMethod::Action,
         });
     }
+    let Some((x, y)) = element.center() else {
+        return Err(ComputerError::InvalidAction(
+            "the menu item has no supported accessibility action".into(),
+        ));
+    };
     if !allow_click {
         return Err(ComputerError::InvalidAction(
             "the element has no supported accessibility action; pointer fallback is disabled"
                 .into(),
         ));
     }
-    let (x, y) = element.center();
     click(desktop, target, x, y, MouseButton::Left)?;
     Ok(ComputerResult::Pressed {
         method: PressMethod::Click,
     })
+}
+
+/// A background app's menus ignore Command shortcuts posted to it, so a Command shortcut for an
+/// app that is not frontmost presses the menu item with that shortcut instead. A disabled item
+/// fails: its app has no window to act on until it comes to the front. Other keys, shortcuts in no
+/// menu, and every key for the frontmost app are posted.
+fn press_key(
+    desktop: &dyn Desktop,
+    target: &ComputerTarget,
+    key: Key,
+    modifiers: &[Modifier],
+) -> Result<ComputerResult, ComputerError> {
+    let window = validate(desktop, target, Need::Keys)?;
+    if modifiers.contains(&Modifier::Command)
+        && desktop.route() == InputRoute::Window
+        && desktop.frontmost() != Some(target.process_id)
+        && let Some(item) = desktop.menu_shortcut(&window, key, modifiers)?
+    {
+        let name = item.name.as_deref().unwrap_or("untitled");
+        if item.states.contains(&ElementState::Disabled) {
+            return Err(ComputerError::InvalidAction(format!(
+                "the shortcut's menu command `{name}` is disabled; apps in the background \
+                 disable commands that act on a window, so press the window's own control instead"
+            )));
+        }
+        if !desktop.press(&window, ElementRoot::MenuBar, &item.path)? {
+            return Err(ComputerError::InvalidAction(format!(
+                "the shortcut's menu command `{name}` has no supported accessibility action"
+            )));
+        }
+        return Ok(ComputerResult::Pressed {
+            method: PressMethod::Action,
+        });
+    }
+    desktop.post(
+        &window,
+        &InputEvent::Key {
+            key,
+            modifiers: modifiers.to_vec(),
+        },
+    )?;
+    Ok(ComputerResult::Posted)
 }
 
 fn type_text(

@@ -71,7 +71,10 @@ Native provider conversations use Unix sockets on macOS and Linux and same-user
 named pipes on Windows. Provider stdin/stdout stay private to the conversation;
 stopping it terminates its owned process tree, including Windows descendants.
 
-Computer commands use an exact window token returned by `computer.targets`.
+Computer commands use an exact window token returned by `computer.targets`,
+passed as one JSON window object. Pointer coordinates and snapshot regions are
+screen points inside the token's `bounds`, not window-relative points. Invalid
+arguments fail with `invalid_arguments` and name the argument and the reason.
 Window or process changes invalidate the token, and input is never redirected
 to another window. `computer.elements` lists the window's accessibility elements
 and `computer.press` presses one of them by the element it returned; it follows
@@ -83,6 +86,16 @@ to the supplied absolute local path and never replaces an existing file.
 
 The optional third argument to `computer.press`, `allow-click`, defaults to `true`;
 pass `false` for an accessibility-only action.
+
+On macOS, `computer.elements <target> menu_bar` lists the menu bar of the target
+window's app in menu order, read through Accessibility without opening a menu or
+bringing the app forward. These elements carry `"root": "menu_bar"` and no frame.
+`computer.press` presses a listed menu item through Accessibility only, never
+with a click, and refuses menu titles and items with a submenu. The system's
+Apple menu and the app menu's submenus, such as Services, are left out because
+they act outside the app. Enabled states may be stale until a menu opens, and a
+background app disables the menu commands that act on a window, such as Close.
+Windows and Linux report the menu bar as unsupported.
 
 Linux element discovery and semantic actions use the installed AT-SPI accessibility
 bus, with bounded reads and no focus or input events. Presses invoke named activation
@@ -123,7 +136,14 @@ window and lifts it behind the frontmost app without activating its app. Views
 that need their window active, such as web content, ignore clicks while their
 app is in the background, so a left click in an app that is not frontmost
 presses the accessibility element under the point when it has its own press
-action. Other clicks, and every click on the frontmost app, are sent as clicks. On Windows and Linux, coordinate and keyboard input drive the shared pointer and keyboard,
+action. Other clicks, and every click on the frontmost app, are sent as clicks.
+A background app's menus ignore posted shortcuts, so `computer.key` with
+Command for an app that is not frontmost presses the menu item with that
+shortcut through Accessibility and returns `pressed`. It fails when that item is
+disabled, as commands that act on a window are while their app is in the
+background; press the window's own control instead, such as its close button.
+A Command shortcut in no menu is posted for views that handle keys themselves.
+On Windows and Linux, coordinate and keyboard input drive the shared pointer and keyboard,
 so the target must be the focused window and each point uncovered;
 `computer.focus` brings it to the front, and Command shortcuts are sent as
 Control.

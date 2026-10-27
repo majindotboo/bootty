@@ -17,8 +17,8 @@ use atspi_proxies::{
 use zbus::{blocking::Connection, proxy::CacheProperties};
 
 use crate::{
-    ComputerElement, ComputerError, ComputerTarget, DisplayBounds, ElementState, MAX_ELEMENT_DEPTH,
-    desktop::NativeWindow,
+    ComputerElement, ComputerError, ComputerTarget, DisplayBounds, ElementRoot, ElementState,
+    MAX_ELEMENT_DEPTH, desktop::NativeWindow,
 };
 
 const CALL_TIMEOUT: Duration = Duration::from_millis(500);
@@ -335,11 +335,12 @@ impl Session {
         }
         Ok(Some(ComputerElement {
             path,
+            root: ElementRoot::Window,
             role: role.name().into(),
             name,
             value,
             identifier: Some(identifier),
-            frame,
+            frame: Some(frame),
             states,
         }))
     }

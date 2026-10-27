@@ -560,10 +560,17 @@ static DISOWNED_COMMAND_COUNTER: AtomicU64 = AtomicU64::new(0);
 #[cfg(target_os = "macos")]
 const DISOWNED_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// launchd restarts a submitted job each time it exits, even after success, until it is removed.
+/// Only the first launch runs the command: a restart cannot create `started` again, nor can a late
+/// one after the directory is gone. The script writes the command's output and exit status itself,
+/// so a restart cannot replace them.
 #[cfg(target_os = "macos")]
-const LAUNCHD_SUBMIT_SCRIPT: &str = r#"program=$1
-shift
-exec "$program" "$@"
+const LAUNCHD_SUBMIT_SCRIPT: &str = r#"directory=$1 program=$2
+shift 2
+(set -C; : > "$directory/started") 2> /dev/null || exit 0
+"$program" "$@" > "$directory/stdout" 2> "$directory/stderr"
+printf '%s\n' "$?" > "$directory/status.part"
+mv "$directory/status.part" "$directory/status"
 "#;
 
 #[cfg(target_os = "macos")]
@@ -576,19 +583,15 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
     let mut script = macos_shell_environment_prelude();
     script.push_str(LAUNCHD_SUBMIT_SCRIPT);
     let directory = tempfile::tempdir().context("prepare detached command output")?;
-    let stdout = tempfile::NamedTempFile::new_in(directory.path())?;
-    let stderr = tempfile::NamedTempFile::new_in(directory.path())?;
 
     let output = command_output(
         "launchctl",
         Command::new(&launchctl)
-            .args(["submit", "-l", &label, "-o"])
-            .arg(stdout.path())
-            .arg("-e")
-            .arg(stderr.path())
-            .args(["--", &shell, "-c"])
+            .args(["submit", "-l", &label, "--", &shell, "-c"])
             .arg(script)
-            .args(["bootty-disowned", &resolved_program])
+            .arg("bootty-disowned")
+            .arg(directory.path())
+            .arg(&resolved_program)
             .args(args)
             .output(),
     )?;
@@ -596,15 +599,10 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
         return Ok(output);
     }
 
-    let status = wait_for_launchd_exit_with_capture(
-        &launchctl,
-        &label,
-        DISOWNED_COMMAND_TIMEOUT,
-        &[stdout.path(), stderr.path()],
-    );
+    let status = wait_for_disowned_exit(directory.path(), &label, DISOWNED_COMMAND_TIMEOUT);
     let _ = Command::new(&launchctl).args(["remove", &label]).output();
-    let stdout = read_disowned_output(&stdout)?;
-    let stderr = read_disowned_output(&stderr)?;
+    let stdout = read_disowned_output(&directory.path().join("stdout"))?;
+    let stderr = read_disowned_output(&directory.path().join("stderr"))?;
     let status = status.with_context(|| {
         if stderr.trim().is_empty() {
             format!("Could not finish starting {program}")
@@ -623,12 +621,48 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
     })
 }
 
+/// Waits for the exit status the submitted script writes once its command exits.
 #[cfg(target_os = "macos")]
-fn read_disowned_output(file: &tempfile::NamedTempFile) -> Result<String> {
+fn wait_for_disowned_exit(directory: &Path, label: &str, timeout: Duration) -> Result<i32> {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        // The command writes to private files, so stop an overflowing job while it is live.
+        for name in ["stdout", "stderr"] {
+            match std::fs::metadata(directory.join(name)) {
+                Ok(metadata) if metadata.len() > MAX_CAPTURE_BYTES => {
+                    bail!("command output exceeds the 16 MiB capture limit")
+                }
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+                _ => {}
+            }
+        }
+        match std::fs::read_to_string(directory.join("status")) {
+            Ok(status) => {
+                return status.trim().parse().with_context(|| {
+                    format!("Detached command {label} reported status {status:?}")
+                });
+            }
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    bail!(
+        "The system launcher did not report completion of {label} within {} seconds. Retry after checking the host's session service.",
+        timeout.as_secs()
+    )
+}
+
+/// Reads one captured stream; a command that never started has none.
+#[cfg(target_os = "macos")]
+fn read_disowned_output(path: &Path) -> Result<String> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
+        Err(error) => return Err(error.into()),
+    };
     let mut bytes = Vec::new();
-    file.as_file()
-        .take(MAX_CAPTURE_BYTES + 1)
-        .read_to_end(&mut bytes)?;
+    file.take(MAX_CAPTURE_BYTES + 1).read_to_end(&mut bytes)?;
     if u64::try_from(bytes.len())? > MAX_CAPTURE_BYTES {
         bail!("command output exceeds the 16 MiB capture limit")
     }
@@ -677,61 +711,6 @@ fn is_shell_identifier(value: &str) -> bool {
 #[cfg(target_os = "macos")]
 fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
-}
-
-#[cfg(target_os = "macos")]
-/// # Errors
-/// Returns launchctl execution, status parsing, or timeout errors.
-pub fn wait_for_launchd_exit(launchctl: &str, label: &str, timeout: Duration) -> Result<i32> {
-    wait_for_launchd_exit_with_capture(launchctl, label, timeout, &[])
-}
-
-#[cfg(target_os = "macos")]
-fn wait_for_launchd_exit_with_capture(
-    launchctl: &str,
-    label: &str,
-    timeout: Duration,
-    captures: &[&Path],
-) -> Result<i32> {
-    let start = Instant::now();
-    while start.elapsed() < timeout {
-        // launchd writes to private files, so stop an overflowing job while it is live.
-        for path in captures {
-            if std::fs::metadata(path)?.len() > MAX_CAPTURE_BYTES {
-                bail!("command output exceeds the 16 MiB capture limit")
-            }
-        }
-        let output = Command::new(launchctl).args(["list", label]).output()?;
-        if !output.status.success() {
-            bail!(
-                "Could not inspect detached command {label} ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        let text = String::from_utf8_lossy(&output.stdout);
-        // A submitted job can be queued without either a PID or an exit status.
-        // Only an explicitly reported exit is completion.
-        if !text.contains("\"PID\"")
-            && let Some(status) = parse_launchd_exit_status(&text)
-        {
-            return Ok(status);
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    bail!(
-        "The system launcher did not report completion of {label} within {} seconds. Retry after checking the host's session service.",
-        timeout.as_secs()
-    )
-}
-
-#[cfg(target_os = "macos")]
-fn parse_launchd_exit_status(text: &str) -> Option<i32> {
-    text.lines().find_map(|line| {
-        line.trim()
-            .strip_prefix("\"LastExitStatus\" = ")
-            .and_then(|value| value.trim_end_matches(';').parse().ok())
-    })
 }
 
 #[cfg(target_os = "macos")]

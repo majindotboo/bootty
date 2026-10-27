@@ -9,5 +9,4 @@ pub use bootty_host::{
 #[cfg(target_os = "macos")]
 pub use bootty_host::{
     macos_shell_environment_prelude, macos_shell_environment_prelude_from, resolve_program,
-    wait_for_launchd_exit,
 };

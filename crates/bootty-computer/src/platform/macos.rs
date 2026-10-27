@@ -8,6 +8,11 @@
 //! the element under the point instead, which leaves only points without a pressable element, such
 //! as a web canvas. Click those directly if macOS offers a public way to make a window key without
 //! activating its app.
+//!
+//! Deliberate limit: a background app's menus ignore posted shortcuts, so the shared rules press
+//! the menu item with the shortcut instead, but such an app disables the commands that act on a
+//! window, such as Close, and those fail. A Command shortcut in no menu is still posted, for views
+//! that handle keys themselves; `AppKit`'s own views ignore it. Lift both with the click limit.
 #![allow(
     unsafe_code,
     reason = "Accessibility, Carbon and Objective-C calls are confined to this native adapter."
@@ -40,8 +45,8 @@ use objc2_screen_capture_kit::{
 };
 
 use crate::{
-    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, ElementState,
-    Key, MAX_ELEMENT_DEPTH, Modifier, MouseButton, PermissionStatus,
+    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, ElementRoot,
+    ElementState, Key, MAX_ELEMENT_DEPTH, Modifier, MouseButton, PermissionStatus,
     desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow},
 };
 
@@ -61,8 +66,19 @@ const MAX_ELEMENT_READS: usize = 4_000;
 const ELEMENT_BUDGET: Duration = Duration::from_secs(3);
 /// Names and values longer than this many characters are cut.
 const MAX_ELEMENT_TEXT: usize = 200;
+/// Menu bar paths step from the menu bar through each menu: `[1, 0, 4]` is the fifth item of the
+/// app menu. The first menu bar item is the system's Apple menu, and the app menu's submenus, such
+/// as Services, run other apps; neither belongs to the target app, so both stay out of reach.
+const APPLE_MENU: u16 = 0;
+const APP_MENU: u16 = 1;
+/// Menu shortcut modifier bits, as `AXMenuItemCmdModifiers` reports them. Every shortcut includes
+/// Command unless it has the no-Command bit.
+const MENU_SHIFT: i64 = 1;
+const MENU_OPTION: i64 = 2;
+const MENU_CONTROL: i64 = 4;
+const MENU_NO_COMMAND: i64 = 8;
 /// Read together, one call per element; `Attributes` indexes values in this order.
-const ELEMENT_ATTRIBUTES: [&str; 12] = [
+const ELEMENT_ATTRIBUTES: [&str; 15] = [
     "AXRole",
     "AXSubrole",
     "AXTitle",
@@ -75,6 +91,9 @@ const ELEMENT_ATTRIBUTES: [&str; 12] = [
     "AXEnabled",
     "AXSelected",
     "AXChildren",
+    "AXMenuItemCmdChar",
+    "AXMenuItemCmdVirtualKey",
+    "AXMenuItemCmdModifiers",
 ];
 /// Roles listed even without a name, because they act when pressed or typed into.
 const CONTROL_ROLES: [&str; 17] = [
@@ -401,8 +420,12 @@ impl Desktop for MacDesktop {
     fn elements(
         &self,
         window: &NativeWindow,
+        root: ElementRoot,
         limit: usize,
     ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        if root == ElementRoot::MenuBar {
+            return menu_bar_elements(window, limit);
+        }
         let root = ax_window(window).ok_or(ComputerError::TargetUnavailable)?;
         if let Some(app) = window
             .app
@@ -422,18 +445,7 @@ impl Desktop for MacDesktop {
             .as_ref()
             .and_then(|app| ax_application(app.process_id))
             .and_then(|app| ax_element(&app, "AXFocusedUIElement"));
-        let mut listing = Listing {
-            names: attribute_names(),
-            focused,
-            window: window.bounds.clone(),
-            limit,
-            deadline: Instant::now()
-                .checked_add(ELEMENT_BUDGET)
-                .unwrap_or_else(Instant::now),
-            reads: 0,
-            elements: Vec::new(),
-            omitted: false,
-        };
+        let mut listing = Listing::new(window, limit, focused);
         let children =
             Attributes::read(&root, &listing.names).map_or_else(Vec::new, |root| root.children());
         listing.visit(&children, &mut Vec::new(), None);
@@ -443,12 +455,13 @@ impl Desktop for MacDesktop {
     fn element(
         &self,
         window: &NativeWindow,
+        root: ElementRoot,
         path: &[u16],
     ) -> Result<Option<ComputerElement>, ComputerError> {
         let names = attribute_names();
-        Ok(element_at(window, path)
+        Ok(element_at(window, root, path)
             .and_then(|element| Attributes::read(&element, &names))
-            .and_then(|attributes| attributes.element(path.to_vec(), false)))
+            .and_then(|attributes| attributes.element(root, path.to_vec(), false)))
     }
 
     fn pressable_at(
@@ -524,7 +537,8 @@ impl Desktop for MacDesktop {
         path: &[u16],
         value: &str,
     ) -> Result<(), ComputerError> {
-        let element = element_at(window, path).ok_or(ComputerError::StaleElement)?;
+        let element =
+            element_at(window, ElementRoot::Window, path).ok_or(ComputerError::StaleElement)?;
         let attribute = CFString::from_static_str("AXValue");
         let mut settable = 0_u8;
         let code = unsafe {
@@ -544,8 +558,21 @@ impl Desktop for MacDesktop {
         }
     }
 
-    fn press(&self, window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
-        let element = element_at(window, path).ok_or(ComputerError::StaleElement)?;
+    /// A menu item is pressed through its menu, which stays closed and does not bring the app
+    /// forward. Menu bar titles and items with a submenu would open a menu instead, so they are
+    /// refused.
+    fn press(
+        &self,
+        window: &NativeWindow,
+        root: ElementRoot,
+        path: &[u16],
+    ) -> Result<bool, ComputerError> {
+        let element = element_at(window, root, path).ok_or(ComputerError::StaleElement)?;
+        if root == ElementRoot::MenuBar && !menu_command(&element) {
+            return Err(ComputerError::InvalidAction(
+                "only menu items without a submenu can be pressed".into(),
+            ));
+        }
         if !has_action(&element, "AXPress") {
             return Ok(false);
         }
@@ -561,6 +588,23 @@ impl Desktop for MacDesktop {
                 "the app refused the press ({code})"
             ))),
         }
+    }
+
+    /// Shortcuts are read from the menus without opening one.
+    fn menu_shortcut(
+        &self,
+        window: &NativeWindow,
+        key: Key,
+        modifiers: &[Modifier],
+    ) -> Result<Option<ComputerElement>, ComputerError> {
+        let Some(bar) = menu_bar(window) else {
+            return Ok(None);
+        };
+        let mut search = ShortcutSearch::new(MenuShortcut::new(key, modifiers));
+        let children =
+            Attributes::read(&bar, &search.names).map_or_else(Vec::new, |bar| bar.children());
+        let enabled = search.visit(&children, &mut Vec::new());
+        Ok(enabled.or(search.disabled))
     }
 }
 
@@ -678,9 +722,53 @@ fn ax_window(window: &NativeWindow) -> Option<CFRetained<CFType>> {
     exact.next().is_none().then_some(element)
 }
 
-/// The element `path` names, by child position from the window.
-fn element_at(window: &NativeWindow, path: &[u16]) -> Option<CFRetained<CFType>> {
-    let mut element = ax_window(window)?;
+/// The menu bar of the window's app.
+fn menu_bar(window: &NativeWindow) -> Option<CFRetained<CFType>> {
+    let app = ax_application(window.app.as_ref()?.process_id)?;
+    ax_element(&app, "AXMenuBar")
+}
+
+/// Whether a menu bar path leads outside the target app's own menus.
+const fn outside_app(path: &[u16]) -> bool {
+    matches!(path, [APPLE_MENU, ..] | [APP_MENU, _, _, _, ..])
+}
+
+/// A menu item that runs a command when pressed: one without a submenu.
+fn menu_command(element: &CFType) -> bool {
+    let role = ax_attribute(element, "AXRole")
+        .and_then(|role| role.downcast::<CFString>().ok())
+        .is_some_and(|role| role.to_string() == "AXMenuItem");
+    let submenu = ax_attribute(element, "AXChildren")
+        .and_then(|children| children.downcast::<CFArray>().ok())
+        .is_some_and(|children| children.count() > 0);
+    role && !submenu
+}
+
+/// The menu bar of the window's app, in menu order.
+fn menu_bar_elements(
+    window: &NativeWindow,
+    limit: usize,
+) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+    let bar = menu_bar(window)
+        .ok_or_else(|| ComputerError::Platform("the app has no readable menu bar".into()))?;
+    let mut listing = Listing::new(window, limit, None);
+    let children =
+        Attributes::read(&bar, &listing.names).map_or_else(Vec::new, |bar| bar.children());
+    listing.visit_menu(&children, &mut Vec::new());
+    Ok((listing.elements, listing.omitted))
+}
+
+/// The element `path` names, by child position from `root`.
+fn element_at(
+    window: &NativeWindow,
+    root: ElementRoot,
+    path: &[u16],
+) -> Option<CFRetained<CFType>> {
+    let mut element = match root {
+        ElementRoot::Window => ax_window(window)?,
+        ElementRoot::MenuBar if outside_app(path) => return None,
+        ElementRoot::MenuBar => menu_bar(window)?,
+    };
     for &index in path {
         let children = ax_attribute(&element, "AXChildren")?
             .downcast::<CFArray>()
@@ -739,6 +827,21 @@ impl Attributes {
         self.value(name)?.downcast::<CFNumber>().ok()?.as_f64()
     }
 
+    fn integer(&self, name: &str) -> Option<i64> {
+        self.value(name)?.downcast::<CFNumber>().ok()?.as_i64()
+    }
+
+    /// A string of exactly one character, uppercased.
+    fn character(&self, name: &str) -> Option<char> {
+        let text = self.value(name)?.downcast::<CFString>().ok()?.to_string();
+        let mut characters = text.chars();
+        let character = characters.next()?;
+        characters
+            .next()
+            .is_none()
+            .then(|| character.to_ascii_uppercase())
+    }
+
     fn children(&self) -> Vec<CFRetained<CFType>> {
         let Some(children) = self
             .value("AXChildren")
@@ -769,8 +872,8 @@ impl Attributes {
         })
     }
 
-    /// The element as listed, when it has a role and a visible frame.
-    fn element(&self, path: Vec<u16>, focused: bool) -> Option<ComputerElement> {
+    /// The element as listed, when it has a role and, in a window, a visible frame.
+    fn element(&self, root: ElementRoot, path: Vec<u16>, focused: bool) -> Option<ComputerElement> {
         let role = self
             .value("AXRole")?
             .downcast::<CFString>()
@@ -781,9 +884,13 @@ impl Attributes {
             .and_then(|subrole| subrole.downcast::<CFString>().ok())
             .map(|subrole| subrole.to_string())
             .filter(|subrole| subrole != "AXUnknown");
-        let frame = self
-            .frame()
-            .filter(|frame| frame.width > 0.0 && frame.height > 0.0)?;
+        let frame = match root {
+            ElementRoot::Window => Some(
+                self.frame()
+                    .filter(|frame| frame.width > 0.0 && frame.height > 0.0)?,
+            ),
+            ElementRoot::MenuBar => None,
+        };
         let secure = subrole.as_deref() == Some("AXSecureTextField");
         let toggle = matches!(role.as_str(), "AXRadioButton" | "AXCheckBox");
         let on = toggle && self.number("AXValue") == Some(1.0);
@@ -802,6 +909,7 @@ impl Attributes {
         }
         Some(ComputerElement {
             path,
+            root,
             role: subrole.as_ref().map_or_else(
                 || bare(&role).to_owned(),
                 |subrole| format!("{}:{}", bare(&role), bare(subrole)),
@@ -855,6 +963,65 @@ struct Listing {
 }
 
 impl Listing {
+    fn new(window: &NativeWindow, limit: usize, focused: Option<CFRetained<CFType>>) -> Self {
+        Self {
+            names: attribute_names(),
+            focused,
+            window: window.bounds.clone(),
+            limit,
+            deadline: Instant::now()
+                .checked_add(ELEMENT_BUDGET)
+                .unwrap_or_else(Instant::now),
+            reads: 0,
+            elements: Vec::new(),
+            omitted: false,
+        }
+    }
+
+    /// Menu order rather than screen order, since closed menus have no frames. Titled menu bar
+    /// items and menu items are listed, those with a submenu for context; menus themselves and
+    /// separators are not.
+    ///
+    /// Deliberate limit: the menu bar shares the element limit and time budget, so an app with
+    /// very long menus omits its later ones. Add a way to list one menu if that hurts real apps.
+    fn visit_menu(&mut self, children: &[CFRetained<CFType>], path: &mut Vec<u16>) {
+        for (index, child) in children.iter().enumerate() {
+            if self.reads >= MAX_ELEMENT_READS || Instant::now() >= self.deadline {
+                self.omitted = true;
+                return;
+            }
+            self.reads = self.reads.saturating_add(1);
+            let (Ok(index), Some(attributes)) =
+                (u16::try_from(index), Attributes::read(child, &self.names))
+            else {
+                continue;
+            };
+            path.push(index);
+            if outside_app(path) {
+                path.pop();
+                continue;
+            }
+            let element = attributes
+                .string("AXTitle")
+                .and_then(|_| attributes.element(ElementRoot::MenuBar, path.clone(), false));
+            if let Some(element) = element {
+                if self.elements.len() >= self.limit {
+                    self.omitted = true;
+                    path.pop();
+                    return;
+                }
+                self.elements.push(element);
+            }
+            if path.len() < MAX_ELEMENT_DEPTH {
+                self.visit_menu(&attributes.children(), path);
+            }
+            path.pop();
+            if self.omitted {
+                return;
+            }
+        }
+    }
+
     /// `context` is the name of the nearest listed ancestor; text that only repeats it is left
     /// out, as in a link and its own label.
     fn visit(
@@ -892,7 +1059,7 @@ impl Listing {
             path.push(index);
             let children = attributes.children();
             let element = (focused || listed(&attributes, children.is_empty(), context))
-                .then(|| attributes.element(path.clone(), focused))
+                .then(|| attributes.element(ElementRoot::Window, path.clone(), focused))
                 .flatten();
             let name = element.as_ref().and_then(|element| element.name.clone());
             if let Some(element) = element {
@@ -910,6 +1077,128 @@ impl Listing {
             if self.omitted {
                 return;
             }
+        }
+    }
+}
+
+/// A requested shortcut in the terms a menu item reports its own.
+struct MenuShortcut {
+    virtual_key: i64,
+    modifiers: i64,
+    /// The key's character, and the symbol Shift types on it with a US layout, which a menu shows
+    /// without Shift, as in `}`.
+    character: Option<char>,
+    shifted: Option<char>,
+}
+
+impl MenuShortcut {
+    fn new(key: Key, modifiers: &[Modifier]) -> Self {
+        let command = if modifiers.contains(&Modifier::Command) {
+            0
+        } else {
+            MENU_NO_COMMAND
+        };
+        let modifiers = modifiers.iter().fold(command, |bits, modifier| {
+            bits | match modifier {
+                Modifier::Command => 0,
+                Modifier::Shift => MENU_SHIFT,
+                Modifier::Option => MENU_OPTION,
+                Modifier::Control => MENU_CONTROL,
+            }
+        });
+        let (character, shifted) = menu_characters(key).unzip();
+        Self {
+            virtual_key: i64::from(key_code(key)),
+            modifiers,
+            character,
+            shifted: shifted.flatten(),
+        }
+    }
+
+    /// Items with a special key, such as Return or an arrow, report its virtual key; others report
+    /// their character.
+    fn matches(&self, item: &Attributes) -> bool {
+        let Some(modifiers) = item.integer("AXMenuItemCmdModifiers") else {
+            return false;
+        };
+        if let Some(code) = item.integer("AXMenuItemCmdVirtualKey") {
+            return code == self.virtual_key && modifiers == self.modifiers;
+        }
+        let character = item.character("AXMenuItemCmdChar");
+        character.is_some()
+            && ((character == self.character && modifiers == self.modifiers)
+                || (character == self.shifted
+                    && self.modifiers & MENU_SHIFT != 0
+                    && modifiers == self.modifiers ^ MENU_SHIFT))
+    }
+}
+
+/// A depth-first search of the app's menus, in menu order and within the listing budget, for the
+/// item with one shortcut. Menus outside the app are never searched.
+struct ShortcutSearch {
+    shortcut: MenuShortcut,
+    names: CFRetained<CFArray<CFString>>,
+    deadline: Instant,
+    reads: usize,
+    /// The first disabled match, reported when no enabled one follows.
+    disabled: Option<ComputerElement>,
+}
+
+impl ShortcutSearch {
+    fn new(shortcut: MenuShortcut) -> Self {
+        Self {
+            shortcut,
+            names: attribute_names(),
+            deadline: Instant::now()
+                .checked_add(ELEMENT_BUDGET)
+                .unwrap_or_else(Instant::now),
+            reads: 0,
+            disabled: None,
+        }
+    }
+
+    /// The first enabled match under `children`.
+    fn visit(
+        &mut self,
+        children: &[CFRetained<CFType>],
+        path: &mut Vec<u16>,
+    ) -> Option<ComputerElement> {
+        for (index, child) in children.iter().enumerate() {
+            if self.reads >= MAX_ELEMENT_READS || Instant::now() >= self.deadline {
+                return None;
+            }
+            self.reads = self.reads.saturating_add(1);
+            let (Ok(index), Some(attributes)) =
+                (u16::try_from(index), Attributes::read(child, &self.names))
+            else {
+                continue;
+            };
+            path.push(index);
+            let found = self.visit_item(&attributes, path);
+            path.pop();
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    fn visit_item(&mut self, item: &Attributes, path: &mut Vec<u16>) -> Option<ComputerElement> {
+        if outside_app(path) {
+            return None;
+        }
+        if self.shortcut.matches(item)
+            && let Some(element) = item.element(ElementRoot::MenuBar, path.clone(), false)
+        {
+            if !element.states.contains(&ElementState::Disabled) {
+                return Some(element);
+            }
+            self.disabled.get_or_insert(element);
+        }
+        if path.len() < MAX_ELEMENT_DEPTH {
+            self.visit(&item.children(), path)
+        } else {
+            None
         }
     }
 }
@@ -1144,6 +1433,61 @@ fn draw(image: &CGImage, width: u32, height: u32) -> Result<Image, ComputerError
 }
 
 /// macOS virtual key codes from Carbon's `Events.h`.
+/// The character a menu shows for a key, uppercased, and the symbol Shift types on it with a US
+/// layout. Keys without one are matched by virtual key.
+const fn menu_characters(key: Key) -> Option<(char, Option<char>)> {
+    Some(match key {
+        Key::A => ('A', None),
+        Key::B => ('B', None),
+        Key::C => ('C', None),
+        Key::D => ('D', None),
+        Key::E => ('E', None),
+        Key::F => ('F', None),
+        Key::G => ('G', None),
+        Key::H => ('H', None),
+        Key::I => ('I', None),
+        Key::J => ('J', None),
+        Key::K => ('K', None),
+        Key::L => ('L', None),
+        Key::M => ('M', None),
+        Key::N => ('N', None),
+        Key::O => ('O', None),
+        Key::P => ('P', None),
+        Key::Q => ('Q', None),
+        Key::R => ('R', None),
+        Key::S => ('S', None),
+        Key::T => ('T', None),
+        Key::U => ('U', None),
+        Key::V => ('V', None),
+        Key::W => ('W', None),
+        Key::X => ('X', None),
+        Key::Y => ('Y', None),
+        Key::Z => ('Z', None),
+        Key::Digit0 => ('0', Some(')')),
+        Key::Digit1 => ('1', Some('!')),
+        Key::Digit2 => ('2', Some('@')),
+        Key::Digit3 => ('3', Some('#')),
+        Key::Digit4 => ('4', Some('$')),
+        Key::Digit5 => ('5', Some('%')),
+        Key::Digit6 => ('6', Some('^')),
+        Key::Digit7 => ('7', Some('&')),
+        Key::Digit8 => ('8', Some('*')),
+        Key::Digit9 => ('9', Some('(')),
+        Key::Minus => ('-', Some('_')),
+        Key::Equal => ('=', Some('+')),
+        Key::LeftBracket => ('[', Some('{')),
+        Key::RightBracket => (']', Some('}')),
+        Key::Backslash => ('\\', Some('|')),
+        Key::Semicolon => (';', Some(':')),
+        Key::Quote => ('\'', Some('"')),
+        Key::Comma => (',', Some('<')),
+        Key::Period => ('.', Some('>')),
+        Key::Slash => ('/', Some('?')),
+        Key::Backtick => ('`', Some('~')),
+        _ => return None,
+    })
+}
+
 const fn key_code(key: Key) -> u16 {
     match key {
         Key::Return => 0x24,

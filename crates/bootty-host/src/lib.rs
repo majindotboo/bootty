@@ -26,7 +26,6 @@ pub use process::{
 #[cfg(target_os = "macos")]
 pub use process::{
     macos_shell_environment_prelude, macos_shell_environment_prelude_from, resolve_program,
-    wait_for_launchd_exit,
 };
 pub use shell::shell_quote;
 

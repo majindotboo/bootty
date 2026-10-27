@@ -26,7 +26,7 @@ use windows::{
 };
 
 use crate::{
-    ComputerElement, ComputerError, DisplayBounds, ElementState, MAX_ELEMENT_DEPTH,
+    ComputerElement, ComputerError, DisplayBounds, ElementRoot, ElementState, MAX_ELEMENT_DEPTH,
     desktop::NativeWindow,
 };
 
@@ -206,11 +206,17 @@ pub(super) fn elements(
         omitted: false,
     };
     listing.visit(&session.root, &[])?;
+    // Every window element has a frame.
+    let origin = |element: &ComputerElement| {
+        element
+            .frame
+            .as_ref()
+            .map_or((f64::INFINITY, f64::INFINITY), |frame| (frame.y, frame.x))
+    };
     listing.elements.sort_by(|a, b| {
-        a.frame
-            .y
-            .total_cmp(&b.frame.y)
-            .then_with(|| a.frame.x.total_cmp(&b.frame.x))
+        let ((ay, ax), (by, bx)) = (origin(a), origin(b));
+        ay.total_cmp(&by)
+            .then_with(|| ax.total_cmp(&bx))
             .then_with(|| a.path.cmp(&b.path))
     });
     Ok((listing.elements, listing.omitted))
@@ -359,11 +365,12 @@ fn describe(
     };
     Ok(Some(ComputerElement {
         path,
+        root: ElementRoot::Window,
         role: role(control_type),
         name,
         value,
         identifier,
-        frame,
+        frame: Some(frame),
         states,
     }))
 }

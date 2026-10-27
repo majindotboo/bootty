@@ -24,9 +24,9 @@ use x11rb::{
 };
 
 use crate::{
-    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, Key, Modifier,
-    MouseButton, PermissionStatus,
-    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count},
+    ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, ElementRoot,
+    Key, Modifier, MouseButton, PermissionStatus,
+    desktop::{Desktop, Image, InputEvent, InputRoute, NativeWindow, pixel_count, window_only},
 };
 
 // About 40 pixels of scrolling is one wheel click.
@@ -216,20 +216,30 @@ impl Desktop for LinuxDesktop {
     fn elements(
         &self,
         window: &NativeWindow,
+        root: ElementRoot,
         limit: usize,
     ) -> Result<(Vec<ComputerElement>, bool), ComputerError> {
+        window_only(root)?;
         accessibility::elements(window, limit)
     }
 
     fn element(
         &self,
         window: &NativeWindow,
+        root: ElementRoot,
         path: &[u16],
     ) -> Result<Option<ComputerElement>, ComputerError> {
+        window_only(root)?;
         accessibility::element(window, path)
     }
 
-    fn press(&self, window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
+    fn press(
+        &self,
+        window: &NativeWindow,
+        root: ElementRoot,
+        path: &[u16],
+    ) -> Result<bool, ComputerError> {
+        window_only(root)?;
         accessibility::press(window, path)
     }
 

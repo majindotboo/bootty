@@ -187,6 +187,8 @@ pub enum ComputerAction {
     },
     /// List the window's accessibility elements.
     Elements,
+    /// List the menu bar of the window's app without opening a menu.
+    MenuBar,
     /// Replace an editable element's value through accessibility, without focus or input events.
     SetValue {
         element: Box<ComputerElement>,
@@ -228,7 +230,7 @@ impl ComputerAction {
     pub const fn observes(&self) -> bool {
         matches!(
             self,
-            Self::Snapshot | Self::SnapshotRegion { .. } | Self::Elements
+            Self::Snapshot | Self::SnapshotRegion { .. } | Self::Elements | Self::MenuBar
         )
     }
 
@@ -302,18 +304,46 @@ impl DisplayBounds {
     }
 }
 
+/// Mirrors the JSON shape so error messages can be compared with listed bounds.
+impl std::fmt::Display for DisplayBounds {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{{x: {}, y: {}, width: {}, height: {}}}",
+            self.x, self.y, self.width, self.height
+        )
+    }
+}
+
 /// Most accessibility elements one listing returns.
 pub const MAX_ELEMENTS: usize = 300;
-/// The deepest element path, in child steps from the window.
+/// The deepest element path, in child steps from its root.
 pub const MAX_ELEMENT_DEPTH: usize = 64;
 
-/// One accessibility element of a window, as the app reported it. Disabled and unlabeled elements
-/// are listed too, so every visible control can be matched to a screenshot by its frame.
+/// Where an element's path starts.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ElementRoot {
+    /// The target window.
+    #[default]
+    Window,
+    /// The menu bar of the window's app. Its elements have no frame: menu items have none while
+    /// their menu is closed, and the app's menu bar is not on screen while it is in the background.
+    MenuBar,
+}
+
+/// One accessibility element of a window or its app's menu bar, as the app reported it.
+///
+/// Disabled and unlabeled window elements are listed too, so every visible control can be matched
+/// to a screenshot by its frame.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct ComputerElement {
-    /// Child positions from the window. A press finds the element again by this path.
+    /// Child positions from `root`. A press finds the element again by this path.
     pub path: Vec<u16>,
+    /// Elements listed before roots existed have none, and are window elements.
+    #[serde(default)]
+    pub root: ElementRoot,
     /// The platform role, with its subrole after a colon, such as `RadioButton:TabButton`.
     pub role: String,
     /// The title, description or help text.
@@ -324,8 +354,9 @@ pub struct ComputerElement {
     /// The app's own identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identifier: Option<String>,
-    /// Global desktop points.
-    pub frame: DisplayBounds,
+    /// Global desktop points. Window elements always have one; menu bar elements never do.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame: Option<DisplayBounds>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub states: Vec<ElementState>,
 }
@@ -340,19 +371,20 @@ pub enum ElementState {
 }
 
 impl ComputerElement {
-    /// Where a press clicks when the element has no accessibility action.
+    /// Where a press clicks when the element has no accessibility action. Menu bar elements have
+    /// no frame, so they are never clicked.
     #[must_use]
-    pub fn center(&self) -> (f64, f64) {
-        (
-            self.frame.x + self.frame.width / 2.0,
-            self.frame.y + self.frame.height / 2.0,
-        )
+    pub fn center(&self) -> Option<(f64, f64)> {
+        self.frame
+            .as_ref()
+            .map(|frame| (frame.x + frame.width / 2.0, frame.y + frame.height / 2.0))
     }
 
     /// The same element after a fresh read: its identity, role, name and frame are unchanged.
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
         self.path == other.path
+            && self.root == other.root
             && self.role == other.role
             && self.name == other.name
             && self.identifier == other.identifier
@@ -374,7 +406,16 @@ impl ComputerElement {
                 "invalid accessibility element".into(),
             ));
         }
-        self.frame.validate()
+        match (self.root, &self.frame) {
+            (ElementRoot::Window, Some(frame)) => frame.validate(),
+            (ElementRoot::MenuBar, None) => Ok(()),
+            (ElementRoot::Window, None) => Err(ComputerError::InvalidAction(
+                "window elements need a frame".into(),
+            )),
+            (ElementRoot::MenuBar, Some(_)) => Err(ComputerError::InvalidAction(
+                "menu bar elements have no frame".into(),
+            )),
+        }
     }
 }
 
@@ -412,9 +453,10 @@ impl HostCaptureRegion {
         frame.validate()?;
         self.rect.validate()?;
         if !frame.contains_rect(&self.rect) {
-            return Err(ComputerError::InvalidAction(
-                "capture rectangle is outside the target".into(),
-            ));
+            return Err(ComputerError::InvalidAction(format!(
+                "capture rectangle {} is outside the target frame {frame}",
+                self.rect
+            )));
         }
         Ok(())
     }
@@ -508,26 +550,37 @@ impl ComputerTarget {
         action.validate()?;
         self.validate()?;
         match action {
-            ComputerAction::SnapshotRegion { rect } if !self.bounds.contains_rect(rect) => Err(
-                ComputerError::InvalidAction("capture rectangle is outside the target".into()),
-            ),
+            ComputerAction::SnapshotRegion { rect } if !self.bounds.contains_rect(rect) => {
+                Err(ComputerError::InvalidAction(format!(
+                    "capture rectangle {rect} is outside the target bounds {}",
+                    self.bounds
+                )))
+            }
             ComputerAction::Click { x, y, .. }
             | ComputerAction::Move { x, y }
             | ComputerAction::Scroll { x, y, .. }
                 if !self.contains(*x, *y) =>
             {
+                Err(ComputerError::InvalidAction(format!(
+                    "coordinates ({x}, {y}) are outside the target bounds {}; \
+                     x and y are screen points, not window-relative points",
+                    self.bounds
+                )))
+            }
+            ComputerAction::SetValue { element, .. } if element.root == ElementRoot::MenuBar => {
                 Err(ComputerError::InvalidAction(
-                    "coordinates are outside the target".into(),
+                    "menu bar items can only be pressed".into(),
                 ))
             }
             ComputerAction::Press { element, .. } | ComputerAction::SetValue { element, .. } => {
-                let (x, y) = element.center();
-                if self.contains(x, y) {
-                    Ok(())
-                } else {
-                    Err(ComputerError::InvalidAction(
-                        "the element is outside the target".into(),
-                    ))
+                match element.center() {
+                    // The menu bar belongs to the target's app, not to a point in its window.
+                    None => Ok(()),
+                    Some((x, y)) if self.contains(x, y) => Ok(()),
+                    Some((x, y)) => Err(ComputerError::InvalidAction(format!(
+                        "the element center ({x}, {y}) is outside the target bounds {}",
+                        self.bounds
+                    ))),
                 }
             }
             _ => Ok(()),
@@ -567,7 +620,8 @@ pub enum ComputerResult {
         omitted: bool,
         target: Box<ComputerTarget>,
     },
-    /// The press was delivered. Application acceptance is observed by a subsequent snapshot.
+    /// The press was delivered: of the element, or of the menu item a key's shortcut names.
+    /// Application acceptance is observed by a subsequent snapshot.
     Pressed { method: PressMethod },
 }
 
@@ -588,28 +642,22 @@ impl ComputerResult {
                 | ComputerAction::Key { .. }
                 | ComputerAction::Scroll { .. },
             )
-            | (Self::Pressed { .. }, ComputerAction::Press { .. }) => Ok(()),
+            | (Self::Pressed { .. }, ComputerAction::Press { .. } | ComputerAction::Key { .. }) => {
+                Ok(())
+            }
             (
                 Self::Elements {
                     elements,
                     target: listed,
                     ..
                 },
-                ComputerAction::Elements,
+                ComputerAction::Elements | ComputerAction::MenuBar,
             ) => {
-                listed.validate()?;
-                if !same_window(listed, target) {
-                    return Err(ComputerError::StaleTarget);
-                }
-                if elements.len() > MAX_ELEMENTS {
-                    return Err(ComputerError::Platform(
-                        "the element list exceeds its limit".into(),
-                    ));
-                }
-                elements
-                    .iter()
-                    .try_for_each(ComputerElement::validate)
-                    .map_err(|_| ComputerError::Platform("invalid accessibility element".into()))
+                let root = match action {
+                    ComputerAction::MenuBar => ElementRoot::MenuBar,
+                    _ => ElementRoot::Window,
+                };
+                validate_listing(listed, target, elements, root)
             }
             (
                 Self::Snapshot {
@@ -674,6 +722,33 @@ impl ComputerResult {
             )),
         }
     }
+}
+
+/// A listing of exactly this window with at most [`MAX_ELEMENTS`] valid elements under `root`.
+fn validate_listing(
+    listed: &ComputerTarget,
+    target: &ComputerTarget,
+    elements: &[ComputerElement],
+    root: ElementRoot,
+) -> Result<(), ComputerError> {
+    listed.validate()?;
+    if !same_window(listed, target) {
+        return Err(ComputerError::StaleTarget);
+    }
+    if elements.len() > MAX_ELEMENTS {
+        return Err(ComputerError::Platform(
+            "the element list exceeds its limit".into(),
+        ));
+    }
+    if elements
+        .iter()
+        .any(|element| element.root != root || element.validate().is_err())
+    {
+        return Err(ComputerError::Platform(
+            "invalid accessibility element".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// The same observed window token, compared exactly.

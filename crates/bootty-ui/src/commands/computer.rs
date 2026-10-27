@@ -1,6 +1,8 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
-use bootty_computer::{ComputerAction, ComputerTarget, HostCaptureRegion, MouseButton};
+use bootty_computer::{
+    ComputerAction, ComputerElement, ComputerTarget, ElementRoot, HostCaptureRegion, MouseButton,
+};
 use bootty_control::{
     CommandDescriptor, CommandInvocation, CommandOutcome, CompactSchema, MutationClass, ValueType,
 };
@@ -77,6 +79,26 @@ pub fn agent_may_use(target: &ComputerTarget) -> bool {
     i32::try_from(std::process::id()).ok() != Some(target.process_id)
         && !BLOCKED.contains(&target.bundle_id.as_str())
 }
+
+/// How `describe` explains argument formats shared across computer commands.
+const ARGUMENT_NOTES: [(&str, &str); 4] = [
+    (
+        "target",
+        "Pass target as one window object from computer.targets, as JSON.",
+    ),
+    (
+        "x",
+        "x and y are screen points inside the target's bounds, not window-relative points.",
+    ),
+    (
+        "region",
+        "region is a JSON {x, y, width, height} rectangle in screen points inside the target's bounds.",
+    ),
+    (
+        "element",
+        "Pass element as one entry from computer.elements, as JSON.",
+    ),
+];
 
 #[allow(
     clippy::too_many_lines,
@@ -157,21 +179,21 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
         (
             "computer.key",
             "Press Computer Key",
-            "Post a key with optional comma-separated modifiers to the exact selected window while it is its app's focused window.",
+            "Post a key with optional comma-separated modifiers to the exact selected window while it is its app's focused window. On macOS, a Command shortcut for an app that is not frontmost presses the menu item with that shortcut instead, and fails when the item is disabled, as commands that act on a window are while their app is in the background.",
             &["target", "key", "modifiers"][..],
             MutationClass::Write,
         ),
         (
             "computer.elements",
             "List Computer Elements",
-            "List the accessibility elements of the exact selected window, in screen order.",
-            &["target"][..],
+            "List the accessibility elements of the exact selected window, in screen order. With root menu_bar, list its app's menu bar instead, in menu order and without opening a menu or bringing the app forward; those elements have no frame, and the system's Apple menu and the app menu's Services are left out.",
+            &["target", "root"][..],
             MutationClass::Read,
         ),
         (
             "computer.press",
             "Press Computer Element",
-            "Press a listed element. Set allow-click to false to require its accessibility action without pointer input.",
+            "Press a listed element. Set allow-click to false to require its accessibility action without pointer input. Menu bar elements are pressed through accessibility only, and only menu items without a submenu. Success means the app accepted the press; a background app disables the menu commands that act on a window.",
             &["target", "element", "allow-click"][..],
             MutationClass::Write,
         ),
@@ -194,13 +216,17 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
                         _ => ValueType::String,
                     },
                 );
-                argument.required = !matches!(*name, "button" | "modifiers" | "allow-click")
-                    && id != "computer.snapshot";
+                argument.required =
+                    !matches!(*name, "button" | "modifiers" | "allow-click" | "root")
+                        && id != "computer.snapshot";
                 if *name == "button" {
                     argument.choices = ["left", "right", "middle"].map(str::to_owned).to_vec();
                 }
                 if *name == "allow-click" {
                     argument.choices = ["true", "false"].map(str::to_owned).to_vec();
+                }
+                if *name == "root" {
+                    argument.choices = ["window", "menu_bar"].map(str::to_owned).to_vec();
                 }
                 if matches!(*name, "delta-x" | "delta-y") {
                     argument.minimum = Some(-10_000);
@@ -209,10 +235,17 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
                 argument
             })
             .collect();
+        let mut description = description.to_owned();
+        for (name, note) in ARGUMENT_NOTES {
+            if names.contains(&name) {
+                description.push(' ');
+                description.push_str(note);
+            }
+        }
         let descriptor = CommandDescriptor {
             id: id.to_owned(),
             title: title.to_owned(),
-            description: description.to_owned(),
+            description,
             mutation,
             arguments: CompactSchema { arguments },
             target: None,
@@ -229,99 +262,53 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
 }
 
 pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand, CommandOutcome> {
-    let invalid = || CommandOutcome::Failed {
+    parse(invocation).map_err(|reason| CommandOutcome::Failed {
         code: "invalid_arguments".to_owned(),
-        message: format!("Invalid arguments for {}", invocation.command),
-    };
+        message: format!("Invalid arguments for {}: {reason}", invocation.command),
+    })
+}
+
+/// Parse a computer command, or say which argument is wrong and why.
+fn parse(invocation: &CommandInvocation) -> Result<ComputerCommand, String> {
+    let host_window = invocation
+        .target
+        .as_ref()
+        .is_some_and(|target| target.kind == bootty_control::ResourceKind::ApplicationWindow);
     match invocation.command.as_str() {
         "computer.capture" => {
-            return if invocation.arguments.is_empty()
-                && invocation.target.as_ref().is_some_and(|target| {
-                    target.kind == bootty_control::ResourceKind::ApplicationWindow
-                }) {
+            return if invocation.arguments.is_empty() && host_window {
                 Ok(ComputerCommand::HostCapture)
             } else {
-                Err(invalid())
+                Err("takes no arguments and needs an application window target".to_owned())
             };
         }
         "computer.snapshot" if invocation.arguments.len() <= 1 => {
-            if invocation.target.as_ref().is_some_and(|target| {
-                target.kind == bootty_control::ResourceKind::ApplicationWindow
-            }) {
-                return resolve_host_snapshot(invocation.arguments.first().map(String::as_str))
-                    .map_err(|()| invalid());
+            if host_window {
+                return resolve_host_snapshot(invocation.arguments.first().map(String::as_str));
             }
-            return Err(invalid());
+            return Err("target and an absolute destination path are required".to_owned());
         }
         "computer.status" if invocation.arguments.is_empty() => return Ok(ComputerCommand::Status),
         "computer.targets" if invocation.arguments.is_empty() => {
             return Ok(ComputerCommand::Targets);
         }
-        "computer.icons" => return resolve_icons(&invocation.arguments).ok_or_else(invalid),
+        "computer.icons" => return resolve_icons(&invocation.arguments),
         _ => {}
     }
-    let argument = |index: usize| {
+    let target: ComputerTarget = serde_json::from_str(
         invocation
             .arguments
-            .get(index)
-            .map(String::as_str)
-            .ok_or_else(invalid)
-    };
-    let target: ComputerTarget = serde_json::from_str(argument(0)?).map_err(|_| invalid())?;
-    target.validate().map_err(|_| invalid())?;
-    let coordinate =
-        |index| -> Result<f64, CommandOutcome> { argument(index)?.parse().map_err(|_| invalid()) };
-    let mut destination = None;
-    let action = match invocation.command.as_str() {
-        "computer.snapshot" => {
-            let path = PathBuf::from(argument(1)?);
-            if !path.is_absolute() || path.file_name().is_none() {
-                return Err(invalid());
-            }
-            destination = Some(path);
-            match invocation.arguments.get(2) {
-                Some(rect) => ComputerAction::SnapshotRegion {
-                    rect: serde_json::from_str(rect).map_err(|_| invalid())?,
-                },
-                None => ComputerAction::Snapshot,
-            }
-        }
-        "computer.focus" => ComputerAction::Focus,
-        "computer.click" => ComputerAction::Click {
-            x: coordinate(1)?,
-            y: coordinate(2)?,
-            button: invocation
-                .arguments
-                .get(3)
-                .map_or(Ok(MouseButton::Left), |button| {
-                    serde_json::from_value(serde_json::Value::String(button.clone()))
-                        .map_err(|_| invalid())
-                })?,
-        },
-        "computer.move" => ComputerAction::Move {
-            x: coordinate(1)?,
-            y: coordinate(2)?,
-        },
-        "computer.scroll" => ComputerAction::Scroll {
-            x: coordinate(1)?,
-            y: coordinate(2)?,
-            delta_x: argument(3)?.parse().map_err(|_| invalid())?,
-            delta_y: argument(4)?.parse().map_err(|_| invalid())?,
-        },
-        "computer.type" => ComputerAction::TypeText {
-            text: argument(1)?.to_owned(),
-        },
-        "computer.key" => resolve_key(
-            argument(1)?,
-            invocation.arguments.get(2).map(String::as_str),
-        )
-        .map_err(|()| invalid())?,
-        "computer.elements" if invocation.arguments.len() == 1 => ComputerAction::Elements,
-        "computer.press" => resolve_press(&invocation.arguments).ok_or_else(invalid)?,
-        "computer.set-value" => resolve_set_value(&invocation.arguments).ok_or_else(invalid)?,
-        _ => return Err(invalid()),
-    };
-    target.validate_action(&action).map_err(|_| invalid())?;
+            .first()
+            .ok_or_else(|| "target is required".to_owned())?,
+    )
+    .map_err(|error| {
+        format!("target must be one window object from computer.targets, passed as JSON: {error}")
+    })?;
+    target.validate().map_err(|error| error.to_string())?;
+    let (action, destination) = parse_action(&invocation.command, &invocation.arguments)?;
+    target
+        .validate_action(&action)
+        .map_err(|error| error.to_string())?;
     Ok(ComputerCommand::Execute {
         target,
         action,
@@ -329,56 +316,141 @@ pub(super) fn resolve(invocation: &CommandInvocation) -> Result<ComputerCommand,
     })
 }
 
-fn resolve_set_value(arguments: &[String]) -> Option<ComputerAction> {
-    let [_, element, value] = arguments else {
-        return None;
+/// The action named by the arguments after the target, with a snapshot's destination.
+fn parse_action(
+    command: &str,
+    arguments: &[String],
+) -> Result<(ComputerAction, Option<PathBuf>), String> {
+    let argument = |index: usize, name: &str| {
+        arguments
+            .get(index)
+            .map(String::as_str)
+            .ok_or_else(|| format!("{name} is required"))
     };
-    Some(ComputerAction::SetValue {
-        element: Box::new(serde_json::from_str(element).ok()?),
-        value: value.clone(),
-    })
-}
-
-fn resolve_press(arguments: &[String]) -> Option<ComputerAction> {
-    let element = serde_json::from_str(arguments.get(1)?).ok()?;
-    let allow_click = arguments
-        .get(2)
-        .map_or(Some(true), |value| value.parse().ok())?;
-    Some(ComputerAction::Press {
-        element: Box::new(element),
-        allow_click,
-    })
+    let coordinate = |index, name| -> Result<f64, String> {
+        argument(index, name)?
+            .parse()
+            .map_err(|_| format!("{name} must be a number"))
+    };
+    let delta = |index, name| -> Result<i32, String> {
+        argument(index, name)?
+            .parse()
+            .map_err(|_| format!("{name} must be an integer"))
+    };
+    let element = |index| -> Result<Box<ComputerElement>, String> {
+        serde_json::from_str(argument(index, "element")?).map_err(|error| {
+            format!("element must be one entry from computer.elements, passed as JSON: {error}")
+        })
+    };
+    let action = match command {
+        "computer.snapshot" => {
+            let path = PathBuf::from(argument(1, "destination")?);
+            if !path.is_absolute() || path.file_name().is_none() {
+                return Err("destination must be an absolute file path".to_owned());
+            }
+            let action = match arguments.get(2) {
+                Some(rect) => ComputerAction::SnapshotRegion {
+                    rect: serde_json::from_str(rect).map_err(|error| {
+                        format!(
+                            "region must be a JSON {{x, y, width, height}} rectangle in screen \
+                             points: {error}"
+                        )
+                    })?,
+                },
+                None => ComputerAction::Snapshot,
+            };
+            return Ok((action, Some(path)));
+        }
+        "computer.focus" => ComputerAction::Focus,
+        "computer.click" => ComputerAction::Click {
+            x: coordinate(1, "x")?,
+            y: coordinate(2, "y")?,
+            button: arguments.get(3).map_or(Ok(MouseButton::Left), |button| {
+                serde_json::from_value(serde_json::Value::String(button.clone()))
+                    .map_err(|_| "button must be left, right or middle".to_owned())
+            })?,
+        },
+        "computer.move" => ComputerAction::Move {
+            x: coordinate(1, "x")?,
+            y: coordinate(2, "y")?,
+        },
+        "computer.scroll" => ComputerAction::Scroll {
+            x: coordinate(1, "x")?,
+            y: coordinate(2, "y")?,
+            delta_x: delta(3, "delta-x")?,
+            delta_y: delta(4, "delta-y")?,
+        },
+        "computer.type" => ComputerAction::TypeText {
+            text: argument(1, "text")?.to_owned(),
+        },
+        "computer.key" => resolve_key(argument(1, "key")?, arguments.get(2).map(String::as_str))?,
+        "computer.elements" => match arguments.get(1).map_or(Ok(ElementRoot::Window), |root| {
+            serde_json::from_value(serde_json::Value::String(root.clone()))
+                .map_err(|_| "root must be window or menu_bar".to_owned())
+        })? {
+            ElementRoot::Window => ComputerAction::Elements,
+            ElementRoot::MenuBar => ComputerAction::MenuBar,
+        },
+        "computer.press" => ComputerAction::Press {
+            element: element(1)?,
+            allow_click: arguments.get(2).map_or(Ok(true), |value| {
+                value
+                    .parse()
+                    .map_err(|_| "allow-click must be true or false".to_owned())
+            })?,
+        },
+        "computer.set-value" => ComputerAction::SetValue {
+            element: element(1)?,
+            value: argument(2, "value")?.to_owned(),
+        },
+        _ => return Err("unsupported arguments".to_owned()),
+    };
+    Ok((action, None))
 }
 
 /// One JSON array of at most [`bootty_computer::MAX_ICON_REQUEST`] bundle ids.
-fn resolve_icons(arguments: &[String]) -> Option<ComputerCommand> {
+fn resolve_icons(arguments: &[String]) -> Result<ComputerCommand, String> {
     let [bundle_ids] = arguments else {
-        return None;
+        return Err("bundle-ids is required".to_owned());
     };
-    serde_json::from_str::<Vec<String>>(bundle_ids)
-        .ok()
-        .filter(|ids| ids.len() <= bootty_computer::MAX_ICON_REQUEST)
-        .map(ComputerCommand::Icons)
+    let ids: Vec<String> = serde_json::from_str(bundle_ids)
+        .map_err(|error| format!("bundle-ids must be a JSON array of strings: {error}"))?;
+    if ids.len() > bootty_computer::MAX_ICON_REQUEST {
+        return Err(format!(
+            "bundle-ids lists {} apps; at most {} are allowed",
+            ids.len(),
+            bootty_computer::MAX_ICON_REQUEST
+        ));
+    }
+    Ok(ComputerCommand::Icons(ids))
 }
 
-fn resolve_host_snapshot(value: Option<&str>) -> Result<ComputerCommand, ()> {
+fn resolve_host_snapshot(value: Option<&str>) -> Result<ComputerCommand, String> {
     let Some(value) = value else {
         return Ok(ComputerCommand::HostSnapshot);
     };
-    let region: HostCaptureRegion = serde_json::from_str(value).map_err(|_| ())?;
-    region.validate().map_err(|_| ())?;
+    let region: HostCaptureRegion = serde_json::from_str(value)
+        .map_err(|error| format!("region must be a JSON window-frame crop: {error}"))?;
+    region.validate().map_err(|error| error.to_string())?;
     Ok(ComputerCommand::HostSnapshotRegion(region))
 }
 
-fn resolve_key(key: &str, modifiers: Option<&str>) -> Result<ComputerAction, ()> {
-    let key = serde_json::from_value(serde_json::Value::String(key.to_owned())).map_err(|_| ())?;
+fn resolve_key(key: &str, modifiers: Option<&str>) -> Result<ComputerAction, String> {
+    let key = serde_json::from_value(serde_json::Value::String(key.to_owned())).map_err(|_| {
+        format!("unknown key `{key}`; use a lowercase name such as a, 1, f5, return or page_up")
+    })?;
     let modifiers = modifiers.map_or(Ok(Vec::new()), |modifiers| {
         modifiers
             .split(',')
             .filter(|modifier| !modifier.is_empty())
             .map(|modifier| {
-                serde_json::from_value(serde_json::Value::String(modifier.to_owned()))
-                    .map_err(|_| ())
+                serde_json::from_value(serde_json::Value::String(modifier.to_owned())).map_err(
+                    |_| {
+                        format!(
+                            "unknown modifier `{modifier}`; use command, control, option or shift"
+                        )
+                    },
+                )
             })
             .collect::<Result<Vec<_>, _>>()
     })?;

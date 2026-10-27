@@ -1033,8 +1033,10 @@ falls back to the existing SSH path. Once a request is submitted, connection los
 reported rather than replaying a possible mutation. Disconnect terminates the
 execution or attach client; the selected mux backend retains its owned sessions.
 Remote Unix PTY writers also close without injecting input into those sessions.
-Detached macOS commands retain their real stdout, stderr and exit status through
-private launchd capture files, checked against the same 16 MiB output limit.
+Detached macOS commands run once through launchd, even though launchd restarts a
+submitted job until it is removed. The submitted script keeps the real stdout,
+stderr and exit status in private files, checked against the same 16 MiB output
+limit.
 The relay expires after five idle minutes and remains alive while streams are
 attached. WSL keeps its local distribution process transport.
 
