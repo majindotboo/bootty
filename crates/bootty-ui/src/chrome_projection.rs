@@ -22,10 +22,6 @@ pub struct SessionProgressView {
 
 /// A mux session for native sidebar presentation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Independent observed projection facts: activity, selection, attachment and progress"
-)]
 pub struct SessionView {
     pub id: String,
     pub identity: Option<String>,

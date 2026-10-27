@@ -3,6 +3,7 @@
 //! Pane-addressed input through `WorkspaceRuntime`: where it goes, and that it never outlives the
 //! binding that dispatched it.
 
+use bootty_mux::workspace::NewSpace;
 use std::{
     path::Path,
     sync::{Arc, Mutex, mpsc},
@@ -193,11 +194,13 @@ fn fixture(topology: PaneTopology) -> Result<Fixture> {
     )?;
     let space = workspace
         .create_space(
-            "Target",
-            "folder",
-            [0, 0, 0],
-            false,
-            placement(MultiplexerBackendConfig::Tmux),
+            NewSpace {
+                name: "Target",
+                icon: "folder",
+                color: [0, 0, 0],
+                tint_sidebar: false,
+                mux: placement(MultiplexerBackendConfig::Tmux),
+            },
             &config,
             AppearanceVariant::Light,
         )?

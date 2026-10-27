@@ -38,7 +38,7 @@ use bootty_ui::{AppEffect, AppState, CursorIcon, ModalDialog};
 
 #[path = "support/frames.rs"]
 mod frames;
-mod support;
+pub mod support;
 
 /// Bounds a real pane-process hang without treating scheduler jitter as failure.
 const PANE_BUDGET: Duration = Duration::from_secs(30);

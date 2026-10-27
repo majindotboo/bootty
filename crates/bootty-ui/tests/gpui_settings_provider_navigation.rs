@@ -8,7 +8,7 @@ use gpui_kit::{Action as _, Modifiers, TestAppContext, VisualTestContext, point,
 use settings_support::{GpuiSettingsSnapshot, SettingsProbe};
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 
 const PROVIDER_NAVIGATION_CLICK_CASES: [(&str, &str, &str, &str, &str); 2] = [
     (

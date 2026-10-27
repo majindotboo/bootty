@@ -396,17 +396,12 @@ pub struct RelatedConversation {
 }
 
 impl NativeAgentSessionView {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Construct the retained conversation view and its subscriptions together"
-    )]
-    pub fn new(
-        record: NativeSessionRecord,
-        sender: BoundAppCommandSender,
-        provider_enabled: bool,
+    /// The message composer, which saves its draft as it changes.
+    fn composer(
+        record: &NativeSessionRecord,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Self {
+    ) -> (Entity<TextareaState>, Subscription) {
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(1, 10)
@@ -422,6 +417,14 @@ impl NativeAgentSessionView {
             }
             cx.notify();
         });
+        (composer, subscription)
+    }
+
+    /// The editor for a citation's comment, which saves on Enter.
+    fn citation_editor(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<TextareaState>, Subscription) {
         let citation_editor = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .auto_grow(2, 4)
@@ -435,6 +438,15 @@ impl NativeAgentSessionView {
                 }
                 cx.notify();
             });
+        (citation_editor, citation_subscription)
+    }
+
+    /// The provider's approval and input requests, answered through the conversation's commands.
+    fn request_view(
+        record: &NativeSessionRecord,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<requests::NativeRequestView>, Subscription) {
         let local = record.config.remote.is_none();
         let requests = cx.new(|cx| requests::NativeRequestView::new(record.target(), local, cx));
         cx.subscribe_in(
@@ -465,6 +477,14 @@ impl NativeAgentSessionView {
                 this.sync_requests(window, cx);
             },
         );
+        (requests, request_subscription)
+    }
+
+    /// Dictation and voice input, whose results land in the composer.
+    fn speech_input(
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<crate::gpui_speech::SpeechInput>, Subscription) {
         let speech = cx.new(crate::gpui_speech::SpeechInput::new);
         let speech_subscription = cx.subscribe_in(
             &speech,
@@ -487,6 +507,24 @@ impl NativeAgentSessionView {
                 crate::gpui_speech::SpeechInputEvent::VoiceEnded => this.end_voice_call(),
             },
         );
+        (speech, speech_subscription)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "The view's struct literal lists over a hundred fields; splitting the view into components lifts this."
+    )]
+    pub fn new(
+        record: NativeSessionRecord,
+        sender: BoundAppCommandSender,
+        provider_enabled: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (composer, subscription) = Self::composer(&record, window, cx);
+        let (citation_editor, citation_subscription) = Self::citation_editor(window, cx);
+        let (requests, request_subscription) = Self::request_view(&record, window, cx);
+        let (speech, speech_subscription) = Self::speech_input(window, cx);
         let mut this = Self {
             record,
             subagent: None,
@@ -3098,10 +3136,23 @@ impl NativeAgentSessionView {
         )
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one message composes its content, attachments and metadata"
-    )]
+    /// The message's attachments the conversation still holds, which go back with its text.
+    fn held_attachments(
+        &self,
+        item: &NativeTranscriptItem,
+    ) -> Vec<bootty_agents::NativeAttachmentReference> {
+        item.attachments
+            .iter()
+            .filter(|attachment| {
+                self.record
+                    .attachments
+                    .iter()
+                    .any(|held| held.id == attachment.id)
+            })
+            .cloned()
+            .collect()
+    }
+
     fn render_message(
         &self,
         ix: usize,
@@ -3161,34 +3212,10 @@ impl NativeAgentSessionView {
             })
             .when(
                 !item.questions.is_empty() && item.text.trim().is_empty(),
-                |row| {
-                    row.child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(
-                                item.questions
-                                    .iter()
-                                    .map(|question| question.title.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("\n"),
-                            ),
-                    )
-                },
+                |row| row.child(question_titles(item, cx)),
             )
             .when(self.record.snapshot.undelivered(item), |row| {
-                // Attachments the conversation still holds go back with the text.
-                let held = item
-                    .attachments
-                    .iter()
-                    .filter(|attachment| {
-                        self.record
-                            .attachments
-                            .iter()
-                            .any(|held| held.id == attachment.id)
-                    })
-                    .cloned()
-                    .collect();
+                let held = self.held_attachments(item);
                 row.child(Self::undelivered_notice(item, held, owner.clone(), cx))
             })
             .when(!meta || !item.complete, |row| {
@@ -5034,53 +5061,94 @@ impl NativeAgentSessionView {
             .child(input)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One footer owns the adjacent composer controls"
-    )]
     fn render_composer_controls(&self, window: &Window, cx: &Context<Self>) -> impl IntoElement {
         // A narrow composer shows the permission control as its icon, as the new-session form
         // does. Labels shrink with an ellipsis instead of scrolling the row sideways.
         let width = f32::from(self.composer.read(cx).input_bounds().size.width);
         let compact = width > 0. && width < f32::from(window.rem_size()) * 32.;
-        let send_pending = self.pending.contains("prompt")
-            || self.pending.contains("queue")
-            || self.pending.contains("interrupt-send");
-        let send_label = if is_busy(self.record.snapshot.status) {
-            match self.follow_up_behavior {
-                bootty_config::config::FollowUpBehavior::Queue => "Queue message",
-                bootty_config::config::FollowUpBehavior::Steer => "Steer agent",
-                bootty_config::config::FollowUpBehavior::Interrupt => "Interrupt and send",
-            }
-        } else {
-            "Send message"
-        };
-        let interrupt_pending = self.pending.contains("interrupt");
-        let send_blocker = self.send_blocker();
-        let ready = self.can_prompt();
         let inactive = matches!(
             self.record.snapshot.status,
             NativeSessionStatus::Starting
                 | NativeSessionStatus::Stopped
                 | NativeSessionStatus::Error
         );
-        let has_draft = !self.composer.read(cx).value().trim().is_empty()
-            || !self.attachments.is_empty()
-            || !self.annotations.is_empty()
-            || !self.active_citations(cx).is_empty()
-            || !self.active_review_comments(cx).is_empty();
-        let interruptible = send_pending || (is_busy(self.record.snapshot.status) && !has_draft);
+        let interruptible =
+            self.send_pending() || (is_busy(self.record.snapshot.status) && !self.has_draft(cx));
         let resumable = !self.record.snapshot.transport_lost
             && matches!(
                 self.record.snapshot.status,
                 NativeSessionStatus::Stopped | NativeSessionStatus::Error
             );
-        let resume_operation = if self.record.snapshot.provider_archived() {
-            "unarchive"
-        } else {
-            "resume"
-        };
-        let options = div()
+        crate::gpui::composer::controls()
+            .id("native-composer-controls")
+            .child(
+                crate::gpui_composer_completion::ComposerCompletion::add_button(
+                    self.completion.as_ref(),
+                    "native-attach",
+                    inactive || !self.provider_enabled(),
+                    self.record.config.plan_mode.unwrap_or(false),
+                    None,
+                    crate::gpui_composer_completion::ComposerFileActions::new(&self.composer, {
+                        let owner = cx.weak_entity();
+                        move |window, cx| {
+                            _ = owner.update(cx, |this, cx| this.choose_attachments(window, cx));
+                        }
+                    }),
+                ),
+            )
+            .child(self.render_composer_options(compact, cx))
+            .children(Self::render_stash(cx))
+            .when(self.composer_expanded, |row| {
+                row.child(Self::render_shrink(cx))
+            })
+            .child(
+                div()
+                    .flex()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .child(self.render_context_usage(cx))
+                    .child(
+                        div()
+                            .id("native-model-control")
+                            .min_w_0()
+                            .flex_1()
+                            .overflow_hidden()
+                            .child(self.render_model_controls(cx)),
+                    )
+                    .child(self.speech.clone())
+                    // The turn can end under a resting pointer.
+                    .when(interruptible, |row| row.child(self.render_interrupt(cx)))
+                    .when(resumable, |row| row.child(self.render_resume(cx)))
+                    .when(!resumable && !interruptible, |row| {
+                        row.child(self.render_send(cx))
+                    }),
+            )
+    }
+
+    fn send_pending(&self) -> bool {
+        self.pending.contains("prompt")
+            || self.pending.contains("queue")
+            || self.pending.contains("interrupt-send")
+    }
+
+    /// Whether the composer holds anything to send: text, attachments, annotations, citations or
+    /// review comments.
+    fn has_draft(&self, cx: &App) -> bool {
+        !self.composer.read(cx).value().trim().is_empty()
+            || !self.attachments.is_empty()
+            || !self.annotations.is_empty()
+            || !self.active_citations(cx).is_empty()
+            || !self.active_review_comments(cx).is_empty()
+    }
+
+    /// The permission control, and a notice while the provider is stopping or disabled.
+    fn render_composer_options(
+        &self,
+        compact: bool,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        div()
             .id("native-composer-options")
             .flex_1()
             .min_w_0()
@@ -5123,118 +5191,88 @@ impl NativeAgentSessionView {
                             }),
                     )
                 },
-            );
-        crate::gpui::composer::controls()
-            .id("native-composer-controls")
-            .child(
-                crate::gpui_composer_completion::ComposerCompletion::add_button(
-                    self.completion.as_ref(),
-                    "native-attach",
-                    inactive || !self.provider_enabled(),
-                    self.record.config.plan_mode.unwrap_or(false),
-                    None,
-                    crate::gpui_composer_completion::ComposerFileActions::new(&self.composer, {
-                        let owner = cx.weak_entity();
-                        move |window, cx| {
-                            _ = owner.update(cx, |this, cx| this.choose_attachments(window, cx));
-                        }
-                    }),
-                ),
             )
-            .child(options)
-            .children(Self::render_stash(cx))
-            .when(self.composer_expanded, |row| {
-                row.child(Self::render_shrink(cx))
+    }
+
+    fn render_interrupt(&self, cx: &Context<Self>) -> Button {
+        let interrupt_pending = self.pending.contains("interrupt");
+        Button::new("native-interrupt")
+            .debug_selector(|| "native-interrupt".into())
+            .accessibility_label("Interrupt")
+            .icon(gpui_kit::assets::IconName::Square)
+            .primary()
+            .rounded_full()
+            .loading(interrupt_pending)
+            .disabled(interrupt_pending)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.command("interrupt", vec![], window, cx);
+            }))
+            .tooltip(if self.record.snapshot.stopping() {
+                format!(
+                    "Restart {} to stop now",
+                    self.record.config.provider.display_name()
+                )
+            } else {
+                "Interrupt".to_owned()
             })
-            .child(
-                div()
-                    .flex()
-                    .min_w_0()
-                    .items_center()
-                    .gap_2()
-                    .child(self.render_context_usage(cx))
-                    .child(
-                        div()
-                            .id("native-model-control")
-                            .min_w_0()
-                            .flex_1()
-                            .overflow_hidden()
-                            .child(self.render_model_controls(cx)),
-                    )
-                    .child(self.speech.clone())
-                    .when(interruptible, |row| {
-                        // The turn can end under a resting pointer.
-                        row.child(
-                            Button::new("native-interrupt")
-                                .debug_selector(|| "native-interrupt".into())
-                                .accessibility_label("Interrupt")
-                                .icon(gpui_kit::assets::IconName::Square)
-                                .primary()
-                                .rounded_full()
-                                .loading(interrupt_pending)
-                                .disabled(interrupt_pending)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.command("interrupt", vec![], window, cx);
-                                }))
-                                .tooltip(if self.record.snapshot.stopping() {
-                                    format!(
-                                        "Restart {} to stop now",
-                                        self.record.config.provider.display_name()
-                                    )
-                                } else {
-                                    "Interrupt".to_owned()
-                                }),
-                        )
-                    })
-                    .when(resumable, |row| {
-                        row.child(
-                            Button::new("native-resume")
-                                .debug_selector(|| "native-resume".into())
-                                .label(if self.record.snapshot.provider_archived() {
-                                    "Unarchive and resume"
-                                } else {
-                                    "Resume"
-                                })
-                                .small()
-                                .primary()
-                                .loading(self.pending.contains(resume_operation))
-                                .disabled(
-                                    !self.provider_enabled()
-                                        || self.pending.contains(resume_operation),
-                                )
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.command(resume_operation, vec![], window, cx);
-                                })),
-                        )
-                    })
-                    .when(!resumable && !interruptible, |row| {
-                        row.child(
-                            Button::new("native-send")
-                                .debug_selector(|| "native-send".into())
-                                .icon(IconName::ArrowUp)
-                                .primary()
-                                .rounded_full()
-                                .accessibility_label(send_blocker.unwrap_or(send_label))
-                                .tooltip(send_blocker.unwrap_or(send_label))
-                                .loading(send_pending)
-                                .disabled(
-                                    !self.provider_enabled()
-                                        || !ready
-                                        || send_pending
-                                        || self.pending.contains("configure")
-                                        || !self.attachment_imports.is_empty()
-                                        || (self.composer.read(cx).value().trim().is_empty()
-                                            && self.attachments.is_empty()
-                                            && self.annotations.is_empty()
-                                            && self.active_citations(cx).is_empty()
-                                            && self.active_review_comments(cx).is_empty()),
-                                )
-                                .on_click(
-                                    cx.listener(|this, _, window, cx| this.send_prompt(window, cx)),
-                                ),
-                        )
-                    }),
+    }
+
+    fn render_resume(&self, cx: &Context<Self>) -> Button {
+        let resume_operation = if self.record.snapshot.provider_archived() {
+            "unarchive"
+        } else {
+            "resume"
+        };
+        Button::new("native-resume")
+            .debug_selector(|| "native-resume".into())
+            .label(if self.record.snapshot.provider_archived() {
+                "Unarchive and resume"
+            } else {
+                "Resume"
+            })
+            .small()
+            .primary()
+            .loading(self.pending.contains(resume_operation))
+            .disabled(!self.provider_enabled() || self.pending.contains(resume_operation))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.command(resume_operation, vec![], window, cx);
+            }))
+    }
+
+    fn render_send(&self, cx: &Context<Self>) -> Button {
+        let send_pending = self.send_pending();
+        let send_label = if is_busy(self.record.snapshot.status) {
+            match self.follow_up_behavior {
+                bootty_config::config::FollowUpBehavior::Queue => "Queue message",
+                bootty_config::config::FollowUpBehavior::Steer => "Steer agent",
+                bootty_config::config::FollowUpBehavior::Interrupt => "Interrupt and send",
+            }
+        } else {
+            "Send message"
+        };
+        let send_blocker = self.send_blocker();
+        let ready = self.can_prompt();
+        Button::new("native-send")
+            .debug_selector(|| "native-send".into())
+            .icon(IconName::ArrowUp)
+            .primary()
+            .rounded_full()
+            .accessibility_label(send_blocker.unwrap_or(send_label))
+            .tooltip(send_blocker.unwrap_or(send_label))
+            .loading(send_pending)
+            .disabled(
+                !self.provider_enabled()
+                    || !ready
+                    || send_pending
+                    || self.pending.contains("configure")
+                    || !self.attachment_imports.is_empty()
+                    || (self.composer.read(cx).value().trim().is_empty()
+                        && self.attachments.is_empty()
+                        && self.annotations.is_empty()
+                        && self.active_citations(cx).is_empty()
+                        && self.active_review_comments(cx).is_empty()),
             )
+            .on_click(cx.listener(|this, _, window, cx| this.send_prompt(window, cx)))
     }
 
     /// The account's usage limits, as the provider last reported them, a line each.
@@ -5516,32 +5554,11 @@ impl NativeAgentSessionView {
 }
 
 impl Render for NativeAgentSessionView {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one conversation composes its transcript, requests, composer and details card"
-    )]
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = self.busy();
         // A subagent's view shows its transcript; the conversation's controls stay with the parent.
         let conversation = self.subagent.is_none();
-        if conversation {
-            self.load_models(window, cx);
-            self.load_history(window, cx);
-            self.sync_placeholder(window, cx);
-        }
-        self.sync_activity_tick(window, cx);
-        if busy && window.is_visible() && self.moving(cx) {
-            self.request_motion_frames(cx);
-        }
-        let enabled = self.provider_enabled()
-            && !matches!(
-                self.record.snapshot.status,
-                NativeSessionStatus::Starting
-                    | NativeSessionStatus::Stopped
-                    | NativeSessionStatus::Error
-            );
-        self.speech
-            .update(cx, |speech, cx| speech.set_enabled(enabled, cx));
+        self.sync_before_paint(busy, conversation, window, cx);
         let card_visible = self.context_card_visible();
         let wide = self.card.wide() && conversation && card_visible;
         div()
@@ -5574,45 +5591,7 @@ impl Render for NativeAgentSessionView {
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(Self::render_word_selection_events(cx))
-            .on_mouse_down(
-                gpui_kit::MouseButton::Left,
-                cx.listener(|this, event, window, cx| {
-                    this.arm_word_selection(event, window, cx);
-                }),
-            )
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::Copy, window, cx| {
-                    this.copy_word_selection(window, cx);
-                },
-            ))
-            .capture_action(cx.listener(
-                |this, _: &gpui_kit::component::input::SelectAll, window, cx| {
-                    if this.word_selection_focused(window, cx) {
-                        this.clear_word_selection(cx);
-                        this.selected_response = None;
-                        cx.notify();
-                    }
-                    cx.propagate();
-                },
-            ))
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                // The selection toolbar closes; the comment editor follows its quote.
-                if this.selected_response.take().is_some() || this.editing_citation.is_some() {
-                    cx.notify();
-                }
-            }))
-            .on_key_down(
-                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
-                    if this.handle_selection_key(event, window, cx)
-                        || (event.keystroke.key == "escape"
-                            && (this.dismiss_citation_controls(window, cx)
-                                || this.dismiss_word_selection(window, cx)
-                                || this.close_context_card(cx)))
-                    {
-                        cx.stop_propagation();
-                    }
-                }),
-            )
+            .map(|view| Self::selection_listeners(view, cx))
             .when(self.record.snapshot.provider_archived(), |body| {
                 body.child(
                     div()
@@ -5651,6 +5630,83 @@ impl Render for NativeAgentSessionView {
                         body.child(self.render_context_card(cx))
                     })
             })
+    }
+}
+
+impl NativeAgentSessionView {
+    /// Bring what the next paint shows up to date: models, history and placeholder for a
+    /// conversation, its activity tick and motion, and whether speech may start.
+    fn sync_before_paint(
+        &mut self,
+        busy: bool,
+        conversation: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if conversation {
+            self.load_models(window, cx);
+            self.load_history(window, cx);
+            self.sync_placeholder(window, cx);
+        }
+        self.sync_activity_tick(window, cx);
+        if busy && window.is_visible() && self.moving(cx) {
+            self.request_motion_frames(cx);
+        }
+        let enabled = self.provider_enabled()
+            && !matches!(
+                self.record.snapshot.status,
+                NativeSessionStatus::Starting
+                    | NativeSessionStatus::Stopped
+                    | NativeSessionStatus::Error
+            );
+        self.speech
+            .update(cx, |speech, cx| speech.set_enabled(enabled, cx));
+    }
+
+    /// Word selection, copying and the keys that dismiss the selection and citation controls.
+    fn selection_listeners(
+        view: gpui_kit::Stateful<gpui_kit::Div>,
+        cx: &Context<Self>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        view.on_mouse_down(
+            gpui_kit::MouseButton::Left,
+            cx.listener(|this, event, window, cx| {
+                this.arm_word_selection(event, window, cx);
+            }),
+        )
+        .capture_action(
+            cx.listener(|this, _: &gpui_kit::component::input::Copy, window, cx| {
+                this.copy_word_selection(window, cx);
+            }),
+        )
+        .capture_action(cx.listener(
+            |this, _: &gpui_kit::component::input::SelectAll, window, cx| {
+                if this.word_selection_focused(window, cx) {
+                    this.clear_word_selection(cx);
+                    this.selected_response = None;
+                    cx.notify();
+                }
+                cx.propagate();
+            },
+        ))
+        .on_scroll_wheel(cx.listener(|this, _, _, cx| {
+            // The selection toolbar closes; the comment editor follows its quote.
+            if this.selected_response.take().is_some() || this.editing_citation.is_some() {
+                cx.notify();
+            }
+        }))
+        .on_key_down(
+            cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                if this.handle_selection_key(event, window, cx)
+                    || (event.keystroke.key == "escape"
+                        && (this.dismiss_citation_controls(window, cx)
+                            || this.dismiss_word_selection(window, cx)
+                            || this.close_context_card(cx)))
+                {
+                    cx.stop_propagation();
+                }
+            }),
+        )
     }
 }
 
@@ -6750,4 +6806,18 @@ fn work_row(
             )
             .into_any_element(),
     }
+}
+
+/// A question-only message lists the questions it asks.
+fn question_titles(item: &NativeTranscriptItem, cx: &App) -> gpui_kit::Div {
+    div()
+        .text_sm()
+        .text_color(cx.theme().muted_foreground)
+        .child(
+            item.questions
+                .iter()
+                .map(|question| question.title.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
 }

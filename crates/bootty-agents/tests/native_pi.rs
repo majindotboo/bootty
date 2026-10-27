@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-mod support;
+pub mod support;
 use std::{fs, io::Cursor, path::Path};
 
 use assert_fs::TempDir;

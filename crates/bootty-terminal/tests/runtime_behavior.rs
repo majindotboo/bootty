@@ -261,19 +261,15 @@ fn quiet_window_waits_for_quiet_but_never_past_the_cap(
     assert_eq!(output_settling(since_last_change, held_for), expected);
 }
 
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "mirrors the Option<CursorSnapshot> frame field"
-)]
-const fn cursor_at(x: u16, y: u16) -> Option<CursorSnapshot> {
-    Some(CursorSnapshot {
+const fn cursor(x: u16, y: u16) -> CursorSnapshot {
+    CursorSnapshot {
         x,
         y,
         at_wide_tail: false,
         style: libghostty_vt::render::CursorVisualStyle::Block,
         blinking: false,
         color: None,
-    })
+    }
 }
 
 #[test]
@@ -281,17 +277,17 @@ fn cursor_hold_never_shows_a_cross_row_move_superseded_within_the_commit_delay()
     let mut hold = CursorHold::default();
     let t0 = Instant::now();
     // First frame initializes at the input row.
-    assert_eq!(hold.resolve(cursor_at(2, 23), t0), cursor_at(2, 23));
+    assert_eq!(hold.resolve(Some(cursor(2, 23)), t0), Some(cursor(2, 23)));
     // A jump to a status row is held: the caret stays at the input row.
     assert_eq!(
-        hold.resolve(cursor_at(99, 1), t0 + Duration::from_millis(1)),
-        cursor_at(2, 23)
+        hold.resolve(Some(cursor(99, 1)), t0 + Duration::from_millis(1)),
+        Some(cursor(2, 23))
     );
     assert!(hold.pending());
     // The app moves the cursor back to the input row before the delay: the park is never shown.
     assert_eq!(
-        hold.resolve(cursor_at(2, 23), t0 + Duration::from_millis(3)),
-        cursor_at(2, 23)
+        hold.resolve(Some(cursor(2, 23)), t0 + Duration::from_millis(3)),
+        Some(cursor(2, 23))
     );
     assert!(!hold.pending());
 }
@@ -300,19 +296,19 @@ fn cursor_hold_never_shows_a_cross_row_move_superseded_within_the_commit_delay()
 fn cursor_hold_commits_a_cross_row_move_that_survives_the_commit_delay() {
     let mut hold = CursorHold::default();
     let t0 = Instant::now();
-    hold.resolve(cursor_at(2, 23), t0);
+    hold.resolve(Some(cursor(2, 23)), t0);
     assert_eq!(
-        hold.resolve(cursor_at(40, 10), t0 + Duration::from_millis(1)),
-        cursor_at(2, 23),
+        hold.resolve(Some(cursor(40, 10)), t0 + Duration::from_millis(1)),
+        Some(cursor(2, 23)),
         "a fresh cross-row move is held"
     );
     assert!(hold.commit_due(t0 + CURSOR_COMMIT_DELAY + Duration::from_millis(1)));
     assert_eq!(
         hold.resolve(
-            cursor_at(40, 10),
+            Some(cursor(40, 10)),
             t0 + CURSOR_COMMIT_DELAY + Duration::from_millis(1)
         ),
-        cursor_at(40, 10),
+        Some(cursor(40, 10)),
         "a cross-row move that outlasts the delay becomes visible"
     );
 }
@@ -321,15 +317,15 @@ fn cursor_hold_commits_a_cross_row_move_that_survives_the_commit_delay() {
 fn cursor_hold_shows_same_row_caret_advances_immediately() {
     let mut hold = CursorHold::default();
     let t0 = Instant::now();
-    assert_eq!(hold.resolve(cursor_at(2, 23), t0), cursor_at(2, 23));
+    assert_eq!(hold.resolve(Some(cursor(2, 23)), t0), Some(cursor(2, 23)));
     // Typing advances the caret along the input row: every step is visible at once, no lag.
     assert_eq!(
-        hold.resolve(cursor_at(3, 23), t0 + Duration::from_millis(1)),
-        cursor_at(3, 23)
+        hold.resolve(Some(cursor(3, 23)), t0 + Duration::from_millis(1)),
+        Some(cursor(3, 23))
     );
     assert_eq!(
-        hold.resolve(cursor_at(4, 23), t0 + Duration::from_millis(2)),
-        cursor_at(4, 23)
+        hold.resolve(Some(cursor(4, 23)), t0 + Duration::from_millis(2)),
+        Some(cursor(4, 23))
     );
     assert!(!hold.pending());
 }
@@ -340,15 +336,15 @@ fn cursor_hold_shows_same_row_caret_advances_immediately() {
 fn cursor_hold_does_not_let_a_live_park_commit_while_held() {
     let mut hold = CursorHold::default();
     let t0 = Instant::now();
-    hold.resolve(cursor_at(2, 23), t0);
+    hold.resolve(Some(cursor(2, 23)), t0);
     assert_eq!(
-        hold.resolve(cursor_at(99, 1), t0 + Duration::from_millis(1)),
-        cursor_at(2, 23)
+        hold.resolve(Some(cursor(99, 1)), t0 + Duration::from_millis(1)),
+        Some(cursor(2, 23))
     );
     // A publish a couple of milliseconds later, still within the delay, keeps holding.
     assert_eq!(
-        hold.resolve(cursor_at(99, 1), t0 + Duration::from_millis(3)),
-        cursor_at(2, 23)
+        hold.resolve(Some(cursor(99, 1)), t0 + Duration::from_millis(3)),
+        Some(cursor(2, 23))
     );
     assert!(hold.pending());
 }
@@ -357,7 +353,7 @@ fn cursor_hold_does_not_let_a_live_park_commit_while_held() {
 fn cursor_hold_commits_a_visibility_change_immediately() {
     let mut hold = CursorHold::default();
     let t0 = Instant::now();
-    hold.resolve(cursor_at(2, 23), t0);
+    hold.resolve(Some(cursor(2, 23)), t0);
     assert_eq!(hold.resolve(None, t0 + Duration::from_millis(1)), None);
 }
 
@@ -366,8 +362,8 @@ proptest! {
     fn cursor_parks_obey_the_commit_boundary(elapsed_us in 0_u64..20_000) {
         let mut hold = CursorHold::default();
         let started = Instant::now();
-        let home = cursor_at(2, 23);
-        let parked = cursor_at(98, 0);
+        let home = Some(cursor(2, 23));
+        let parked = Some(cursor(98, 0));
         prop_assert_eq!(hold.resolve(home, started), home);
         prop_assert_eq!(hold.resolve(parked, started), home);
         let elapsed = Duration::from_micros(elapsed_us);

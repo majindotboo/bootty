@@ -91,6 +91,20 @@ impl Default for GpuiTerminalAdapter {
     }
 }
 
+/// One published frame to draw: its text size and contract, and how its cursor shows.
+#[derive(Clone, Copy)]
+pub struct TerminalElementRequest<'a> {
+    pub surface: TerminalSurface,
+    pub frame: &'a Arc<RenderFrame>,
+    pub font_size: f32,
+    pub text_cell_height: f32,
+    pub pixels_per_point: f32,
+    pub text_contract: &'a TerminalTextContract,
+    pub cursor_blink_phase: CursorBlinkPhase,
+    pub cursor_focused: bool,
+    pub marked_text: &'a str,
+}
+
 impl GpuiTerminalAdapter {
     pub fn with_platform_text_system(text_system: Arc<dyn gpui_kit::PlatformTextSystem>) -> Self {
         let mut adapter = Self::default();
@@ -114,19 +128,18 @@ impl GpuiTerminalAdapter {
 
     /// Build a disposable GPUI element for one published terminal frame.
     #[track_caller]
-    #[allow(clippy::too_many_arguments)]
-    pub fn element(
-        &mut self,
-        surface: TerminalSurface,
-        frame: &Arc<RenderFrame>,
-        font_size: f32,
-        text_cell_height: f32,
-        pixels_per_point: f32,
-        text_contract: &TerminalTextContract,
-        cursor_blink_phase: CursorBlinkPhase,
-        cursor_focused: bool,
-        marked_text: &str,
-    ) -> GpuiTerminalElement {
+    pub fn element(&mut self, request: TerminalElementRequest<'_>) -> GpuiTerminalElement {
+        let TerminalElementRequest {
+            surface,
+            frame,
+            font_size,
+            text_cell_height,
+            pixels_per_point,
+            text_contract,
+            cursor_blink_phase,
+            cursor_focused,
+            marked_text,
+        } = request;
         let frame = self.frame_for_paint(frame);
         let search_pulse = self.search_pulse.overlay(surface, &frame);
         let scene = self.scene_for_frame(TerminalSceneKey {
@@ -195,9 +208,11 @@ impl GpuiTerminalAdapter {
             previous_scene.as_mut(),
             &mut self.prepared_rows,
             prepared_inputs_match && incremental && rebuilt_rows < usize::from(frame.rows),
-            &frame.row_dirty,
-            surface.content_origin().y,
-            surface.cell.height,
+            RowGrid {
+                dirty: &frame.row_dirty,
+                min_y: surface.content_origin().y,
+                cell_height: surface.cell.height,
+            },
             TerminalSceneResources {
                 baseline_adjustment: text_contract.baseline_adjustment(),
                 text_atlas: &mut self.text_atlas,
@@ -1262,16 +1277,22 @@ struct TerminalSceneResources<'a> {
     metrics: Option<&'a TerminalRenderMetrics>,
 }
 
+/// The terminal's rows as scene reuse sees them: which changed, where the grid starts, and how
+/// tall each row is.
+#[derive(Clone, Copy)]
+struct RowGrid<'a> {
+    dirty: &'a [bool],
+    min_y: f32,
+    cell_height: f32,
+}
+
 impl GpuiTerminalScene {
-    #[allow(clippy::too_many_arguments)]
     fn new_with_reuse(
         frame: TerminalRenderFrame,
         previous: Option<&mut Self>,
         prepared_rows: &mut PreparedRowPool,
         allow_reuse: bool,
-        dirty_rows: &[bool],
-        grid_min_y: f32,
-        cell_height: f32,
+        rows: RowGrid<'_>,
         mut resources: TerminalSceneResources<'_>,
         pixels_per_point: f32,
     ) -> Self {
@@ -1281,9 +1302,7 @@ impl GpuiTerminalScene {
                 &frame,
                 previous,
                 prepared_rows,
-                dirty_rows,
-                grid_min_y,
-                cell_height,
+                rows,
                 &mut resources,
                 pixels_per_point,
             )
@@ -1306,17 +1325,19 @@ impl GpuiTerminalScene {
         Self::new(frame, resources, pixels_per_point)
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn try_prepare_reusing(
         frame: &TerminalRenderFrame,
         previous: &mut Self,
         prepared_rows: &mut PreparedRowPool,
-        dirty_rows: &[bool],
-        grid_min_y: f32,
-        cell_height: f32,
+        rows: RowGrid<'_>,
         resources: &mut TerminalSceneResources<'_>,
         pixels_per_point: f32,
     ) -> Option<ReusedPreparedScene> {
+        let RowGrid {
+            dirty: dirty_rows,
+            min_y: grid_min_y,
+            cell_height,
+        } = rows;
         // Image placement, overlays, and changed render contracts stay on the full path until
         // they have stable command identities that can be proven equal independently per row.
         if !resources.images.is_empty()

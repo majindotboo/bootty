@@ -2,7 +2,7 @@
 
 use settings_support::{GpuiSettingsSnapshot, SettingsProbe as ScrollbarProbe};
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use bootty_ui::gpui::{
     ScalarValue, SettingsCategory, SettingsControl, SettingsPage, SettingsPageItem, SettingsRow,
     UiPalette, init_theme,

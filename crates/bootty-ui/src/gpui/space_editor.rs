@@ -210,13 +210,13 @@ impl SpaceEditorInputState {
                         }
                         _ => {}
                     }
-                    editor.emit(intent, cx);
+                    cx.emit(intent);
                 });
             }
             InputEvent::PressEnter { .. } => {
                 let _ = self.owner.update(cx, |editor, cx| {
                     if let Some(intent) = editor.field_enter_intent(self.field) {
-                        editor.emit(intent, cx);
+                        cx.emit(intent);
                     }
                 });
             }
@@ -302,8 +302,8 @@ impl GpuiSpaceEditor {
                 return;
             };
             let rgb = rgb_from_hsla(*color);
-            let _ = owner.update(cx, |editor, cx| {
-                editor.emit(SpaceEditorIntent::SetColor(rgb), cx);
+            let _ = owner.update(cx, |_, cx| {
+                cx.emit(SpaceEditorIntent::SetColor(rgb));
             });
         });
         Self {
@@ -414,21 +414,13 @@ impl GpuiSpaceEditor {
     /// Emit the host-owned Save action when the current snapshot is valid.
     pub fn request_save(&self, cx: &mut Context<Self>) {
         if self.save_enabled() {
-            self.emit(SpaceEditorIntent::Save, cx);
+            cx.emit(SpaceEditorIntent::Save);
         }
     }
 
     /// Emit the host-owned Close action.
     pub fn request_close(&self, cx: &mut Context<Self>) {
-        self.emit(SpaceEditorIntent::Close, cx);
-    }
-
-    #[expect(
-        clippy::unused_self,
-        reason = "This entity event helper is called from GPUI listener callbacks."
-    )]
-    fn emit(&self, intent: SpaceEditorIntent, cx: &mut Context<Self>) {
-        cx.emit(intent);
+        cx.emit(SpaceEditorIntent::Close);
     }
 
     fn field_enter_intent(&self, field: EditorField) -> Option<SpaceEditorIntent> {
@@ -620,9 +612,9 @@ impl GpuiSpaceEditor {
                 choice.selected,
                 enabled,
             )
-            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+            .on_click(cx.listener(move |_, checked: &bool, _, cx| {
                 if enabled && *checked {
-                    this.emit(SpaceEditorIntent::SelectBackend(id.clone()), cx);
+                    cx.emit(SpaceEditorIntent::SelectBackend(id.clone()));
                 }
             }))
         });
@@ -672,9 +664,9 @@ impl GpuiSpaceEditor {
                         .child(detail),
                 )
             })
-            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+            .on_click(cx.listener(move |_, checked: &bool, _, cx| {
                 if enabled && *checked {
-                    this.emit(SpaceEditorIntent::SelectLocation(id.clone()), cx);
+                    cx.emit(SpaceEditorIntent::SelectLocation(id.clone()));
                 }
             }))
         });
@@ -726,8 +718,8 @@ impl GpuiSpaceEditor {
                             .selected(icon.selected)
                             .accessibility_label(icon.label.clone())
                             .tooltip(icon.label.clone())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.emit(SpaceEditorIntent::SelectIcon(id.clone()), cx);
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(SpaceEditorIntent::SelectIcon(id.clone()));
                             }))
                             .child(crate::gpui::icon(&icon.glyph, 18.0, text)),
                     )
@@ -756,8 +748,8 @@ impl GpuiSpaceEditor {
                             .id("space-tint-sidebar-wrapper")
                             .debug_selector(|| "space-tint-sidebar".to_owned())
                             .child(editor_switch(tint).on_click(cx.listener(
-                                move |this, checked: &bool, _, cx| {
-                                    this.emit(SpaceEditorIntent::SetTintSidebar(*checked), cx);
+                                move |_, checked: &bool, _, cx| {
+                                    cx.emit(SpaceEditorIntent::SetTintSidebar(*checked));
                                 },
                             ))),
                     )
@@ -859,9 +851,9 @@ impl GpuiSpaceEditor {
                 .when_some(choice.detail.clone(), |button, detail| {
                     button.child(div().text_xs().child(detail))
                 })
-                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                .on_click(cx.listener(move |_, checked: &bool, _, cx| {
                     if enabled && *checked {
-                        this.emit(SpaceEditorIntent::SelectRemoteSpace(id.clone()), cx);
+                        cx.emit(SpaceEditorIntent::SelectRemoteSpace(id.clone()));
                     }
                 }))
             })
@@ -922,12 +914,9 @@ impl GpuiSpaceEditor {
                     choice.selected,
                     enabled,
                 )
-                .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                .on_click(cx.listener(move |_, checked: &bool, _, cx| {
                     if enabled && *checked {
-                        this.emit(
-                            SpaceEditorIntent::SelectNewRemoteSpaceBackend(id.clone()),
-                            cx,
-                        );
+                        cx.emit(SpaceEditorIntent::SelectNewRemoteSpaceBackend(id.clone()));
                     }
                 }))
             })
@@ -959,9 +948,9 @@ impl GpuiSpaceEditor {
             )
             .child(
                 editor_button("space-create-remote", "Create", can_create).on_click(cx.listener(
-                    move |this, _, _, cx| {
+                    move |_, _, _, cx| {
                         if let Some((name, backend)) = request.clone() {
-                            this.emit(SpaceEditorIntent::CreateRemoteSpace { name, backend }, cx);
+                            cx.emit(SpaceEditorIntent::CreateRemoteSpace { name, backend });
                         }
                     },
                 )),
@@ -996,8 +985,8 @@ impl GpuiSpaceEditor {
                     .child(
                         editor_button("space-remote-retry", "Retry", true)
                             .mt_2()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.emit(SpaceEditorIntent::RetryRemoteSpaces, cx);
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(SpaceEditorIntent::RetryRemoteSpaces);
                             })),
                     )
                     .into_any_element(),

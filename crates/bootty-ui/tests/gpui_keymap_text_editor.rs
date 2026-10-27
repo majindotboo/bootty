@@ -12,7 +12,7 @@ use bootty_ui::{AppState, load_keymap_text_file, reload_saved_keymap_text};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
-mod support;
+pub mod support;
 
 fn state(directory: &TempDir, keymap: &str) -> AppState {
     directory

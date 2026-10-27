@@ -39,16 +39,6 @@ fn binding(
     }
 }
 
-#[allow(clippy::unnecessary_wraps)] // Matches the fallible action resolver contract.
-fn action_name(action: &KeymapAction) -> Result<Option<String>, String> {
-    Ok(action.name().map(str::to_owned))
-}
-
-#[allow(clippy::unnecessary_wraps)] // Matches the fallible context compiler contract.
-fn context_name(context: &KeymapContext) -> Result<String, String> {
-    Ok(context.to_string())
-}
-
 #[test]
 fn sequence_parser_preserves_flags_sides_aliases_and_legacy_hyphens() {
     let sequence = parse_keymap_sequence("performable:unconsumed:left_ctrl+right_alt+a ctrl-b")
@@ -143,8 +133,8 @@ fn program_preserves_precedence_named_unbind_case_fold_and_consume() {
             },
             binding(KeymapContext::Global, "ctrl+catch_all", KeymapAction::None),
         ],
-        action_name,
-        context_name,
+        |action: &KeymapAction| Ok(action.name().map(str::to_owned)),
+        |context: &KeymapContext| Ok(context.to_string()),
     )
     .0;
 

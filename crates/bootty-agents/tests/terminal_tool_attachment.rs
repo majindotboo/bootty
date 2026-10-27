@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![cfg(unix)]
 
 use std::{
@@ -603,10 +604,6 @@ fn failed_registration_revokes_tools_and_keeps_prior_catalog(launch: AgentLaunch
     assert_eq!(service.records().len(), 0);
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "Construct a fixed valid one-pixel PNG fixture"
-)]
 fn snapshot() -> Value {
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     let mut bytes = Vec::new();

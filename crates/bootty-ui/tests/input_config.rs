@@ -14,7 +14,7 @@ use bootty_ui::{AppEffect, AppState, input::resolve_modifier_remaps};
 mod events;
 #[path = "support/frames.rs"]
 mod frames;
-mod support;
+pub mod support;
 
 fn entries(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()

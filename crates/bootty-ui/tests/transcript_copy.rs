@@ -1,5 +1,5 @@
 //! Keyboard copy mode's cursor and selections over a conversation's shown text.
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
 use bootty_ui::presentation::transcript_copy::{
     CopyMotion, CopySelection, apply_motion, cursor_at, selected_ranges, selected_text,
 };

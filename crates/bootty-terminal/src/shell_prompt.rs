@@ -71,10 +71,6 @@ pub struct PromptSnapshot {
     pub cwd: String,
     pub recent: Vec<ShellCommandRecord>,
 }
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Prompt readiness, user edits, and shell integration support are independent facts."
-)]
 pub struct ShellPrompt {
     revision: u64,
     ready: bool,

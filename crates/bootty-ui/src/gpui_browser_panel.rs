@@ -55,7 +55,6 @@ enum BrowserInteraction {
 }
 
 // Native visibility, host activation, and site-data reset/confirmation are independent states.
-#[allow(clippy::struct_excessive_bools)]
 pub struct BrowserPanel {
     tabs: Vec<BrowserTab>,
     reset_view: Option<BrowserView>,

@@ -147,7 +147,7 @@ fn update_gpui_component_theme(palette: UiPalette, cx: &mut App) {
 // Exhaustive construction makes a new GPUI role a compile error until Bootty maps it.
 #[expect(
     clippy::too_many_lines,
-    reason = "The complete component color record is intentionally exhaustive"
+    reason = "ThemeColor has a field per GPUI role, and only one exhaustive literal keeps every role mapped."
 )]
 fn component_colors(palette: UiPalette) -> gpui_kit::component::ThemeColor {
     let background = color(palette.base);

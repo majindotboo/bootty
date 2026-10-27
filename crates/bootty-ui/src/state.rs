@@ -204,6 +204,29 @@ pub struct OpenFilesRequest {
     pub column: u32,
 }
 
+/// Live changes to the fonts of everything but the terminal: settings, sidebar and status.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UiFontEffect {
+    /// Reinstall UI-chrome fonts so a `font.ui-family` edit applies live, mirroring how
+    /// `SetTerminalTextConfig` re-fonts the terminal.
+    Families(Vec<String>),
+    Weights(bootty_config::FontWeightAssignments),
+    /// Resize all non-terminal UI text independently from the terminal cell font.
+    Size(f32),
+}
+
+/// Changes to the native window itself.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowEffect {
+    Title(String),
+    Fullscreen(bool),
+    Maximized(bool),
+    Decorations(bool),
+    Focus,
+    MacosNonNativeFullscreen,
+    RestoreMacosPresentation,
+}
+
 /// Host actions requested by a frame update, applied by the active window adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppEffect {
@@ -227,10 +250,7 @@ pub enum AppEffect {
     OpenWindow,
     OpenSpaceWindow(bootty_mux::controller::SpaceId),
     QuitApplication,
-    SetWindowTitle(String),
-    SetFullscreen(bool),
-    SetMaximized(bool),
-    SetDecorations(bool),
+    Window(WindowEffect),
     RequestCopy,
     RequestRepaint,
     Bell,
@@ -241,16 +261,8 @@ pub enum AppEffect {
     RepaintAfter(Duration),
     SetTerminalTextConfig(TerminalTextConfig),
     SetTerminalCursorIcon(CursorIcon),
-    /// Reinstall UI-chrome fonts (settings/sidebar/status) so a `font.ui-family` edit applies
-    /// live, mirroring how `SetTerminalTextConfig` re-fonts the terminal.
-    SetUiFonts(Vec<String>),
-    SetUiFontWeights(bootty_config::FontWeightAssignments),
-    /// Resize all non-terminal UI text independently from the terminal cell font.
-    SetUiFontSize(f32),
-    SetWindowFocus,
+    UiFont(UiFontEffect),
     FocusTerminal,
-    ApplyMacosNonNativeFullscreen,
-    RestoreMacosPresentation,
     OpenUrl(String),
     OpenSettings,
     OpenThemeSettings,
@@ -580,9 +592,9 @@ impl AppState {
     ) -> Result<bootty_config::keymap_file::KeymapWriteOutcome> {
         let outcome = self.keymap_runtime.edit(edit)?;
         if let Some(warning) = outcome.durability_warning() {
-            self.record_error("Could not confirm the keymap was saved", warning);
+            self.record_error("Could not confirm the keymap was saved", &warning);
         } else if let Some(diagnostic) = self.keymap_runtime.snapshot().diagnostic_summary() {
-            self.record_error("Some key bindings could not be used", diagnostic);
+            self.record_error("Some key bindings could not be used", &diagnostic);
         }
         Ok(outcome)
     }
@@ -593,7 +605,7 @@ impl AppState {
     /// Returns an error when the keymap file cannot be loaded.
     pub fn reload_keymap(&mut self) -> Result<()> {
         if let Some(diagnostic) = self.keymap_runtime.reload()? {
-            self.record_error("Some key bindings could not be used", diagnostic);
+            self.record_error("Some key bindings could not be used", &diagnostic);
         }
         Ok(())
     }
@@ -635,7 +647,7 @@ impl AppState {
                 || warning.clone(),
                 |existing| format!("{}; {warning}", existing.raw_message()),
             );
-            self.record_error("Could not confirm the settings were saved", message);
+            self.record_error("Could not confirm the settings were saved", &message);
         }
         Ok((document, warning, effects))
     }
@@ -647,7 +659,7 @@ impl AppState {
     ) -> bool {
         let mut document = self.config_runtime.document().clone();
         if let Err(error) = mutate(&mut document) {
-            self.record_error("Could not change the setting", error);
+            self.record_error("Could not change the setting", &error);
             return false;
         }
         match self.commit_settings_document(document) {
@@ -656,7 +668,7 @@ impl AppState {
                 true
             }
             Err(error) => {
-                self.record_error("Could not save the setting", error);
+                self.record_error("Could not save the setting", &error);
                 false
             }
         }
@@ -745,24 +757,24 @@ impl AppState {
             );
 
         if self.macos_non_native_fullscreen_active {
-            effects.push(AppEffect::SetFullscreen(false));
-            effects.push(AppEffect::ApplyMacosNonNativeFullscreen);
+            effects.push(AppEffect::Window(WindowEffect::Fullscreen(false)));
+            effects.push(AppEffect::Window(WindowEffect::MacosNonNativeFullscreen));
             if !crate::platform::macos_handles_non_native_fullscreen_frame(&self.config().window) {
-                effects.push(AppEffect::SetMaximized(true));
+                effects.push(AppEffect::Window(WindowEffect::Maximized(true)));
             }
         } else {
             if was_non_native {
-                effects.push(AppEffect::RestoreMacosPresentation);
+                effects.push(AppEffect::Window(WindowEffect::RestoreMacosPresentation));
             }
-            effects.push(AppEffect::SetFullscreen(
+            effects.push(AppEffect::Window(WindowEffect::Fullscreen(
                 enabled && mode == WindowFullscreen::Native,
-            ));
+            )));
             if was_non_native
                 && !crate::platform::macos_handles_non_native_fullscreen_frame(
                     &self.config().window,
                 )
             {
-                effects.push(AppEffect::SetMaximized(false));
+                effects.push(AppEffect::Window(WindowEffect::Maximized(false)));
             }
         }
     }
@@ -795,7 +807,7 @@ impl AppState {
         let resolved = match bootty_config::config::resolve_theme(theme, config_dir) {
             Ok(theme) => theme,
             Err(error) => {
-                self.record_error("Could not preview the theme", error);
+                self.record_error("Could not preview the theme", &error);
                 return;
             }
         };
@@ -832,7 +844,7 @@ impl AppState {
             .workspace
             .publish_terminal_config(&config, variant, Some(&live_config));
         if !warnings.is_empty() {
-            self.record_error("Could not apply terminal settings", warnings.join("; "));
+            self.record_error("Could not apply terminal settings", &warnings.join("; "));
         }
     }
     pub fn theme_picker_preview_active(&self) -> bool {
@@ -923,11 +935,7 @@ impl AppState {
             .or_else(|| self.last_error.clone())
     }
     /// Records a failure of `action`, which names what failed: "Could not paste".
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "Reporting consumes errors at the application boundary while accepting borrowed diagnostics"
-    )]
-    pub(crate) fn record_error(&mut self, action: &str, error: impl ToString) {
+    pub(crate) fn record_error(&mut self, action: &str, error: &dyn std::fmt::Display) {
         self.last_error = Some(ErrorNotice::failed(action, error.to_string()));
     }
     /// Records Bootty's own sentence as written, so it never reads as the generic failure.
@@ -939,7 +947,7 @@ impl AppState {
     }
     fn keep_creation_draft(&mut self, now: Instant) {
         if let Err(error) = self.save_creation_drafts(now, false) {
-            self.record_error("Could not save session drafts", error);
+            self.record_error("Could not save session drafts", &error);
         }
     }
 
@@ -1043,7 +1051,7 @@ impl AppState {
         }
         if self.macos_non_native_fullscreen_pending_apply {
             self.macos_non_native_fullscreen_pending_apply = false;
-            effects.push(AppEffect::ApplyMacosNonNativeFullscreen);
+            effects.push(AppEffect::Window(WindowEffect::MacosNonNativeFullscreen));
         }
     }
     pub fn terminal_mut(&mut self) -> &mut ActiveTerminal {
@@ -1084,7 +1092,7 @@ impl AppState {
     pub fn record_mouse_input_target_none(&mut self) {
         self.pending_mouse_input_targets.push_back(None);
     }
-    pub fn record_render_error(&mut self, error: impl ToString) {
+    pub fn record_render_error(&mut self, error: &dyn std::fmt::Display) {
         self.record_error("Could not draw the window", error);
     }
 
@@ -1106,7 +1114,7 @@ impl AppState {
             .create()
         {
             Ok(guard) => self.keep_awake = Some(guard),
-            Err(error) => self.record_render_error(error),
+            Err(error) => self.record_render_error(&error),
         }
     }
 
@@ -1144,7 +1152,7 @@ impl AppState {
 
     fn sync_terminal_panes_or_record_error(&mut self) {
         if let Err(error) = self.sync_terminal_panes() {
-            self.record_error("Could not update the panes", error);
+            self.record_error("Could not update the panes", &error);
         }
     }
     pub fn native_multi_pane(&self) -> bool {
@@ -1242,7 +1250,7 @@ impl AppState {
             self.workspace
                 .activate_target(target.scope, &target.session_id, None, &self.repaint)
         {
-            self.record_error("Could not open the session", error);
+            self.record_error("Could not open the session", &error);
             return false;
         }
         self.sync_terminal_panes_now();
@@ -1304,7 +1312,7 @@ impl AppState {
                     Some(&window_id),
                     &self.repaint,
                 ) {
-                    self.record_error("Could not open the window", error);
+                    self.record_error("Could not open the window", &error);
                     return false;
                 }
                 self.sync_terminal_panes_now();
@@ -1333,7 +1341,7 @@ impl AppState {
                         pane_id: Some(pane_id.clone()),
                     },
                 ) {
-                    self.record_error("Could not close the pane", error);
+                    self.record_error("Could not close the pane", &error);
                     return false;
                 }
                 let binding = &mut self.workspace.active.binding;
@@ -1390,7 +1398,7 @@ impl AppState {
         match result {
             Ok(changed) => changed,
             Err(error) => {
-                self.record_error("Could not save the workspace", error);
+                self.record_error("Could not save the workspace", &error);
                 false
             }
         }
@@ -1638,7 +1646,7 @@ impl AppState {
         match effect {
             TerminalSideEffect::ClipboardWrite(text) => {
                 if let Err(error) = write_clipboard_text(&text) {
-                    self.record_error("Could not copy to the clipboard", error);
+                    self.record_error("Could not copy to the clipboard", &error);
                 }
             }
             TerminalSideEffect::ClipboardQuery { selection } => {
@@ -1659,7 +1667,7 @@ impl AppState {
                 }
             }
             TerminalSideEffect::OpenUrl(url) => effects.push(AppEffect::OpenUrl(url)),
-            TerminalSideEffect::FocusWindow => effects.push(AppEffect::SetWindowFocus),
+            TerminalSideEffect::FocusWindow => effects.push(AppEffect::Window(WindowEffect::Focus)),
             TerminalSideEffect::ReportCellSize => {
                 let response = encode_iterm2_report_cell_size(
                     terminal_cell_width,
@@ -1713,7 +1721,7 @@ impl AppState {
             .terminal_mut()
             .write_input(bytes)
         {
-            self.record_error("Could not answer the terminal", error);
+            self.record_error("Could not answer the terminal", &error);
         }
     }
 
@@ -1727,11 +1735,11 @@ impl AppState {
                     .terminal_mut()
                     .write_input(&encode_osc52_response(selection, &text))
                 {
-                    self.record_error("Could not answer the terminal", error);
+                    self.record_error("Could not answer the terminal", &error);
                 }
             }
             Ok(None) => {}
-            Err(error) => self.record_error("Could not read the clipboard", error),
+            Err(error) => self.record_error("Could not read the clipboard", &error),
         }
     }
     fn apply_terminal_window_title(
@@ -1748,7 +1756,7 @@ impl AppState {
         if source_pane_id.is_none()
             || self.workspace.active.binding.terminal().focused_pane_id() == source_pane_id
         {
-            effects.push(AppEffect::SetWindowTitle(title));
+            effects.push(AppEffect::Window(WindowEffect::Title(title)));
         }
     }
     pub fn update_frame(&mut self, inputs: FrameInputs) -> Vec<AppEffect> {
@@ -1833,7 +1841,7 @@ impl AppState {
         self.hot_reload_config_if_changed(&mut effects, now);
         self.hot_reload_keymap_if_changed(now);
         for error in workspace_frame.errors {
-            self.record_error("Could not update terminal sessions", error);
+            self.record_error("Could not update terminal sessions", &error);
         }
         self.terminal_view_transform = terminal_view_transform;
         self.restore_mouse_pointer_after_pointer_moved(&events, hover_position, &mut effects);
@@ -1911,7 +1919,7 @@ impl AppState {
                 })
         };
         if let Err(error) = terminal_host_metrics {
-            self.record_error("Could not size the terminal", error);
+            self.record_error("Could not size the terminal", &error);
         }
     }
 
@@ -1964,7 +1972,7 @@ impl AppState {
         ) {
             Ok(change) => change,
             Err(error) => {
-                self.record_error("Could not reload settings", error);
+                self.record_error("Could not reload settings", &error);
                 return false;
             }
         };
@@ -1990,23 +1998,23 @@ impl AppState {
         if self.localizer.locale() != self.config().locale {
             match crate::i18n::Localizer::new(&self.config().locale) {
                 Ok(localizer) => self.localizer = localizer,
-                Err(error) => self.record_error("Could not change the language", error),
+                Err(error) => self.record_error("Could not change the language", &error),
             }
         }
         if let Some(text_config) = change.text_config {
             effects.push(AppEffect::SetTerminalTextConfig(text_config));
         }
         if let Some(ui_fonts) = change.ui_fonts {
-            effects.push(AppEffect::SetUiFonts(ui_fonts));
+            effects.push(AppEffect::UiFont(UiFontEffect::Families(ui_fonts)));
         }
         if let Some(weights) = change.ui_font_weights {
-            effects.push(AppEffect::SetUiFontWeights(weights));
+            effects.push(AppEffect::UiFont(UiFontEffect::Weights(weights)));
         }
         if let Some(ui_font_size) = change.ui_font_size {
-            effects.push(AppEffect::SetUiFontSize(ui_font_size));
+            effects.push(AppEffect::UiFont(UiFontEffect::Size(ui_font_size)));
         }
         if let Some(window_title) = change.window_title {
-            effects.push(AppEffect::SetWindowTitle(window_title));
+            effects.push(AppEffect::Window(WindowEffect::Title(window_title)));
         }
         if change.window_fullscreen.is_some() {
             self.apply_configured_fullscreen(effects);
@@ -2083,7 +2091,7 @@ impl AppState {
             return;
         }
         if let Err(error) = self.reload_keymap() {
-            self.record_error("Could not reload the keymap", error);
+            self.record_error("Could not reload the keymap", &error);
         }
     }
     fn split_app_actions(

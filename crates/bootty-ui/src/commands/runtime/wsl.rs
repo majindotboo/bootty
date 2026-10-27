@@ -86,15 +86,17 @@ impl AppState {
                 .into(),
             ),
         };
-        match self.workspace.create_space(
+        let space = bootty_mux::workspace::NewSpace {
             name,
-            "terminal",
-            bootty_mux::repository::DEFAULT_SPACE_COLOR,
-            false,
+            icon: "terminal",
+            color: bootty_mux::repository::DEFAULT_SPACE_COLOR,
+            tint_sidebar: false,
             mux,
-            &config,
-            self.active_appearance_variant(),
-        ) {
+        };
+        match self
+            .workspace
+            .create_space(space, &config, self.active_appearance_variant())
+        {
             Ok(Some(space_id)) => {
                 let activated = self.activate_space_from_ui(space_id);
                 CommandOutcome::Success {

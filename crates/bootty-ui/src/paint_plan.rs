@@ -57,10 +57,6 @@ impl PlanColor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent VT rendition flags may be combined."
-)]
 pub struct TextAttrs {
     pub fg: PlanColor,
     pub bold: bool,
@@ -371,10 +367,14 @@ impl PaintPlanner {
                     surface,
                     frame,
                     row,
-                    self.underline_offset.unwrap_or(font_size + 3.0),
-                    text_cell_height,
-                    default_foreground,
-                    default_background,
+                    TextPlanContext {
+                        default_foreground,
+                        default_background,
+                        underline_offset: self.underline_offset.unwrap_or(font_size + 3.0),
+                        text_cell_height,
+                        minimum_contrast: false,
+                        overlay_mask: &[],
+                    },
                 );
                 rebuilt_rows = rebuilt_rows.saturating_add(1);
             }
@@ -449,7 +449,6 @@ impl PaintPlanner {
             &mut self.plan.text_runs,
             &mut self.plan.decorations,
             &mut self.run_text_pool,
-            &self.overlay_mask,
             surface,
             frame,
             TextPlanContext {
@@ -458,6 +457,7 @@ impl PaintPlanner {
                 underline_offset: self.underline_offset.unwrap_or(font_size + 3.0),
                 text_cell_height,
                 minimum_contrast,
+                overlay_mask: &self.overlay_mask,
             },
             None,
         );
@@ -525,13 +525,16 @@ fn push_background(backgrounds: &mut Vec<BackgroundRect>, rect: SurfaceRect, col
     backgrounds.push(BackgroundRect { rect, color });
 }
 
+/// What decides each cell's text attributes and where its runs sit in the cell.
 #[derive(Clone, Copy)]
-struct TextPlanContext {
+struct TextPlanContext<'a> {
     default_foreground: PlanColor,
     default_background: PlanColor,
     underline_offset: f32,
     text_cell_height: f32,
     minimum_contrast: bool,
+    /// Selection and search overlays per cell; empty when nothing is overlaid.
+    overlay_mask: &'a [u8],
 }
 
 fn plan_overlays(
@@ -625,18 +628,13 @@ fn cell_overlay(mask: &[u8], cols: u16, cell: &RenderCell) -> u8 {
     .unwrap_or_default()
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the row cache redirects the same planner into either the full plan or one row fragment"
-)]
 fn plan_text_runs(
     text_runs: &mut Vec<TextRun>,
     decorations: &mut Vec<DecorationLine>,
     pool: &mut Vec<String>,
-    overlay_mask: &[u8],
     surface: TerminalSurface,
     frame: &RenderFrame,
-    context: TextPlanContext,
+    context: TextPlanContext<'_>,
     row: Option<u16>,
 ) {
     let colors = OverlayTextColors {
@@ -648,7 +646,7 @@ fn plan_text_runs(
         paint_attrs(
             cell,
             text,
-            cell_overlay(overlay_mask, frame.cols, cell),
+            cell_overlay(context.overlay_mask, frame.cols, cell),
             context.default_foreground,
             context.default_background,
             colors,
@@ -718,41 +716,30 @@ fn row_cells(frame: &RenderFrame, row: Option<u16>) -> &[RenderCell] {
     frame.cells.get(start..end).unwrap_or_default()
 }
 
-#[allow(clippy::too_many_arguments)]
 fn plan_row_fragment(
     fragment: &mut RowPaintFragment,
     text_pool: &mut Vec<String>,
     surface: TerminalSurface,
     frame: &RenderFrame,
     row: u16,
-    underline_offset: f32,
-    text_cell_height: f32,
-    default_foreground: PlanColor,
-    default_background: PlanColor,
+    context: TextPlanContext<'_>,
 ) {
     fragment.clear(text_pool);
     plan_backgrounds(
         &mut fragment.backgrounds,
         surface,
         frame,
-        default_foreground,
-        default_background,
+        context.default_foreground,
+        context.default_background,
         Some(row),
     );
     plan_text_runs(
         &mut fragment.text_runs,
         &mut fragment.decorations,
         text_pool,
-        &[],
         surface,
         frame,
-        TextPlanContext {
-            default_foreground,
-            default_background,
-            underline_offset,
-            text_cell_height,
-            minimum_contrast: false,
-        },
+        context,
         Some(row),
     );
 }

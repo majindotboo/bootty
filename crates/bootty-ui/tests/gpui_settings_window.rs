@@ -13,7 +13,7 @@ use gpui_kit::{
 use settings_support::GpuiSettingsSnapshot;
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use settings_support::SettingsProbe as SettingsWindowProbe;
 
 fn init_zed_ui(cx: &TestAppContext) {
@@ -877,22 +877,16 @@ fn edit_config_button_requests_the_host_owned_file_editor(cx: &mut TestAppContex
     });
 }
 
-#[allow(clippy::too_many_lines)]
 fn snapshot_with_category(category: SettingsCategory) -> GpuiSettingsSnapshot {
     GpuiSettingsSnapshot {
         category,
         pages: vec![
-            page(
+            one_section_page(
                 SettingsCategory::General,
-                vec![section(
-                    "general",
-                    "General",
-                    "general startup restore session profile lifecycle",
-                    vec![toggle_row(
-                        "general.restore-session",
-                        "Restore previous session",
-                    )],
-                )],
+                "general",
+                "General",
+                "general startup restore session profile lifecycle",
+                toggle_row("general.restore-session", "Restore previous session"),
             ),
             page(
                 SettingsCategory::Appearance,
@@ -917,76 +911,70 @@ fn snapshot_with_category(category: SettingsCategory) -> GpuiSettingsSnapshot {
                     ),
                 ],
             ),
-            page(
+            one_section_page(
                 SettingsCategory::Keymap,
-                vec![section(
-                    "keymap",
-                    "Keymap",
-                    "keymap shortcuts bindings",
-                    vec![action_row("keymap:open", "Open Keymap")],
-                )],
+                "keymap",
+                "Keymap",
+                "keymap shortcuts bindings",
+                action_row("keymap:open", "Open Keymap"),
             ),
-            page(
+            one_section_page(
                 SettingsCategory::WindowAndLayout,
-                vec![section(
-                    "window",
-                    "Window",
-                    "window tabs splits fullscreen chrome",
-                    vec![toggle_row("window.fullscreen", "Fullscreen")],
-                )],
+                "window",
+                "Window",
+                "window tabs splits fullscreen chrome",
+                toggle_row("window.fullscreen", "Fullscreen"),
             ),
-            page(
+            one_section_page(
                 SettingsCategory::Panels,
-                vec![section(
-                    "panels",
-                    "Panels",
-                    "sidebar status docking widths visibility modules",
-                    vec![toggle_row("panels.sidebar", "Show sidebar")],
-                )],
+                "panels",
+                "Panels",
+                "sidebar status docking widths visibility modules",
+                toggle_row("panels.sidebar", "Show sidebar"),
             ),
-            page(
+            one_section_page(
                 SettingsCategory::Terminal,
-                vec![section(
-                    "terminal",
-                    "Terminal",
-                    "terminal shell environment",
-                    vec![toggle_row("terminal.login-shell", "Login shell")],
-                )],
+                "terminal",
+                "Terminal",
+                "terminal shell environment",
+                toggle_row("terminal.login-shell", "Login shell"),
             ),
-            page(
+            one_section_page(
                 SettingsCategory::Ai,
-                vec![section(
-                    "providers:codex",
-                    "Codex",
-                    "provider account profile update",
-                    vec![action_row(
-                        "agents.codex.provider.status",
-                        "Check installation",
-                    )],
-                )],
+                "providers:codex",
+                "Codex",
+                "provider account profile update",
+                action_row("agents.codex.provider.status", "Check installation"),
             ),
-            page(
+            one_section_page(
                 SettingsCategory::Remotes,
-                vec![section(
-                    "remotes",
-                    "Remotes",
-                    "remotes ssh host",
-                    vec![toggle_row("remotes.default", "Default remote")],
-                )],
+                "remotes",
+                "Remotes",
+                "remotes ssh host",
+                toggle_row("remotes.default", "Default remote"),
             ),
-            page(
+            one_section_page(
                 SettingsCategory::Advanced,
-                vec![section(
-                    "advanced",
-                    "Advanced",
-                    "config diagnostics extensions",
-                    vec![toggle_row("advanced.trace", "Stability trace")],
-                )],
+                "advanced",
+                "Advanced",
+                "config diagnostics extensions",
+                toggle_row("advanced.trace", "Stability trace"),
             ),
         ],
         search: String::new(),
         write_error: None,
     }
+}
+
+/// A page with one section, which holds one row.
+fn one_section_page(
+    category: SettingsCategory,
+    id: &str,
+    title: &str,
+    search_terms: &str,
+    row: SettingsRow,
+) -> SettingsPage {
+    page(category, vec![section(id, title, search_terms, vec![row])])
 }
 
 fn page(category: SettingsCategory, sections: Vec<Vec<SettingsPageItem>>) -> SettingsPage {

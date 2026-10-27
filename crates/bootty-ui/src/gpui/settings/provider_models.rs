@@ -13,7 +13,11 @@ use bootty_control::{
 use gpui_kit::component::{Sizable as _, button::Button};
 use gpui_kit::{AnyElement, Context, IntoElement as _, Window};
 
-use super::{GpuiSettings, ScalarValue, SettingsChoice, SettingsIntent};
+use super::{
+    GpuiSettings, ScalarValue, SettingsChoice, SettingsIntent,
+    components::ValueRow,
+    picker::{SelectControl, SelectStyle},
+};
 
 pub(super) struct ProviderCatalog {
     key: String,
@@ -232,16 +236,19 @@ impl GpuiSettings {
         .detach();
     }
 
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(super) fn render_provider_default(
         &self,
-        id: &str,
-        label: &str,
-        help: &str,
-        value: &ScalarValue,
+        row: ValueRow<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
+        let ValueRow {
+            id,
+            label,
+            help,
+            value,
+            ..
+        } = row;
         let quick_model = id == "agents.quick-model";
         let (provider, leaf) = if quick_model {
             ("codex", "default-model")
@@ -256,32 +263,77 @@ impl GpuiSettings {
             .find(|kind| kind.to_string() == provider)?;
         let catalog = self.provider_catalogs.get(&provider);
         if let Some(error) = catalog.and_then(|catalog| catalog.error.as_ref()) {
-            return Some(
-                Button::new(gpui_kit::SharedString::from(format!(
-                    "models-retry-{provider}"
-                )))
-                .outline()
-                .small()
-                .label("Retry loading models")
-                .tooltip(error.clone())
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    this.request_provider_catalog(provider, cx);
-                    cx.notify();
-                }))
-                .into_any_element(),
-            );
+            return Some(Self::render_catalog_retry(provider, error, cx));
         }
         let models = catalog.map_or(&[][..], |catalog| catalog.models.as_slice());
+        let current = value.as_str().unwrap_or_default();
+        let choices = if quick_model {
+            self.model_choices(provider, leaf, models, current)
+        } else {
+            let mut choices = vec![self.provider_settings_choice(provider, leaf, models)];
+            choices.extend(self.model_choices(provider, leaf, models, current));
+            choices
+        };
+        let id = id.to_owned();
+        Some(Self::render_select(
+            SelectControl {
+                selector: format!("settings-choice-{id}"),
+                label,
+                description: help,
+                current,
+                choices: &choices,
+                enabled: !models.is_empty(),
+            },
+            SelectStyle::Searchable { catalog: "models" },
+            Rc::new(move |value| SettingsIntent::SetValue {
+                id: id.clone(),
+                value: ScalarValue::Text(value),
+            }),
+            window,
+            cx,
+        ))
+    }
+
+    fn render_catalog_retry(provider: AgentKind, error: &str, cx: &Context<Self>) -> AnyElement {
+        Button::new(gpui_kit::SharedString::from(format!(
+            "models-retry-{provider}"
+        )))
+        .outline()
+        .small()
+        .label("Retry loading models")
+        .tooltip(error.to_owned())
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.request_provider_catalog(provider, cx);
+            cx.notify();
+        }))
+        .into_any_element()
+    }
+
+    /// The configured model, or the provider's default when none is configured.
+    fn current_model<'a>(
+        &self,
+        provider: AgentKind,
+        models: &'a [NativeModelOption],
+    ) -> Option<&'a NativeModelOption> {
         let configured = self
             .draft
             .value(&format!("agents.{provider}.default-model"));
-        let current_model = models
+        models
             .iter()
             .find(|model| {
                 configured.as_ref().and_then(ScalarValue::as_str) == Some(model.id.as_str())
             })
-            .or_else(|| models.iter().find(|model| model.is_default));
-        let default_label = if models.is_empty() {
+            .or_else(|| models.iter().find(|model| model.is_default))
+    }
+
+    /// The empty choice, which leaves the model or effort to the provider's own settings.
+    fn provider_settings_choice(
+        &self,
+        provider: AgentKind,
+        leaf: &str,
+        models: &[NativeModelOption],
+    ) -> SettingsChoice {
+        let label = if models.is_empty() {
             "Loading models…".to_owned()
         } else if leaf == "default-model" {
             models.iter().find(|model| model.is_default).map_or_else(
@@ -289,29 +341,37 @@ impl GpuiSettings {
                 |model| format!("Use provider settings ({})", model.display_name),
             )
         } else {
-            current_model
+            self.current_model(provider, models)
                 .and_then(|model| model.default_reasoning_effort.as_deref())
                 .map_or_else(
                     || "Use provider settings".to_owned(),
                     |effort| format!("Use provider settings ({effort})"),
                 )
         };
-        let mut choices = if quick_model {
-            Vec::new()
-        } else {
-            vec![SettingsChoice {
-                token: String::new(),
-                label: default_label,
-                description: None,
-            }]
-        };
+        SettingsChoice {
+            token: String::new(),
+            label,
+            description: None,
+        }
+    }
+
+    /// The models, or the current model's available efforts, plus a configured value the
+    /// catalog no longer lists.
+    fn model_choices(
+        &self,
+        provider: AgentKind,
+        leaf: &str,
+        models: &[NativeModelOption],
+        current: &str,
+    ) -> Vec<SettingsChoice> {
+        let mut choices = Vec::new();
         if leaf == "default-model" {
             choices.extend(models.iter().map(|model| SettingsChoice {
                 token: model.id.clone(),
                 label: model.display_name.clone(),
                 description: Some(model.id.clone()),
             }));
-        } else if let Some(model) = current_model {
+        } else if let Some(model) = self.current_model(provider, models) {
             let available = self
                 .draft
                 .string_list(&format!("agents.{provider}.available-efforts"))
@@ -328,7 +388,6 @@ impl GpuiSettings {
                     }),
             );
         }
-        let current = value.as_str().unwrap_or_default();
         if !current.is_empty() && !choices.iter().any(|choice| choice.token == current) {
             choices.push(SettingsChoice {
                 token: current.to_owned(),
@@ -336,21 +395,6 @@ impl GpuiSettings {
                 description: Some("Configured value".to_owned()),
             });
         }
-        let id = id.to_owned();
-        Some(Self::render_searchable_picker(
-            format!("settings-choice-{id}"),
-            label,
-            help,
-            "models",
-            current,
-            &choices,
-            !models.is_empty(),
-            Rc::new(move |value| SettingsIntent::SetValue {
-                id: id.clone(),
-                value: ScalarValue::Text(value),
-            }),
-            window,
-            cx,
-        ))
+        choices
     }
 }

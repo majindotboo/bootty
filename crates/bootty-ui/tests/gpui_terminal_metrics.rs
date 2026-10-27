@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use bootty_ui::gpui::TerminalElementRequest;
 use std::sync::Arc;
 
 use bootty_terminal::geometry::{
@@ -46,17 +47,17 @@ fn draw_frame(
         point(px(0.0), px(0.0)),
         size(px(surface.rect.width()), px(surface.rect.height())),
         |_, _| {
-            adapter.element(
+            adapter.element(TerminalElementRequest {
                 surface,
                 frame,
-                14.0,
-                surface.cell.height,
-                1.0,
-                contract,
-                CursorBlinkPhase::visible(),
-                true,
-                "",
-            )
+                font_size: 14.0,
+                text_cell_height: surface.cell.height,
+                pixels_per_point: 1.0,
+                text_contract: contract,
+                cursor_blink_phase: CursorBlinkPhase::visible(),
+                cursor_focused: true,
+                marked_text: "",
+            })
         },
     );
 }
@@ -99,28 +100,28 @@ fn adapter_rebuilds_erased_rows_when_publications_are_skipped() {
     let mut engine = TerminalEngine::new(surface.geometry()).unwrap();
     let mut adapter = GpuiTerminalAdapter::default();
     let mut draw = |frame: &Arc<RenderFrame>| {
-        let actual = adapter.element(
+        let actual = adapter.element(TerminalElementRequest {
             surface,
             frame,
-            15.0,
-            20.0,
-            1.0,
-            &contract,
-            CursorBlinkPhase::visible(),
-            true,
-            "",
-        );
-        let expected = GpuiTerminalAdapter::default().element(
+            font_size: 15.0,
+            text_cell_height: 20.0,
+            pixels_per_point: 1.0,
+            text_contract: &contract,
+            cursor_blink_phase: CursorBlinkPhase::visible(),
+            cursor_focused: true,
+            marked_text: "",
+        });
+        let expected = GpuiTerminalAdapter::default().element(TerminalElementRequest {
             surface,
             frame,
-            15.0,
-            20.0,
-            1.0,
-            &contract,
-            CursorBlinkPhase::visible(),
-            true,
-            "",
-        );
+            font_size: 15.0,
+            text_cell_height: 20.0,
+            pixels_per_point: 1.0,
+            text_contract: &contract,
+            cursor_blink_phase: CursorBlinkPhase::visible(),
+            cursor_focused: true,
+            marked_text: "",
+        });
         assert_eq!(actual.frame(), expected.frame());
         assert_eq!(actual.glyph_sprite_rects(), expected.glyph_sprite_rects());
     };
@@ -150,17 +151,17 @@ fn padded_terminal_layout_preserves_the_outer_surface(cx: &mut TestAppContext) {
         point(px(0.0), px(0.0)),
         size(px(208.0), px(168.0)),
         |window, app| {
-            let mut element = GpuiTerminalAdapter::default().element(
+            let mut element = GpuiTerminalAdapter::default().element(TerminalElementRequest {
                 surface,
-                &frame,
-                15.0,
-                20.0,
-                1.0,
-                &contract,
-                CursorBlinkPhase::visible(),
-                true,
-                "",
-            );
+                frame: &frame,
+                font_size: 15.0,
+                text_cell_height: 20.0,
+                pixels_per_point: 1.0,
+                text_contract: &contract,
+                cursor_blink_phase: CursorBlinkPhase::visible(),
+                cursor_focused: true,
+                marked_text: "",
+            });
             let (layout, ()) = element.request_layout(None, None, window, app);
             window.compute_layout(layout, size(px(208.0), px(168.0)).into(), app);
             assert_eq!(
@@ -319,17 +320,17 @@ fn opt_in_metrics_count_actual_terminal_prepaint_and_paint(cx: &mut TestAppConte
     ] {
         let frame = frame(image);
         cx.draw(point(px(0.0), px(0.0)), size(px(40.0), px(20.0)), |_, _| {
-            adapter.element(
-                surface(),
-                &frame,
-                14.0,
-                20.0,
-                1.0,
-                &contract,
-                CursorBlinkPhase::visible(),
-                true,
-                "",
-            )
+            adapter.element(TerminalElementRequest {
+                surface: surface(),
+                frame: &frame,
+                font_size: 14.0,
+                text_cell_height: 20.0,
+                pixels_per_point: 1.0,
+                text_contract: &contract,
+                cursor_blink_phase: CursorBlinkPhase::visible(),
+                cursor_focused: true,
+                marked_text: "",
+            })
         });
     }
 
@@ -385,17 +386,17 @@ fn terminal_glyph_tiles_apply_baseline_changes_without_reusing_stale_geometry(
             let mut output = None;
 
             cx.draw(point(px(0.0), px(0.0)), size(px(10.0), px(20.0)), |_, _| {
-                let element = adapter.element(
+                let element = adapter.element(TerminalElementRequest {
                     surface,
-                    &frame,
+                    frame: &frame,
                     font_size,
-                    surface.cell.height,
+                    text_cell_height: surface.cell.height,
                     pixels_per_point,
-                    &contract,
-                    CursorBlinkPhase::visible(),
-                    true,
-                    "",
-                );
+                    text_contract: &contract,
+                    cursor_blink_phase: CursorBlinkPhase::visible(),
+                    cursor_focused: true,
+                    marked_text: "",
+                });
                 let text_rect = element
                     .frame()
                     .commands
@@ -453,17 +454,17 @@ fn copy_mode_label_uses_the_inherited_root_font(cx: &mut TestAppContext) {
     let mut adapter = GpuiTerminalAdapter::default();
     let ((), prepaint) = cx.draw(point(px(0.0), px(0.0)), size(px(80.0), px(20.0)), |_, _| {
         InheritedFontTerminal {
-            terminal: adapter.element(
+            terminal: adapter.element(TerminalElementRequest {
                 surface,
-                &frame,
-                14.0,
-                20.0,
-                1.0,
-                &contract,
-                CursorBlinkPhase::visible(),
-                true,
-                "",
-            ),
+                frame: &frame,
+                font_size: 14.0,
+                text_cell_height: 20.0,
+                pixels_per_point: 1.0,
+                text_contract: &contract,
+                cursor_blink_phase: CursorBlinkPhase::visible(),
+                cursor_focused: true,
+                marked_text: "",
+            }),
             font: root_font.clone(),
         }
     });
@@ -535,17 +536,17 @@ fn adapter_rebuilds_only_dirty_rows_after_incremental_cache_warmup(cx: &mut Test
         point(px(0.0), px(0.0)),
         size(px(surface.rect.width()), px(surface.rect.height())),
         |_, _| {
-            let element = adapter.element(
+            let element = adapter.element(TerminalElementRequest {
                 surface,
-                &second_edit,
-                14.0,
-                surface.cell.height,
-                1.0,
-                &contract,
-                CursorBlinkPhase::visible(),
-                true,
-                "",
-            );
+                frame: &second_edit,
+                font_size: 14.0,
+                text_cell_height: surface.cell.height,
+                pixels_per_point: 1.0,
+                text_contract: &contract,
+                cursor_blink_phase: CursorBlinkPhase::visible(),
+                cursor_focused: true,
+                marked_text: "",
+            });
             incremental_output = Some((
                 element.frame().clone(),
                 element.glyph_sprite_rects(),
@@ -571,17 +572,17 @@ fn adapter_rebuilds_only_dirty_rows_after_incremental_cache_warmup(cx: &mut Test
         point(px(0.0), px(0.0)),
         size(px(surface.rect.width()), px(surface.rect.height())),
         |_, _| {
-            let element = cold_adapter.element(
+            let element = cold_adapter.element(TerminalElementRequest {
                 surface,
-                &second_edit,
-                14.0,
-                surface.cell.height,
-                1.0,
-                &contract,
-                CursorBlinkPhase::visible(),
-                true,
-                "",
-            );
+                frame: &second_edit,
+                font_size: 14.0,
+                text_cell_height: surface.cell.height,
+                pixels_per_point: 1.0,
+                text_contract: &contract,
+                cursor_blink_phase: CursorBlinkPhase::visible(),
+                cursor_focused: true,
+                marked_text: "",
+            });
             cold_output = Some((
                 element.frame().clone(),
                 element.glyph_sprite_rects(),

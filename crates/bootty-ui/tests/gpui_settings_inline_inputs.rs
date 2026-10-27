@@ -13,7 +13,7 @@ use gpui_kit::{
 };
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use settings_support::SettingsProbe as InlineInputProbe;
 
 impl InlineInputProbe {

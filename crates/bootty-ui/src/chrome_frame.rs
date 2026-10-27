@@ -476,7 +476,6 @@ fn hsl_hex(hue: f64, saturation: f64, lightness: f64) -> String {
     )
 }
 
-#[allow(clippy::too_many_lines)]
 pub fn snapshot(
     state: &AppState,
     native: &NativeChrome,
@@ -1058,10 +1057,35 @@ fn session_title<'a>(name: &'a str, project: &str, explicit: bool) -> &'a str {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Projects and their session rows share one projection pass"
-)]
+/// The sessions the sidebar lists, in order: each session once, by project when grouped, without
+/// the tasks a conversation delegated, which show under their parent instead.
+fn listed_sessions<'a>(
+    projection: &'a ChromeProjection,
+    delegated: &HashSet<&str>,
+    grouped: bool,
+) -> Vec<(usize, &'a SessionView)> {
+    let mut groups = Vec::<(Option<&str>, Vec<(usize, &SessionView)>)>::new();
+    for (index, session) in projection.mux.sessions.iter().enumerate() {
+        if session
+            .identity
+            .as_deref()
+            .is_some_and(|identity| delegated.contains(identity))
+        {
+            continue;
+        }
+        let group = session_project_path(projection, session);
+        if grouped && let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
+            indices.push((index, session));
+        } else {
+            groups.push((group, vec![(index, session)]));
+        }
+    }
+    groups
+        .into_iter()
+        .flat_map(|(_, indices)| indices)
+        .collect()
+}
+
 fn sidebar_rows(
     state: &AppState,
     native: &NativeChrome,
@@ -1077,29 +1101,13 @@ fn sidebar_rows(
     let mut rows = Vec::new();
     let grouped = state.config().sidebar.group_by_project;
     let names = state.saved_session_names();
-    let mut groups = Vec::<(Option<&str>, Vec<(usize, &SessionView)>)>::new();
     let delegated: HashSet<_> = native_activities
         .iter()
         .filter(|activity| activity.spawn_parent.is_some())
         .filter_map(|activity| activity.task_identity.as_deref())
         .collect();
-    for (index, session) in sessions.iter().enumerate() {
-        if session
-            .identity
-            .as_deref()
-            .is_some_and(|identity| delegated.contains(identity))
-        {
-            continue;
-        }
-        let group = session_project_path(projection, session);
-        if grouped && let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
-            indices.push((index, session));
-        } else {
-            groups.push((group, vec![(index, session)]));
-        }
-    }
     let mut last_group = None;
-    for (index, session) in groups.into_iter().flat_map(|(_, indices)| indices) {
+    for (index, session) in listed_sessions(projection, &delegated, grouped) {
         let facts = projection
             .session_facts
             .get(&session.id)
@@ -1142,32 +1150,17 @@ fn sidebar_rows(
             .and_then(|identity| state.workspace.active.binding.sessions().get(identity))
             .is_some_and(|saved| saved.explicit);
         let title = session_title(name, project, explicit_title);
-        let mut row = SidebarRow {
-            text: title.to_owned(),
-            project: Some(SidebarProject {
+        let mut row = session_row(
+            state,
+            session,
+            facts,
+            SidebarProject {
                 name: project.to_owned(),
                 artwork,
-            }),
-            branch: facts.branch,
-            pull_request: sidebar_pull_request(
-                facts.pull_request.as_ref(),
-                state.ui_theme().palette,
-            ),
-            diff: sidebar_diff(
-                facts.diff_added,
-                facts.diff_removed,
-                state.ui_theme().palette,
-            ),
-            worktree: facts.project.is_some(),
-            icon: Some("terminal".to_owned()),
-            kind: if session.detached {
-                SidebarRowKind::DetachedSession
-            } else {
-                SidebarRowKind::Session
             },
-            selectable: true,
-            ..base
-        };
+            title,
+            base,
+        );
         let terminal_priority = sidebar_session_activity(state, session, &mut row);
         let selected_native = active_pane_conversation(state, session);
         sidebar_native_activity(
@@ -1188,6 +1181,37 @@ fn sidebar_rows(
         last_group = Some(group);
     }
     rows
+}
+
+/// A session's own row: its title, project, branch, pull request and diff.
+fn session_row(
+    state: &AppState,
+    session: &SessionView,
+    facts: bootty_git::GitSessionFacts,
+    project: SidebarProject,
+    title: &str,
+    base: SidebarRow,
+) -> SidebarRow {
+    SidebarRow {
+        text: title.to_owned(),
+        project: Some(project),
+        branch: facts.branch,
+        pull_request: sidebar_pull_request(facts.pull_request.as_ref(), state.ui_theme().palette),
+        diff: sidebar_diff(
+            facts.diff_added,
+            facts.diff_removed,
+            state.ui_theme().palette,
+        ),
+        worktree: facts.project.is_some(),
+        icon: Some("terminal".to_owned()),
+        kind: if session.detached {
+            SidebarRowKind::DetachedSession
+        } else {
+            SidebarRowKind::Session
+        },
+        selectable: true,
+        ..base
+    }
 }
 
 /// A session row's project: its path, and the names of the scripts it can run.
@@ -2230,7 +2254,7 @@ fn apply_place(state: &mut AppState, intent: ChromeIntent, effects: &mut Vec<App
     match intent {
         ChromeIntent::CopyText(text) => {
             if let Err(error) = crate::platform::write_clipboard_text(&text) {
-                state.record_error("Could not copy", error);
+                state.record_error("Could not copy", &error);
             }
             true
         }

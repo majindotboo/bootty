@@ -152,7 +152,7 @@ impl AppState {
                 Err(std::sync::mpsc::TryRecvError::Empty) => true,
             });
         for (action, message) in messages {
-            self.record_error(action, message);
+            self.record_error(action, &message);
         }
     }
 
@@ -444,7 +444,7 @@ impl AppState {
                     &target.session_id,
                     &self.repaint,
                 ) {
-                    self.record_error("Could not move the session", error);
+                    self.record_error("Could not move the session", &error);
                     return;
                 }
                 self.activate_scoped_session_from_ui(&target);
@@ -688,7 +688,7 @@ impl AppState {
         if !warnings.is_empty() {
             self.record_error(
                 "The session started with a problem",
-                warnings
+                &warnings
                     .into_iter()
                     .map(|warning| warning.message)
                     .collect::<Vec<_>>()
@@ -773,12 +773,12 @@ impl AppState {
                 });
                 match result {
                     Some(Ok(())) => {}
-                    Some(Err(error)) => self.record_error("Could not add the project", error),
+                    Some(Err(error)) => self.record_error("Could not add the project", &error),
                     None => self.record_message("The project picker is no longer open"),
                 }
             }
             NewSessionPickerEvent::Error(error) => {
-                self.record_error("Could not start the session", error);
+                self.record_error("Could not start the session", &error);
             }
             NewSessionPickerEvent::CreateWorktree { repo, request } => {
                 self.create_picked_worktree(repo, request);
@@ -1074,7 +1074,7 @@ impl AppState {
         {
             let scope = record.draft.scope;
             if let Err(error) = self.open_creation_draft(scope, &identity) {
-                self.record_error("Could not restore the session draft", error);
+                self.record_error("Could not restore the session draft", &error);
             }
             return;
         }
@@ -1114,7 +1114,7 @@ impl AppState {
         }
         if let Err(outcome) = self.validate_surface_request(request) {
             if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                self.record_error("Could not open the agent form", message);
+                self.record_error("Could not open the agent form", &message);
             }
             return;
         }

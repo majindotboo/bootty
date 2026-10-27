@@ -50,6 +50,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 struct RetainedRun(DWRITE_GLYPH_RUN);
 impl Drop for RetainedRun {
     fn drop(&mut self) {
+        // SAFETY: with_run put one owned face reference in fontFace, and this drop runs once.
         unsafe {
             ManuallyDrop::drop(&mut self.0.fontFace);
         }
@@ -100,6 +101,8 @@ fn analysis(
     };
     let mut mode = DWRITE_RENDERING_MODE1::default();
     let mut fitting = DWRITE_GRID_FIT_MODE::default();
+    // SAFETY: face is a live font face, matrix outlives the call, and mode and fitting are valid
+    // out-pointers.
     unsafe {
         face.GetRecommendedRenderingMode(
             params.font_size.into(),
@@ -119,6 +122,8 @@ fn analysis(
     }
     let origin = origin(params);
     with_run(face, params, |run| {
+        // SAFETY: factory is live, and run, the glyph data it points to and matrix outlive the
+        // call.
         Ok(unsafe {
             factory.CreateGlyphRunAnalysis(
                 run,
@@ -161,6 +166,7 @@ impl Fonts {
         if params.is_emoji {
             return self.color_raster()?.bounds(&face, params);
         }
+        // SAFETY: The analysis was just created and lives through the call.
         let rect = unsafe {
             analysis(&self.factory, &face, params)?.GetAlphaTextureBounds(texture(params))?
         };
@@ -226,6 +232,8 @@ impl Fonts {
                 .checked_add(bounds.size.height.0)
                 .context("Glyph bottom edge overflow")?,
         };
+        // SAFETY: bitmap holds width times height times channels bytes, the size CreateAlphaTexture
+        // writes for rect.
         unsafe {
             analysis(&self.factory, &face, params)?.CreateAlphaTexture(
                 texture(params),
@@ -253,6 +261,8 @@ pub(super) struct ColorRaster {
 impl ColorRaster {
     fn new() -> Result<Self> {
         let mut device: Option<ID3D11Device> = None;
+        // SAFETY: Every pointer argument is null or the caller's device slot, which outlives the
+        // call.
         let create = |driver, device: &mut Option<ID3D11Device>| unsafe {
             D3D11CreateDevice(
                 None::<&IDXGIAdapter>,
@@ -269,6 +279,7 @@ impl ColorRaster {
         create(D3D_DRIVER_TYPE_HARDWARE, &mut device)
             .or_else(|_| create(D3D_DRIVER_TYPE_WARP, &mut device))?;
         let dxgi: IDXGIDevice = device.context("Direct3D returned no device")?.cast()?;
+        // SAFETY: dxgi is a live DXGI device.
         let context = unsafe {
             D2D1CreateDevice(&dxgi, None)?
                 .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?
@@ -282,11 +293,13 @@ impl ColorRaster {
         face: &IDWriteFontFace3,
         params: &RenderGlyphParams,
     ) -> Result<Bounds<DevicePixels>> {
+        // SAFETY: context is a live device context, and the matrix outlives the call.
         unsafe {
             self.context
                 .SetTransform(&Matrix3x2::scale(params.scale_factor, params.scale_factor));
         }
         let rect = with_run(face, params, |run| {
+            // SAFETY: context is live, and run and the glyph data it points to outlive the call.
             Ok(unsafe {
                 self.context.GetGlyphRunWorldBounds(
                     origin(params),
@@ -349,6 +362,7 @@ impl ColorRaster {
             bitmapOptions: options,
             colorContext: ManuallyDrop::new(None),
         };
+        // SAFETY: context is live, no initial data is passed, and properties outlives the call.
         let target = unsafe {
             self.context.CreateBitmap(
                 dimensions,
@@ -357,6 +371,7 @@ impl ColorRaster {
                 &properties(D2D1_BITMAP_OPTIONS_TARGET),
             )?
         };
+        // SAFETY: context is live, no initial data is passed, and properties outlives the call.
         let staging = unsafe {
             self.context.CreateBitmap(
                 dimensions,
@@ -365,6 +380,8 @@ impl ColorRaster {
                 &properties(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
             )?
         };
+        // SAFETY: context and target are live; these calls set state and begin a draw that EndDraw
+        // closes below.
         unsafe {
             self.context.SetTarget(&target);
             self.context.SetTransform(&Matrix3x2 {
@@ -392,12 +409,15 @@ impl ColorRaster {
         let draw_result = with_run(face, params, |run| {
             self.draw_layers(factory, run, origin(params))
         });
+        // SAFETY: context is live, and BeginDraw opened this draw above.
         let finish = unsafe { self.context.EndDraw(None, None) };
+        // SAFETY: context is live; clearing the target releases it.
         unsafe {
             self.context.SetTarget(None::<&ID2D1Image>);
         }
         draw_result?;
         finish?;
+        // SAFETY: staging and target are live bitmaps of the same size.
         unsafe {
             staging.CopyFromBitmap(None, &target, None)?;
         }
@@ -418,6 +438,7 @@ impl ColorRaster {
             | DWRITE_GLYPH_IMAGE_FORMATS_JPEG
             | DWRITE_GLYPH_IMAGE_FORMATS_TIFF
             | DWRITE_GLYPH_IMAGE_FORMATS_PREMULTIPLIED_B8G8R8A8;
+        // SAFETY: context is live, and the color outlives the call.
         let default = unsafe {
             self.context.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
@@ -429,6 +450,7 @@ impl ColorRaster {
                 None,
             )?
         };
+        // SAFETY: factory is live, and run and the glyph data it points to outlive the call.
         let layers = match unsafe {
             factory.TranslateColorGlyphRun(
                 baseline,
@@ -442,6 +464,7 @@ impl ColorRaster {
         } {
             Ok(layers) => layers,
             Err(error) if error.code() == DWRITE_E_NOCOLOR => {
+                // SAFETY: context and default are live, and run outlives the call.
                 unsafe {
                     self.context.DrawGlyphRun(
                         baseline,
@@ -455,7 +478,10 @@ impl ColorRaster {
             }
             Err(error) => return Err(error.into()),
         };
+        // SAFETY: layers is a live color glyph run enumerator.
         while unsafe { layers.MoveNext()?.as_bool() } {
+            // SAFETY: layers is live, its current run stays valid until the next MoveNext, and
+            // as_ref checks for null.
             let layer = unsafe { layers.GetCurrentRun()?.as_ref() }
                 .context("DirectWrite returned a null color layer")?;
             self.draw_layer(layer, &default)?;
@@ -473,6 +499,8 @@ impl ColorRaster {
             X: layer.Base.baselineOriginX,
             Y: layer.Base.baselineOriginY,
         };
+        // SAFETY: context and default are live, and layer's glyph run stays valid until the next
+        // MoveNext.
         unsafe {
             match layer.glyphImageFormat {
                 DWRITE_GLYPH_IMAGE_FORMATS_SVG => self.context.DrawSvgGlyphRun(
@@ -527,6 +555,7 @@ fn bitmap_pixels(staging: &ID2D1Bitmap1, dimensions: D2D_SIZE_U) -> Result<Vec<u
     let count = stride
         .checked_mul(height)
         .context("Glyph bitmap overflow")?;
+    // SAFETY: staging is a CPU-readable bitmap that is not mapped yet; Unmap below balances this.
     let mapped = unsafe { staging.Map(D2D1_MAP_OPTIONS_READ)? };
     let copied = (|| -> Result<Vec<u8>> {
         let pitch = usize::try_from(mapped.pitch)?;
@@ -548,13 +577,15 @@ fn bitmap_pixels(staging: &ID2D1Bitmap1, dimensions: D2D_SIZE_U) -> Result<Vec<u
             let offset = row
                 .checked_mul(pitch)
                 .context("Glyph row offset overflow")?;
-            // Direct2D owns this mapped allocation until Unmap; each copy stays in one row.
+            // SAFETY: Direct2D owns this mapped allocation until Unmap, and the checks above keep
+            // each row's stride bytes inside the mapped span.
             pixels.extend_from_slice(unsafe {
                 std::slice::from_raw_parts(mapped.bits.add(offset), stride)
             });
         }
         Ok(pixels)
     })();
+    // SAFETY: staging was mapped above, and no slice into it survives the copy.
     let unmapped = unsafe { staging.Unmap() };
     let mut pixels = copied?;
     unmapped?;

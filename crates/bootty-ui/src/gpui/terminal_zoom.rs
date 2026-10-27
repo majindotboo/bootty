@@ -41,17 +41,17 @@ impl TerminalZoomRequest {
     }
 
     fn prepare(&self, adapter: &mut GpuiTerminalAdapter) -> GpuiTerminalElement {
-        adapter.element(
-            self.surface,
-            &self.frame,
-            self.font_size,
-            self.text_cell_height,
-            self.pixels_per_point,
-            &self.text_contract,
-            self.cursor_blink_phase,
-            self.cursor_focused,
-            &self.marked_text,
-        )
+        adapter.element(super::TerminalElementRequest {
+            surface: self.surface,
+            frame: &self.frame,
+            font_size: self.font_size,
+            text_cell_height: self.text_cell_height,
+            pixels_per_point: self.pixels_per_point,
+            text_contract: &self.text_contract,
+            cursor_blink_phase: self.cursor_blink_phase,
+            cursor_focused: self.cursor_focused,
+            marked_text: &self.marked_text,
+        })
     }
 }
 

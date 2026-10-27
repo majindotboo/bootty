@@ -6,7 +6,7 @@ use bootty_control::{CommandTarget, ResourceKind};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
-mod support;
+pub mod support;
 
 fn record(provider: AgentKind, prompt: &str) -> TerminalAgentRecord {
     TerminalAgentRecord {

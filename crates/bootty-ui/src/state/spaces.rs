@@ -5,7 +5,7 @@ use bootty_mux::repository::SpaceMuxOverride;
 
 use super::AppState;
 use crate::input::focus::InputFocus;
-use bootty_mux::workspace::{SpaceCloseOutcome, SpaceSummary};
+use bootty_mux::workspace::{NewSpace, SpaceCloseOutcome, SpaceSummary};
 impl AppState {
     pub(crate) fn persist_space_selection_for_window(
         &mut self,
@@ -18,7 +18,7 @@ impl AppState {
         {
             Ok(()) => true,
             Err(error) => {
-                self.record_error("Could not remember the selected Space", error);
+                self.record_error("Could not remember the selected Space", &error);
                 false
             }
         }
@@ -50,22 +50,25 @@ impl AppState {
         mux: SpaceMuxOverride,
     ) -> bool {
         let config = self.config().clone();
-        let space_id = match self.workspace.create_space(
+        let space = NewSpace {
             name,
             icon,
             color,
             tint_sidebar,
             mux,
-            &config,
-            self.active_appearance_variant,
-        ) {
-            Ok(Some(space_id)) => space_id,
-            Ok(None) => return false,
-            Err(error) => {
-                self.record_error("Could not create the Space", error);
-                return false;
-            }
         };
+        let space_id =
+            match self
+                .workspace
+                .create_space(space, &config, self.active_appearance_variant)
+            {
+                Ok(Some(space_id)) => space_id,
+                Ok(None) => return false,
+                Err(error) => {
+                    self.record_error("Could not create the Space", &error);
+                    return false;
+                }
+            };
         self.activate_space_from_ui(space_id)
     }
     pub fn close_space_from_ui(&mut self, space_id: SpaceId) -> bool {
@@ -91,7 +94,7 @@ impl AppState {
             }
             Ok(SpaceCloseOutcome::Unchanged) => false,
             Err(error) => {
-                self.record_error("Could not close the Space", error);
+                self.record_error("Could not close the Space", &error);
                 false
             }
         }
@@ -132,7 +135,7 @@ impl AppState {
             }
             Ok(_) => false,
             Err(error) => {
-                self.record_error("Could not update the Space", error);
+                self.record_error("Could not update the Space", &error);
                 false
             }
         }
@@ -167,7 +170,7 @@ impl AppState {
             &self.repaint,
             Instant::now(),
         ) {
-            self.record_error("Could not switch Spaces", error);
+            self.record_error("Could not switch Spaces", &error);
             return false;
         }
         self.publish_space_activation();

@@ -36,12 +36,12 @@ static ALLOC_BYTES: AtomicUsize = AtomicUsize::new(0);
 
 struct CountingAllocator;
 
-// SAFETY: this allocator only records counters and forwards each operation, pointer, and
-// layout unchanged to System. Counting uses atomics and cannot allocate or unwind.
-#[allow(
+#[expect(
     unsafe_code,
     reason = "The allocation benchmark must implement GlobalAlloc; operations delegate to System."
 )]
+// SAFETY: this allocator only records counters and forwards each operation, pointer, and
+// layout unchanged to System. Counting uses atomics and cannot allocate or unwind.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);

@@ -78,7 +78,7 @@ impl AppState {
             }
         }
         if let Some(error) = update_error {
-            self.record_error("Could not update provider", error);
+            self.record_error("Could not update provider", &error);
         }
         if !self.config().agents.auto_update || self.commands.terminal_agents.is_none() {
             return;

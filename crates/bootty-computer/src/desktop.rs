@@ -4,6 +4,7 @@ use crate::{
     ComputerElement, ComputerError, ComputerStatus, ComputerTarget, DisplayBounds, ElementRoot,
     Key, Modifier, MouseButton,
 };
+use num_traits::ToPrimitive as _;
 
 /// One observed window.
 ///
@@ -70,14 +71,9 @@ pub fn pixel_count(points: f64) -> u32 {
     pixel_edge(points).max(1)
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    reason = "Float-to-integer casts saturate; callers pass finite, non-negative pixel edges."
-)]
-pub(crate) const fn pixel_edge(value: f64) -> u32 {
-    value as u32
+/// Whole pixels in a non-negative edge; anything else, including NaN, is none.
+pub(crate) fn pixel_edge(value: f64) -> u32 {
+    value.to_u32().unwrap_or(0)
 }
 
 impl Image {

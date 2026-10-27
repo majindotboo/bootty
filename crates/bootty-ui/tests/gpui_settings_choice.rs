@@ -13,7 +13,7 @@ fn init_zed_ui(cx: &TestAppContext) {
 use gpui_kit::{Context, Modifiers, TestAppContext, point, px};
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use settings_support::SettingsProbe as ChoiceProbe;
 
 impl ChoiceProbe {

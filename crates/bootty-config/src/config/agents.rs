@@ -371,10 +371,6 @@ impl AgentProviderConfig {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Agent preferences are independent policies, not mutually exclusive states"
-)]
 pub struct AgentProvidersConfig {
     #[serde(rename = "auto-update")]
     pub auto_update: bool,

@@ -1,5 +1,5 @@
 #![cfg(target_os = "windows")]
-#![allow(
+#![expect(
     unsafe_code,
     reason = "Read-only Win32 probes verify UIA does not move focus or the pointer."
 )]
@@ -49,12 +49,14 @@ async fn calculator_uia_calculates_in_background_without_capture_or_input_events
         "Open exactly one Windows Calculator window first"
     );
     let target = candidates.first().unwrap();
+    // SAFETY: GetForegroundWindow has no preconditions.
     let foreground = unsafe { GetForegroundWindow() };
     assert_ne!(
         foreground.0.expose_provenance(),
         usize::try_from(target.window_id).unwrap()
     );
     let mut pointer = POINT::default();
+    // SAFETY: pointer is a valid out-pointer for the call.
     unsafe { GetCursorPos(&raw mut pointer) }.unwrap();
     for identifier in [
         "clearButton",
@@ -78,8 +80,10 @@ async fn calculator_uia_calculates_in_background_without_capture_or_input_events
                 method: PressMethod::Action
             }
         );
+        // SAFETY: GetForegroundWindow has no preconditions.
         assert_eq!(unsafe { GetForegroundWindow() }, foreground);
         let mut current_pointer = POINT::default();
+        // SAFETY: current_pointer is a valid out-pointer for the call.
         unsafe { GetCursorPos(&raw mut current_pointer) }.unwrap();
         assert_eq!(
             (current_pointer.x, current_pointer.y),
@@ -102,5 +106,6 @@ async fn calculator_uia_calculates_in_background_without_capture_or_input_events
         result.and_then(|element| element.name).as_deref(),
         Some("Display is 56")
     );
+    // SAFETY: GetForegroundWindow has no preconditions.
     assert_eq!(unsafe { GetForegroundWindow() }, foreground);
 }

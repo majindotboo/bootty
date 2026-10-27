@@ -851,10 +851,6 @@ fn task_row_snapshot(grouped: bool) -> ChromeSnapshot {
 }
 
 #[gpui_kit::test]
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "Compare measured GPUI pixel geometry within a row's padding"
-)]
 fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestAppContext) {
     for (font_size, grouped) in [12.0, 16.0, 20.0]
         .into_iter()
@@ -955,10 +951,6 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
     }
 }
 
-#[allow(
-    clippy::arithmetic_side_effects,
-    reason = "Compare measured layout insets"
-)]
 fn assert_task_padding(cx: &mut VisualTestContext, font_size: f32, grouped: bool) {
     if !grouped {
         let project = cx

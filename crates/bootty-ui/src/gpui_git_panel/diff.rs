@@ -113,7 +113,6 @@ pub(super) struct DraftCodeComment {
     pub comment: CodeComment,
 }
 
-#[allow(clippy::struct_excessive_bools)] // Each flag is an independent view state.
 pub struct GitDiffPanel {
     pub(super) active: bool,
     pub(crate) group: Option<gpui_kit::WeakEntity<gpui_kit::component::dock::TabGroup>>,
@@ -622,10 +621,6 @@ impl GitDiffPanel {
     /// Kit reports source positions independently of wrapping. A drag from its add button
     /// has no text selection; complete that gesture as a line-range comment. Text drags keep
     /// their ordinary copy behavior, and number-gutter selections stay owned by Kit.
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "Pointer displacement is measured in finite window pixels"
-    )]
     fn finish_comment_drag(
         &mut self,
         event: &gpui_kit::MouseUpEvent,
@@ -780,10 +775,6 @@ impl GitDiffPanel {
         ))
     }
 
-    #[expect(
-        clippy::arithmetic_side_effects,
-        reason = "Measured column geometry minus component insets is clamped to zero"
-    )]
     fn render_comment(&self, window: &Window, cx: &Context<Self>) -> gpui_kit::Div {
         let column = if self.diff.read(cx).mode() == gpui_kit::component::diff::DiffMode::Split {
             self.width / 2.

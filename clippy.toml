@@ -2,3 +2,5 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+# GPUI geometry wraps f32, so its arithmetic cannot overflow.
+arithmetic-side-effects-allowed = ["gpui_kit::Pixels", "gpui_kit::Point"]

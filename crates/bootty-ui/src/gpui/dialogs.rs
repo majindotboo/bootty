@@ -829,13 +829,9 @@ impl DialogView {
         }
     }
 
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "GPUI subscribe_in requires a mutable Context"
-    )]
     fn subscribe_prompt_content(
         prompt_textarea: &Entity<TextareaState>,
-        window: &mut Window,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> Subscription {
         cx.subscribe_in(

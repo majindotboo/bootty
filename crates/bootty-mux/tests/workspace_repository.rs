@@ -1,5 +1,3 @@
-#![allow(clippy::redundant_closure_for_method_calls)]
-
 use assert_fs::{TempDir, prelude::*};
 use bootty_config::config::{MultiplexerBackendConfig, SshRemoteConfig};
 use bootty_mux::{
@@ -34,13 +32,15 @@ impl LoadedRepository {
     }
 
     fn default_space(&self) -> Option<SpaceId> {
-        self.spaces().first().map(|space| space.id())
+        self.spaces()
+            .first()
+            .map(bootty_mux::repository::WorkspaceSpace::id)
     }
 
     fn sessions(&self, space: SpaceId) -> Option<SessionMembership> {
         self.spaces()
             .iter()
-            .map(|space| space.binding())
+            .map(bootty_mux::repository::WorkspaceSpace::binding)
             .find(|binding| binding.mux_scope() == space)
             .map(|binding| binding.sessions().clone())
     }
@@ -240,7 +240,7 @@ fn a_space_update_that_fails_leaves_every_field_as_it_was(
             "star",
             [9, 8, 7],
             true,
-            SpaceMuxOverride {
+            &SpaceMuxOverride {
                 backend: Some(MultiplexerBackendConfig::Tmux),
                 remote: SpaceRemoteOverride::Local,
             },
@@ -334,7 +334,7 @@ fn a_two_space_commit_is_atomic_when_the_second_space_fails(
     let stored = reopened
         .spaces()
         .iter()
-        .map(|space| space.binding())
+        .map(bootty_mux::repository::WorkspaceSpace::binding)
         .map(|binding| (binding.mux_scope(), backend_names(binding.sessions())))
         .collect::<std::collections::HashMap<_, _>>();
     assert_eq!(
@@ -394,7 +394,7 @@ fn a_remote_backend_success_is_recovered_after_its_metadata_commit_fails(
             .pending_binding_membership_mutations(scope)
             .expect("read pending mutations")
             .iter()
-            .map(|pending| pending.mutation())
+            .map(bootty_mux::repository::PendingBindingMembershipMutation::mutation)
             .collect::<Vec<_>>(),
         [&mutation]
     );
@@ -458,7 +458,9 @@ fn remote_rename_and_ditch_mutations_commit_binding_membership(
         .expect("commit rename");
     assert_eq!(backend_names(&sessions), vec!["new-name"]);
     assert_eq!(
-        sessions.get("id-1").map(|claimed| claimed.label()),
+        sessions
+            .get("id-1")
+            .map(bootty_mux::session_membership::WorkspaceSession::label),
         Some("New name"),
         "the claim keeps its identity across the rename"
     );
@@ -474,7 +476,9 @@ fn remote_rename_and_ditch_mutations_commit_binding_membership(
         .commit_binding_membership_mutation(scope, &ditch, &mut sessions)
         .expect("commit ditch");
     assert_eq!(
-        sessions.get("id-1").map(|saved| saved.label()),
+        sessions
+            .get("id-1")
+            .map(bootty_mux::session_membership::WorkspaceSession::label),
         Some("New name")
     );
 
@@ -494,12 +498,16 @@ fn remote_rename_and_ditch_mutations_commit_binding_membership(
         .expect("commit the replacement create");
 
     assert_eq!(
-        sessions.get("id-2").map(|claimed| claimed.label()),
+        sessions
+            .get("id-2")
+            .map(bootty_mux::session_membership::WorkspaceSession::label),
         Some("new-name"),
         "the ditched session's display name is not reused"
     );
     assert_eq!(
-        sessions.get("id-1").map(|saved| saved.label()),
+        sessions
+            .get("id-1")
+            .map(bootty_mux::session_membership::WorkspaceSession::label),
         Some("New name")
     );
 }
@@ -743,7 +751,7 @@ fn a_stranded_mutation_does_not_block_a_change_to_another_session(
     assert_eq!(
         pending
             .iter()
-            .map(|entry| entry.mutation())
+            .map(bootty_mux::repository::PendingBindingMembershipMutation::mutation)
             .collect::<Vec<_>>(),
         [&replacement, &stranded],
     );

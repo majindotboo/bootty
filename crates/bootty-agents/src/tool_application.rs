@@ -119,22 +119,12 @@ pub struct NativeElementPress {
     action: PressTag,
     /// Numbered from 1, as the snapshot lists them.
     pub element: std::num::NonZeroU16,
-    #[serde(
-        default = "default_allow_click",
-        skip_serializing_if = "allow_click_enabled"
-    )]
+    #[serde(default = "default_allow_click")]
     pub allow_click: bool,
 }
 
 const fn default_allow_click() -> bool {
     true
-}
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "Serde skip predicates borrow their field."
-)]
-const fn allow_click_enabled(value: &bool) -> bool {
-    *value
 }
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

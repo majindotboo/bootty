@@ -154,10 +154,6 @@ pub struct FrameColors {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "renderer snapshot preserves Ghostty cursor metadata for upcoming renderer work"
-)]
 pub struct CursorSnapshot {
     pub x: u16,
     pub y: u16,
@@ -180,14 +176,6 @@ pub struct RenderCell {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(
-    dead_code,
-    reason = "renderer snapshot preserves full style flags for upcoming renderer work"
-)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "VT rendition attributes are independent bits."
-)]
 pub struct CellStyle {
     pub bold: bool,
     pub italic: bool,

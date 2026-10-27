@@ -76,18 +76,20 @@ impl GpuiSettings {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_environment_field(
         id: &str,
-        selector: String,
         index: usize,
         field: EnvironmentField,
         value: &str,
-        placeholder: &str,
         enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let (part, placeholder) = match field {
+            EnvironmentField::Name => ("name", "NAME"),
+            EnvironmentField::Value => ("value", "Value"),
+        };
+        let selector = format!("settings-environment-{id}-{index}-{part}");
         // Environment rows are still addressed by index in the typed persistence contract. Keep
         // that complete domain coordinate in the retained-state key until the model gains row IDs.
         let target = match field {
@@ -172,22 +174,18 @@ impl EnvironmentRows<'_> {
         row = row
             .child(GpuiSettings::render_environment_field(
                 id,
-                format!("settings-environment-{id}-{index}-name"),
                 index,
                 EnvironmentField::Name,
                 &item.name,
-                "NAME",
                 enabled,
                 window,
                 cx,
             ))
             .child(GpuiSettings::render_environment_field(
                 id,
-                format!("settings-environment-{id}-{index}-value"),
                 index,
                 EnvironmentField::Value,
                 &item.value,
-                "Value",
                 enabled,
                 window,
                 cx,

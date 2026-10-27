@@ -5,11 +5,12 @@
 //! that read raw input or the real key state ignore them. Address input to the window that way if
 //! the apps agents drive turn out to honor it.
 //! Coordinates are physical pixels; Bootty runs per-monitor DPI aware.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "Win32 window, GDI, process and input calls are confined to this native adapter."
 )]
 
+use num_traits::ToPrimitive as _;
 use std::{ffi::c_void, sync::Arc};
 
 mod accessibility;
@@ -127,6 +128,8 @@ impl Desktop for WindowsDesktop {
     fn windows(&self) -> Vec<NativeWindow> {
         unsafe extern "system" fn collect(window: HWND, list: LPARAM) -> BOOL {
             let list = std::ptr::with_exposed_provenance_mut::<Vec<HWND>>(list.0.cast_unsigned());
+            // SAFETY: EnumWindows passes back the LPARAM `windows` set: the address of its live
+            // handle list, used only during the enumeration.
             let list = unsafe { &mut *list };
             list.push(window);
             BOOL::from(list.len() < 4096)
@@ -138,6 +141,8 @@ impl Desktop for WindowsDesktop {
                 .cast_signed(),
         );
         // EnumWindows walks top-level windows in z-order, front to back.
+        // SAFETY: collect matches the callback signature, and list points to handles, which
+        // outlives the call.
         _ = unsafe { EnumWindows(Some(collect), list) };
         handles.into_iter().filter_map(native_window).collect()
     }
@@ -172,10 +177,14 @@ impl Desktop for WindowsDesktop {
             pixel_count(window.bounds.width),
             pixel_count(window.bounds.height),
         );
+        // SAFETY: GetDC(None) has no preconditions; it returns the screen DC or null.
         let screen = unsafe { GetDC(None) };
+        // SAFETY: screen is the screen DC or null, both of which CreateCompatibleDC accepts.
         let memory = unsafe { CreateCompatibleDC(Some(screen)) };
         let mut bits: *mut c_void = std::ptr::null_mut();
         let info = bitmap_info(native_width, native_height);
+        // SAFETY: memory is a memory DC, info describes a 32-bit bitmap, and bits is a valid
+        // out-pointer.
         let bitmap = unsafe {
             CreateDIBSection(
                 Some(memory),
@@ -189,18 +198,26 @@ impl Desktop for WindowsDesktop {
         let result = bitmap
             .map_err(|_| ComputerError::Platform("could not allocate a capture buffer".into()))
             .and_then(|bitmap| {
+                // SAFETY: memory and bitmap are valid GDI objects this capture created.
                 let previous = unsafe { SelectObject(memory, HGDIOBJ(bitmap.0)) };
+                // SAFETY: handle names the captured window, and memory has the bitmap selected; a
+                // stale handle fails the call.
                 let printed =
                     unsafe { PrintWindow(handle, memory, PW_RENDERFULLCONTENT) }.as_bool();
                 let pixels = printed
+                    // SAFETY: PrintWindow drew into the DIB section, so bits points to native_width
+                    // times native_height BGRA pixels.
                     .then(|| unsafe { dib_pixels(bits, native_width, native_height) })
                     .flatten();
+                // SAFETY: previous was selected out of memory above, and the bitmap is not used
+                // after this.
                 unsafe {
                     SelectObject(memory, previous);
                     _ = DeleteObject(HGDIOBJ(bitmap.0));
                 }
                 pixels.ok_or_else(|| ComputerError::Platform("window capture failed".into()))
             });
+        // SAFETY: memory and screen were created above and are released once here.
         unsafe {
             _ = DeleteDC(memory);
             ReleaseDC(None, screen);
@@ -283,6 +300,7 @@ impl Desktop for WindowsDesktop {
             }
         };
         let size = i32::try_from(std::mem::size_of::<INPUT>()).unwrap_or(i32::MAX);
+        // SAFETY: inputs is a valid slice of INPUT records, and size is the size of one.
         let sent = unsafe { SendInput(&inputs, size) };
         if usize::try_from(sent).ok() == Some(inputs.len()) {
             Ok(())
@@ -293,6 +311,7 @@ impl Desktop for WindowsDesktop {
 
     fn raise(&self, window: &NativeWindow) -> Result<(), ComputerError> {
         let handle = hwnd(window.id);
+        // SAFETY: handle names a window; a stale handle makes each call fail instead of acting.
         unsafe {
             if IsIconic(handle).as_bool() {
                 _ = ShowWindow(handle, SW_RESTORE);
@@ -308,6 +327,8 @@ impl Desktop for WindowsDesktop {
     fn icon(&self, bundle_id: &str, side: u32) -> Option<Image> {
         let path: Vec<u16> = bundle_id.encode_utf16().chain(Some(0)).collect();
         let mut info = SHFILEINFOW::default();
+        // SAFETY: path is a NUL-terminated wide string, and info a valid out-structure of the size
+        // passed.
         let found = unsafe {
             SHGetFileInfoW(
                 PCWSTR(path.as_ptr()),
@@ -320,10 +341,14 @@ impl Desktop for WindowsDesktop {
         if found == 0 || info.hIcon.is_invalid() {
             return None;
         }
+        // SAFETY: GetDC(None) has no preconditions; it returns the screen DC or null.
         let screen = unsafe { GetDC(None) };
+        // SAFETY: screen is the screen DC or null, both of which CreateCompatibleDC accepts.
         let memory = unsafe { CreateCompatibleDC(Some(screen)) };
         let mut bits: *mut c_void = std::ptr::null_mut();
         let bitmap_info = bitmap_info(side, side);
+        // SAFETY: memory is a memory DC, bitmap_info describes a 32-bit bitmap, and bits is a valid
+        // out-pointer.
         let pixels = unsafe {
             CreateDIBSection(
                 Some(memory),
@@ -336,20 +361,28 @@ impl Desktop for WindowsDesktop {
         }
         .ok()
         .and_then(|bitmap| {
+            // SAFETY: memory and bitmap are valid GDI objects created above.
             let previous = unsafe { SelectObject(memory, HGDIOBJ(bitmap.0)) };
             let edge = i32::try_from(side).unwrap_or(32);
             let drawn =
+                // SAFETY: memory has the bitmap selected, and info.hIcon is the icon SHGetFileInfoW
+                // returned.
                 unsafe { DrawIconEx(memory, 0, 0, info.hIcon, edge, edge, 0, None, DI_NORMAL) }
                     .is_ok();
             let pixels = drawn
+                // SAFETY: DrawIconEx drew into the DIB section, so bits points to side times side
+                // BGRA pixels.
                 .then(|| unsafe { dib_pixels(bits, side, side) })
                 .flatten();
+            // SAFETY: previous was selected out of memory above, and the bitmap is not used after
+            // this.
             unsafe {
                 SelectObject(memory, previous);
                 _ = DeleteObject(HGDIOBJ(bitmap.0));
             }
             pixels
         });
+        // SAFETY: memory, screen and the icon were created above and are released once here.
         unsafe {
             _ = DeleteDC(memory);
             ReleaseDC(None, screen);
@@ -382,16 +415,20 @@ unsafe fn dib_pixels(bits: *mut c_void, width: u32, height: u32) -> Option<Vec<u
         .ok()?
         .checked_mul(usize::try_from(height).ok()?)?
         .checked_mul(4)?;
+    // SAFETY: The caller guarantees bits points to width times height BGRA pixels, which is length
+    // bytes.
     let bgra = unsafe { std::slice::from_raw_parts(bits.cast::<u8>(), length) };
     Some(bgra_to_rgba(bgra))
 }
 
 fn native_window(window: HWND) -> Option<NativeWindow> {
+    // SAFETY: window names a window EnumWindows reported; a stale handle returns false.
     if !unsafe { IsWindowVisible(window) }.as_bool() {
         return None;
     }
     let mut cloaked: u32 = 0;
     let cloak_size = u32::try_from(std::mem::size_of::<u32>()).ok()?;
+    // SAFETY: window names a window, cloaked is a u32 out-value, and cloak_size is its size.
     let is_cloaked = unsafe {
         DwmGetWindowAttribute(window, DWMWA_CLOAKED, (&raw mut cloaked).cast(), cloak_size)
     }
@@ -402,9 +439,12 @@ fn native_window(window: HWND) -> Option<NativeWindow> {
     }
     let bounds = bounds(window)?;
     let id = u32::try_from(window.0.expose_provenance()).ok()?;
+    // SAFETY: window names a window; a stale handle returns zero.
     let style = unsafe { GetWindowLongPtrW(window, GWL_EXSTYLE) };
+    // SAFETY: window names a window; a stale handle returns an error.
     let owned = unsafe { GetWindow(window, GW_OWNER) }.is_ok_and(|owner| !owner.is_invalid());
     let tool = style & isize::try_from(WS_EX_TOOLWINDOW.0).unwrap_or_default() != 0;
+    // SAFETY: window names a window; a stale handle returns false.
     let app = (!tool && !owned && !unsafe { IsIconic(window) }.as_bool())
         .then(|| application(window, id, &bounds))
         .flatten();
@@ -418,17 +458,20 @@ fn native_window(window: HWND) -> Option<NativeWindow> {
 
 /// The foreground window and its process.
 fn foreground() -> Option<(i32, HWND)> {
+    // SAFETY: GetForegroundWindow has no preconditions.
     let window = unsafe { GetForegroundWindow() };
     if window.is_invalid() {
         return None;
     }
     let mut owner = 0;
+    // SAFETY: window is the foreground window, and owner a valid out-pointer.
     unsafe { GetWindowThreadProcessId(window, Some(&raw mut owner)) };
     Some((i32::try_from(owner).ok()?, window))
 }
 
 fn bounds(window: HWND) -> Option<DisplayBounds> {
     let mut rect = RECT::default();
+    // SAFETY: window names a window, and rect is a valid out-pointer.
     unsafe { GetWindowRect(window, &raw mut rect) }.ok()?;
     let width = f64::from(rect.right.saturating_sub(rect.left));
     let height = f64::from(rect.bottom.saturating_sub(rect.top));
@@ -442,11 +485,15 @@ fn bounds(window: HWND) -> Option<DisplayBounds> {
 
 fn application(window: HWND, id: u32, bounds: &DisplayBounds) -> Option<ComputerTarget> {
     let mut process_id = 0;
+    // SAFETY: window names a window, and process_id is a valid out-pointer.
     unsafe { GetWindowThreadProcessId(window, Some(&raw mut process_id)) };
+    // SAFETY: Opening a process by id has no memory preconditions; a stale id fails.
     let process =
         unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }.ok()?;
     let mut path = vec![0_u16; 1024];
     let mut length = u32::try_from(path.len()).ok()?;
+    // SAFETY: process is open, path holds length wide characters, and length is a valid in-out
+    // size.
     let named = unsafe {
         QueryFullProcessImageNameW(
             process,
@@ -462,6 +509,7 @@ fn application(window: HWND, id: u32, bounds: &DisplayBounds) -> Option<Computer
         FILETIME::default(),
         FILETIME::default(),
     );
+    // SAFETY: process is open, and the four times are valid out-structures.
     let timed = unsafe {
         GetProcessTimes(
             process,
@@ -472,6 +520,7 @@ fn application(window: HWND, id: u32, bounds: &DisplayBounds) -> Option<Computer
         )
     }
     .is_ok();
+    // SAFETY: process was opened above and is closed once here.
     unsafe { _ = CloseHandle(process) };
     if !named || !timed {
         return None;
@@ -482,6 +531,7 @@ fn application(window: HWND, id: u32, bounds: &DisplayBounds) -> Option<Computer
         .file_stem()
         .map(|stem| stem.to_string_lossy().chars().take(256).collect());
     let mut title = vec![0_u16; 512];
+    // SAFETY: window names a window, and the call fills title within its length.
     let title_length = unsafe { GetWindowTextW(window, &mut title) };
     let title = usize::try_from(title_length)
         .ok()
@@ -528,16 +578,13 @@ fn bgra_to_rgba(bgra: &[u8]) -> Vec<u8> {
         .collect()
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    reason = "Float-to-integer casts saturate; normalized coordinates stay within 0..=65535."
-)]
-const fn rounded(value: f64) -> i32 {
-    value.round() as i32
+/// Normalized coordinates stay within 0..=65535.
+fn rounded(value: f64) -> i32 {
+    value.round().to_i32().unwrap_or(0)
 }
 
 fn mouse_at(x: f64, y: f64, flags: MOUSE_EVENT_FLAGS, data: i32) -> INPUT {
+    // SAFETY: GetSystemMetrics takes plain indexes.
     let (left, top, width, height) = unsafe {
         (
             GetSystemMetrics(SM_XVIRTUALSCREEN),

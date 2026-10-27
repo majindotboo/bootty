@@ -635,10 +635,6 @@ fn legacy_alignment_point(alignment: LegacyAlignment, rect: SurfaceRect) -> Spri
 }
 
 #[derive(Clone, Copy)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Mosaic edge bits are independent parts of the Unicode glyph."
-)]
 struct SmoothMosaic {
     tl: bool,
     ul: bool,

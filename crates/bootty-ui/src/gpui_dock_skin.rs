@@ -719,7 +719,6 @@ impl WorkspaceTabGroup {
         cx: &mut App,
     ) -> AnyElement {
         let tab_config = self.chrome.read(cx).dock_tabs_config();
-        let tab_accent = self.chrome.read(cx).tab_accent();
         let visible = group
             .panels()
             .iter()
@@ -754,10 +753,8 @@ impl WorkspaceTabGroup {
                 Some(crate::gpui::tabs::ScrollableTab {
                     id,
                     title: None,
-                    focus: Some(focus.clone()),
-                    tab: self.render_group_tab(
-                        group, ix, tab_config, tab_accent, &focuses, &focus, window, cx,
-                    )?,
+                    focus: Some(focus),
+                    tab: self.render_group_tab(group, ix, &focuses, window, cx)?,
                 })
             })
             .collect();
@@ -834,19 +831,18 @@ impl WorkspaceTabGroup {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_group_tab(
         &self,
         group: &TabGroupContext,
         ix: usize,
-        tab_config: bootty_config::config::TabConfig,
-        accent: gpui_kit::Hsla,
         focuses: &[(usize, FocusHandle)],
-        focus: &FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Tab> {
         let panel = group.panels().get(ix)?;
+        let focus = &focuses.iter().find(|(candidate, _)| *candidate == ix)?.1;
+        let tab_config = self.chrome.read(cx).dock_tabs_config();
+        let accent = self.chrome.read(cx).tab_accent();
         let id = panel.panel_id(cx);
         let icon = self
             .owner

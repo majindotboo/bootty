@@ -212,12 +212,79 @@ impl AppState {
         ))
     }
 
+    /// List, open or discard the saved creation drafts of the target's Space.
+    fn dispatch_draft_command(
+        &mut self,
+        action: SessionAction,
+        arguments: &[String],
+        exact_target: Option<&ExactMuxTarget>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(&ExactMuxTarget::Binding(scope)) = exact_target else {
+            return CommandDispatch::Complete(CommandOutcome::StaleTarget {
+                message: "The draft's Space is no longer available".into(),
+            });
+        };
+        if let Err(error) = executor::begin_synchronous_command(execution) {
+            return CommandDispatch::Complete(command_outcome_for_mux_error(error));
+        }
+        if action == SessionAction::ListDrafts {
+            return CommandDispatch::Complete(serialized_command_outcome(
+                self.creation_draft_summaries()
+                    .filter(|draft| draft.scope == scope)
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        let Some(identity) = arguments.first() else {
+            return CommandDispatch::Complete(CommandOutcome::Failed {
+                code: "invalid_arguments".into(),
+                message: "A draft identity is required".into(),
+            });
+        };
+        if action == SessionAction::DiscardDraft {
+            return match self.discard_creation_draft(scope, identity) {
+                Ok(reply) => CommandDispatch::Pending(PendingCommandResult::Outcome(reply)),
+                Err(message) => CommandDispatch::Complete(CommandOutcome::Failed {
+                    code: "draft_unavailable".into(),
+                    message,
+                }),
+            };
+        }
+        CommandDispatch::Complete(match self.open_creation_draft(scope, identity) {
+            Ok(()) => CommandOutcome::success(),
+            Err(message) => CommandOutcome::Failed {
+                code: "draft_unavailable".into(),
+                message,
+            },
+        })
+    }
+
+    /// Whether the session runs on process-local panes, none of which ever started a process.
+    fn native_session_never_started(&mut self, scope: SpaceId, identity: &str) -> bool {
+        let native_panes = self
+            .workspace
+            .binding(scope)
+            .filter(|binding| binding.backend_policy().panes.topology == PaneTopology::ProcessLocal)
+            .and_then(|binding| binding.session_attachment(identity))
+            .map(|session| {
+                session
+                    .windows
+                    .iter()
+                    .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
+                    .filter_map(|pane| pane.pane_id.clone())
+                    .collect::<Vec<_>>()
+            });
+        native_panes.is_some_and(|panes| {
+            !panes.iter().any(|pane| {
+                self.workspace
+                    .space_terminal_runtime(scope, pane)
+                    .is_some_and(|runtime| matches!(runtime.started(), Ok(true)))
+            })
+        })
+    }
+
     /// Create or close a session in the target's Space, leaving selection, focus and the active
     /// Space alone, or list the Spaces.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One dispatcher prepares exact session operations and their checkpoint boundary"
-    )]
     pub(super) fn dispatch_session_command(
         &mut self,
         action: SessionAction,
@@ -229,43 +296,12 @@ impl AppState {
             action,
             SessionAction::ListDrafts | SessionAction::OpenDraft | SessionAction::DiscardDraft
         ) {
-            let Some(ExactMuxTarget::Binding(scope)) = exact_target else {
-                return CommandDispatch::Complete(CommandOutcome::StaleTarget {
-                    message: "The draft's Space is no longer available".into(),
-                });
-            };
-            if let Err(error) = executor::begin_synchronous_command(execution) {
-                return CommandDispatch::Complete(command_outcome_for_mux_error(error));
-            }
-            if action == SessionAction::ListDrafts {
-                return CommandDispatch::Complete(serialized_command_outcome(
-                    self.creation_draft_summaries()
-                        .filter(|draft| draft.scope == scope)
-                        .collect::<Vec<_>>(),
-                ));
-            }
-            let Some(identity) = arguments.first() else {
-                return CommandDispatch::Complete(CommandOutcome::Failed {
-                    code: "invalid_arguments".into(),
-                    message: "A draft identity is required".into(),
-                });
-            };
-            if action == SessionAction::DiscardDraft {
-                return match self.discard_creation_draft(scope, identity) {
-                    Ok(reply) => CommandDispatch::Pending(PendingCommandResult::Outcome(reply)),
-                    Err(message) => CommandDispatch::Complete(CommandOutcome::Failed {
-                        code: "draft_unavailable".into(),
-                        message,
-                    }),
-                };
-            }
-            return CommandDispatch::Complete(match self.open_creation_draft(scope, identity) {
-                Ok(()) => CommandOutcome::success(),
-                Err(message) => CommandOutcome::Failed {
-                    code: "draft_unavailable".into(),
-                    message,
-                },
-            });
+            return self.dispatch_draft_command(
+                action,
+                arguments,
+                exact_target.as_ref(),
+                execution,
+            );
         }
         if action == SessionAction::Delete
             && let Some(ExactMuxTarget::Binding(scope)) = &exact_target
@@ -322,28 +358,7 @@ impl AppState {
                         .is_some_and(|session| !session.windows.is_empty())
             })
         {
-            let native_panes = self
-                .workspace
-                .binding(*scope)
-                .filter(|binding| {
-                    binding.backend_policy().panes.topology == PaneTopology::ProcessLocal
-                })
-                .and_then(|binding| binding.session_attachment(&identity))
-                .map(|session| {
-                    session
-                        .windows
-                        .iter()
-                        .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
-                        .filter_map(|pane| pane.pane_id.clone())
-                        .collect::<Vec<_>>()
-                });
-            if native_panes.is_some_and(|panes| {
-                !panes.iter().any(|pane| {
-                    self.workspace
-                        .space_terminal_runtime(*scope, pane)
-                        .is_some_and(|runtime| matches!(runtime.started(), Ok(true)))
-                })
-            }) {
+            if self.native_session_never_started(*scope, &identity) {
                 // A failed or unstarted native process has no output state to checkpoint.
                 return self.dispatch_session_command_after_checkpoint(
                     action,

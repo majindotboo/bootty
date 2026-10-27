@@ -117,10 +117,6 @@ pub enum SidebarPosition {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Configured chrome visibility and window presentation flags vary independently"
-)]
 pub struct ChromeLayout {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
@@ -310,10 +306,6 @@ impl WindowDragGesture {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent sidebar presentation settings"
-)]
 pub struct SidebarSnapshot {
     pub projects: Vec<bootty_mux::repository::RegisteredProject>,
     pub project_target: Option<bootty_control::CommandTarget>,
@@ -337,7 +329,6 @@ pub struct SidebarSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct SidebarRow {
     pub key: String,
     pub text: String,
@@ -444,10 +435,6 @@ pub struct SidebarFooterItem {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Each action has an independent availability condition"
-)]
 pub struct SessionContextSnapshot {
     pub can_rename: bool,
     pub can_activate: bool,
@@ -531,10 +518,6 @@ pub struct StatusItemSnapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Each action has an independent availability condition"
-)]
 pub struct TabContextSnapshot {
     pub session_id: String,
     pub window_id: String,

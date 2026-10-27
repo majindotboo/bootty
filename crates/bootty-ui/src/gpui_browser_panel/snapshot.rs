@@ -115,10 +115,6 @@ impl BrowserPanel {
     }
 }
 
-#[allow(
-    clippy::future_not_send,
-    reason = "Native browser views remain on GPUI's UI executor"
-)]
 async fn read_snapshot(
     owner: &gpui_kit::WeakEntity<BrowserPanel>,
     cx: &mut gpui_kit::AsyncWindowContext,
@@ -184,10 +180,6 @@ async fn read_snapshot(
     })
 }
 
-#[allow(
-    clippy::future_not_send,
-    reason = "Receivers are awaited on GPUI's UI executor"
-)]
 pub(super) async fn receive<T, E>(
     receiver: async_channel::Receiver<Result<T, E>>,
     deadline: Instant,

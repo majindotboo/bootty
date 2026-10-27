@@ -236,78 +236,59 @@ impl Focusable for WorkspaceDock {
     }
 }
 
+/// The workspace parts a dock hosts, and where it sends commands.
+pub struct DockHosts {
+    pub owner: gpui_kit::WeakEntity<crate::gpui_workspace::GpuiWorkspace>,
+    pub terminal: Entity<crate::gpui_terminal_view::GpuiTerminalView>,
+    pub chrome: Entity<crate::gpui::chrome::GpuiChrome>,
+    pub sender: BoundAppCommandSender,
+}
+
+/// Where a dock keeps its state: beside the config file under the window's state key, and its
+/// browser profile.
+pub struct DockStorage<'a> {
+    pub config_path: &'a std::path::Path,
+    pub state_key: String,
+    pub browser_profile: PathBuf,
+}
+
 impl WorkspaceDock {
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub(crate) fn new(
         context: GitPanelContext,
-        owner: gpui_kit::WeakEntity<crate::gpui_workspace::GpuiWorkspace>,
-        terminal: Entity<crate::gpui_terminal_view::GpuiTerminalView>,
-        chrome: Entity<crate::gpui::chrome::GpuiChrome>,
+        hosts: DockHosts,
         scope: bootty_mux::controller::SpaceId,
-        sender: BoundAppCommandSender,
-        config_path: &std::path::Path,
-        state_key: String,
-        browser_profile: PathBuf,
+        storage: DockStorage<'_>,
         local_git: Option<bootty_git::GitFactsCache>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let DockHosts {
+            owner,
+            terminal,
+            chrome,
+            sender,
+        } = hosts;
+        let DockStorage {
+            config_path,
+            state_key,
+            browser_profile,
+        } = storage;
         let legacy_key = format!(
             "{state_key}:space:{}:host:{}",
             scope.persistence_value(),
             context.host_identity
         );
-        let dock_owner = cx.weak_entity();
         let motion = Rc::<RefCell<motion::DockMotion>>::default();
-        let area = cx.new(|cx| {
-            let skin = crate::gpui_dock_skin::WorkspaceDockSkin::new(
-                dock_owner.clone(),
-                chrome.clone(),
-                motion.clone(),
-                cx,
-            );
-            DockArea::new("workspace", Some(8), window, cx).with_renderer(skin)
-        });
-        let navigation = cx.new(|cx| {
-            crate::gpui_dock_skin::WorkspaceNavigation::new(
-                dock_owner.clone(),
-                &area,
-                chrome.clone(),
-                cx,
-            )
-        });
-        let titlebar = cx.new(|cx| {
-            crate::gpui_dock_skin::WorkspaceTitleBar::new(chrome.clone(), dock_owner, &area, cx)
-        });
+        let (area, navigation, titlebar) = Self::skinned_area(&chrome, &motion, window, cx);
         let attachment = cx.new(|cx| {
             crate::gpui_terminal_panel::TerminalAttachmentPanel::new(terminal, owner.clone(), cx)
         });
         register(&area, attachment.clone(), cx);
-        // The terminal center is a singleton: the mux owns the window and every split inside
-        // it, so Dock restores whichever leaf the save holds onto this one panel.
-        let terminal_panel = cx.new(|cx| {
-            crate::gpui_terminal_panel::TerminalPanel::new(
-                context.target.clone(),
-                bootty_mux::workspace::ScopedWindowId::new(scope, String::new(), String::new()),
-                "Terminal".to_owned(),
-                owner.clone(),
-                window,
-                cx,
-            )
-        });
-        register(&area, terminal_panel.clone(), cx);
+        let terminal_panel =
+            Self::terminal_center(&area, context.target.clone(), scope, &owner, window, cx);
         // Legacy sidebar values seed unsaved layouts; saved docks own their live geometry.
         let sidebar_defaults = chrome.read(cx).sidebar_defaults();
-        let sessions =
-            cx.new(|cx| crate::gpui_sidebar_panel::SessionsPanel::new(chrome.clone(), cx));
-        register(&area, sessions.clone(), cx);
-        let legacy_sessions = panel_handle(sessions.clone());
-        register_factory(
-            &area,
-            "bootty.sidebar",
-            Rc::new(move |_, _, _| legacy_sessions.clone()),
-            cx,
-        );
+        let sessions = Self::sessions_panel(&area, &chrome, cx);
         let subagents = Self::subagent_panels(&area, cx);
         let mcp_apps = Self::mcp_app_panels(&area, cx);
         let subagents_hub = cx.new(crate::gpui_sidebar_panel::SubagentsPanel::new);
@@ -375,6 +356,84 @@ impl WorkspaceDock {
             save,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The terminal center is a singleton: the mux owns the window and every split inside it,
+    /// so Dock restores whichever leaf the save holds onto this one panel.
+    fn terminal_center(
+        area: &Entity<DockArea>,
+        target: CommandTarget,
+        scope: bootty_mux::controller::SpaceId,
+        owner: &gpui_kit::WeakEntity<crate::gpui_workspace::GpuiWorkspace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::gpui_terminal_panel::TerminalPanel> {
+        let panel = cx.new(|cx| {
+            crate::gpui_terminal_panel::TerminalPanel::new(
+                target,
+                bootty_mux::workspace::ScopedWindowId::new(scope, String::new(), String::new()),
+                "Terminal".to_owned(),
+                owner.clone(),
+                window,
+                cx,
+            )
+        });
+        register(area, panel.clone(), cx);
+        panel
+    }
+
+    /// The sessions panel, which also answers saves from before it replaced the sidebar.
+    fn sessions_panel(
+        area: &Entity<DockArea>,
+        chrome: &Entity<crate::gpui::chrome::GpuiChrome>,
+        cx: &mut Context<Self>,
+    ) -> Entity<crate::gpui_sidebar_panel::SessionsPanel> {
+        let sessions =
+            cx.new(|cx| crate::gpui_sidebar_panel::SessionsPanel::new(chrome.clone(), cx));
+        register(area, sessions.clone(), cx);
+        let legacy_sessions = panel_handle(sessions.clone());
+        register_factory(
+            area,
+            "bootty.sidebar",
+            Rc::new(move |_, _, _| legacy_sessions.clone()),
+            cx,
+        );
+        sessions
+    }
+
+    /// The dock area drawn with Bootty's skin, and the navigation and title bar that follow it.
+    fn skinned_area(
+        chrome: &Entity<crate::gpui::chrome::GpuiChrome>,
+        motion: &Rc<RefCell<motion::DockMotion>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (
+        Entity<DockArea>,
+        Entity<crate::gpui_dock_skin::WorkspaceNavigation>,
+        Entity<crate::gpui_dock_skin::WorkspaceTitleBar>,
+    ) {
+        let dock_owner = cx.weak_entity();
+        let area = cx.new(|cx| {
+            let skin = crate::gpui_dock_skin::WorkspaceDockSkin::new(
+                dock_owner.clone(),
+                chrome.clone(),
+                motion.clone(),
+                cx,
+            );
+            DockArea::new("workspace", Some(8), window, cx).with_renderer(skin)
+        });
+        let navigation = cx.new(|cx| {
+            crate::gpui_dock_skin::WorkspaceNavigation::new(
+                dock_owner.clone(),
+                &area,
+                chrome.clone(),
+                cx,
+            )
+        });
+        let titlebar = cx.new(|cx| {
+            crate::gpui_dock_skin::WorkspaceTitleBar::new(chrome.clone(), dock_owner, &area, cx)
+        });
+        (area, navigation, titlebar)
     }
 
     fn observe_browser_pages(

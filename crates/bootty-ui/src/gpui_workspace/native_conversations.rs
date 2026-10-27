@@ -1662,7 +1662,7 @@ impl GpuiWorkspace {
         let annotations = browser.read(cx).annotation_records().to_vec();
         if let Some(status) = browser.read(cx).annotation_status() {
             self.state
-                .record_error("Could not update browser annotations", status);
+                .record_error("Could not update browser annotations", &status);
         }
         for record in &self.native_conversations.records {
             let Some(view) = self.native_conversations.views.get(&record.id) else {
@@ -1678,7 +1678,7 @@ impl GpuiWorkspace {
             });
             if let Err(error) = result {
                 self.state
-                    .record_error("Could not show browser annotations", error);
+                    .record_error("Could not show browser annotations", &error);
             }
         }
     }

@@ -17,7 +17,8 @@ pub enum ComputerCommand {
     HostSnapshot,
     HostSnapshotRegion(HostCaptureRegion),
     Execute {
-        target: ComputerTarget,
+        // Boxed so this rare variant does not size every command executor.
+        target: Box<ComputerTarget>,
         action: ComputerAction,
         destination: Option<PathBuf>,
     },
@@ -100,157 +101,111 @@ const ARGUMENT_NOTES: [(&str, &str); 4] = [
     ),
 ];
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "Keep the finite command schemas in one declarative table"
-)]
+/// Each computer command: id, title, description, argument names and mutation class.
+const COMMANDS: &[(&str, &str, &str, &[&str], MutationClass)] = &[
+    (
+        "computer.status",
+        "Computer Permission Status",
+        "Read feature policy and existing OS permissions without requesting access.",
+        &[],
+        MutationClass::Read,
+    ),
+    (
+        "computer.targets",
+        "List Computer Windows",
+        "List exact local window tokens without enabling computer use or changing focus.",
+        &[],
+        MutationClass::Read,
+    ),
+    (
+        "computer.icons",
+        "List App Icons",
+        "Return small PNG icons for apps named by a JSON array of bundle ids, without OS access.",
+        &["bundle-ids"],
+        MutationClass::Read,
+    ),
+    (
+        "computer.capture",
+        "Capture Computer Image",
+        "Return a bounded PNG of the exact owning application window without writing a file.",
+        &[],
+        MutationClass::Read,
+    ),
+    (
+        "computer.snapshot",
+        "Capture Computer Window",
+        "Capture the selected window to a new absolute PNG path; existing files are preserved.",
+        &["target", "destination", "region"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.click",
+        "Click Computer Window",
+        "Click a point inside the exact selected window, even behind other windows on macOS.",
+        &["target", "x", "y", "button"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.move",
+        "Move Computer Pointer",
+        "Move the pointer to a point inside the exact selected window, even behind other windows on macOS.",
+        &["target", "x", "y"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.scroll",
+        "Scroll Computer Window",
+        "Scroll at a point inside the exact selected window, even behind other windows on macOS.",
+        &["target", "x", "y", "delta-x", "delta-y"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.type",
+        "Type Computer Text",
+        "Type bounded text into the exact selected window while it is its app's focused window.",
+        &["target", "text"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.focus",
+        "Focus Computer Window",
+        "Make the exact selected window its app's focused window; on macOS the app stays in the background.",
+        &["target"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.key",
+        "Press Computer Key",
+        "Post a key with optional comma-separated modifiers to the exact selected window while it is its app's focused window. On macOS, a Command shortcut for an app that is not frontmost presses the menu item with that shortcut instead, and fails when the item is disabled, as commands that act on a window are while their app is in the background.",
+        &["target", "key", "modifiers"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.elements",
+        "List Computer Elements",
+        "List the accessibility elements of the exact selected window, in screen order. With root menu_bar, list its app's menu bar instead, in menu order and without opening a menu or bringing the app forward; those elements have no frame, and the system's Apple menu and the app menu's Services are left out.",
+        &["target", "root"],
+        MutationClass::Read,
+    ),
+    (
+        "computer.press",
+        "Press Computer Element",
+        "Press a listed element. Set allow-click to false to require its accessibility action without pointer input. Menu bar elements are pressed through accessibility only, and only menu items without a submenu. Success means the app accepted the press; a background app disables the menu commands that act on a window.",
+        &["target", "element", "allow-click"],
+        MutationClass::Write,
+    ),
+    (
+        "computer.set-value",
+        "Set Computer Element Value",
+        "Replace a listed editable element's value through accessibility, without focus, clicks or key events. An empty value clears it. This does not submit the value.",
+        &["target", "element", "value"],
+        MutationClass::Write,
+    ),
+];
+
 pub(super) fn register_commands(commands: &mut BTreeMap<String, super::RegisteredCommand>) {
-    for (id, title, description, names, mutation) in [
-        (
-            "computer.status",
-            "Computer Permission Status",
-            "Read feature policy and existing OS permissions without requesting access.",
-            &[][..],
-            MutationClass::Read,
-        ),
-        (
-            "computer.targets",
-            "List Computer Windows",
-            "List exact local window tokens without enabling computer use or changing focus.",
-            &[][..],
-            MutationClass::Read,
-        ),
-        (
-            "computer.icons",
-            "List App Icons",
-            "Return small PNG icons for apps named by a JSON array of bundle ids, without OS access.",
-            &["bundle-ids"][..],
-            MutationClass::Read,
-        ),
-        (
-            "computer.capture",
-            "Capture Computer Image",
-            "Return a bounded PNG of the exact owning application window without writing a file.",
-            &[][..],
-            MutationClass::Read,
-        ),
-        (
-            "computer.snapshot",
-            "Capture Computer Window",
-            "Capture the selected window to a new absolute PNG path; existing files are preserved.",
-            &["target", "destination", "region"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.click",
-            "Click Computer Window",
-            "Click a point inside the exact selected window, even behind other windows on macOS.",
-            &["target", "x", "y", "button"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.move",
-            "Move Computer Pointer",
-            "Move the pointer to a point inside the exact selected window, even behind other windows on macOS.",
-            &["target", "x", "y"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.scroll",
-            "Scroll Computer Window",
-            "Scroll at a point inside the exact selected window, even behind other windows on macOS.",
-            &["target", "x", "y", "delta-x", "delta-y"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.type",
-            "Type Computer Text",
-            "Type bounded text into the exact selected window while it is its app's focused window.",
-            &["target", "text"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.focus",
-            "Focus Computer Window",
-            "Make the exact selected window its app's focused window; on macOS the app stays in the background.",
-            &["target"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.key",
-            "Press Computer Key",
-            "Post a key with optional comma-separated modifiers to the exact selected window while it is its app's focused window. On macOS, a Command shortcut for an app that is not frontmost presses the menu item with that shortcut instead, and fails when the item is disabled, as commands that act on a window are while their app is in the background.",
-            &["target", "key", "modifiers"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.elements",
-            "List Computer Elements",
-            "List the accessibility elements of the exact selected window, in screen order. With root menu_bar, list its app's menu bar instead, in menu order and without opening a menu or bringing the app forward; those elements have no frame, and the system's Apple menu and the app menu's Services are left out.",
-            &["target", "root"][..],
-            MutationClass::Read,
-        ),
-        (
-            "computer.press",
-            "Press Computer Element",
-            "Press a listed element. Set allow-click to false to require its accessibility action without pointer input. Menu bar elements are pressed through accessibility only, and only menu items without a submenu. Success means the app accepted the press; a background app disables the menu commands that act on a window.",
-            &["target", "element", "allow-click"][..],
-            MutationClass::Write,
-        ),
-        (
-            "computer.set-value",
-            "Set Computer Element Value",
-            "Replace a listed editable element's value through accessibility, without focus, clicks or key events. An empty value clears it. This does not submit the value.",
-            &["target", "element", "value"][..],
-            MutationClass::Write,
-        ),
-    ] {
-        let arguments = names
-            .iter()
-            .map(|name| {
-                let mut argument = super::argument(
-                    name,
-                    match *name {
-                        "x" | "y" => ValueType::Number,
-                        "delta-x" | "delta-y" => ValueType::Integer,
-                        _ => ValueType::String,
-                    },
-                );
-                argument.required =
-                    !matches!(*name, "button" | "modifiers" | "allow-click" | "root")
-                        && id != "computer.snapshot";
-                if *name == "button" {
-                    argument.choices = ["left", "right", "middle"].map(str::to_owned).to_vec();
-                }
-                if *name == "allow-click" {
-                    argument.choices = ["true", "false"].map(str::to_owned).to_vec();
-                }
-                if *name == "root" {
-                    argument.choices = ["window", "menu_bar"].map(str::to_owned).to_vec();
-                }
-                if matches!(*name, "delta-x" | "delta-y") {
-                    argument.minimum = Some(-10_000);
-                    argument.maximum = Some(10_000);
-                }
-                argument
-            })
-            .collect();
-        let mut description = description.to_owned();
-        for (name, note) in ARGUMENT_NOTES {
-            if names.contains(&name) {
-                description.push(' ');
-                description.push_str(note);
-            }
-        }
-        let descriptor = CommandDescriptor {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            description,
-            mutation,
-            arguments: CompactSchema { arguments },
-            target: None,
-            palette: false,
-        };
+    for &(id, title, description, names, mutation) in COMMANDS {
+        let descriptor = descriptor(id, title, description, names, mutation);
         commands.insert(
             descriptor.id.clone(),
             super::RegisteredCommand {
@@ -258,6 +213,60 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
                 executor: super::CommandExecutorResolver::Computer,
             },
         );
+    }
+}
+
+fn descriptor(
+    id: &str,
+    title: &str,
+    description: &str,
+    names: &[&str],
+    mutation: MutationClass,
+) -> CommandDescriptor {
+    let arguments = names
+        .iter()
+        .map(|name| {
+            let mut argument = super::argument(
+                name,
+                match *name {
+                    "x" | "y" => ValueType::Number,
+                    "delta-x" | "delta-y" => ValueType::Integer,
+                    _ => ValueType::String,
+                },
+            );
+            argument.required = !matches!(*name, "button" | "modifiers" | "allow-click" | "root")
+                && id != "computer.snapshot";
+            if *name == "button" {
+                argument.choices = ["left", "right", "middle"].map(str::to_owned).to_vec();
+            }
+            if *name == "allow-click" {
+                argument.choices = ["true", "false"].map(str::to_owned).to_vec();
+            }
+            if *name == "root" {
+                argument.choices = ["window", "menu_bar"].map(str::to_owned).to_vec();
+            }
+            if matches!(*name, "delta-x" | "delta-y") {
+                argument.minimum = Some(-10_000);
+                argument.maximum = Some(10_000);
+            }
+            argument
+        })
+        .collect();
+    let mut description = description.to_owned();
+    for (name, note) in ARGUMENT_NOTES {
+        if names.contains(&name) {
+            description.push(' ');
+            description.push_str(note);
+        }
+    }
+    CommandDescriptor {
+        id: id.to_owned(),
+        title: title.to_owned(),
+        description,
+        mutation,
+        arguments: CompactSchema { arguments },
+        target: None,
+        palette: false,
     }
 }
 
@@ -310,7 +319,7 @@ fn parse(invocation: &CommandInvocation) -> Result<ComputerCommand, String> {
         .validate_action(&action)
         .map_err(|error| error.to_string())?;
     Ok(ComputerCommand::Execute {
-        target,
+        target: Box::new(target),
         action,
         destination,
     })

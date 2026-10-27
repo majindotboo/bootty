@@ -170,7 +170,7 @@ pub use native_protocol::{
 };
 pub use native_service::{
     NativeAgentService, NativeCreationError, NativeDraft, NativeProviderInfo, NativeQueuedMessage,
-    NativeQueuedMessageStatus, NativeSessionActivity, NativeSessionRecord,
+    NativeQueuedMessageStatus, NativeSessionActivity, NativeSessionRecord, NativeTaskConversation,
 };
 pub use native_session::{
     NativeAgentSession, NativeChangeHandler, NativeRemote, NativeSessionConfig,

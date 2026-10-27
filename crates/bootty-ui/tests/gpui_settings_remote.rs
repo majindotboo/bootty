@@ -12,7 +12,7 @@ use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::{AppContext as _, Context, Modifiers, TestAppContext, point};
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use settings_support::SettingsProbe as RemoteProbe;
 
 impl RemoteProbe {

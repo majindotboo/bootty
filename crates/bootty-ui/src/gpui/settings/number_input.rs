@@ -2,7 +2,8 @@
 
 use super::model::NumberControl;
 use super::{
-    model::{ScalarValue, SettingsIntent},
+    components::ValueRow,
+    model::{NumberSetting, ScalarValue, SettingsIntent},
     window::GpuiSettings,
 };
 use gpui_kit::component::{
@@ -49,10 +50,6 @@ struct NumberControlState {
 }
 
 impl NumberControlState {
-    #[expect(
-        clippy::float_cmp,
-        reason = "Exact accepted values deduplicate slider notifications."
-    )]
     fn new(
         config: NumberControlConfig,
         control: NumberControl,
@@ -96,7 +93,8 @@ impl NumberControlState {
             // Observe those discrete changes; drag events already mark a local preview.
             subscriptions.push(cx.observe_in(slider, window, |this, slider, window, cx| {
                 let value = slider.read(cx).value().start();
-                if this.slider_preview.is_none() && value != this.current_value {
+                if this.slider_preview.is_none() && value.to_bits() != this.current_value.to_bits()
+                {
                     this.sync_input(value, window, cx);
                     this.emit_value(value, cx);
                 }
@@ -199,12 +197,8 @@ impl NumberControlState {
         }
     }
 
-    #[expect(
-        clippy::float_cmp,
-        reason = "Exact accepted values deduplicate control events and prevent feedback loops."
-    )]
     fn emit_value(&mut self, value: f32, cx: &mut Context<Self>) {
-        if self.current_value == value {
+        if self.current_value.to_bits() == value.to_bits() {
             return;
         }
         self.current_value = value;
@@ -219,12 +213,8 @@ impl NumberControlState {
         });
     }
 
-    #[expect(
-        clippy::float_cmp,
-        reason = "Exact accepted values deduplicate control events and prevent feedback loops."
-    )]
     fn sync_external_value(&mut self, value: f32, window: &mut Window, cx: &mut Context<Self>) {
-        if self.external_value == value {
+        if self.external_value.to_bits() == value.to_bits() {
             return;
         }
         self.external_value = value;
@@ -244,24 +234,28 @@ impl NumberControlState {
 }
 
 impl GpuiSettings {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_number_control(
         &self,
-        id: &str,
-        label: &str,
-        value: f32,
-        range: std::ops::RangeInclusive<f32>,
-        control: NumberControl,
-        precision: usize,
-        step: f32,
-        slider_step: f32,
-        suffix: &str,
-        display_scale: f32,
-        optional: bool,
-        enabled: bool,
+        row: ValueRow<'_>,
+        number: &NumberSetting,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ValueRow {
+            id, label, enabled, ..
+        } = row;
+        let NumberSetting {
+            ref range,
+            control,
+            precision,
+            step,
+            slider_step,
+            ref suffix,
+            display_scale,
+            optional,
+        } = *number;
+        let value = row.value.as_number().unwrap_or_else(|| *range.start());
+        let range = range.clone();
         let display_scale = valid_display_scale(display_scale);
         let range_start = *range.start();
         let range_end = *range.end();

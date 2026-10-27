@@ -343,7 +343,7 @@ impl AppState {
         match executor::execute_local_command(&mut self.workspace, &self.repaint, command) {
             Ok(true) => self.input_focus = crate::input::focus::InputFocus::Terminal,
             Ok(false) => {}
-            Err(error) => self.record_error("Could not run the terminal command", error),
+            Err(error) => self.record_error("Could not run the terminal command", &error),
         }
         self.sync_terminal_panes_now();
         crate::diagnostics::trace_phase("mux.execute_and_sync", started);

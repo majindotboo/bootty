@@ -140,10 +140,6 @@ impl Documents {
     }
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Visibility, loading, preview and close requests vary independently"
-)]
 pub struct DocumentPanel {
     context: GitPanelContext,
     host_identity: String,
@@ -916,13 +912,13 @@ impl DocumentPanel {
         }
     }
 
-    // Keep one lifecycle hook signature until video playback supports other platforms.
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(
+        expect(
             clippy::unused_self,
             clippy::missing_const_for_fn,
-            clippy::needless_pass_by_ref_mut
+            clippy::needless_pass_by_ref_mut,
+            reason = "One lifecycle hook signature holds until video playback supports other platforms."
         )
     )]
     fn pause_video(&self, cx: &mut Context<Self>) {

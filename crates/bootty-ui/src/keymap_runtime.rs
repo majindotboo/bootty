@@ -683,110 +683,102 @@ const FOCUS_COMPOSER_KEYSTROKE: &str = if cfg!(target_os = "macos") {
     "ctrl+l"
 };
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One finite table owns built-in command bindings"
-)]
+/// Built-in bindings by context: each keystroke and the command it runs there.
+const BUILT_IN_BINDINGS: [(KeymapContext, &[(&str, &str)]); 4] = [
+    (
+        KeymapContext::Command,
+        &[
+            ("arrow_up", "ui.command.previous"),
+            ("ctrl+p", "ui.command.previous"),
+            ("arrow_down", "ui.command.next"),
+            ("ctrl+n", "ui.command.next"),
+            ("enter", "ui.command.confirm"),
+            ("escape", "ui.command.cancel"),
+            ("ctrl+shift+f", "ui.command.toggle_favorite"),
+        ],
+    ),
+    (
+        KeymapContext::SurfaceChooser,
+        &[
+            ("arrow_up", "ui.surface.previous"),
+            ("k", "ui.surface.previous"),
+            ("ctrl+p", "ui.surface.previous"),
+            ("shift+tab", "ui.surface.previous"),
+            ("arrow_down", "ui.surface.next"),
+            ("j", "ui.surface.next"),
+            ("ctrl+n", "ui.surface.next"),
+            ("tab", "ui.surface.next"),
+            ("home", "ui.surface.first"),
+            ("g > g", "ui.surface.first"),
+            ("alt+<", "ui.surface.first"),
+            ("end", "ui.surface.last"),
+            ("shift+g", "ui.surface.last"),
+            ("alt+>", "ui.surface.last"),
+            ("enter", "ui.surface.confirm"),
+            ("ctrl+m", "ui.surface.confirm"),
+            ("ctrl+g", "ui.surface.cancel"),
+            ("escape", "ui.surface.cancel"),
+            ("a", "ui.surface.agent"),
+            ("t", "ui.surface.terminal"),
+            ("1", "ui.surface.claude"),
+            ("2", "ui.surface.codex"),
+            ("3", "ui.surface.pi"),
+            ("e", "ui.surface.edit_profiles"),
+        ],
+    ),
+    (
+        KeymapContext::ComposerCompletion,
+        &[
+            ("arrow_up", "ui.composer.previous"),
+            ("ctrl+p", "ui.composer.previous"),
+            ("ctrl+k", "ui.composer.previous"),
+            ("alt+k", "ui.composer.previous"),
+            ("arrow_down", "ui.composer.next"),
+            ("ctrl+n", "ui.composer.next"),
+            ("ctrl+j", "ui.composer.next"),
+            ("alt+j", "ui.composer.next"),
+            ("enter", "ui.composer.confirm"),
+            ("tab", "ui.composer.confirm"),
+            ("escape", "ui.composer.cancel"),
+            ("ctrl+g", "ui.composer.cancel"),
+        ],
+    ),
+    (
+        KeymapContext::Composer,
+        &[
+            ("ctrl+alt+s", "ui.composer.focus-space"),
+            ("ctrl+alt+m", "ui.composer.focus-model"),
+            ("alt+,", "ui.composer.effort-down"),
+            ("alt+.", "ui.composer.effort-up"),
+            ("ctrl+alt+p", "ui.composer.focus-project"),
+            ("ctrl+alt+w", "ui.composer.focus-worktree"),
+            ("ctrl+alt+a", "ui.composer.focus-permissions"),
+            ("shift+tab", "ui.composer.toggle-plan"),
+            ("ctrl+alt+f", "ui.composer.toggle-fast"),
+            ("ctrl+alt+d", "ui.composer.dictate"),
+            ("ctrl+alt+v", "ui.composer.voice"),
+            ("ctrl+alt+i", "ui.composer.focus-composer"),
+            (FOCUS_COMPOSER_KEYSTROKE, "ui.composer.focus-composer"),
+            ("ctrl+alt+e", "ui.composer.expand"),
+            (STASH_KEYSTROKE, "ui.composer.stash"),
+        ],
+    ),
+];
+
 fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
-    let mut bindings = Vec::new();
-    for (keystrokes, command) in [
-        ("arrow_up", "ui.command.previous"),
-        ("ctrl+p", "ui.command.previous"),
-        ("arrow_down", "ui.command.next"),
-        ("ctrl+n", "ui.command.next"),
-        ("enter", "ui.command.confirm"),
-        ("escape", "ui.command.cancel"),
-        ("ctrl+shift+f", "ui.command.toggle_favorite"),
-    ] {
-        bindings.push(KeymapBindingSnapshot {
-            context: KeymapContext::Command,
-            keystrokes: keystrokes.to_owned(),
-            action: KeymapAction::command(command),
-            kind: KeymapBindingKind::Binding,
-            source: KeymapBindingSource::BuiltIn,
-        });
-    }
-    for (keystrokes, action) in [
-        ("arrow_up", "ui.surface.previous"),
-        ("k", "ui.surface.previous"),
-        ("ctrl+p", "ui.surface.previous"),
-        ("shift+tab", "ui.surface.previous"),
-        ("arrow_down", "ui.surface.next"),
-        ("j", "ui.surface.next"),
-        ("ctrl+n", "ui.surface.next"),
-        ("tab", "ui.surface.next"),
-        ("home", "ui.surface.first"),
-        ("g > g", "ui.surface.first"),
-        ("alt+<", "ui.surface.first"),
-        ("end", "ui.surface.last"),
-        ("shift+g", "ui.surface.last"),
-        ("alt+>", "ui.surface.last"),
-        ("enter", "ui.surface.confirm"),
-        ("ctrl+m", "ui.surface.confirm"),
-        ("ctrl+g", "ui.surface.cancel"),
-        ("escape", "ui.surface.cancel"),
-        ("a", "ui.surface.agent"),
-        ("t", "ui.surface.terminal"),
-        ("1", "ui.surface.claude"),
-        ("2", "ui.surface.codex"),
-        ("3", "ui.surface.pi"),
-        ("e", "ui.surface.edit_profiles"),
-    ] {
-        bindings.push(KeymapBindingSnapshot {
-            context: KeymapContext::SurfaceChooser,
-            keystrokes: keystrokes.to_owned(),
-            action: KeymapAction::command(action),
-            kind: KeymapBindingKind::Binding,
-            source: KeymapBindingSource::BuiltIn,
-        });
-    }
-    for (keystrokes, command) in [
-        ("arrow_up", "ui.composer.previous"),
-        ("ctrl+p", "ui.composer.previous"),
-        ("ctrl+k", "ui.composer.previous"),
-        ("alt+k", "ui.composer.previous"),
-        ("arrow_down", "ui.composer.next"),
-        ("ctrl+n", "ui.composer.next"),
-        ("ctrl+j", "ui.composer.next"),
-        ("alt+j", "ui.composer.next"),
-        ("enter", "ui.composer.confirm"),
-        ("tab", "ui.composer.confirm"),
-        ("escape", "ui.composer.cancel"),
-        ("ctrl+g", "ui.composer.cancel"),
-    ] {
-        bindings.push(KeymapBindingSnapshot {
-            context: KeymapContext::ComposerCompletion,
-            keystrokes: keystrokes.into(),
-            action: KeymapAction::command(command),
-            kind: KeymapBindingKind::Binding,
-            source: KeymapBindingSource::BuiltIn,
-        });
-    }
-    for (keystrokes, command) in [
-        ("ctrl+alt+s", "ui.composer.focus-space"),
-        ("ctrl+alt+m", "ui.composer.focus-model"),
-        ("alt+,", "ui.composer.effort-down"),
-        ("alt+.", "ui.composer.effort-up"),
-        ("ctrl+alt+p", "ui.composer.focus-project"),
-        ("ctrl+alt+w", "ui.composer.focus-worktree"),
-        ("ctrl+alt+a", "ui.composer.focus-permissions"),
-        ("shift+tab", "ui.composer.toggle-plan"),
-        ("ctrl+alt+f", "ui.composer.toggle-fast"),
-        ("ctrl+alt+d", "ui.composer.dictate"),
-        ("ctrl+alt+v", "ui.composer.voice"),
-        ("ctrl+alt+i", "ui.composer.focus-composer"),
-        (FOCUS_COMPOSER_KEYSTROKE, "ui.composer.focus-composer"),
-        ("ctrl+alt+e", "ui.composer.expand"),
-        (STASH_KEYSTROKE, "ui.composer.stash"),
-    ] {
-        bindings.push(KeymapBindingSnapshot {
-            context: KeymapContext::Composer,
-            keystrokes: keystrokes.into(),
-            action: KeymapAction::command(command),
-            kind: KeymapBindingKind::Binding,
-            source: KeymapBindingSource::BuiltIn,
-        });
-    }
-    bindings.extend(bootty_config::legacy_keymap_bindings(config));
-    bindings
+    BUILT_IN_BINDINGS
+        .iter()
+        .flat_map(|(context, bindings)| {
+            bindings
+                .iter()
+                .map(move |&(keystrokes, command)| KeymapBindingSnapshot {
+                    context: context.clone(),
+                    keystrokes: keystrokes.to_owned(),
+                    action: KeymapAction::command(command),
+                    kind: KeymapBindingKind::Binding,
+                    source: KeymapBindingSource::BuiltIn,
+                })
+        })
+        .chain(bootty_config::legacy_keymap_bindings(config))
+        .collect()
 }

@@ -49,6 +49,7 @@ impl IDWritePixelSnapping_Impl for LayoutRenderer_Impl {
         Ok(true.into())
     }
     fn GetCurrentTransform(&self, _: *const c_void, transform: *mut DWRITE_MATRIX) -> Result<()> {
+        // SAFETY: DirectWrite passes a writable matrix for this call, and as_mut checks for null.
         let transform = unsafe { transform.as_mut() }.ok_or_else(|| Error::from(E_POINTER))?;
         *transform = DWRITE_MATRIX {
             m11: 1.0,
@@ -85,7 +86,11 @@ impl IDWriteTextRenderer_Impl for LayoutRenderer_Impl {
         description: *const DWRITE_GLYPH_RUN_DESCRIPTION,
         _: Ref<IUnknown>,
     ) -> Result<()> {
+        // SAFETY: DirectWrite passes a glyph run that lives through this callback, and as_ref
+        // checks for null.
         let glyphs = unsafe { glyphs.as_ref() }.ok_or_else(|| Error::from(E_POINTER))?;
+        // SAFETY: DirectWrite passes a description that lives through this callback, and as_ref
+        // checks for null.
         let description = unsafe { description.as_ref() }.ok_or_else(|| Error::from(E_POINTER))?;
         let face: IDWriteFontFace3 = glyphs
             .fontFace

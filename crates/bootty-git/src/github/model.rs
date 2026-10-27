@@ -190,10 +190,6 @@ pub(super) struct ThreadConnection {
     pub page_info: PageInfo,
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Independent permissions come from GitHub's viewer, repository role and PR authorship"
-)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ViewerPermissions {
     pub can_write: bool,

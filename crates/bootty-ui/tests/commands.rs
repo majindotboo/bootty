@@ -36,7 +36,7 @@ const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 mod frames;
 #[path = "support/naming_backend.rs"]
 mod naming_backend;
-mod support;
+pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 

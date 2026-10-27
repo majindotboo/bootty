@@ -185,8 +185,14 @@ impl WorkspaceDock {
             request.action,
             BrowserAction::Capture | BrowserAction::CaptureAnnotation(_)
         ) {
+            #[cfg(target_os = "macos")]
             self.browser.session.update(cx, |browser, cx| {
                 browser.capture_request(request, window, cx);
+            });
+            // Page capture needs exact-window capture, which only macOS has.
+            #[cfg(not(target_os = "macos"))]
+            request.complete(bootty_control::CommandOutcome::Unsupported {
+                message: "Browser page capture currently requires macOS".into(),
             });
             return;
         }

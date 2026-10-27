@@ -192,10 +192,6 @@ impl<R: CommandRunner> GitHub<'_, R> {
     }
 }
 
-#[expect(
-    clippy::case_sensitive_file_extension_comparisons,
-    reason = "Git ref names prohibit the case-sensitive .lock suffix"
-)]
 fn validate_branch(branch: &str) -> Result<(), String> {
     if branch.is_empty()
         || branch.len() > 1024
@@ -208,9 +204,16 @@ fn validate_branch(branch: &str) -> Result<(), String> {
         || branch.contains("@{")
         || branch
             .split('/')
-            .any(|part| part.is_empty() || part.starts_with('.') || part.ends_with(".lock"))
+            .any(|part| part.is_empty() || part.starts_with('.') || lock_file(part))
     {
         return Err("Invalid branch name".into());
     }
     Ok(())
+}
+
+/// Git refuses ref components named like its lock files, `*.lock`, matched case-sensitively.
+fn lock_file(component: &str) -> bool {
+    std::path::Path::new(component)
+        .extension()
+        .is_some_and(|extension| extension == "lock")
 }

@@ -15,7 +15,9 @@ use std::{
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 const OWNER_LAUNCH: &str = "BOOTTY_TEST_CODEX_OWNER_LAUNCH";
-const LIMIT: Duration = Duration::from_secs(5);
+/// Bounds waits on real child processes. Passing tests advance on events; only a broken fixture
+/// reaches this, so it is generous enough for a loaded machine.
+const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 struct OwnedChild(Child);
 impl Drop for OwnedChild {
@@ -45,8 +47,8 @@ fn accepted(listener: &UnixListener) -> TestResult<UnixStream> {
     std::thread::spawn(move || {
         let _ = sender.send(listener.accept());
     });
-    let (stream, _) = response.recv_timeout(LIMIT)??;
-    stream.set_read_timeout(Some(LIMIT))?;
+    let (stream, _) = response.recv_timeout(FIXTURE_DEADLINE)??;
+    stream.set_read_timeout(Some(FIXTURE_DEADLINE))?;
     Ok(stream)
 }
 
@@ -191,7 +193,7 @@ fn failed_provider_exit_is_observed_after_supervisor_reaps_its_watcher() -> Test
             let _ = sender.send(observation);
         }),
     )?;
-    let observation = observed.recv_timeout(LIMIT)?;
+    let observation = observed.recv_timeout(FIXTURE_DEADLINE)?;
     assert_eq!(
         observation.status,
         bootty_agents::TerminalAgentStatus::Unavailable

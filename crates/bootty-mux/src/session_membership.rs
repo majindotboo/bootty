@@ -20,7 +20,6 @@ pub enum SessionLifecycle {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, from = "SavedSessionState")]
 // These independent flags survive archive/delete so restoring preserves prior presentation.
-#[allow(clippy::struct_excessive_bools)]
 pub struct SessionState {
     pub lifecycle: SessionLifecycle,
     pub pinned: bool,
@@ -38,7 +37,6 @@ pub struct SessionState {
 /// Saved state as any version wrote it. Sessions could once be hidden; a hidden one is archived.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-#[allow(clippy::struct_excessive_bools)]
 struct SavedSessionState {
     lifecycle: SessionLifecycle,
     pinned: bool,

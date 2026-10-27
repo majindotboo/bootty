@@ -566,7 +566,7 @@ async fn wait_events(params: &Value, state: &SharedControlState) -> Result<Value
     let mut changed = lock_control_state(state).changes();
     loop {
         let mut batch = lock_control_state(state).poll_subscription(subscription, cursor)?;
-        if batch.has_events() {
+        if !batch.events.is_empty() {
             batch.timed_out = Some(false);
             return serde_json::to_value(batch).map_err(|error| internal_error(&error));
         }

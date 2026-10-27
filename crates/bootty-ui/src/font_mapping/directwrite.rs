@@ -1,5 +1,5 @@
 //! Native DirectWrite layouts retain exact faces; ordinary rasterization uses the host backend.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "DirectWrite COM callbacks and retained font handles are confined to this native adapter."
 )]
@@ -74,7 +74,8 @@ impl Drop for Fonts {
         self.color.take();
         self.faces.clear();
         self.files.clear();
-        // No font references escape this engine; release them before unregistering the loader.
+        // SAFETY: No font reference escapes this engine, and the faces and files were released
+        // above, so the loader can be unregistered.
         let _ = unsafe { self.factory.UnregisterFontFileLoader(&self.loader) };
     }
 }
@@ -83,8 +84,11 @@ impl WindowsFontSystem {
     pub(super) fn new(native: Arc<dyn PlatformTextSystem>, mappings: FontMappings) -> Result<Self> {
         // The existing Windows host already requires DirectWrite5; this uses the shared OS factory.
         let policy_font = native.font_id(&gpui_kit::font(".SystemUIFont"))?;
+        // SAFETY: DWriteCreateFactory has no preconditions; it returns the shared OS factory.
         let factory: IDWriteFactory5 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
+        // SAFETY: factory is a live DirectWrite factory.
         let loader = unsafe { factory.CreateInMemoryFontFileLoader()? };
+        // SAFETY: loader is a live loader this factory created, and Drop unregisters it.
         unsafe {
             factory.RegisterFontFileLoader(&loader)?;
         }
@@ -118,8 +122,10 @@ impl WindowsFontSystem {
 }
 
 fn localized_name(names: &IDWriteLocalizedStrings) -> Result<String> {
+    // SAFETY: names is a live localized-strings object; an invalid index returns an error.
     let count = usize::try_from(unsafe { names.GetStringLength(0)? })?;
     let mut buffer = vec![0; count.checked_add(1).context("Font name length overflow")?];
+    // SAFETY: buffer holds the reported length plus the terminator GetString writes.
     unsafe {
         names.GetString(0, &mut buffer)?;
     }
@@ -139,6 +145,7 @@ fn system_ui_family() -> String {
     let Ok(font_bytes) = u32::try_from(std::mem::size_of::<LOGFONTW>()) else {
         return "Segoe UI".into();
     };
+    // SAFETY: font is a LOGFONTW, and font_bytes is its exact size.
     let read = unsafe {
         SystemParametersInfoW(
             SPI_GETICONTITLELOGFONT,
@@ -207,8 +214,9 @@ impl Fonts {
             let file = self
                 .catalog
                 .with_face_data(id, |data, _| -> Result<IDWriteFontFile> {
-                    // With no owner object DirectWrite copies the data; our file cache shares
-                    // that one native buffer across every face in the original collection.
+                    // SAFETY: With no owner object DirectWrite copies the data before returning, so
+                    // the borrowed slice only has to outlive this call; our file cache shares that
+                    // one native copy across every face in the original collection.
                     Ok(unsafe {
                         self.loader.CreateInMemoryFontFileReference(
                             &self.factory,
@@ -222,6 +230,8 @@ impl Fonts {
             self.files.insert(key, file.clone());
             file
         };
+        // SAFETY: factory and file are live, and DirectWrite rejects a face index the file does not
+        // have.
         let native = unsafe {
             self.factory
                 .CreateFontFaceReference(&file, index, DWRITE_FONT_SIMULATIONS_NONE)?
@@ -240,9 +250,11 @@ impl Fonts {
                 }
             }
         }
+        // SAFETY: factory is a live DirectWrite factory.
         let typography = unsafe { self.factory.CreateTypography()? };
         for (tag, value) in descriptor.features.tag_value_list() {
             if let Ok(tag) = <[u8; 4]>::try_from(tag.as_bytes()) {
+                // SAFETY: typography is a live typography object, and the feature is a plain value.
                 unsafe {
                     typography.AddFontFeature(DWRITE_FONT_FEATURE {
                         nameTag: DWRITE_FONT_FEATURE_TAG(u32::from_le_bytes(tag)),
@@ -263,8 +275,11 @@ impl Fonts {
         fallbacks: Vec<FontId>,
         platform: &dyn PlatformTextSystem,
     ) -> Result<FontId> {
+        // SAFETY: native is a live font face.
         let family = localized_name(&unsafe { native.GetFamilyNames()? })?;
+        // SAFETY: native is a live font face.
         let weight = unsafe { native.GetWeight() }.0;
+        // SAFETY: native is a live font face.
         let style = unsafe { native.GetStyle() };
         let descriptor = Font {
             family: family.clone().into(),
@@ -293,6 +308,7 @@ impl Fonts {
         // Delegate only where these native properties identify one concrete face.
         let mut names = None;
         let mut exists = windows::core::BOOL::default();
+        // SAFETY: native is a live font face, and names and exists are valid out-pointers.
         unsafe {
             native.GetInformationalStrings(
                 DWRITE_INFORMATIONAL_STRING_POSTSCRIPT_NAME,
@@ -310,10 +326,13 @@ impl Fonts {
         } else {
             None
         };
+        // SAFETY: factory is a live DirectWrite factory.
         let builder = unsafe { self.factory.CreateFontSetBuilder()? };
+        // SAFETY: builder and native are live DirectWrite objects.
         unsafe {
             builder.AddFontFaceReference2(&native.GetFontFaceReference()?)?;
         }
+        // SAFETY: factory and builder are live DirectWrite objects.
         let collection = unsafe {
             self.factory
                 .CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)?
@@ -347,6 +366,7 @@ impl Fonts {
         let Ok(count) = u32::try_from(characters.len()) else {
             return false;
         };
+        // SAFETY: characters and glyphs both hold count elements.
         unsafe {
             face.native
                 .GetGlyphIndices(characters.as_ptr(), count, glyphs.as_mut_ptr())
@@ -412,6 +432,8 @@ impl Fonts {
                     startPosition: utf16_start,
                     length,
                 };
+                // SAFETY: layout and the face's DirectWrite objects are live, and range is a plain
+                // value.
                 unsafe {
                     layout.SetFontCollection(&face.collection, range)?;
                     layout.SetFontFamilyName(&face.family, range)?;
@@ -453,8 +475,11 @@ impl Fonts {
             // DirectWrite may return a new interface for the same face; retain its GPUI ID,
             // features and explicit fallbacks when the native references still match.
             let configured = if let Some(id) = configured {
+                // SAFETY: The face's native object is a live font face.
                 let requested = unsafe { self.face(id)?.native.GetFontFaceReference()? };
+                // SAFETY: run.face is a live font face DirectWrite returned.
                 let actual = unsafe { run.face.GetFontFaceReference()? };
+                // SAFETY: requested and actual are live font face references.
                 unsafe { requested.Equals(&actual).as_bool() }.then_some(id)
             } else {
                 None
@@ -464,9 +489,11 @@ impl Fonts {
             } else if let Some(id) = self.native_ids.get(&key) {
                 *id
             } else {
+                // SAFETY: factory is a live DirectWrite factory.
                 let typography = unsafe { self.factory.CreateTypography()? };
                 self.insert(run.face.clone(), typography, Vec::new(), platform)?
             };
+            // SAFETY: run.face is a live font face.
             let color = unsafe { run.face.IsColorFont().as_bool() };
             let mut pen = run.x;
             anyhow::ensure!(
@@ -517,6 +544,8 @@ impl Fonts {
             });
         };
         let first = self.face(first.font_id)?;
+        // SAFETY: factory and the first face's objects are live, and the family and locale strings
+        // outlive the call.
         let format = unsafe {
             self.factory.CreateTextFormat(
                 &first.family,
@@ -529,6 +558,7 @@ impl Fonts {
             )?
         };
         let wide = text.encode_utf16().collect::<Vec<_>>();
+        // SAFETY: factory and format are live, and wide outlives the call.
         let layout = unsafe {
             self.factory
                 .CreateTextLayout(&wide, &format, f32::INFINITY, f32::INFINITY)?
@@ -536,15 +566,20 @@ impl Fonts {
         let assigned = self.assign_runs(&layout, text, font_size, runs)?;
         let output = Arc::new(Mutex::new(Vec::new()));
         let renderer: IDWriteTextRenderer = renderer::LayoutRenderer(output.clone()).into();
+        // SAFETY: layout and renderer are live, and the renderer copies every buffer it receives
+        // before returning.
         unsafe {
             layout.Draw(None, &renderer, 0.0, 0.0)?;
         }
         let mut metrics = DWRITE_TEXT_METRICS::default();
+        // SAFETY: metrics is a valid out-pointer.
         unsafe {
             layout.GetMetrics(&raw mut metrics)?;
         }
         let mut count = 0;
         let mut line_metrics = vec![DWRITE_LINE_METRICS::default(); wide.len().max(1)];
+        // SAFETY: DirectWrite receives line_metrics as a sized slice, and count is a valid
+        // out-pointer.
         unsafe {
             layout.GetLineMetrics(Some(&mut line_metrics), &raw mut count)?;
         }
@@ -619,6 +654,7 @@ impl PlatformTextSystem for WindowsFontSystem {
             };
         };
         let mut metrics = DWRITE_FONT_METRICS1::default();
+        // SAFETY: face is a live font face, and metrics is a valid out-pointer.
         unsafe {
             face.GetMetrics(&raw mut metrics);
         }
@@ -690,6 +726,7 @@ impl PlatformTextSystem for WindowsFontSystem {
         let face = self.face(id)?;
         let character = u32::from(ch);
         let mut glyph = 0;
+        // SAFETY: face is a live font face, and the pointers name one character and one glyph slot.
         unsafe { face.GetGlyphIndices(&raw const character, 1, &raw mut glyph) }.ok()?;
         (glyph != 0).then_some(GlyphId(u32::from(glyph)))
     }
@@ -756,6 +793,7 @@ impl PlatformTextSystem for WindowsFontSystem {
 fn glyph_metrics(face: &IDWriteFontFace3, glyph: GlyphId) -> Result<DWRITE_GLYPH_METRICS> {
     let glyph = u16::try_from(glyph.0)?;
     let mut metrics = DWRITE_GLYPH_METRICS::default();
+    // SAFETY: face is a live font face, and the pointers name one glyph and one metrics slot.
     unsafe {
         face.GetDesignGlyphMetrics(&raw const glyph, 1, &raw mut metrics, false)?;
     }

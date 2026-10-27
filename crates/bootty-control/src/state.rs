@@ -60,7 +60,7 @@ struct SubscriptionRecord {
 }
 
 #[derive(Serialize)]
-struct SubscriptionEvent {
+pub struct SubscriptionEvent {
     sequence: u64,
     scope: String,
     revision: u64,
@@ -76,19 +76,9 @@ pub struct SubscriptionBatch {
     scope: String,
     revision: u64,
     cursor: u64,
-    events: VecDeque<SubscriptionEvent>,
+    pub(crate) events: VecDeque<SubscriptionEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) timed_out: Option<bool>,
-}
-
-impl SubscriptionBatch {
-    #[allow(
-        clippy::missing_const_for_fn,
-        reason = "VecDeque::is_empty is not const on older supported nightly toolchains"
-    )]
-    pub(crate) fn has_events(&self) -> bool {
-        !self.events.is_empty()
-    }
 }
 
 impl ControlState {

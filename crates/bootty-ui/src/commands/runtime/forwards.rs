@@ -171,6 +171,18 @@ impl AppState {
         });
         CommandDispatch::Pending(PendingCommandResult::Forward { result })
     }
+    /// Finishes a forward once its worker answered.
+    pub(super) fn finish_forward_result(
+        &mut self,
+        forward: Result<Result<ForwardResult, String>, mpsc::RecvError>,
+    ) -> CommandOutcome {
+        match forward {
+            Ok(Ok(result)) => self.finish_forward(result),
+            Ok(Err(message)) => super::links::failure(message),
+            Err(mpsc::RecvError) => super::links::failure("Forward worker stopped".to_owned()),
+        }
+    }
+
     pub(super) fn finish_forward(&mut self, result: ForwardResult) -> CommandOutcome {
         match result {
             ForwardResult::Opened {

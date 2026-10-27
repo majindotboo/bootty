@@ -1,9 +1,5 @@
+#![cfg(test)]
 #![cfg(target_os = "linux")]
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "Fixture failures must fail the acceptance test immediately."
-)]
 
 use bootty_computer::{
     Computer, ComputerAccess, ComputerAction, ComputerElement, ComputerResult, ComputerTarget,

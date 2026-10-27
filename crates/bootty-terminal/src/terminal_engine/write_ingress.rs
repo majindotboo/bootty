@@ -22,10 +22,6 @@ pub fn split_osc_payload(payload: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent protocol recognizers may be enabled together."
-)]
 pub(super) struct TerminalWriteFeatures {
     pub(super) tmux_passthrough: bool,
     pub(super) kitty_graphics: bool,

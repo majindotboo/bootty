@@ -63,10 +63,6 @@ pub enum Key {
 
 /// Modifier state without platform-specific aliases such as `command`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Keyboard modifiers can be pressed independently."
-)]
 pub struct Modifiers {
     pub control: bool,
     pub alt: bool,

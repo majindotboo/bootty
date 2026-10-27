@@ -59,7 +59,7 @@ pub use session_requests::{
     PreparedSessionRequest, SESSION_ARGV_MAX_BYTES, SESSION_ARGV_MAX_ELEMENTS,
     SESSION_NAME_MAX_BYTES, SavedSessionMetadata, SessionRequestError, StartingSession,
 };
-pub use space_summary::SpaceSummary;
+pub use space_summary::{NewSpace, SpaceSummary};
 
 use crate::repository::{
     BindingMembershipMutation, SpaceMuxOverride, SpaceRemoteOverride, WorkspaceBinding,
@@ -1569,19 +1569,21 @@ impl WorkspaceRuntime {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     /// # Errors
     /// Returns persistence or binding realization errors; failed writes preserve live state.
     pub fn create_space(
         &mut self,
-        name: &str,
-        icon: &str,
-        color: [u8; 3],
-        tint_sidebar: bool,
-        mux: SpaceMuxOverride,
+        space: NewSpace<'_>,
         config: &BoottyConfig,
         variant: AppearanceVariant,
     ) -> Result<Option<SpaceId>, WorkspacePersistenceError> {
+        let NewSpace {
+            name,
+            icon,
+            color,
+            tint_sidebar,
+            mux,
+        } = space;
         let realized = realize_binding(config, mux.backend, &mux.remote, String::new());
         self.backends
             .app_provider(&realized.config)
@@ -1702,7 +1704,7 @@ impl WorkspaceRuntime {
             &summary.icon,
             summary.color,
             summary.tint_sidebar,
-            mux.clone(),
+            &mux,
         )?;
         if updated {
             let repaint = self.repaint.clone();

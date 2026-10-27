@@ -325,10 +325,12 @@ impl AppState {
             terminal_events,
             modifiers,
             self.modifier_sides,
-            hover_pos,
-            pressed_mouse_button,
-            surface,
-            view,
+            PointerFrame {
+                hover_pos,
+                pressed_mouse_button,
+                surface,
+                view,
+            },
             macos_option_as_alt,
             &mut self.wheel_scroll_state,
             &self.config_runtime,
@@ -378,7 +380,7 @@ impl AppState {
             .terminal_mut()
             .write_paste(&text)
         {
-            self.record_error("Could not paste the dropped files", error);
+            self.record_error("Could not paste the dropped files", &error);
             return 0;
         }
         if let Some((scope, identity)) = activity {
@@ -409,7 +411,7 @@ impl AppState {
             match TerminalRuntime::copy_mode_active(self.workspace.active.binding.terminal_mut()) {
                 Ok(active) => active,
                 Err(error) => {
-                    self.record_error("Could not use copy mode", error);
+                    self.record_error("Could not use copy mode", &error);
                     false
                 }
             };
@@ -685,7 +687,7 @@ impl AppState {
         };
         let (result, hides_pointer) = Self::apply_terminal_input_to_runtime(terminal, command);
         if let Err(error) = result {
-            self.record_error("Could not send input to the terminal", error);
+            self.record_error("Could not send input to the terminal", &error);
         } else {
             if let Some((scope, identity)) = activity {
                 self.record_session_activity(
@@ -728,19 +730,30 @@ impl AppState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn terminal_input_commands(
-    events: Vec<InputEvent>,
-    modifiers: Modifiers,
-    modifier_sides: ModifierSideState,
+/// Where pointer events land in the terminal, and the button held as they arrive.
+#[derive(Clone, Copy)]
+struct PointerFrame {
     hover_pos: Option<Point>,
     pressed_mouse_button: Option<PointerButton>,
     surface: Option<TerminalSurface>,
     view: ViewTransform,
+}
+
+fn terminal_input_commands(
+    events: Vec<InputEvent>,
+    modifiers: Modifiers,
+    modifier_sides: ModifierSideState,
+    pointer: PointerFrame,
     macos_option_as_alt: MacosOptionAsAlt,
     wheel_state: &mut NeutralWheelScrollState,
     config: &crate::config_runtime::AppConfigRuntime,
 ) -> Vec<TerminalInputCommand> {
+    let PointerFrame {
+        hover_pos,
+        pressed_mouse_button,
+        surface,
+        view,
+    } = pointer;
     let mut commands = Vec::with_capacity(events.len());
     let suppress_modified_text =
         suppress_modified_text(&events, modifiers, macos_option_as_alt, modifier_sides);

@@ -23,14 +23,14 @@ use bootty_mux::snapshot::MuxPaneAnchor;
 use bootty_ui::settings_session::{
     AcceptedSettings, Catalogs, SettingsEffect, SettingsOutcome, SettingsSession,
 };
-use bootty_ui::{AppEffect, AppState};
+use bootty_ui::{AppEffect, AppState, WindowEffect};
 use rstest::rstest;
 
 #[path = "support/events.rs"]
 mod events;
 #[path = "support/frames.rs"]
 mod frames;
-mod support;
+pub mod support;
 
 fn app_state(config: BoottyConfig) -> AppState {
     AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
@@ -90,10 +90,6 @@ fn persist_settings_submissions(config_file: &ChildPath, session: &mut SettingsS
 }
 
 #[rstest]
-#[expect(
-    clippy::float_cmp,
-    reason = "The explicit saved font size must be preserved exactly"
-)]
 fn stale_settings_drafts_preserve_external_edits_and_can_be_discarded() {
     let directory = TempDir::new().unwrap();
     let file = directory.child("config.toml");
@@ -135,8 +131,10 @@ fn stale_settings_drafts_preserve_external_edits_and_can_be_discarded() {
     session.set_value("font.size", &SettingValue::Number(18.0));
     persist_settings_submissions(&file, &mut session);
     let config = load_config_from_path(file.path()).unwrap();
-    assert_eq!(config.window.title, "external");
-    assert_eq!(config.font.size, 18.0);
+    assert_eq!(
+        (config.window.title.as_str(), config.font.size),
+        ("external", 18.0)
+    );
     assert!(
         std::fs::read_to_string(file.path())
             .unwrap()
@@ -172,10 +170,6 @@ fn selecting_a_missing_space_is_a_noop() {
 }
 
 #[test]
-#[expect(
-    clippy::float_cmp,
-    reason = "The accepted width must retain the supplied value after a failed write."
-)]
 fn a_failed_app_write_keeps_the_error_visible() {
     let (_directory, config_file, mut state) =
         state_from_config("[chrome]\nsidebar-width = 320\n\n[multiplexer]\nbackend = \"rmux\"\n");
@@ -185,7 +179,10 @@ fn a_failed_app_write_keeps_the_error_visible() {
     state.set_sidebar_width_live(444.0);
     state.persist_sidebar_width(444.0, &mut Vec::new());
 
-    assert_eq!(state.config().chrome.sidebar_width, 444.0);
+    assert_eq!(
+        state.config().chrome.sidebar_width.to_bits(),
+        444.0_f32.to_bits()
+    );
     assert!(
         state
             .last_error()
@@ -396,8 +393,8 @@ fn fullscreen_launch_preference_does_not_resize_the_running_window() {
 
     assert_eq!(state.last_error(), None);
     assert!(!state.macos_non_native_fullscreen_active());
-    assert!(!effects.contains(&AppEffect::ApplyMacosNonNativeFullscreen));
-    assert!(effects.contains(&AppEffect::SetFullscreen(false)));
+    assert!(!effects.contains(&AppEffect::Window(WindowEffect::MacosNonNativeFullscreen)));
+    assert!(effects.contains(&AppEffect::Window(WindowEffect::Fullscreen(false))));
     assert!(effects.contains(&AppEffect::RequestRepaint));
 }
 
@@ -412,7 +409,7 @@ fn fullscreen_style_changes_apply_live_but_launch_preference_changes_do_not() {
         .expect("enable borderless fullscreen");
     let mut enter_effects = Vec::new();
     assert!(state.reload_config(&mut enter_effects));
-    assert!(enter_effects.contains(&AppEffect::ApplyMacosNonNativeFullscreen));
+    assert!(enter_effects.contains(&AppEffect::Window(WindowEffect::MacosNonNativeFullscreen)));
 
     config_file
         .write_str(
@@ -421,7 +418,7 @@ fn fullscreen_style_changes_apply_live_but_launch_preference_changes_do_not() {
         .expect("disable borderless fullscreen");
     let mut leave_effects = Vec::new();
     assert!(state.reload_config(&mut leave_effects));
-    assert!(!leave_effects.contains(&AppEffect::RestoreMacosPresentation));
+    assert!(!leave_effects.contains(&AppEffect::Window(WindowEffect::RestoreMacosPresentation)));
     assert!(state.macos_non_native_fullscreen_active());
 }
 

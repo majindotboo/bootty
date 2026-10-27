@@ -6,6 +6,7 @@
 //!
 //! Deliberate limit: the cursor appears at each point instead of gliding, because GPUI cannot
 //! move a window; add a native move when the cursor should animate.
+use num_traits::ToPrimitive as _;
 use std::{
     sync::{Mutex, PoisonError},
     time::Duration,
@@ -127,13 +128,9 @@ impl AgentCursor {
     }
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    reason = "Desktop coordinates fit GPUI's f32 points."
-)]
-const fn gpui_points(value: f64) -> f32 {
-    value as f32
+/// Desktop coordinates in GPUI's f32 points.
+fn gpui_points(value: f64) -> f32 {
+    value.to_f32().unwrap_or(f32::MAX)
 }
 
 struct CursorView;

@@ -345,115 +345,114 @@ const CROSS_BINDING_NATIVE_DISCOVERY: [&str; 5] = [
     "agents.native.names",
 ];
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One exhaustive table owns cross-binding command authority"
-)]
 fn allows_cross_binding(command: &str, expected: ResourceKind) -> bool {
     match expected {
-        ResourceKind::Binding => {
-            (command.starts_with("agents.")
-                && [
-                    ".start",
-                    ".resume",
-                    ".fork",
-                    ".account.login",
-                    ".account.logout",
-                    ".account.status",
-                    ".provider.status",
-                    ".connectors",
-                ]
-                .iter()
-                .any(|suffix| command.ends_with(suffix)))
-                || CROSS_BINDING_NATIVE_DISCOVERY.contains(&command)
-                || matches!(
-                    command,
-                    "runs.create" | "runs.dispatch" | "runs.cancel" | "runs.retry" | "runs.restart"
-                )
-                || command.starts_with("git.")
-                || command.starts_with("files.")
-                || command.starts_with("project.")
-                || matches!(
-                    command,
-                    "jobs.start"
-                        | "spaces.inspect"
-                        | "terminal.activities"
-                        | "new_tab"
-                        | "transfers.start"
-                        | "forwards.open"
-                        | "history.search"
-                        | "session.create"
-                        | "session.saved"
-                        | "session.set_title"
-                        | "session.pin"
-                        | "session.unpin"
-                        | "session.activity"
-                        | "session.settle"
-                        | "session.activate"
-                        | "session.snooze"
-                        | "session.unsnooze"
-                        | "session.auto_settle"
-                        | "session.archive"
-                        | "session.unarchive"
-                        | "session.delete"
-                        | "session.restore"
-                        | "session.reopen"
-                )
-        }
-        ResourceKind::Session => {
-            command.starts_with("pane.")
-                || matches!(
-                    command,
-                    "session.close"
-                        | "terminal.create_tab"
-                        | "settle_session"
-                        | "toggle_session_pin"
-                        | "archive_session"
-                        | "new_tab"
-                )
-                || (command.starts_with("agents.") && command.rsplit('.').next() == Some("tab"))
-        }
+        ResourceKind::Binding => binding_command_crosses(command),
+        ResourceKind::Session => session_command_crosses(command),
         // Terminal input and capture address the pane through the mux and never select it.
-        ResourceKind::Terminal => {
-            matches!(
-                command,
-                "link.open"
-                    | "agents.focus"
-                    | "agents.spawn"
-                    | "terminal.write"
-                    | "terminal.paste"
-                    | "terminal.submit"
-                    | "terminal.capture"
-                    | "terminal.create_pane"
-                    | "new_tab"
-                    | "split_right"
-                    | "split_down"
-                    | "pane.close"
-            ) || command.ends_with(".acknowledge")
-                || matches!(
-                    command,
-                    "agents.claude.pane"
-                        | "agents.codex.pane"
-                        | "agents.pi.pane"
-                        | "agents.native.pane"
-                )
-                || (command.starts_with("agents.")
-                    && (command.ends_with(".associate")
-                        || command.ends_with(".restore")
-                        || command.ends_with(".restore.launch")))
-                || (command.starts_with("agents.")
-                    && [
-                        ".prompt",
-                        ".follow_up",
-                        ".steer",
-                        ".abort",
-                        ".interrupt",
-                        ".state",
-                    ]
-                    .iter()
-                    .any(|operation| command.ends_with(operation)))
-        }
+        ResourceKind::Terminal => terminal_command_crosses(command),
         ResourceKind::Pane => matches!(command, "split_right" | "split_down" | "interrupt_agent"),
         _ => false,
     }
+}
+
+fn binding_command_crosses(command: &str) -> bool {
+    (command.starts_with("agents.")
+        && [
+            ".start",
+            ".resume",
+            ".fork",
+            ".account.login",
+            ".account.logout",
+            ".account.status",
+            ".provider.status",
+            ".connectors",
+        ]
+        .iter()
+        .any(|suffix| command.ends_with(suffix)))
+        || CROSS_BINDING_NATIVE_DISCOVERY.contains(&command)
+        || matches!(
+            command,
+            "runs.create" | "runs.dispatch" | "runs.cancel" | "runs.retry" | "runs.restart"
+        )
+        || command.starts_with("git.")
+        || command.starts_with("files.")
+        || command.starts_with("project.")
+        || matches!(
+            command,
+            "jobs.start"
+                | "spaces.inspect"
+                | "terminal.activities"
+                | "new_tab"
+                | "transfers.start"
+                | "forwards.open"
+                | "history.search"
+                | "session.create"
+                | "session.saved"
+                | "session.set_title"
+                | "session.pin"
+                | "session.unpin"
+                | "session.activity"
+                | "session.settle"
+                | "session.activate"
+                | "session.snooze"
+                | "session.unsnooze"
+                | "session.auto_settle"
+                | "session.archive"
+                | "session.unarchive"
+                | "session.delete"
+                | "session.restore"
+                | "session.reopen"
+        )
+}
+
+fn session_command_crosses(command: &str) -> bool {
+    command.starts_with("pane.")
+        || matches!(
+            command,
+            "session.close"
+                | "terminal.create_tab"
+                | "settle_session"
+                | "toggle_session_pin"
+                | "archive_session"
+                | "new_tab"
+        )
+        || (command.starts_with("agents.") && command.rsplit('.').next() == Some("tab"))
+}
+
+fn terminal_command_crosses(command: &str) -> bool {
+    matches!(
+        command,
+        "link.open"
+            | "agents.focus"
+            | "agents.spawn"
+            | "terminal.write"
+            | "terminal.paste"
+            | "terminal.submit"
+            | "terminal.capture"
+            | "terminal.create_pane"
+            | "new_tab"
+            | "split_right"
+            | "split_down"
+            | "pane.close"
+    ) || command.ends_with(".acknowledge")
+        || matches!(
+            command,
+            "agents.claude.pane" | "agents.codex.pane" | "agents.pi.pane" | "agents.native.pane"
+        )
+        || (command.starts_with("agents.")
+            && (command.ends_with(".associate")
+                || command.ends_with(".restore")
+                || command.ends_with(".restore.launch")))
+        || (command.starts_with("agents.")
+            && [
+                ".prompt",
+                ".follow_up",
+                ".steer",
+                ".abort",
+                ".interrupt",
+                ".state",
+            ]
+            .iter()
+            .any(|operation| command.ends_with(operation)))
 }

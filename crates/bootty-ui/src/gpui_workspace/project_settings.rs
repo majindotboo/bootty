@@ -574,6 +574,34 @@ impl ProjectSettingsView {
             )
     }
 
+    /// A text field that is disabled while the project saves.
+    fn text_input(&self, state: &Entity<InputState>, label: &'static str) -> Input {
+        Input::new(state)
+            .context_menu(crate::gpui::text_menu(state))
+            .disabled(self.saving)
+            .aria_label(label)
+    }
+
+    /// The scripts a session's menu runs, and the one that runs before a worktree is removed.
+    fn scripts_section(&self, cx: &Context<Self>) -> [gpui_kit::AnyElement; 4] {
+        [
+            Self::section("Scripts", cx).into_any_element(),
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child("Run from a session's menu in a new tab.")
+                .into_any_element(),
+            self.render_scripts(cx).into_any_element(),
+            Self::row(
+                "Before removing a worktree",
+                "If it fails, the worktree stays.",
+                self.text_input(&self.teardown, "Before removing a worktree"),
+                cx,
+            )
+            .into_any_element(),
+        ]
+    }
+
     fn section(title: &'static str, cx: &Context<Self>) -> gpui_kit::Div {
         div()
             .pt_4()
@@ -628,10 +656,6 @@ impl ProjectSettingsView {
 }
 
 impl Render for ProjectSettingsView {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one settings page composes its header, form, scripts and save actions"
-    )]
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let [icon, provider, isolation] = self.project_choices(cx);
         let dirty = self.is_dirty(cx);
@@ -653,10 +677,7 @@ impl Render for ProjectSettingsView {
                     .child(Self::row(
                         "Name",
                         "Empty uses the folder name.",
-                        Input::new(&self.name)
-                            .context_menu(crate::gpui::text_menu(&self.name))
-                            .disabled(self.saving)
-                            .aria_label("Project name"),
+                        self.text_input(&self.name, "Project name"),
                         cx,
                     ))
                     .child(Self::row("Icon", "", icon, cx))
@@ -678,38 +699,16 @@ impl Render for ProjectSettingsView {
                     .child(Self::row(
                         "Branch prefix",
                         "Empty uses bootty/.",
-                        Input::new(&self.branch_prefix)
-                            .context_menu(crate::gpui::text_menu(&self.branch_prefix))
-                            .disabled(self.saving)
-                            .aria_label("Branch prefix"),
+                        self.text_input(&self.branch_prefix, "Branch prefix"),
                         cx,
                     ))
                     .child(Self::row(
                         "Starting ref",
                         "Branch, tag or commit. Empty uses HEAD.",
-                        Input::new(&self.start_ref)
-                            .context_menu(crate::gpui::text_menu(&self.start_ref))
-                            .disabled(self.saving)
-                            .aria_label("Starting ref"),
+                        self.text_input(&self.start_ref, "Starting ref"),
                         cx,
                     ))
-                    .child(Self::section("Scripts", cx))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Run from a session's menu in a new tab."),
-                    )
-                    .child(self.render_scripts(cx))
-                    .child(Self::row(
-                        "Before removing a worktree",
-                        "If it fails, the worktree stays.",
-                        Input::new(&self.teardown)
-                            .context_menu(crate::gpui::text_menu(&self.teardown))
-                            .disabled(self.saving)
-                            .aria_label("Before removing a worktree"),
-                        cx,
-                    ))
+                    .children(self.scripts_section(cx))
                     .child(Self::section("Registration", cx))
                     .child(Self::row(
                         "Remove project",

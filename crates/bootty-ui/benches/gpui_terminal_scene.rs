@@ -113,17 +113,17 @@ fn prepare_at_size(
     font_size: f32,
 ) -> usize {
     adapter
-        .element(
-            surface(),
+        .element(bootty_ui::gpui::TerminalElementRequest {
+            surface: surface(),
             frame,
             font_size,
-            CELL_HEIGHT * font_size / FONT_SIZE,
-            PIXELS_PER_POINT,
-            contract,
-            CursorBlinkPhase::visible(),
-            true,
-            "",
-        )
+            text_cell_height: CELL_HEIGHT * font_size / FONT_SIZE,
+            pixels_per_point: PIXELS_PER_POINT,
+            text_contract: contract,
+            cursor_blink_phase: CursorBlinkPhase::visible(),
+            cursor_focused: true,
+            marked_text: "",
+        })
         .frame()
         .commands
         .len()
@@ -386,21 +386,22 @@ struct PresentedTerminal {
 
 impl Render for PresentedTerminal {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.adapter.element(
-            surface(),
-            &self.frame,
-            FONT_SIZE,
-            CELL_HEIGHT,
-            PIXELS_PER_POINT,
-            &self.contract,
-            if self.cursor_visible {
-                CursorBlinkPhase::visible()
-            } else {
-                CursorBlinkPhase::hidden()
-            },
-            true,
-            "",
-        )
+        self.adapter
+            .element(bootty_ui::gpui::TerminalElementRequest {
+                surface: surface(),
+                frame: &self.frame,
+                font_size: FONT_SIZE,
+                text_cell_height: CELL_HEIGHT,
+                pixels_per_point: PIXELS_PER_POINT,
+                text_contract: &self.contract,
+                cursor_blink_phase: if self.cursor_visible {
+                    CursorBlinkPhase::visible()
+                } else {
+                    CursorBlinkPhase::hidden()
+                },
+                cursor_focused: true,
+                marked_text: "",
+            })
     }
 }
 
@@ -634,15 +635,17 @@ fn gpui_terminal_zoom_requests(cx: &mut BenchAppContext) -> Result<()> {
         marked_text: String::new(),
     };
     let expected = GpuiTerminalAdapter::with_platform_text_system(provider.clone()).element(
-        request.surface,
-        &request.frame,
-        request.font_size,
-        request.text_cell_height,
-        request.pixels_per_point,
-        &request.text_contract,
-        request.cursor_blink_phase,
-        true,
-        "",
+        bootty_ui::gpui::TerminalElementRequest {
+            surface: request.surface,
+            frame: &request.frame,
+            font_size: request.font_size,
+            text_cell_height: request.text_cell_height,
+            pixels_per_point: request.pixels_per_point,
+            text_contract: &request.text_contract,
+            cursor_blink_phase: request.cursor_blink_phase,
+            cursor_focused: true,
+            marked_text: "",
+        },
     );
     let mut requests = Vec::new();
     let mut worker_error = None;

@@ -59,7 +59,7 @@ fn shortcuts_use_one_typed_command_for_all_callers(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action: ComputerAction::Key {
                 key: Key::Return,
                 modifiers: vec![Modifier::Command, Modifier::Shift]
@@ -296,7 +296,7 @@ fn menu_bar_commands_share_the_typed_computer_executor(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action,
             destination: None,
         }
@@ -346,7 +346,7 @@ fn element_commands_share_the_typed_computer_executor(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action,
             destination: None,
         }
@@ -444,7 +444,7 @@ fn explicit_snapshot_target_and_path_keep_the_existing_command_shape(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action: ComputerAction::Snapshot,
             destination: Some(destination)
         }
@@ -561,7 +561,7 @@ fn explicit_crop_keeps_the_captured_target_and_destination(
     assert_eq!(
         actual,
         ComputerCommand::Execute {
-            target,
+            target: Box::new(target),
             action: ComputerAction::SnapshotRegion { rect },
             destination: Some(path)
         }

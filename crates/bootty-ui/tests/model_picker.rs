@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![cfg(test)]
 use bootty_agents::{AgentKind, NativeModelOption};
 use bootty_ui::gpui::{ModelPickerEvent, ModelPickerView, UiPalette, init_theme};
 use bootty_ui::gpui_actions::{

@@ -4,7 +4,7 @@ use crate::{
 };
 use bootty_config::config::WindowConfig;
 
-use super::{AppEffect, AppState, CursorIcon, ViewportSnapshot};
+use super::{AppEffect, AppState, CursorIcon, UiFontEffect, ViewportSnapshot};
 use crate::app_actions::{
     AppAction, FontSizeAction, KeybindAction, MuxKeyAction, TerminalFindAction,
     TerminalScrollAction,
@@ -56,7 +56,7 @@ impl AppState {
                 } else {
                     self.record_error(
                         "Could not open the setting",
-                        format!("Unknown setting: {id}"),
+                        &format!("Unknown setting: {id}"),
                     );
                 }
             }
@@ -83,7 +83,7 @@ impl AppState {
                     .terminal_mut()
                     .write_input(&bytes)
                 {
-                    self.record_error("Could not send keys to the terminal", error);
+                    self.record_error("Could not send keys to the terminal", &error);
                 } else {
                     self.hide_mouse_pointer_for_terminal_typing(effects);
                 }
@@ -117,10 +117,6 @@ impl AppState {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One match owns application action routing"
-    )]
     fn apply_app_action(
         &mut self,
         action: AppAction,
@@ -145,7 +141,7 @@ impl AppState {
             AppAction::AgentHistory => {
                 let outcome = self.open_agent_history();
                 if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                    self.record_error("Could not open agent history", message);
+                    self.record_error("Could not open agent history", &message);
                 }
             }
             AppAction::AddSelectionToConversation => {
@@ -154,28 +150,22 @@ impl AppState {
             AppAction::ResumeAgentSession(provider) => {
                 let outcome = self.open_saved_agent_session(provider);
                 if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                    self.record_error("Could not resume the agent session", message);
+                    self.record_error("Could not resume the agent session", &message);
                 }
             }
 
             AppAction::SessionPicker => {
-                self.toggle_session_picker_dialog();
-                effects.push(AppEffect::RequestRepaint);
+                self.then_repaint(effects, Self::toggle_session_picker_dialog);
             }
             AppAction::CommandPalette => {
-                self.open_command_palette_dialog();
-                effects.push(AppEffect::RequestRepaint);
+                self.then_repaint(effects, Self::open_command_palette_dialog);
             }
             AppAction::ChangeAppearance(mode) => {
                 self.persist_appearance_mode(mode, effects);
             }
-            AppAction::SwitchTheme => {
-                self.open_theme_picker_dialog();
-                effects.push(AppEffect::RequestRepaint);
-            }
+            AppAction::SwitchTheme => self.then_repaint(effects, Self::open_theme_picker_dialog),
             AppAction::RenameSession => {
-                self.open_rename_session_dialog();
-                effects.push(AppEffect::RequestRepaint);
+                self.then_repaint(effects, Self::open_rename_session_dialog);
             }
             AppAction::CleanWorktrees => {
                 self.commands
@@ -185,50 +175,24 @@ impl AppState {
                     ));
             }
             AppAction::MoveSessionToSpace => {
-                self.open_space_picker_for_current_session();
-                effects.push(AppEffect::RequestRepaint);
+                self.then_repaint(effects, Self::open_space_picker_for_current_session);
             }
-            AppAction::RenameTab => {
-                self.open_rename_tab_dialog();
-                effects.push(AppEffect::RequestRepaint);
-            }
-            AppAction::EditSpace => {
-                self.open_edit_space_dialog_from_ui(self.workspace.active.id);
-                effects.push(AppEffect::RequestRepaint);
-            }
+            AppAction::RenameTab => self.then_repaint(effects, Self::open_rename_tab_dialog),
+            AppAction::EditSpace => self.then_repaint(effects, |state| {
+                state.open_edit_space_dialog_from_ui(state.workspace.active.id);
+            }),
             AppAction::Quit => effects.push(AppEffect::QuitApplication),
             AppAction::CreateSpace => {
-                self.open_create_space_dialog_from_ui();
-                effects.push(AppEffect::RequestRepaint);
+                self.then_repaint(effects, Self::open_create_space_dialog_from_ui);
             }
-            AppAction::CloseSpace => {
-                self.close_space_from_ui(self.workspace.active.id);
-                effects.push(AppEffect::RequestRepaint);
-            }
-            AppAction::NextSpace => {
-                if self.activate_relative_space(1) {
-                    effects.push(AppEffect::RequestRepaint);
-                }
-            }
-            AppAction::PreviousSpace => {
-                if self.activate_relative_space(-1) {
-                    effects.push(AppEffect::RequestRepaint);
-                }
-            }
-            AppAction::SelectSpace(index) => {
-                if self.select_space(index) {
-                    effects.push(AppEffect::RequestRepaint);
-                }
-            }
-            AppAction::Navigate(step) => {
-                if self.navigate(step) {
-                    effects.push(AppEffect::RequestRepaint);
-                }
-            }
-            AppAction::ShowKeybinds => {
-                self.open_keybind_help_dialog();
-                effects.push(AppEffect::RequestRepaint);
-            }
+            AppAction::CloseSpace => self.then_repaint(effects, |state| {
+                state.close_space_from_ui(state.workspace.active.id);
+            }),
+            AppAction::NextSpace => repaint_if(effects, self.activate_relative_space(1)),
+            AppAction::PreviousSpace => repaint_if(effects, self.activate_relative_space(-1)),
+            AppAction::SelectSpace(index) => repaint_if(effects, self.select_space(index)),
+            AppAction::Navigate(step) => repaint_if(effects, self.navigate(step)),
+            AppAction::ShowKeybinds => self.then_repaint(effects, Self::open_keybind_help_dialog),
             AppAction::Close => effects.push(AppEffect::CloseWindow),
             AppAction::EditTheme => effects.push(AppEffect::OpenThemeSettings),
             AppAction::ExportTerminal => self.open_capture_dialog(),
@@ -251,6 +215,16 @@ impl AppState {
                 )));
             }
         }
+    }
+
+    /// Open a dialog or change the Space, then repaint to show it.
+    fn then_repaint<R>(
+        &mut self,
+        effects: &mut Vec<AppEffect>,
+        change: impl FnOnce(&mut Self) -> R,
+    ) {
+        change(self);
+        effects.push(AppEffect::RequestRepaint);
     }
 
     fn toggle_fullscreen(&mut self, viewport: ViewportSnapshot, effects: &mut Vec<AppEffect>) {
@@ -398,7 +372,7 @@ impl AppState {
                 None,
                 &self.repaint,
             ) {
-                self.record_error("Could not switch sessions", error);
+                self.record_error("Could not switch sessions", &error);
             } else {
                 self.sync_terminal_panes_now();
             }
@@ -469,7 +443,7 @@ impl AppState {
             }
         };
         if let Err(error) = result {
-            self.record_error("Could not scroll the terminal", error);
+            self.record_error("Could not scroll the terminal", &error);
         }
     }
     fn apply_ui_font_size_action(&mut self, action: FontSizeAction, effects: &mut Vec<AppEffect>) {
@@ -481,12 +455,12 @@ impl AppState {
         }
         self.config_runtime.set_ui_font_size(next_size);
         if let Some(existing) = effects.iter_mut().rev().find_map(|effect| match effect {
-            AppEffect::SetUiFontSize(existing) => Some(existing),
+            AppEffect::UiFont(UiFontEffect::Size(existing)) => Some(existing),
             _ => None,
         }) {
             *existing = next_size;
         } else {
-            effects.push(AppEffect::SetUiFontSize(next_size));
+            effects.push(AppEffect::UiFont(UiFontEffect::Size(next_size)));
         }
     }
     fn apply_font_size_action(&mut self, action: FontSizeAction, effects: &mut Vec<AppEffect>) {
@@ -578,4 +552,11 @@ fn font_size_after_action(action: FontSizeAction, current: f32, configured: f32)
         FontSizeAction::Set(size) => size,
     }
     .max(1.0)
+}
+
+/// Repaint only when the change took effect.
+fn repaint_if(effects: &mut Vec<AppEffect>, changed: bool) {
+    if changed {
+        effects.push(AppEffect::RequestRepaint);
+    }
 }

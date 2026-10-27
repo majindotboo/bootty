@@ -1,6 +1,7 @@
 #[cfg(target_os = "macos")]
 use std::time::Instant;
 
+#[cfg(target_os = "macos")]
 use bootty_control::CommandOutcome;
 #[cfg(target_os = "macos")]
 use gpui_kit::component::{WindowExt as _, notification::Notification};
@@ -75,23 +76,6 @@ impl BrowserPanel {
         if let Some(pending) = &self.capture_request {
             pending.request.cancel_capture();
         }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    #[allow(
-        clippy::unused_self,
-        clippy::needless_pass_by_ref_mut,
-        reason = "Keep the capture dispatch interface shared while this host lacks exact-window capture"
-    )]
-    pub(crate) fn capture_request(
-        &mut self,
-        request: BrowserRequest,
-        _: &mut Window,
-        _: &mut Context<Self>,
-    ) {
-        request.complete(CommandOutcome::Unsupported {
-            message: "Browser page capture currently requires macOS".into(),
-        });
     }
 
     #[cfg(target_os = "macos")]
@@ -318,10 +302,6 @@ impl BrowserPanel {
 }
 
 #[cfg(target_os = "macos")]
-#[allow(
-    clippy::future_not_send,
-    reason = "GPUI spawn_in runs this on its UI executor with a thread-local AsyncWindowContext; only native capture and publication enter background_executor"
-)]
 async fn capture_candidate(
     owner: &gpui_kit::WeakEntity<BrowserPanel>,
     cx: &mut gpui_kit::AsyncWindowContext,
@@ -509,10 +489,6 @@ fn annotation_crop(
 }
 
 #[cfg(target_os = "macos")]
-#[allow(
-    clippy::future_not_send,
-    reason = "This continuation stays on GPUI's UI executor; only image-store I/O enters background_executor"
-)]
 async fn publish_capture(
     owner: &gpui_kit::WeakEntity<BrowserPanel>,
     cx: &mut gpui_kit::AsyncWindowContext,

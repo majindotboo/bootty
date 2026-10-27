@@ -14,7 +14,6 @@ use bootty_terminal::terminal_engine::NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE;
 use clap::{Args, ValueEnum};
 
 #[derive(Clone, Debug, Default, Args)]
-#[allow(clippy::struct_excessive_bools)] // Each boolean is an independent command-line switch.
 pub(super) struct ConfigOverrides {
     /// Force the multiplexer backend.
     #[arg(long, value_enum, value_name = "BACKEND")]

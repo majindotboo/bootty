@@ -13,11 +13,12 @@
 //! the menu item with the shortcut instead, but such an app disables the commands that act on a
 //! window, such as Close, and those fail. A Command shortcut in no menu is still posted, for views
 //! that handle keys themselves; `AppKit`'s own views ignore it. Lift both with the click limit.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "Accessibility, Carbon and Objective-C calls are confined to this native adapter."
 )]
 
+use num_traits::ToPrimitive as _;
 use std::{
     ffi::c_void,
     ptr::NonNull,
@@ -176,6 +177,7 @@ struct MacDesktop;
 impl Desktop for MacDesktop {
     fn status(&self) -> ComputerStatus {
         ComputerStatus {
+            // SAFETY: AXIsProcessTrusted takes no arguments and only reads this process's trust.
             accessibility: permission(unsafe { AXIsProcessTrusted() }),
             screen_recording: permission(CGPreflightScreenCaptureAccess()),
             secure_input: self.secure_input(),
@@ -189,7 +191,8 @@ impl Desktop for MacDesktop {
         ) else {
             return Vec::new();
         };
-        // The window list is documented as an array of dictionaries keyed by strings.
+        // SAFETY: CGWindowListCopyWindowInfo is documented to return an array of dictionaries keyed
+        // by strings.
         let list: CFRetained<CFArray<CFDictionary<CFString, CFType>>> =
             unsafe { CFRetained::cast_unchecked(list) };
         list.iter()
@@ -215,6 +218,7 @@ impl Desktop for MacDesktop {
     }
 
     fn secure_input(&self) -> bool {
+        // SAFETY: IsSecureEventInputEnabled takes no arguments and only reads system state.
         (unsafe { IsSecureEventInputEnabled() }) != 0
             || NSWorkspace::sharedWorkspace()
                 .frontmostApplication()
@@ -235,9 +239,11 @@ impl Desktop for MacDesktop {
             .ok_or(ComputerError::TargetUnavailable)?;
         let (sender, receiver) = mpsc::channel();
         let found = RcBlock::new(move |content: *mut SCShareableContent, _: *mut NSError| {
-            // The handler may run once; retain the content past the callback.
+            // SAFETY: ScreenCaptureKit passes a valid content object or null; retaining it keeps it
+            // alive past this handler, which may run once.
             _ = sender.send(unsafe { Retained::retain(content) });
         });
+        // SAFETY: The completion block is valid, and ScreenCaptureKit copies it before it returns.
         unsafe {
             SCShareableContent::getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler(
                 false, true, &found,
@@ -248,8 +254,10 @@ impl Desktop for MacDesktop {
             .ok()
             .flatten()
             .ok_or(ComputerError::TargetUnavailable)?;
+        // SAFETY: content is the valid shareable content the request just returned.
         let shareable = unsafe { content.windows() }
             .iter()
+            // SAFETY: Each candidate is a valid window of that content.
             .find(|candidate| unsafe {
                 candidate.windowID() == window.id
                     && candidate
@@ -257,10 +265,13 @@ impl Desktop for MacDesktop {
                         .is_some_and(|app| app.processID() == process_id)
             })
             .ok_or(ComputerError::TargetUnavailable)?;
+        // SAFETY: shareable is a valid window of the current content.
         let filter = unsafe {
             SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &shareable)
         };
+        // SAFETY: Creating a stream configuration has no preconditions.
         let config = unsafe { SCStreamConfiguration::new() };
+        // SAFETY: config is a configuration created above, and its setters take plain values.
         unsafe {
             config.setWidth(usize::try_from(width).unwrap_or(1));
             config.setHeight(usize::try_from(height).unwrap_or(1));
@@ -270,9 +281,13 @@ impl Desktop for MacDesktop {
         }
         let (sender, receiver) = mpsc::channel();
         let captured = RcBlock::new(move |image: *mut CGImage, _: *mut NSError| {
+            // SAFETY: ScreenCaptureKit passes a valid image or null; retaining it keeps it alive
+            // past this handler.
             let image = NonNull::new(image).map(|image| unsafe { CFRetained::retain(image) });
             _ = sender.send(image);
         });
+        // SAFETY: The filter, configuration and completion block are valid for the call, which
+        // copies the block.
         unsafe {
             SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(
                 &filter,
@@ -349,6 +364,7 @@ impl Desktop for MacDesktop {
                 let units: Vec<u16> = text.encode_utf16().collect();
                 let (down, up) = keyboard(0, CGEventFlags::empty())?;
                 for event in [&down, &up] {
+                    // SAFETY: units outlives the call, and its length is the count passed with it.
                     unsafe {
                         CGEvent::keyboard_set_unicode_string(
                             Some(event),
@@ -388,6 +404,7 @@ impl Desktop for MacDesktop {
     fn raise(&self, window: &NativeWindow) -> Result<(), ComputerError> {
         let element = ax_window(window).ok_or(ComputerError::TargetNotFocused)?;
         let raise = CFString::from_static_str("AXRaise");
+        // SAFETY: element and raise are valid CF objects for the call.
         if unsafe { AXUIElementPerformAction(cf(&element), cf(&raise)) } == 0 {
             Ok(())
         } else {
@@ -413,6 +430,8 @@ impl Desktop for MacDesktop {
             objc2_foundation::NSSize::new(f64::from(side), f64::from(side)),
         );
         let image =
+            // SAFETY: rect is a valid rectangle the call may update; the context and hints are
+            // optional.
             unsafe { icon.CGImageForProposedRect_context_hints(&raw mut rect, None, None) }?;
         draw(&image, side, side).ok()
     }
@@ -436,6 +455,8 @@ impl Desktop for MacDesktop {
             // build it in the background, so the first listing of a page may still be partial.
             // Other apps refuse the attribute.
             let manual = CFString::from_static_str("AXManualAccessibility");
+            // SAFETY: app, the attribute name and the boolean are valid CF objects; the result is
+            // ignored on purpose.
             unsafe {
                 AXUIElementSetAttributeValue(cf(&app), cf(&manual), cf(CFBoolean::new(true)));
             }
@@ -480,6 +501,7 @@ impl Desktop for MacDesktop {
         };
         // Hit-testing through the app element looks only at that app's windows, front to back.
         let mut hit = std::ptr::null_mut();
+        // SAFETY: app is a valid accessibility element and hit a valid out-pointer.
         if unsafe {
             AXUIElementCopyElementAtPosition(
                 cf(&app),
@@ -494,8 +516,9 @@ impl Desktop for MacDesktop {
         let Some(hit) = NonNull::new(hit.cast::<CFType>()) else {
             return Ok(None);
         };
-        // Copy functions return a +1 reference. The chain runs from the hit element up to the
-        // window; a point showing another window of the app never reaches it.
+        // SAFETY: The hit test succeeded, so hit is a +1 reference that `from_raw` takes over. The
+        // chain runs from the hit element up to the window; a point showing another window of the
+        // app never reaches it.
         let mut chain = vec![unsafe { CFRetained::from_raw(hit) }];
         while chain.last().is_some_and(|element| **element != *root) {
             let parent = chain
@@ -541,6 +564,7 @@ impl Desktop for MacDesktop {
             element_at(window, ElementRoot::Window, path).ok_or(ComputerError::StaleElement)?;
         let attribute = CFString::from_static_str("AXValue");
         let mut settable = 0_u8;
+        // SAFETY: element and attribute are valid CF objects and settable a valid out-pointer.
         let code = unsafe {
             AXUIElementIsAttributeSettable(cf(&element), cf(&attribute), &raw mut settable)
         };
@@ -550,6 +574,7 @@ impl Desktop for MacDesktop {
             ));
         }
         let value = CFString::from_str(value);
+        // SAFETY: element, attribute and value are valid CF objects for the call.
         match unsafe { AXUIElementSetAttributeValue(cf(&element), cf(&attribute), cf(&value)) } {
             0 => Ok(()),
             code => Err(ComputerError::Platform(format!(
@@ -577,6 +602,7 @@ impl Desktop for MacDesktop {
             return Ok(false);
         }
         let action = CFString::from_static_str("AXPress");
+        // SAFETY: element and action are valid CF objects for the call.
         match unsafe { AXUIElementPerformAction(cf(&element), cf(&action)) } {
             0 => Ok(true),
             AX_ERROR_ACTION_UNSUPPORTED => Ok(false),
@@ -621,18 +647,24 @@ fn native_window(info: &CFDictionary<CFString, CFType>) -> Option<NativeWindow> 
         info.get(key)
             .and_then(|value| value.downcast::<CFNumber>().ok())
     };
+    // SAFETY: The window info keys are immutable CFString constants CoreGraphics defines.
     let id = u32::try_from(number(unsafe { kCGWindowNumber })?.as_i64()?).ok()?;
+    // SAFETY: As above, the key is an immutable CoreGraphics constant.
     let process_id = number(unsafe { kCGWindowOwnerPID })?.as_i32()?;
+    // SAFETY: As above, the key is an immutable CoreGraphics constant.
     let layer = number(unsafe { kCGWindowLayer })
         .and_then(|layer| layer.as_i32())
         .unwrap_or(0);
+    // SAFETY: As above, the key is an immutable CoreGraphics constant.
     let alpha = number(unsafe { kCGWindowAlpha })
         .and_then(|alpha| alpha.as_f64())
         .unwrap_or(1.0);
     let bounds = info
+        // SAFETY: As above, the key is an immutable CoreGraphics constant.
         .get(unsafe { kCGWindowBounds })
         .and_then(|value| value.downcast::<CFDictionary>().ok())?;
     let mut rect = CGRect::default();
+    // SAFETY: bounds is a valid dictionary and rect a valid out-pointer.
     if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&bounds), &raw mut rect) } {
         return None;
     }
@@ -643,6 +675,7 @@ fn native_window(info: &CFDictionary<CFString, CFType>) -> Option<NativeWindow> 
         height: rect.size.height,
     };
     let title = info
+        // SAFETY: As above, the key is an immutable CoreGraphics constant.
         .get(unsafe { kCGWindowName })
         .and_then(|value| value.downcast::<CFString>().ok())
         .map(|title| title.to_string().chars().take(512).collect());
@@ -685,9 +718,12 @@ const fn cf(value: &CFType) -> *const c_void {
 }
 
 fn ax_application(process_id: i32) -> Option<CFRetained<CFType>> {
+    // SAFETY: AXUIElementCreateApplication accepts any process id and returns null or a new
+    // element.
     let raw = NonNull::new(unsafe { AXUIElementCreateApplication(process_id) }.cast::<CFType>())?;
-    // AXUIElementCreateApplication returns a +1 reference.
+    // SAFETY: AXUIElementCreateApplication returns a +1 reference, which `from_raw` takes over.
     let app = unsafe { CFRetained::from_raw(raw) };
+    // SAFETY: app is a valid accessibility element.
     unsafe { AXUIElementSetMessagingTimeout(cf(&app), AX_TIMEOUT) };
     Some(app)
 }
@@ -695,15 +731,17 @@ fn ax_application(process_id: i32) -> Option<CFRetained<CFType>> {
 fn ax_attribute(element: &CFType, name: &str) -> Option<CFRetained<CFType>> {
     let name = CFString::from_str(name);
     let mut value = std::ptr::null_mut();
+    // SAFETY: element and name are valid CF objects and value a valid out-pointer.
     if unsafe { AXUIElementCopyAttributeValue(cf(element), cf(&name), &raw mut value) } != 0 {
         return None;
     }
-    // Copy functions return a +1 reference.
+    // SAFETY: The copy succeeded, so value is a +1 reference that `from_raw` takes over.
     NonNull::new(value.cast::<CFType>()).map(|value| unsafe { CFRetained::from_raw(value) })
 }
 
 fn ax_element(element: &CFType, name: &str) -> Option<CFRetained<CFType>> {
     ax_attribute(element, name)
+        // SAFETY: AXUIElementGetTypeID takes no arguments.
         .filter(|value| CFGetTypeID(Some(value)) == unsafe { AXUIElementGetTypeID() })
 }
 
@@ -713,7 +751,7 @@ fn ax_window(window: &NativeWindow) -> Option<CFRetained<CFType>> {
     let windows = ax_attribute(&app, "AXWindows")?
         .downcast::<CFArray>()
         .ok()?;
-    // Accessibility elements are CFTypes; the array holds only window elements.
+    // SAFETY: Accessibility elements are CFTypes, and a window list holds only window elements.
     let windows: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(windows) };
     let mut exact = windows
         .iter()
@@ -773,7 +811,8 @@ fn element_at(
         let children = ax_attribute(&element, "AXChildren")?
             .downcast::<CFArray>()
             .ok()?;
-        // Children of an accessibility element are elements.
+        // SAFETY: Children of an accessibility element are accessibility elements, which are
+        // CFTypes.
         let children: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(children) };
         element = children.get(usize::from(index))?;
     }
@@ -791,6 +830,7 @@ struct Attributes(CFRetained<CFArray<CFType>>);
 impl Attributes {
     fn read(element: &CFType, names: &CFArray<CFString>) -> Option<Self> {
         let mut values = std::ptr::null_mut();
+        // SAFETY: element and names are valid CF objects and values a valid out-pointer.
         if unsafe {
             AXUIElementCopyMultipleAttributeValues(cf(element), cf(names), 0, &raw mut values)
         } != 0
@@ -798,7 +838,8 @@ impl Attributes {
             return None;
         }
         let values = NonNull::new(values.cast::<CFArray>())?;
-        // Copy functions return a +1 reference to an array of values.
+        // SAFETY: The copy succeeded, so values is a +1 reference to an array of values that
+        // `from_raw` takes over.
         Some(Self(unsafe {
             CFRetained::cast_unchecked(CFRetained::from_raw(values))
         }))
@@ -849,7 +890,8 @@ impl Attributes {
         else {
             return Vec::new();
         };
-        // Children of an accessibility element are elements.
+        // SAFETY: Children of an accessibility element are accessibility elements, which are
+        // CFTypes.
         let children: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(children) };
         children.to_vec()
     }
@@ -857,7 +899,10 @@ impl Attributes {
     fn frame(&self) -> Option<DisplayBounds> {
         let read = |name, kind, out: *mut c_void| {
             self.value(name)
+                // SAFETY: AXValueGetTypeID takes no arguments.
                 .filter(|value| CFGetTypeID(Some(value)) == unsafe { AXValueGetTypeID() })
+                // SAFETY: value is an AXValue, and callers pass storage that matches kind: a
+                // CGPoint for a point, a CGSize for a size.
                 .is_some_and(|value| unsafe { AXValueGetValue(cf(&value), kind, out) })
         };
         let mut origin = CGPoint::default();
@@ -1266,7 +1311,10 @@ fn intersects(frame: &DisplayBounds, window: &DisplayBounds) -> bool {
 fn element_bounds(element: &CFType) -> Option<DisplayBounds> {
     let value = |name, kind, out: *mut c_void| {
         ax_attribute(element, name)
+            // SAFETY: AXValueGetTypeID takes no arguments.
             .filter(|value| CFGetTypeID(Some(value)) == unsafe { AXValueGetTypeID() })
+            // SAFETY: value is an AXValue, and callers pass storage that matches kind: a CGPoint
+            // for a point, a CGSize for a size.
             .is_some_and(|value| unsafe { AXValueGetValue(cf(&value), kind, out) })
     };
     let mut origin = CGPoint::default();
@@ -1284,13 +1332,15 @@ fn element_bounds(element: &CFType) -> Option<DisplayBounds> {
 /// Whether the element offers this accessibility action.
 fn has_action(element: &CFType, action: &str) -> bool {
     let mut names = std::ptr::null_mut();
+    // SAFETY: element is a valid accessibility element and names a valid out-pointer.
     if unsafe { AXUIElementCopyActionNames(cf(element), &raw mut names) } != 0 {
         return false;
     }
     let Some(names) = NonNull::new(names.cast::<CFArray>()) else {
         return false;
     };
-    // Copy functions return a +1 reference; action names are strings.
+    // SAFETY: The copy succeeded, so names is a +1 reference that `from_raw` takes over, to an
+    // array of action name strings.
     let names: CFRetained<CFArray<CFType>> =
         unsafe { CFRetained::cast_unchecked(CFRetained::from_raw(names)) };
     names.iter().any(|name| {
@@ -1310,19 +1360,15 @@ fn child_index(parent: &CFType, child: &CFType) -> Option<u16> {
     let children = ax_attribute(parent, "AXChildren")?
         .downcast::<CFArray>()
         .ok()?;
-    // Children of an accessibility element are elements.
+    // SAFETY: Children of an accessibility element are accessibility elements, which are CFTypes.
     let children: CFRetained<CFArray<CFType>> = unsafe { CFRetained::cast_unchecked(children) };
     let index = children.iter().position(|candidate| *candidate == *child)?;
     u16::try_from(index).ok()
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    reason = "Accessibility hit-testing takes f32 desktop points."
-)]
-const fn ax_coordinate(value: f64) -> f32 {
-    value as f32
+/// Accessibility hit-testing takes f32 desktop points.
+fn ax_coordinate(value: f64) -> f32 {
+    value.to_f32().unwrap_or(f32::MAX)
 }
 
 /// Whether the app's focused element hides what is typed, such as a password field.
@@ -1348,6 +1394,7 @@ fn address(event: &CGEvent, window: &NativeWindow) {
         x: point.x - window.bounds.x,
         y: point.y - window.bounds.y,
     };
+    // SAFETY: event is a valid CGEvent for the call.
     unsafe { CGEventSetWindowLocation(cf(event), local) };
 }
 
@@ -1388,6 +1435,8 @@ fn draw(image: &CGImage, width: u32, height: u32) -> Result<Image, ComputerError
     let stride = columns.checked_mul(4).ok_or_else(unreadable)?;
     let mut rgba = vec![0_u8; stride.checked_mul(rows).ok_or_else(unreadable)?];
     let space = CGColorSpace::new_device_rgb().ok_or_else(unreadable)?;
+    // SAFETY: rgba holds stride times rows bytes and outlives the context, which draws only into
+    // it.
     let context = unsafe {
         CGBitmapContextCreate(
             rgba.as_mut_ptr().cast(),

@@ -1,3 +1,4 @@
+use bootty_mux::workspace::NewSpace;
 use std::{
     path::Path,
     sync::{
@@ -192,11 +193,13 @@ fn a_missing_provider_leaves_saved_and_live_spaces_unchanged(#[case] update: boo
     } else {
         workspace
             .create_space(
-                "Should not persist",
-                "folder",
-                [0, 0, 0],
-                false,
-                placement,
+                NewSpace {
+                    name: "Should not persist",
+                    icon: "folder",
+                    color: [0, 0, 0],
+                    tint_sidebar: false,
+                    mux: placement,
+                },
                 &config,
                 AppearanceVariant::Light,
             )
@@ -241,11 +244,13 @@ fn changing_a_spaces_backend_preserves_shared_native_panes(
     let original_scope = workspace.active_space_id();
     let edited_scope = workspace
         .create_space(
-            "Edited",
-            "folder",
-            [0, 0, 0],
-            false,
-            SpaceMuxOverride::default(),
+            NewSpace {
+                name: "Edited",
+                icon: "folder",
+                color: [0, 0, 0],
+                tint_sidebar: false,
+                mux: SpaceMuxOverride::default(),
+            },
             &config,
             variant,
         )?
@@ -916,11 +921,13 @@ fn selecting_an_inactive_binding_target_preserves_the_active_space_and_its_selec
     workspace.activate_target(parent_scope, "parent", None, &repaint)?;
     let captured_scope = workspace
         .create_space(
-            "Captured",
-            "folder",
-            [0, 0, 0],
-            false,
-            SpaceMuxOverride::default(),
+            NewSpace {
+                name: "Captured",
+                icon: "folder",
+                color: [0, 0, 0],
+                tint_sidebar: false,
+                mux: SpaceMuxOverride::default(),
+            },
             &config,
             variant,
         )?

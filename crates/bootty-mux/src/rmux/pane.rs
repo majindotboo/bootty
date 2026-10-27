@@ -174,10 +174,6 @@ impl Drop for RmuxWorkerClosedGuard {
     }
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "publication, synchronized output, and channel lifetime flags are independent"
-)]
 struct RmuxWorker {
     pane_io: RmuxPaneIo,
     geometry: TerminalGeometry,

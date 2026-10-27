@@ -2,305 +2,263 @@ use bootty_control::{
     ArgumentSchema, CommandDescriptor, CompactSchema, MutationClass, ResourceKind, ValueType,
 };
 
+/// Each native conversation command: its operation, the shared arguments it starts from, the
+/// arguments it adds, and what it addresses. Registration keeps this order.
+const COMMANDS: &[(&str, &[&str], &[&str], ResourceKind)] = &[
+    (
+        "start",
+        LAUNCH,
+        &["projectless", "saved_session", "provider_mentions", "goal"],
+        ResourceKind::Binding,
+    ),
+    (
+        "tab",
+        LAUNCH,
+        &["projectless", "saved_session", "provider_mentions", "goal"],
+        ResourceKind::Binding,
+    ),
+    (
+        "pane",
+        LAUNCH,
+        &["direction", "saved_session", "provider_mentions", "goal"],
+        ResourceKind::Terminal,
+    ),
+    ("list", &[], &[], ResourceKind::Binding),
+    ("activities", &[], &[], ResourceKind::Binding),
+    ("names", CATALOG, &["prompt"], ResourceKind::Binding),
+    ("catalog", CATALOG, &[], ResourceKind::Binding),
+    ("catalog-info", CATALOG, &["refresh"], ResourceKind::Binding),
+    ("catalog-completions", CATALOG, &[], ResourceKind::Binding),
+    ("completions", SESSION, &[], ResourceKind::Session),
+    (
+        "catalog-favorite",
+        CATALOG,
+        &["model"],
+        ResourceKind::Binding,
+    ),
+    (
+        "spawn",
+        SESSION,
+        &["request", "attachment"],
+        ResourceKind::Session,
+    ),
+    (
+        "control-child",
+        SESSION,
+        &["request", "attachment"],
+        ResourceKind::Session,
+    ),
+    ("regenerate-title", SESSION, &[], ResourceKind::Session),
+    ("focus", &[], &[], ResourceKind::Session),
+    ("close", &[], &[], ResourceKind::Session),
+    ("panel", SESSION, &["terminal"], ResourceKind::Session),
+    ("prompt", PROMPT, &[], ResourceKind::Session),
+    ("import", SESSION, &["path"], ResourceKind::Session),
+    ("queue", PROMPT, &[], ResourceKind::Session),
+    ("interrupt-send", PROMPT, &[], ResourceKind::Session),
+    (
+        "queue-cancel",
+        SESSION,
+        &["message_id"],
+        ResourceKind::Session,
+    ),
+    ("draft", SESSION, &["draft"], ResourceKind::Session),
+    ("seen", SESSION, &[], ResourceKind::Session),
+    ("voice-start", SESSION, &["offer"], ResourceKind::Session),
+    ("voice-stop", SESSION, &[], ResourceKind::Session),
+    ("mark-unread", SESSION, &[], ResourceKind::Session),
+    (
+        "queue-retry",
+        SESSION,
+        &["message_id"],
+        ResourceKind::Session,
+    ),
+    (
+        "queue-steer",
+        SESSION,
+        &["message_id"],
+        ResourceKind::Session,
+    ),
+    ("queue-resume", SESSION, &[], ResourceKind::Session),
+    (
+        "queue-move",
+        SESSION,
+        &["message_id", "direction"],
+        ResourceKind::Session,
+    ),
+    (
+        "attachment-preview",
+        SESSION,
+        &["attachment_id"],
+        ResourceKind::Session,
+    ),
+    (
+        "attachment-open",
+        SESSION,
+        &["attachment_id"],
+        ResourceKind::Session,
+    ),
+    (
+        "attachment-reveal",
+        SESSION,
+        &["attachment_id"],
+        ResourceKind::Session,
+    ),
+    (
+        "computer",
+        SESSION,
+        &["application", "action"],
+        ResourceKind::Session,
+    ),
+    (
+        "fork",
+        SESSION,
+        &["response", "provider"],
+        ResourceKind::Session,
+    ),
+    (
+        "subagent-read",
+        SESSION,
+        &["subagent"],
+        ResourceKind::Session,
+    ),
+    (
+        "subagent-stop",
+        SESSION,
+        &["subagent"],
+        ResourceKind::Session,
+    ),
+    (
+        "mcp-app-read",
+        SESSION,
+        &["server", "uri", "call"],
+        ResourceKind::Session,
+    ),
+    (
+        "mcp-app-call",
+        SESSION,
+        &["server", "tool", "arguments", "approved"],
+        ResourceKind::Session,
+    ),
+    ("implement", SESSION, &[], ResourceKind::Session),
+    ("interrupt", SESSION, &[], ResourceKind::Session),
+    ("stop", SESSION, &[], ResourceKind::Session),
+    (
+        "rename",
+        SESSION,
+        &["title", "expected_title"],
+        ResourceKind::Session,
+    ),
+    ("resume", SESSION, &[], ResourceKind::Session),
+    ("unarchive", SESSION, &[], ResourceKind::Session),
+    ("goal", SESSION, &["objective"], ResourceKind::Session),
+    ("goal-status", SESSION, &["status"], ResourceKind::Session),
+    ("turn-diff", SESSION, &["reply"], ResourceKind::Session),
+    ("rewind-files", SESSION, &["prompt"], ResourceKind::Session),
+    (
+        "rewind",
+        SESSION,
+        &["prompt", "files"],
+        ResourceKind::Session,
+    ),
+    ("models", SESSION, &[], ResourceKind::Session),
+    ("models-info", SESSION, &[], ResourceKind::Session),
+    ("provider", SESSION, &[], ResourceKind::Session),
+    ("profiles", SESSION, &[], ResourceKind::Session),
+    ("status", SESSION, &[], ResourceKind::Session),
+    ("activity", SESSION, &["limit"], ResourceKind::Session),
+    ("terminal", SESSION, &[], ResourceKind::Session),
+    ("open-link", SESSION, &["location"], ResourceKind::Session),
+    ("reveal-link", SESSION, &["location"], ResourceKind::Session),
+    (
+        "edit-link",
+        SESSION,
+        &["location", "editor"],
+        ResourceKind::Session,
+    ),
+    ("history", SESSION, &["direction"], ResourceKind::Session),
+    ("favorite", SESSION, &["model"], ResourceKind::Session),
+    ("configure", SESSION, &["selection"], ResourceKind::Session),
+    (
+        "permissions",
+        SESSION,
+        &["permissions"],
+        ResourceKind::Session,
+    ),
+    (
+        "approve",
+        SESSION,
+        &["request", "decision"],
+        ResourceKind::Session,
+    ),
+    ("deny", SESSION, &["request", "note"], ResourceKind::Session),
+    (
+        "browser-attach",
+        SESSION,
+        &["attachment"],
+        ResourceKind::Session,
+    ),
+    (
+        "respond",
+        SESSION,
+        &["request", "response"],
+        ResourceKind::Session,
+    ),
+];
+
+/// What every launch takes.
+const LAUNCH: &[&str] = &[
+    "provider",
+    "cwd",
+    "program",
+    "argv",
+    "name",
+    "profile",
+    "identity",
+    "title",
+    "prompt",
+    "expected_account",
+    "attachments",
+    "selection",
+    "applications",
+    "attachment_ranges",
+    "permissions",
+];
+
+/// What a catalog query takes: the launch arguments that pick a provider and account.
+const CATALOG: &[&str] = &["provider", "cwd", "program", "argv", "name", "profile"];
+
+/// The exact conversation a session command addresses.
+const SESSION: &[&str] = &["id", "generation"];
+
+/// What a message to a conversation carries.
+const PROMPT: &[&str] = &[
+    "id",
+    "generation",
+    "prompt",
+    "annotations",
+    "attachments",
+    "citations",
+    "applications",
+    "authored_bytes",
+    "attachment_ranges",
+    "provider_mentions",
+    "conversations",
+    "review_comments",
+];
+
 #[must_use]
-#[expect(
-    clippy::too_many_lines,
-    reason = "One table owns native command wire metadata"
-)]
 pub fn native_command_descriptors() -> Vec<CommandDescriptor> {
-    let launch_arguments = launch_arguments();
-    [
-        (
-            "start",
-            launch_arguments
-                .iter()
-                .copied()
-                .chain(["projectless", "saved_session", "provider_mentions", "goal"])
-                .collect(),
-            ResourceKind::Binding,
-        ),
-        (
-            "tab",
-            launch_arguments
-                .iter()
-                .copied()
-                .chain(["projectless", "saved_session", "provider_mentions", "goal"])
-                .collect(),
-            ResourceKind::Binding,
-        ),
-        (
-            "pane",
-            launch_arguments
-                .into_iter()
-                .chain(["direction", "saved_session", "provider_mentions", "goal"])
-                .collect(),
-            ResourceKind::Terminal,
-        ),
-        ("list", vec![], ResourceKind::Binding),
-        ("activities", vec![], ResourceKind::Binding),
-        (
-            "names",
-            catalog_arguments(Some("prompt")),
-            ResourceKind::Binding,
-        ),
-        ("catalog", catalog_arguments(None), ResourceKind::Binding),
-        (
-            "catalog-info",
-            catalog_arguments(Some("refresh")),
-            ResourceKind::Binding,
-        ),
-        (
-            "catalog-completions",
-            catalog_arguments(None),
-            ResourceKind::Binding,
-        ),
-        (
-            "completions",
-            vec!["id", "generation"],
-            ResourceKind::Session,
-        ),
-        (
-            "catalog-favorite",
-            catalog_arguments(Some("model")),
-            ResourceKind::Binding,
-        ),
-        (
-            "spawn",
-            vec!["id", "generation", "request", "attachment"],
-            ResourceKind::Session,
-        ),
-        (
-            "control-child",
-            vec!["id", "generation", "request", "attachment"],
-            ResourceKind::Session,
-        ),
-        (
-            "regenerate-title",
-            vec!["id", "generation"],
-            ResourceKind::Session,
-        ),
-        ("focus", vec![], ResourceKind::Session),
-        ("close", vec![], ResourceKind::Session),
-        (
-            "panel",
-            vec!["id", "generation", "terminal"],
-            ResourceKind::Session,
-        ),
-        ("prompt", prompt_arguments(), ResourceKind::Session),
-        (
-            "import",
-            vec!["id", "generation", "path"],
-            ResourceKind::Session,
-        ),
-        ("queue", prompt_arguments(), ResourceKind::Session),
-        ("interrupt-send", prompt_arguments(), ResourceKind::Session),
-        (
-            "queue-cancel",
-            vec!["id", "generation", "message_id"],
-            ResourceKind::Session,
-        ),
-        (
-            "draft",
-            vec!["id", "generation", "draft"],
-            ResourceKind::Session,
-        ),
-        ("seen", vec!["id", "generation"], ResourceKind::Session),
-        (
-            "voice-start",
-            vec!["id", "generation", "offer"],
-            ResourceKind::Session,
-        ),
-        (
-            "voice-stop",
-            vec!["id", "generation"],
-            ResourceKind::Session,
-        ),
-        (
-            "mark-unread",
-            vec!["id", "generation"],
-            ResourceKind::Session,
-        ),
-        (
-            "queue-retry",
-            vec!["id", "generation", "message_id"],
-            ResourceKind::Session,
-        ),
-        (
-            "queue-steer",
-            vec!["id", "generation", "message_id"],
-            ResourceKind::Session,
-        ),
-        (
-            "queue-resume",
-            vec!["id", "generation"],
-            ResourceKind::Session,
-        ),
-        (
-            "queue-move",
-            vec!["id", "generation", "message_id", "direction"],
-            ResourceKind::Session,
-        ),
-        (
-            "attachment-preview",
-            vec!["id", "generation", "attachment_id"],
-            ResourceKind::Session,
-        ),
-        (
-            "attachment-open",
-            vec!["id", "generation", "attachment_id"],
-            ResourceKind::Session,
-        ),
-        (
-            "attachment-reveal",
-            vec!["id", "generation", "attachment_id"],
-            ResourceKind::Session,
-        ),
-        (
-            "computer",
-            vec!["id", "generation", "application", "action"],
-            ResourceKind::Session,
-        ),
-        (
-            "fork",
-            vec!["id", "generation", "response", "provider"],
-            ResourceKind::Session,
-        ),
-        (
-            "subagent-read",
-            vec!["id", "generation", "subagent"],
-            ResourceKind::Session,
-        ),
-        (
-            "subagent-stop",
-            vec!["id", "generation", "subagent"],
-            ResourceKind::Session,
-        ),
-        (
-            "mcp-app-read",
-            vec!["id", "generation", "server", "uri", "call"],
-            ResourceKind::Session,
-        ),
-        (
-            "mcp-app-call",
-            vec![
-                "id",
-                "generation",
-                "server",
-                "tool",
-                "arguments",
-                "approved",
-            ],
-            ResourceKind::Session,
-        ),
-        ("implement", vec!["id", "generation"], ResourceKind::Session),
-        ("interrupt", vec!["id", "generation"], ResourceKind::Session),
-        ("stop", vec!["id", "generation"], ResourceKind::Session),
-        (
-            "rename",
-            vec!["id", "generation", "title", "expected_title"],
-            ResourceKind::Session,
-        ),
-        ("resume", vec!["id", "generation"], ResourceKind::Session),
-        ("unarchive", vec!["id", "generation"], ResourceKind::Session),
-        (
-            "goal",
-            vec!["id", "generation", "objective"],
-            ResourceKind::Session,
-        ),
-        (
-            "goal-status",
-            vec!["id", "generation", "status"],
-            ResourceKind::Session,
-        ),
-        (
-            "turn-diff",
-            vec!["id", "generation", "reply"],
-            ResourceKind::Session,
-        ),
-        (
-            "rewind-files",
-            vec!["id", "generation", "prompt"],
-            ResourceKind::Session,
-        ),
-        (
-            "rewind",
-            vec!["id", "generation", "prompt", "files"],
-            ResourceKind::Session,
-        ),
-        ("models", vec!["id", "generation"], ResourceKind::Session),
-        (
-            "models-info",
-            vec!["id", "generation"],
-            ResourceKind::Session,
-        ),
-        ("provider", vec!["id", "generation"], ResourceKind::Session),
-        ("profiles", vec!["id", "generation"], ResourceKind::Session),
-        ("status", vec!["id", "generation"], ResourceKind::Session),
-        (
-            "activity",
-            vec!["id", "generation", "limit"],
-            ResourceKind::Session,
-        ),
-        ("terminal", vec!["id", "generation"], ResourceKind::Session),
-        (
-            "open-link",
-            vec!["id", "generation", "location"],
-            ResourceKind::Session,
-        ),
-        (
-            "reveal-link",
-            vec!["id", "generation", "location"],
-            ResourceKind::Session,
-        ),
-        (
-            "edit-link",
-            vec!["id", "generation", "location", "editor"],
-            ResourceKind::Session,
-        ),
-        (
-            "history",
-            vec!["id", "generation", "direction"],
-            ResourceKind::Session,
-        ),
-        (
-            "favorite",
-            vec!["id", "generation", "model"],
-            ResourceKind::Session,
-        ),
-        (
-            "configure",
-            vec!["id", "generation", "selection"],
-            ResourceKind::Session,
-        ),
-        (
-            "permissions",
-            vec!["id", "generation", "permissions"],
-            ResourceKind::Session,
-        ),
-        (
-            "approve",
-            vec!["id", "generation", "request", "decision"],
-            ResourceKind::Session,
-        ),
-        (
-            "deny",
-            vec!["id", "generation", "request", "note"],
-            ResourceKind::Session,
-        ),
-        (
-            "browser-attach",
-            vec!["id", "generation", "attachment"],
-            ResourceKind::Session,
-        ),
-        (
-            "respond",
-            vec!["id", "generation", "request", "response"],
-            ResourceKind::Session,
-        ),
-    ]
-    .into_iter()
-    .map(|(operation, names, target)| descriptor(operation, names, target))
-    .collect()
+    COMMANDS
+        .iter()
+        .map(|&(operation, base, extra, target)| {
+            descriptor(
+                operation,
+                base.iter().chain(extra).copied().collect(),
+                target,
+            )
+        })
+        .collect()
 }
 
 fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> CommandDescriptor {
@@ -383,49 +341,4 @@ fn descriptor(operation: &str, names: Vec<&str>, target: ResourceKind) -> Comman
         target: Some(target),
         palette: false,
     }
-}
-
-fn catalog_arguments(extra: Option<&'static str>) -> Vec<&'static str> {
-    launch_arguments()
-        .into_iter()
-        .take(6)
-        .chain(extra)
-        .collect()
-}
-
-fn prompt_arguments() -> Vec<&'static str> {
-    vec![
-        "id",
-        "generation",
-        "prompt",
-        "annotations",
-        "attachments",
-        "citations",
-        "applications",
-        "authored_bytes",
-        "attachment_ranges",
-        "provider_mentions",
-        "conversations",
-        "review_comments",
-    ]
-}
-
-fn launch_arguments() -> Vec<&'static str> {
-    vec![
-        "provider",
-        "cwd",
-        "program",
-        "argv",
-        "name",
-        "profile",
-        "identity",
-        "title",
-        "prompt",
-        "expected_account",
-        "attachments",
-        "selection",
-        "applications",
-        "attachment_ranges",
-        "permissions",
-    ]
 }

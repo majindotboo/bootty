@@ -245,6 +245,19 @@ pub struct EnvironmentVariable {
     pub value: String,
 }
 
+/// How a number setting is edited and shown.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NumberSetting {
+    pub range: std::ops::RangeInclusive<f32>,
+    pub control: NumberControl,
+    pub precision: usize,
+    pub step: f32,
+    pub slider_step: f32,
+    pub suffix: String,
+    pub display_scale: f32,
+    pub optional: bool,
+}
+
 /// Presentation metadata for the scalar setting controls.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SettingsControl {
@@ -253,16 +266,7 @@ pub enum SettingsControl {
         placeholder: String,
         optional: bool,
     },
-    Number {
-        range: std::ops::RangeInclusive<f32>,
-        control: NumberControl,
-        precision: usize,
-        step: f32,
-        slider_step: f32,
-        suffix: String,
-        display_scale: f32,
-        optional: bool,
-    },
+    Number(NumberSetting),
     Choice(Vec<SettingsChoice>),
     /// A searchable picker for theme names. This stays distinct from small finite choices so
     /// the control can preserve the selected theme while filtering a larger catalog.

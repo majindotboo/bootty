@@ -15,25 +15,34 @@ mod cli_runtime;
 mod macos_cli;
 
 fn main() -> ExitCode {
-    match run() {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("{error:#}");
-            ExitCode::from(cli_runtime::exit_code(&error))
-        }
+    #[cfg(target_os = "macos")]
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--agent-tray-stdio")) {
+        // The helper exits when its parent closes stdin, even while AppKit blocks this thread.
+        return report(agent_tray_helper(|failed| {
+            std::process::exit(i32::from(failed))
+        }));
     }
+    report(run())
+}
+
+fn report(result: Result<ExitCode>) -> ExitCode {
+    result.unwrap_or_else(|error| {
+        eprintln!("{error:#}");
+        ExitCode::from(cli_runtime::exit_code(&error))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn agent_tray_helper(exit: fn(bool) -> !) -> Result<ExitCode> {
+    anyhow::ensure!(
+        std::env::args_os().len() == 2,
+        "Unexpected agent tray arguments"
+    );
+    bootty_ui::run_agent_tray_helper(exit)?;
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run() -> Result<ExitCode> {
-    #[cfg(target_os = "macos")]
-    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--agent-tray-stdio")) {
-        anyhow::ensure!(
-            std::env::args_os().len() == 2,
-            "Unexpected agent tray arguments"
-        );
-        bootty_ui::run_agent_tray_helper()?;
-        return Ok(ExitCode::SUCCESS);
-    }
     if let Some(connection) = agent_tool_stdio_connection()? {
         let stdin = io::stdin();
         let stdout = io::stdout();

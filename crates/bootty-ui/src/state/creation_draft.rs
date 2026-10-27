@@ -45,10 +45,6 @@ pub struct DraftSummary {
 /// What of a draft survives a restart. Pasted files live in temporary files that end with the
 /// app, so only attachments of real files are kept.
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "The saved form mirrors the draft's independent choices"
-)]
 struct SavedDraft {
     scope: SpaceId,
     #[serde(default)]

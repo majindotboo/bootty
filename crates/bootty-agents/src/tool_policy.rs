@@ -18,10 +18,6 @@ static NEXT_ATTACHMENT: AtomicU64 = AtomicU64::new(1);
 
 /// Separate terminal state from explicitly enabled browser/computer capture.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent grants attenuate separately"
-)]
 pub struct ToolPolicy {
     pub own_terminal_read: bool,
     pub browser_capture: bool,

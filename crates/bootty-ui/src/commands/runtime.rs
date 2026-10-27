@@ -615,13 +615,13 @@ impl AppState {
 
     fn reject_command(&mut self, outcome: CommandOutcome) -> CommandDispatch {
         if let Some(message) = command_outcome_message(&outcome) {
-            self.record_command_failure(message);
+            self.record_command_failure(&message);
         }
         CommandDispatch::Complete(outcome)
     }
 
     /// Records a failure of the command being dispatched or polled, named by its title.
-    pub(super) fn record_command_failure(&mut self, message: impl ToString) {
+    pub(super) fn record_command_failure(&mut self, message: &dyn std::fmt::Display) {
         let action = self.commands.title.as_ref().map_or_else(
             || "The command failed".to_owned(),
             |title| format!("{title} failed"),
@@ -782,17 +782,56 @@ impl AppState {
                     {
                         self.record_message(format!("{} took too long. Try again.", pending.label));
                     } else if let Some(message) = command_outcome_message(&outcome) {
-                        self.record_error(&format!("{} failed", pending.label), message);
+                        self.record_error(&format!("{} failed", pending.label), &message);
                     }
                 }
             }
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Pending command variants retain one explicit polling precedence"
-    )]
+    /// A dispatch's outcome now, or the command it continues as, kept pending.
+    fn settle(
+        pending: &mut PendingAppCommand,
+        dispatch: CommandDispatch,
+    ) -> Poll<Option<CommandOutcome>> {
+        match dispatch {
+            CommandDispatch::Complete(outcome) => Poll::Ready(Some(outcome)),
+            CommandDispatch::Pending(result) => {
+                pending.result = result;
+                Poll::Pending
+            }
+        }
+    }
+
+    /// Release what a cancelled command still holds, and the outcome to report for it.
+    fn cancel_pending(
+        &mut self,
+        pending: &mut PendingAppCommand,
+        outcome: CommandOutcome,
+        effects: &mut Vec<AppEffect>,
+    ) -> CommandOutcome {
+        if let PendingCommandResult::TerminalAgentRestore { restore, .. } = &mut pending.result {
+            let preparation = restore.take();
+            std::thread::spawn(move || drop(preparation));
+        }
+        if let PendingCommandResult::SurfaceCreation { request_id, .. }
+        | PendingCommandResult::SurfaceRestore { request_id, .. } = &pending.result
+            && let Err(error) = self.finish_surface_creation(*request_id, &outcome, effects)
+        {
+            return error;
+        }
+        if let PendingCommandResult::Mux {
+            scope,
+            membership: Some(_),
+            ..
+        } = &pending.result
+        {
+            self.workspace
+                .defer_binding_membership_reconciliation(*scope);
+        }
+        outcome
+    }
+
     fn poll_pending_app_command(
         &mut self,
         pending: &mut PendingAppCommand,
@@ -800,27 +839,7 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
     ) -> Poll<Option<CommandOutcome>> {
         if let Some(outcome) = pending.cancellation_outcome(now) {
-            if let PendingCommandResult::TerminalAgentRestore { restore, .. } = &mut pending.result
-            {
-                let preparation = restore.take();
-                std::thread::spawn(move || drop(preparation));
-            }
-            if let PendingCommandResult::SurfaceCreation { request_id, .. }
-            | PendingCommandResult::SurfaceRestore { request_id, .. } = &pending.result
-                && let Err(error) = self.finish_surface_creation(*request_id, &outcome, effects)
-            {
-                return Poll::Ready(Some(error));
-            }
-            if let PendingCommandResult::Mux {
-                scope,
-                membership: Some(_),
-                ..
-            } = &pending.result
-            {
-                self.workspace
-                    .defer_binding_membership_reconciliation(*scope);
-            }
-            return Poll::Ready(Some(outcome));
+            return Poll::Ready(Some(self.cancel_pending(pending, outcome, effects)));
         }
         if let PendingCommandResult::SessionReopen {
             scope,
@@ -877,17 +896,12 @@ impl AppState {
         } = &mut pending.result
         {
             let outcome = ready!(self.poll_session_start(starting, name, outcome));
-            return match self.hold_until_session_checkpoint(
+            let dispatch = self.hold_until_session_checkpoint(
                 starting.scope(),
                 starting.session_id(),
                 outcome,
-            ) {
-                CommandDispatch::Complete(outcome) => Poll::Ready(Some(outcome)),
-                CommandDispatch::Pending(result) => {
-                    pending.result = result;
-                    Poll::Pending
-                }
-            };
+            );
+            return Self::settle(pending, dispatch);
         }
         if let PendingCommandResult::SessionCheckpointCompletion {
             target,
@@ -926,10 +940,26 @@ impl AppState {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One match routes every pending command to its completion owner"
-    )]
+    /// Pastes clipboard text once its worker read it, unless the caller cancelled first.
+    fn finish_clipboard(
+        &mut self,
+        text: Result<Result<String, String>, mpsc::RecvError>,
+        scope: SpaceId,
+        target: &CommandTarget,
+        cancellation: &CommandCancellation,
+    ) -> CommandOutcome {
+        match text {
+            Ok(Ok(text)) if cancellation.try_start() => {
+                self.finish_clipboard_paste(scope, target, &text)
+            }
+            Ok(Ok(_)) => CommandOutcome::cancelled(),
+            Ok(Err(message)) => clipboard::upload_failure(message),
+            Err(mpsc::RecvError) => {
+                clipboard::upload_failure("clipboard worker stopped".to_owned())
+            }
+        }
+    }
+
     fn poll_started_pending_command(
         &mut self,
         pending: &mut PendingAppCommand,
@@ -981,11 +1011,10 @@ impl AppState {
                     },
                 }
             }
-            PendingCommandResult::Forward { result } => match ready!(poll_command_result(result)) {
-                Ok(Ok(result)) => self.finish_forward(result),
-                Ok(Err(message)) => links::failure(message),
-                Err(mpsc::RecvError) => links::failure("Forward worker stopped".to_owned()),
-            },
+            PendingCommandResult::Forward { result } => {
+                let forward = ready!(poll_command_result(result));
+                self.finish_forward_result(forward)
+            }
             PendingCommandResult::Link {
                 scope,
                 target,
@@ -1004,46 +1033,36 @@ impl AppState {
                 scope,
                 target,
                 result,
-            } => match ready!(poll_command_result(result)) {
-                Ok(Ok(text)) if pending.cancellation.try_start() => {
-                    self.finish_clipboard_paste(*scope, target, &text)
-                }
-                Ok(Ok(_)) => CommandOutcome::cancelled(),
-                Ok(Err(message)) => clipboard::upload_failure(message),
-                Err(mpsc::RecvError) => {
-                    clipboard::upload_failure("clipboard worker stopped".to_owned())
-                }
-            },
+            } => {
+                let text = ready!(poll_command_result(result));
+                self.finish_clipboard(text, *scope, target, &pending.cancellation)
+            }
             PendingCommandResult::Mux {
                 scope,
                 command,
                 membership,
                 result,
                 layout,
-            } => match ready!(self.poll_pending_mux(
-                *scope,
-                command,
-                membership.as_deref(),
-                layout.as_ref(),
-                result,
-                &mut pending.creation_receipt
-            )) {
-                CommandDispatch::Complete(outcome) => outcome,
-                CommandDispatch::Pending(result) => {
-                    pending.result = result;
-                    return Poll::Pending;
-                }
-            },
+            } => {
+                let dispatch = ready!(self.poll_pending_mux(
+                    *scope,
+                    command,
+                    membership.as_deref(),
+                    layout.as_ref(),
+                    result,
+                    &mut pending.creation_receipt
+                ));
+                return Self::settle(pending, dispatch);
+            }
             PendingCommandResult::Outcome(result)
             | PendingCommandResult::NativeResume { result, .. }
             | PendingCommandResult::NativeTitle { result, .. } => {
-                match ready!(poll_command_result(result)) {
-                    Ok(outcome) => outcome,
-                    Err(mpsc::RecvError) => CommandOutcome::Failed {
+                ready!(poll_command_result(result)).unwrap_or_else(|mpsc::RecvError| {
+                    CommandOutcome::Failed {
                         code: "command_worker_stopped".to_owned(),
                         message: ErrorNotice::CommandWorkerStopped.to_string(),
-                    },
-                }
+                    }
+                })
             }
         };
         Poll::Ready(Some(outcome))
@@ -1395,10 +1414,6 @@ impl AppState {
         })
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One match routes the typed core executors"
-    )]
     fn dispatch_core_command(
         &mut self,
         executor: CoreCommandExecutor,
@@ -1407,66 +1422,62 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        let invocation = context.invocation;
-        let exact_target = context.exact_target;
-        let target_scope = exact_target.as_ref().map(ExactMuxTarget::scope);
+        let target_scope = context.exact_target.as_ref().map(ExactMuxTarget::scope);
+        let caller = context.invocation.caller;
         match executor {
             CoreCommandExecutor::Composer(action) => {
-                dispatch_composer(action, invocation.caller, execution, effects)
+                dispatch_composer(action, caller, execution, effects)
             }
-            CoreCommandExecutor::Surface(command) => {
-                self.dispatch_surface_command(command, invocation, viewport, effects, execution)
+            CoreCommandExecutor::Surface(command) => self.dispatch_surface_command(
+                command,
+                context.invocation,
+                viewport,
+                effects,
+                execution,
+            ),
+            CoreCommandExecutor::Recovery(_, _) => {
+                self.dispatch_recovery(&context.invocation, execution)
             }
-            CoreCommandExecutor::Recovery(_, _) => self.dispatch_recovery(&invocation, execution),
-            CoreCommandExecutor::ShellPrompt(action, arguments) => {
-                self.dispatch_attached_shell_prompt(exact_target, action, &arguments, execution)
-            }
+            CoreCommandExecutor::ShellPrompt(action, arguments) => self
+                .dispatch_attached_shell_prompt(
+                    context.exact_target,
+                    action,
+                    &arguments,
+                    execution,
+                ),
             CoreCommandExecutor::Forward(action, arguments) => {
                 self.dispatch_forward(action, &arguments, target_scope, execution)
             }
             CoreCommandExecutor::Job(action, arguments) => {
                 self.dispatch_job_command(action, arguments, target_scope, execution)
             }
-            CoreCommandExecutor::AgentWorkspace(action) => {
-                self.dispatch_agent_workspace_command(action, exact_target.as_ref(), effects)
-            }
+            CoreCommandExecutor::AgentWorkspace(action) => self.dispatch_agent_workspace_command(
+                action,
+                context.exact_target.as_ref(),
+                effects,
+            ),
             CoreCommandExecutor::Theme(action, arguments) => {
                 self.dispatch_theme_command(action, &arguments, execution, effects)
             }
-            CoreCommandExecutor::CaptureTerminal(arguments, export) => self
-                .dispatch_captured_terminal(
-                    exact_target,
-                    invocation.target,
-                    &arguments,
-                    export,
-                    execution,
-                ),
+            CoreCommandExecutor::CaptureTerminal(arguments, export) => {
+                self.dispatch_captured_terminal(context, &arguments, export, execution)
+            }
             CoreCommandExecutor::WslList => self.dispatch_wsl_list(execution),
             CoreCommandExecutor::WorktreeCleanup => self.dispatch_worktree_cleanup(execution),
             CoreCommandExecutor::OpenLink(arguments) => {
-                self.dispatch_attached_link(exact_target, invocation.target, &arguments, execution)
+                self.dispatch_attached_link(context, &arguments, execution)
             }
-            CoreCommandExecutor::Keybind(KeybindAction::PasteFromClipboard) => self
-                .dispatch_attached_clipboard(
-                    target_scope.unwrap_or_else(|| self.mux_scope()),
-                    invocation.target,
-                    execution,
-                ),
             CoreCommandExecutor::Pane(action, arguments) => {
-                self.dispatch_pane_command(action, &arguments, exact_target, execution)
+                self.dispatch_pane_command(action, &arguments, context.exact_target, execution)
             }
-            CoreCommandExecutor::Session(action, arguments) => self.dispatch_session_with_caller(
-                action,
-                &arguments,
-                exact_target,
-                invocation.caller,
-                execution,
-            ),
+            CoreCommandExecutor::Session(action, arguments) => {
+                self.dispatch_session_with_caller(action, &arguments, context, execution)
+            }
             CoreCommandExecutor::File(action, arguments) => self.dispatch_file_action(
                 target_scope.unwrap_or_else(|| self.mux_scope()),
                 action,
                 &arguments,
-                invocation.target,
+                context.invocation.target,
                 effects,
                 execution,
             ),
@@ -1474,29 +1485,69 @@ impl AppState {
                 target_scope.unwrap_or_else(|| self.mux_scope()),
                 action,
                 arguments,
-                invocation.target,
+                context.invocation.target,
                 effects,
                 execution,
             ),
             CoreCommandExecutor::Synchronous(executor) => {
                 self.dispatch_synchronous_command(executor, effects, execution)
             }
-            CoreCommandExecutor::Keybind(KeybindAction::Invoke("interrupt_agent")) => self
-                .interrupt_pane_conversation(
-                    exact_target.as_ref(),
-                    invocation.caller,
-                    effects,
-                    execution,
-                ),
-            CoreCommandExecutor::Keybind(KeybindAction::App(
-                crate::app_actions::AppAction::AgentHistory,
-            )) => {
+            CoreCommandExecutor::Keybind(action) => {
+                self.dispatch_keybind_executor(action, context, viewport, effects, execution)
+            }
+            CoreCommandExecutor::Dock(action, group) => {
+                Self::dispatch_dock_command(action, group, effects, execution)
+            }
+            CoreCommandExecutor::Browser(action, page) => self.dispatch_browser_command(
+                action,
+                page,
+                context.invocation.target,
+                caller,
+                effects,
+                execution,
+            ),
+            CoreCommandExecutor::Orchestration(command) => self.dispatch_orchestration_command(
+                command,
+                context.invocation,
+                context.exact_target.as_ref(),
+                execution,
+            ),
+            CoreCommandExecutor::Computer(command) => {
+                self.dispatch_computer_command(command, execution)
+            }
+        }
+    }
+
+    /// Keybind actions that act on the exact target first, then every other resolved keybind.
+    fn dispatch_keybind_executor(
+        &mut self,
+        action: KeybindAction,
+        context: ResolvedCommandContext,
+        viewport: ViewportSnapshot,
+        effects: &mut Vec<AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let exact_target = context.exact_target.as_ref();
+        let invocation = context.invocation;
+        match action {
+            KeybindAction::PasteFromClipboard => self.dispatch_attached_clipboard(
+                exact_target.map_or_else(|| self.mux_scope(), ExactMuxTarget::scope),
+                invocation.target,
+                execution,
+            ),
+            KeybindAction::Invoke("interrupt_agent") => self.interrupt_pane_conversation(
+                exact_target,
+                invocation.caller,
+                effects,
+                execution,
+            ),
+            KeybindAction::App(crate::app_actions::AppAction::AgentHistory) => {
                 if let Err(error) = executor::begin_synchronous_command(execution) {
                     return CommandDispatch::Complete(command_outcome_for_mux_error(error));
                 }
-                CommandDispatch::Complete(self.open_agent_history_at(exact_target.as_ref()))
+                CommandDispatch::Complete(self.open_agent_history_at(exact_target))
             }
-            CoreCommandExecutor::Keybind(action) => self.dispatch_resolved_keybind_command(
+            action => self.dispatch_resolved_keybind_command(
                 action,
                 context.planned_mux_command,
                 invocation.caller,
@@ -1504,26 +1555,6 @@ impl AppState {
                 effects,
                 execution,
             ),
-            CoreCommandExecutor::Dock(action, group) => {
-                Self::dispatch_dock_command(action, group, effects, execution)
-            }
-            CoreCommandExecutor::Browser(action, page) => self.dispatch_browser_command(
-                action,
-                page,
-                invocation.target,
-                invocation.caller,
-                effects,
-                execution,
-            ),
-            CoreCommandExecutor::Orchestration(command) => self.dispatch_orchestration_command(
-                command,
-                invocation,
-                exact_target.as_ref(),
-                execution,
-            ),
-            CoreCommandExecutor::Computer(command) => {
-                self.dispatch_computer_command(command, execution)
-            }
         }
     }
 
@@ -1548,10 +1579,10 @@ impl AppState {
         &mut self,
         action: crate::commands::SessionAction,
         arguments: &[String],
-        target: Option<ExactMuxTarget>,
-        caller: Caller,
+        context: ResolvedCommandContext,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
+        let (target, caller) = (context.exact_target, context.invocation.caller);
         if matches!(
             action,
             crate::commands::SessionAction::Activity
@@ -1596,12 +1627,11 @@ impl AppState {
 
     fn dispatch_attached_link(
         &mut self,
-        exact: Option<ExactMuxTarget>,
-        target: Option<CommandTarget>,
+        context: ResolvedCommandContext,
         arguments: &[String],
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        let (Some(exact), Some(target)) = (exact, target) else {
+        let (Some(exact), Some(target)) = (context.exact_target, context.invocation.target) else {
             return self
                 .reject_command(links::failure("Link needs an attached terminal".to_owned()));
         };
@@ -1610,13 +1640,12 @@ impl AppState {
 
     fn dispatch_captured_terminal(
         &mut self,
-        exact: Option<ExactMuxTarget>,
-        target: Option<CommandTarget>,
+        context: ResolvedCommandContext,
         arguments: &[String],
         export: bool,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        let (Some(exact), Some(target)) = (exact, target) else {
+        let (Some(exact), Some(target)) = (context.exact_target, context.invocation.target) else {
             return self.reject_command(CommandOutcome::Unavailable {
                 message: "Capture needs an attached terminal".to_owned(),
             });
@@ -1921,10 +1950,6 @@ impl AppState {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One dispatch owns shared window policy, pane closure and exact mux action routing"
-    )]
     fn dispatch_resolved_keybind_command(
         &mut self,
         action: KeybindAction,
@@ -1945,25 +1970,14 @@ impl AppState {
             });
         }
         if matches!(action, KeybindAction::Mux(MuxKeyAction::ClosePane))
-            && let Some(policy) = self.last_surface_close_policy()
+            && self.closes_window_with_last_pane()
         {
-            // This is a window policy, shared by every caller and backend. Other sessions
-            // and Spaces must remain reachable when only the selected session becomes empty.
-            let close_window = match policy {
-                bootty_config::config::WhenClosingWithNoTabs::CloseWindow => true,
-                bootty_config::config::WhenClosingWithNoTabs::KeepWindowOpen => false,
-                bootty_config::config::WhenClosingWithNoTabs::PlatformDefault => {
-                    !cfg!(target_os = "macos")
-                }
-            };
-            if close_window {
-                if let Err(error) = executor::begin_synchronous_command(execution) {
-                    return CommandDispatch::Complete(command_outcome_for_mux_error(error));
-                }
-                effects.push(AppEffect::CloseWindow);
-                effects.push(AppEffect::RequestRepaint);
-                return CommandDispatch::Complete(CommandOutcome::success());
+            if let Err(error) = executor::begin_synchronous_command(execution) {
+                return CommandDispatch::Complete(command_outcome_for_mux_error(error));
             }
+            effects.push(AppEffect::CloseWindow);
+            effects.push(AppEffect::RequestRepaint);
+            return CommandDispatch::Complete(CommandOutcome::success());
         }
         if matches!(
             action,
@@ -1981,34 +1995,9 @@ impl AppState {
         {
             return self.dispatch_planned_pane_close(session_id, pane, execution);
         }
-        let gui_tab_navigation = execution.is_none()
-            && matches!(self.modal_dialog(), Some(crate::state::ModalDialog::NewSession(dialog))
-                if dialog.is_creation_form())
-            && !matches!(caller, Caller::Cli | Caller::Socket | Caller::Luau)
-            && matches!(
-                action,
-                KeybindAction::Mux(
-                    MuxKeyAction::NextTab
-                        | MuxKeyAction::PreviousTab
-                        | MuxKeyAction::LastTab
-                        | MuxKeyAction::SelectTab(_)
-                )
-            );
-        if matches!(
-            action,
-            KeybindAction::Mux(
-                MuxKeyAction::NewTab
-                    | MuxKeyAction::NextTab
-                    | MuxKeyAction::PreviousTab
-                    | MuxKeyAction::LastTab
-                    | MuxKeyAction::SelectTab(_)
-                    | MuxKeyAction::SplitPane(_)
-                    | MuxKeyAction::SelectPane(_)
-                    | MuxKeyAction::NextPane
-                    | MuxKeyAction::PreviousPane
-            )
-        ) && !gui_tab_navigation
-        {
+        let gui_tab_navigation =
+            execution.is_none() && self.navigates_creation_form_tabs(&action, caller);
+        if moves_terminal_focus(&action) && !gui_tab_navigation {
             effects.push(AppEffect::FocusTerminal);
         }
         let mut return_native_mux_focus = false;
@@ -2042,25 +2031,73 @@ impl AppState {
         if let Err(error) = executor::begin_synchronous_command(execution) {
             return CommandDispatch::Complete(command_outcome_for_mux_error(error));
         }
+        CommandDispatch::Complete(self.apply_keybind_now(
+            action,
+            planned_mux_command,
+            viewport,
+            effects,
+            return_native_mux_focus,
+        ))
+    }
+
+    /// A tab key typed in the GUI while the new session dialog shows its creation form moves
+    /// between the form's tabs instead of the terminal's.
+    fn navigates_creation_form_tabs(&self, action: &KeybindAction, caller: Caller) -> bool {
+        matches!(self.modal_dialog(), Some(crate::state::ModalDialog::NewSession(dialog))
+            if dialog.is_creation_form())
+            && !matches!(caller, Caller::Cli | Caller::Socket | Caller::Luau)
+            && matches!(
+                action,
+                KeybindAction::Mux(
+                    MuxKeyAction::NextTab
+                        | MuxKeyAction::PreviousTab
+                        | MuxKeyAction::LastTab
+                        | MuxKeyAction::SelectTab(_)
+                )
+            )
+    }
+
+    /// Whether closing the last pane closes the window. This is a window policy, shared by every
+    /// caller and backend; other sessions and Spaces stay reachable when only the selected
+    /// session becomes empty.
+    fn closes_window_with_last_pane(&self) -> bool {
+        self.last_surface_close_policy()
+            .is_some_and(|policy| match policy {
+                bootty_config::config::WhenClosingWithNoTabs::CloseWindow => true,
+                bootty_config::config::WhenClosingWithNoTabs::KeepWindowOpen => false,
+                bootty_config::config::WhenClosingWithNoTabs::PlatformDefault => {
+                    !cfg!(target_os = "macos")
+                }
+            })
+    }
+
+    /// Apply a keybind on the app thread and report what it did, with the native mux focus when
+    /// asked.
+    fn apply_keybind_now(
+        &mut self,
+        action: KeybindAction,
+        planned_mux_command: Option<MuxCommand>,
+        viewport: ViewportSnapshot,
+        effects: &mut Vec<AppEffect>,
+        report_mux_focus: bool,
+    ) -> CommandOutcome {
         let previous_error = self.last_error.take();
         self.apply_resolved_keybind_action(action, planned_mux_command, viewport, effects);
-        let outcome = if let Some(notice) = self.last_error.clone() {
-            CommandOutcome::Failed {
+        if let Some(notice) = self.last_error.clone() {
+            return CommandOutcome::Failed {
                 code: "execution_failed".to_owned(),
                 message: notice.raw_message(),
+            };
+        }
+        self.last_error = previous_error;
+        if report_mux_focus {
+            CommandOutcome::Success {
+                value: self.current_mux_focus_value(),
+                warnings: Vec::new(),
             }
         } else {
-            self.last_error = previous_error;
-            if return_native_mux_focus {
-                CommandOutcome::Success {
-                    value: self.current_mux_focus_value(),
-                    warnings: Vec::new(),
-                }
-            } else {
-                CommandOutcome::success()
-            }
-        };
-        CommandDispatch::Complete(outcome)
+            CommandOutcome::success()
+        }
     }
     const fn process_local_mux_action_uses_local_layout(action: MuxKeyAction) -> bool {
         matches!(
@@ -2111,4 +2148,22 @@ fn dispatch_composer(
         crate::commands::ComposerRequest::new(action, execution, sender),
     ));
     CommandDispatch::Pending(PendingCommandResult::Outcome(receiver))
+}
+
+/// Tab and pane navigation lands in the terminal it selects.
+const fn moves_terminal_focus(action: &KeybindAction) -> bool {
+    matches!(
+        action,
+        KeybindAction::Mux(
+            MuxKeyAction::NewTab
+                | MuxKeyAction::NextTab
+                | MuxKeyAction::PreviousTab
+                | MuxKeyAction::LastTab
+                | MuxKeyAction::SelectTab(_)
+                | MuxKeyAction::SplitPane(_)
+                | MuxKeyAction::SelectPane(_)
+                | MuxKeyAction::NextPane
+                | MuxKeyAction::PreviousPane
+        )
+    )
 }

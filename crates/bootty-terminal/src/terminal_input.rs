@@ -5,10 +5,6 @@ use anyhow::Result;
 /// Modifier side state retained by a native input adapter when the host reports physical keys.
 /// GPUI itself exposes aggregate modifiers, so the desktop may leave this at its default value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Physical modifier keys are independent pressed bits."
-)]
 pub struct ModifierSideState {
     pub left_shift: bool,
     pub right_shift: bool,

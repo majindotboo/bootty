@@ -18,7 +18,7 @@ impl AppState {
             match response.try_recv() {
                 Ok(outcome) => {
                     if let Some(error) = crate::commands::command_outcome_message(&outcome) {
-                        self.record_error("Could not restore terminal agents", error);
+                        self.record_error("Could not restore terminal agents", &error);
                     }
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {

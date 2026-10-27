@@ -1,6 +1,4 @@
-#![allow(clippy::wildcard_imports)]
-
-use super::*;
+use super::{Connection, HashSet, Transaction, WORKSPACE_SNAPSHOT_REVISION};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WorkspaceSchemaKind {

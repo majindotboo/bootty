@@ -461,10 +461,6 @@ impl NativeAgentSession {
         Self::start_with_tools(config, clock, None, None)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One constructor owns provider pipes, workers, and their cleanup"
-    )]
     pub(crate) fn start_with_tools(
         config: NativeSessionConfig,
         clock: Arc<dyn Fn() -> Instant + Send + Sync>,
@@ -508,74 +504,27 @@ impl NativeAgentSession {
         let workers = Arc::new(Mutex::new(Vec::new()));
         let tail = Arc::new(Mutex::new(Vec::new()));
         lock(&workers).push(start_stderr_worker(stderr, Arc::clone(&tail), &child)?);
-        let reader_snapshot = Arc::clone(&snapshot);
-        let reader_pending = Arc::clone(&pending);
-        let reader_child = Arc::clone(&child);
-        let reader_closing = Arc::clone(&closing);
-        let reader_handler = Arc::clone(&change_handler);
-        let reader_input = Arc::clone(&stdin);
-        let reader_next = Arc::clone(&next_request);
-        let reader_cancel = Arc::clone(&cancel_requested);
-        let reader_workers = Arc::clone(&workers);
-        let (reader_tools, reader_claude) = (tools.clone(), claude.clone());
-        let reader_remote = config.remote.is_some();
         let checkpoints = crate::native_checkpoints::CheckpointHost {
             directory: config.cwd.to_string_lossy().into_owned(),
             remote: config.remote.as_ref().map(|remote| remote.host.clone()),
         };
-        let reader_checkpoints = checkpoints.clone();
+        let reader = ProtocolReader {
+            snapshot: Arc::clone(&snapshot),
+            pending: Arc::clone(&pending),
+            change_handler: Arc::clone(&change_handler),
+            input: Arc::clone(&stdin),
+            next: Arc::clone(&next_request),
+            closing: Arc::clone(&closing),
+            cancel: Arc::clone(&cancel_requested),
+            workers: Arc::clone(&workers),
+            claude: claude.clone(),
+            checkpoints: checkpoints.clone(),
+        };
+        let (reader_child, reader_tools) = (Arc::clone(&child), tools.clone());
+        let remote = config.remote.is_some();
         let reader_worker = spawn_worker("native-agent-protocol", move || {
-            let fault = read_frames(
-                BufReader::new(stdout),
-                &reader_snapshot,
-                &reader_pending,
-                &reader_handler,
-                &reader_input,
-                &reader_next,
-                &reader_closing,
-                &reader_cancel,
-                &reader_workers,
-                reader_claude.as_deref(),
-                &reader_checkpoints,
-            )
-            .err();
-            if let Some(tools) = &reader_tools {
-                tools.stop();
-            }
-            // EOF ends the protocol lease even when a misbehaving child keeps running.
-            if !reader_closing.load(Ordering::Acquire) {
-                terminate(&reader_child);
-            }
-            let status = lock(&reader_child).wait();
-            let mut snapshot = lock(&reader_snapshot);
-            let intentional = reader_closing.load(Ordering::Acquire);
-            // Only an established conversation can reconnect. Startup failures remain
-            // visible instead of retrying an executable/configuration error forever.
-            snapshot.transport_lost =
-                reader_remote && !intentional && fault.is_none() && snapshot.session_id.is_some();
-            let error = fault.unwrap_or_else(|| {
-                format!(
-                    "Agent process ended ({}): {}",
-                    status.map_or_else(|error| error.to_string(), |status| status.to_string()),
-                    String::from_utf8_lossy(&lock(&tail))
-                )
-            });
-            if !intentional {
-                snapshot.set_provider_error(&error);
-            }
-            snapshot.status = if intentional || snapshot.provider_writer_blocked() {
-                NativeSessionStatus::Stopped
-            } else {
-                NativeSessionStatus::Error
-            };
-            snapshot.working_since = None;
-            snapshot.changed();
-            drop(snapshot);
-            publish_change(&reader_handler);
-            let replies = std::mem::take(&mut *lock(&reader_pending));
-            for (_, reply) in replies {
-                let _ = reply.sender.send(ReplyEvent::Reply(Err(error.clone())));
-            }
+            let fault = reader.read_frames(BufReader::new(stdout)).err();
+            reader.finish(fault, &reader_child, reader_tools.as_deref(), remote, &tail);
         })
         .inspect_err(|_| {
             terminate(&child);
@@ -1861,121 +1810,178 @@ fn ingest_pi_frame(snapshot: &Mutex<NativeSessionSnapshot>, value: &Value) -> Re
     })
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    reason = "One reader owns replies, input waits and deferred cancellation for this transport"
-)]
-fn read_frames(
-    mut reader: impl BufRead,
-    snapshot: &Arc<Mutex<NativeSessionSnapshot>>,
-    pending: &PendingReplies,
-    change_handler: &ChangePublisher,
-    input: &Arc<Mutex<Option<ChildStdin>>>,
-    next: &Arc<AtomicU64>,
-    closing: &Arc<AtomicBool>,
-    cancel: &Arc<AtomicBool>,
-    workers: &NativeWorkers,
-    claude: Option<&Mutex<crate::native_claude::ClaudeProtocol>>,
-    checkpoints: &crate::native_checkpoints::CheckpointHost,
-) -> Result<(), String> {
-    let provider = lock(snapshot).provider;
-    loop {
-        let (mut value, count) = match read_native_frame(&mut reader, provider)? {
-            None => return Ok(()),
-            Some(NativeFrame::Message(value, count)) => (value, count),
-            Some(NativeFrame::Oversized(count)) => {
-                lock(snapshot).skipped_frame(count);
-                publish_change(change_handler);
-                continue;
-            }
-        };
-        // An oversized message is cut down, never fatal: its long strings shrink so its state
-        // still lands. An oversized reply fails only its own request.
-        if count > FRAME_LIMIT
-            && !is_provider_request(&value, provider)
-            && !allows_history_page(&value, snapshot, pending)
-            && !allows_image_frame(&value, snapshot, pending, claude)
-            && !allows_history_echo(&value, snapshot, pending, claude)
-        {
-            let removed = if is_reply(&value, provider) {
-                fail_reply(
-                    &value,
-                    pending,
-                    provider,
-                    "The provider's reply is too large for Bootty to read",
-                );
-                count
-            } else {
-                shorten_strings(&mut value)
-            };
-            lock(snapshot).skipped_frame(removed);
-            publish_change(change_handler);
-            if count.saturating_sub(removed) > FRAME_LIMIT {
-                continue;
-            }
-        }
-        if let Some(claude) = claude {
-            if field(&value, "type") == "control_response" {
-                route_reply(&value, pending, provider);
-            } else {
-                let response = ingest_claude_frame(snapshot, claude, &value)?;
-                lock(snapshot).settle_stop_request();
-                if let Some(response) = response {
-                    write_frame(input, closing, &response)?;
+/// What the protocol reader shares with its session, owned by the reader's thread.
+struct ProtocolReader {
+    snapshot: Arc<Mutex<NativeSessionSnapshot>>,
+    pending: PendingReplies,
+    change_handler: ChangePublisher,
+    input: Arc<Mutex<Option<ChildStdin>>>,
+    next: Arc<AtomicU64>,
+    closing: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    workers: NativeWorkers,
+    claude: Option<Arc<Mutex<crate::native_claude::ClaudeProtocol>>>,
+    checkpoints: crate::native_checkpoints::CheckpointHost,
+}
+
+impl ProtocolReader {
+    /// Apply each provider frame to the session until the stream ends.
+    fn read_frames(&self, mut reader: impl BufRead) -> Result<(), String> {
+        let Self {
+            snapshot,
+            pending,
+            change_handler,
+            claude,
+            ..
+        } = self;
+        let claude = claude.as_deref();
+        let provider = lock(snapshot).provider;
+        loop {
+            let (mut value, count) = match read_native_frame(&mut reader, provider)? {
+                None => return Ok(()),
+                Some(NativeFrame::Message(value, count)) => (value, count),
+                Some(NativeFrame::Oversized(count)) => {
+                    lock(snapshot).skipped_frame(count);
+                    publish_change(change_handler);
+                    continue;
                 }
+            };
+            // An oversized message is cut down, never fatal: its long strings shrink so its state
+            // still lands. An oversized reply fails only its own request.
+            if count > FRAME_LIMIT
+                && !is_provider_request(&value, provider)
+                && !allows_history_page(&value, snapshot, pending)
+                && !allows_image_frame(&value, snapshot, pending, claude)
+                && !allows_history_echo(&value, snapshot, pending, claude)
+            {
+                let removed = if is_reply(&value, provider) {
+                    fail_reply(
+                        &value,
+                        pending,
+                        provider,
+                        "The provider's reply is too large for Bootty to read",
+                    );
+                    count
+                } else {
+                    shorten_strings(&mut value)
+                };
+                lock(snapshot).skipped_frame(removed);
                 publish_change(change_handler);
-                record_turn_end(snapshot, checkpoints, change_handler, workers);
+                if count.saturating_sub(removed) > FRAME_LIMIT {
+                    continue;
+                }
             }
-            continue;
-        }
-        if provider == AgentKind::Pi {
-            let declined = (field(&value, "type") != "response")
-                .then(|| crate::native_pi::decline_ui_request(&mut lock(snapshot), &value))
-                .flatten();
-            if field(&value, "type") == "response" {
-                route_reply(&value, pending, provider);
-            } else if let Some(reply) = declined {
-                write_frame(input, closing, &reply)?;
-                publish_change(change_handler);
+            if let Some(claude) = claude {
+                self.claude_frame(claude, &value)?;
+            } else if provider == AgentKind::Pi {
+                self.pi_frame(&value)?;
             } else {
-                ingest_pi_frame(snapshot, &value)?;
-                lock(snapshot).settle_stop_request();
-                let waiting = lock(snapshot).waiting_for_input();
-                update_input_wait(pending, waiting);
-                publish_change(change_handler);
-                record_turn_end(snapshot, checkpoints, change_handler, workers);
+                self.codex_frame(&value, provider)?;
             }
-            continue;
         }
+    }
+
+    fn claude_frame(
+        &self,
+        claude: &Mutex<crate::native_claude::ClaudeProtocol>,
+        value: &Value,
+    ) -> Result<(), String> {
+        let Self {
+            snapshot,
+            pending,
+            change_handler,
+            input,
+            closing,
+            workers,
+            checkpoints,
+            ..
+        } = self;
+        let provider = AgentKind::Claude;
+        if field(value, "type") == "control_response" {
+            route_reply(value, pending, provider);
+        } else {
+            let response = ingest_claude_frame(snapshot, claude, value)?;
+            lock(snapshot).settle_stop_request();
+            if let Some(response) = response {
+                write_frame(input, closing, &response)?;
+            }
+            publish_change(change_handler);
+            record_turn_end(snapshot, checkpoints, change_handler, workers);
+        }
+        Ok(())
+    }
+
+    fn pi_frame(&self, value: &Value) -> Result<(), String> {
+        let Self {
+            snapshot,
+            pending,
+            change_handler,
+            input,
+            closing,
+            workers,
+            checkpoints,
+            ..
+        } = self;
+        let provider = AgentKind::Pi;
+        let declined = (field(value, "type") != "response")
+            .then(|| crate::native_pi::decline_ui_request(&mut lock(snapshot), value))
+            .flatten();
+        if field(value, "type") == "response" {
+            route_reply(value, pending, provider);
+        } else if let Some(reply) = declined {
+            write_frame(input, closing, &reply)?;
+            publish_change(change_handler);
+        } else {
+            ingest_pi_frame(snapshot, value)?;
+            lock(snapshot).settle_stop_request();
+            let waiting = lock(snapshot).waiting_for_input();
+            update_input_wait(pending, waiting);
+            publish_change(change_handler);
+            record_turn_end(snapshot, checkpoints, change_handler, workers);
+        }
+        Ok(())
+    }
+
+    fn codex_frame(&self, value: &Value, provider: AgentKind) -> Result<(), String> {
+        let Self {
+            snapshot,
+            pending,
+            change_handler,
+            input,
+            closing,
+            cancel,
+            workers,
+            checkpoints,
+            ..
+        } = self;
         if value.get("method").is_none() {
-            route_reply(&value, pending, provider);
-            continue;
+            route_reply(value, pending, provider);
+            return Ok(());
         }
         let shared_snapshot = Arc::clone(snapshot);
         let mut snapshot = lock(snapshot);
         if value.get("id").is_some() {
-            let subagent = snapshot.requesting_subagent(&value);
-            if subagent.is_none() && !snapshot.accepts(&value) {
+            let subagent = snapshot.requesting_subagent(value);
+            if subagent.is_none() && !snapshot.accepts(value) {
                 write_frame(
                     input,
                     closing,
-                    &json!({"id":field(&value,"id"),"error":{"code":-32602,"message":"Request does not match the owned thread and turn"}}),
+                    &json!({"id":field(value,"id"),"error":{"code":-32602,"message":"Request does not match the owned thread and turn"}}),
                 )?;
-                continue;
+                return Ok(());
             }
-            if let Some(reply) = capture_request(&mut snapshot, &value, subagent)? {
+            if let Some(reply) = capture_request(&mut snapshot, value, subagent)? {
                 write_frame(input, closing, &reply)?;
             }
         } else {
             // The reducer also accepts observed child lifecycles after the parent turn ends.
             // It still rejects foreign threads and unrelated turns before projecting content.
             let now = Some(chrono::Utc::now().timestamp_millis());
-            snapshot.with_message_times((now, now), |snapshot| snapshot.ingest(&value));
+            snapshot.with_message_times((now, now), |snapshot| snapshot.ingest(value));
         }
         snapshot.settle_stop_request();
-        let deferred = if field(&value, "method") == "turn/started"
-            && snapshot.accepts(&value)
+        let deferred = if field(value, "method") == "turn/started"
+            && snapshot.accepts(value)
             && cancel.swap(false, Ordering::AcqRel)
         {
             Some(json!({"threadId":snapshot.session_id,"turnId":snapshot.turn_id}))
@@ -1987,41 +1993,109 @@ fn read_frames(
         update_input_wait(pending, waiting);
         record_turn_end(&shared_snapshot, checkpoints, change_handler, workers);
         if let Some(params) = deferred {
-            let input = Arc::clone(input);
-            let pending = Arc::clone(pending);
-            let next = Arc::clone(next);
-            let closing = Arc::clone(closing);
-            let handler = Arc::clone(change_handler);
-            // Cancellation owns a separate RPC so it never waits for prompt acknowledgement.
-            let turn =
-                string(field(&params, "turnId")).ok_or("Missing interrupted turn identity")?;
-            let worker = spawn_worker("native-agent-interrupt", move || {
-                let result = send_rpc(
-                    &input,
-                    &pending,
-                    &next,
-                    &closing,
-                    (AgentKind::Codex, "turn/interrupt", params, FRAME_LIMIT),
-                );
-                if let Err(error) = result {
-                    if closing.load(Ordering::Acquire) {
-                        return;
-                    }
-                    let mut snapshot = lock(&shared_snapshot);
-                    snapshot.set_provider_error(&error);
-                    snapshot.changed();
-                    drop(snapshot);
-                } else {
-                    let mut snapshot = lock(&shared_snapshot);
-                    snapshot.finish_first_turn(&turn, NativeTurnOutcome::Interrupted);
-                    snapshot.changed();
-                    drop(snapshot);
-                }
-                publish_change(&handler);
-            })?;
-            lock(workers).push(worker);
+            self.interrupt(params, shared_snapshot)?;
         }
         publish_change(change_handler);
+        Ok(())
+    }
+
+    /// End the conversation's protocol after its stream closed: stop its tools and child, record
+    /// why it ended, and fail every reply still waiting.
+    fn finish(
+        &self,
+        fault: Option<String>,
+        child: &Mutex<ProcessTreeChild>,
+        tools: Option<&crate::ToolBridge>,
+        remote: bool,
+        tail: &Mutex<Vec<u8>>,
+    ) {
+        if let Some(tools) = tools {
+            tools.stop();
+        }
+        // EOF ends the protocol lease even when a misbehaving child keeps running.
+        if !self.closing.load(Ordering::Acquire) {
+            terminate(child);
+        }
+        let status = lock(child).wait();
+        let mut snapshot = lock(&self.snapshot);
+        let intentional = self.closing.load(Ordering::Acquire);
+        // Only an established conversation can reconnect. Startup failures remain
+        // visible instead of retrying an executable/configuration error forever.
+        snapshot.transport_lost =
+            remote && !intentional && fault.is_none() && snapshot.session_id.is_some();
+        let error = fault.unwrap_or_else(|| {
+            format!(
+                "Agent process ended ({}): {}",
+                status.map_or_else(|error| error.to_string(), |status| status.to_string()),
+                String::from_utf8_lossy(&lock(tail))
+            )
+        });
+        if !intentional {
+            snapshot.set_provider_error(&error);
+        }
+        snapshot.status = if intentional || snapshot.provider_writer_blocked() {
+            NativeSessionStatus::Stopped
+        } else {
+            NativeSessionStatus::Error
+        };
+        snapshot.working_since = None;
+        snapshot.changed();
+        drop(snapshot);
+        publish_change(&self.change_handler);
+        let replies = std::mem::take(&mut *lock(&self.pending));
+        for (_, reply) in replies {
+            let _ = reply.sender.send(ReplyEvent::Reply(Err(error.clone())));
+        }
+    }
+
+    /// Interrupt a turn that started after its cancellation was requested.
+    fn interrupt(
+        &self,
+        params: Value,
+        shared_snapshot: Arc<Mutex<NativeSessionSnapshot>>,
+    ) -> Result<(), String> {
+        let Self {
+            input,
+            pending,
+            next,
+            closing,
+            change_handler,
+            workers,
+            ..
+        } = self;
+        let input = Arc::clone(input);
+        let pending = Arc::clone(pending);
+        let next = Arc::clone(next);
+        let closing = Arc::clone(closing);
+        let handler = Arc::clone(change_handler);
+        // Cancellation owns a separate RPC so it never waits for prompt acknowledgement.
+        let turn = string(field(&params, "turnId")).ok_or("Missing interrupted turn identity")?;
+        let worker = spawn_worker("native-agent-interrupt", move || {
+            let result = send_rpc(
+                &input,
+                &pending,
+                &next,
+                &closing,
+                (AgentKind::Codex, "turn/interrupt", params, FRAME_LIMIT),
+            );
+            if let Err(error) = result {
+                if closing.load(Ordering::Acquire) {
+                    return;
+                }
+                let mut snapshot = lock(&shared_snapshot);
+                snapshot.set_provider_error(&error);
+                snapshot.changed();
+                drop(snapshot);
+            } else {
+                let mut snapshot = lock(&shared_snapshot);
+                snapshot.finish_first_turn(&turn, NativeTurnOutcome::Interrupted);
+                snapshot.changed();
+                drop(snapshot);
+            }
+            publish_change(&handler);
+        })?;
+        lock(workers).push(worker);
+        Ok(())
     }
 }
 

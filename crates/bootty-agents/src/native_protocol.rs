@@ -444,7 +444,6 @@ impl RealtimeCall {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[allow(clippy::struct_excessive_bools)] // Each flag is an independent fact about the session.
 pub struct NativeSessionSnapshot {
     pub provider: AgentKind,
     #[serde(default)]
@@ -477,7 +476,7 @@ pub struct NativeSessionSnapshot {
     pub completed_turns: u64,
     /// How many items the bounded live view has let go; the provider's history still holds
     /// them.
-    #[serde(default, skip_serializing_if = "is_zero")]
+    #[serde(default)]
     pub evicted: u64,
     pub transcript: Vec<NativeTranscriptItem>,
     /// The plan the current turn reported, step by step. A new turn starts without one.
@@ -1992,12 +1991,4 @@ impl anstyle_parse::Perform for TranscriptText {
             self.0.push(char::from(byte));
         }
     }
-}
-
-#[expect(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "serde passes fields by reference"
-)]
-const fn is_zero(value: &u64) -> bool {
-    *value == 0
 }

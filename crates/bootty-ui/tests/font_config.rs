@@ -8,10 +8,10 @@ use bootty_config::FontFeature;
 use bootty_config::config::load_config_from_path;
 use bootty_ui::gpui::{InputEvent, Key, Modifiers};
 use bootty_ui::terminal_text::{CodepointFontMap, TerminalTextConfig};
-use bootty_ui::{AppEffect, AppState};
+use bootty_ui::{AppEffect, AppState, UiFontEffect};
 use pretty_assertions::assert_eq;
 
-mod support;
+pub mod support;
 
 #[path = "support/frames.rs"]
 mod frame_inputs;
@@ -106,7 +106,7 @@ ui-size = 18
     let families = effects
         .iter()
         .find_map(|effect| match effect {
-            AppEffect::SetUiFonts(families) => Some(families),
+            AppEffect::UiFont(UiFontEffect::Families(families)) => Some(families),
             _ => None,
         })
         .expect("UI family change publishes its accepted stack");
@@ -120,7 +120,7 @@ ui-size = 18
     assert!(
         effects
             .iter()
-            .any(|effect| matches!(effect, AppEffect::SetUiFontSize(size) if size.to_bits() == 18.0_f32.to_bits()))
+            .any(|effect| matches!(effect, AppEffect::UiFont(UiFontEffect::Size(size)) if size.to_bits() == 18.0_f32.to_bits()))
     );
 }
 
@@ -189,7 +189,7 @@ fn ui_weight_reload_publishes_the_accepted_assignment(
     let weights = effects
         .iter()
         .find_map(|effect| match effect {
-            AppEffect::SetUiFontWeights(weights) => Some(weights),
+            AppEffect::UiFont(UiFontEffect::Weights(weights)) => Some(weights),
             _ => None,
         })
         .expect("accepted assignment is published");
@@ -269,7 +269,7 @@ fn font_commands_publish_only_the_requested_sizes(
     let ui_effects: Vec<_> = effects
         .iter()
         .filter_map(|effect| match effect {
-            AppEffect::SetUiFontSize(size) => Some(size.to_bits()),
+            AppEffect::UiFont(UiFontEffect::Size(size)) => Some(size.to_bits()),
             _ => None,
         })
         .collect();

@@ -1,3 +1,4 @@
+#![cfg(test)]
 use std::{
     collections::BTreeMap,
     sync::{Arc, mpsc},
@@ -29,11 +30,7 @@ mod frames;
 #[cfg(windows)]
 #[path = "support/naming_backend.rs"]
 mod naming_backend;
-#[allow(
-    clippy::expect_used,
-    reason = "Shared desktop backend fixture follows existing test module convention"
-)]
-mod support;
+pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 

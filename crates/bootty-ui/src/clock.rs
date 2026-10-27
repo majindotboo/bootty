@@ -24,10 +24,7 @@ pub enum Moment {
 
 impl Moment {
     /// The Unicode date skeleton the system localizes.
-    #[cfg_attr(
-        not(target_os = "macos"),
-        allow(dead_code, reason = "macOS formats skeletons")
-    )]
+    #[cfg(target_os = "macos")]
     const fn skeleton(self) -> &'static str {
         match self {
             Self::Time => "jmm",

@@ -46,7 +46,7 @@ impl AppState {
             return;
         };
         if let Some(error) = service.take_retirement_error() {
-            self.record_error("Could not close a terminal agent", error);
+            self.record_error("Could not close a terminal agent", &error);
         }
         for record in service.live_records() {
             let authoritative = self.workspace.all_bindings().any(|binding| {
@@ -947,13 +947,144 @@ fn capture_spawn(
     })
 }
 
-#[allow(clippy::too_many_lines)]
+/// Focus the live terminal already running this provider session instead of starting another.
+fn reuse_live_session(
+    service: &TerminalAgentService,
+    commands: &Arc<dyn AgentCommandExecutor>,
+    invocation: &CommandInvocation,
+    provider: AgentKind,
+    context: &LaunchContext,
+    launch: &AgentLaunch,
+    (deadline, cancellation): (Instant, CommandCancellation),
+) -> Option<CommandOutcome> {
+    let session = invocation.arguments.first()?;
+    let target = service.live_session(
+        provider,
+        session,
+        &context.binding_id,
+        launch.account_directory.as_deref(),
+    )?;
+    let mut focus = CommandInvocation::from_action("agents.focus", invocation.caller);
+    focus.target = Some(target.clone());
+    Some(match commands.execute(focus, deadline, cancellation) {
+        CommandOutcome::Success { warnings, .. } => CommandOutcome::Success {
+            value: serde_json::json!({"terminal": target, "reused": true}),
+            warnings,
+        },
+        outcome => outcome,
+    })
+}
+
+/// Prepare the provider's launch with Bootty's tools when it can take them, or unobserved when
+/// Bootty cannot watch it, with a warning when tools were left out.
+fn prepare_terminal_launch(
+    service: &Arc<TerminalAgentService>,
+    commands: &Arc<dyn AgentCommandExecutor>,
+    invocation: &CommandInvocation,
+    (provider, operation): (AgentKind, &str),
+    context: &LaunchContext,
+    mut launch: AgentLaunch,
+) -> Result<(bootty_agents::PreparedTerminalAgent, Option<CommandWarning>), String> {
+    let account = operation.starts_with("account.") || operation.starts_with("connector.");
+    // A private app-server must not become the owner of a persistent backend's Codex turn.
+    let persistent_codex = provider == AgentKind::Codex && !context.process_local;
+    let (tools, tools_warning) = launch_tools(
+        commands,
+        invocation,
+        provider,
+        operation,
+        context,
+        &mut launch,
+    );
+    let unobserved = (context.remote || account || persistent_codex).then(|| {
+        if account {
+            "Account command uses the provider's own terminal"
+        } else if context.remote {
+            "Native activity observation needs a supported remote host bridge"
+        } else {
+            "Codex runs directly in this persistent terminal; app-owned observation is unavailable"
+        }
+        .to_owned()
+    });
+    let prepared = if context.remote {
+        TerminalAgentService::prepare_remote(provider, launch)
+    } else if let Some(tools) = tools {
+        service.prepare_with_tools(provider, launch, tools, unobserved)
+    } else if let Some(detail) = unobserved {
+        TerminalAgentService::prepare_unobserved(provider, launch, detail)
+    } else {
+        service.prepare(provider, launch)
+    }?;
+    Ok((prepared, tools_warning))
+}
+
+/// The prepared command line as JSON, quoted for a POSIX shell on a remote host.
+fn launch_argv(
+    prepared: &bootty_agents::PreparedTerminalAgent,
+    remote: bool,
+) -> Result<String, String> {
+    let argv = if remote {
+        prepared.argv_for_shell(bootty_agents::LaunchShell::Posix)
+    } else {
+        prepared.argv()
+    }?;
+    serde_json::to_string(&argv).map_err(|error| error.to_string())
+}
+
+/// The command that creates the agent's terminal: a sign-in session, a pane, a named session or
+/// a tab, addressed to the host the caller captured.
+fn terminal_creation(
+    invocation: &CommandInvocation,
+    (provider, operation): (AgentKind, &str),
+    context: &LaunchContext,
+    name: Option<&String>,
+    cwd: Option<String>,
+    argv: String,
+) -> CommandInvocation {
+    let login_session = operation == "account.login" && context.session.is_none();
+    let mut create = if login_session {
+        let identity = bootty_mux::snapshot::new_session_identity();
+        CommandInvocation::new(
+            "session.create",
+            vec![
+                format!("sign-in-{identity}"),
+                cwd.unwrap_or_default(),
+                argv,
+                identity,
+                format!("Sign in to {}", provider.display_name()),
+            ],
+            invocation.caller,
+        )
+    } else if operation == "pane" {
+        return pane::create_invocation(invocation, context, argv, cwd);
+    } else if let Some(name) = name {
+        let mut arguments = vec![name.clone(), cwd.unwrap_or_default(), argv];
+        arguments.extend(invocation.arguments.iter().skip(5).take(2).cloned());
+        CommandInvocation::new("session.create", arguments, invocation.caller)
+    } else {
+        CommandInvocation::new(
+            "terminal.create_tab",
+            vec![argv, cwd.unwrap_or_default()],
+            invocation.caller,
+        )
+    };
+    // A named request keeps the caller's captured host through preparation and backend creation.
+    create.target = if login_session {
+        context.binding.clone()
+    } else if name.is_some() {
+        invocation.target.clone()
+    } else {
+        context.session.clone()
+    };
+    create
+}
+
 fn start_terminal(
     service: &Arc<TerminalAgentService>,
     commands: &Arc<dyn AgentCommandExecutor>,
     invocation: &CommandInvocation,
     operation: (AgentKind, &str),
-    mut launch: AgentLaunch,
+    launch: AgentLaunch,
     context: LaunchContext,
     execution: (Instant, CommandCancellation),
 ) -> CommandOutcome {
@@ -976,109 +1107,41 @@ fn start_terminal(
         return CommandOutcome::Unsupported { message: "Account directory selection requires a local terminal; remote accounts remain owned by their host".to_owned() };
     }
     if operation == "resume"
-        && let Some(session) = invocation.arguments.first()
-        && let Some(target) = service.live_session(
+        && let Some(outcome) = reuse_live_session(
+            service,
+            commands,
+            invocation,
             provider,
-            session,
-            &context.binding_id,
-            launch.account_directory.as_deref(),
+            &context,
+            &launch,
+            (deadline, cancellation.clone()),
         )
     {
-        let mut focus = CommandInvocation::from_action("agents.focus", invocation.caller);
-        focus.target = Some(target.clone());
-        return match commands.execute(focus, deadline, cancellation) {
-            CommandOutcome::Success { warnings, .. } => CommandOutcome::Success {
-                value: serde_json::json!({"terminal": target, "reused": true}),
-                warnings,
-            },
-            outcome => outcome,
-        };
+        return outcome;
     }
-    // A private app-server must not become the owner of a persistent backend's Codex turn.
-    let persistent_codex = provider == AgentKind::Codex && !context.process_local;
-    let (tools, tools_warning) = launch_tools(
+    let (prepared, tools_warning) = match prepare_terminal_launch(
+        service,
         commands,
         invocation,
-        provider,
-        operation,
+        (provider, operation),
         &context,
-        &mut launch,
-    );
-    let unobserved = (context.remote || account || persistent_codex).then(|| {
-        if account {
-            "Account command uses the provider's own terminal"
-        } else if context.remote {
-            "Native activity observation needs a supported remote host bridge"
-        } else {
-            "Codex runs directly in this persistent terminal; app-owned observation is unavailable"
-        }
-        .to_owned()
-    });
-    let prepared = if context.remote {
-        TerminalAgentService::prepare_remote(provider, launch)
-    } else if let Some(tools) = tools {
-        service.prepare_with_tools(provider, launch, tools, unobserved)
-    } else if let Some(detail) = unobserved {
-        TerminalAgentService::prepare_unobserved(provider, launch, detail)
-    } else {
-        service.prepare(provider, launch)
-    };
-    let prepared = match prepared {
+        launch,
+    ) {
         Ok(prepared) => prepared,
         Err(error) => return failure(&error),
     };
-    let prepared_argv = if context.remote {
-        prepared.argv_for_shell(bootty_agents::LaunchShell::Posix)
-    } else {
-        prepared.argv()
-    };
-    let argv = match prepared_argv
-        .and_then(|argv| serde_json::to_string(&argv).map_err(|error| error.to_string()))
-    {
+    let argv = match launch_argv(&prepared, context.remote) {
         Ok(argv) => argv,
         Err(error) => return failure(&error),
     };
-    let login_session = operation == "account.login" && context.session.is_none();
-    let mut create = if login_session {
-        let identity = bootty_mux::snapshot::new_session_identity();
-        CommandInvocation::new(
-            "session.create",
-            vec![
-                format!("sign-in-{identity}"),
-                prepared.launch.cwd.clone().unwrap_or_default(),
-                argv,
-                identity,
-                format!("Sign in to {}", provider.display_name()),
-            ],
-            invocation.caller,
-        )
-    } else if operation == "pane" {
-        pane::create_invocation(invocation, &context, argv, prepared.launch.cwd.clone())
-    } else if let Some(name) = name {
-        let mut arguments = vec![
-            name.clone(),
-            prepared.launch.cwd.clone().unwrap_or_default(),
-            argv,
-        ];
-        arguments.extend(invocation.arguments.iter().skip(5).take(2).cloned());
-        CommandInvocation::new("session.create", arguments, invocation.caller)
-    } else {
-        CommandInvocation::new(
-            "terminal.create_tab",
-            vec![argv, prepared.launch.cwd.clone().unwrap_or_default()],
-            invocation.caller,
-        )
-    };
-    // A named request keeps the caller's captured host through preparation and backend creation.
-    if operation != "pane" {
-        create.target = if login_session {
-            context.binding.clone()
-        } else if name.is_some() {
-            invocation.target.clone()
-        } else {
-            context.session
-        };
-    }
+    let create = terminal_creation(
+        invocation,
+        (provider, operation),
+        &context,
+        name,
+        prepared.launch.cwd.clone(),
+        argv,
+    );
     let outcome = commands.execute(create, deadline, cancellation.clone());
     let CommandOutcome::Success {
         mut value,

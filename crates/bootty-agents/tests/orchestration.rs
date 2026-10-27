@@ -1,5 +1,5 @@
 use std::{fs, path::PathBuf};
-mod support;
+pub mod support;
 
 use bootty_agents::{
     AgentKind, AgentLaunch, AgentPrompt, MAX_RUN_FILE_BYTES, OrchestrationContext,

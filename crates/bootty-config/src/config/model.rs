@@ -442,7 +442,6 @@ pub struct TabConfig {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct ChromeConfig {
     pub left_dock_toggle: bool,
     pub right_dock_toggle: bool,
@@ -475,10 +474,6 @@ pub struct ChromeConfig {
 /// Sidebar placement and color overrides. Colors layer on top of the active theme; an unset slot
 /// falls back to the theme-derived value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Each flag is an independent sidebar preference"
-)]
 pub struct SidebarConfig {
     pub group_by_project: bool,
     /// The Settled shelf shows only its heading.

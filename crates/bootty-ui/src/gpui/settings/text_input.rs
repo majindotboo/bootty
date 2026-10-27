@@ -1,6 +1,6 @@
 //! Settings and remote-profile text input lifecycle.
 
-use super::{model::SettingsIntent, window::GpuiSettings};
+use super::{components::ValueRow, model::SettingsIntent, window::GpuiSettings};
 use gpui_kit::Role;
 use gpui_kit::component::{
     Sizable as _, Size,
@@ -15,7 +15,7 @@ use gpui_kit::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TextControlTarget {
+pub(super) enum TextControlTarget {
     Setting(String),
     Remote {
         profile_id: String,
@@ -147,20 +147,22 @@ impl TextControlState {
 }
 
 impl GpuiSettings {
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_setting_text_control(
-        id: &str,
-        label: &str,
-        help: &str,
-        value: &str,
+        row: ValueRow<'_>,
         placeholder: &str,
-        enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let ValueRow {
+            id,
+            label,
+            help,
+            value,
+            enabled,
+        } = row;
         let input = TextControlState::input(
             TextControlTarget::Setting(id.to_owned()),
-            value,
+            value.as_str().unwrap_or_default(),
             placeholder,
             window,
             cx,
@@ -187,28 +189,16 @@ impl GpuiSettings {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_remote_text_field(
-        profile_id: String,
-        field_id: String,
+        target: TextControlTarget,
         selector: String,
         aria_label: String,
         value: &str,
         placeholder: &str,
-        enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let input = TextControlState::input(
-            TextControlTarget::Remote {
-                profile_id,
-                field_id,
-            },
-            value,
-            placeholder,
-            window,
-            cx,
-        );
+        let input = TextControlState::input(target, value, placeholder, window, cx);
         let debug_selector = selector.clone();
         let escape_owner = cx.entity();
         div()
@@ -231,7 +221,6 @@ impl GpuiSettings {
                     .context_menu(crate::gpui::text_menu(&input))
                     .aria_label(aria_label)
                     .role(Role::TextInput)
-                    .disabled(!enabled)
                     .with_size(Size::Medium)
                     .w_full(),
             ))

@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Account-scoped file reads preserve bounds and revisions without loading whole histories.
 use assert_fs::prelude::*;
 use bootty_host::{
@@ -71,10 +72,6 @@ fn account_history_rejects_symlinks_and_non_regular_sources() {
 }
 
 /// Appends a line to `file` the way an agent extends its transcript.
-#[expect(
-    clippy::unwrap_used,
-    reason = "Fixture writes require the temporary file"
-)]
 fn append(file: &assert_fs::fixture::ChildPath, text: &str) {
     use std::io::Write as _;
     std::fs::OpenOptions::new()

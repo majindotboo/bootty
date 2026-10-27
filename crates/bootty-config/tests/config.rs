@@ -1,6 +1,3 @@
-#![allow(clippy::needless_raw_string_hashes)]
-#![allow(clippy::float_cmp)]
-
 use assert_fs::prelude::*;
 use bootty_config::FontFeature;
 use bootty_config::color::Color;
@@ -53,8 +50,9 @@ fn default_font_keeps_the_established_terminal_baseline() {
         load_config_source("")
             .expect("valid config")
             .font
-            .baseline_adjustment,
-        0.0
+            .baseline_adjustment
+            .to_bits(),
+        0.0_f32.to_bits()
     );
 }
 
@@ -64,9 +62,8 @@ fn default_fonts_match_zed() {
     let font = config.font;
 
     assert_eq!(font.family, [".ZedMono"]);
-    assert_eq!(font.size, 15.0);
     assert_eq!(font.ui_family, [".ZedSans"]);
-    assert_eq!(font.ui_size, 16.0);
+    assert_eq!((font.size, font.ui_size), (15.0, 16.0));
     assert_eq!(font.features, Vec::<FontFeature>::new());
     assert_eq!(config.cursor.style, Some(CursorStyleConfig::Block));
     assert_eq!(config.cursor.blink, None);
@@ -78,8 +75,9 @@ fn ui_font_size_is_typed_and_loadable() {
         load_config_source("[font]\nui-size = 18\n")
             .expect("valid config")
             .font
-            .ui_size,
-        18.0
+            .ui_size
+            .to_bits(),
+        18.0_f32.to_bits()
     );
 }
 
@@ -306,11 +304,11 @@ fn sidebar_modules_default_and_override_in_order() {
 
     // An empty list keeps the defaults: a sidebar with no modules has no session list at all, so
     // an empty one only ever means the file was damaged.
-    let emptied = load_config_source(indoc! {r#"
+    let emptied = load_config_source(indoc! {r"
         [sidebar]
         modules = []
         session-modules = []
-    "#})
+    "})
     .expect("valid config");
     assert_eq!(emptied.sidebar.modules, defaults.sidebar.modules);
     assert_eq!(
@@ -344,8 +342,7 @@ fn included_file_overrides_containing_file_without_dropping_base_keys() {
     let config = sandbox.load().unwrap();
 
     assert_eq!(config.window.title, "local");
-    assert_eq!(config.window.width, 1000.0);
-    assert_eq!(config.window.height, 640.0);
+    assert_eq!((config.window.width, config.window.height), (1000.0, 640.0));
 }
 
 #[test]
@@ -870,8 +867,7 @@ fn documented_sample_config_loads() {
 #[rstest]
 fn chrome_regions_are_flush_and_terminal_surfaces_match_by_default() {
     let chrome = BoottyConfig::default().chrome;
-    assert_eq!(chrome.gap, 0.0);
-    assert_eq!(chrome.unfocused_terminal_dim, 0.0);
+    assert_eq!((chrome.gap, chrome.unfocused_terminal_dim), (0.0, 0.0));
 }
 
 /// Chrome keys an earlier version read still load, and change nothing: the status bar has one

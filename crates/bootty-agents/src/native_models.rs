@@ -5,10 +5,6 @@ use crate::{AgentKind, NativeAgentSession, NativePermissionMode, native_protocol
 
 /// Provider-advertised choices. IDs are wire selectors, never display labels.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Default, legacy, favorite and speed capability vary independently"
-)]
 pub struct NativeModelOption {
     pub id: String,
     pub display_name: String,

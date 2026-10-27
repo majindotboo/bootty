@@ -21,7 +21,7 @@ use std::{
 
 #[path = "support/idle_frames.rs"]
 mod frames;
-mod support;
+pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 

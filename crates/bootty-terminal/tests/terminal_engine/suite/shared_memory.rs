@@ -1,4 +1,4 @@
-#![allow(
+#![expect(
     unsafe_code,
     reason = "POSIX shared-memory input tests need a real named mmap fixture; pointers and descriptors stay inside this owner."
 )]

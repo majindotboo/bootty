@@ -102,10 +102,6 @@ impl PartialEq for TerminalPresentation {
 const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(700);
 
 /// Stateful terminal presentation and input owner, following Zed's `TerminalView` boundary.
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Focus, cursor animation, and frame dirtiness are independent presentation state."
-)]
 pub struct GpuiTerminalView {
     focus: FocusHandle,
     adapter: GpuiTerminalAdapter,
@@ -711,17 +707,17 @@ impl Render for GpuiTerminalView {
         };
         // Keep the normal scene current: it owns transition placeholders and provides
         // the current frame while a cold zoom resolution is being prepared.
-        let base = self.adapter.element(
-            presentation.surface,
-            &presentation.frame,
-            presentation.text_contract.config.font_size,
-            presentation.text_cell_height,
-            presentation.pixels_per_point,
-            &presentation.text_contract,
-            blink,
+        let base = self.adapter.element(crate::gpui::TerminalElementRequest {
+            surface: presentation.surface,
+            frame: &presentation.frame,
+            font_size: presentation.text_contract.config.font_size,
+            text_cell_height: presentation.text_cell_height,
+            pixels_per_point: presentation.pixels_per_point,
+            text_contract: &presentation.text_contract,
+            cursor_blink_phase: blink,
             cursor_focused,
-            &self.marked_text,
-        );
+            marked_text: &self.marked_text,
+        });
         for image in self.adapter.take_retired_images() {
             cx.drop_image(image, Some(window));
         }

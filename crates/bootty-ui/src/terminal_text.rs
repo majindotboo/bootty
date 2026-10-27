@@ -269,10 +269,6 @@ impl FontStyle {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Terminal sprite families are independent policy switches."
-)]
 pub struct NativeSymbolPolicy {
     blocks: bool,
     shades: bool,

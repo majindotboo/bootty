@@ -343,21 +343,12 @@ impl TabScrollState {
 }
 
 impl RenderOnce for ScrollableTabBar {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "one tab-strip layout owns the notch split and the new-tab affordance"
-    )]
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state = window.use_keyed_state(self.id.clone(), cx, |_, _| TabScrollState::default());
         let selected = self
             .selected
             .and_then(|ix| self.tabs.get(ix).map(|tab| (tab.id.clone(), ix)));
-        let focused = self.tabs.iter().enumerate().find_map(|(ix, tab)| {
-            tab.focus
-                .as_ref()
-                .filter(|focus| focus.is_focused(window))
-                .map(|_| (tab.id.clone(), ix))
-        });
+        let focused = focused_tab(&self.tabs, window);
         let (mut tabs, widths) =
             state.update(cx, |state, cx| state.size_tabs(self.tabs, window, cx));
         let gap = tab_gap(self.config.appearance);
@@ -394,16 +385,19 @@ impl RenderOnce for ScrollableTabBar {
             gpui_kit::Empty.into_any_element()
         };
         let second_tabs = tabs.split_off(first_count);
+        let style = BarStyle {
+            config: self.config,
+            background: self.background,
+            rem,
+        };
         let first_row = notch.filter(|notch| notch.wrap).map(|notch| {
             let bar = make_bar(
+                style,
                 format!("{}-first", self.id).into(),
-                self.config,
-                self.background,
                 tabs,
                 self.selected.filter(|ix| *ix < first_count),
                 None,
                 first_end,
-                rem,
             )
             .w(px(first_width))
             .flex_none();
@@ -416,14 +410,12 @@ impl RenderOnce for ScrollableTabBar {
             end
         };
         let bar = make_bar(
+            style,
             self.id.clone(),
-            self.config,
-            self.background,
             second_tabs,
             self.selected.and_then(|ix| ix.checked_sub(first_count)),
             Some(&scroll),
             scroll_end,
-            rem,
         );
         let scroll_row = ScrollRow {
             id: self.id,
@@ -437,16 +429,7 @@ impl RenderOnce for ScrollableTabBar {
         // of clipping it behind the cutout.
         let notch_plus = notch
             .filter(|_| wrap && all_in_first_row && !plus_fits_first_row && plus.is_some())
-            .map(|notch| {
-                div()
-                    .absolute()
-                    .top_0()
-                    .left(px(notch.right_edge))
-                    .h(px(notch.height))
-                    .flex()
-                    .items_center()
-                    .child(take_or_empty(&mut plus))
-            });
+            .map(|notch| beside_notch(notch, take_or_empty(&mut plus)));
         div()
             .flex()
             .flex_col()
@@ -456,28 +439,20 @@ impl RenderOnce for ScrollableTabBar {
             .when(notch.is_none(), Styled::h_full)
             .children(first_row)
             .when(has_scrolling_row, |column| {
-                column.child(
-                    div()
-                        .w_full()
-                        .min_w_0()
-                        .when(notch.is_none(), Styled::h_full)
-                        .when_some(notch, |row, notch| {
-                            row.h(px(notch.height))
-                                .when(!notch.wrap, |row| row.pl(px(notch.inset)))
-                        })
-                        .child(
-                            div()
-                                .h_full()
-                                .min_w_0()
-                                .when_some(notch.filter(|notch| !notch.wrap), |row, notch| {
-                                    row.w(px(notch.width))
-                                })
-                                .child(scroll_row),
-                        ),
-                )
+                column.child(scrolling_row(notch, scroll_row))
             })
             .children(notch_plus)
     }
+}
+
+/// The tab whose focus handle holds the window's focus, and where it sits.
+fn focused_tab(tabs: &[ScrollableTab], window: &Window) -> Option<(String, usize)> {
+    tabs.iter().enumerate().find_map(|(ix, tab)| {
+        tab.focus
+            .as_ref()
+            .filter(|focus| focus.is_focused(window))
+            .map(|_| (tab.id.clone(), ix))
+    })
 }
 
 // Keep spacing stable across appearance changes; each tab is one logical scroll child.
@@ -509,17 +484,60 @@ fn end_with_plus(plus: AnyElement, end: AnyElement) -> AnyElement {
         .into_any_element()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn make_bar(
-    id: SharedString,
+/// The new-tab affordance, right of the camera cutout.
+fn beside_notch(notch: NotchTabLayout, plus: AnyElement) -> gpui_kit::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left(px(notch.right_edge))
+        .h(px(notch.height))
+        .flex()
+        .items_center()
+        .child(plus)
+}
+
+/// The scrolling row, under the cutout when the first row wraps and inset beside it otherwise.
+fn scrolling_row(notch: Option<NotchTabLayout>, scroll_row: ScrollRow) -> gpui_kit::Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .when(notch.is_none(), Styled::h_full)
+        .when_some(notch, |row, notch| {
+            row.h(px(notch.height))
+                .when(!notch.wrap, |row| row.pl(px(notch.inset)))
+        })
+        .child(
+            div()
+                .h_full()
+                .min_w_0()
+                .when_some(notch.filter(|notch| !notch.wrap), |row, notch| {
+                    row.w(px(notch.width))
+                })
+                .child(scroll_row),
+        )
+}
+
+/// What both rows of a tab bar share: its tab configuration, background and text size.
+#[derive(Clone, Copy)]
+struct BarStyle {
     config: TabConfig,
     background: Hsla,
+    rem: f32,
+}
+
+fn make_bar(
+    style: BarStyle,
+    id: SharedString,
     tabs: Vec<Tab>,
     selected: Option<usize>,
     scroll: Option<&ScrollHandle>,
     end: AnyElement,
-    rem: f32,
 ) -> Tabs {
+    let BarStyle {
+        config,
+        background,
+        rem,
+    } = style;
     let count = tabs.len();
     Tabs::new(id)
         .flex()

@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use bootty_ui::gpui::TerminalElementRequest;
 use std::sync::Arc;
 
 use bootty_terminal::geometry::{CellMetrics, SurfaceRect, TerminalPadding, TerminalSurface};
@@ -59,17 +60,17 @@ fn kitty_placements_reuse_one_prepared_crop_across_placement_ids() {
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
 
-    let element = adapter.element(
+    let element = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
     assert_eq!(element.limits(), []);
     drop(element);
 

@@ -427,10 +427,6 @@ impl XtermColorOverrides {
         self.slot(code).and_then(Option::take).is_some()
     }
 }
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "VT protocol modes and cache invalidation flags vary independently."
-)]
 pub struct TerminalEngine {
     terminal: Terminal<'static, 'static>,
     base_color_palette: crate::terminal_palette::Palette,

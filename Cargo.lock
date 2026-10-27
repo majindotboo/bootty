@@ -1011,6 +1011,7 @@ dependencies = [
  "atspi-proxies",
  "base64 0.23.1",
  "block2 0.6.2",
+ "num-traits",
  "objc2 0.6.5",
  "objc2-app-kit 0.3.2",
  "objc2-core-foundation",

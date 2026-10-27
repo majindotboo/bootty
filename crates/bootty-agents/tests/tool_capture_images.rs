@@ -1,3 +1,4 @@
+#![cfg(test)]
 use std::{
     sync::{Arc, Mutex},
     time::Instant,
@@ -25,10 +26,6 @@ fn target(kind: ResourceKind) -> CommandTarget {
 }
 
 #[fixture]
-#[allow(
-    clippy::unwrap_used,
-    reason = "Fixture issues and binds a known valid exact host authority"
-)]
 fn lease() -> ToolLease {
     let mut invocation = CommandInvocation::new("computer.capture", Vec::new(), Caller::Internal);
     invocation.target = Some(target(ResourceKind::ApplicationWindow));
@@ -57,10 +54,6 @@ fn lease() -> ToolLease {
     lease
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "Fixture encodes fixed bounded PNG dimensions and pixels"
-)]
 fn image(width: u32, height: u32) -> Value {
     let mut bytes = Vec::new();
     {
@@ -89,10 +82,6 @@ const fn receipt(value: Value) -> CommandOutcome {
     }
 }
 
-#[expect(
-    clippy::unwrap_used,
-    reason = "Fixture serializes a valid request and requires its response"
-)]
 fn call(lease: &ToolLease, name: &str, executor: &dyn AgentCommandExecutor) -> Value {
     let request = serde_json::to_vec(
         &json!({"jsonrpc":"2.0","id":"\u{0001}".repeat(128),"method":"tools/call",

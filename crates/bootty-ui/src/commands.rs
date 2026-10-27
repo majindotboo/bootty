@@ -361,11 +361,13 @@ impl CommandRegistry {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One finite registry defines navigation and composer commands"
-)]
 fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
+    register_sidebar_commands(commands);
+    register_picker_commands(commands);
+    register_composer_commands(commands);
+}
+
+fn register_sidebar_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
     for action in SidebarAction::ALL {
         let descriptor = sidebar_descriptor(action);
         commands.insert(
@@ -376,38 +378,44 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
             },
         );
     }
-    for (action, name, title, description) in [
-        (
-            CommandAction::Previous,
-            "previous",
-            "Previous Command Item",
-            "Select the previous item in the active palette or picker.",
-        ),
-        (
-            CommandAction::Next,
-            "next",
-            "Next Command Item",
-            "Select the next item in the active palette or picker.",
-        ),
-        (
-            CommandAction::Confirm,
-            "confirm",
-            "Confirm Command Item",
-            "Activate the selected item in the active palette or picker.",
-        ),
-        (
-            CommandAction::Cancel,
-            "cancel",
-            "Close Command Picker",
-            "Close the active palette or picker.",
-        ),
-        (
-            CommandAction::ToggleFavorite,
-            "toggle_favorite",
-            "Toggle Directory Favorite",
-            "Toggle the selected directory's favorite state.",
-        ),
-    ] {
+}
+
+/// Palette and picker navigation: action, command name, title and description.
+const PICKER_COMMANDS: [(CommandAction, &str, &str, &str); 5] = [
+    (
+        CommandAction::Previous,
+        "previous",
+        "Previous Command Item",
+        "Select the previous item in the active palette or picker.",
+    ),
+    (
+        CommandAction::Next,
+        "next",
+        "Next Command Item",
+        "Select the next item in the active palette or picker.",
+    ),
+    (
+        CommandAction::Confirm,
+        "confirm",
+        "Confirm Command Item",
+        "Activate the selected item in the active palette or picker.",
+    ),
+    (
+        CommandAction::Cancel,
+        "cancel",
+        "Close Command Picker",
+        "Close the active palette or picker.",
+    ),
+    (
+        CommandAction::ToggleFavorite,
+        "toggle_favorite",
+        "Toggle Directory Favorite",
+        "Toggle the selected directory's favorite state.",
+    ),
+];
+
+fn register_picker_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
+    for (action, name, title, description) in PICKER_COMMANDS {
         let id = format!("ui.command.{name}");
         commands.insert(
             id.clone(),
@@ -425,61 +433,69 @@ fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredComman
             },
         );
     }
-    for (name, action, title) in [
-        (
-            "previous",
-            CommandAction::Previous,
-            "Previous Composer Suggestion",
-        ),
-        ("next", CommandAction::Next, "Next Composer Suggestion"),
-        (
-            "confirm",
-            CommandAction::Confirm,
-            "Insert Composer Suggestion",
-        ),
-        (
-            "cancel",
-            CommandAction::Cancel,
-            "Dismiss Composer Suggestions",
-        ),
-        (
-            "effort-down",
-            CommandAction::EffortDown,
-            "Decrease thinking effort",
-        ),
-        (
-            "effort-up",
-            CommandAction::EffortUp,
-            "Increase thinking effort",
-        ),
-        ("dictate", CommandAction::Dictate, "Dictate into composer"),
-        ("voice", CommandAction::Voice, "Toggle voice mode"),
-        ("toggle-plan", CommandAction::TogglePlan, "Toggle plan mode"),
-        ("toggle-fast", CommandAction::ToggleFast, "Toggle fast mode"),
-        (
-            "focus-composer",
-            CommandAction::FocusComposer,
-            "Focus composer",
-        ),
-        ("stash", CommandAction::Stash, "Stash or restore prompt"),
-        (
-            "expand",
-            CommandAction::Expand,
-            "Expand or shrink the composer",
-        ),
-    ]
-    .into_iter()
-    .chain(
-        crate::gpui::ComposerControl::ALL
+}
+
+/// Composer controls and completion menu commands: name, action and title.
+const COMPOSER_COMMANDS: [(&str, CommandAction, &str); 13] = [
+    (
+        "previous",
+        CommandAction::Previous,
+        "Previous Composer Suggestion",
+    ),
+    ("next", CommandAction::Next, "Next Composer Suggestion"),
+    (
+        "confirm",
+        CommandAction::Confirm,
+        "Insert Composer Suggestion",
+    ),
+    (
+        "cancel",
+        CommandAction::Cancel,
+        "Dismiss Composer Suggestions",
+    ),
+    (
+        "effort-down",
+        CommandAction::EffortDown,
+        "Decrease thinking effort",
+    ),
+    (
+        "effort-up",
+        CommandAction::EffortUp,
+        "Increase thinking effort",
+    ),
+    ("dictate", CommandAction::Dictate, "Dictate into composer"),
+    ("voice", CommandAction::Voice, "Toggle voice mode"),
+    ("toggle-plan", CommandAction::TogglePlan, "Toggle plan mode"),
+    ("toggle-fast", CommandAction::ToggleFast, "Toggle fast mode"),
+    (
+        "focus-composer",
+        CommandAction::FocusComposer,
+        "Focus composer",
+    ),
+    ("stash", CommandAction::Stash, "Stash or restore prompt"),
+    (
+        "expand",
+        CommandAction::Expand,
+        "Expand or shrink the composer",
+    ),
+];
+
+fn register_composer_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
+    for (name, action, title) in
+        COMPOSER_COMMANDS
             .into_iter()
-            .map(|control| {
-                (
-                    control.command(),
-                    CommandAction::Focus(control),
-                    control.title(),
-                )
-            }),
-    ) {
+            .chain(
+                crate::gpui::ComposerControl::ALL
+                    .into_iter()
+                    .map(|control| {
+                        (
+                            control.command(),
+                            CommandAction::Focus(control),
+                            control.title(),
+                        )
+                    }),
+            )
+    {
         let id = format!("ui.composer.{name}");
         commands.insert(
             id.clone(),

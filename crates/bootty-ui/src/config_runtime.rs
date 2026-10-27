@@ -35,7 +35,6 @@ pub struct AcceptedConfigChange {
     pub(super) compatibility_warning: Option<String>,
 }
 
-#[allow(clippy::float_cmp)]
 fn new_session_only_config_changed(previous: &BoottyConfig, next: &BoottyConfig) -> bool {
     previous.session.shell != next.session.shell
         || previous.session.working_directory != next.session.working_directory
@@ -45,8 +44,8 @@ fn new_session_only_config_changed(previous: &BoottyConfig, next: &BoottyConfig)
         || previous.session.max_scrollback != next.session.max_scrollback
         || previous.restore_on_startup != next.restore_on_startup
         || previous.on_last_window_closed != next.on_last_window_closed
-        || previous.window.width != next.window.width
-        || previous.window.height != next.window.height
+        || previous.window.width.to_bits() != next.window.width.to_bits()
+        || previous.window.height.to_bits() != next.window.height.to_bits()
         || previous.window.window_decoration != next.window.window_decoration
         || previous.window.macos_titlebar_style != next.window.macos_titlebar_style
 }
@@ -142,10 +141,6 @@ impl AppConfigRuntime {
         Ok((self.project_change(&change, appearance), document, outcome))
     }
 
-    #[expect(
-        clippy::float_cmp,
-        reason = "Accepted configuration values are compared exactly to detect edits."
-    )]
     fn project_change(
         &mut self,
         change: &ConfigChange,
@@ -162,8 +157,8 @@ impl AppConfigRuntime {
             .then(|| next.font.ui_families().to_vec());
         let ui_font_weights = (previous.font.ui_weights != next.font.ui_weights)
             .then(|| next.font.ui_weights.clone());
-        let ui_font_size =
-            (previous.font.ui_size != next.font.ui_size).then_some(next.font.ui_size);
+        let ui_font_size = (previous.font.ui_size.to_bits() != next.font.ui_size.to_bits())
+            .then_some(next.font.ui_size);
         let window_title =
             (previous.window.title != next.window.title).then(|| next.window.title.clone());
         // `fullscreen-enabled` is a launch preference. Editing it must not enter or leave

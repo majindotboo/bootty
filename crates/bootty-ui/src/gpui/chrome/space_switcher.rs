@@ -15,20 +15,19 @@ use gpui_kit::component::{
 const BUTTON_SIZE: f32 = 28.0;
 const BUTTON_GAP: f32 = 4.0;
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Render captured Space and shortcut projections together"
-)]
 pub(super) fn render(
-    spaces: &[SpaceSnapshot],
-    transition: Option<SpaceTransition>,
-    height: f32,
+    chrome: super::sidebar::SidebarChrome<'_>,
     background: Rgba,
-    colors: ChromePalette,
-    navigation_hints: &[(String, gpui_kit::Keystroke)],
-    hint_modifiers: gpui_kit::Modifiers,
     cx: &Context<GpuiChrome>,
 ) -> gpui_kit::AnyElement {
+    let super::sidebar::SidebarChrome {
+        spaces,
+        transition,
+        colors,
+        navigation_hints,
+        hint_modifiers,
+        ..
+    } = chrome;
     let controls_min_width = px((spaces.len().to_f32().unwrap_or(f32::MAX)).mul_add(
         BUTTON_GAP,
         (spaces.len().to_f32().unwrap_or(f32::MAX) + 1.0) * BUTTON_SIZE,
@@ -52,7 +51,7 @@ pub(super) fn render(
         .id("bootty-gpui-space-switcher")
         .debug_selector(|| "bootty-gpui-space-switcher".to_owned())
         .flex_none()
-        .h(px(height))
+        .h(px(super::sidebar::SPACE_SWITCHER_HEIGHT))
         .w_full()
         .p_1()
         .overflow_x_scroll()

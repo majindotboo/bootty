@@ -256,27 +256,29 @@ pub fn flush_all(limit: Duration) -> Result<(), String> {
 
 /// Ask `shared` to write its newest state at once and wait for the attempt until `deadline`.
 /// Returns why the newest state is not on disk, if it is not.
-#[expect(
-    clippy::significant_drop_tightening,
-    reason = "the guard sets the flush request and must stay held into the condvar wait"
-)]
 fn flush_one(shared: &Shared, deadline: Instant) -> Option<String> {
-    let mut slot = lock(&shared.slot);
-    if slot.saved >= slot.submitted {
-        return None;
-    }
-    slot.flush = true;
-    shared.wake.notify_all();
     let remaining = deadline.saturating_duration_since(Instant::now());
     let (slot, _) = shared
         .wake
-        .wait_timeout_while(slot, remaining, |slot| slot.flush)
+        .wait_timeout_while(request_flush(shared)?, remaining, |slot| slot.flush)
         .unwrap_or_else(PoisonError::into_inner);
     (slot.saved < slot.submitted).then(|| {
         slot.error
             .clone()
             .unwrap_or_else(|| format!("{}: not written before shutdown", shared.path.display()))
     })
+}
+
+/// Ask the writer for the newest state at once, keeping the slot locked for the wait. `None`
+/// when the newest state is already on disk.
+fn request_flush(shared: &Shared) -> Option<MutexGuard<'_, Slot>> {
+    let mut slot = lock(&shared.slot);
+    if slot.saved >= slot.submitted {
+        return None;
+    }
+    slot.flush = true;
+    shared.wake.notify_all();
+    Some(slot)
 }
 
 fn write_forever(shared: &Shared) {
@@ -315,26 +317,26 @@ fn retry_delay(failures: u32) -> Duration {
 
 /// Wait until a snapshot newer than disk exists, let a burst settle for `delay` unless a flush
 /// is requested, then take the newest.
-#[expect(
-    clippy::significant_drop_tightening,
-    reason = "the guard must stay held across both condvar waits; it drops right after the take"
-)]
 fn next_snapshot(shared: &Shared, delay: Duration) -> (Arc<Snapshot>, u64) {
     loop {
-        let unsaved = shared
-            .wake
-            .wait_while(lock(&shared.slot), |slot| {
-                slot.saved >= slot.submitted || slot.latest.is_none()
-            })
-            .unwrap_or_else(PoisonError::into_inner);
         let (settled, _) = shared
             .wake
-            .wait_timeout_while(unsaved, delay, |slot| !slot.flush)
+            .wait_timeout_while(unsaved(shared), delay, |slot| !slot.flush)
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(snapshot) = settled.latest.clone() {
             return (snapshot, settled.submitted);
         }
     }
+}
+
+/// The slot, locked once it holds a snapshot newer than disk.
+fn unsaved(shared: &Shared) -> MutexGuard<'_, Slot> {
+    shared
+        .wake
+        .wait_while(lock(&shared.slot), |slot| {
+            slot.saved >= slot.submitted || slot.latest.is_none()
+        })
+        .unwrap_or_else(PoisonError::into_inner)
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {

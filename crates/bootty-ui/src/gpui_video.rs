@@ -91,7 +91,7 @@ impl Playback {
         })
     }
 
-    #[allow(
+    #[expect(
         unsafe_code,
         reason = "Retain the same Core Video object in GPUI's wrapper"
     )]

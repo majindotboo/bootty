@@ -36,10 +36,6 @@ pub struct GitPanelContext {
     pub remote: Option<bootty_config::config::RemoteConfig>,
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Panel visibility, read requests and mutations vary independently"
-)]
 pub struct GitChangesPanel {
     host_visible: bool,
     context: GitPanelContext,

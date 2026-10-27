@@ -1,11 +1,8 @@
 use std::hint::black_box;
 
 use anyhow::{Result, anyhow};
-
-mod paint_plan_fixtures;
-
 use bootty_config::config::{BoottyConfig, MultiplexerBackendConfig};
-use bootty_terminal::geometry::TerminalSurface;
+use bootty_terminal::geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface};
 use bootty_terminal::{
     terminal_engine::TerminalEngine,
     terminal_input_model::{KeyInput, KeyMods, TerminalKey},
@@ -20,7 +17,6 @@ use bootty_ui::{
     terminal_text::{TerminalTextConfig, TerminalTextContract},
 };
 use criterion::Criterion;
-use paint_plan_fixtures::{surface_for, terminal_engine};
 
 const PANE_COUNTS: [usize; 4] = [1, 4, 16, 64];
 const TAB_COUNTS: [usize; 3] = [1, 8, 32];
@@ -691,4 +687,22 @@ fn main() -> Result<()> {
     criterion.final_summary();
     drop(criterion);
     Ok(())
+}
+
+fn terminal_engine(cols: u16, rows: u16) -> Result<TerminalEngine> {
+    TerminalEngine::new(TerminalGeometry {
+        cols,
+        rows,
+        cell_width: 9,
+        cell_height: 22,
+    })
+}
+
+fn surface_for(cols: u16, rows: u16) -> TerminalSurface {
+    TerminalSurface::for_logical_size(
+        f32::mul_add(f32::from(cols), 9.0, 20.0),
+        f32::mul_add(f32::from(rows), 22.0, 20.0),
+        CellMetrics::new(9.0, 22.0),
+        TerminalPadding::uniform(10.0),
+    )
 }

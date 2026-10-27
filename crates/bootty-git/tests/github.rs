@@ -53,10 +53,6 @@ fn ambiguous_remotes_are_rejected(#[case] remote: &str) {
     assert!(GitHubRepository::from_remote(remote).is_err());
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Independent host failure and permission scenarios"
-)]
 #[derive(Default)]
 struct Host {
     writes: Rc<RefCell<Vec<Value>>>,

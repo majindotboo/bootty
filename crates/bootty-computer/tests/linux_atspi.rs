@@ -1,13 +1,8 @@
+#![cfg(test)]
 #![cfg(target_os = "linux")]
-#![allow(
-    clippy::unwrap_used,
-    clippy::panic,
-    reason = "Fixture failures must fail the test immediately."
-)]
-#![allow(
+#![expect(
     clippy::unused_self,
-    clippy::missing_const_for_fn,
-    reason = "D-Bus fixture methods must use interface method signatures."
+    reason = "zbus interface methods take &self even when the fixture object answers with a constant."
 )]
 
 use std::{
@@ -72,10 +67,6 @@ fn adapter_semantics() {
 }
 
 #[derive(Default)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Independent fixture failure modes are toggled by the acceptance scenario."
-)]
 struct Values {
     text: String,
     presses: usize,

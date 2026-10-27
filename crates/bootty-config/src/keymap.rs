@@ -27,7 +27,6 @@ pub enum KeymapModifierSide {
 
 /// Modifier state used by keymap matching. Side constraints are optional so a binding can match
 /// either a particular physical modifier or the aggregate modifier.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct KeymapModifiers {
     pub shift: bool,
@@ -520,7 +519,6 @@ fn set_sided_modifier(
 }
 
 /// Flags attached to a keymap sequence.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KeymapBindingFlags {
     pub consumed: bool,

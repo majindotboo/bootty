@@ -126,10 +126,6 @@ proptest! {
 }
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Generate independent saved flags to prove restoration preserves every combination"
-)]
 struct SavedStateSeed {
     settled: bool,
     pinned: bool,

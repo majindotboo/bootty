@@ -63,7 +63,7 @@ use crate::{
     },
     keymap_runtime::KeymapFocus,
     settings_runtime::SettingsRuntime,
-    state::{AppEffect, AppState, ViewportSnapshot},
+    state::{AppEffect, AppState, UiFontEffect, ViewportSnapshot, WindowEffect},
     terminal_config::terminal_text_config,
 };
 
@@ -212,10 +212,6 @@ struct TerminalHit {
 }
 
 /// Root GPUI entity for one Bootty window.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Window focus, panel visibility, and modal lifetimes vary independently"
-)]
 pub struct GpuiWorkspace {
     state: AppState,
     workspace_bounds: Bounds<Pixels>,
@@ -802,7 +798,7 @@ impl GpuiWorkspace {
                     let _ = workspace.update(cx, |workspace, cx| {
                         workspace
                             .state
-                            .record_error("Could not open a Bootty window", error);
+                            .record_error("Could not open a Bootty window", &error);
                         cx.notify();
                     });
                 }
@@ -935,7 +931,7 @@ impl GpuiWorkspace {
             cx,
         ) {
             self.state
-                .record_error("Could not load key bindings", format!("{error:#}"));
+                .record_error("Could not load key bindings", &format!("{error:#}"));
         } else {
             // Native menu accelerators are built from the current GPUI keymap.
             #[cfg(target_os = "macos")]
@@ -1000,7 +996,7 @@ impl GpuiWorkspace {
             None => Some(self.state.terminal_mut().scroll_viewport_to(input.offset)),
         };
         if let Some(Err(error)) = result {
-            self.state.record_render_error(error);
+            self.state.record_render_error(&error);
         }
         cx.notify();
     }
@@ -1153,7 +1149,7 @@ impl GpuiWorkspace {
                 Ok(identity) => identity,
                 Err(error) => {
                     self.state
-                        .record_error("Could not open the tools panel", error);
+                        .record_error("Could not open the tools panel", &error);
                     return;
                 }
             };
@@ -1225,14 +1221,18 @@ impl GpuiWorkspace {
         let tools = cx.new(|cx| {
             crate::gpui_dock::WorkspaceDock::new(
                 context,
-                owner,
-                self.terminal.view.clone(),
-                self.chrome_view.clone(),
+                crate::gpui_dock::DockHosts {
+                    owner,
+                    terminal: self.terminal.view.clone(),
+                    chrome: self.chrome_view.clone(),
+                    sender,
+                },
                 scope,
-                sender,
-                &path,
-                key,
-                browser_profile_directory(),
+                crate::gpui_dock::DockStorage {
+                    config_path: &path,
+                    state_key: key,
+                    browser_profile: browser_profile_directory(),
+                },
                 local_git,
                 window,
                 cx,
@@ -1432,7 +1432,7 @@ impl GpuiWorkspace {
             let drafts = match drafts {
                 Ok(Ok(drafts)) => drafts,
                 Ok(Err(error)) => {
-                    _ = weak.update(cx, |this, _| this.state.record_error("Could not save conversation drafts", error));
+                    _ = weak.update(cx, |this, _| this.state.record_error("Could not save conversation drafts", &error));
                     return false;
                 }
                 Err(_) => return false,
@@ -1459,7 +1459,7 @@ impl GpuiWorkspace {
                 let (sessions, drafts) = match pending {
                     Ok(Ok(pending)) => pending,
                     Ok(Err(error)) => {
-                        _ = weak.update(cx, |this, _| this.state.record_error("Could not save session drafts", error));
+                        _ = weak.update(cx, |this, _| this.state.record_error("Could not save session drafts", &error));
                         return false;
                     }
                     Err(_) => return false,
@@ -1675,15 +1675,15 @@ impl GpuiWorkspace {
         // is occluded and cannot render its queued effects yet. Consume them in order so an
         // older queued selection cannot overwrite the latest accepted font later.
         self.pending_effects.retain(|effect| match effect {
-            AppEffect::SetUiFonts(families) => {
+            AppEffect::UiFont(UiFontEffect::Families(families)) => {
                 crate::gpui::update_ui_font_families(families, cx);
                 false
             }
-            AppEffect::SetUiFontSize(size) => {
+            AppEffect::UiFont(UiFontEffect::Size(size)) => {
                 crate::gpui::update_ui_font_size(*size, cx);
                 false
             }
-            AppEffect::SetUiFontWeights(weights) => {
+            AppEffect::UiFont(UiFontEffect::Weights(weights)) => {
                 crate::gpui::update_ui_font_weights(weights, cx);
                 false
             }
@@ -1758,10 +1758,6 @@ impl GpuiWorkspace {
         }
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Dispatch every application effect exhaustively through its owner"
-    )]
     fn apply_effects(
         &mut self,
         effects: Vec<AppEffect>,
@@ -1776,20 +1772,7 @@ impl GpuiWorkspace {
                     self.open_workspace_window_for_space(Some(space_id), cx);
                 }
                 AppEffect::QuitApplication => self.request_document_exit(true, window, cx),
-                AppEffect::SetWindowTitle(title) => window.set_window_title(&title),
-                AppEffect::SetFullscreen(fullscreen) => {
-                    if window.is_fullscreen() != fullscreen {
-                        window.toggle_fullscreen();
-                    }
-                }
-                AppEffect::SetMaximized(maximized) => {
-                    if window.is_maximized() != maximized {
-                        window.zoom_window();
-                    }
-                }
-                AppEffect::SetDecorations(decorated) => {
-                    self.set_window_decorations(decorated, window);
-                }
+                AppEffect::Window(effect) => self.apply_window_effect(effect, window),
                 // GPUI performs the native copy key equivalent itself but exposes no
                 // request-copy event equivalent for an application view.
                 AppEffect::RequestCopy => {}
@@ -1810,27 +1793,9 @@ impl GpuiWorkspace {
                 AppEffect::SetTerminalTextConfig(config) => {
                     self.apply_terminal_text_config(config, window);
                 }
-                AppEffect::SetTerminalCursorIcon(icon) => {
-                    self.terminal_cursor = gpui_cursor(icon);
-                    self.cursor = self.terminal_cursor;
-                }
-                AppEffect::SetUiFonts(families) => {
-                    crate::gpui::update_ui_font_families(&families, cx);
-                }
-                AppEffect::SetUiFontWeights(weights) => {
-                    crate::gpui::update_ui_font_weights(&weights, cx);
-                }
-                AppEffect::SetUiFontSize(size) => {
-                    crate::gpui::update_ui_font_size(size, cx);
-                }
+                AppEffect::SetTerminalCursorIcon(icon) => self.set_terminal_cursor(icon),
+                AppEffect::UiFont(effect) => apply_ui_font_effect(effect, cx),
                 AppEffect::FocusTerminal => self.focus_terminal_surface(window, cx),
-                AppEffect::SetWindowFocus => window.activate_window(),
-                AppEffect::ApplyMacosNonNativeFullscreen => {
-                    Self::apply_simple_fullscreen(true, window);
-                }
-                AppEffect::RestoreMacosPresentation => {
-                    Self::apply_simple_fullscreen(false, window);
-                }
                 AppEffect::OpenUrl(url) => cx.open_url(&url),
                 AppEffect::NativeConversation(target) => {
                     self.open_native_conversation(target, window, cx);
@@ -1863,14 +1828,10 @@ impl GpuiWorkspace {
                 AppEffect::RevealPath(path) => cx.reveal_path(&path),
                 AppEffect::OpenWithSystem(path) => cx.open_with_system(&path),
                 AppEffect::ConversationFind(action) => {
-                    if let Some(view) = self.native_conversation_view(cx) {
-                        view.update(cx, |view, cx| view.find_action(&action, window, cx));
-                    }
+                    self.update_conversation(cx, |view, cx| view.find_action(&action, window, cx));
                 }
                 AppEffect::ConversationCopyMode => {
-                    if let Some(view) = self.native_conversation_view(cx) {
-                        view.update(cx, |view, cx| view.enter_copy_mode(window, cx));
-                    }
+                    self.update_conversation(cx, |view, cx| view.enter_copy_mode(window, cx));
                 }
                 AppEffect::OpenInEditor { editor, path } => Self::open_in_editor(editor, path, cx),
                 AppEffect::AddSelectionToConversation => {
@@ -1890,50 +1851,7 @@ impl GpuiWorkspace {
                     self.open_settings_window_target(SettingsWindowTarget::Setting(id), window, cx);
                 }
                 AppEffect::ComposerAction(request) => {
-                    if let Err(error) = request.begin() {
-                        request.complete(crate::commands::runtime::command_outcome_for_mux_error(
-                            error,
-                        ));
-                        continue;
-                    }
-                    let action = request.action;
-                    if matches!(
-                        action,
-                        crate::gpui::CommandAction::Dictate | crate::gpui::CommandAction::Voice
-                    ) {
-                        let codex = self.state.config().agents.codex.clone();
-                        self.dialogs
-                            .creation_view
-                            .update(cx, |view, cx| view.configure_speech_account(&codex, cx));
-                        if let Some(view) = self.native_conversation_view(cx) {
-                            view.update(cx, |view, cx| view.configure_speech_account(&codex, cx));
-                        }
-                    }
-                    if window.has_active_dialog(cx)
-                        && matches!(
-                            self.state.modal_dialog(),
-                            None | Some(crate::state::ModalDialog::NewSession(_))
-                        )
-                    {
-                        window.close_dialog(cx);
-                    }
-                    let performed = self
-                        .dialogs
-                        .creation_view
-                        .update(cx, |view, cx| view.perform_completion(action, window, cx))
-                        || self.native_conversation_view(cx).is_some_and(|view| {
-                            view.update(cx, |view, cx| view.perform_completion(action, window, cx))
-                        });
-                    request.complete(if performed {
-                        bootty_control::CommandOutcome::Success {
-                            warnings: Vec::new(),
-                            value: serde_json::Value::Null,
-                        }
-                    } else {
-                        bootty_control::CommandOutcome::Unavailable {
-                            message: "This composer action is not available".into(),
-                        }
-                    });
+                    self.apply_composer_action(request, window, cx);
                 }
                 AppEffect::CommandAction(action) => {
                     self.dialogs
@@ -1945,6 +1863,102 @@ impl GpuiWorkspace {
                 }
             }
         }
+    }
+
+    /// Show the terminal's pointer shape, which also becomes the window's current one.
+    const fn set_terminal_cursor(&mut self, icon: crate::state::CursorIcon) {
+        self.terminal_cursor = gpui_cursor(icon);
+        self.cursor = self.terminal_cursor;
+    }
+
+    /// Act on the native conversation that shows, when one does.
+    fn update_conversation(
+        &self,
+        cx: &mut Context<Self>,
+        act: impl FnOnce(
+            &mut crate::NativeAgentSessionView,
+            &mut Context<crate::NativeAgentSessionView>,
+        ),
+    ) {
+        if let Some(view) = self.native_conversation_view(cx) {
+            view.update(cx, act);
+        }
+    }
+
+    fn apply_window_effect(&self, effect: WindowEffect, window: &mut Window) {
+        match effect {
+            WindowEffect::Title(title) => window.set_window_title(&title),
+            WindowEffect::Fullscreen(fullscreen) => {
+                if window.is_fullscreen() != fullscreen {
+                    window.toggle_fullscreen();
+                }
+            }
+            WindowEffect::Maximized(maximized) => {
+                if window.is_maximized() != maximized {
+                    window.zoom_window();
+                }
+            }
+            WindowEffect::Decorations(decorated) => self.set_window_decorations(decorated, window),
+            WindowEffect::Focus => window.activate_window(),
+            WindowEffect::MacosNonNativeFullscreen => Self::apply_simple_fullscreen(true, window),
+            WindowEffect::RestoreMacosPresentation => {
+                Self::apply_simple_fullscreen(false, window);
+            }
+        }
+    }
+
+    /// Run a composer action in the composer that shows, after readying speech for dictation
+    /// and voice.
+    fn apply_composer_action(
+        &self,
+        request: crate::commands::ComposerRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Err(error) = request.begin() {
+            request.complete(crate::commands::runtime::command_outcome_for_mux_error(
+                error,
+            ));
+            return;
+        }
+        let action = request.action;
+        if matches!(
+            action,
+            crate::gpui::CommandAction::Dictate | crate::gpui::CommandAction::Voice
+        ) {
+            let codex = self.state.config().agents.codex.clone();
+            self.dialogs
+                .creation_view
+                .update(cx, |view, cx| view.configure_speech_account(&codex, cx));
+            if let Some(view) = self.native_conversation_view(cx) {
+                view.update(cx, |view, cx| view.configure_speech_account(&codex, cx));
+            }
+        }
+        if window.has_active_dialog(cx)
+            && matches!(
+                self.state.modal_dialog(),
+                None | Some(crate::state::ModalDialog::NewSession(_))
+            )
+        {
+            window.close_dialog(cx);
+        }
+        let performed = self
+            .dialogs
+            .creation_view
+            .update(cx, |view, cx| view.perform_completion(action, window, cx))
+            || self.native_conversation_view(cx).is_some_and(|view| {
+                view.update(cx, |view, cx| view.perform_completion(action, window, cx))
+            });
+        request.complete(if performed {
+            bootty_control::CommandOutcome::Success {
+                warnings: Vec::new(),
+                value: serde_json::Value::Null,
+            }
+        } else {
+            bootty_control::CommandOutcome::Unavailable {
+                message: "This composer action is not available".into(),
+            }
+        });
     }
 
     fn set_window_decorations(&self, decorated: bool, window: &Window) {
@@ -2032,7 +2046,7 @@ impl GpuiWorkspace {
         let host_identity = match bootty_host::files::host_identity(remote) {
             Ok(identity) => identity,
             Err(error) => {
-                self.state.record_error("Could not open files", error);
+                self.state.record_error("Could not open files", &error);
                 return;
             }
         };
@@ -2097,7 +2111,7 @@ impl GpuiWorkspace {
         let host_identity = match bootty_host::files::host_identity(remote) {
             Ok(identity) => identity,
             Err(error) => {
-                self.state.record_error("Could not open changes", error);
+                self.state.record_error("Could not open changes", &error);
                 return;
             }
         };
@@ -2242,7 +2256,7 @@ impl GpuiWorkspace {
             if let Err(error) = work.await {
                 _ = weak.update(cx, |this, cx| {
                     this.state
-                        .record_error("Could not show a desktop notification", error);
+                        .record_error("Could not show a desktop notification", &error);
                     cx.notify();
                 });
             }
@@ -2343,7 +2357,7 @@ impl GpuiWorkspace {
                 Ok(_) => return true,
                 Err(error) => {
                     self.state
-                        .record_error("Could not draw the terminal", error);
+                        .record_error("Could not draw the terminal", &error);
                     return true;
                 }
             }
@@ -2676,7 +2690,7 @@ impl GpuiWorkspace {
             if let Err(error) = opened {
                 _ = this.update(cx, |this, cx| {
                     this.state
-                        .record_error(&format!("Could not open it in {}", editor.name), error);
+                        .record_error(&format!("Could not open it in {}", editor.name), &error);
                     cx.notify();
                 });
             }
@@ -2765,7 +2779,7 @@ impl GpuiWorkspace {
         }
         let binding = &mut self.state.workspace.active.binding;
         if let Err(error) = binding.prepare_window(id.session_id(), id.window_id(), geometry) {
-            self.state.record_render_error(error);
+            self.state.record_render_error(&error);
         }
         cx.notify();
     }
@@ -3339,7 +3353,7 @@ impl GpuiWorkspace {
         let frame = match frame {
             Ok(frame) => frame,
             Err(error) => {
-                self.state.record_render_error(error);
+                self.state.record_render_error(&error);
                 return None;
             }
         };
@@ -3455,7 +3469,7 @@ impl GpuiWorkspace {
                     .visible_terminal_frame_source(Some(&pane_id))
                     && let Err(error) = runtime.resize(surface.geometry())
                 {
-                    self.state.record_render_error(error);
+                    self.state.record_render_error(&error);
                 }
                 panes.push(GpuiPaneSnapshot {
                     id: pane_id,
@@ -3551,7 +3565,7 @@ impl GpuiWorkspace {
                     .resize_visible_window(Some(window_id.window_id()), cols, rows)
             };
             if let Err(error) = result {
-                self.state.record_render_error(error);
+                self.state.record_render_error(&error);
             }
         }
     }
@@ -4041,11 +4055,8 @@ impl GpuiWorkspace {
                 },
             ));
         }
-        #[expect(
-            clippy::float_cmp,
-            reason = "An exact platform display-scale change invalidates cached cell metrics"
-        )]
-        let display_scale_changed = self.terminal_display_scale != window.scale_factor();
+        let display_scale_changed =
+            self.terminal_display_scale.to_bits() != window.scale_factor().to_bits();
         if display_scale_changed {
             self.terminal_display_scale = window.scale_factor();
             self.terminal_base_cell =
@@ -4483,4 +4494,12 @@ pub fn browser_profile_directory() -> std::path::PathBuf {
     state
         .unwrap_or_else(|| identity.default_config_path())
         .with_file_name("browser")
+}
+
+fn apply_ui_font_effect(effect: UiFontEffect, cx: &mut App) {
+    match effect {
+        UiFontEffect::Families(families) => crate::gpui::update_ui_font_families(&families, cx),
+        UiFontEffect::Weights(weights) => crate::gpui::update_ui_font_weights(&weights, cx),
+        UiFontEffect::Size(size) => crate::gpui::update_ui_font_size(size, cx),
+    }
 }

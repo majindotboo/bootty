@@ -168,86 +168,38 @@ impl SettingsChoiceState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_dropdown(
-    selector: String,
-    label: &str,
-    description: &str,
-    current: &str,
-    choices: &[SettingsChoice],
-    enabled: bool,
-    on_change: SelectionHandler,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    render_select(
-        selector,
-        label,
-        description,
-        current,
-        choices,
-        enabled,
-        on_change,
-        gpui_kit::rems(210.0 / 16.0),
-        None,
-        window,
-        cx,
-    )
+/// One setting's choice control: its identity, what it shows and what it may change to.
+pub(super) struct SelectControl<'a> {
+    pub selector: String,
+    pub label: &'a str,
+    pub description: &'a str,
+    pub current: &'a str,
+    pub choices: &'a [SettingsChoice],
+    pub enabled: bool,
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_compact_dropdown(
-    selector: String,
-    label: &str,
-    description: &str,
-    current: &str,
-    choices: &[SettingsChoice],
-    enabled: bool,
-    on_change: SelectionHandler,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    render_select(
-        selector,
-        label,
-        description,
-        current,
-        choices,
-        enabled,
-        on_change,
-        gpui_kit::rems(118.0 / 16.0),
-        None,
-        window,
-        cx,
-    )
+/// How wide a choice control starts, and whether it searches a catalog by name.
+#[derive(Clone, Copy)]
+pub(super) enum SelectStyle<'a> {
+    Dropdown,
+    Compact,
+    Searchable { catalog: &'a str },
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(super) fn render_searchable_picker(
-    selector: String,
-    label: &str,
-    description: &str,
-    catalog_name: &str,
-    current: &str,
-    choices: &[SettingsChoice],
-    enabled: bool,
-    on_change: SelectionHandler,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
-    render_select(
-        selector,
-        label,
-        description,
-        current,
-        choices,
-        enabled,
-        on_change,
-        gpui_kit::rems(210.0 / 16.0),
-        Some(catalog_name),
-        window,
-        cx,
-    )
+impl<'a> SelectStyle<'a> {
+    fn minimum_width(self) -> gpui_kit::Rems {
+        match self {
+            Self::Dropdown | Self::Searchable { .. } => gpui_kit::rems(210.0 / 16.0),
+            Self::Compact => gpui_kit::rems(118.0 / 16.0),
+        }
+    }
+
+    const fn catalog(self) -> Option<&'a str> {
+        match self {
+            Self::Searchable { catalog } => Some(catalog),
+            Self::Dropdown | Self::Compact => None,
+        }
+    }
 }
 
 fn searchable_picker_placeholder(catalog_name: &str) -> &'static str {
@@ -293,20 +245,23 @@ fn choice_width(
     rems(minimum.0.max(widest / rem + 4.0))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_select(
-    selector: String,
-    label: &str,
-    description: &str,
-    current: &str,
-    choices: &[SettingsChoice],
-    enabled: bool,
+pub(super) fn render_select(
+    control: SelectControl<'_>,
+    style: SelectStyle<'_>,
     on_change: SelectionHandler,
-    width: gpui_kit::Rems,
-    search_catalog: Option<&str>,
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
+    let SelectControl {
+        selector,
+        label,
+        description,
+        current,
+        choices,
+        enabled,
+    } = control;
+    let width = style.minimum_width();
+    let search_catalog = style.catalog();
     let searchable = search_catalog.is_some();
     let state_key = SharedString::from(format!("{selector}-select-state-{searchable}"));
     let state = window.use_keyed_state(state_key, cx, |window, cx| {

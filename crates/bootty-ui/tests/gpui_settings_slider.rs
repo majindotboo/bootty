@@ -5,8 +5,8 @@ use std::ops::RangeInclusive;
 
 use bootty_config::settings_schema::{SettingKind, SettingsSchema};
 use bootty_ui::gpui::{
-    NumberControl, ScalarValue, SettingsCategory, SettingsControl, SettingsIntent, SettingsPage,
-    SettingsPageItem, SettingsRow, UiPalette, init_theme, update_ui_font,
+    NumberControl, NumberSetting, ScalarValue, SettingsCategory, SettingsControl, SettingsIntent,
+    SettingsPage, SettingsPageItem, SettingsRow, UiPalette, init_theme, update_ui_font,
 };
 
 fn init_zed_ui(cx: &TestAppContext) {
@@ -17,7 +17,7 @@ use gpui_kit::{
 };
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use settings_support::SettingsProbe as NumberProbe;
 
 impl NumberProbe {
@@ -47,7 +47,7 @@ fn number_snapshot(
         "text.font_size",
         enabled,
         value,
-        SettingsControl::Number {
+        SettingsControl::Number(NumberSetting {
             range,
             control: NumberControl::Slider,
             precision,
@@ -56,7 +56,7 @@ fn number_snapshot(
             suffix: " px".to_owned(),
             display_scale: 1.0,
             optional: true,
-        },
+        }),
     )
 }
 
@@ -127,7 +127,7 @@ fn font_size_sliders_snap_to_quarters_and_buttons_step_by_halves(cx: &mut TestAp
             id,
             true,
             12.25,
-            SettingsControl::Number {
+            SettingsControl::Number(NumberSetting {
                 range: range.clone(),
                 control: *control,
                 precision: *precision,
@@ -136,7 +136,7 @@ fn font_size_sliders_snap_to_quarters_and_buttons_step_by_halves(cx: &mut TestAp
                 suffix: suffix.to_string(),
                 display_scale: *display_scale,
                 optional: false,
-            },
+            }),
         );
         let (probe, visual) = cx.add_window_view(|_, cx| NumberProbe::with_snapshot(snapshot, cx));
         let input = visual

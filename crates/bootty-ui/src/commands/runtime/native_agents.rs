@@ -253,10 +253,6 @@ impl AppState {
         true
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "One router sends every native operation to its owner"
-    )]
     pub(super) fn dispatch_native_agent(
         &mut self,
         invocation: CommandInvocation,
@@ -330,6 +326,26 @@ impl AppState {
         if let Err(outcome) = self.native_operation_enabled(&service, target, operation) {
             return CommandDispatch::Complete(outcome);
         }
+        self.route_native_operation(service, invocation, effects, execution)
+    }
+
+    /// Run a checked operation on an exact conversation with the handler that owns it.
+    fn route_native_operation(
+        &mut self,
+        service: Arc<NativeAgentService>,
+        invocation: CommandInvocation,
+        effects: &mut Vec<AppEffect>,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let Some(target) = invocation.target.as_ref() else {
+            return CommandDispatch::Complete(CommandOutcome::Denied {
+                message: "Native conversations require an exact captured destination".to_owned(),
+            });
+        };
+        let operation = invocation
+            .command
+            .strip_prefix("agents.native.")
+            .unwrap_or_default();
         if operation == "interrupt" && stop_restarts(&service, target) {
             return self.dispatch_native_resume(service, &invocation, execution);
         }
@@ -337,22 +353,12 @@ impl AppState {
             return self.dispatch_regenerate_title(service, &invocation, execution);
         }
         if matches!(operation, "attachment-open" | "attachment-reveal") {
-            // The stored copy is on this computer, even for a conversation on a remote host.
-            let id = invocation.arguments.get(2).map_or("", String::as_str);
-            return CommandDispatch::Complete(match service.attachment_file(target, id) {
-                Ok(path) => {
-                    effects.push(if operation == "attachment-open" {
-                        AppEffect::OpenWithSystem(path)
-                    } else {
-                        AppEffect::RevealPath(path)
-                    });
-                    CommandOutcome::success()
-                }
-                Err(message) => CommandOutcome::Failed {
-                    code: "attachment_failed".to_owned(),
-                    message,
-                },
-            });
+            return CommandDispatch::Complete(open_native_attachment(
+                &service,
+                &invocation,
+                operation,
+                effects,
+            ));
         }
         if operation == "profiles" {
             return CommandDispatch::Complete(self.native_profile_names(&service, target));
@@ -1498,14 +1504,16 @@ impl AppState {
                     .as_ref()
                     .ok_or("The source native pane is unavailable")?;
                 let (terminal, creation_warnings) = create_native_panel_terminal(
-                    &commands,
+                    Nested {
+                        commands: &commands,
+                        caller: invocation_caller,
+                        deadline,
+                        cancellation: &cancellation,
+                    },
                     parent,
                     captured.context.session.as_ref(),
                     &record.config.cwd,
                     Some("right"),
-                    invocation_caller,
-                    deadline,
-                    &cancellation,
                 )
                 .map_err(|outcome| {
                     crate::commands::command_outcome_message(&outcome)
@@ -1524,12 +1532,14 @@ impl AppState {
                     tools,
                     |child| {
                         let registered = register_native_panel(
-                            &commands,
+                            Nested {
+                                commands: &commands,
+                                caller: invocation_caller,
+                                deadline,
+                                cancellation: &cancellation,
+                            },
                             child,
                             &terminal,
-                            invocation_caller,
-                            deadline,
-                            &cancellation,
                         );
                         match registered {
                             CommandOutcome::Success { .. } => Ok(()),
@@ -2088,15 +2098,17 @@ fn restore_native_terminal(
             )
             .map_err(|error| failure(format!("The conversation task is unavailable: {error}")))?;
             let (created, creation_warnings) = create_native_panel_terminal(
-                commands,
+                Nested {
+                    commands,
+                    caller,
+                    deadline,
+                    cancellation,
+                },
                 &terminal,
                 Some(&session),
                 &record.config.cwd,
                 (destination.get("split").and_then(Value::as_bool) == Some(true))
                     .then_some("right"),
-                caller,
-                deadline,
-                cancellation,
             )?;
             warnings.extend(creation_warnings);
             terminal = serde_json::from_value(created).map_err(|error| {
@@ -2104,12 +2116,14 @@ fn restore_native_terminal(
             })?;
         }
         let placed = register_native_panel(
-            commands,
+            Nested {
+                commands,
+                caller,
+                deadline,
+                cancellation,
+            },
             record,
             &json!(terminal),
-            caller,
-            deadline,
-            cancellation,
         );
         if !matches!(placed, CommandOutcome::Success { .. }) {
             return Err(placed);
@@ -2165,125 +2179,61 @@ fn start(
     )
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "Linear acceptance phases keep the saved task and provider placement together"
-)]
 fn start_prepared(
     service: &NativeAgentService,
     commands: &Arc<dyn AgentCommandExecutor>,
     invocation: &CommandInvocation,
     captured: &NativeLaunch,
-    prepared: PreparedNativeLaunch,
+    mut prepared: PreparedNativeLaunch,
     deadline: Instant,
     cancellation: &CommandCancellation,
 ) -> CommandOutcome {
-    let arg = |index| invocation.arguments.get(index).cloned().unwrap_or_default();
+    let nested = Nested {
+        commands,
+        caller: invocation.caller,
+        deadline,
+        cancellation,
+    };
     let attachment_paths = match native_start_attachment_paths(invocation) {
         Ok(paths) => paths,
         Err(error) => return failure(error),
     };
-    let tab = matches!(
-        invocation.command.as_str(),
-        "agents.native.tab" | "agents.native.pane"
-    );
-    let PreparedNativeLaunch {
-        config,
-        tools,
-        warnings: mut tools_warnings,
-        spawn_parent,
-    } = prepared;
+    let mut warnings = std::mem::take(&mut prepared.warnings);
     if cancellation.is_cancelled() {
         return CommandOutcome::cancelled();
     }
     if Instant::now() >= deadline {
         return CommandOutcome::deadline_exceeded();
     }
-    let (terminal, warnings) = if tab {
-        let Some(parent) = captured.terminal.as_ref() else {
-            return failure("The native tab has no captured backend parent".into());
+    let (terminal, creation_warnings) =
+        match create_launch_terminal(nested, invocation, captured, &prepared.config.cwd) {
+            Ok(created) => created,
+            Err(outcome) => return outcome,
         };
-        match create_native_panel_terminal(
-            commands,
-            parent,
-            captured.context.session.as_ref(),
-            &config.cwd,
-            captured.split.map(|direction| match direction {
-                bootty_mux::pane_layout::SplitDirection::Right => "right",
-                bootty_mux::pane_layout::SplitDirection::Down => "down",
-            }),
-            invocation.caller,
-            deadline,
-            cancellation,
-        ) {
-            Ok(created) => created,
-            Err(outcome) => return outcome,
-        }
-    } else {
-        match create_task_shell(commands, invocation, deadline, cancellation) {
-            Ok(created) => created,
-            Err(outcome) => return outcome,
-        }
-    };
     if cancellation.is_cancelled() {
         return CommandOutcome::cancelled();
     }
-    tools_warnings.extend(warnings);
+    warnings.extend(creation_warnings);
     let terminal_target = match serde_json::from_value::<CommandTarget>(terminal.clone()) {
         Ok(target) => target,
         Err(error) => return failure(format!("Native launch has no exact task Terminal: {error}")),
     };
-    let result = launch_native_record(
+    let spawned = prepared.spawn_parent.is_some();
+    let record = match launch_native_record(
         service,
         captured,
         invocation,
-        config,
-        tools,
+        prepared,
         &terminal_target,
-        spawn_parent.as_ref(),
         &attachment_paths,
-        commands,
-        deadline,
-        cancellation,
-    );
-    let record = match result {
+        nested,
+    ) {
         Ok(record) => record,
-        Err(error) => {
-            // A durable failed reservation still owns its new pane. Keep its error visible
-            // instead of publishing that pane as an unrelated empty terminal.
-            if spawn_parent.is_some()
-                && let Some(record) = service
-                    .sessions()
-                    .into_iter()
-                    .find(|record| Some(record.target()) == error.target)
-            {
-                let placed = register_native_panel(
-                    commands,
-                    &record,
-                    &terminal,
-                    invocation.caller,
-                    deadline,
-                    cancellation,
-                );
-                if !matches!(placed, CommandOutcome::Success { .. }) {
-                    return placed;
-                }
-            }
-            return failure(format!(
-                "Provider launch failed: {error}. The saved task is retained."
-            ));
-        }
+        Err(error) => return keep_failed_reservation(service, nested, spawned, &error, &terminal),
     };
     // Root conversations were placed at reservation; spawned children are placed here.
-    if spawn_parent.is_some() {
-        let placed = register_native_panel(
-            commands,
-            &record,
-            &terminal,
-            invocation.caller,
-            deadline,
-            cancellation,
-        );
+    if spawned {
+        let placed = register_native_panel(nested, &record, &terminal);
         if !matches!(placed, CommandOutcome::Success { .. }) {
             return placed;
         }
@@ -2291,14 +2241,14 @@ fn start_prepared(
     let first_prompt_error = initial_native_input(
         service,
         &record,
-        &arg(8),
+        &invocation.arguments.get(8).cloned().unwrap_or_default(),
         &attachment_paths,
         invocation,
         deadline,
         cancellation,
     );
     if let Some(error) = &first_prompt_error {
-        tools_warnings.push(CommandWarning {
+        warnings.push(CommandWarning {
             code: "native_first_prompt_failed".to_owned(),
             message: format!("Conversation saved; initial input failed: {error}. Open the conversation to review its state before retrying."),
         });
@@ -2310,27 +2260,85 @@ fn start_prepared(
         .unwrap_or(record);
     CommandOutcome::Success {
         value: json!({"terminal":terminal,"native":record,"first_prompt_error":first_prompt_error}),
-        warnings: tools_warnings,
+        warnings,
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Placement uses the accepted command lifetime and exact mux target"
-)]
+/// The terminal a launch runs in: a new pane or tab beside the captured one for a native tab,
+/// otherwise a new task shell.
+fn create_launch_terminal(
+    nested: Nested<'_>,
+    invocation: &CommandInvocation,
+    captured: &NativeLaunch,
+    cwd: &std::path::Path,
+) -> Result<(Value, Vec<CommandWarning>), CommandOutcome> {
+    if !matches!(
+        invocation.command.as_str(),
+        "agents.native.tab" | "agents.native.pane"
+    ) {
+        return create_task_shell(
+            nested.commands,
+            invocation,
+            nested.deadline,
+            nested.cancellation,
+        );
+    }
+    let parent = captured
+        .terminal
+        .as_ref()
+        .ok_or_else(|| failure("The native tab has no captured backend parent".into()))?;
+    create_native_panel_terminal(
+        nested,
+        parent,
+        captured.context.session.as_ref(),
+        cwd,
+        captured.split.map(|direction| match direction {
+            bootty_mux::pane_layout::SplitDirection::Right => "right",
+            bootty_mux::pane_layout::SplitDirection::Down => "down",
+        }),
+    )
+}
+
+/// A durable failed reservation still owns its new pane. Keep its error visible instead of
+/// publishing that pane as an unrelated empty terminal.
+fn keep_failed_reservation(
+    service: &NativeAgentService,
+    nested: Nested<'_>,
+    spawned: bool,
+    error: &bootty_agents::NativeCreationError,
+    terminal: &Value,
+) -> CommandOutcome {
+    if spawned
+        && let Some(record) = service
+            .sessions()
+            .into_iter()
+            .find(|record| Some(record.target()) == error.target)
+    {
+        let placed = register_native_panel(nested, &record, terminal);
+        if !matches!(placed, CommandOutcome::Success { .. }) {
+            return placed;
+        }
+    }
+    failure(format!(
+        "Provider launch failed: {error}. The saved task is retained."
+    ))
+}
+
 fn launch_native_record(
     service: &NativeAgentService,
     captured: &NativeLaunch,
     invocation: &CommandInvocation,
-    config: NativeSessionConfig,
-    tools: Option<Arc<ToolBridge>>,
+    prepared: PreparedNativeLaunch,
     terminal_target: &CommandTarget,
-    spawn_parent: Option<&CommandTarget>,
     attachment_paths: &[std::path::PathBuf],
-    commands: &Arc<dyn AgentCommandExecutor>,
-    deadline: Instant,
-    cancellation: &CommandCancellation,
+    nested: Nested<'_>,
 ) -> Result<NativeSessionRecord, bootty_agents::NativeCreationError> {
+    let PreparedNativeLaunch {
+        config,
+        tools,
+        spawn_parent,
+        ..
+    } = prepared;
     let binding_id = captured.context.binding_id.as_str();
     let arg = |index| invocation.arguments.get(index).cloned().unwrap_or_default();
     if let Some(tools) = &tools {
@@ -2347,22 +2355,16 @@ fn launch_native_record(
             },
         )?;
     }
-    let place = |record: &NativeSessionRecord| {
-        let placed = register_native_panel(
-            commands,
-            record,
-            &json!(terminal_target),
-            invocation.caller,
-            deadline,
-            cancellation,
-        );
-        match placed {
-            CommandOutcome::Success { .. } => Ok(()),
-            outcome => Err(crate::commands::command_outcome_message(&outcome)
-                .unwrap_or_else(|| "Could not place the conversation".into())),
-        }
+    let place = |record: &NativeSessionRecord| match register_native_panel(
+        nested,
+        record,
+        &json!(terminal_target),
+    ) {
+        CommandOutcome::Success { .. } => Ok(()),
+        outcome => Err(crate::commands::command_outcome_message(&outcome)
+            .unwrap_or_else(|| "Could not place the conversation".into())),
     };
-    if let (Some(parent), Some(tools)) = (spawn_parent, tools.as_ref()) {
+    if let (Some(parent), Some(tools)) = (spawn_parent.as_ref(), tools.as_ref()) {
         return service.create_spawned_for_task_placed(
             parent,
             &arg(6),
@@ -2372,24 +2374,39 @@ fn launch_native_record(
         );
     }
     service.create_for_task_placed(
-        binding_id,
-        &arg(6),
-        &arg(7),
-        config,
-        tools,
+        bootty_agents::NativeTaskConversation {
+            binding_id,
+            task_identity: &arg(6),
+            title: &arg(7),
+            config,
+            tools,
+        },
         &arg(8),
         attachment_paths,
         place,
     )
 }
 
-fn register_native_panel(
-    commands: &Arc<dyn AgentCommandExecutor>,
-    record: &NativeSessionRecord,
-    terminal: &Value,
+/// Nested commands a native launch runs for its caller, within the caller's deadline.
+#[derive(Clone, Copy)]
+struct Nested<'a> {
+    commands: &'a Arc<dyn AgentCommandExecutor>,
     caller: Caller,
     deadline: Instant,
-    cancellation: &CommandCancellation,
+    cancellation: &'a CommandCancellation,
+}
+
+impl Nested<'_> {
+    fn execute(self, invocation: CommandInvocation) -> CommandOutcome {
+        self.commands
+            .execute(invocation, self.deadline, self.cancellation.clone())
+    }
+}
+
+fn register_native_panel(
+    nested: Nested<'_>,
+    record: &NativeSessionRecord,
+    terminal: &Value,
 ) -> CommandOutcome {
     let mut invocation = CommandInvocation::new(
         "agents.native.panel",
@@ -2398,32 +2415,25 @@ fn register_native_panel(
             record.generation.to_string(),
             terminal.to_string(),
         ],
-        caller,
+        nested.caller,
     );
     invocation.target = Some(record.target());
-    commands.execute(invocation, deadline, cancellation.clone())
+    nested.execute(invocation)
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The nested command preserves its caller and exact captured backend target"
-)]
 fn create_native_panel_terminal(
-    commands: &Arc<dyn AgentCommandExecutor>,
+    nested: Nested<'_>,
     parent: &CommandTarget,
     session: Option<&CommandTarget>,
     cwd: &std::path::Path,
     direction: Option<&str>,
-    caller: Caller,
-    deadline: Instant,
-    cancellation: &CommandCancellation,
 ) -> Result<(Value, Vec<CommandWarning>), CommandOutcome> {
     let mut arguments = vec!["[]".to_owned(), cwd.to_string_lossy().into_owned()];
     let operation = direction.map_or("terminal.create_tab", |direction| {
         arguments.insert(0, direction.to_owned());
         "terminal.create_pane"
     });
-    let mut invocation = CommandInvocation::new(operation, arguments, caller);
+    let mut invocation = CommandInvocation::new(operation, arguments, nested.caller);
     invocation.target = Some(if direction.is_some() {
         parent.clone()
     } else {
@@ -2431,7 +2441,7 @@ fn create_native_panel_terminal(
             .cloned()
             .ok_or_else(|| failure("The captured task has no issued backend session".into()))?
     });
-    match commands.execute(invocation, deadline, cancellation.clone()) {
+    match nested.execute(invocation) {
         CommandOutcome::Success { value, warnings } => {
             let created = value
                 .get("created")
@@ -3005,10 +3015,6 @@ fn native_title_context(
     })
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One match routes every native conversation operation"
-)]
 fn invoke(
     service: &NativeAgentService,
     invocation: &CommandInvocation,
@@ -3018,13 +3024,58 @@ fn invoke(
     let Some(target) = invocation.target.as_ref() else {
         return failure("Missing native session target".to_owned());
     };
-    let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
     let operation = invocation.command.strip_prefix("agents.native.");
     if matches!(operation, Some("prompt" | "queue" | "interrupt-send")) {
         let result = submit_native_input(service, invocation, deadline, cancellation);
         return complete_native_operation(service, target, operation, result);
     }
-    let result = match operation.unwrap_or_default() {
+    if operation == Some("browser-attach") {
+        let attachment = invocation.arguments.get(2).map_or("", String::as_str);
+        if attachment.len() > 16 * 1024 {
+            return failure("Browser attachment exceeds the input limit".into());
+        }
+        let result = attach_browser(service, target, attachment, deadline, cancellation);
+        return complete_native_operation(service, target, operation, result);
+    }
+    let name = operation.unwrap_or_default();
+    let result = queue_operation(service, invocation, target, name)
+        .or_else(|| internal_operation(service, invocation, target, name))
+        .or_else(|| state_operation(service, invocation, target, name))
+        .or_else(|| catalog_operation(service, invocation, target, name))
+        .or_else(|| answer_operation(service, invocation, target, name))
+        .unwrap_or_else(|| Err("Unknown native conversation operation".to_owned()));
+    complete_native_operation(service, target, operation, result)
+}
+
+/// Attach the browser view the agent may read, once the caller has not cancelled.
+fn attach_browser(
+    service: &NativeAgentService,
+    target: &CommandTarget,
+    attachment: &str,
+    deadline: Instant,
+    cancellation: &CommandCancellation,
+) -> Result<Value, String> {
+    serde_json::from_str::<Option<bootty_agents::NativeBrowserAttachment>>(attachment)
+        .map_err(|_| "Invalid browser attachment".to_owned())
+        .and_then(|attachment| {
+            check_native_input(deadline, cancellation)?;
+            if !cancellation.try_start() {
+                return Err("Browser attachment was cancelled".into());
+            }
+            service.attach_browser(target, attachment)
+        })
+        .map(|()| Value::Null)
+}
+
+/// Changes to the queue of messages waiting for the current turn.
+fn queue_operation(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    target: &CommandTarget,
+    operation: &str,
+) -> Option<Result<Value, String>> {
+    let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
+    Some(match operation {
         "queue-cancel" => service
             .cancel_followup(target, arg(2))
             .map(|()| Value::Null),
@@ -3037,6 +3088,19 @@ fn invoke(
                 .map(|()| Value::Null),
             _ => Err("A queued message moves earlier or later".to_owned()),
         },
+        _ => return None,
+    })
+}
+
+/// Operations only Bootty's own views may ask for.
+fn internal_operation(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    target: &CommandTarget,
+    operation: &str,
+) -> Option<Result<Value, String>> {
+    let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
+    Some(match operation {
         "import" if invocation.caller == Caller::Internal => service
             .import_attachment(target, std::path::Path::new(arg(2)))
             .and_then(|reference| {
@@ -3050,23 +3114,16 @@ fn invoke(
                 .map(|()| Value::Null)
         }
         "draft" => Err("Native drafts require an internal caller".to_owned()),
-        "seen" => service.mark_seen(target, true).map(|()| Value::Null),
         "voice-start" if invocation.caller == Caller::Internal => service
             .start_voice(target, arg(2))
             .map(|sdp| json!({"sdp": sdp})),
         "voice-start" => Err("Voice mode requires an internal caller".to_owned()),
-        "voice-stop" => service.stop_voice(target).map(|()| Value::Null),
-        "mark-unread" => service.mark_seen(target, false).map(|()| Value::Null),
         "attachment-preview" if invocation.caller == Caller::Internal => service
             .preview_attachment(target, arg(2))
             .map(|png| json!({"png": BASE64.encode(png)})),
         "attachment-preview" => {
             Err("Native attachment previews require an internal caller".to_owned())
         }
-        "subagent-read" => service
-            .read_subagent(target, arg(2))
-            .and_then(|detail| serde_json::to_value(detail).map_err(|error| error.to_string())),
-        "subagent-stop" => service.stop_subagent(target, arg(2)).map(|()| Value::Null),
         // An MCP app's requests come only from the view hosting it, which asks the user first.
         "mcp-app-read" if invocation.caller == Caller::Internal => {
             service.read_mcp_app_resource(target, arg(2), arg(3), arg(4))
@@ -3088,6 +3145,26 @@ fn invoke(
         "mcp-app-read" | "mcp-app-call" => {
             Err("MCP app requests come only from the app's own view".to_owned())
         }
+        _ => return None,
+    })
+}
+
+/// The conversation's turn, history, subagents, title, goal and files.
+fn state_operation(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    target: &CommandTarget,
+    operation: &str,
+) -> Option<Result<Value, String>> {
+    let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
+    Some(match operation {
+        "seen" => service.mark_seen(target, true).map(|()| Value::Null),
+        "voice-stop" => service.stop_voice(target).map(|()| Value::Null),
+        "mark-unread" => service.mark_seen(target, false).map(|()| Value::Null),
+        "subagent-read" => service
+            .read_subagent(target, arg(2))
+            .and_then(|detail| serde_json::to_value(detail).map_err(|error| error.to_string())),
+        "subagent-stop" => service.stop_subagent(target, arg(2)).map(|()| Value::Null),
         "history" => service
             .read_history(target, arg(2))
             .and_then(|page| serde_json::to_value(page).map_err(|error| error.to_string())),
@@ -3126,6 +3203,19 @@ fn invoke(
                 .map(|()| Value::Null),
             _ => Err("A goal is active or paused".to_owned()),
         },
+        _ => return None,
+    })
+}
+
+/// What the provider offers the conversation: completions, models and activity.
+fn catalog_operation(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    target: &CommandTarget,
+    operation: &str,
+) -> Option<Result<Value, String>> {
+    let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
+    Some(match operation {
         "completions" => service
             .completions(target)
             .and_then(|catalog| serde_json::to_value(catalog).map_err(|e| e.to_string())),
@@ -3153,7 +3243,19 @@ fn invoke(
             .map_err(|error| error.to_string())
             .and_then(|selection| service.configure(target, &selection))
             .and_then(|config| serde_json::to_value(config).map_err(|error| error.to_string())),
+        _ => return None,
+    })
+}
 
+/// Answers to the provider's approval and input requests.
+fn answer_operation(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    target: &CommandTarget,
+    operation: &str,
+) -> Option<Result<Value, String>> {
+    let arg = |index| invocation.arguments.get(index).map_or("", String::as_str);
+    Some(match operation {
         "approve" => bootty_agents::NativeApprovalDecision::ALL
             .into_iter()
             .find(|decision| decision.id() == arg(3))
@@ -3167,24 +3269,8 @@ fn invoke(
             .map_err(|error| error.to_string())
             .and_then(|response| service.respond(target, arg(2), response))
             .map(|()| Value::Null),
-        "browser-attach" => {
-            if arg(2).len() > 16 * 1024 {
-                return failure("Browser attachment exceeds the input limit".into());
-            }
-            serde_json::from_str::<Option<bootty_agents::NativeBrowserAttachment>>(arg(2))
-                .map_err(|_| "Invalid browser attachment".to_owned())
-                .and_then(|attachment| {
-                    check_native_input(deadline, cancellation)?;
-                    if !cancellation.try_start() {
-                        return Err("Browser attachment was cancelled".into());
-                    }
-                    service.attach_browser(target, attachment)
-                })
-                .map(|()| Value::Null)
-        }
-        _ => Err("Unknown native conversation operation".to_owned()),
-    };
-    complete_native_operation(service, target, operation, result)
+        _ => return None,
+    })
 }
 
 fn submit_native_input(
@@ -3566,4 +3652,34 @@ fn prompt_provider_mentions(
             }
             serde_json::from_str(value).map_err(|error| error.to_string())
         })
+}
+
+/// Open or reveal a conversation's stored attachment. The stored copy is on this computer, even
+/// for a conversation on a remote host.
+fn open_native_attachment(
+    service: &NativeAgentService,
+    invocation: &CommandInvocation,
+    operation: &str,
+    effects: &mut Vec<AppEffect>,
+) -> CommandOutcome {
+    let Some(target) = invocation.target.as_ref() else {
+        return CommandOutcome::Denied {
+            message: "Native conversations require an exact captured destination".to_owned(),
+        };
+    };
+    let id = invocation.arguments.get(2).map_or("", String::as_str);
+    match service.attachment_file(target, id) {
+        Ok(path) => {
+            effects.push(if operation == "attachment-open" {
+                AppEffect::OpenWithSystem(path)
+            } else {
+                AppEffect::RevealPath(path)
+            });
+            CommandOutcome::success()
+        }
+        Err(message) => CommandOutcome::Failed {
+            code: "attachment_failed".to_owned(),
+            message,
+        },
+    }
 }

@@ -109,33 +109,6 @@ impl InlineInputState {
 }
 
 impl GpuiSettings {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_inline_input(
-        selector: String,
-        target: InlineInputTarget,
-        value: &str,
-        placeholder: &str,
-        aria_label: &str,
-        enabled: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        Self::render_inline_input_with_options(
-            InlineInputOptions {
-                selector,
-                target,
-                value: value.to_owned(),
-                placeholder: placeholder.to_owned(),
-                aria_label: aria_label.to_owned(),
-                enabled,
-                width_rems: 22.5,
-                size: Size::Medium,
-            },
-            window,
-            cx,
-        )
-    }
-
     pub(super) fn render_inline_input_with_options(
         options: InlineInputOptions,
         window: &mut Window,

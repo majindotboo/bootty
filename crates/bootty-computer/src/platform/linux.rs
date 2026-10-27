@@ -7,6 +7,7 @@
 //! Deliberate limit: portal capture/input need a user-selected sharing session, which cannot yet
 //! be bound to our exact window token. Add that binding before enabling them for these targets.
 mod accessibility;
+use num_traits::ToPrimitive as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use x11rb::{
@@ -529,13 +530,13 @@ fn start_time(process_id: i32) -> Option<f64> {
     fields.split_whitespace().nth(19)?.parse::<f64>().ok()
 }
 
-#[expect(
-    clippy::as_conversions,
-    clippy::cast_possible_truncation,
-    reason = "Float-to-integer casts saturate; points are clamped to the X11 coordinate range."
-)]
-const fn coordinate(value: f64) -> i16 {
-    value.round().clamp(-32768.0, 32767.0) as i16
+/// A desktop point clamped to the X11 coordinate range.
+fn coordinate(value: f64) -> i16 {
+    value
+        .round()
+        .clamp(f64::from(i16::MIN), f64::from(i16::MAX))
+        .to_i16()
+        .unwrap_or(0)
 }
 
 /// Pick the smallest `_NET_WM_ICON` image at least `side` wide, or the largest one.

@@ -49,7 +49,7 @@ use rusqlite::Connection;
 
 #[path = "support/idle_frames.rs"]
 mod frames;
-mod support;
+pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 
@@ -1818,7 +1818,7 @@ fn a_deferred_profile_rebuild_preserves_the_intended_display_name(directory: ass
             space.icon(),
             space.color(),
             space.tint_sidebar(),
-            SpaceMuxOverride {
+            &SpaceMuxOverride {
                 backend: Some(MultiplexerBackendConfig::Native),
                 remote: SpaceRemoteOverride::Profile(RemoteSpaceRef {
                     profile_id: "test".to_owned(),
@@ -1988,7 +1988,7 @@ fn a_corrected_ssh_profile_rebuilds_an_unavailable_binding(directory: assert_fs:
             space.icon(),
             space.color(),
             space.tint_sidebar(),
-            SpaceMuxOverride {
+            &SpaceMuxOverride {
                 backend: Some(MultiplexerBackendConfig::Native),
                 remote: SpaceRemoteOverride::Profile(RemoteSpaceRef {
                     profile_id: "development".to_owned(),

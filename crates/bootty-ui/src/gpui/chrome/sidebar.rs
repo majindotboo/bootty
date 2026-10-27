@@ -133,44 +133,145 @@ impl Default for SettledShelf {
     }
 }
 
-// Keep independent snapshot owners explicit until the chrome snapshot owns this projection.
-#[allow(clippy::too_many_arguments)]
+/// The sidebar's own state in the chrome: search, filters, selection, renaming and scrolling.
+#[derive(Clone, Copy)]
+pub(super) struct SidebarView<'a> {
+    pub search: &'a Entity<InputState>,
+    pub project_filter: Option<&'a str>,
+    pub task_view: TaskView,
+    pub attention_only: bool,
+    pub settled_shelf: SettledShelf,
+    pub drag_order: Option<&'a (String, Option<String>)>,
+    pub rename: Option<&'a super::view::SidebarRename>,
+    pub selection: &'a [String],
+    pub conversation_matches: &'a [(String, String)],
+    pub row_bounds: &'a SidebarRowBounds,
+    pub scroll: &'a gpui_kit::ScrollHandle,
+    pub reveal_current: &'a Rc<Cell<bool>>,
+    pub reconcile_hover: bool,
+}
+
+/// What the sidebar shows from the rest of the chrome, and where it sits. Each snapshot owner
+/// stays explicit until the chrome snapshot owns this projection.
+#[derive(Clone, Copy)]
+pub(super) struct SidebarChrome<'a> {
+    pub title: &'a TitlebarSnapshot,
+    pub pointer_hovered_session: Option<&'a SessionTarget>,
+    pub spaces: &'a [SpaceSnapshot],
+    pub transition: Option<SpaceTransition>,
+    pub layout: &'a ChromeLayout,
+    pub header_height: f32,
+    pub docked: bool,
+    pub colors: ChromePalette,
+    pub navigation_hints: &'a [(String, gpui_kit::Keystroke)],
+    pub hint_modifiers: gpui_kit::Modifiers,
+}
+
 pub(super) fn render(
     snapshot: &SidebarSnapshot,
-    search: &Entity<InputState>,
-    project_filter: Option<&str>,
-    task_view: TaskView,
-    attention_only: bool,
-    settled_shelf: SettledShelf,
-    drag_order: Option<&(String, Option<String>)>,
-    rename: Option<&super::view::SidebarRename>,
-    selection: &[String],
-    conversation_matches: &[(String, String)],
-    title: &TitlebarSnapshot,
-    pointer_hovered_session: Option<&SessionTarget>,
-    spaces: &[SpaceSnapshot],
-    transition: Option<SpaceTransition>,
-    layout: &ChromeLayout,
-    header_height: f32,
-    docked: bool,
-    colors: ChromePalette,
-    sidebar_row_bounds: &SidebarRowBounds,
-    scroll: &gpui_kit::ScrollHandle,
-    reveal_current: &Rc<Cell<bool>>,
-    reconcile_hover: bool,
-    navigation_hints: &[(String, gpui_kit::Keystroke)],
-    hint_modifiers: gpui_kit::Modifiers,
+    view: SidebarView<'_>,
+    chrome: SidebarChrome<'_>,
     cx: &Context<GpuiChrome>,
 ) -> gpui_kit::AnyElement {
+    let SidebarChrome {
+        title,
+        layout,
+        header_height,
+        docked,
+        colors,
+        ..
+    } = chrome;
+    let scroll = view.scroll;
     let width = layout.effective_sidebar_width();
     let position = layout.sidebar_position;
+    let rows = sidebar_rows(snapshot, view, chrome, cx);
+    let toolbar = rows.search_toolbar();
+    let content = v_flex()
+        .id("bootty-sidebar-scroll")
+        .flex_1()
+        .min_h_0()
+        .overflow_y_scroll()
+        .track_scroll(scroll)
+        .child(rows.render_content(width, docked).flex_none().min_h_full())
+        .vertical_scrollbar(scroll);
+    let status_footer = render_codexbar(snapshot, colors);
+
+    let resize_handle = resize_handle(position, cx);
+
+    let header = sidebar_header(snapshot, title, layout, header_height, docked, colors, cx);
+    let component_footer = v_flex()
+        .w(px(width))
+        .when(docked, gpui_kit::Styled::w_full)
+        .when_some(status_footer, ParentElement::child)
+        .child(space_switcher::render(chrome, snapshot.tint, cx));
+    let sidebar = v_flex()
+        .id("bootty-gpui-sidebar")
+        .size_full()
+        .bg(color(snapshot.tint))
+        .text_color(color(snapshot.foreground))
+        .child(
+            v_flex()
+                .flex_none()
+                .w_full()
+                .children(header)
+                .child(toolbar),
+        )
+        .child(content)
+        .child(component_footer);
+
+    shell(width, docked)
+        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+            if !hovered && this.pointer_hovered_session.take().is_some() {
+                cx.notify();
+            }
+        }))
+        .child(sidebar)
+        .when(!layout.fullscreen, |element| {
+            element.child(edge(position, snapshot.border))
+        })
+        .when(!docked, |element| element.child(resize_handle))
+        .into_any_element()
+}
+
+/// The rows the sidebar lists for its search, filters and task view.
+fn sidebar_rows(
+    snapshot: &SidebarSnapshot,
+    view: SidebarView<'_>,
+    chrome: SidebarChrome<'_>,
+    cx: &Context<GpuiChrome>,
+) -> SidebarRows {
+    let SidebarView {
+        search,
+        project_filter,
+        task_view,
+        attention_only,
+        settled_shelf,
+        drag_order,
+        rename,
+        selection,
+        conversation_matches,
+        row_bounds: sidebar_row_bounds,
+        scroll,
+        reveal_current,
+        reconcile_hover,
+    } = view;
+    let SidebarChrome {
+        pointer_hovered_session,
+        spaces,
+        layout,
+        colors,
+        navigation_hints,
+        hint_modifiers,
+        ..
+    } = chrome;
+    let width = layout.effective_sidebar_width();
     let query = search.read(cx).value().trim().to_lowercase();
     let words = Search {
         query: &query,
         conversations: conversation_matches,
     };
     let views = task_view_counts(snapshot, &words, project_filter);
-    let rows = SidebarRows {
+    SidebarRows {
         snapshot: task_view_snapshot(snapshot, &words, project_filter, task_view),
         search: search.clone(),
         project_filter: project_filter.map(str::to_owned),
@@ -203,62 +304,7 @@ pub(super) fn render(
         session_ordinal: Rc::new(Cell::new(0)),
         navigation_hints: navigation_hints.to_vec(),
         hint_modifiers,
-    };
-    let toolbar = rows.search_toolbar();
-    let content = v_flex()
-        .id("bootty-sidebar-scroll")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .track_scroll(scroll)
-        .child(rows.render_content(width, docked).flex_none().min_h_full())
-        .vertical_scrollbar(scroll);
-    let status_footer = render_codexbar(snapshot, colors);
-
-    let resize_handle = resize_handle(position, cx);
-
-    let header = sidebar_header(snapshot, title, layout, header_height, docked, colors, cx);
-    let component_footer = v_flex()
-        .w(px(width))
-        .when(docked, gpui_kit::Styled::w_full)
-        .when_some(status_footer, ParentElement::child)
-        .child(space_switcher::render(
-            spaces,
-            transition,
-            SPACE_SWITCHER_HEIGHT,
-            snapshot.tint,
-            colors,
-            navigation_hints,
-            hint_modifiers,
-            cx,
-        ));
-    let sidebar = v_flex()
-        .id("bootty-gpui-sidebar")
-        .size_full()
-        .bg(color(snapshot.tint))
-        .text_color(color(snapshot.foreground))
-        .child(
-            v_flex()
-                .flex_none()
-                .w_full()
-                .children(header)
-                .child(toolbar),
-        )
-        .child(content)
-        .child(component_footer);
-
-    shell(width, docked)
-        .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-            if !hovered && this.pointer_hovered_session.take().is_some() {
-                cx.notify();
-            }
-        }))
-        .child(sidebar)
-        .when(!layout.fullscreen, |element| {
-            element.child(edge(position, snapshot.border))
-        })
-        .when(!docked, |element| element.child(resize_handle))
-        .into_any_element()
+    }
 }
 
 /// What the sidebar looks for: words in a row's own labels, and saved sessions whose
@@ -2001,10 +2047,6 @@ impl SidebarRows {
         ))
     }
 
-    #[allow(
-        clippy::arithmetic_side_effects,
-        reason = "Paint the rotating status ring in its measured icon box"
-    )]
     fn working_indicator(&self, tint: gpui_kit::Hsla) -> gpui_kit::AnyElement {
         let owner = self.owner.clone();
         let animate = self.snapshot.animate_working;

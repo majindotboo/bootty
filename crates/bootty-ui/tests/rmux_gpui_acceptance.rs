@@ -1,6 +1,7 @@
 #![cfg(test)]
 #![cfg(unix)]
 
+use bootty_ui::gpui::TerminalElementRequest;
 use std::{
     env, fs,
     os::unix::fs::PermissionsExt as _,
@@ -560,17 +561,17 @@ fn draw_remote_with_gpui(initial: Arc<RenderFrame>, final_frame: Arc<RenderFrame
             point(px(0.0), px(0.0)),
             size(px(surface.rect.width()), px(surface.rect.height())),
             |_, _| {
-                adapter.element(
+                adapter.element(TerminalElementRequest {
                     surface,
-                    &frame,
-                    14.0,
-                    surface.cell.height,
-                    1.0,
-                    &contract,
-                    CursorBlinkPhase::visible(),
-                    true,
-                    "",
-                )
+                    frame: &frame,
+                    font_size: 14.0,
+                    text_cell_height: surface.cell.height,
+                    pixels_per_point: 1.0,
+                    text_contract: &contract,
+                    cursor_blink_phase: CursorBlinkPhase::visible(),
+                    cursor_focused: true,
+                    marked_text: "",
+                })
             },
         );
     }
@@ -606,29 +607,29 @@ fn draw_with_gpui(
             point(px(0.0), px(0.0)),
             size(px(surface.rect.width()), px(surface.rect.height())),
             |_, _| {
-                let actual = adapter.element(
+                let actual = adapter.element(TerminalElementRequest {
                     surface,
-                    &frame,
-                    14.0,
-                    surface.cell.height,
-                    1.0,
-                    &contract,
-                    CursorBlinkPhase::visible(),
-                    true,
-                    "",
-                );
+                    frame: &frame,
+                    font_size: 14.0,
+                    text_cell_height: surface.cell.height,
+                    pixels_per_point: 1.0,
+                    text_contract: &contract,
+                    cursor_blink_phase: CursorBlinkPhase::visible(),
+                    cursor_focused: true,
+                    marked_text: "",
+                });
                 // Observing selected PTY publications can skip the damage's base frame.
-                let expected = GpuiTerminalAdapter::default().element(
+                let expected = GpuiTerminalAdapter::default().element(TerminalElementRequest {
                     surface,
-                    &frame,
-                    14.0,
-                    surface.cell.height,
-                    1.0,
-                    &contract,
-                    CursorBlinkPhase::visible(),
-                    true,
-                    "",
-                );
+                    frame: &frame,
+                    font_size: 14.0,
+                    text_cell_height: surface.cell.height,
+                    pixels_per_point: 1.0,
+                    text_contract: &contract,
+                    cursor_blink_phase: CursorBlinkPhase::visible(),
+                    cursor_focused: true,
+                    marked_text: "",
+                });
                 assert_eq!(actual.frame(), expected.frame());
                 assert_eq!(actual.glyph_sprite_rects(), expected.glyph_sprite_rects());
                 actual

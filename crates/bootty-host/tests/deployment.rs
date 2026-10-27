@@ -77,16 +77,17 @@ fn compatible_ping() -> CommandOutput {
 }
 
 const fn platform_probe() -> &'static str {
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    return "Darwin\narm64\n";
-    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-    return "Darwin\nx86_64\n";
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-    return "Linux\naarch64\n";
-    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-    return "Linux\nx86_64\n";
-    #[allow(unreachable_code)]
-    "unsupported\nunsupported\n"
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "Darwin\narm64\n"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "Darwin\nx86_64\n"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "Linux\naarch64\n"
+    } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        "Linux\nx86_64\n"
+    } else {
+        "unsupported\nunsupported\n"
+    }
 }
 
 struct PackagedDaemon {

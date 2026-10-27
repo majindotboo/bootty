@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use bootty_ui::gpui::TerminalElementRequest;
 use std::sync::Arc;
 
 use bootty_terminal::{
@@ -46,17 +47,17 @@ fn request(text: &[u8]) -> TerminalZoomRequest {
 }
 
 fn expected(request: &TerminalZoomRequest) -> GpuiTerminalElement {
-    GpuiTerminalAdapter::default().element(
-        request.surface,
-        &request.frame,
-        request.font_size,
-        request.text_cell_height,
-        request.pixels_per_point,
-        &request.text_contract,
-        request.cursor_blink_phase,
-        request.cursor_focused,
-        &request.marked_text,
-    )
+    GpuiTerminalAdapter::default().element(TerminalElementRequest {
+        surface: request.surface,
+        frame: &request.frame,
+        font_size: request.font_size,
+        text_cell_height: request.text_cell_height,
+        pixels_per_point: request.pixels_per_point,
+        text_contract: &request.text_contract,
+        cursor_blink_phase: request.cursor_blink_phase,
+        cursor_focused: request.cursor_focused,
+        marked_text: &request.marked_text,
+    })
 }
 
 #[gpui_kit::test]

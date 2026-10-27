@@ -1,5 +1,5 @@
 //! CoreText keeps the selected face attached to both shaped runs and glyph coverage.
-#![allow(
+#![expect(
     unsafe_code,
     reason = "CoreText attributes and native drawing use owned CF handles at this boundary."
 )]
@@ -391,6 +391,8 @@ fn attributed_line(
             font_size.into()
         };
         let native = font.native_font().clone_with_font_size(f64::from(run_size));
+        // SAFETY: kCTFontAttributeName is an immutable CoreText key whose value is a CTFont, and
+        // the range covers this run's UTF-16 units within the string.
         unsafe {
             attributed.set_attribute(
                 CFRange::init(
@@ -426,6 +428,8 @@ fn layout_font_line(
         let Some(run_attributes) = run.attributes() else {
             continue;
         };
+        // SAFETY: kCTFontAttributeName is an immutable CoreText key, and a run's font attribute is
+        // a CTFont.
         let Some(native) = (unsafe {
             run_attributes
                 .get(kCTFontAttributeName)
@@ -434,6 +438,7 @@ fn layout_font_line(
             continue;
         };
         let emoji = native.postscript_name().contains("AppleColorEmoji");
+        // SAFETY: native is a valid CTFont from the run.
         let native_font = unsafe { NativeFont::from_native_font(&native) };
         let font_id = fonts.insert(native_font);
         let glyphs = run
@@ -468,6 +473,8 @@ fn configured_font(font: &NativeFont, descriptor: &Font, fonts: &mut Fonts) -> R
         .features
         .tag_value_list()
         .iter()
+        // SAFETY: The feature tag and value keys are immutable CoreText constants, used under the
+        // get rule.
         .map(|(tag, value)| unsafe {
             CFDictionary::from_CFType_pairs(&[
                 (
@@ -481,6 +488,8 @@ fn configured_font(font: &NativeFont, descriptor: &Font, fonts: &mut Fonts) -> R
             ])
         })
         .collect::<Vec<_>>();
+    // SAFETY: kCTFontFeatureSettingsAttribute is an immutable CoreText constant, used under the get
+    // rule.
     unsafe {
         attributes.push((
             CFString::wrap_under_get_rule(kCTFontFeatureSettingsAttribute),
@@ -504,6 +513,8 @@ fn configured_font(font: &NativeFont, descriptor: &Font, fonts: &mut Fonts) -> R
                     .map(|font| font.native_font().copy_descriptor())
             })
             .collect::<Vec<_>>();
+        // SAFETY: CFLocaleCopyPreferredLanguages returns a new array of language strings, which the
+        // create rule takes over.
         let languages = unsafe {
             CFArray::<CFString>::wrap_under_create_rule(CFLocaleCopyPreferredLanguages())
         };
@@ -512,6 +523,8 @@ fn configured_font(font: &NativeFont, descriptor: &Font, fonts: &mut Fonts) -> R
                 .iter()
                 .map(|entry| (*entry).clone()),
         );
+        // SAFETY: kCTFontCascadeListAttribute is an immutable CoreText constant, used under the get
+        // rule.
         unsafe {
             attributes.push((
                 CFString::wrap_under_get_rule(kCTFontCascadeListAttribute),

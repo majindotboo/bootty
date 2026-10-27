@@ -1,4 +1,4 @@
-#![allow(clippy::panic_in_result_fn)] // Assertions report failures; Result propagates fallible fixture I/O.
+#![cfg(test)]
 
 use assert_fs::{TempDir, prelude::*};
 use bootty_browser::{
@@ -32,15 +32,16 @@ fn annotation() -> Annotation {
 }
 
 #[fixture]
-fn png() -> Result<Vec<u8>, image::ImageError> {
+fn png() -> Vec<u8> {
     let mut output = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
         2,
         2,
         image::Rgba([12, 34, 56, 255]),
     ))
-    .write_to(&mut output, image::ImageFormat::Png)?;
-    Ok(output.into_inner())
+    .write_to(&mut output, image::ImageFormat::Png)
+    .unwrap();
+    output.into_inner()
 }
 
 #[fixture]
@@ -108,61 +109,81 @@ fn capture_accepts_only_persisted_selection_bounds(
 #[rstest]
 fn visual_attachment_commits_image_before_publishing_and_survives_restart(
     mut annotation: Annotation,
-    png: Result<Vec<u8>, image::ImageError>,
+    png: Vec<u8>,
     image_geometry: AnnotationImageGeometry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let png = png?;
-    let directory = TempDir::new()?;
+) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    annotation.attach_to("old-conversation")?;
-    annotation.prepare_attachment("New visual comment".into(), "captured-conversation")?;
+    annotation.attach_to("old-conversation").unwrap();
+    annotation
+        .prepare_attachment("New visual comment".into(), "captured-conversation")
+        .unwrap();
     assert_eq!(annotation.note, "Saved note");
     assert_eq!(annotation.conversation.as_deref(), Some("old-conversation"));
-    store.commit(&[], std::slice::from_ref(&annotation))?;
-    let staged = store.load()?;
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
+    let staged = store.load().unwrap();
     assert_eq!(
         staged
             .first()
             .and_then(|note| note.pending_conversation.as_deref()),
         Some("captured-conversation")
     );
-    let (image, _) = store.commit_image(&png, &image_geometry)?;
+    let (image, _) = store.commit_image(&png, &image_geometry).unwrap();
     let mut attached = annotation.clone();
-    attached.finish_attachment(&annotation, image)?;
-    store.commit(&staged, std::slice::from_ref(&attached))?;
-    assert_eq!(store.load_image(&attached, "captured-conversation")?, png);
+    attached.finish_attachment(&annotation, image).unwrap();
+    store
+        .commit(&staged, std::slice::from_ref(&attached))
+        .unwrap();
+    assert_eq!(
+        store
+            .load_image(&attached, "captured-conversation")
+            .unwrap(),
+        png
+    );
     assert!(store.load_image(&attached, "old-conversation").is_err());
     let mut replaced = attached.clone();
-    replaced.prepare_attachment("Changed while sending".into(), "captured-conversation")?;
-    store.commit(
-        std::slice::from_ref(&attached),
-        std::slice::from_ref(&replaced),
-    )?;
+    replaced
+        .prepare_attachment("Changed while sending".into(), "captured-conversation")
+        .unwrap();
+    store
+        .commit(
+            std::slice::from_ref(&attached),
+            std::slice::from_ref(&replaced),
+        )
+        .unwrap();
     assert!(
         store
             .load_image(&attached, "captured-conversation")
             .is_err()
     );
     assert_eq!(
-        store.load()?.first().and_then(|note| note.image.as_ref()),
+        store
+            .load()
+            .unwrap()
+            .first()
+            .and_then(|note| note.image.as_ref()),
         replaced.image.as_ref()
     );
-    Ok(())
 }
 
 #[rstest]
 fn failed_visual_capture_retains_draft_and_prior_attachment(
     mut annotation: Annotation,
     image_geometry: AnnotationImageGeometry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    annotation.attach_to("prior")?;
-    annotation.prepare_attachment("Unfinished visual change".into(), "captured")?;
-    store.commit(&[], std::slice::from_ref(&annotation))?;
+    annotation.attach_to("prior").unwrap();
+    annotation
+        .prepare_attachment("Unfinished visual change".into(), "captured")
+        .unwrap();
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
     assert!(store.commit_image(b"not a PNG", &image_geometry).is_err());
-    assert_eq!(store.load()?, vec![annotation]);
-    Ok(())
+    assert_eq!(store.load().unwrap(), vec![annotation]);
 }
 
 #[rstest]
@@ -170,57 +191,65 @@ fn failed_visual_capture_retains_draft_and_prior_attachment(
 #[case::substituted(true)]
 fn missing_or_substituted_image_never_resolves_as_text_success(
     mut annotation: Annotation,
-    png: Result<Vec<u8>, image::ImageError>,
+    png: Vec<u8>,
     image_geometry: AnnotationImageGeometry,
     #[case] substitute: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    annotation.prepare_attachment("Visual comment".into(), "captured")?;
-    let (image, _) = store.commit_image(&png?, &image_geometry)?;
+    annotation
+        .prepare_attachment("Visual comment".into(), "captured")
+        .unwrap();
+    let (image, _) = store.commit_image(&png, &image_geometry).unwrap();
     let path = directory.child(format!("browser-annotation-images/{}.png", image.id));
     let intent = annotation.clone();
-    annotation.finish_attachment(&intent, image)?;
-    store.commit(&[], std::slice::from_ref(&annotation))?;
+    annotation.finish_attachment(&intent, image).unwrap();
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
     if substitute {
-        path.write_binary(b"substituted")?;
+        path.write_binary(b"substituted").unwrap();
     } else {
-        std::fs::remove_file(path.path())?;
+        std::fs::remove_file(path.path()).unwrap();
     }
     assert!(store.load_image(&annotation, "captured").is_err());
-    assert_eq!(store.load()?, vec![annotation]);
-    Ok(())
+    assert_eq!(store.load().unwrap(), vec![annotation]);
 }
 
 #[rstest]
 fn cancelled_or_changed_intent_cannot_publish_late_image(
     mut annotation: Annotation,
-    png: Result<Vec<u8>, image::ImageError>,
+    png: Vec<u8>,
     image_geometry: AnnotationImageGeometry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    annotation.prepare_attachment("Captured change".into(), "captured")?;
+    annotation
+        .prepare_attachment("Captured change".into(), "captured")
+        .unwrap();
     let intent = annotation.clone();
-    let (image, _) = store.commit_image(&png?, &image_geometry)?;
-    annotation.prepare_attachment("Newer change".into(), "captured")?;
+    let (image, _) = store.commit_image(&png, &image_geometry).unwrap();
+    annotation
+        .prepare_attachment("Newer change".into(), "captured")
+        .unwrap();
     let prior = annotation.clone();
     assert!(annotation.finish_attachment(&intent, image).is_err());
     assert_eq!(annotation, prior);
-    Ok(())
 }
 
 #[rstest]
 fn cancelled_capture_cannot_publish_a_late_image(
     mut annotation: Annotation,
-    png: Result<Vec<u8>, image::ImageError>,
+    png: Vec<u8>,
     image_geometry: AnnotationImageGeometry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    annotation.prepare_attachment("Captured change".into(), "captured")?;
+    annotation
+        .prepare_attachment("Captured change".into(), "captured")
+        .unwrap();
     let intent = annotation.clone();
-    store.commit(&[], std::slice::from_ref(&intent))?;
+    store.commit(&[], std::slice::from_ref(&intent)).unwrap();
 
     let cancelled = apply_annotation_event(
         std::slice::from_ref(&intent),
@@ -230,31 +259,35 @@ fn cancelled_capture_cannot_publish_a_late_image(
             address: intent.address.clone(),
             id: intent.id.to_string(),
         },
-    )?;
-    store.commit(std::slice::from_ref(&intent), &cancelled)?;
-    let (image, _) = store.commit_image(&png?, &image_geometry)?;
+    )
+    .unwrap();
+    store
+        .commit(std::slice::from_ref(&intent), &cancelled)
+        .unwrap();
+    let (image, _) = store.commit_image(&png, &image_geometry).unwrap();
     let mut late = cancelled
         .first()
         .cloned()
-        .ok_or("missing cancelled annotation")?;
+        .expect("missing cancelled annotation");
     let prior = late.clone();
 
     assert!(late.finish_attachment(&intent, image).is_err());
     assert_eq!(late, prior);
-    assert_eq!(store.load()?, cancelled);
-    Ok(())
+    assert_eq!(store.load().unwrap(), cancelled);
 }
 
 #[rstest]
 fn cancellation_after_attachment_commit_restores_only_its_record(
     mut annotation: Annotation,
-    png: Result<Vec<u8>, image::ImageError>,
+    png: Vec<u8>,
     image_geometry: AnnotationImageGeometry,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    annotation.attach_to("prior-conversation")?;
-    annotation.prepare_attachment("New visual comment".into(), "captured-conversation")?;
+    annotation.attach_to("prior-conversation").unwrap();
+    annotation
+        .prepare_attachment("New visual comment".into(), "captured-conversation")
+        .unwrap();
     let prior = annotation.clone();
     let mut sibling = annotation.clone();
     sibling.id = 2;
@@ -264,11 +297,11 @@ fn cancellation_after_attachment_commit_restores_only_its_record(
     sibling.revision = 0;
     sibling.pending_conversation = None;
     let before = vec![prior.clone(), sibling.clone()];
-    store.commit(&[], &before)?;
+    store.commit(&[], &before).unwrap();
 
-    let (image, _) = store.commit_image(&png?, &image_geometry)?;
+    let (image, _) = store.commit_image(&png, &image_geometry).unwrap();
     let mut attached = prior.clone();
-    attached.finish_attachment(&prior, image)?;
+    attached.finish_attachment(&prior, image).unwrap();
     let candidate = vec![attached.clone(), sibling];
     let writer_store = store.clone();
     let write_completed = std::sync::Arc::new(std::sync::Barrier::new(2));
@@ -283,21 +316,20 @@ fn cancellation_after_attachment_commit_restores_only_its_record(
     });
     write_completed.wait();
 
-    let committed = store.load()?;
+    let committed = store.load().unwrap();
     let mut concurrent = committed.clone();
     let other = concurrent
         .iter_mut()
         .find(|record| record.id == 2)
-        .ok_or("missing sibling annotation")?;
+        .expect("missing sibling annotation");
     other.note = "Saved by another window".into();
-    store.commit(&committed, &concurrent)?;
+    store.commit(&committed, &concurrent).unwrap();
     write_completed.wait();
 
-    let restored = writer.join().map_err(|_| "attachment writer panicked")??;
+    let restored = writer.join().unwrap().unwrap();
     let expected = vec![prior, concurrent[1].clone()];
     assert_eq!(restored, expected);
-    assert_eq!(store.load()?, expected);
-    Ok(())
+    assert_eq!(store.load().unwrap(), expected);
 }
 
 #[rstest]
@@ -306,16 +338,21 @@ fn cancellation_after_attachment_commit_restores_only_its_record(
 fn geometric_selection_survives_restart_and_attachment(
     mut annotation: Annotation,
     #[case] selection: AnnotationSelection,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     annotation.anchor.selection = Some(selection.clone());
-    annotation.attach_to("conversation-1")?;
-    let directory = TempDir::new()?;
+    annotation.attach_to("conversation-1").unwrap();
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    store.commit(&[], std::slice::from_ref(&annotation))?;
-    let restored = store.load()?;
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
+    let restored = store.load().unwrap();
     assert_eq!(restored, vec![annotation]);
-    assert!(annotation_batch(&restored)?.contains(&serde_json::to_string(&selection)?));
-    Ok(())
+    assert!(
+        annotation_batch(&restored)
+            .unwrap()
+            .contains(&serde_json::to_string(&selection).unwrap())
+    );
 }
 
 /// A sent message splits back into the words written with it and the notes its batch names,
@@ -327,24 +364,23 @@ fn sent_batches_split_back_into_words_and_notes(
     mut annotation: Annotation,
     #[case] words: &str,
     #[case] authored: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     annotation.note = "Annotation 99: not a header".to_owned();
     let mut second = annotation.clone();
     second.id = annotation.id.saturating_add(1);
-    let batch = annotation_batch(&[annotation.clone(), second.clone()])?;
+    let batch = annotation_batch(&[annotation.clone(), second.clone()]).unwrap();
     let message = if words.is_empty() {
         batch
     } else {
         format!("{words}\n\n{batch}")
     };
-    let (written, ids) = split_annotation_batch(&message).ok_or("a batch")?;
+    let (written, ids) = split_annotation_batch(&message).expect("a batch");
     assert_eq!(written, authored);
     assert!(
         ids.contains(&annotation.id) && ids.contains(&second.id),
         "{ids:?}"
     );
     assert_eq!(split_annotation_batch("Just words"), None);
-    Ok(())
 }
 
 #[rstest]
@@ -362,17 +398,18 @@ fn invalid_geometry_cannot_enter_a_batch(
 }
 
 #[rstest]
-fn restart_retains_notes_and_unfinished_drafts(
-    annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+fn restart_retains_notes_and_unfinished_drafts(annotation: Annotation) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    store.commit(&[], std::slice::from_ref(&annotation))?;
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
     assert_eq!(
-        AnnotationStore::new(directory.child("browser").path()).load()?,
+        AnnotationStore::new(directory.child("browser").path())
+            .load()
+            .unwrap(),
         vec![annotation]
     );
-    Ok(())
 }
 
 #[rstest]
@@ -382,8 +419,9 @@ fn editor_commits_or_discards_only_the_draft(
     annotation: Annotation,
     #[case] event: AnnotationEvent,
     #[case] note: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let records = apply_annotation_event(&[annotation], 7, "https://example.com/page", event)?;
+) {
+    let records =
+        apply_annotation_event(&[annotation], 7, "https://example.com/page", event).unwrap();
     assert_eq!(
         records.first().map(|record| record.note.as_str()),
         Some(note)
@@ -392,7 +430,6 @@ fn editor_commits_or_discards_only_the_draft(
         records.first().and_then(|record| record.draft.as_ref()),
         None
     );
-    Ok(())
 }
 
 #[rstest]
@@ -412,12 +449,12 @@ fn stale_page_or_navigation_cannot_edit_a_saved_note(
 }
 
 #[rstest]
-fn invalid_candidate_keeps_prior_document(
-    annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+fn invalid_candidate_keeps_prior_document(annotation: Annotation) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    store.commit(&[], std::slice::from_ref(&annotation))?;
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
     let mut invalid = annotation.clone();
     invalid.note = "x".repeat(4097);
     assert!(
@@ -425,20 +462,19 @@ fn invalid_candidate_keeps_prior_document(
             .commit(std::slice::from_ref(&annotation), &[invalid])
             .is_err()
     );
-    assert_eq!(store.load()?, vec![annotation]);
-    Ok(())
+    assert_eq!(store.load().unwrap(), vec![annotation]);
 }
 
 #[rstest]
-fn damaged_storage_is_reported_without_overwriting() -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+fn damaged_storage_is_reported_without_overwriting() {
+    let directory = TempDir::new().unwrap();
     directory
         .child("browser-annotations.json")
-        .write_str("broken")?;
+        .write_str("broken")
+        .unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
     assert!(store.load().is_err());
     directory.child("browser-annotations.json").assert("broken");
-    Ok(())
 }
 
 proptest! {
@@ -458,33 +494,27 @@ proptest! {
 }
 
 #[rstest]
-fn batch_excludes_unfinished_drafts_and_keeps_page_identity(
-    annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn batch_excludes_unfinished_drafts_and_keeps_page_identity(annotation: Annotation) {
     let mut other = annotation.clone();
     other.id = 2;
     other.page = 8;
     other.note.clear();
     other.draft = Some("Unfinished other page".into());
     let selected = vec![annotation, other];
-    let batch = annotation_batch(&selected)?;
+    let batch = annotation_batch(&selected).unwrap();
     assert!(batch.contains("Saved note"));
     assert!(!batch.contains("Unfinished edit"));
     assert!(!batch.contains("Unfinished other page"));
     assert!(batch.contains("Page 7:"));
-    Ok(())
 }
 
 #[rstest]
-fn identity_directories_have_independent_annotation_documents(
-    annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+fn identity_directories_have_independent_annotation_documents(annotation: Annotation) {
+    let directory = TempDir::new().unwrap();
     let production = AnnotationStore::new(directory.child("production/browser").path());
     let development = AnnotationStore::new(directory.child("development/browser").path());
-    production.commit(&[], &[annotation])?;
-    assert_eq!(development.load()?, Vec::<Annotation>::new());
-    Ok(())
+    production.commit(&[], &[annotation]).unwrap();
+    assert_eq!(development.load().unwrap(), Vec::<Annotation>::new());
 }
 
 #[rstest]
@@ -508,8 +538,7 @@ fn oversized_batch_can_be_reduced_without_losing_saved_notes(annotation: Annotat
 }
 
 #[rstest]
-fn cancelling_a_new_draft_does_not_leave_an_empty_annotation()
--> Result<(), Box<dyn std::error::Error>> {
+fn cancelling_a_new_draft_does_not_leave_an_empty_annotation() {
     let original = annotation();
     let picked = apply_annotation_event(
         &[],
@@ -519,8 +548,9 @@ fn cancelling_a_new_draft_does_not_leave_an_empty_annotation()
             address: original.address.clone(),
             anchor: original.anchor,
         },
-    )?;
-    let id = picked.first().ok_or("missing draft")?.id.to_string();
+    )
+    .unwrap();
+    let id = picked.first().expect("missing draft").id.to_string();
     let cancelled = apply_annotation_event(
         &picked,
         7,
@@ -529,101 +559,102 @@ fn cancelling_a_new_draft_does_not_leave_an_empty_annotation()
             address: original.address.clone(),
             id,
         },
-    )?;
+    )
+    .unwrap();
     assert_eq!(cancelled, Vec::<Annotation>::new());
-    Ok(())
 }
 
 #[rstest]
-fn annotation_storage_survives_site_data_directory_removal(
-    annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+fn annotation_storage_survives_site_data_directory_removal(annotation: Annotation) {
+    let directory = TempDir::new().unwrap();
     let site_data = directory.child("browser");
-    site_data.create_dir_all()?;
+    site_data.create_dir_all().unwrap();
     let store = AnnotationStore::new(site_data.path());
-    store.commit(&[], std::slice::from_ref(&annotation))?;
-    std::fs::remove_dir(site_data.path())?;
-    assert_eq!(store.load()?, vec![annotation]);
-    Ok(())
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
+    std::fs::remove_dir(site_data.path()).unwrap();
+    assert_eq!(store.load().unwrap(), vec![annotation]);
 }
 
 #[rstest]
-fn stale_window_snapshot_cannot_overwrite_another_windows_saved_note(
-    annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+fn stale_window_snapshot_cannot_overwrite_another_windows_saved_note(annotation: Annotation) {
+    let directory = TempDir::new().unwrap();
     let first = AnnotationStore::new(directory.child("browser").path());
     let second = AnnotationStore::new(directory.child("browser").path());
-    first.commit(&[], std::slice::from_ref(&annotation))?;
-    let stale = second.load()?;
+    first
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
+    let stale = second.load().unwrap();
     let mut replacement = annotation.clone();
     replacement.note = "Other window edit".into();
-    first.commit(
-        std::slice::from_ref(&annotation),
-        std::slice::from_ref(&replacement),
-    )?;
+    first
+        .commit(
+            std::slice::from_ref(&annotation),
+            std::slice::from_ref(&replacement),
+        )
+        .unwrap();
     assert!(matches!(
         second.commit(&stale, &[]),
         Err(bootty_browser::AnnotationError::Conflict)
     ));
-    assert_eq!(first.load()?, vec![replacement]);
-    Ok(())
+    assert_eq!(first.load().unwrap(), vec![replacement]);
 }
 
 #[rstest]
-fn legacy_notes_load_without_inventing_conversation_attachment(
-    annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
-    let mut legacy = serde_json::to_value(&annotation)?;
-    let object = legacy
-        .as_object_mut()
-        .ok_or("annotation is not an object")?;
+fn legacy_notes_load_without_inventing_conversation_attachment(annotation: Annotation) {
+    let directory = TempDir::new().unwrap();
+    let mut legacy = serde_json::to_value(&annotation).unwrap();
+    let object = legacy.as_object_mut().expect("annotation is not an object");
     object.remove("conversation");
     object.remove("revision");
     directory
         .child("browser-annotations.json")
-        .write_str(&serde_json::to_string(&vec![legacy])?)?;
-    let restored = AnnotationStore::new(directory.child("browser").path()).load()?;
+        .write_str(&serde_json::to_string(&vec![legacy]).unwrap())
+        .unwrap();
+    let restored = AnnotationStore::new(directory.child("browser").path())
+        .load()
+        .unwrap();
     assert_eq!(restored, vec![annotation]);
-    Ok(())
 }
 
 #[rstest]
-fn attached_draft_survives_reopen_and_detachment_keeps_the_note(
-    mut annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let directory = TempDir::new()?;
+fn attached_draft_survives_reopen_and_detachment_keeps_the_note(mut annotation: Annotation) {
+    let directory = TempDir::new().unwrap();
     let store = AnnotationStore::new(directory.child("browser").path());
-    annotation.attach_to("native:codex:7")?;
-    store.commit(&[], std::slice::from_ref(&annotation))?;
-    let mut reopened = store.load()?.into_iter().next().ok_or("missing note")?;
+    annotation.attach_to("native:codex:7").unwrap();
+    store
+        .commit(&[], std::slice::from_ref(&annotation))
+        .unwrap();
+    let mut reopened = store
+        .load()
+        .unwrap()
+        .into_iter()
+        .next()
+        .expect("missing note");
     assert!(reopened.is_attached_to("native:codex:7"));
     assert!(!reopened.is_attached_to("native:codex:8"));
-    assert!(reopened.detach_if_unchanged(&annotation)?);
-    store.commit(
-        std::slice::from_ref(&annotation),
-        std::slice::from_ref(&reopened),
-    )?;
-    assert_eq!(store.load()?, vec![reopened.clone()]);
+    assert!(reopened.detach_if_unchanged(&annotation).unwrap());
+    store
+        .commit(
+            std::slice::from_ref(&annotation),
+            std::slice::from_ref(&reopened),
+        )
+        .unwrap();
+    assert_eq!(store.load().unwrap(), vec![reopened.clone()]);
     assert_eq!(reopened.note, annotation.note);
     assert_eq!(reopened.conversation, None);
-    Ok(())
 }
 
 #[rstest]
-fn stale_send_cannot_detach_an_identical_note_reattached_later(
-    mut annotation: Annotation,
-) -> Result<(), Box<dyn std::error::Error>> {
-    annotation.attach_to("native:codex:7")?;
+fn stale_send_cannot_detach_an_identical_note_reattached_later(mut annotation: Annotation) {
+    annotation.attach_to("native:codex:7").unwrap();
     let submitted = annotation.clone();
-    assert!(annotation.detach_if_unchanged(&submitted)?);
-    annotation.attach_to("native:codex:7")?;
-    assert!(!annotation.detach_if_unchanged(&submitted)?);
+    assert!(annotation.detach_if_unchanged(&submitted).unwrap());
+    annotation.attach_to("native:codex:7").unwrap();
+    assert!(!annotation.detach_if_unchanged(&submitted).unwrap());
     assert!(annotation.is_attached_to("native:codex:7"));
     assert_eq!(annotation.note, submitted.note);
-    Ok(())
 }
 
 proptest! {

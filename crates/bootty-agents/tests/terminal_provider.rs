@@ -2,7 +2,7 @@ use assert_fs::prelude::*;
 use bootty_agents::{AgentKind, AgentLaunch, TerminalAgentService, terminal_provider_installer};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-mod support;
+pub mod support;
 
 #[rstest]
 #[case(AgentKind::Codex, "CODEX_HOME")]

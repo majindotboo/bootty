@@ -290,10 +290,6 @@ impl KeymapBindingSnapshot {
 
 /// Trigger capabilities that are not encoded by a GPUI [`Keystroke`] alone.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Trigger policies are independent options, not exclusive states."
-)]
 pub struct KeymapTriggerOptions {
     pub performable: bool,
     pub global: bool,

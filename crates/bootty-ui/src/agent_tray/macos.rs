@@ -107,13 +107,12 @@ fn host(
 
 /// Run the private macOS tray process without configuration, terminals or a control endpoint.
 ///
+/// `exit` ends the process when stdin closes, even if `AppKit` has blocked the main thread, or
+/// when the tray cannot be shown; its argument says whether the helper failed.
+///
 /// # Errors
 /// Returns errors starting the bounded stdio readers and native tray event loop.
-#[expect(
-    clippy::exit,
-    reason = "This stateless executable entry point must terminate on parent EOF even when AppKit is deadlocked."
-)]
-pub fn run_helper() -> Result<()> {
+pub fn run_helper(exit: fn(bool) -> !) -> Result<()> {
     let latest = Arc::new(Mutex::new(None));
     let state = latest.clone();
     let (wake, updates) = async_channel::bounded(1);
@@ -124,8 +123,7 @@ pub fn run_helper() -> Result<()> {
             if let Err(error) = &result {
                 eprintln!("Agent tray input failed: {error:#}");
             }
-            // EOF ends this stateless helper even if AppKit has blocked its main thread.
-            std::process::exit(i32::from(result.is_err()));
+            exit(result.is_err());
         })?;
     let (events, clicks) = mpsc::sync_channel::<String>(128);
     std::thread::Builder::new()
@@ -169,7 +167,7 @@ pub fn run_helper() -> Result<()> {
                         Ok(backend) => tray = Some(backend),
                         Err(error) => {
                             eprintln!("Agent tray unavailable: {error}");
-                            std::process::exit(1);
+                            exit(true);
                         }
                     }
                 }

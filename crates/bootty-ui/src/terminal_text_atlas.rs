@@ -101,7 +101,6 @@ const SHAPED_RUN_CACHE_CAP: usize = 1024;
 
 #[derive(Clone)]
 pub struct TextAtlasBuilder {
-    shaper: TerminalTextShaper,
     atlas: GlyphAtlas,
     fonts: FontLibrary,
     platform_text_system: Option<Arc<dyn gpui_kit::PlatformTextSystem>>,
@@ -180,7 +179,6 @@ impl TextAtlasBuilder {
 
     fn from_atlas(atlas: GlyphAtlas) -> Self {
         Self {
-            shaper: TerminalTextShaper,
             atlas,
             fonts: FontLibrary::new(),
             platform_text_system: None,
@@ -395,8 +393,7 @@ impl TextAtlasBuilder {
                     );
                     return;
                 }
-                self.shaper
-                    .shape_into_retained(&command.text, 0, &mut clusters)
+                TerminalTextShaper::shape_into_retained(&command.text, 0, &mut clusters)
             }
         };
         let cell_width = command.rect.width() / f32::from(total_cells);

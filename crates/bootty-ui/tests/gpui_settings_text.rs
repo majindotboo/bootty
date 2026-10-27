@@ -8,7 +8,7 @@ use gpui_kit::{Context, Modifiers, TestAppContext, point};
 use settings_support::GpuiSettingsSnapshot;
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use settings_support::SettingsProbe as TextProbe;
 
 impl TextProbe {

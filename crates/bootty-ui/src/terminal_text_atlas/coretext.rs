@@ -1,6 +1,9 @@
-#![allow(
-    unsafe_code,
-    reason = "Native glyph rasterization requires CoreText pointer APIs; buffers and owned handles are confined to this adapter."
+#![cfg_attr(
+    target_os = "macos",
+    expect(
+        unsafe_code,
+        reason = "Native glyph rasterization requires CoreText pointer APIs; buffers and owned handles are confined to this adapter."
+    )
 )]
 
 use super::atlas::GlyphRaster;

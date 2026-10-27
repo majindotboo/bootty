@@ -286,10 +286,6 @@ impl Render for AsyncQuestionsView {
 }
 
 /// Keep a focused answer in its own scroll region after its bounds are known.
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "Finite measured scroll geometry is adjusted to a visible edge"
-)]
 fn reveal_answer(
     scroll: &ScrollHandle,
     bounds: gpui_kit::Bounds<gpui_kit::Pixels>,

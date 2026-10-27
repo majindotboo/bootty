@@ -1054,10 +1054,6 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
         .map_err(|error| anyhow::anyhow!(error))
 }
 
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Transport lifetimes and frame publication flags vary independently."
-)]
 struct TerminalWorker {
     shell_prompt: ShellPrompt,
     engine: TerminalEngine,

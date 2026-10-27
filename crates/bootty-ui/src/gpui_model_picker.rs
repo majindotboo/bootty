@@ -268,7 +268,6 @@ impl ListDelegate for ModelList {
 }
 
 // Popup focus, availability and the selected speed are independent facts.
-#[allow(clippy::struct_excessive_bools)]
 pub struct ModelPickerView {
     list: Entity<ListState<ModelList>>,
     trigger_focus: FocusHandle,

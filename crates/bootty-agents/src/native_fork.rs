@@ -136,21 +136,23 @@ impl NativeAgentService {
             .as_deref()
             .ok_or("The source has no saved task")?;
         self.create_captured(
-            &parent.binding_id,
-            Some(task),
-            "Side chat",
-            config,
-            tools,
-            Some(super::CreationOrigin::SideChat(ForkContext {
-                origin: NativeSideChat {
-                    source_id: parent.id,
-                    boundary,
-                    seeded_identity: None,
-                    transcript,
-                },
-                source: source.clone(),
-                attachments,
-            })),
+            super::Creation {
+                binding_id: &parent.binding_id,
+                task_identity: Some(task),
+                title: "Side chat",
+                config,
+                tools,
+                origin: Some(super::CreationOrigin::SideChat(ForkContext {
+                    origin: NativeSideChat {
+                        source_id: parent.id,
+                        boundary,
+                        seeded_identity: None,
+                        transcript,
+                    },
+                    source: source.clone(),
+                    attachments,
+                })),
+            },
             Some(&place),
         )
         .map_err(|error| error.message)

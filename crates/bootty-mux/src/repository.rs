@@ -1,7 +1,3 @@
-#![allow(clippy::needless_pass_by_value)]
-#![allow(clippy::match_same_arms)]
-#![allow(clippy::wildcard_imports)]
-
 use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,8 +12,14 @@ mod projects;
 mod schema;
 mod snapshot;
 
-use schema::*;
-use snapshot::*;
+use schema::{
+    WorkspaceSchemaKind, classify_schema, create_workspace_schema, new_remote_space_id,
+    table_columns, user_tables,
+};
+use snapshot::{
+    LoadedSpaces, backend_to_storage, bool_from_storage, color_to_hex, load_spaces,
+    nonempty_trimmed, remote_to_storage,
+};
 
 use crate::session_membership::{SessionMembership, SessionState, WorkspaceSession};
 
@@ -349,22 +351,26 @@ impl WorkspaceRepository {
         let encoded = encode(snapshot)?;
         let previous = previous.map(encode).transpose()?;
         let mut conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open terminal checkpoint", error))?;
+            .map_err(|error| self.database_error("open terminal checkpoint", &error))?;
         let tx = conn
             .transaction()
-            .map_err(|error| self.database_error("begin terminal checkpoint", error))?;
-        let changed = tx.execute("UPDATE workspace_sessions SET terminal_snapshot = ?1 WHERE identity = ?2 AND space_id = ?3 AND terminal_snapshot IS ?4", params![encoded, identity, scope.persistence_value(), previous]).map_err(|error| self.database_error("save terminal checkpoint", error))?;
+            .map_err(|error| self.database_error("begin terminal checkpoint", &error))?;
+        let changed = tx.execute("UPDATE workspace_sessions SET terminal_snapshot = ?1 WHERE identity = ?2 AND space_id = ?3 AND terminal_snapshot IS ?4", params![encoded, identity, scope.persistence_value(), previous]).map_err(|error| self.database_error("save terminal checkpoint", &error))?;
         if changed != 1 {
             return Err(WorkspacePersistenceError::operation(
                 "terminal checkpoint owner or prior state changed",
             ));
         }
-        tx.execute("UPDATE workspace_spaces SET selected_session_identity = ?1 WHERE id = ?2 AND selected_session_id = ?3", params![identity, scope.persistence_value(), snapshot.backend_id]).map_err(|error| self.database_error("save checkpoint selection", error))?;
+        tx.execute("UPDATE workspace_spaces SET selected_session_identity = ?1 WHERE id = ?2 AND selected_session_id = ?3", params![identity, scope.persistence_value(), snapshot.backend_id]).map_err(|error| self.database_error("save checkpoint selection", &error))?;
         tx.commit()
-            .map_err(|error| self.database_error("commit terminal checkpoint", error))
+            .map_err(|error| self.database_error("commit terminal checkpoint", &error))
     }
 
-    fn database_error(&self, operation: &str, error: rusqlite::Error) -> WorkspacePersistenceError {
+    fn database_error(
+        &self,
+        operation: &str,
+        error: &rusqlite::Error,
+    ) -> WorkspacePersistenceError {
         WorkspacePersistenceError::new(format!("{operation} at {}: {error}", self.path.display()))
     }
 
@@ -380,7 +386,7 @@ impl WorkspaceRepository {
         hide_tmux_status: bool,
     ) -> WorkspaceResult<Option<WorkspaceSpace>> {
         self.create_space_db(name, icon, color, tint_sidebar, mux, hide_tmux_status)
-            .map_err(|error| self.database_error("create space", error))
+            .map_err(|error| self.database_error("create space", &error))
     }
 
     fn create_space_db(
@@ -465,10 +471,10 @@ impl WorkspaceRepository {
         icon: &str,
         color: [u8; 3],
         tint_sidebar: bool,
-        mux: SpaceMuxOverride,
+        mux: &SpaceMuxOverride,
     ) -> WorkspaceResult<bool> {
         self.update_space_db(scope, name, icon, color, tint_sidebar, mux)
-            .map_err(|error| self.database_error("update space", error))
+            .map_err(|error| self.database_error("update space", &error))
     }
 
     fn update_space_db(
@@ -478,7 +484,7 @@ impl WorkspaceRepository {
         icon: &str,
         color: [u8; 3],
         tint_sidebar: bool,
-        mux: SpaceMuxOverride,
+        mux: &SpaceMuxOverride,
     ) -> rusqlite::Result<bool> {
         let Some(name) = nonempty_trimmed(name) else {
             return Ok(false);
@@ -511,7 +517,7 @@ impl WorkspaceRepository {
     /// Returns database transaction errors; failed writes leave prior state intact.
     pub fn delete_space(&mut self, id: SpaceId) -> WorkspaceResult<bool> {
         self.delete_space_db(id, None)
-            .map_err(|error| self.database_error("delete space", error))
+            .map_err(|error| self.database_error("delete space", &error))
     }
 
     pub(crate) fn delete_space_and_select(
@@ -521,7 +527,7 @@ impl WorkspaceRepository {
         replacement: SpaceId,
     ) -> WorkspaceResult<bool> {
         self.delete_space_db(id, Some((window_key, replacement)))
-            .map_err(|error| self.database_error("close active space", error))
+            .map_err(|error| self.database_error("close active space", &error))
     }
 
     fn delete_space_db(
@@ -559,7 +565,7 @@ impl WorkspaceRepository {
         space_id: SpaceId,
     ) -> WorkspaceResult<()> {
         self.set_selected_space_db(window_key, space_id)
-            .map_err(|error| self.database_error("select space", error))
+            .map_err(|error| self.database_error("select space", &error))
     }
 
     fn set_selected_space_db(&self, window_key: &str, space_id: SpaceId) -> rusqlite::Result<()> {
@@ -592,8 +598,8 @@ impl WorkspaceRepository {
         window_id: Option<&str>,
     ) -> WorkspaceResult<()> {
         let conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open saved selection", error))?;
-        let changed = conn.execute("UPDATE workspace_spaces SET selected_session_identity = ?1, selected_session_id = ?3, selected_window_id = ?4, unavailable = 0 WHERE id = ?2 AND (?1 IS NULL OR EXISTS (SELECT 1 FROM workspace_sessions WHERE identity = ?1 AND space_id = ?2))", params![identity, scope.persistence_value(), session_id, window_id]).map_err(|error| self.database_error("save selected identity", error))?;
+            .map_err(|error| self.database_error("open saved selection", &error))?;
+        let changed = conn.execute("UPDATE workspace_spaces SET selected_session_identity = ?1, selected_session_id = ?3, selected_window_id = ?4, unavailable = 0 WHERE id = ?2 AND (?1 IS NULL OR EXISTS (SELECT 1 FROM workspace_sessions WHERE identity = ?1 AND space_id = ?2))", params![identity, scope.persistence_value(), session_id, window_id]).map_err(|error| self.database_error("save selected identity", &error))?;
         if changed != 1 {
             return Err(WorkspacePersistenceError::operation(
                 "selected task is not held by the Space",
@@ -612,7 +618,7 @@ impl WorkspaceRepository {
         window_id: Option<&str>,
     ) -> WorkspaceResult<()> {
         let conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to save binding restore state", error)
+            self.database_error("open database to save binding restore state", &error)
         })?;
         let changed = conn
             .execute(
@@ -626,7 +632,7 @@ impl WorkspaceRepository {
                     scope.persistence_value(),
                 ],
             )
-            .map_err(|error| self.database_error("save binding restore state", error))?
+            .map_err(|error| self.database_error("save binding restore state", &error))?
             != 0;
         if !changed {
             return Err(WorkspacePersistenceError::new(format!(
@@ -662,11 +668,11 @@ impl WorkspaceRepository {
     ) -> WorkspaceResult<()> {
         validate_binding_membership_mutation(mutation)?;
         let mut conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to journal binding membership", error)
+            self.database_error("open database to journal binding membership", &error)
         })?;
         let tx = conn
             .transaction()
-            .map_err(|error| self.database_error("begin binding membership journal", error))?;
+            .map_err(|error| self.database_error("begin binding membership journal", &error))?;
         self.validate_binding_scope(&tx, scope)?;
         let stored = binding_membership_mutation_to_storage(mutation);
         tx.execute(
@@ -695,9 +701,9 @@ impl WorkspaceRepository {
                 stored.initial_state,
             ],
         )
-        .map_err(|error| self.database_error("journal binding membership", error))?;
+        .map_err(|error| self.database_error("journal binding membership", &error))?;
         tx.commit()
-            .map_err(|error| self.database_error("commit binding membership journal", error))?;
+            .map_err(|error| self.database_error("commit binding membership journal", &error))?;
         Ok(())
     }
 
@@ -708,7 +714,7 @@ impl WorkspaceRepository {
         scope: SpaceId,
     ) -> WorkspaceResult<Vec<PendingBindingMembershipMutation>> {
         let conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to read binding membership", error)
+            self.database_error("open database to read binding membership", &error)
         })?;
         self.load_pending_binding_membership_mutations(&conn, scope)
     }
@@ -730,16 +736,16 @@ impl WorkspaceRepository {
         apply_binding_membership_mutation(mutation, &mut next)?;
 
         let mut conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to commit binding membership", error)
+            self.database_error("open database to commit binding membership", &error)
         })?;
         let tx = conn
             .transaction()
-            .map_err(|error| self.database_error("begin binding membership commit", error))?;
+            .map_err(|error| self.database_error("begin binding membership commit", &error))?;
         self.require_pending_binding_membership_mutation(&tx, scope, mutation)?;
         self.write_binding_state(&tx, scope, &next)?;
         self.delete_pending_binding_membership_mutation(&tx, mutation.identity())?;
         tx.commit()
-            .map_err(|error| self.database_error("commit binding membership", error))?;
+            .map_err(|error| self.database_error("commit binding membership", &error))?;
         *sessions = next;
         Ok(())
     }
@@ -757,10 +763,10 @@ impl WorkspaceRepository {
         sessions: &mut SessionMembership,
     ) -> WorkspaceResult<bool> {
         let mut conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to reconcile binding membership", error)
+            self.database_error("open database to reconcile binding membership", &error)
         })?;
         let tx = conn.transaction().map_err(|error| {
-            self.database_error("begin binding membership reconciliation", error)
+            self.database_error("begin binding membership reconciliation", &error)
         })?;
         let pending = self.load_pending_binding_membership_mutations(&tx, scope)?;
         if pending.is_empty() {
@@ -779,7 +785,7 @@ impl WorkspaceRepository {
         }
         self.write_binding_state(&tx, scope, &next)?;
         tx.commit().map_err(|error| {
-            self.database_error("commit binding membership reconciliation", error)
+            self.database_error("commit binding membership reconciliation", &error)
         })?;
         *sessions = next;
         Ok(true)
@@ -787,7 +793,7 @@ impl WorkspaceRepository {
 
     fn validate_binding_scope(&self, tx: &Transaction<'_>, scope: SpaceId) -> WorkspaceResult<()> {
         space_exists(tx, scope)
-            .map_err(|error| self.database_error("validate binding membership scope", error))?
+            .map_err(|error| self.database_error("validate binding membership scope", &error))?
             .then_some(())
             .ok_or_else(|| {
                 WorkspacePersistenceError::new(format!(
@@ -815,7 +821,7 @@ impl WorkspaceRepository {
             })?;
             rows.collect()
         };
-        load().map_err(|error| self.database_error("load binding membership journal", error))
+        load().map_err(|error| self.database_error("load binding membership journal", &error))
     }
 
     fn require_pending_binding_membership_mutation(
@@ -842,7 +848,7 @@ impl WorkspaceRepository {
             "DELETE FROM workspace_pending_binding_operations WHERE identity = ?1",
             [identity],
         )
-        .map_err(|error| self.database_error("delete binding membership journal", error))?;
+        .map_err(|error| self.database_error("delete binding membership journal", &error))?;
         Ok(())
     }
 
@@ -860,16 +866,17 @@ impl WorkspaceRepository {
             return Ok(());
         }
         Self::validate_binding_states(states)?;
-        let mut conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open database to commit binding state", error))?;
+        let mut conn = open_db(&self.path).map_err(|error| {
+            self.database_error("open database to commit binding state", &error)
+        })?;
         let tx = conn
             .transaction()
-            .map_err(|error| self.database_error("begin binding state commit", error))?;
+            .map_err(|error| self.database_error("begin binding state commit", &error))?;
         for (scope, sessions) in states {
             self.write_binding_state(&tx, *scope, sessions)?;
         }
         tx.commit()
-            .map_err(|error| self.database_error("commit binding state", error))?;
+            .map_err(|error| self.database_error("commit binding state", &error))?;
 
         Ok(())
     }
@@ -915,7 +922,7 @@ impl WorkspaceRepository {
         sessions: &SessionMembership,
     ) -> WorkspaceResult<()> {
         if !space_exists(tx, scope)
-            .map_err(|error| self.database_error("validate binding state scope", error))?
+            .map_err(|error| self.database_error("validate binding state scope", &error))?
         {
             return Err(WorkspacePersistenceError::new(format!(
                 "commit binding state: Space {} is gone",
@@ -927,20 +934,20 @@ impl WorkspaceRepository {
         let snapshots = {
             let mut statement = tx
                 .prepare("SELECT identity, terminal_snapshot FROM workspace_sessions")
-                .map_err(|error| self.database_error("read terminal checkpoints", error))?;
+                .map_err(|error| self.database_error("read terminal checkpoints", &error))?;
             statement
                 .query_map([], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
                 })
-                .map_err(|error| self.database_error("read terminal checkpoints", error))?
+                .map_err(|error| self.database_error("read terminal checkpoints", &error))?
                 .collect::<rusqlite::Result<HashMap<_, _>>>()
-                .map_err(|error| self.database_error("read terminal checkpoints", error))?
+                .map_err(|error| self.database_error("read terminal checkpoints", &error))?
         };
         tx.execute(
             "DELETE FROM workspace_sessions WHERE space_id = ?1",
             [scope.persistence_value()],
         )
-        .map_err(|error| self.database_error("replace persisted sessions", error))?;
+        .map_err(|error| self.database_error("replace persisted sessions", &error))?;
         for (position, session) in sessions.sessions().iter().enumerate() {
             if let Some(snapshot) = &session.terminal_snapshot {
                 snapshot
@@ -973,7 +980,7 @@ impl WorkspaceRepository {
                     snapshots.get(&session.identity).cloned().unwrap_or(session.terminal_snapshot.as_deref().map(serde_json::to_string).transpose().map_err(|error| WorkspacePersistenceError::new(format!("encode terminal snapshot: {error}")))?)
                 ],
             )
-            .map_err(|error| self.database_error("insert persisted session", error))?;
+            .map_err(|error| self.database_error("insert persisted session", &error))?;
         }
         Ok(())
     }
@@ -1226,12 +1233,9 @@ fn binding_membership_mutation_to_storage(
     }
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "Decode the fixed journal columns at the SQLite boundary"
-)]
-fn binding_membership_mutation_from_storage(
-    operation: &str,
+/// One binding membership journal row, as stored.
+struct StoredMembershipMutation {
+    operation: String,
     identity: String,
     old_name: Option<String>,
     new_name: Option<String>,
@@ -1239,87 +1243,100 @@ fn binding_membership_mutation_from_storage(
     explicit: Option<i64>,
     cwd: Option<String>,
     initial_state: Option<String>,
-) -> WorkspaceResult<BindingMembershipMutation> {
-    let explicit = explicit
-        .map(|value| {
-            bool_from_storage(value).map_err(|_| {
-                WorkspacePersistenceError::new("binding membership explicit-name state is invalid")
-            })
+}
+
+impl StoredMembershipMutation {
+    /// The journal columns starting at `offset`.
+    fn read(row: &Row<'_>, offset: usize) -> rusqlite::Result<Self> {
+        let column = |index: usize| {
+            offset
+                .checked_add(index)
+                .ok_or(rusqlite::Error::InvalidColumnIndex(offset))
+        };
+        Ok(Self {
+            operation: row.get(column(0)?)?,
+            identity: row.get(column(1)?)?,
+            old_name: row.get(column(2)?)?,
+            new_name: row.get(column(3)?)?,
+            display_name: row.get(column(4)?)?,
+            explicit: row.get(column(5)?)?,
+            cwd: row.get(column(6)?)?,
+            initial_state: row.get(column(7)?)?,
         })
-        .transpose()?;
-    let missing = |what: &str| WorkspacePersistenceError::new(format!("binding membership {what}"));
-    let mutation = match operation {
-        "create" if old_name.is_none() => BindingMembershipMutation::Create {
+    }
+
+    fn mutation(self) -> WorkspaceResult<BindingMembershipMutation> {
+        let Self {
+            operation,
             identity,
-            session_name: new_name.ok_or_else(|| missing("create is missing its name"))?,
-            display_name: display_name
-                .ok_or_else(|| missing("create is missing its display name"))?,
-            explicit: explicit
-                .ok_or_else(|| missing("create is missing its explicit-name state"))?,
-            cwd: cwd.unwrap_or_default(),
-            initial_state: serde_json::from_str(initial_state.as_deref().unwrap_or("{}"))
-                .map_err(|_| missing("create has invalid initial state"))?,
-        },
-        "rename" if cwd.is_none() => BindingMembershipMutation::Rename {
-            identity,
-            old_name: old_name.ok_or_else(|| missing("rename is missing its old name"))?,
-            new_name: new_name.ok_or_else(|| missing("rename is missing its new name"))?,
-            display_name: display_name
-                .ok_or_else(|| missing("rename is missing its display name"))?,
-            explicit: explicit
-                .ok_or_else(|| missing("rename is missing its explicit-name state"))?,
-        },
-        "ditch"
-            if new_name.is_none()
-                && display_name.is_none()
-                && explicit.is_none()
-                && cwd.is_none() =>
-        {
-            BindingMembershipMutation::Ditch {
+            old_name,
+            new_name,
+            display_name,
+            explicit,
+            cwd,
+            initial_state,
+        } = self;
+        let explicit = explicit
+            .map(|value| {
+                bool_from_storage(value).map_err(|_| {
+                    WorkspacePersistenceError::new(
+                        "binding membership explicit-name state is invalid",
+                    )
+                })
+            })
+            .transpose()?;
+        let missing =
+            |what: &str| WorkspacePersistenceError::new(format!("binding membership {what}"));
+        let mutation = match operation.as_str() {
+            "create" if old_name.is_none() => BindingMembershipMutation::Create {
                 identity,
-                old_name: old_name.ok_or_else(|| missing("ditch is missing its old name"))?,
+                session_name: new_name.ok_or_else(|| missing("create is missing its name"))?,
+                display_name: display_name
+                    .ok_or_else(|| missing("create is missing its display name"))?,
+                explicit: explicit
+                    .ok_or_else(|| missing("create is missing its explicit-name state"))?,
+                cwd: cwd.unwrap_or_default(),
+                initial_state: serde_json::from_str(initial_state.as_deref().unwrap_or("{}"))
+                    .map_err(|_| missing("create has invalid initial state"))?,
+            },
+            "rename" if cwd.is_none() => BindingMembershipMutation::Rename {
+                identity,
+                old_name: old_name.ok_or_else(|| missing("rename is missing its old name"))?,
+                new_name: new_name.ok_or_else(|| missing("rename is missing its new name"))?,
+                display_name: display_name
+                    .ok_or_else(|| missing("rename is missing its display name"))?,
+                explicit: explicit
+                    .ok_or_else(|| missing("rename is missing its explicit-name state"))?,
+            },
+            "ditch"
+                if new_name.is_none()
+                    && display_name.is_none()
+                    && explicit.is_none()
+                    && cwd.is_none() =>
+            {
+                BindingMembershipMutation::Ditch {
+                    identity,
+                    old_name: old_name.ok_or_else(|| missing("ditch is missing its old name"))?,
+                }
             }
-        }
-        _ => {
-            return Err(WorkspacePersistenceError::new(
-                "binding membership operation is unknown",
-            ));
-        }
-    };
-    validate_binding_membership_mutation(&mutation)?;
-    Ok(mutation)
+            _ => {
+                return Err(WorkspacePersistenceError::new(
+                    "binding membership operation is unknown",
+                ));
+            }
+        };
+        validate_binding_membership_mutation(&mutation)?;
+        Ok(mutation)
+    }
 }
 
 fn binding_membership_mutation_from_row(
     row: &Row<'_>,
     offset: usize,
 ) -> rusqlite::Result<BindingMembershipMutation> {
-    let [
-        operation,
-        identity,
-        old_name,
-        new_name,
-        display_name,
-        explicit,
-        cwd,
-        initial_state,
-    ] = [0, 1, 2, 3, 4, 5, 6, 7].map(|column| {
-        offset
-            .checked_add(column)
-            .ok_or(rusqlite::Error::InvalidColumnIndex(offset))
-    });
-    let operation = row.get::<_, String>(operation?)?;
-    binding_membership_mutation_from_storage(
-        &operation,
-        row.get(identity?)?,
-        row.get(old_name?)?,
-        row.get(new_name?)?,
-        row.get(display_name?)?,
-        row.get(explicit?)?,
-        row.get(cwd?)?,
-        row.get(initial_state?)?,
-    )
-    .map_err(|_| rusqlite::Error::InvalidQuery)
+    StoredMembershipMutation::read(row, offset)?
+        .mutation()
+        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn space_exists(tx: &Transaction<'_>, space: SpaceId) -> rusqlite::Result<bool> {

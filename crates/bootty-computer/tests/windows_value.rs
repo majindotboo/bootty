@@ -1,5 +1,5 @@
 #![cfg(target_os = "windows")]
-#![allow(
+#![expect(
     unsafe_code,
     reason = "An owned, non-activating native window exercises the real UIA provider."
 )]
@@ -31,6 +31,9 @@ impl Fixture {
         let (stop, stopping) = mpsc::channel();
         let worker = thread::spawn(
             move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                // SAFETY: This thread owns every window it creates here, passes static class and
+                // title strings, gives MSG out-pointers that live through each call, and destroys
+                // the parent once.
                 unsafe {
                     let parent = CreateWindowExW(
                         WS_EX_NOACTIVATE,
@@ -121,9 +124,11 @@ impl Drop for Fixture {
 
 #[tokio::test]
 async fn native_edit_value_changes_and_clears_without_foreground_or_pointer_changes() {
+    // SAFETY: GetForegroundWindow has no preconditions.
     let foreground = unsafe { GetForegroundWindow() };
     let mut pointer = POINT::default();
     // Locked Windows sessions deny cursor queries, but UIA can still edit the owned window.
+    // SAFETY: pointer is a valid out-pointer for the call.
     let pointer_observed = unsafe { GetCursorPos(&raw mut pointer) }.is_ok();
     let fixture = Fixture::new().unwrap();
     let computer = Computer::new();
@@ -190,9 +195,11 @@ async fn native_edit_value_changes_and_clears_without_foreground_or_pointer_chan
                 .await,
             Err(ComputerError::InvalidAction(_))
         ));
+        // SAFETY: GetForegroundWindow has no preconditions.
         assert_eq!(unsafe { GetForegroundWindow() }, foreground);
         let mut after = POINT::default();
         if pointer_observed {
+            // SAFETY: after is a valid out-pointer for the call.
             unsafe { GetCursorPos(&raw mut after) }.unwrap();
             assert_eq!((after.x, after.y), (pointer.x, pointer.y));
         }

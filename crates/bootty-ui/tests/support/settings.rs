@@ -7,19 +7,11 @@ use gpui_kit::{AppContext as _, Context, Entity, IntoElement, Render, Subscripti
 
 pub struct SettingsProbe {
     pub settings: Entity<GpuiSettings>,
-    #[allow(
-        dead_code,
-        reason = "Layout tests share the interactive settings fixture."
-    )]
     pub intents: Rc<RefCell<Vec<SettingsIntent>>>,
     _subscription: Subscription,
 }
 
 impl SettingsProbe {
-    #[allow(
-        dead_code,
-        reason = "Some targets supply a configured draft instead of defaults."
-    )]
     pub fn with_snapshot(snapshot: GpuiSettingsSnapshot, cx: &mut Context<Self>) -> Self {
         Self::with_draft(snapshot, draft(), cx)
     }
@@ -49,6 +41,11 @@ impl Render for SettingsProbe {
     }
 }
 
+/// A settings session over an empty config file in a fresh directory.
+///
+/// # Panics
+/// Panics when the directory or the empty document can't be created.
+#[must_use]
 pub fn draft() -> bootty_ui::settings_session::SettingsSession {
     use bootty_ui::settings_session::{AcceptedSettings, Catalogs, SettingsSession};
     let directory = assert_fs::TempDir::new().expect("settings directory");
@@ -92,6 +89,7 @@ impl GpuiSettingsSnapshot {
         settings
     }
 
+    #[must_use]
     pub fn into_content(self) -> SettingsContent {
         SettingsContent {
             pages: self.pages,

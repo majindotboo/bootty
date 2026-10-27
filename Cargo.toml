@@ -14,6 +14,12 @@ unused_must_use = "deny"
 all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
+# GPUI's foreground futures hold its thread-bound contexts by design, and a future that must be
+# Send already fails to compile where it is spawned.
+future_not_send = "allow"
+# Bootty names independent flags, such as modifier keys, cell styles and capabilities, as bool
+# fields; bitflags would lose the names and enums only fit flags that exclude each other.
+struct_excessive_bools = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 indexing_slicing = "deny"
@@ -27,6 +33,9 @@ panic_in_result_fn = "deny"
 panic = "deny"
 exit = "deny"
 as_conversions = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
+undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
 anstyle-parse = "1"

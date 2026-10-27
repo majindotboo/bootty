@@ -199,24 +199,13 @@ pub enum ComputerAction {
     Press {
         element: Box<ComputerElement>,
         /// Refuse controls without an accessibility action when false.
-        #[serde(
-            default = "default_allow_click",
-            skip_serializing_if = "allow_click_enabled"
-        )]
+        #[serde(default = "default_allow_click")]
         allow_click: bool,
     },
 }
 
 const fn default_allow_click() -> bool {
     true
-}
-
-#[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "Serde skip predicates borrow their field."
-)]
-const fn allow_click_enabled(value: &bool) -> bool {
-    *value
 }
 
 impl ComputerAction {

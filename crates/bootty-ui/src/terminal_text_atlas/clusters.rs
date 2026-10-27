@@ -33,17 +33,12 @@ impl TerminalTextShaper {
         start_cell: u16,
         clusters: &mut Vec<ShapedCluster>,
     ) -> u16 {
-        let (total_cells, cluster_len) = self.shape_into_retained(text, start_cell, clusters);
+        let (total_cells, cluster_len) = Self::shape_into_retained(text, start_cell, clusters);
         clusters.truncate(cluster_len);
         total_cells
     }
 
-    #[allow(
-        clippy::unused_self,
-        reason = "Retains the shaper instance API used by the host and atlas."
-    )]
     pub(super) fn shape_into_retained(
-        &self,
         text: &str,
         start_cell: u16,
         clusters: &mut Vec<ShapedCluster>,

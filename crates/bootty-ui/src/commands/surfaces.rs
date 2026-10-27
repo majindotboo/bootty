@@ -87,11 +87,13 @@ impl SurfaceChooserAction {
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "One table owns the captured surface command schema"
-)]
 pub(super) fn register_commands(commands: &mut BTreeMap<String, super::RegisteredCommand>) {
+    register_chooser_navigation(commands);
+    register_surface_creation(commands);
+}
+
+/// Moving through the focused new tab or split chooser.
+fn register_chooser_navigation(commands: &mut BTreeMap<String, super::RegisteredCommand>) {
     for action in SurfaceChooserAction::ALL {
         commands.insert(
             action.command().to_owned(),
@@ -109,6 +111,9 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
             },
         );
     }
+}
+
+fn register_surface_creation(commands: &mut BTreeMap<String, super::RegisteredCommand>) {
     for (id, title, names) in [
         (
             "surface.choose",

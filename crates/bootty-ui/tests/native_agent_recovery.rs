@@ -1,3 +1,4 @@
+#![cfg(test)]
 #![cfg(unix)]
 
 use bootty_agents::{AgentKind, TerminalAgentStatus, ToolCapture};
@@ -21,11 +22,7 @@ const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[path = "support/idle_frames.rs"]
 mod frames;
-#[allow(
-    clippy::expect_used,
-    reason = "Shared desktop backend fixture follows existing test convention"
-)]
-mod support;
+pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 

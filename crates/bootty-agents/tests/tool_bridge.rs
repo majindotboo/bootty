@@ -1,3 +1,4 @@
+#![cfg(test)]
 use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -1115,7 +1116,6 @@ fn revoking_tools_ends_app_access_and_waiting_requests(binding: CommandTarget) {
     drop(guard);
 }
 
-#[expect(clippy::unwrap_used, reason = "Fixture encodes one fixed opaque pixel")]
 fn snapshot_png() -> String {
     use base64::Engine as _;
     let mut bytes = Vec::new();
@@ -1189,7 +1189,7 @@ fn app_snapshots_number_elements_that_presses_name(binding: CommandTarget) {
     assert_eq!(result["isError"], false);
     assert_eq!(
         calls.lock().unwrap().last(),
-        Some(&json!({"action":"press","element":2}))
+        Some(&json!({"action":"press","element":2,"allow_click":true}))
     );
     let action_only = json!({"name":"computer_input","arguments":{"application":"Test","action":{"action":"press","element":2,"allow_click":false}}});
     assert_eq!(

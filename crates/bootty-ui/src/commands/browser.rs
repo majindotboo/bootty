@@ -39,7 +39,7 @@ struct BrowserCompletion {
     response: Option<std::sync::mpsc::Sender<CommandOutcome>>,
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(dead_code, reason = "Exact-window capture is currently macOS-only")
+        expect(dead_code, reason = "Exact-window capture is currently macOS-only")
     )]
     capture: Option<(
         std::num::NonZeroU32,
@@ -150,11 +150,42 @@ impl BrowserRequest {
     }
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "This fixed command table keeps browser metadata together; splitting the declarations would scatter the registry"
-)]
 pub(super) fn register_commands(commands: &mut BTreeMap<String, super::RegisteredCommand>) {
+    for (id, title, description, arguments) in browser_commands() {
+        let descriptor = CommandDescriptor {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            description: description.to_owned(),
+            mutation: if id == "browser.reset_site_data" {
+                MutationClass::Destructive
+            } else if id == "browser.snapshot" {
+                MutationClass::Read
+            } else {
+                MutationClass::Write
+            },
+            arguments: CompactSchema { arguments },
+            target: Some(ResourceKind::ApplicationWindow),
+            palette: id == "browser.new_tab",
+        };
+        commands.insert(
+            descriptor.id.clone(),
+            super::RegisteredCommand {
+                descriptor,
+                executor: super::CommandExecutorResolver::Browser,
+            },
+        );
+    }
+}
+
+/// One browser command: id, title, description and arguments.
+type BrowserCommand = (
+    &'static str,
+    &'static str,
+    &'static str,
+    Vec<bootty_control::ArgumentSchema>,
+);
+
+fn browser_commands() -> [BrowserCommand; 13] {
     let page_argument = |required| {
         let mut argument = super::argument("page-id", ValueType::Integer);
         argument.required = required;
@@ -162,7 +193,7 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
         argument
     };
 
-    for (id, title, description, arguments) in [
+    [
         (
             "browser.input",
             "Send Browser Input",
@@ -252,30 +283,7 @@ pub(super) fn register_commands(commands: &mut BTreeMap<String, super::Registere
             "Clear this browser profile's cookies and website storage.",
             vec![page_argument(false)],
         ),
-    ] {
-        let descriptor = CommandDescriptor {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            description: description.to_owned(),
-            mutation: if id == "browser.reset_site_data" {
-                MutationClass::Destructive
-            } else if id == "browser.snapshot" {
-                MutationClass::Read
-            } else {
-                MutationClass::Write
-            },
-            arguments: CompactSchema { arguments },
-            target: Some(ResourceKind::ApplicationWindow),
-            palette: id == "browser.new_tab",
-        };
-        commands.insert(
-            descriptor.id.clone(),
-            super::RegisteredCommand {
-                descriptor,
-                executor: super::CommandExecutorResolver::Browser,
-            },
-        );
-    }
+    ]
 }
 
 pub(super) fn resolve(

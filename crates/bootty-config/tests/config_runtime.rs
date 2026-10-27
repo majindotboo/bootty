@@ -1,5 +1,3 @@
-#![allow(clippy::float_cmp)] // Acceptance preserves exact assigned font sizes.
-
 use assert_fs::{TempDir, prelude::*};
 use bootty_config::{ConfigRuntime, config::load_config_from_path};
 use pretty_assertions::assert_eq;
@@ -61,8 +59,10 @@ fn rejected_candidate_retains_live_state_until_accepted(#[case] reload: bool) {
         );
     }
     assert_eq!(runtime.current().window.title, "accepted");
-    assert_eq!(runtime.current().font.size, 20.0);
-    assert_eq!(runtime.configured_font_size(), 14.0);
+    assert_eq!(
+        (runtime.current().font.size, runtime.configured_font_size()),
+        (20.0, 14.0)
+    );
     assert_eq!(runtime.revision(), revision);
 
     let change = if reload {
@@ -73,11 +73,18 @@ fn rejected_candidate_retains_live_state_until_accepted(#[case] reload: bool) {
             .expect("accept document")
             .0
     };
-    assert_eq!(change.previous().window.title, "accepted");
-    assert_eq!(change.previous().font.size, 20.0);
+    assert_eq!(
+        (
+            change.previous().window.title.as_str(),
+            change.previous().font.size
+        ),
+        ("accepted", 20.0)
+    );
     assert_eq!(change.current().window.title, "candidate");
-    assert_eq!(runtime.current().font.size, 16.0);
-    assert_eq!(runtime.configured_font_size(), 16.0);
+    assert_eq!(
+        (runtime.current().font.size, runtime.configured_font_size()),
+        (16.0, 16.0)
+    );
     assert_eq!(runtime.revision(), revision.wrapping_add(1));
 }
 
@@ -118,8 +125,13 @@ fn reload_retains_the_root_document_without_flattening_includes() {
 
     runtime.reload(|_| Ok(())).unwrap();
 
-    assert_eq!(runtime.current().window.title, "reloaded");
-    assert_eq!(runtime.current().font.size, 19.0);
+    assert_eq!(
+        (
+            runtime.current().window.title.as_str(),
+            runtime.current().font.size
+        ),
+        ("reloaded", 19.0)
+    );
     assert_eq!(
         runtime.document().str_at(&["window", "title"]),
         Some("reloaded")

@@ -1,6 +1,7 @@
 #![cfg(test)]
 #![cfg(unix)]
 
+use bootty_ui::gpui::TerminalElementRequest;
 use std::{
     env, fs,
     os::unix::fs::PermissionsExt as _,
@@ -396,17 +397,17 @@ fn draw_with_gpui(initial: Arc<RenderFrame>, final_frame: Arc<RenderFrame>) {
             point(px(0.0), px(0.0)),
             size(px(surface.rect.width()), px(surface.rect.height())),
             |_, _| {
-                adapter.element(
+                adapter.element(TerminalElementRequest {
                     surface,
-                    &frame,
-                    14.0,
-                    surface.cell.height,
-                    1.0,
-                    &contract,
-                    CursorBlinkPhase::visible(),
-                    true,
-                    "",
-                )
+                    frame: &frame,
+                    font_size: 14.0,
+                    text_cell_height: surface.cell.height,
+                    pixels_per_point: 1.0,
+                    text_contract: &contract,
+                    cursor_blink_phase: CursorBlinkPhase::visible(),
+                    cursor_focused: true,
+                    marked_text: "",
+                })
             },
         );
     }

@@ -5,10 +5,10 @@ use crate::{
     gpui::{
         AnsiPalettePreset, EnvironmentVariable, FontFeatureEditorSnapshot, FontFeaturePreset,
         GpuiSettings, ModifierRemap, ModifierRemapField, ModuleIntegrationsSnapshot,
-        ModuleSourceIntent, RemoteEditorSnapshot, RemoteProfileFieldSnapshot, RemoteProfileOption,
-        RemoteProfileSnapshot, RemoteTestIntent, RemoteTestState, ScalarValue, SettingsCategory,
-        SettingsChoice, SettingsContent, SettingsControl, SettingsIntent, SettingsListItem,
-        SettingsPage, SettingsPageItem, SettingsRow,
+        ModuleSourceIntent, NumberSetting, RemoteEditorSnapshot, RemoteProfileFieldSnapshot,
+        RemoteProfileOption, RemoteProfileSnapshot, RemoteTestIntent, RemoteTestState, ScalarValue,
+        SettingsCategory, SettingsChoice, SettingsContent, SettingsControl, SettingsIntent,
+        SettingsListItem, SettingsPage, SettingsPageItem, SettingsRow,
     },
     gpui_settings_catalog::{
         advanced_configuration_rows, group_settings, setting_is_visible_in_native_settings,
@@ -607,9 +607,7 @@ fn provider_settings_page(
     page
 }
 
-#[allow(clippy::too_many_lines)]
 fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<SettingsRow> {
-    let home = crate::strings::home_dir();
     let mut rows = Vec::new();
     let remote = state
         .workspace
@@ -626,210 +624,260 @@ fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<Se
         bootty_agents::AgentKind::Claude,
         bootty_agents::AgentKind::Pi,
     ] {
-        let key = provider.to_string();
-        let Some(preferences) = state.config().agents.provider(&key) else {
-            continue;
-        };
-        let base = format!("agents.{key}");
-        let label = provider.display_name();
-        rows.push(SettingsRow::Section(label.to_owned()));
-        rows.push(SettingsRow::Value {
-            id: format!("{base}.enabled"),
-            label: "Enabled".to_owned(),
-            help: "Allow new conversations and agent tabs. Existing conversations stay readable but cannot send until this is on again.".to_owned(),
-            value: ScalarValue::Bool(preferences.enabled),
-            control: SettingsControl::Toggle,
-            enabled: true,
-        });
-        rows.extend(provider_scalar_settings(
-            state,
-            session,
-            &format!("{base}."),
-        ));
-        rows.push(SettingsRow::StringList {
-            id: format!("{base}.available-efforts"),
-            label: "Available thinking levels".to_owned(),
-            help: "Choose levels for the picker and effort shortcuts. Empty shows all supported levels; each model still determines which levels it supports.".to_owned(),
-            items: session.string_list(&format!("{base}.available-efforts"))
-                .unwrap_or_else(|| preferences.available_efforts.clone()),
-            options: ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-                .into_iter().map(str::to_owned).collect(),
-            add_label: "Add thinking level".to_owned(),
-            enabled: true,
-        });
+        if let Some(preferences) = state.config().agents.provider(&provider.to_string()) {
+            rows.extend(provider_rows(state, session, provider, preferences, remote));
+        }
+    }
+    rows
+}
+
+/// One provider's section: its preferences, profiles, account status and actions.
+fn provider_rows(
+    state: &AppState,
+    session: &SettingsSession,
+    provider: bootty_agents::AgentKind,
+    preferences: &bootty_config::config::AgentProviderConfig,
+    remote: bool,
+) -> Vec<SettingsRow> {
+    let key = provider.to_string();
+    let base = format!("agents.{key}");
+    let mut rows = vec![SettingsRow::Section(provider.display_name().to_owned())];
+    rows.push(SettingsRow::Value {
+        id: format!("{base}.enabled"),
+        label: "Enabled".to_owned(),
+        help: "Allow new conversations and agent tabs. Existing conversations stay readable but cannot send until this is on again.".to_owned(),
+        value: ScalarValue::Bool(preferences.enabled),
+        control: SettingsControl::Toggle,
+        enabled: true,
+    });
+    rows.extend(provider_scalar_settings(
+        state,
+        session,
+        &format!("{base}."),
+    ));
+    rows.push(SettingsRow::StringList {
+        id: format!("{base}.available-efforts"),
+        label: "Available thinking levels".to_owned(),
+        help: "Choose levels for the picker and effort shortcuts. Empty shows all supported levels; each model still determines which levels it supports.".to_owned(),
+        items: session.string_list(&format!("{base}.available-efforts"))
+            .unwrap_or_else(|| preferences.available_efforts.clone()),
+        options: ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
+            .into_iter().map(str::to_owned).collect(),
+        add_label: "Add thinking level".to_owned(),
+        enabled: true,
+    });
+    rows.push(provider_text_row(
+        format!("{base}.program"),
+        "Executable",
+        "Leave empty to use PATH.",
+        &preferences.program,
+        provider.default_program(),
+        true,
+    ));
+    rows.extend(provider_profile_rows(&base, &key, preferences));
+    rows.extend(provider_account_rows(
+        state,
+        session,
+        provider,
+        preferences,
+        remote,
+    ));
+    rows
+}
+
+/// The profile picker, and the selected profile's own settings.
+fn provider_profile_rows(
+    base: &str,
+    key: &str,
+    preferences: &bootty_config::config::AgentProviderConfig,
+) -> Vec<SettingsRow> {
+    let home = crate::strings::home_dir();
+    let mut rows = Vec::new();
+    let mut choices = vec![SettingsChoice {
+        token: String::new(),
+        label: "Default account".to_owned(),
+        description: None,
+    }];
+    choices.extend(preferences.profiles.iter().map(|(id, profile)| {
+        SettingsChoice {
+            token: id.clone(),
+            label: profile.name.clone(),
+            description: profile
+                .directory
+                .as_deref()
+                .map(|directory| bootty_git::project::display_path(directory, home.as_deref())),
+        }
+    }));
+    rows.push(SettingsRow::Value {
+        id: format!("{base}.selected"),
+        label: "Profile".to_owned(),
+        help: "Used for new agents.".to_owned(),
+        value: ScalarValue::Token(preferences.selected.clone()),
+        control: SettingsControl::Choice(choices),
+        enabled: true,
+    });
+    rows.push(SettingsRow::Action {
+        id: format!("provider:new:{key}"),
+        label: "Profiles".to_owned(),
+        help: String::new(),
+        button: "Add profile".to_owned(),
+        enabled: preferences.profiles.len() < 16,
+    });
+    if let Some(profile) = preferences.selected_profile() {
+        let path = format!("{base}.profiles.{}", preferences.selected);
         rows.push(provider_text_row(
-            format!("{base}.program"),
-            "Executable",
-            "Leave empty to use PATH.",
-            &preferences.program,
-            provider.default_program(),
+            format!("{path}.name"),
+            "Profile name",
+            "",
+            &profile.name,
+            "Work",
+            false,
+        ));
+        rows.push(provider_text_row(
+            format!("{path}.directory"),
+            "Account directory",
+            "Separate sign-in storage. Leave empty to use the default.",
+            profile.directory.as_deref().unwrap_or_default(),
+            "/path/to/provider-account",
             true,
         ));
-        let mut choices = vec![SettingsChoice {
-            token: String::new(),
-            label: "Default account".to_owned(),
-            description: None,
-        }];
-        choices.extend(preferences.profiles.iter().map(|(id, profile)| {
-            SettingsChoice {
-                token: id.clone(),
-                label: profile.name.clone(),
-                description: profile
-                    .directory
-                    .as_deref()
-                    .map(|directory| bootty_git::project::display_path(directory, home.as_deref())),
-            }
-        }));
-        rows.push(SettingsRow::Value {
-            id: format!("{base}.selected"),
-            label: "Profile".to_owned(),
-            help: "Used for new agents.".to_owned(),
-            value: ScalarValue::Token(preferences.selected.clone()),
-            control: SettingsControl::Choice(choices),
+        rows.push(SettingsRow::StringList {
+            id: format!("{path}.arguments"),
+            label: "Launch arguments".to_owned(),
+            help: "One argument per field.".to_owned(),
+            items: profile.arguments.clone(),
+            options: Vec::new(),
+            add_label: "Add argument".to_owned(),
             enabled: true,
         });
         rows.push(SettingsRow::Action {
-            id: format!("provider:new:{key}"),
-            label: "Profiles".to_owned(),
-            help: String::new(),
-            button: "Add profile".to_owned(),
-            enabled: preferences.profiles.len() < 16,
+            id: format!("provider:remove:{key}"),
+            label: "Remove profile".to_owned(),
+            help: "Keeps credentials and conversations.".to_owned(),
+            button: "Remove profile".to_owned(),
+            enabled: true,
         });
-        if let Some(profile) = preferences.selected_profile() {
-            let path = format!("{base}.profiles.{}", preferences.selected);
-            rows.push(provider_text_row(
-                format!("{path}.name"),
-                "Profile name",
-                "",
-                &profile.name,
-                "Work",
-                false,
-            ));
-            rows.push(provider_text_row(
-                format!("{path}.directory"),
-                "Account directory",
-                "Separate sign-in storage. Leave empty to use the default.",
-                profile.directory.as_deref().unwrap_or_default(),
-                "/path/to/provider-account",
-                true,
-            ));
-            rows.push(SettingsRow::StringList {
-                id: format!("{path}.arguments"),
-                label: "Launch arguments".to_owned(),
-                help: "One argument per field.".to_owned(),
-                items: profile.arguments.clone(),
-                options: Vec::new(),
-                add_label: "Add argument".to_owned(),
-                enabled: true,
-            });
-            rows.push(SettingsRow::Action {
-                id: format!("provider:remove:{key}"),
-                label: "Remove profile".to_owned(),
-                help: "Keeps credentials and conversations.".to_owned(),
-                button: "Remove profile".to_owned(),
-                enabled: true,
-            });
-        }
-        let program = if preferences.program.is_empty() {
-            provider.default_program()
-        } else {
-            &preferences.program
-        };
-        let directory = preferences
-            .selected_profile()
-            .and_then(|profile| profile.directory.as_deref());
-        let selector = if provider == bootty_agents::AgentKind::Pi {
-            preferences
-                .selected_profile()
-                .map(|profile| bootty_agents::PiAccountSelector::from_arguments(&profile.arguments))
-                .transpose()
-                .map(Option::flatten)
-        } else {
-            Ok(None)
-        };
-        let status = if remote {
-            None
-        } else {
-            selector.as_ref().ok().and_then(|selector| {
-                state.terminal_agent_service().and_then(|service| {
-                    service.provider_status_with_pi_selector(
-                        provider,
-                        program,
-                        directory,
-                        selector.as_ref(),
-                    )
-                })
-            })
-        };
+    }
+    rows
+}
 
-        rows.extend(provider_status_rows(
+/// What the provider reports about its installation and account, read locally only.
+fn provider_status(
+    state: &AppState,
+    provider: bootty_agents::AgentKind,
+    preferences: &bootty_config::config::AgentProviderConfig,
+    remote: bool,
+) -> Option<bootty_agents::TerminalProviderStatus> {
+    if remote {
+        return None;
+    }
+    let program = if preferences.program.is_empty() {
+        provider.default_program()
+    } else {
+        &preferences.program
+    };
+    let directory = preferences
+        .selected_profile()
+        .and_then(|profile| profile.directory.as_deref());
+    let selector = if provider == bootty_agents::AgentKind::Pi {
+        preferences
+            .selected_profile()
+            .map(|profile| bootty_agents::PiAccountSelector::from_arguments(&profile.arguments))
+            .transpose()
+            .map(Option::flatten)
+            .ok()?
+    } else {
+        None
+    };
+    state
+        .terminal_agent_service()?
+        .provider_status_with_pi_selector(provider, program, directory, selector.as_ref())
+}
+
+/// The account's status, connectors, and sign-in, start and update actions.
+fn provider_account_rows(
+    state: &AppState,
+    session: &SettingsSession,
+    provider: bootty_agents::AgentKind,
+    preferences: &bootty_config::config::AgentProviderConfig,
+    remote: bool,
+) -> Vec<SettingsRow> {
+    let base = format!("agents.{provider}");
+    let program = if preferences.program.is_empty() {
+        provider.default_program()
+    } else {
+        &preferences.program
+    };
+    let directory = preferences
+        .selected_profile()
+        .and_then(|profile| profile.directory.as_deref());
+    let status = provider_status(state, provider, preferences, remote);
+    let mut rows = Vec::new();
+    rows.extend(provider_status_rows(
+        provider,
+        preferences
+            .selected_profile()
+            .map_or(&[], |profile| profile.arguments.as_slice()),
+        status.as_ref(),
+        remote,
+    ));
+    let has_session = state
+        .current_command_target_for(
+            &format!("{base}.tab"),
+            bootty_control::ResourceKind::Session,
+        )
+        .is_some();
+    if bootty_agents::manages_connectors(provider) && !remote {
+        let listing = state
+            .terminal_agent_service()
+            .and_then(|service| service.connectors(provider, program, directory));
+        rows.extend(connector_rows(
             provider,
-            preferences
-                .selected_profile()
-                .map_or(&[], |profile| profile.arguments.as_slice()),
-            status.as_ref(),
-            remote,
+            listing.as_ref(),
+            session,
+            has_session,
         ));
-        let has_session = state
-            .current_command_target_for(
-                &format!("{base}.tab"),
-                bootty_control::ResourceKind::Session,
-            )
-            .is_some();
-        if bootty_agents::manages_connectors(provider) && !remote {
-            let listing = state
-                .terminal_agent_service()
-                .and_then(|service| service.connectors(provider, program, directory));
-            rows.extend(connector_rows(
-                provider,
-                listing.as_ref(),
-                session,
-                has_session,
-            ));
-        }
-        for (operation, title, help, button, enabled) in [
-            (
-                "account.login",
-                "Sign in",
-                if provider == bootty_agents::AgentKind::Pi {
-                    "Open Pi in the selected account store, then use /login."
-                } else {
-                    "Use the provider's sign-in flow in a terminal tab."
-                },
-                "Sign in…",
-                has_session && (directory.is_none() || (!remote && cfg!(unix))),
-            ),
-            (
-                "tab",
-                "Start agent",
-                "Open the selected account/profile in a new tab in this session.",
-                "Open terminal",
-                has_session
-                    && preferences.enabled
-                    && (directory.is_none() || (!remote && cfg!(unix))),
-            ),
-            (
-                "provider.update",
-                "Update agent",
-                "Uses the detected installer when this provider has no active processes.",
-                "Update…",
-                !remote
-                    && status
-                        .as_ref()
-                        .is_some_and(|status| status.installer.is_some())
-                    && state
-                        .terminal_agent_service()
-                        .is_none_or(|service| !service.has_live_provider(provider)),
-            ),
-        ] {
-            rows.push(SettingsRow::Action {
-                id: format!("{base}.{operation}"),
-                label: title.to_owned(),
-                help: help.to_owned(),
-                button: button.to_owned(),
-                enabled,
-            });
-        }
+    }
+    for (operation, title, help, button, enabled) in [
+        (
+            "account.login",
+            "Sign in",
+            if provider == bootty_agents::AgentKind::Pi {
+                "Open Pi in the selected account store, then use /login."
+            } else {
+                "Use the provider's sign-in flow in a terminal tab."
+            },
+            "Sign in…",
+            has_session && (directory.is_none() || (!remote && cfg!(unix))),
+        ),
+        (
+            "tab",
+            "Start agent",
+            "Open the selected account/profile in a new tab in this session.",
+            "Open terminal",
+            has_session && preferences.enabled && (directory.is_none() || (!remote && cfg!(unix))),
+        ),
+        (
+            "provider.update",
+            "Update agent",
+            "Uses the detected installer when this provider has no active processes.",
+            "Update…",
+            !remote
+                && status
+                    .as_ref()
+                    .is_some_and(|status| status.installer.is_some())
+                && state
+                    .terminal_agent_service()
+                    .is_none_or(|service| !service.has_live_provider(provider)),
+        ),
+    ] {
+        rows.push(SettingsRow::Action {
+            id: format!("{base}.{operation}"),
+            label: title.to_owned(),
+            help: help.to_owned(),
+            button: button.to_owned(),
+            enabled,
+        });
     }
     rows
 }
@@ -1232,7 +1280,7 @@ fn optional_metric_row(
         } else {
             bootty_terminal::geometry::DEFAULT_LINE_HEIGHT
         })),
-        control: SettingsControl::Number {
+        control: SettingsControl::Number(NumberSetting {
             range,
             control: NumberControl::Slider,
             precision: 2,
@@ -1241,7 +1289,7 @@ fn optional_metric_row(
             suffix: "px".to_owned(),
             display_scale: 1.0,
             optional: true,
-        },
+        }),
         enabled: true,
     }
 }
@@ -1404,7 +1452,7 @@ fn editable_custom_setting(spec: &SettingSpec, config: &BoottyConfig) -> Option<
 fn fullscreen_offset_control(config: &BoottyConfig) -> (ScalarValue, SettingsControl) {
     (
         ScalarValue::Number(config.window.fullscreen_top_offset.unwrap_or(0.0)),
-        SettingsControl::Number {
+        SettingsControl::Number(NumberSetting {
             range: 0.0..=160.0,
             control: NumberControl::Edit,
             precision: 0,
@@ -1413,7 +1461,7 @@ fn fullscreen_offset_control(config: &BoottyConfig) -> (ScalarValue, SettingsCon
             suffix: "px".to_owned(),
             display_scale: 1.0,
             optional: true,
-        },
+        }),
     )
 }
 
@@ -1947,7 +1995,7 @@ fn settings_control(kind: &SettingKind) -> SettingsControl {
             slider_step,
             suffix,
             display_scale,
-        } => SettingsControl::Number {
+        } => SettingsControl::Number(NumberSetting {
             range: range.clone(),
             control: *control,
             precision: *precision,
@@ -1956,7 +2004,7 @@ fn settings_control(kind: &SettingKind) -> SettingsControl {
             suffix: suffix.to_string(),
             display_scale: *display_scale,
             optional: false,
-        },
+        }),
         SettingKind::Choice { options } => SettingsControl::Choice(
             options
                 .iter()

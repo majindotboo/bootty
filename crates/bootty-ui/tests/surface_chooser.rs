@@ -1,3 +1,4 @@
+#![cfg(test)]
 use std::{cell::RefCell, rc::Rc};
 
 use bootty_control::{CommandInvocation, CommandTarget, ResourceKind};
@@ -58,10 +59,6 @@ fn chooser_window(
     )
 }
 
-#[expect(
-    clippy::expect_used,
-    reason = "Abort invalid test fixture setup before exercising the chooser"
-)]
 fn chooser_window_with_config<'a>(
     cx: &'a mut TestAppContext,
     received: Rc<RefCell<Vec<CommandInvocation>>>,

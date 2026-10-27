@@ -498,7 +498,6 @@ fn parse_git_worktree_list(text: &str) -> Vec<WorktreePickerEntry> {
 
 /// Git state of a session's working directory, used to decide whether a checkout can be removed
 /// without losing work.
-#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorktreeStatus {
     pub in_repo: bool,

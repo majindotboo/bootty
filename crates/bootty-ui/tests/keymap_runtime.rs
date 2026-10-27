@@ -17,7 +17,7 @@ use rstest::rstest;
 mod events;
 #[path = "support/frames.rs"]
 mod frames;
-mod support;
+pub mod support;
 
 fn state(directory: &TempDir, toml_binding: &str, keymap: &str) -> AppState {
     let config_path = directory.path().join("config.toml");

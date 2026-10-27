@@ -17,7 +17,6 @@ use clap::Args as ClapArgs;
 use toml_edit::DocumentMut;
 
 #[derive(Clone, Copy, Debug, Default, ClapArgs)]
-#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Use the fast-release Cargo profile.
     #[arg(long)]

@@ -27,10 +27,6 @@ use gpui_kit::{
 ///
 /// Semantic icons, session progress, ports, labels, colors, and actions are rendered here while
 /// product mutations remain behind typed [`ChromeIntent`] values.
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Independent dock, drag, attention and hover interaction state"
-)]
 pub struct GpuiChrome {
     pub(super) snapshot: ChromeSnapshot,
     pub(super) navigation_hints: Vec<(String, gpui_kit::Keystroke)>,
@@ -303,6 +299,24 @@ impl GpuiChrome {
         }))
     }
 
+    fn sidebar_view(&self, reconcile_hover: bool) -> sidebar::SidebarView<'_> {
+        sidebar::SidebarView {
+            search: &self.sidebar_search,
+            project_filter: self.sidebar_project.as_deref(),
+            task_view: self.sidebar_task_view,
+            attention_only: self.sidebar_attention_only,
+            settled_shelf: self.sidebar_settled_shelf,
+            drag_order: self.sidebar_drag_order.as_ref(),
+            rename: self.sidebar_rename.as_ref(),
+            selection: &self.sidebar_selection,
+            conversation_matches: &self.sidebar_conversation_matches,
+            row_bounds: &self.sidebar_row_bounds,
+            scroll: &self.sidebar_scroll,
+            reveal_current: &self.sidebar_reveal_current,
+            reconcile_hover,
+        }
+    }
+
     pub(crate) fn dock_sidebar(&mut self, cx: &mut Context<Self>) -> Option<gpui_kit::AnyElement> {
         let snapshot = self.snapshot.sidebar.clone()?;
         Some(
@@ -315,29 +329,19 @@ impl GpuiChrome {
                 })
                 .child(sidebar::render(
                     &snapshot,
-                    &self.sidebar_search,
-                    self.sidebar_project.as_deref(),
-                    self.sidebar_task_view,
-                    self.sidebar_attention_only,
-                    self.sidebar_settled_shelf,
-                    self.sidebar_drag_order.as_ref(),
-                    self.sidebar_rename.as_ref(),
-                    &self.sidebar_selection,
-                    &self.sidebar_conversation_matches,
-                    &self.snapshot.titlebar,
-                    self.pointer_hovered_session.as_ref(),
-                    &self.snapshot.spaces,
-                    self.snapshot.space_transition,
-                    &self.snapshot.layout,
-                    0.0,
-                    true,
-                    self.snapshot.palette,
-                    &self.sidebar_row_bounds,
-                    &self.sidebar_scroll,
-                    &self.sidebar_reveal_current,
-                    self.sidebar_reconcile_hover,
-                    &self.navigation_hints,
-                    self.hint_modifiers,
+                    self.sidebar_view(self.sidebar_reconcile_hover),
+                    sidebar::SidebarChrome {
+                        title: &self.snapshot.titlebar,
+                        pointer_hovered_session: self.pointer_hovered_session.as_ref(),
+                        spaces: &self.snapshot.spaces,
+                        transition: self.snapshot.space_transition,
+                        layout: &self.snapshot.layout,
+                        header_height: 0.0,
+                        docked: true,
+                        colors: self.snapshot.palette,
+                        navigation_hints: &self.navigation_hints,
+                        hint_modifiers: self.hint_modifiers,
+                    },
                     cx,
                 ))
                 .into_any_element(),
@@ -857,29 +861,19 @@ impl GpuiChrome {
         let render_sidebar = |sidebar: &super::SidebarSnapshot, cx: &Context<Self>| {
             sidebar::render(
                 sidebar,
-                &self.sidebar_search,
-                self.sidebar_project.as_deref(),
-                self.sidebar_task_view,
-                self.sidebar_attention_only,
-                self.sidebar_settled_shelf,
-                self.sidebar_drag_order.as_ref(),
-                self.sidebar_rename.as_ref(),
-                &self.sidebar_selection,
-                &self.sidebar_conversation_matches,
-                &titlebar,
-                pointer_hovered_session.as_ref(),
-                &spaces,
-                transition,
-                &layout,
-                sidebar_header_height,
-                false,
-                colors,
-                &self.sidebar_row_bounds,
-                &self.sidebar_scroll,
-                &self.sidebar_reveal_current,
-                sidebar_reconcile_hover,
-                &self.navigation_hints,
-                self.hint_modifiers,
+                self.sidebar_view(sidebar_reconcile_hover),
+                sidebar::SidebarChrome {
+                    title: &titlebar,
+                    pointer_hovered_session: pointer_hovered_session.as_ref(),
+                    spaces: &spaces,
+                    transition,
+                    layout: &layout,
+                    header_height: sidebar_header_height,
+                    docked: false,
+                    colors,
+                    navigation_hints: &self.navigation_hints,
+                    hint_modifiers: self.hint_modifiers,
+                },
                 cx,
             )
         };

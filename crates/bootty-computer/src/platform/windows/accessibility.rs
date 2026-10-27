@@ -37,14 +37,16 @@ const MAX_TEXT: usize = 200;
 struct Apartment;
 impl Apartment {
     fn new() -> Result<Self, ComputerError> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
-            .ok()
-            .map_err(platform)?;
+        // SAFETY: CoInitializeEx joins this thread to the MTA; Drop balances it with
+        // CoUninitialize.
+        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
         Ok(Self)
     }
 }
 impl Drop for Apartment {
     fn drop(&mut self) {
+        // SAFETY: Apartment::new succeeded on this thread, so this balances exactly one
+        // CoInitializeEx.
         unsafe { CoUninitialize() };
     }
 }
@@ -61,17 +63,25 @@ struct Session {
 impl Session {
     fn new(window: &NativeWindow) -> Result<Self, ComputerError> {
         let apartment = Apartment::new()?;
+        // SAFETY: COM is initialized on this thread, and CUIAutomation8 is a registered in-process
+        // class.
         let automation: IUIAutomation2 =
-            unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
-                .map_err(platform)?;
-        unsafe { automation.SetAutoSetFocus(false) }.map_err(platform)?;
-        unsafe { automation.SetConnectionTimeout(500) }.map_err(platform)?;
-        unsafe { automation.SetTransactionTimeout(500) }.map_err(platform)?;
-        let root =
-            unsafe { automation.ElementFromHandle(super::hwnd(window.id)) }.map_err(platform)?;
-        let walker = unsafe { automation.ControlViewWalker() }.map_err(platform)?;
-        let cache = unsafe { automation.CreateCacheRequest() }.map_err(platform)?;
-        unsafe { cache.SetTreeScope(TreeScope_Element) }.map_err(platform)?;
+            unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }?;
+        // SAFETY: automation is a live UIA client in this apartment, and each setting is a plain
+        // value.
+        unsafe { automation.SetAutoSetFocus(false) }?;
+        // SAFETY: As above.
+        unsafe { automation.SetConnectionTimeout(500) }?;
+        // SAFETY: As above.
+        unsafe { automation.SetTransactionTimeout(500) }?;
+        // SAFETY: window.id is a window handle; UIA rejects a stale one instead of reading it.
+        let root = unsafe { automation.ElementFromHandle(super::hwnd(window.id)) }?;
+        // SAFETY: automation is a live UIA client in this apartment.
+        let walker = unsafe { automation.ControlViewWalker() }?;
+        // SAFETY: automation is a live UIA client in this apartment.
+        let cache = unsafe { automation.CreateCacheRequest() }?;
+        // SAFETY: cache is a live cache request, and the scope is a plain value.
+        unsafe { cache.SetTreeScope(TreeScope_Element) }?;
         for property in [
             UIA_ControlTypePropertyId,
             UIA_NamePropertyId,
@@ -82,7 +92,8 @@ impl Session {
             UIA_IsPasswordPropertyId,
             UIA_IsOffscreenPropertyId,
         ] {
-            unsafe { cache.AddProperty(property) }.map_err(platform)?;
+            // SAFETY: cache is a live cache request, and property is a UIA property id.
+            unsafe { cache.AddProperty(property) }?;
         }
         Ok(Self {
             root,
@@ -97,6 +108,7 @@ impl Session {
         &self,
         parent: &IUIAutomationElement,
     ) -> Result<Option<IUIAutomationElement>, ComputerError> {
+        // SAFETY: walker, parent and the cache are live UIA objects in this apartment.
         optional_element(unsafe {
             self.walker
                 .GetFirstChildElementBuildCache(parent, &self.cache)
@@ -107,6 +119,7 @@ impl Session {
         &self,
         element: &IUIAutomationElement,
     ) -> Result<Option<IUIAutomationElement>, ComputerError> {
+        // SAFETY: walker, element and the cache are live UIA objects in this apartment.
         optional_element(unsafe {
             self.walker
                 .GetNextSiblingElementBuildCache(element, &self.cache)
@@ -237,24 +250,25 @@ pub(super) fn element(
 pub(super) fn press(window: &NativeWindow, path: &[u16]) -> Result<bool, ComputerError> {
     let session = Session::new(window)?;
     let element = session.resolve(path)?.ok_or(ComputerError::StaleElement)?;
-    if !unsafe { element.CurrentIsEnabled() }
-        .map_err(platform)?
-        .as_bool()
-    {
+    // SAFETY: element is a live UIA element in this session's apartment.
+    if !unsafe { element.CurrentIsEnabled() }?.as_bool() {
         return Err(ComputerError::InvalidAction(
             "the element is disabled".into(),
         ));
     }
     if let Some(invoke) = pattern::<IUIAutomationInvokePattern>(&element, UIA_InvokePatternId)? {
-        unsafe { invoke.Invoke() }.map_err(platform)?;
+        // SAFETY: invoke is a live pattern of an enabled element.
+        unsafe { invoke.Invoke() }?;
     } else if let Some(toggle) =
         pattern::<IUIAutomationTogglePattern>(&element, UIA_TogglePatternId)?
     {
-        unsafe { toggle.Toggle() }.map_err(platform)?;
+        // SAFETY: toggle is a live pattern of an enabled element.
+        unsafe { toggle.Toggle() }?;
     } else if let Some(selection) =
         pattern::<IUIAutomationSelectionItemPattern>(&element, UIA_SelectionItemPatternId)?
     {
-        unsafe { selection.Select() }.map_err(platform)?;
+        // SAFETY: selection is a live pattern of an enabled element.
+        unsafe { selection.Select() }?;
     } else {
         return Ok(false);
     }
@@ -268,10 +282,8 @@ pub(super) fn set_value(
 ) -> Result<(), ComputerError> {
     let session = Session::new(window)?;
     let element = session.resolve(path)?.ok_or(ComputerError::StaleElement)?;
-    if !unsafe { element.CurrentIsEnabled() }
-        .map_err(platform)?
-        .as_bool()
-    {
+    // SAFETY: element is a live UIA element in this session's apartment.
+    if !unsafe { element.CurrentIsEnabled() }?.as_bool() {
         return Err(ComputerError::InvalidAction(
             "the element is disabled".into(),
         ));
@@ -280,15 +292,14 @@ pub(super) fn set_value(
         pattern::<IUIAutomationValuePattern>(&element, UIA_ValuePatternId)?.ok_or_else(|| {
             ComputerError::InvalidAction("the element has no writable accessibility value".into())
         })?;
-    if unsafe { pattern.CurrentIsReadOnly() }
-        .map_err(platform)?
-        .as_bool()
-    {
+    // SAFETY: pattern is a live value pattern of an enabled element.
+    if unsafe { pattern.CurrentIsReadOnly() }?.as_bool() {
         return Err(ComputerError::InvalidAction(
             "the element is read-only".into(),
         ));
     }
-    unsafe { pattern.SetValue(&BSTR::from(value)) }.map_err(platform)
+    // SAFETY: pattern is a live, writable value pattern, and the BSTR outlives the call.
+    unsafe { pattern.SetValue(&BSTR::from(value)) }.map_err(ComputerError::from)
 }
 
 fn describe(
@@ -296,13 +307,12 @@ fn describe(
     path: Vec<u16>,
     window: &NativeWindow,
 ) -> Result<Option<ComputerElement>, ComputerError> {
-    if unsafe { element.CachedIsOffscreen() }
-        .map_err(platform)?
-        .as_bool()
-    {
+    // SAFETY: element was built with this property in its cache.
+    if unsafe { element.CachedIsOffscreen() }?.as_bool() {
         return Ok(None);
     }
-    let rect = unsafe { element.CachedBoundingRectangle() }.map_err(platform)?;
+    // SAFETY: element was built with this property in its cache.
+    let rect = unsafe { element.CachedBoundingRectangle() }?;
     let frame = DisplayBounds {
         x: f64::from(rect.left),
         y: f64::from(rect.top),
@@ -319,47 +329,47 @@ fn describe(
     {
         return Ok(None);
     }
-    let control_type = unsafe { element.CachedControlType() }.map_err(platform)?;
-    let name = text(&unsafe { element.CachedName() }.map_err(platform)?);
-    let identifier = text(&unsafe { element.CachedAutomationId() }.map_err(platform)?);
+    // SAFETY: element was built with this property in its cache.
+    let control_type = unsafe { element.CachedControlType() }?;
+    // SAFETY: element was built with this property in its cache.
+    let name = text(&unsafe { element.CachedName() }?);
+    // SAFETY: element was built with this property in its cache.
+    let identifier = text(&unsafe { element.CachedAutomationId() }?);
     let mut states = Vec::new();
-    if !unsafe { element.CachedIsEnabled() }
-        .map_err(platform)?
-        .as_bool()
-    {
+    // SAFETY: element was built with this property in its cache.
+    if !unsafe { element.CachedIsEnabled() }?.as_bool() {
         states.push(ElementState::Disabled);
     }
-    if unsafe { element.CachedHasKeyboardFocus() }
-        .map_err(platform)?
-        .as_bool()
-    {
+    // SAFETY: element was built with this property in its cache.
+    if unsafe { element.CachedHasKeyboardFocus() }?.as_bool() {
         states.push(ElementState::Focused);
     }
     if let Some(selection) =
         pattern::<IUIAutomationSelectionItemPattern>(element, UIA_SelectionItemPatternId)?
-        && unsafe { selection.CurrentIsSelected() }
-            .map_err(platform)?
-            .as_bool()
+        // SAFETY: selection is a live pattern of this element.
+        && unsafe { selection.CurrentIsSelected() }?.as_bool()
     {
         states.push(ElementState::Selected);
     }
     if let Some(toggle) = pattern::<IUIAutomationTogglePattern>(element, UIA_TogglePatternId)?
-        && unsafe { toggle.CurrentToggleState() }.map_err(platform)? == ToggleState_On
+        // SAFETY: toggle is a live pattern of this element.
+        && unsafe { toggle.CurrentToggleState() }? == ToggleState_On
     {
         states.push(ElementState::Checked);
     }
-    let value = if unsafe { element.CachedIsPassword() }
-        .map_err(platform)?
-        .as_bool()
-    {
+    // SAFETY: element was built with this property in its cache.
+    let value = if unsafe { element.CachedIsPassword() }?.as_bool() {
         None
     } else if let Some(value) = pattern::<IUIAutomationValuePattern>(element, UIA_ValuePatternId)? {
-        text(&unsafe { value.CurrentValue() }.map_err(platform)?)
+        // SAFETY: value is a live value pattern of this element.
+        text(&unsafe { value.CurrentValue() }?)
     } else if (control_type == UIA_DocumentControlTypeId || control_type == UIA_EditControlTypeId)
         && let Some(pattern) = pattern::<IUIAutomationTextPattern>(element, UIA_TextPatternId)?
     {
-        let range = unsafe { pattern.DocumentRange() }.map_err(platform)?;
-        text(&unsafe { range.GetText(200) }.map_err(platform)?)
+        // SAFETY: pattern is a live text pattern of this element.
+        let range = unsafe { pattern.DocumentRange() }?;
+        // SAFETY: range is a live text range, and the limit bounds the copy.
+        text(&unsafe { range.GetText(200) }?)
     } else {
         None
     };
@@ -379,6 +389,7 @@ fn pattern<T: Interface>(
     element: &IUIAutomationElement,
     id: UIA_PATTERN_ID,
 ) -> Result<Option<T>, ComputerError> {
+    // SAFETY: element is a live UIA element, and T is the interface that pattern id returns.
     match unsafe { element.GetCurrentPatternAs(id) } {
         Ok(pattern) => Ok(Some(pattern)),
         Err(error)
@@ -387,7 +398,7 @@ fn pattern<T: Interface>(
         {
             Ok(None)
         }
-        Err(error) => Err(platform(error)),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -399,19 +410,18 @@ fn optional_element(
         // UIA returns S_OK plus a null interface at the end of a walk. windows-rs represents
         // that nullable COM result as Error::empty(), whose HRESULT is also S_OK.
         Err(error) if matches!(error.code(), E_POINTER | S_OK) => Ok(None),
-        Err(error) => Err(platform(error)),
+        Err(error) => Err(error.into()),
     }
 }
 
-#[allow(
-    clippy::needless_pass_by_value,
-    reason = "Matches Result::map_err's owned error argument."
-)]
-fn platform(error: windows::core::Error) -> ComputerError {
-    if error.code().0 == i32::from_ne_bytes(UIA_E_ELEMENTNOTAVAILABLE.to_ne_bytes()) {
-        ComputerError::StaleElement
-    } else {
-        ComputerError::Platform(format!("Windows UI Automation: {error}"))
+/// An element that went away is stale; every other UI Automation failure is the platform's.
+impl From<windows::core::Error> for ComputerError {
+    fn from(error: windows::core::Error) -> Self {
+        if error.code().0 == i32::from_ne_bytes(UIA_E_ELEMENTNOTAVAILABLE.to_ne_bytes()) {
+            Self::StaleElement
+        } else {
+            Self::Platform(format!("Windows UI Automation: {error}"))
+        }
     }
 }
 

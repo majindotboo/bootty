@@ -35,16 +35,15 @@ use gpui_kit::{
 
 use super::{
     ToggleFocusNav,
-    inline_inputs::InlineInputTarget,
+    inline_inputs::{InlineInputOptions, InlineInputTarget},
     model::{
         AnsiPalettePreset, ModifierRemap, ModifierRemapField, ModuleIntegrationStatus,
         ModuleIntegrationsSnapshot, ModuleSourceIntent, RemoteEditorSnapshot, RemoteTestState,
         ScalarValue, SettingsCategory, SettingsChoice, SettingsControl, SettingsIntent,
         SettingsPageItem, SettingsRow, provider_kind_for_settings_row, provider_navigation_id,
     },
-    picker::{
-        render_compact_dropdown, render_dropdown, render_searchable_picker, uses_searchable_picker,
-    },
+    picker::{SelectControl, SelectStyle, render_select, uses_searchable_picker},
+    text_input::TextControlTarget,
     window::{GpuiSettings, NAVBAR_GROUP_TAB_INDEX},
 };
 
@@ -63,6 +62,16 @@ pub(super) struct NavBarEntry {
     pub(super) section_id: Option<String>,
     pub(super) provider: Option<bootty_agents::AgentKind>,
     pub(super) focus_handle: FocusHandle,
+}
+
+/// A value setting's row, as its control shows it.
+#[derive(Clone, Copy)]
+pub(super) struct ValueRow<'a> {
+    pub id: &'a str,
+    pub label: &'a str,
+    pub help: &'a str,
+    pub value: &'a ScalarValue,
+    pub enabled: bool,
 }
 
 impl GpuiSettings {
@@ -865,7 +874,18 @@ impl GpuiSettings {
                 value,
                 control,
                 enabled,
-            } => self.render_value_control(id, label, help, value, control, *enabled, window, cx),
+            } => self.render_value_control(
+                ValueRow {
+                    id,
+                    label,
+                    help,
+                    value,
+                    enabled: *enabled,
+                },
+                control,
+                window,
+                cx,
+            ),
             SettingsRow::AnsiPalette {
                 id,
                 colors,
@@ -964,19 +984,21 @@ impl GpuiSettings {
             })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_value_control(
         &self,
-        id: &str,
-        label: &str,
-        help: &str,
-        value: &ScalarValue,
+        row: ValueRow<'_>,
         control: &SettingsControl,
-        enabled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        if let Some(control) = self.render_provider_default(id, label, help, value, window, cx) {
+        let ValueRow {
+            id,
+            label,
+            help,
+            value,
+            enabled,
+        } = row;
+        if let Some(control) = self.render_provider_default(row, window, cx) {
             return control;
         }
         match control {
@@ -988,79 +1010,25 @@ impl GpuiSettings {
                 enabled,
                 cx,
             ),
-            SettingsControl::Text { placeholder, .. } => Self::render_setting_text_control(
-                id,
-                label,
-                help,
-                value.as_str().unwrap_or_default(),
-                placeholder,
-                enabled,
-                window,
-                cx,
-            ),
-            SettingsControl::Number {
-                range,
-                control,
-                precision,
-                step,
-                slider_step,
-                suffix,
-                display_scale,
-                optional,
-            } => self.render_number_control(
-                id,
-                label,
-                value.as_number().unwrap_or_else(|| *range.start()),
-                range.clone(),
-                *control,
-                *precision,
-                *step,
-                *slider_step,
-                suffix,
-                *display_scale,
-                *optional,
-                enabled,
-                window,
-                cx,
-            ),
+            SettingsControl::Text { placeholder, .. } => {
+                Self::render_setting_text_control(row, placeholder, window, cx)
+            }
+            SettingsControl::Number(number) => self.render_number_control(row, number, window, cx),
             SettingsControl::Choice(choices) => {
-                let current = value.as_str().unwrap_or_default();
-                let id_for_intent = id.to_owned();
-                let selector = format!("settings-choice-{id}");
-                let intent = Rc::new(move |token| SettingsIntent::SetValue {
-                    id: id_for_intent.clone(),
-                    value: ScalarValue::Token(token),
-                });
-                if uses_searchable_picker(choices.len()) {
-                    Self::render_searchable_picker(
-                        selector, label, help, "options", current, choices, enabled, intent,
-                        window, cx,
-                    )
+                let style = if uses_searchable_picker(choices.len()) {
+                    SelectStyle::Searchable { catalog: "options" }
                 } else {
-                    Self::render_dropdown(
-                        selector, label, help, current, choices, enabled, intent, window, cx,
-                    )
-                }
+                    SelectStyle::Dropdown
+                };
+                Self::render_token_select(row, choices, style, window, cx)
             }
-            SettingsControl::Theme(choices) => {
-                let current = value.as_str().unwrap_or_default();
-                let id_for_intent = id.to_owned();
-                Self::render_searchable_picker(
-                    format!("settings-choice-{id}"),
-                    label,
-                    help,
-                    "themes",
-                    current,
-                    choices,
-                    enabled,
-                    Rc::new(move |token| SettingsIntent::SetValue {
-                        id: id_for_intent.clone(),
-                        value: ScalarValue::Token(token),
-                    }),
-                    window,
-                    cx,
-                )
-            }
+            SettingsControl::Theme(choices) => Self::render_token_select(
+                row,
+                choices,
+                SelectStyle::Searchable { catalog: "themes" },
+                window,
+                cx,
+            ),
             SettingsControl::Color => Self::render_color_control(
                 id,
                 &format!("{label}. {help}"),
@@ -1076,83 +1044,48 @@ impl GpuiSettings {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_dropdown(
-        selector: String,
-        label: &str,
-        help: &str,
-        current: &str,
+    /// A choice setting whose picked token becomes its value.
+    fn render_token_select(
+        row: ValueRow<'_>,
         choices: &[SettingsChoice],
-        enabled: bool,
-        intent: Rc<dyn Fn(String) -> SettingsIntent>,
+        style: SelectStyle<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let entity = cx.entity();
-        let on_change = Rc::new(move |token: String, app: &mut gpui_kit::App| {
-            entity.update(app, |this, cx| {
-                this.emit(intent(token), cx);
-            });
-        });
-        render_dropdown(
-            selector, label, help, current, choices, enabled, on_change, window, cx,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn render_compact_dropdown(
-        selector: String,
-        label: &str,
-        help: &str,
-        current: &str,
-        choices: &[SettingsChoice],
-        enabled: bool,
-        intent: Rc<dyn Fn(String) -> SettingsIntent>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let entity = cx.entity();
-        let on_change = Rc::new(move |token: String, app: &mut gpui_kit::App| {
-            entity.update(app, |this, cx| {
-                this.emit(intent(token), cx);
-            });
-        });
-        render_compact_dropdown(
-            selector, label, help, current, choices, enabled, on_change, window, cx,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn render_searchable_picker(
-        selector: String,
-        label: &str,
-        help: &str,
-        catalog_name: &str,
-        current: &str,
-        choices: &[SettingsChoice],
-        enabled: bool,
-        intent: Rc<dyn Fn(String) -> SettingsIntent>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let entity = cx.entity();
-        let on_change = Rc::new(move |token: String, app: &mut gpui_kit::App| {
-            entity.update(app, |this, cx| {
-                this.emit(intent(token), cx);
-            });
-        });
-        render_searchable_picker(
-            selector,
-            label,
-            help,
-            catalog_name,
-            current,
-            choices,
-            enabled,
-            on_change,
+        let id = row.id.to_owned();
+        Self::render_select(
+            SelectControl {
+                selector: format!("settings-choice-{}", row.id),
+                label: row.label,
+                description: row.help,
+                current: row.value.as_str().unwrap_or_default(),
+                choices,
+                enabled: row.enabled,
+            },
+            style,
+            Rc::new(move |token| SettingsIntent::SetValue {
+                id: id.clone(),
+                value: ScalarValue::Token(token),
+            }),
             window,
             cx,
         )
+    }
+
+    pub(super) fn render_select(
+        control: SelectControl<'_>,
+        style: SelectStyle<'_>,
+        intent: Rc<dyn Fn(String) -> SettingsIntent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let entity = cx.entity();
+        let on_change = Rc::new(move |token: String, app: &mut gpui_kit::App| {
+            entity.update(app, |this, cx| {
+                this.emit(intent(token), cx);
+            });
+        });
+        render_select(control, style, on_change, window, cx)
     }
 
     pub(super) fn render_color_control(
@@ -1281,7 +1214,6 @@ impl GpuiSettings {
         content.into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_font_stack_entry(
         id: &str,
         index: usize,
@@ -1306,14 +1238,16 @@ impl GpuiSettings {
             .collect::<Vec<_>>();
         let list = id.to_owned();
         let weight = selection.weight;
-        let family = Self::render_searchable_picker(
-            format!("settings-font-family-{id}-{index}"),
-            "Font family",
-            "",
-            "fonts",
-            &selection.family,
-            &choices,
-            enabled,
+        let family = Self::render_select(
+            SelectControl {
+                selector: format!("settings-font-family-{id}-{index}"),
+                label: "Font family",
+                description: "",
+                current: &selection.family,
+                choices: &choices,
+                enabled,
+            },
+            SelectStyle::Searchable { catalog: "fonts" },
             Rc::new(move |family| SettingsIntent::SetStringListItem {
                 id: list.clone(),
                 index,
@@ -1333,13 +1267,16 @@ impl GpuiSettings {
             })
             .collect::<Vec<_>>();
         let list = id.to_owned();
-        let weight = Self::render_compact_dropdown(
-            format!("settings-font-weight-{id}-{index}"),
-            "Font weight",
-            "",
-            &selection.selected,
-            &weights,
-            enabled,
+        let weight = Self::render_select(
+            SelectControl {
+                selector: format!("settings-font-weight-{id}-{index}"),
+                label: "Font weight",
+                description: "",
+                current: &selection.selected,
+                choices: &weights,
+                enabled,
+            },
+            SelectStyle::Compact,
             Rc::new(move |value| SettingsIntent::SetStringListItem {
                 id: list.clone(),
                 index,
@@ -1360,7 +1297,6 @@ impl GpuiSettings {
             .into_any_element()
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_string_list(
         id: &str,
         items: &[String],
@@ -1764,13 +1700,17 @@ impl GpuiSettings {
         let control = if let Some(selection) = &font_selection {
             Self::render_font_stack_entry(id, index, selection, options, enabled, window, cx)
         } else if options.is_empty() {
-            Self::render_inline_input(
-                format!("settings-string-list-{id}-{index}"),
-                target,
-                value,
-                "Enter a value",
-                "List value",
-                enabled,
+            Self::render_inline_input_with_options(
+                InlineInputOptions {
+                    selector: format!("settings-string-list-{id}-{index}"),
+                    target,
+                    value: value.to_owned(),
+                    placeholder: "Enter a value".to_owned(),
+                    aria_label: "List value".to_owned(),
+                    enabled,
+                    width_rems: 22.5,
+                    size: Size::Medium,
+                },
                 window,
                 cx,
             )
@@ -1802,21 +1742,36 @@ impl GpuiSettings {
                 } else {
                     "options"
                 };
-                Self::render_searchable_picker(
-                    selector,
-                    "Value",
-                    "",
-                    catalog_name,
-                    value,
-                    &choices,
-                    enabled,
+                Self::render_select(
+                    SelectControl {
+                        selector,
+                        label: "Value",
+                        description: "",
+                        current: value,
+                        choices: &choices,
+                        enabled,
+                    },
+                    SelectStyle::Searchable {
+                        catalog: catalog_name,
+                    },
                     intent,
                     window,
                     cx,
                 )
             } else {
-                Self::render_dropdown(
-                    selector, "Value", "", value, &choices, enabled, intent, window, cx,
+                Self::render_select(
+                    SelectControl {
+                        selector,
+                        label: "Value",
+                        description: "",
+                        current: value,
+                        choices: &choices,
+                        enabled,
+                    },
+                    SelectStyle::Dropdown,
+                    intent,
+                    window,
+                    cx,
                 )
             }
         };
@@ -1920,13 +1875,14 @@ impl GpuiSettings {
     ) -> AnyElement {
         let control = if field.options.is_empty() {
             Self::render_remote_text_field(
-                profile_id.to_owned(),
-                field.id.clone(),
+                TextControlTarget::Remote {
+                    profile_id: profile_id.to_owned(),
+                    field_id: field.id.clone(),
+                },
                 format!("remote-field-{}-{}", profile_id, field.id),
                 field.label.clone(),
                 &field.value,
                 &field.label,
-                true,
                 window,
                 cx,
             )
@@ -1942,13 +1898,16 @@ impl GpuiSettings {
                 .collect::<Vec<_>>();
             let profile_id = profile_id.to_owned();
             let field_id = field.id.clone();
-            Self::render_dropdown(
-                format!("remote-field-{}-{}", profile_id, field.id),
-                &field.label,
-                "",
-                &field.value,
-                &choices,
-                true,
+            Self::render_select(
+                SelectControl {
+                    selector: format!("remote-field-{}-{}", profile_id, field.id),
+                    label: &field.label,
+                    description: "",
+                    current: &field.value,
+                    choices: &choices,
+                    enabled: true,
+                },
+                SelectStyle::Dropdown,
                 Rc::new(move |value| SettingsIntent::SetRemoteField {
                     profile_id: profile_id.clone(),
                     field_id: field_id.clone(),
@@ -2044,25 +2003,31 @@ impl GpuiSettings {
             ));
         }
         row = row
-            .child(Self::render_compact_dropdown(
-                format!("settings-modifier-remap-{index}-source"),
-                "Source modifier",
-                "The physical modifier to remap.",
-                &mapping.source,
-                choices,
-                enabled,
+            .child(Self::render_select(
+                SelectControl {
+                    selector: format!("settings-modifier-remap-{index}-source"),
+                    label: "Source modifier",
+                    description: "The physical modifier to remap.",
+                    current: &mapping.source,
+                    choices,
+                    enabled,
+                },
+                SelectStyle::Compact,
                 source_intent,
                 window,
                 cx,
             ))
             .child(Icon::new(IconName::ArrowRight).small())
-            .child(Self::render_compact_dropdown(
-                format!("settings-modifier-remap-{index}-target"),
-                "Target modifier",
-                "The modifier Bootty should receive.",
-                &mapping.target,
-                choices,
-                enabled,
+            .child(Self::render_select(
+                SelectControl {
+                    selector: format!("settings-modifier-remap-{index}-target"),
+                    label: "Target modifier",
+                    description: "The modifier Bootty should receive.",
+                    current: &mapping.target,
+                    choices,
+                    enabled,
+                },
+                SelectStyle::Compact,
                 target_intent,
                 window,
                 cx,
@@ -2100,13 +2065,14 @@ impl GpuiSettings {
                     .items_center()
                     .gap_1()
                     .child(Self::render_remote_text_field(
-                        profile.id.clone(),
-                        format!("args.{index}"),
+                        TextControlTarget::Remote {
+                            profile_id: profile.id.clone(),
+                            field_id: format!("args.{index}"),
+                        },
                         format!("remote-argument-{}-{index}", profile.id),
                         format!("SSH argument {}", index.saturating_add(1)),
                         argument,
                         "-o BatchMode=yes",
-                        true,
                         window,
                         cx,
                     ))

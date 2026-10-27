@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use bootty_ui::gpui::TerminalElementRequest;
 use std::sync::Arc;
 
 use bootty_terminal::geometry::{
@@ -137,17 +138,17 @@ fn blank_terminal_cells_have_no_plaintext_hyperlink() {
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
 
-    let element = adapter.element(
+    let element = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
 
     assert_eq!(
         element
@@ -171,28 +172,28 @@ fn terminal_adapter_reuses_the_prepared_scene_for_the_same_published_frame() {
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
 
-    let first = adapter.element(
+    let first = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
-    let second = adapter.element(
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
+    let second = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
 
     assert!(std::ptr::eq(first.frame(), second.frame()));
 }
@@ -234,29 +235,29 @@ fn terminal_glyph_cache_reuses_images_across_new_published_frames() {
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
 
-    let _ = adapter.element(
+    let _ = adapter.element(TerminalElementRequest {
         surface,
-        &text_frame("ABCD"),
-        14.0,
-        20.0,
-        2.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &text_frame("ABCD"),
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 2.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
     let cold = adapter.glyph_cache_metrics();
-    let _ = adapter.element(
+    let _ = adapter.element(TerminalElementRequest {
         surface,
-        &text_frame("ABCD"),
-        14.0,
-        20.0,
-        2.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &text_frame("ABCD"),
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 2.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
     let warm = adapter.glyph_cache_metrics();
 
     assert!(cold.image_creations > 0);
@@ -275,17 +276,17 @@ fn terminal_glyph_cache_is_byte_bounded_and_device_aligned() {
     let contract =
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut probe = GpuiTerminalAdapter::with_glyph_cache_byte_budget(usize::MAX);
-    let _ = probe.element(
+    let _ = probe.element(TerminalElementRequest {
         surface,
-        &text_frame("A"),
-        14.0,
-        20.0,
-        2.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &text_frame("A"),
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 2.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
     let byte_budget = probe
         .glyph_cache_metrics()
         .bytes
@@ -293,17 +294,17 @@ fn terminal_glyph_cache_is_byte_bounded_and_device_aligned() {
         .expect("test glyph cache budget fits");
     assert!(byte_budget > 0);
     let mut adapter = GpuiTerminalAdapter::with_glyph_cache_byte_budget(byte_budget);
-    let element = adapter.element(
+    let element = adapter.element(TerminalElementRequest {
         surface,
-        &text_frame("ABCDEFGH"),
-        14.0,
-        20.0,
-        2.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &text_frame("ABCDEFGH"),
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 2.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
 
     let metrics = adapter.glyph_cache_metrics();
     assert!(metrics.bytes <= byte_budget);
@@ -369,28 +370,28 @@ fn terminal_adapter_reuses_the_stable_scene_when_cursor_blink_changes() {
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
 
-    let visible = adapter.element(
+    let visible = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
-    let hidden = adapter.element(
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
+    let hidden = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::hidden(),
-        true,
-        "",
-    );
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::hidden(),
+        cursor_focused: true,
+        marked_text: "",
+    });
 
     assert!(std::ptr::eq(visible.frame(), hidden.frame()));
 }
@@ -420,17 +421,17 @@ fn terminal_interaction_retains_wide_cursor_bounds_for_ime_placement() {
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
 
-    let element = adapter.element(
+    let element = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::visible(),
-        true,
-        "",
-    );
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::visible(),
+        cursor_focused: true,
+        marked_text: "",
+    });
 
     assert_eq!(
         element
@@ -468,17 +469,17 @@ fn terminal_view_transform_projects_interaction_geometry_without_rebuilding_scen
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
     let first = adapter
-        .element(
+        .element(TerminalElementRequest {
             surface,
-            &frame,
-            14.0,
-            20.0,
-            1.0,
-            &contract,
-            CursorBlinkPhase::visible(),
-            true,
-            "",
-        )
+            frame: &frame,
+            font_size: 14.0,
+            text_cell_height: 20.0,
+            pixels_per_point: 1.0,
+            text_contract: &contract,
+            cursor_blink_phase: CursorBlinkPhase::visible(),
+            cursor_focused: true,
+            marked_text: "",
+        })
         .with_view_transform(ViewTransform::IDENTITY);
     let initial_cache = adapter.glyph_cache_metrics();
     let view = ViewTransform {
@@ -487,17 +488,17 @@ fn terminal_view_transform_projects_interaction_geometry_without_rebuilding_scen
         pan_y: -3.0,
     };
     let second = adapter
-        .element(
+        .element(TerminalElementRequest {
             surface,
-            &frame,
-            14.0,
-            20.0,
-            1.0,
-            &contract,
-            CursorBlinkPhase::visible(),
-            true,
-            "",
-        )
+            frame: &frame,
+            font_size: 14.0,
+            text_cell_height: 20.0,
+            pixels_per_point: 1.0,
+            text_contract: &contract,
+            cursor_blink_phase: CursorBlinkPhase::visible(),
+            cursor_focused: true,
+            marked_text: "",
+        })
         .with_view_transform(view);
     let second_cache = adapter.glyph_cache_metrics();
     let other_view = ViewTransform {
@@ -506,17 +507,17 @@ fn terminal_view_transform_projects_interaction_geometry_without_rebuilding_scen
         pan_y: 7.0,
     };
     let third = adapter
-        .element(
+        .element(TerminalElementRequest {
             surface,
-            &frame,
-            14.0,
-            20.0,
-            1.0,
-            &contract,
-            CursorBlinkPhase::visible(),
-            true,
-            "",
-        )
+            frame: &frame,
+            font_size: 14.0,
+            text_cell_height: 20.0,
+            pixels_per_point: 1.0,
+            text_contract: &contract,
+            cursor_blink_phase: CursorBlinkPhase::visible(),
+            cursor_focused: true,
+            marked_text: "",
+        })
         .with_view_transform(other_view);
     let final_cache = adapter.glyph_cache_metrics();
 
@@ -595,17 +596,17 @@ fn terminal_preedit_overlays_the_cursor_cell_and_hides_the_terminal_cursor() {
         TerminalTextContract::new(TerminalTextConfig::default(), NativeSymbolPolicy::default());
     let mut adapter = GpuiTerminalAdapter::default();
 
-    let element = adapter.element(
+    let element = adapter.element(TerminalElementRequest {
         surface,
-        &frame,
-        14.0,
-        20.0,
-        1.0,
-        &contract,
-        CursorBlinkPhase::hidden(),
-        true,
-        "文",
-    );
+        frame: &frame,
+        font_size: 14.0,
+        text_cell_height: 20.0,
+        pixels_per_point: 1.0,
+        text_contract: &contract,
+        cursor_blink_phase: CursorBlinkPhase::hidden(),
+        cursor_focused: true,
+        marked_text: "文",
+    });
     let commands = &element.frame().commands;
     let preedit_rect =
         bootty_terminal::geometry::SurfaceRect::from_min_size(40.0, 40.0, 20.0, 20.0);

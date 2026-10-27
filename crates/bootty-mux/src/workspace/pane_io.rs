@@ -50,10 +50,10 @@ impl WorkspaceRuntime {
             let result = begin_synchronous_command(execution).and_then(|()| {
                 let pane = pane.ok_or(MuxCommandError::Stale)?;
                 self.space_terminal_owner(scope)
-                    .map_err(failed)?
+                    .map_err(|error| failed(&error))?
                     .terminal
                     .replace_scoped_restored_native(scope, pane, argv, cwd, history)
-                    .map_err(failed)
+                    .map_err(|error| failed(&error))
             });
             done(result);
             return;
@@ -123,19 +123,16 @@ impl WorkspaceRuntime {
         };
         if topology != PaneTopology::Attach {
             if let Some(runtime) = self.space_terminal_runtime(scope, pane_id) {
-                done(
-                    begin_synchronous_command(execution)
-                        .and_then(|()| write_local_pane(runtime, &input).map_err(failed)),
-                );
+                done(begin_synchronous_command(execution).and_then(|()| {
+                    write_local_pane(runtime, &input).map_err(|error| failed(&error))
+                }));
                 return;
             }
             // A process-local pane exists only as its runtime.
             if topology == PaneTopology::ProcessLocal {
-                done(
-                    begin_synchronous_command(execution).and_then(|()| {
-                        Err(failed(anyhow!("pane {pane_id} has no running terminal")))
-                    }),
-                );
+                done(begin_synchronous_command(execution).and_then(|()| {
+                    Err(failed(&anyhow!("pane {pane_id} has no running terminal")))
+                }));
                 return;
             }
         }
@@ -295,11 +292,11 @@ impl BindingRuntime {
         move || {
             backends
                 .build_backend(&config, workspace.as_deref())
-                .map_err(failed)
+                .map_err(|error| failed(&error))
                 .and_then(|backend| {
                     fence.claim()?;
                     begin_synchronous_command(execution)?;
-                    run(backend.as_ref()).map_err(failed)
+                    run(backend.as_ref()).map_err(|error| failed(&error))
                 })
         }
     }
@@ -319,7 +316,6 @@ fn write_local_pane(runtime: &mut dyn TerminalRuntime, input: &PaneInput) -> Res
     }
 }
 
-#[allow(clippy::needless_pass_by_value, reason = "used as a `map_err` adapter")]
-fn failed(error: anyhow::Error) -> MuxCommandError {
+fn failed(error: &anyhow::Error) -> MuxCommandError {
     MuxCommandError::Failed(format!("{error:#}"))
 }

@@ -15,10 +15,6 @@ pub(super) fn icon(style: TrayIconStyle) -> Result<Vec<u8>, String> {
     .clone())
 }
 
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "The visible pixel bounds are ordered coordinates within the decoded image; 8-bit coverage products fit in u16."
-)]
 fn load() -> Result<[Vec<u8>; 2], String> {
     let image = image::load_from_memory_with_format(
         include_bytes!("../../assets/bootty-mascot.png"),
@@ -37,35 +33,39 @@ fn load() -> Result<[Vec<u8>; 2], String> {
         }
     }
     let (left, top, right, bottom) = bounds.ok_or("The mascot has no visible pixels")?;
-    let cropped =
-        imageops::crop_imm(&image, left, top, right - left + 1, bottom - top + 1).to_image();
+    let (width, height) = (
+        right.saturating_sub(left).saturating_add(1),
+        bottom.saturating_sub(top).saturating_add(1),
+    );
+    let cropped = imageops::crop_imm(&image, left, top, width, height).to_image();
     let mut mono = cropped.clone();
     for pixel in mono.pixels_mut() {
         let [red, green, blue, alpha] = pixel.0;
         // Bright mascot parts become ink; the dark face becomes negative space. Flattening
         // alpha alone would lose the eyes and mouth in a solid silhouette.
-        let coverage = u16::from(red.max(green).max(blue)) * u16::from(alpha) / 255;
+        let coverage = u16::from(red.max(green).max(blue)).saturating_mul(u16::from(alpha)) / 255;
         let ink = if cfg!(target_os = "macos") { 0 } else { 128 };
         pixel.0 = [ink, ink, ink, u8::try_from(coverage).unwrap_or(255)];
     }
     Ok([fit(&cropped), fit(&mono)])
 }
 
-#[expect(
-    clippy::arithmetic_side_effects,
-    reason = "The nonempty crop gives a nonzero extent and the fitted dimensions cannot exceed SIZE."
-)]
 fn fit(image: &image::RgbaImage) -> Vec<u8> {
     let extent = image.width().max(image.height());
-    let width = (image.width().saturating_mul(SIZE) / extent).max(1);
-    let height = (image.height().saturating_mul(SIZE) / extent).max(1);
+    let fitted = |side: u32| {
+        side.saturating_mul(SIZE)
+            .checked_div(extent)
+            .unwrap_or(0)
+            .max(1)
+    };
+    let (width, height) = (fitted(image.width()), fitted(image.height()));
     let resized = imageops::resize(image, width, height, imageops::FilterType::Lanczos3);
     let mut icon = image::RgbaImage::new(SIZE, SIZE);
     imageops::overlay(
         &mut icon,
         &resized,
-        i64::from((SIZE - width) / 2),
-        i64::from((SIZE - height) / 2),
+        i64::from(SIZE.saturating_sub(width) / 2),
+        i64::from(SIZE.saturating_sub(height) / 2),
     );
     icon.into_raw()
 }

@@ -13,7 +13,7 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 
 #[path = "support/settings.rs"]
-mod settings_support;
+pub mod settings_support;
 use settings_support::{GpuiSettingsSnapshot, SettingsProbe};
 
 #[rstest]

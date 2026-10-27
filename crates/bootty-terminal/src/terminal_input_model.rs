@@ -31,10 +31,6 @@ pub struct KeyInput {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "Terminal protocol modifier flags vary independently."
-)]
 pub struct KeyMods {
     pub shift: bool,
     pub alt: bool,

@@ -118,12 +118,12 @@ impl WorkspaceRepository {
     /// Returns a workspace persistence failure.
     pub fn registered_projects(&self) -> WorkspaceResult<Vec<RegisteredProject>> {
         let conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open project registry", error))?;
+            .map_err(|error| self.database_error("open project registry", &error))?;
         let mut statement = conn
             .prepare(
                 "SELECT space_id, cwd, collapsed, settings FROM workspace_projects ORDER BY space_id, cwd",
             )
-            .map_err(|error| self.database_error("read project registry", error))?;
+            .map_err(|error| self.database_error("read project registry", &error))?;
         let projects = statement
             .query_map([], |row| {
                 Ok(RegisteredProject {
@@ -140,7 +140,7 @@ impl WorkspaceRepository {
                 })
             })
             .and_then(Iterator::collect)
-            .map_err(|error| self.database_error("read project registry", error))?;
+            .map_err(|error| self.database_error("read project registry", &error))?;
         Ok(projects)
     }
 
@@ -150,9 +150,9 @@ impl WorkspaceRepository {
     pub fn register_project(&self, scope: SpaceId, cwd: &str) -> WorkspaceResult<()> {
         validate_path(cwd)?;
         let conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open project registry", error))?;
+            .map_err(|error| self.database_error("open project registry", &error))?;
         conn.execute("INSERT INTO workspace_projects (space_id, cwd) VALUES (?1, ?2) ON CONFLICT(space_id, cwd) DO NOTHING", params![scope.persistence_value(), cwd])
-            .map_err(|error| self.database_error("register project", error))?;
+            .map_err(|error| self.database_error("register project", &error))?;
         Ok(())
     }
 
@@ -162,12 +162,12 @@ impl WorkspaceRepository {
     pub fn remove_project(&self, scope: SpaceId, cwd: &str) -> WorkspaceResult<()> {
         validate_path(cwd)?;
         let conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open project registry", error))?;
+            .map_err(|error| self.database_error("open project registry", &error))?;
         conn.execute(
             "DELETE FROM workspace_projects WHERE space_id = ?1 AND cwd = ?2",
             params![scope.persistence_value(), cwd],
         )
-        .map_err(|error| self.database_error("remove project", error))?;
+        .map_err(|error| self.database_error("remove project", &error))?;
         Ok(())
     }
 
@@ -184,9 +184,9 @@ impl WorkspaceRepository {
         let encoded = serde_json::to_string(settings)
             .map_err(|error| super::WorkspacePersistenceError::operation(error.to_string()))?;
         let conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open project registry", error))?;
+            .map_err(|error| self.database_error("open project registry", &error))?;
         conn.execute("INSERT INTO workspace_projects (space_id, cwd, settings) VALUES (?1, ?2, ?3) ON CONFLICT(space_id, cwd) DO UPDATE SET settings = excluded.settings", params![scope.persistence_value(), cwd, encoded])
-            .map_err(|error| self.database_error("configure project", error))?;
+            .map_err(|error| self.database_error("configure project", &error))?;
         Ok(())
     }
 
@@ -195,9 +195,9 @@ impl WorkspaceRepository {
     pub fn toggle_project_collapsed(&self, scope: SpaceId, cwd: &str) -> WorkspaceResult<()> {
         validate_path(cwd)?;
         let conn = open_db(&self.path)
-            .map_err(|error| self.database_error("open project registry", error))?;
+            .map_err(|error| self.database_error("open project registry", &error))?;
         conn.execute("INSERT INTO workspace_projects (space_id, cwd, collapsed) VALUES (?1, ?2, 1) ON CONFLICT(space_id, cwd) DO UPDATE SET collapsed = NOT collapsed", params![scope.persistence_value(), cwd])
-            .map_err(|error| self.database_error("collapse project", error))?;
+            .map_err(|error| self.database_error("collapse project", &error))?;
         Ok(())
     }
 }

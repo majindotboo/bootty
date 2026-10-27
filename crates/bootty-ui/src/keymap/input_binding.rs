@@ -17,10 +17,6 @@ pub enum BindingElement {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Binding policies are independent options, not exclusive states."
-)]
 pub struct BindingFlags {
     pub consumed: bool,
     pub all: bool,
@@ -46,10 +42,6 @@ pub enum BindingModSide {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Keyboard modifiers can be pressed independently."
-)]
 pub struct BindingMods {
     pub shift: bool,
     pub ctrl: bool,

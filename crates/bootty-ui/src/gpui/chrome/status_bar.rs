@@ -412,9 +412,11 @@ pub(super) fn dock_tabs(
             navigation_hints: &chrome.navigation_hints,
             hint_modifiers: chrome.hint_modifiers,
         },
-        &chrome.tab_bounds,
-        chrome.tab_drag.insertion_target(),
-        &chrome.status_tab_focus_handles,
+        TabState {
+            bounds: &chrome.tab_bounds,
+            insertion_target: chrome.tab_drag.insertion_target(),
+            focus_handles: &chrome.status_tab_focus_handles,
+        },
         notch,
         cx,
     );
@@ -479,9 +481,11 @@ fn render_segment_items(
                 segment,
                 colors,
                 bar,
-                tab_bounds,
-                insertion_target,
-                tab_focus_handles,
+                TabState {
+                    bounds: tab_bounds,
+                    insertion_target,
+                    focus_handles: tab_focus_handles,
+                },
                 None,
                 cx,
             ))
@@ -489,17 +493,27 @@ fn render_segment_items(
     ]
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The chrome's state for measuring, dragging and focusing tabs.
+#[derive(Clone, Copy)]
+struct TabState<'a> {
+    bounds: &'a TabBounds,
+    insertion_target: Option<&'a TabInsertionTarget>,
+    focus_handles: &'a std::collections::HashMap<String, FocusHandle>,
+}
+
 fn tab_strip(
     segment: &StatusSegmentSnapshot,
     colors: ChromePalette,
     bar: StatusBarStyle<'_>,
-    tab_bounds: &TabBounds,
-    insertion_target: Option<&TabInsertionTarget>,
-    tab_focus_handles: &std::collections::HashMap<String, FocusHandle>,
+    tabs: TabState<'_>,
     notch: Option<crate::gpui::tabs::NotchTabLayout>,
     cx: &Context<GpuiChrome>,
 ) -> crate::gpui::tabs::ScrollableTabBar {
+    let TabState {
+        insertion_target,
+        focus_handles: tab_focus_handles,
+        ..
+    } = tabs;
     let groups = tab_groups(segment).collect::<Vec<_>>();
     let active_index = groups
         .iter()
@@ -518,17 +532,7 @@ fn tab_strip(
                 focus: tab_focus_handles.get(&id).cloned(),
                 id,
                 title: Some(title.into()),
-                tab: render_tab(
-                    segment,
-                    items,
-                    bar,
-                    colors,
-                    tab_bounds.clone(),
-                    insertion_target,
-                    tab_focus_handles,
-                    &tab_ids,
-                    cx,
-                ),
+                tab: render_tab(segment, items, bar, colors, tabs, &tab_ids, cx),
             }
         })
         .collect();
@@ -609,34 +613,68 @@ fn new_tab_button(
         .into_any_element()
 }
 
-#[allow(clippy::too_many_arguments)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "One tab retains its shared pointer and keyboard behavior"
-)]
+/// A conversation or chooser tab closes through its own owner, not the mux.
+fn native_close_button(
+    items: &[StatusItemSnapshot],
+    label: &str,
+    cx: &Context<GpuiChrome>,
+) -> Option<gpui_kit::AnyElement> {
+    items.iter().find_map(|item| match &item.action {
+        Some(NativeChromeAction::FocusConversation(target)) => {
+            Some(native_tab_close_button(target.clone(), label, cx))
+        }
+        Some(NativeChromeAction::SurfaceChooser(id)) => Some(surface_tab_close_button(*id, cx)),
+        _ => None,
+    })
+}
+
+/// The keystroke hint that selects this tab, by its place in the strip.
+fn tab_shortcut(
+    bar: StatusBarStyle<'_>,
+    tab_ids: &[String],
+    focus_id: &str,
+) -> Option<gpui_kit::AnyElement> {
+    let index = tab_ids.iter().position(|id| id == focus_id)?;
+    super::view::navigation_hint(
+        bar.navigation_hints,
+        bar.hint_modifiers,
+        "select_tab",
+        index.saturating_add(1),
+    )
+}
+
+/// Where a dragged tab lands: a line at the leading edge of the tab it goes before.
+fn insertion_marker(colors: ChromePalette) -> gpui_kit::Div {
+    div()
+        .absolute()
+        .left_0()
+        .top_1()
+        .bottom_1()
+        .w_px()
+        .bg(color(colors.accent))
+        .rounded_none()
+}
+
 fn render_tab(
     segment: &StatusSegmentSnapshot,
     items: &[StatusItemSnapshot],
     bar: StatusBarStyle<'_>,
     colors: ChromePalette,
-    tab_bounds: TabBounds,
-    insertion_target: Option<&TabInsertionTarget>,
-    tab_focus_handles: &std::collections::HashMap<String, FocusHandle>,
+    tabs: TabState<'_>,
     tab_ids: &Rc<[String]>,
     cx: &Context<GpuiChrome>,
 ) -> Tab {
+    let TabState {
+        bounds: tab_bounds,
+        insertion_target,
+        focus_handles: tab_focus_handles,
+    } = tabs;
     let active = items.iter().any(tab_is_active);
     let key = items.first().map_or("empty", |item| item.key.as_str());
     let label = tab_label(items);
     let tab_context = items.iter().find_map(|item| item.tab_context.clone());
     let activation = tab_activation(items, tab_context.as_ref());
-    let native_close = items.iter().find_map(|item| match &item.action {
-        Some(NativeChromeAction::FocusConversation(target)) => {
-            Some(native_tab_close_button(target.clone(), &label, cx))
-        }
-        Some(NativeChromeAction::SurfaceChooser(id)) => Some(surface_tab_close_button(*id, cx)),
-        _ => None,
-    });
+    let native_close = native_close_button(items, &label, cx);
     let source = items.first().and_then(|item| item.reorder_anchor.clone());
     let insertion_here = source.as_ref().is_some_and(|source| {
         matches!(insertion_target, Some(TabInsertionTarget::Before(before)) if before == source)
@@ -647,17 +685,7 @@ fn render_tab(
     ));
     let focus_id = tab_id(bar.key, segment.source_slot, key);
     let tab_focus = tab_focus_handles.get(&focus_id).cloned();
-    let shortcut = tab_ids
-        .iter()
-        .position(|id| id == &focus_id)
-        .and_then(|index| {
-            super::view::navigation_hint(
-                bar.navigation_hints,
-                bar.hint_modifiers,
-                "select_tab",
-                index.saturating_add(1),
-            )
-        });
+    let shortcut = tab_shortcut(bar, tab_ids, &focus_id);
     let focus_id_for_key = focus_id;
     let navigation_ids_for_key = tab_ids.clone();
     let activation_for_key = activation.clone();
@@ -708,16 +736,7 @@ fn render_tab(
     .selected(active)
     .accessibility_label(label)
     .when(insertion_here, |element| {
-        element.child(
-            div()
-                .absolute()
-                .left_0()
-                .top_1()
-                .bottom_1()
-                .w_px()
-                .bg(color(colors.accent))
-                .rounded_none(),
-        )
+        element.child(insertion_marker(colors))
     })
     .when_some(tab_focus.clone(), |element, focus| {
         element.track_focus(&focus).focusable().tab_index(0_isize)
@@ -745,7 +764,7 @@ fn render_tab(
     .map(|tab| tab_middle_close(tab, tab_context, cx))
     .child(content)
     .children(shortcut);
-    measured_tab(tab, source, tab_bounds, cx)
+    measured_tab(tab, source, tab_bounds.clone(), cx)
 }
 
 fn tab_content_gestures(

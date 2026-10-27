@@ -1,3 +1,4 @@
+#![cfg(test)]
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -17,11 +18,7 @@ use rstest::rstest;
 
 #[path = "support/idle_frames.rs"]
 mod frames;
-#[allow(
-    clippy::expect_used,
-    reason = "Existing shared backend fixture uses checked setup"
-)]
-mod support;
+pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 

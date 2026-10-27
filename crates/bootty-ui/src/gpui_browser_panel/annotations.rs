@@ -46,7 +46,7 @@ enum AnnotationMutation {
     },
     #[cfg_attr(
         not(target_os = "macos"),
-        allow(
+        expect(
             dead_code,
             reason = "Image association awaits an exact-window capture backend on this host"
         )

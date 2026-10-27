@@ -1,8 +1,5 @@
+#![cfg(test)]
 #![cfg(unix)]
-#![allow(
-    clippy::panic_in_result_fn,
-    reason = "Test assertions retain failure diagnostics; Result propagates fixture and command errors"
-)]
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -41,141 +38,16 @@ const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[path = "support/idle_frames.rs"]
 mod frames;
-#[allow(
-    clippy::expect_used,
-    reason = "Shared desktop backend fixture follows existing test convention"
-)]
-mod support;
+pub mod support;
 #[path = "support/config.rs"]
 mod test_config;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 // Real provider subprocess, public app-server protocol, and reply barriers; no timed sleeps.
-#[expect(
-    clippy::too_many_lines,
-    reason = "One provider script holds every scripted Codex turn"
-)]
 fn provider(root: &Path) -> TestResult<String> {
     let program = root.join("codex-provider.py");
-    bootty_test_support::write_executable(
-        &program,
-        r"#!/usr/bin/env python3
-import json,os,socket,sys
-if 'exec' in sys.argv:
- assert '--ephemeral' in sys.argv
- with open(sys.argv[sys.argv.index('--output-last-message')+1],'w') as result: json.dump({'title':'Fix native composer','slug':'fix-native-composer'},result)
- sys.exit(0)
-assert sys.argv[1:3] == ['app-server','--listen']
-source=sys.stdin
-output=sys.stdout
-if sys.argv[3].startswith('unix://'):
- listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
- listener.bind(sys.argv[3].removeprefix('unix://'));listener.listen()
- connection,_=listener.accept()
- source=connection.makefile('r');output=connection.makefile('w')
-else: assert sys.argv[3]=='stdio://'
-thread='thread-'+str(os.getpid())
-turn=0
-waiting=None
-held_start=None
-stuck=False
-approval=False
-methods=[]
-turns=[]
-reverted=[]
-def emit(value): print(json.dumps(value),file=output,flush=True)
-def reply(ident,result): emit({'id':ident,'result':result})
-def notice(method,**params): emit({'method':method,'params':{'threadId':thread,'turnId':'turn-'+str(turn),**params}})
-def tool_call(params):
- config={}
- for index,arg in enumerate(sys.argv):
-  if arg=='--config' and index+1<len(sys.argv):
-   key,value=sys.argv[index+1].split('=',1)
-   if key.startswith('mcp_servers.') and key.endswith('.args'): config=json.loads(value)
- with open(config[1]) as source: connection=json.load(source)
- with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as stream:
-  stream.connect(connection['socket'])
-  stream.sendall((json.dumps({'token':connection['token'],'request':{'jsonrpc':'2.0','id':1,'method':'tools/call','params':params}})+'\n').encode())
-  return json.loads(stream.makefile().readline())['result']
-for line in source:
- value=json.loads(line)
- method=value.get('method')
- if method is None:
-  # An approval answer finishes the turn that asked for it.
-  if approval and 'result' in value: notice('turn/completed',turn={'id':'turn-'+str(turn),'status':'completed','items':[]}); approval=False
-  continue
- methods.append(method)
- ident=value.get('id')
- params=value.get('params',{})
- if method == 'initialized': continue
- if method == 'initialize':
-  if os.path.exists('fail-initialize'): emit({'id':ident,'error':{'code':-32603,'message':'provider initialization failed'}})
-  else: reply(ident,{})
- elif method in ['thread/start','thread/resume']:
-  thread=params.get('threadId',thread)
-  if method=='thread/start' and os.path.exists('hold-thread-start'):
-   held_start=ident
-   ready=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);ready.connect('start-barrier');ready.sendall(b'1');ready.close()
-  else: reply(ident,{'thread':{'id':thread,'turns':[]}})
- elif method == '__allow_start':
-  reply(held_start,{'thread':{'id':thread,'turns':[]}});held_start=None;reply(ident,{})
- elif method == 'model/list': reply(ident,{'data':[{'model':'qa-model','displayName':'QA Model','isDefault':True,'supportedReasoningEfforts':[{'reasoningEffort':'medium'}],'defaultReasoningEffort':'medium'}],'nextCursor':None})
- elif method == 'thread/fork': reply(ident,{'thread':{'id':'fork-'+str(os.getpid())}})
- elif method == 'thread/items/list': reply(ident,{'data':[],'nextCursor':None})
- elif method == 'thread/turns/list':
-  # Newest first, a page at a time; the cursor is where the next page starts.
-  start=int(params.get('cursor') or 0);end=start+params['limit']
-  page=[{'id':'turn-'+str(n),'items':[{'id':'user-'+str(n),'type':'userMessage','content':[]}]} for n in reversed(turns)][start:end]
-  reply(ident,{'data':page,'nextCursor':str(end) if end<len(turns) else None})
- elif method == 'thread/revert':
-  before=int(params['beforeTurnId'].removeprefix('turn-'));turns=[n for n in turns if n<before];reverted.append(params['beforeTurnId']);reply(ident,{'thread':{'id':thread}})
- elif method == 'turn/start':
-  assert params['threadId'] == thread
-  turn+=1
-  turns.append(turn)
-  text=params['input'][0]['text']
-  if text=='visual-image':
-   import base64,struct
-   assert len(params['input'])==2 and params['input'][1]['type']=='image'
-   url=params['input'][1]['url'];assert url.startswith('data:image/png;base64,')
-   png=base64.b64decode(url.split(',',1)[1]);assert png[:8]==b'\x89PNG\r\n\x1a\n'
-   assert struct.unpack('>II',png[16:24])==(2,2)
-  if text=='reject-first':
-   emit({'id':ident,'error':{'code':-32600,'message':'first prompt rejected'}});continue
-  # The turn edits the conversation's files, as an agent would.
-  if text.startswith('write '):
-   with open('turn.txt','w') as written: written.write(text[6:]+'\n')
-  notice('turn/started',turn={'id':'turn-'+str(turn),'status':'inProgress','items':[]})
-  notice('item/completed',item={'id':'user-'+str(turn),'type':'userMessage','content':params['input']})
-  if text == 'wait': waiting=ident; continue
-  # The turn starts but never reports an end, even after an acknowledged interrupt.
-  if text == 'stuck': stuck=True; reply(ident,{'turn':{'id':'turn-'+str(turn)}}); continue
-  if text == 'async-question':
-   notice('item/completed',item={'id':'question-'+str(turn),'type':'agentMessage','text':'','delivery':'async','questions':[{'title':'Which option?','options':['A','B']}]})
-   reply(ident,{'turn':{'id':'turn-'+str(turn)}});continue
-  if text == 'approval':
-   approval=True
-   emit({'id':900,'method':'item/commandExecution/requestApproval','params':{'threadId':thread,'turnId':'turn-'+str(turn),'itemId':'command','command':'echo approved'}})
-   reply(ident,{'turn':{'id':'turn-'+str(turn)}});continue
-  notice('item/started',item={'id':'command-'+str(turn),'type':'commandExecution','command':'echo probe','aggregatedOutput':''})
-  notice('item/commandExecution/outputDelta',itemId='command-'+str(turn),delta='tool output')
-  notice('item/agentMessage/delta',itemId='answer-'+str(turn),delta='reply: '+text)
-  notice('item/completed',item={'id':'answer-'+str(turn),'type':'agentMessage','text':'reply: '+text})
-  notice('turn/completed',turn={'id':'turn-'+str(turn),'status':'completed','items':[]})
-  reply(ident,{'turn':{'id':'turn-'+str(turn)}})
- elif method == 'turn/interrupt':
-  assert params['threadId'] == thread and params['turnId'] == 'turn-'+str(turn)
-  if stuck: reply(ident,{}); continue
-  notice('turn/completed',turn={'id':'turn-'+str(turn),'status':'interrupted','items':[]})
-  if waiting is not None: reply(waiting,{'turn':{'id':'turn-'+str(turn)}}); waiting=None
-  reply(ident,{})
- elif method == '__spawn': reply(ident,tool_call(params))
- elif method == '__barrier': reply(ident,{})
- elif method == '__calls': reply(ident,{'methods':methods,'reverted':reverted,'account_directory':os.environ.get('CODEX_HOME'),'bootty_tools':any(arg.startswith('mcp_servers.') for arg in sys.argv)})
- else: reply(ident,{})
-",
-    )?;
+    bootty_test_support::write_executable(&program, include_str!("support/codex_provider.py"))?;
     Ok(program.to_string_lossy().into_owned())
 }
 
@@ -369,26 +241,23 @@ impl Host {
         success(self.receive(&receiver, deadline)?)
     }
 
-    fn restart(&mut self) -> TestResult<()> {
-        self.restart_with_provider_enabled(self.state.config().agents.codex.enabled)
+    fn restart(&mut self) {
+        self.restart_with_provider_enabled(self.state.config().agents.codex.enabled);
     }
 
-    fn restart_with_provider_enabled(&mut self, enabled: bool) -> TestResult<()> {
-        self.restart_with_provider_selection(enabled, None)
+    fn restart_with_provider_enabled(&mut self, enabled: bool) {
+        self.restart_with_provider_selection(enabled, None);
     }
 
-    fn restart_with_provider_selection(
-        &mut self,
-        enabled: bool,
-        selected: Option<&str>,
-    ) -> TestResult<()> {
+    fn restart_with_provider_selection(&mut self, enabled: bool, selected: Option<&str>) {
         if let Some(service) = self.state.terminal_agent_service() {
-            service.shutdown_and_wait()?;
+            service.shutdown_and_wait().unwrap();
         }
         self.state
             .native_agent_service()
-            .ok_or("Native owner missing")?
-            .shutdown()?;
+            .expect("Native owner missing")
+            .shutdown()
+            .unwrap();
         let repaint = self.wake.clone();
         let (events, _receiver) = bootty_control::event_queue();
         let mut config = self.state.config().clone();
@@ -406,8 +275,8 @@ impl Host {
             None,
             None,
             Some(events),
-        )?;
-        Ok(())
+        )
+        .unwrap();
     }
 
     fn tick(&mut self) {
@@ -447,20 +316,19 @@ impl Host {
         }
     }
 
-    fn close_task(&mut self, name: &str) -> TestResult<()> {
-        let spaces = self.spaces()?;
+    fn close_task(&mut self, name: &str) {
+        let spaces = self.spaces().unwrap();
         let session = spaces
             .as_array()
             .into_iter()
             .flatten()
             .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
             .find(|session| session["name"] == name)
-            .ok_or("Created task missing")?;
+            .expect("Created task missing");
         let mut close = CommandInvocation::from_action("session.close", Caller::Internal);
-        close.target = Some(serde_json::from_value(session["target"].clone())?);
+        close.target = Some(serde_json::from_value(session["target"].clone()).unwrap());
         close.confirmation = Some(close.confirmation());
-        success(self.submit(close)?)?;
-        Ok(())
+        success(self.submit(close).unwrap()).unwrap();
     }
 
     fn spaces(&mut self) -> TestResult<Value> {
@@ -531,22 +399,23 @@ impl Host {
         success(self.submit(invocation)?)
     }
 
-    fn wait_working(&mut self, target: &CommandTarget, deadline: Instant) -> TestResult<()> {
+    fn wait_working(&mut self, target: &CommandTarget, deadline: Instant) {
         loop {
             self.tick();
             let service = self
                 .state
                 .native_agent_service()
-                .ok_or("native owner missing")?;
+                .expect("native owner missing");
             if service.sessions().iter().any(|record| {
                 record.target() == *target
                     && record.snapshot.status == NativeSessionStatus::Working
                     && record.snapshot.turn_id.is_some()
             }) {
-                return Ok(());
+                return;
             }
             self.wakes
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
         }
     }
 }
@@ -638,16 +507,18 @@ fn native_command(
 }
 
 #[rstest]
-fn native_conversation_commands_stream_through_every_shared_mailbox_caller() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let launched = host.start(
-        &binding,
-        "conversation",
-        "task-conversation",
-        "first prompt",
-    )?;
-    let record = record(&launched)?;
+fn native_conversation_commands_stream_through_every_shared_mailbox_caller() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let launched = host
+        .start(
+            &binding,
+            "conversation",
+            "task-conversation",
+            "first prompt",
+        )
+        .unwrap();
+    let record = record(&launched).unwrap();
     assert_eq!(record.task_identity.as_deref(), Some("task-conversation"));
     assert_eq!(record.snapshot.status, NativeSessionStatus::Idle);
     assert!(
@@ -664,7 +535,7 @@ fn native_conversation_commands_stream_through_every_shared_mailbox_caller() -> 
             .iter()
             .any(|item| item.role == "assistant" && item.text == "reply: first prompt")
     );
-    let terminal: CommandTarget = serde_json::from_value(launched["terminal"].clone())?;
+    let terminal: CommandTarget = serde_json::from_value(launched["terminal"].clone()).unwrap();
     assert_eq!(terminal.kind, ResourceKind::Terminal);
     assert_ne!(terminal.handle, record.id);
     for caller in [
@@ -677,27 +548,35 @@ fn native_conversation_commands_stream_through_every_shared_mailbox_caller() -> 
         Caller::Internal,
     ] {
         let text = format!("prompt from {caller:?}");
-        let snapshot = success(host.submit(native_command(
-            "agents.native.prompt",
-            &record.target(),
-            &[&text],
-            caller,
-        ))?)?;
-        assert!(snapshot["transcript"].as_array().ok_or("transcript missing")?.iter().any(|item| item["role"] == "assistant" && item["text"] == format!("reply: {text}")));
+        let snapshot = success(
+            host.submit(native_command(
+                "agents.native.prompt",
+                &record.target(),
+                &[&text],
+                caller,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(snapshot["transcript"].as_array().expect("transcript missing").iter().any(|item| item["role"] == "assistant" && item["text"] == format!("reply: {text}")));
         let title = format!("Title from {caller:?}");
         assert_eq!(
-            success(host.submit(native_command(
-                "agents.native.rename",
-                &record.target(),
-                &[&title],
-                caller
-            ))?)?,
+            success(
+                host.submit(native_command(
+                    "agents.native.rename",
+                    &record.target(),
+                    &[&title],
+                    caller
+                ))
+                .unwrap()
+            )
+            .unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
             host.state
                 .native_agent_service()
-                .ok_or("owner missing")?
+                .expect("owner missing")
                 .activities()[0]
                 .title,
             title
@@ -705,28 +584,32 @@ fn native_conversation_commands_stream_through_every_shared_mailbox_caller() -> 
     }
     let mut list = CommandInvocation::new("agents.native.list", Vec::new(), Caller::Socket);
     list.target = Some(binding);
-    let listed = success(host.submit(list)?)?;
-    let listed = listed.as_array().ok_or("list missing")?;
+    let listed = success(host.submit(list).unwrap()).unwrap();
+    let listed = listed.as_array().expect("list missing");
     assert_eq!(listed.len(), 1);
     // A listing names targets without whole transcripts, which exceed the payload limit.
-    let entry = listed.first().ok_or("listed conversation")?;
+    let entry = listed.first().expect("listed conversation");
     assert_eq!(entry["id"], record.id);
     assert_eq!(entry["generation"], record.generation);
     assert!(entry.get("snapshot").is_none() && entry.get("transcript").is_none());
-    Ok(())
 }
 
 /// A conversation's short name from the agent list stands for it, as the target and in place of
 /// its id, at its current generation.
 #[rstest]
-fn conversation_names_stand_for_their_targets() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "conversation", "task-names", "")?)?;
+fn conversation_names_stand_for_their_targets() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(
+        &host
+            .start(&binding, "conversation", "task-names", "")
+            .unwrap(),
+    )
+    .unwrap();
     let mut list = CommandInvocation::new("agents.native.activities", Vec::new(), Caller::Socket);
     list.target = Some(binding);
-    let listed = success(host.submit(list)?)?;
-    let name = listed[0]["name"].as_str().ok_or("listed name")?.to_owned();
+    let listed = success(host.submit(list).unwrap()).unwrap();
+    let name = listed[0]["name"].as_str().expect("listed name").to_owned();
     assert!(bootty_control::short_name::names(
         &name,
         &record.full_name()
@@ -743,38 +626,45 @@ fn conversation_names_stand_for_their_targets() -> TestResult<()> {
             Caller::Socket,
         )
     };
-    let value = success(host.submit(status)?)?;
+    let value = success(host.submit(status).unwrap()).unwrap();
     assert_eq!(value["id"], record.id);
     assert_eq!(value["generation"], record.generation);
-    Ok(())
 }
 
 /// A message that mentions another conversation sends that conversation's recent words after
 /// it, while the transcript keeps the message as written.
 #[rstest]
-fn mentioned_conversations_follow_the_message_quoted() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let mentioned = record(&host.start(&binding, "earlier", "task-earlier", "")?)?;
-    success(host.submit(native_command(
-        "agents.native.prompt",
-        &mentioned.target(),
-        &["the flaky test is in scroll.rs"],
-        Caller::Internal,
-    ))?)?;
-    let asking = record(&host.start(&binding, "asking", "task-asking", "")?)?;
+fn mentioned_conversations_follow_the_message_quoted() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let mentioned = record(&host.start(&binding, "earlier", "task-earlier", "").unwrap()).unwrap();
+    success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &mentioned.target(),
+            &["the flaky test is in scroll.rs"],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let asking = record(&host.start(&binding, "asking", "task-asking", "").unwrap()).unwrap();
     let message = "What did the other conversation find?";
     let authored = message.len().to_string();
-    let conversations = serde_json::to_string(&[mentioned.target()])?;
-    let snapshot = success(host.submit(native_command(
-        "agents.native.prompt",
-        &asking.target(),
-        &[message, "", "", "", "", &authored, "", "", &conversations],
-        Caller::Internal,
-    ))?)?;
+    let conversations = serde_json::to_string(&[mentioned.target()]).unwrap();
+    let snapshot = success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &asking.target(),
+            &[message, "", "", "", "", &authored, "", "", &conversations],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let transcript = snapshot["transcript"]
         .as_array()
-        .ok_or("transcript missing")?;
+        .expect("transcript missing");
     assert!(
         transcript
             .iter()
@@ -784,31 +674,37 @@ fn mentioned_conversations_follow_the_message_quoted() -> TestResult<()> {
         .iter()
         .find(|item| item["role"] == "assistant")
         .and_then(|item| item["text"].as_str())
-        .ok_or("reply missing")?;
+        .expect("reply missing");
     assert!(
         reply.contains(&format!("The conversation “{}”", mentioned.title))
             && reply.contains("User: the flaky test is in scroll.rs"),
         "{reply}"
     );
     // Only Bootty's own composer may attach another conversation's words.
-    let forged = host.submit(native_command(
-        "agents.native.prompt",
-        &asking.target(),
-        &[message, "", "", "", "", "", "", "", &conversations],
-        Caller::Socket,
-    ))?;
+    let forged = host
+        .submit(native_command(
+            "agents.native.prompt",
+            &asking.target(),
+            &[message, "", "", "", "", "", "", "", &conversations],
+            Caller::Socket,
+        ))
+        .unwrap();
     assert!(
         !matches!(forged, CommandOutcome::Success { .. }),
         "{forged:?}"
     );
-    Ok(())
 }
 
 #[rstest]
-fn saved_annotation_batch_reaches_exact_native_conversation_alongside_message() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "conversation", "task-annotations", "")?)?;
+fn saved_annotation_batch_reaches_exact_native_conversation_alongside_message() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(
+        &host
+            .start(&binding, "conversation", "task-annotations", "")
+            .unwrap(),
+    )
+    .unwrap();
     let notes = [(1, "Fix this spacing"), (2, "Keep the label 日本語")]
         .into_iter()
         .map(|(id, note)| Annotation {
@@ -830,21 +726,25 @@ fn saved_annotation_batch_reaches_exact_native_conversation_alongside_message() 
         })
         .collect::<Vec<_>>();
     let store = AnnotationStore::new(&host.directory.path().join("browser"));
-    store.commit(&[], &notes)?;
-    let committed = store.load()?;
+    store.commit(&[], &notes).unwrap();
+    let committed = store.load().unwrap();
     let message = format!(
         "Review both changes together.\n\n{}",
-        annotation_batch(&committed)?
+        annotation_batch(&committed).unwrap()
     );
-    let snapshot = success(host.submit(native_command(
-        "agents.native.prompt",
-        &record.target(),
-        &[&message],
-        Caller::Internal,
-    ))?)?;
+    let snapshot = success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &record.target(),
+            &[&message],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let transcript = snapshot["transcript"]
         .as_array()
-        .ok_or("transcript missing")?;
+        .expect("transcript missing");
     assert!(
         transcript
             .iter()
@@ -856,16 +756,15 @@ fn saved_annotation_batch_reaches_exact_native_conversation_alongside_message() 
             .any(|item| item["role"] == "assistant" && item["text"] == format!("reply: {message}"))
     );
     // Provider delivery never deletes the local saved notes.
-    assert_eq!(store.load()?, notes);
-    Ok(())
+    assert_eq!(store.load().unwrap(), notes);
 }
 
 #[rstest]
-fn annotation_images_forward_only_exact_saved_versions() -> TestResult<()> {
+fn annotation_images_forward_only_exact_saved_versions() {
     const CHILD: &str = "BOOTTY_ANNOTATION_IMAGE_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        let directory = assert_fs::TempDir::new()?;
-        let output = std::process::Command::new(std::env::current_exe()?)
+        let directory = assert_fs::TempDir::new().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "annotation_images_forward_only_exact_saved_versions",
@@ -876,20 +775,26 @@ fn annotation_images_forward_only_exact_saved_versions() -> TestResult<()> {
             .env("XDG_STATE_HOME", directory.path())
             .env("LOCALAPPDATA", directory.path())
             .env("APPDATA", directory.path())
-            .output()?;
+            .output()
+            .unwrap();
         assert!(
             output.status.success(),
             "{}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
-        return Ok(());
+        return;
     }
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "conversation", "task-visual-annotation", "")?)?;
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(
+        &host
+            .start(&binding, "conversation", "task-visual-annotation", "")
+            .unwrap(),
+    )
+    .unwrap();
     let child_state = std::path::PathBuf::from(
-        std::env::var_os("XDG_STATE_HOME").ok_or("Missing isolated child state")?,
+        std::env::var_os("XDG_STATE_HOME").expect("Missing isolated child state"),
     );
     let browser_directory = bootty_config::identity::unix_daemon_state_path(
         bootty_config::identity::ApplicationIdentity::for_process(),
@@ -897,7 +802,7 @@ fn annotation_images_forward_only_exact_saved_versions() -> TestResult<()> {
         Some(&child_state),
         None,
     )
-    .ok_or("Missing browser state directory")?
+    .expect("Missing browser state directory")
     .with_file_name("browser");
     let store = AnnotationStore::new(&browser_directory);
     let mut png = std::io::Cursor::new(Vec::new());
@@ -906,7 +811,8 @@ fn annotation_images_forward_only_exact_saved_versions() -> TestResult<()> {
         2,
         image::Rgba([12, 34, 56, 255]),
     ))
-    .write_to(&mut png, image::ImageFormat::Png)?;
+    .write_to(&mut png, image::ImageFormat::Png)
+    .unwrap();
     let rect = bootty_browser::AnnotationRect {
         x: 0.0,
         y: 0.0,
@@ -922,7 +828,7 @@ fn annotation_images_forward_only_exact_saved_versions() -> TestResult<()> {
         pixel_width: 2,
         pixel_height: 2,
     };
-    let (image, _) = store.commit_image(png.get_ref(), &geometry)?;
+    let (image, _) = store.commit_image(png.get_ref(), &geometry).unwrap();
     let note = Annotation {
         id: 1,
         page: 1,
@@ -940,59 +846,73 @@ fn annotation_images_forward_only_exact_saved_versions() -> TestResult<()> {
         image: Some(image.clone()),
         pending_conversation: None,
     };
-    store.commit(&[], std::slice::from_ref(&note))?;
-    let refs = serde_json::to_string(std::slice::from_ref(&note))?;
-    let snapshot = success(host.submit(native_command(
-        "agents.native.prompt",
-        &record.target(),
-        &["visual-image", &refs],
-        Caller::Internal,
-    ))?)?;
+    store.commit(&[], std::slice::from_ref(&note)).unwrap();
+    let refs = serde_json::to_string(std::slice::from_ref(&note)).unwrap();
+    let snapshot = success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &record.target(),
+            &["visual-image", &refs],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     assert!(
         snapshot["transcript"]
             .as_array()
-            .ok_or("Missing transcript")?
+            .expect("Missing transcript")
             .iter()
             .any(|item| item["role"] == "user" && item["images"][0]["id"] == image.id)
     );
     let mut foreign = note.clone();
     foreign.conversation = Some("other-conversation".into());
-    let refs = serde_json::to_string(&[foreign])?;
+    let refs = serde_json::to_string(&[foreign]).unwrap();
     assert!(matches!(
         host.submit(native_command(
             "agents.native.prompt",
             &record.target(),
             &["visual-image", &refs],
             Caller::Internal
-        ))?,
+        ))
+        .unwrap(),
         CommandOutcome::Failed { .. }
     ));
-    let captured = serde_json::to_string(std::slice::from_ref(&note))?;
+    let captured = serde_json::to_string(std::slice::from_ref(&note)).unwrap();
     let mut changed = note.clone();
-    changed.prepare_attachment("Changed after Send capture".into(), &record.id)?;
-    store.commit(std::slice::from_ref(&note), std::slice::from_ref(&changed))?;
+    changed
+        .prepare_attachment("Changed after Send capture".into(), &record.id)
+        .unwrap();
+    store
+        .commit(std::slice::from_ref(&note), std::slice::from_ref(&changed))
+        .unwrap();
     assert!(matches!(
         host.submit(native_command(
             "agents.native.prompt",
             &record.target(),
             &["visual-image", &captured],
             Caller::Internal
-        ))?,
+        ))
+        .unwrap(),
         CommandOutcome::Failed { .. }
     ));
-    assert_eq!(store.load()?, vec![changed]);
-    Ok(())
+    assert_eq!(store.load().unwrap(), vec![changed]);
 }
 
 #[rstest]
-fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "conversation", "task-cancel", "")?)?;
+fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(
+        &host
+            .start(&binding, "conversation", "task-cancel", "")
+            .unwrap(),
+    )
+    .unwrap();
     let target = record.target();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("deadline overflow")?;
+        .expect("deadline overflow");
     let waiting = host
         .state
         .app_command_sender(Caller::Socket)
@@ -1001,52 +921,62 @@ fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() ->
             deadline,
             CommandCancellation::new(),
         )
-        .map_err(|error| format!("mailbox failed: {error:?}"))?;
-    host.wait_working(&target, deadline)?;
+        .expect("mailbox failed");
+    host.wait_working(&target, deadline);
     assert!(matches!(waiting.try_recv(), Err(mpsc::TryRecvError::Empty)));
-    success(host.submit(native_command(
-        "agents.native.interrupt",
-        &target,
-        &[],
-        Caller::Keybinding,
-    ))?)?;
-    success(host.receive(&waiting, deadline)?)?;
+    success(
+        host.submit(native_command(
+            "agents.native.interrupt",
+            &target,
+            &[],
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    success(host.receive(&waiting, deadline).unwrap()).unwrap();
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("owner missing")?
+            .expect("owner missing")
             .sessions()[0]
             .snapshot
             .status,
         NativeSessionStatus::Idle
     );
-    let completed = success(host.submit(native_command(
-        "agents.native.prompt",
-        &target,
-        &["after interrupt"],
-        Caller::Socket,
-    ))?)?;
+    let completed = success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &target,
+            &["after interrupt"],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(completed["completed_turn"], true);
     assert!(
         completed["transcript"]
             .as_array()
-            .ok_or("Transcript missing")?
+            .expect("Transcript missing")
             .iter()
             .any(|item| item["role"] == "assistant" && item["text"] == "reply: after interrupt")
     );
-    let service = host.state.native_agent_service().ok_or("Native owner")?;
+    let service = host.state.native_agent_service().expect("Native owner");
     let records = service.sessions();
     assert_eq!(records.len(), 1);
-    let continued = records.first().ok_or("Conversation missing")?;
+    let continued = records.first().expect("Conversation missing");
     assert_eq!(continued.target(), target);
     assert_eq!(continued.binding_id, record.binding_id);
     assert_eq!(continued.task_identity, record.task_identity);
     assert_eq!(continued.snapshot.session_id, record.snapshot.session_id);
     assert_eq!(continued.snapshot.status, NativeSessionStatus::Idle);
-    let calls = service.resolve(&target)?.rpc("__calls", json!({}))?;
-    let methods = calls["methods"]
-        .as_array()
-        .ok_or("Provider calls missing")?;
+    let calls = service
+        .resolve(&target)
+        .unwrap()
+        .rpc("__calls", json!({}))
+        .unwrap();
+    let methods = calls["methods"].as_array().expect("Provider calls missing");
     assert_eq!(
         methods
             .iter()
@@ -1066,24 +996,32 @@ fn shared_command_interrupt_remains_available_while_prompt_reply_is_pending() ->
             .count(),
         2
     );
-    Ok(())
 }
 
 /// A path in a reply opens on the conversation's host, relative to its directory, the way a path
 /// in its terminal does.
 #[rstest]
-fn reply_paths_open_relative_to_the_conversation() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let conversation = record(&host.start(&binding, "conversation", "task-links", "")?)?;
-    fs::write(host.directory.path().join("notes.md"), "one\ntwo\n")?;
+fn reply_paths_open_relative_to_the_conversation() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let conversation = record(
+        &host
+            .start(&binding, "conversation", "task-links", "")
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(host.directory.path().join("notes.md"), "one\ntwo\n").unwrap();
     host.effects.clear();
-    success(host.submit(native_command(
-        "agents.native.open-link",
-        &conversation.target(),
-        &["notes.md:2"],
-        Caller::Internal,
-    ))?)?;
+    success(
+        host.submit(native_command(
+            "agents.native.open-link",
+            &conversation.target(),
+            &["notes.md:2"],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let opened = host
         .effects
         .iter()
@@ -1092,39 +1030,56 @@ fn reply_paths_open_relative_to_the_conversation() -> TestResult<()> {
             _ => None,
         })
         .collect::<Vec<_>>();
-    let notes = fs::canonicalize(host.directory.path().join("notes.md"))?;
+    let notes = fs::canonicalize(host.directory.path().join("notes.md")).unwrap();
     assert_eq!(opened, [(notes.to_string_lossy().into_owned(), 2)]);
-    Ok(())
 }
 
 /// A sent file opens, or shows in the file manager, from the stored copy its conversation keeps.
 /// Another conversation can't reach it.
 #[rstest]
-fn sent_attachments_open_and_reveal_their_stored_copy() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let conversation = record(&host.start(&binding, "conversation", "task-sent-file", "")?)?;
-    let other = record(&host.start(&binding, "other", "task-other-file", "")?)?;
+fn sent_attachments_open_and_reveal_their_stored_copy() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let conversation = record(
+        &host
+            .start(&binding, "conversation", "task-sent-file", "")
+            .unwrap(),
+    )
+    .unwrap();
+    let other = record(
+        &host
+            .start(&binding, "other", "task-other-file", "")
+            .unwrap(),
+    )
+    .unwrap();
     let source = host.directory.path().join("notes.md");
-    fs::write(&source, "one\ntwo\n")?;
-    let reference = success(host.submit(native_command(
-        "agents.native.import",
-        &conversation.target(),
-        &[&source.to_string_lossy()],
-        Caller::Internal,
-    ))?)?;
-    let id = reference["id"].as_str().ok_or("an attachment id")?;
+    fs::write(&source, "one\ntwo\n").unwrap();
+    let reference = success(
+        host.submit(native_command(
+            "agents.native.import",
+            &conversation.target(),
+            &[&source.to_string_lossy()],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let id = reference["id"].as_str().expect("an attachment id");
     host.effects.clear();
     for command in [
         "agents.native.attachment-open",
         "agents.native.attachment-reveal",
     ] {
-        success(host.submit(native_command(
-            command,
-            &conversation.target(),
-            &[id],
-            Caller::Internal,
-        ))?)?;
+        success(
+            host.submit(native_command(
+                command,
+                &conversation.target(),
+                &[id],
+                Caller::Internal,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
     }
     let shown = host
         .effects
@@ -1137,28 +1092,34 @@ fn sent_attachments_open_and_reveal_their_stored_copy() -> TestResult<()> {
         .collect::<Vec<_>>();
     let copy = Some("one\ntwo\n".to_owned());
     assert_eq!(shown, [("open", copy.clone()), ("reveal", copy)]);
-    let outcome = host.submit(native_command(
-        "agents.native.attachment-open",
-        &other.target(),
-        &[id],
-        Caller::Internal,
-    ))?;
+    let outcome = host
+        .submit(native_command(
+            "agents.native.attachment-open",
+            &other.target(),
+            &[id],
+            Caller::Internal,
+        ))
+        .unwrap();
     assert!(
         matches!(&outcome, CommandOutcome::Failed { message, .. } if message.contains("does not belong")),
         "{outcome:?}"
     );
-    Ok(())
 }
 
 /// A reply's path and a document's path both show in the file manager: the reply's resolved
 /// against the conversation's directory, the way it would open.
 #[rstest]
-fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let conversation = record(&host.start(&binding, "conversation", "task-reveal", "")?)?;
-    fs::write(host.directory.path().join("notes.md"), "one\ntwo\n")?;
-    let notes = fs::canonicalize(host.directory.path().join("notes.md"))?;
+fn reply_and_document_paths_reveal_in_the_file_manager() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let conversation = record(
+        &host
+            .start(&binding, "conversation", "task-reveal", "")
+            .unwrap(),
+    )
+    .unwrap();
+    fs::write(host.directory.path().join("notes.md"), "one\ntwo\n").unwrap();
+    let notes = fs::canonicalize(host.directory.path().join("notes.md")).unwrap();
     let revealed = |host: &Host| {
         host.effects
             .iter()
@@ -1169,12 +1130,16 @@ fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
             .collect::<Vec<_>>()
     };
     host.effects.clear();
-    success(host.submit(native_command(
-        "agents.native.reveal-link",
-        &conversation.target(),
-        &["notes.md:2"],
-        Caller::Internal,
-    ))?)?;
+    success(
+        host.submit(native_command(
+            "agents.native.reveal-link",
+            &conversation.target(),
+            &["notes.md:2"],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(revealed(&host), std::slice::from_ref(&notes));
     host.effects.clear();
     let mut reveal = CommandInvocation::new(
@@ -1183,7 +1148,7 @@ fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
         Caller::Internal,
     );
     reveal.target = Some(binding.clone());
-    success(host.submit(reveal)?)?;
+    success(host.submit(reveal).unwrap()).unwrap();
     assert_eq!(revealed(&host), std::slice::from_ref(&notes));
     // Editors are the ones this computer has; one it doesn't is refused by name.
     host.effects.clear();
@@ -1200,7 +1165,7 @@ fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
         Caller::Internal,
     );
     for invocation in [edit, link] {
-        let outcome = host.submit(invocation)?;
+        let outcome = host.submit(invocation).unwrap();
         assert!(
             matches!(&outcome, CommandOutcome::Unavailable { message } if message.contains("notepad")),
             "{outcome:?}"
@@ -1212,7 +1177,6 @@ fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
             .iter()
             .any(|effect| matches!(effect, AppEffect::OpenInEditor { .. }))
     );
-    Ok(())
 }
 
 #[rstest]
@@ -1220,40 +1184,40 @@ fn reply_and_document_paths_reveal_in_the_file_manager() -> TestResult<()> {
 #[case(MultiplexerBackendConfig::Tmux)]
 fn reopening_a_conversation_waits_for_terminal_membership_reconciliation(
     #[case] backend: MultiplexerBackendConfig,
-) -> TestResult<()> {
-    let mut host = Host::new_with_backend(true, false, backend)?;
-    let binding = host.binding(false)?;
+) {
+    let mut host = Host::new_with_backend(true, false, backend).unwrap();
+    let binding = host.binding(false).unwrap();
     let identity = bootty_mux::snapshot::new_session_identity();
     let name = format!("focus-{identity}");
-    let launched = host.start(&binding, &name, &identity, "")?;
-    let native = record(&launched)?;
-    host.close_task(&name)?;
-    host.restart()?;
+    let launched = host.start(&binding, &name, &identity, "").unwrap();
+    let native = record(&launched).unwrap();
+    host.close_task(&name);
+    host.restart();
     let stopped = host
         .state
         .native_agent_service()
-        .ok_or("Native owner")?
+        .expect("Native owner")
         .sessions()
         .into_iter()
         .find(|record| record.id == native.id)
-        .ok_or("Saved conversation")?;
+        .expect("Saved conversation");
     let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
     focus.target = Some(stopped.target());
-    let reopened: NativeSessionRecord = serde_json::from_value(success(host.submit(focus)?)?)?;
+    let reopened: NativeSessionRecord =
+        serde_json::from_value(success(host.submit(focus).unwrap()).unwrap()).unwrap();
     assert_eq!(reopened.id, native.id);
     assert_eq!(reopened.config.session_id, stopped.config.session_id);
     assert_ne!(reopened.generation, stopped.generation);
     assert!(host.effects.iter().any(|effect| matches!(effect, AppEffect::NativeConversation(target) if target == &reopened.target())));
-    host.close_task(&name)?;
-    Ok(())
+    host.close_task(&name);
 }
 
 #[rstest]
-fn failed_native_reopen_preserves_its_cause_instead_of_cancelling_itself() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
+fn failed_native_reopen_preserves_its_cause_instead_of_cancelling_itself() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
     let cwd = host.directory.path().join("removed-checkout");
-    fs::create_dir(&cwd)?;
+    fs::create_dir(&cwd).unwrap();
     let identity = bootty_mux::snapshot::new_session_identity();
     let name = format!("missing-{identity}");
     let mut start = CommandInvocation::new(
@@ -1272,35 +1236,44 @@ fn failed_native_reopen_preserves_its_cause_instead_of_cancelling_itself() -> Te
         Caller::Internal,
     );
     start.target = Some(binding);
-    let native = record(&success(host.submit(start)?)?)?;
-    host.close_task(&name)?;
-    fs::remove_dir(&cwd)?;
+    let native = record(&success(host.submit(start).unwrap()).unwrap()).unwrap();
+    host.close_task(&name);
+    fs::remove_dir(&cwd).unwrap();
     let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
     focus.target = Some(native.target());
-    let outcome = host.submit(focus)?;
+    let outcome = host.submit(focus).unwrap();
     assert!(
         matches!(&outcome, CommandOutcome::Failed { code, message } if code == "invalid_arguments" && message.contains("directory")),
         "{outcome:?}"
     );
-    Ok(())
 }
 
 /// Native conversations raise desktop notifications like observed agents: when one needs
 /// approval, and when its turn finishes. The Agents panel lists them too.
 #[rstest]
-fn native_conversations_notify_when_they_need_approval_and_finish() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let background = record(&host.start(&binding, "conversation", "task-notify", "")?)?;
+fn native_conversations_notify_when_they_need_approval_and_finish() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let background = record(
+        &host
+            .start(&binding, "conversation", "task-notify", "")
+            .unwrap(),
+    )
+    .unwrap();
     let target = background.target();
     // A conversation in view doesn't notify; another task's conversation takes focus.
-    let foreground = record(&host.start(&binding, "foreground", "task-foreground", "")?)?;
+    let foreground = record(
+        &host
+            .start(&binding, "foreground", "task-foreground", "")
+            .unwrap(),
+    )
+    .unwrap();
     let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Socket);
     focus.target = Some(foreground.target());
-    success(host.submit(focus)?)?;
+    success(host.submit(focus).unwrap()).unwrap();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("deadline overflow")?;
+        .expect("deadline overflow");
     let notified = |host: &mut Host, title: &str| -> TestResult<()> {
         loop {
             host.tick();
@@ -1315,34 +1288,42 @@ fn native_conversations_notify_when_they_need_approval_and_finish() -> TestResul
     };
     host.tick();
     host.effects.clear();
-    success(host.submit(native_command(
-        "agents.native.prompt",
-        &target,
-        &["approval"],
-        Caller::Socket,
-    ))?)?;
-    notified(&mut host, "Codex: Needs approval")?;
+    success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &target,
+            &["approval"],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    notified(&mut host, "Codex: Needs approval").unwrap();
     let request = host
         .state
         .native_agent_service()
-        .ok_or("native owner missing")?
+        .expect("native owner missing")
         .sessions()
         .into_iter()
         .find(|session| session.id == background.id)
-        .ok_or("conversation")?
+        .expect("conversation")
         .snapshot
         .requests
         .first()
-        .ok_or("pending approval")?
+        .expect("pending approval")
         .id
         .clone();
-    success(host.submit(native_command(
-        "agents.native.approve",
-        &target,
-        &[&request, "allow"],
-        Caller::Socket,
-    ))?)?;
-    notified(&mut host, "Codex: Finished")?;
+    success(
+        host.submit(native_command(
+            "agents.native.approve",
+            &target,
+            &[&request, "allow"],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    notified(&mut host, "Codex: Finished").unwrap();
     let mut listed = host
         .state
         .agent_overview()
@@ -1354,18 +1335,23 @@ fn native_conversations_notify_when_they_need_approval_and_finish() -> TestResul
     // The Agents panel lists both conversations: the finished one and the one in view.
     assert_eq!(listed, vec!["complete".to_owned(), "idle".to_owned()]);
     host.effects.clear();
-    success(host.submit(native_command(
-        "agents.native.prompt",
-        &target,
-        &["async-question"],
-        Caller::Socket,
-    ))?)?;
-    notified(&mut host, "Codex: Needs input")?;
+    success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &target,
+            &["async-question"],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    notified(&mut host, "Codex: Needs input").unwrap();
     let activity = host
         .state
         .native_agent_service()
-        .ok_or("native owner missing")?
-        .activity(&target)?;
+        .expect("native owner missing")
+        .activity(&target)
+        .unwrap();
     assert_eq!(
         activity.status,
         NativeSessionStatus::Working,
@@ -1376,69 +1362,93 @@ fn native_conversations_notify_when_they_need_approval_and_finish() -> TestResul
     host.effects.clear();
     host.tick();
     assert!(!host.effects.iter().any(|effect| matches!(effect, AppEffect::DesktopNotification { title, .. } if title == "Codex: Needs input")));
-    Ok(())
 }
 
 /// Interrupt Agent in the palette stops the conversation in the focused pane, the same way the
 /// conversation's own interrupt does.
 #[rstest]
-fn interrupt_agent_stops_the_conversation_in_the_focused_pane() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "conversation", "task-palette", "")?)?;
+fn interrupt_agent_stops_the_conversation_in_the_focused_pane() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(
+        &host
+            .start(&binding, "conversation", "task-palette", "")
+            .unwrap(),
+    )
+    .unwrap();
     let target = record.target();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("deadline overflow")?;
-    success(host.submit(native_command(
-        "agents.native.prompt",
-        &target,
-        &["stuck"],
-        Caller::Socket,
-    ))?)?;
-    host.wait_working(&target, deadline)?;
-    success(host.submit(CommandInvocation::from_action(
-        "interrupt_agent",
-        Caller::CommandPalette,
-    ))?)?;
-    let service = host.state.native_agent_service().ok_or("owner missing")?;
-    assert!(service.resolve(&target)?.snapshot().stopping());
-    Ok(())
+        .expect("deadline overflow");
+    success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &target,
+            &["stuck"],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    host.wait_working(&target, deadline);
+    success(
+        host.submit(CommandInvocation::from_action(
+            "interrupt_agent",
+            Caller::CommandPalette,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let service = host.state.native_agent_service().expect("owner missing");
+    assert!(service.resolve(&target).unwrap().snapshot().stopping());
 }
 
 /// A provider can acknowledge a stop and never end its turn. The conversation shows it is
 /// stopping; stopping again restarts the provider, and the queued message goes out afterwards.
 #[rstest]
-fn a_second_stop_restarts_a_provider_that_never_ends_its_turn() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "conversation", "task-stuck", "")?)?;
+fn a_second_stop_restarts_a_provider_that_never_ends_its_turn() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(
+        &host
+            .start(&binding, "conversation", "task-stuck", "")
+            .unwrap(),
+    )
+    .unwrap();
     let target = record.target();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("deadline overflow")?;
-    success(host.submit(native_command(
-        "agents.native.prompt",
-        &target,
-        &["stuck"],
-        Caller::Socket,
-    ))?)?;
-    host.wait_working(&target, deadline)?;
+        .expect("deadline overflow");
+    success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &target,
+            &["stuck"],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    host.wait_working(&target, deadline);
     let stop = native_command("agents.native.interrupt", &target, &[], Caller::Keybinding);
-    success(host.submit(stop.clone())?)?;
-    success(host.submit(native_command(
-        "agents.native.queue",
-        &target,
-        &["after restart"],
-        Caller::Socket,
-    ))?)?;
-    let service = host.state.native_agent_service().ok_or("owner missing")?;
+    success(host.submit(stop.clone()).unwrap()).unwrap();
+    success(
+        host.submit(native_command(
+            "agents.native.queue",
+            &target,
+            &["after restart"],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let service = host.state.native_agent_service().expect("owner missing");
     let stopping = service.sessions().remove(0);
     assert_eq!(stopping.snapshot.status, NativeSessionStatus::Working);
     assert!(stopping.snapshot.stopping());
     assert_eq!(stopping.queued_messages.len(), 1);
 
-    success(host.submit(stop)?)?;
+    success(host.submit(stop).unwrap()).unwrap();
     let resumed = loop {
         host.tick();
         let current = service.sessions().remove(0);
@@ -1453,44 +1463,50 @@ fn a_second_stop_restarts_a_provider_that_never_ends_its_turn() -> TestResult<()
             break current;
         }
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
     };
     assert!(
         resumed.generation > record.generation,
         "the provider restarted"
     );
     let calls = service
-        .resolve(&resumed.target())?
-        .rpc("__calls", json!({}))?;
-    let methods = calls["methods"]
-        .as_array()
-        .ok_or("Provider calls missing")?;
+        .resolve(&resumed.target())
+        .unwrap()
+        .rpc("__calls", json!({}))
+        .unwrap();
+    let methods = calls["methods"].as_array().expect("Provider calls missing");
     assert!(
         methods
             .iter()
             .any(|method| method.as_str() == Some("thread/resume")),
         "the restart resumes the captured thread: {methods:?}"
     );
-    Ok(())
 }
 
 #[rstest]
-fn native_target_generation_and_argument_identity_cannot_redirect_a_prompt() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "conversation", "task-target", "")?)?;
+fn native_target_generation_and_argument_identity_cannot_redirect_a_prompt() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(
+        &host
+            .start(&binding, "conversation", "task-target", "")
+            .unwrap(),
+    )
+    .unwrap();
     let mut stale = record.target();
     stale.generation = stale
         .generation
         .checked_add(1)
-        .ok_or("generation overflow")?;
+        .expect("generation overflow");
     assert!(matches!(
         host.submit(native_command(
             "agents.native.prompt",
             &stale,
             &["stale"],
             Caller::Socket
-        ))?,
+        ))
+        .unwrap(),
         CommandOutcome::StaleTarget { .. }
     ));
     let mut mismatched = native_command(
@@ -1501,7 +1517,7 @@ fn native_target_generation_and_argument_identity_cannot_redirect_a_prompt() -> 
     );
     mismatched.arguments[0] = "another-native-id".to_owned();
     assert!(matches!(
-        host.submit(mismatched)?,
+        host.submit(mismatched).unwrap(),
         CommandOutcome::StaleTarget { .. }
     ));
     let mut absent = native_command(
@@ -1512,20 +1528,19 @@ fn native_target_generation_and_argument_identity_cannot_redirect_a_prompt() -> 
     );
     absent.target = None;
     assert!(!matches!(
-        host.submit(absent)?,
+        host.submit(absent).unwrap(),
         CommandOutcome::Success { .. }
     ));
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("owner missing")?
+            .expect("owner missing")
             .sessions()[0]
             .snapshot
             .transcript
             .as_slice(),
         &[],
     );
-    Ok(())
 }
 
 #[rstest]
@@ -1534,9 +1549,9 @@ fn native_target_generation_and_argument_identity_cannot_redirect_a_prompt() -> 
 fn rejected_provider_does_not_create_a_shell_or_native_record(
     #[case] provider: &str,
     #[case] enabled: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(enabled)?;
-    let binding = host.binding(false)?;
+) {
+    let mut host = Host::new(enabled).unwrap();
+    let binding = host.binding(false).unwrap();
     let mut invocation = CommandInvocation::new(
         "agents.native.start",
         vec![
@@ -1553,7 +1568,7 @@ fn rejected_provider_does_not_create_a_shell_or_native_record(
         Caller::Socket,
     );
     invocation.target = Some(binding);
-    let outcome = host.submit(invocation)?;
+    let outcome = host.submit(invocation).unwrap();
     assert!(
         matches!(
             outcome,
@@ -1564,70 +1579,75 @@ fn rejected_provider_does_not_create_a_shell_or_native_record(
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("owner missing")?
+            .expect("owner missing")
             .activities()
             .as_slice(),
         &[],
     );
     assert!(
-        host.spaces()?
+        host.spaces()
+            .unwrap()
             .as_array()
-            .ok_or("Spaces missing")?
+            .expect("Spaces missing")
             .iter()
             .all(|space| space["sessions"].as_array().is_some_and(Vec::is_empty))
     );
-    Ok(())
 }
 
 #[rstest]
-fn checkpointing_a_shared_backend_saves_only_each_spaces_own_sessions() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let other = host.binding(true)?;
-    let home = host.binding(false)?;
-    host.start(&other, "other-checkpoint", "other-task", "")?;
-    host.start(&home, "home-checkpoint", "home-task", "")?;
+fn checkpointing_a_shared_backend_saves_only_each_spaces_own_sessions() {
+    let mut host = Host::new(true).unwrap();
+    let other = host.binding(true).unwrap();
+    let home = host.binding(false).unwrap();
+    host.start(&other, "other-checkpoint", "other-task", "")
+        .unwrap();
+    host.start(&home, "home-checkpoint", "home-task", "")
+        .unwrap();
     host.state.clear_last_error();
     host.state
         .checkpoint_sessions(chrono::Utc::now().timestamp());
     assert_eq!(host.state.last_error(), None);
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("checkpoint deadline")?;
+        .expect("checkpoint deadline");
     while host.state.session_checkpoint_pending() {
         host.tick();
         if host.state.session_checkpoint_pending() {
             host.wakes
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
         }
     }
     assert_eq!(host.state.last_error(), None);
-    let (_, reloaded) = WorkspaceRepository::open(&host.state.config().config_path)?;
+    let (_, reloaded) = WorkspaceRepository::open(&host.state.config().config_path).unwrap();
     for space in reloaded.spaces() {
         let saved = space.binding().sessions().sessions();
         assert_eq!(saved.len(), 1);
         assert!(saved[0].terminal_snapshot.is_some());
     }
-    Ok(())
 }
 
 #[rstest]
-fn native_task_identity_is_exactly_scoped_and_shell_keeps_real_tabs_and_splits() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let other = host.binding(true)?;
-    let home = host.binding(false)?;
-    let launched = host.start(
-        &other,
-        "other-conversation",
-        "task-owned-elsewhere",
-        "other prompt",
-    )?;
-    let record = record(&launched)?;
+fn native_task_identity_is_exactly_scoped_and_shell_keeps_real_tabs_and_splits() {
+    let mut host = Host::new(true).unwrap();
+    let other = host.binding(true).unwrap();
+    let home = host.binding(false).unwrap();
+    let launched = host
+        .start(
+            &other,
+            "other-conversation",
+            "task-owned-elsewhere",
+            "other prompt",
+        )
+        .unwrap();
+    let record = record(&launched).unwrap();
     let mut home_list = CommandInvocation::new("agents.native.list", Vec::new(), Caller::Socket);
     home_list.target = Some(home.clone());
     assert_eq!(
-        success(host.submit(home_list)?)?
+        success(host.submit(home_list).unwrap())
+            .unwrap()
             .as_array()
-            .ok_or("native list missing")?
+            .expect("native list missing")
             .as_slice(),
         Vec::<Value>::new().as_slice(),
     );
@@ -1648,13 +1668,13 @@ fn native_task_identity_is_exactly_scoped_and_shell_keeps_real_tabs_and_splits()
     );
     collision.target = Some(home);
     assert!(!matches!(
-        host.submit(collision)?,
+        host.submit(collision).unwrap(),
         CommandOutcome::Success { .. }
     ));
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("owner missing")?
+            .expect("owner missing")
             .activities()
             .len(),
         1
@@ -1662,27 +1682,27 @@ fn native_task_identity_is_exactly_scoped_and_shell_keeps_real_tabs_and_splits()
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("owner missing")?
+            .expect("owner missing")
             .activities()[0]
             .id,
         record.id
     );
-    let spaces = host.spaces()?;
+    let spaces = host.spaces().unwrap();
     let other_space = spaces
         .as_array()
-        .ok_or("Spaces missing")?
+        .expect("Spaces missing")
         .iter()
         .find(|space| space["name"] == "Other")
-        .ok_or("Other missing")?;
+        .expect("Other missing");
     assert_eq!(
         other_space["sessions"]
             .as_array()
-            .ok_or("sessions missing")?
+            .expect("sessions missing")
             .len(),
         1
     );
     let shell: CommandTarget =
-        serde_json::from_value(other_space["sessions"][0]["target"].clone())?;
+        serde_json::from_value(other_space["sessions"][0]["target"].clone()).unwrap();
     let mut tab = CommandInvocation::new(
         "terminal.create_tab",
         vec![
@@ -1692,47 +1712,52 @@ fn native_task_identity_is_exactly_scoped_and_shell_keeps_real_tabs_and_splits()
         Caller::Socket,
     );
     tab.target = Some(shell);
-    let tab_value = success(host.submit(tab)?)?;
-    let terminal: CommandTarget = serde_json::from_value(tab_value["created"].clone())?;
+    let tab_value = success(host.submit(tab).unwrap()).unwrap();
+    let terminal: CommandTarget = serde_json::from_value(tab_value["created"].clone()).unwrap();
     assert_eq!(terminal.kind, ResourceKind::Terminal);
     let mut focus = CommandInvocation::new("agents.focus", Vec::new(), Caller::Internal);
     focus.target = Some(terminal);
-    success(host.submit(focus)?)?;
-    success(host.submit(CommandInvocation::from_action(
-        "split_right",
-        Caller::Keybinding,
-    ))?)?;
+    success(host.submit(focus).unwrap()).unwrap();
+    success(
+        host.submit(CommandInvocation::from_action(
+            "split_right",
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(host.state.mux().selected_window_panes().len(), 1);
     let request_id = host
         .state
         .pending_new_surface()
-        .ok_or("split chooser missing")?
+        .expect("split chooser missing")
         .id;
-    success(host.submit(CommandInvocation::new(
-        "surface.choose",
-        vec![request_id.to_string(), "terminal".to_owned()],
-        Caller::Keybinding,
-    ))?)?;
+    success(
+        host.submit(CommandInvocation::new(
+            "surface.choose",
+            vec![request_id.to_string(), "terminal".to_owned()],
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(host.state.mux().selected_window_panes().len(), 2);
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("owner missing")?
+            .expect("owner missing")
             .activities()[0]
             .id,
         record.id
     );
-    Ok(())
 }
 
 #[rstest]
 #[case::foreground(false)]
 #[case::background(true)]
-fn observed_dialog_completion_focuses_only_foreground_native_start(
-    #[case] background: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
+fn observed_dialog_completion_focuses_only_foreground_native_start(#[case] background: bool) {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
     let scope = host.state.mux_scope();
     let cwd = host.directory.path().to_string_lossy().into_owned();
     let form = NewSessionForm::new(
@@ -1780,7 +1805,7 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
     let mut dialog = NewSessionDialog::open_form(form, &repaint);
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("dialog deadline overflow")?;
+        .expect("dialog deadline overflow");
     // The public dialog starts discovery and enables Start only after observing its completion.
     let spec = loop {
         if dialog.poll().is_some() {
@@ -1790,7 +1815,9 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
         if spec.rows.first().is_some_and(|row| row.enabled) {
             break spec;
         }
-        discovery_wakes.recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+        discovery_wakes
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
     };
     let event = dialog
         .apply(
@@ -1806,18 +1833,18 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
             },
             &[],
         )
-        .ok_or("start event missing")?;
+        .expect("start event missing");
     let NewSessionPickerEvent::Submit(invocation) = event else {
-        return Err("Ordinary creation must submit before background naming".into());
+        panic!("Ordinary creation must submit before background naming");
     };
     assert_eq!(invocation.arguments[7], "dialog prompt");
-    let outcome = host.submit(invocation)?;
-    let value = success(outcome.clone())?;
-    let native = record(&value)?.target();
+    let outcome = host.submit(invocation).unwrap();
+    let value = success(outcome.clone()).unwrap();
+    let native = record(&value).unwrap().target();
     let (sender, receiver) = mpsc::channel();
-    sender.send(outcome)?;
+    sender.send(outcome).unwrap();
     dialog.started(receiver);
-    let observed = dialog.poll().ok_or("completion missing")?;
+    let observed = dialog.poll().expect("completion missing");
     assert!(
         matches!(&observed,NewSessionPickerEvent::Started {foreground,..} if *foreground != background)
     );
@@ -1825,7 +1852,7 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
     *host
         .state
         .modal_dialog_mut()
-        .ok_or("creation view missing")? = bootty_ui::ModalDialog::NewSession(Box::new(dialog));
+        .expect("creation view missing") = bootty_ui::ModalDialog::NewSession(Box::new(dialog));
     host.effects.clear();
     host.state.apply_picker_event(observed);
     host.tick();
@@ -1834,7 +1861,8 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
             |effect| matches!(effect, AppEffect::NativeConversation(target) if target == &native),
         ) {
             host.wakes
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap();
             host.tick();
         }
     }
@@ -1857,47 +1885,45 @@ fn observed_dialog_completion_focuses_only_foreground_native_start(
         let activity = host
             .state
             .native_agent_service()
-            .ok_or("native owner missing")?
+            .expect("native owner missing")
             .activities()
             .into_iter()
             .find(|record| record.id == native.handle)
-            .ok_or("native activity missing")?;
-        let binding = host.binding(false)?;
+            .expect("native activity missing");
+        let binding = host.binding(false).unwrap();
         let mut invocation = CommandInvocation::new("session.saved", Vec::new(), Caller::Socket);
         invocation.target = Some(binding);
-        let saved = success(host.submit(invocation)?)?;
+        let saved = success(host.submit(invocation).unwrap()).unwrap();
         let title = saved
             .as_array()
-            .ok_or("saved sessions missing")?
+            .expect("saved sessions missing")
             .iter()
             .find(|session| session["identity"] == "task-dialog")
-            .ok_or("saved task missing")?["title"]
+            .expect("saved task missing")["title"]
             .as_str()
-            .ok_or("saved title missing")?;
+            .expect("saved title missing");
         if activity.title == "Fix native composer" && title == "Fix native composer" {
             break;
         }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "Naming did not finish: tab {:?}, task {title:?}",
-                activity.title
-            )
-            .into());
-        }
+        assert!(
+            Instant::now() < deadline,
+            "Naming did not finish: tab {:?}, task {title:?}",
+            activity.title
+        );
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
         host.tick();
     }
-    Ok(())
 }
 
 #[rstest]
-fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    fs::write(host.directory.path().join("fail-initialize"), "")?;
+fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    fs::write(host.directory.path().join("fail-initialize"), "").unwrap();
     let attachment = host.directory.path().join("initial.txt");
-    fs::write(&attachment, "Retain this attachment across a failed start")?;
+    fs::write(&attachment, "Retain this attachment across a failed start").unwrap();
     let mut start = CommandInvocation::new(
         "agents.native.start",
         vec![
@@ -1916,9 +1942,9 @@ fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() -> TestR
     start.arguments.resize(10, String::new());
     start
         .arguments
-        .push(serde_json::to_string(&vec![&attachment])?);
+        .push(serde_json::to_string(&vec![&attachment]).unwrap());
     start.target = Some(binding);
-    let outcome = host.submit(start)?;
+    let outcome = host.submit(start).unwrap();
     assert!(
         matches!(outcome, CommandOutcome::Failed { .. }),
         "{outcome:?}"
@@ -1926,22 +1952,22 @@ fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() -> TestR
     let failed = host
         .state
         .native_agent_service()
-        .ok_or("native owner missing")?
+        .expect("native owner missing")
         .sessions()
         .into_iter()
         .next()
-        .ok_or("failed reservation missing")?;
+        .expect("failed reservation missing");
     assert_eq!(failed.snapshot.status, NativeSessionStatus::Error);
     assert_eq!(
         failed.pending_initial_message.as_deref(),
         Some("Do not replay")
     );
     assert_eq!(failed.attachments.len(), 1);
-    fs::remove_file(attachment)?;
+    fs::remove_file(attachment).unwrap();
     let attachments = host
         .state
         .native_agent_service()
-        .ok_or("native owner")?
+        .expect("native owner")
         .resolve_prompt_attachments(
             &failed.target(),
             &failed
@@ -1949,19 +1975,21 @@ fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() -> TestR
                 .iter()
                 .map(|reference| reference.id.clone())
                 .collect::<Vec<_>>(),
-        )?;
+        )
+        .unwrap();
     let prompt = bootty_agents::NativePrompt::new_with_context(
         "Review the saved attachment".into(),
         Vec::new(),
         attachments,
         Vec::new(),
-    )?;
+    )
+    .unwrap();
     assert_eq!(prompt.attachment_references(), failed.attachments);
     let window = host
         .state
         .mux()
         .selected_window()
-        .ok_or("failed pane not selected")?
+        .expect("failed pane not selected")
         .to_owned();
     assert_eq!(host.state.mux().selected_window_panes().len(), 1);
     assert_eq!(
@@ -1971,10 +1999,11 @@ fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() -> TestR
         Some(failed.id.as_str())
     );
 
-    fs::remove_file(host.directory.path().join("fail-initialize"))?;
+    fs::remove_file(host.directory.path().join("fail-initialize")).unwrap();
     let mut focus = CommandInvocation::new("agents.native.focus", Vec::new(), Caller::Socket);
     focus.target = Some(failed.target());
-    let recovered: NativeSessionRecord = serde_json::from_value(success(host.submit(focus)?)?)?;
+    let recovered: NativeSessionRecord =
+        serde_json::from_value(success(host.submit(focus).unwrap()).unwrap()).unwrap();
     assert_eq!(recovered.id, failed.id);
     assert_eq!(recovered.task_identity, failed.task_identity);
     assert_eq!(recovered.snapshot.status, NativeSessionStatus::Idle);
@@ -1988,14 +2017,13 @@ fn a_failed_provider_keeps_its_exact_native_pane_and_retries_in_place() -> TestR
     );
     assert_eq!(host.state.mux().selected_window(), Some(window.as_str()));
     assert_eq!(host.state.mux().selected_session_windows().len(), 1);
-    Ok(())
 }
 
 #[rstest]
-fn native_tabs_share_the_existing_task_and_create_real_backend_windows() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let other = host.binding(true)?;
+fn native_tabs_share_the_existing_task_and_create_real_backend_windows() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let other = host.binding(true).unwrap();
     let cwd = host.directory.path().to_string_lossy().into_owned();
     let mut shell = CommandInvocation::new(
         "session.create",
@@ -2009,8 +2037,8 @@ fn native_tabs_share_the_existing_task_and_create_real_backend_windows() -> Test
         Caller::Socket,
     );
     shell.target = Some(binding.clone());
-    let terminal = success(host.submit(shell)?)?;
-    let before = host.spaces()?;
+    let terminal = success(host.submit(shell).unwrap()).unwrap();
+    let before = host.spaces().unwrap();
     let mut tab = CommandInvocation::new(
         "agents.native.tab",
         vec![
@@ -2027,10 +2055,10 @@ fn native_tabs_share_the_existing_task_and_create_real_backend_windows() -> Test
         Caller::Socket,
     );
     tab.target = Some(binding.clone());
-    let first = record(&success(host.submit(tab.clone())?)?)?;
+    let first = record(&success(host.submit(tab.clone()).unwrap()).unwrap()).unwrap();
     "Second conversation".clone_into(&mut tab.arguments[7]);
     "second prompt".clone_into(&mut tab.arguments[8]);
-    let second = record(&success(host.submit(tab.clone())?)?)?;
+    let second = record(&success(host.submit(tab.clone()).unwrap()).unwrap()).unwrap();
     assert_ne!(first.id, second.id);
     assert_ne!(first.target(), second.target());
     assert_eq!(first.task_identity.as_deref(), Some("existing-task"));
@@ -2048,7 +2076,7 @@ fn native_tabs_share_the_existing_task_and_create_real_backend_windows() -> Test
         ),
     );
     assert_eq!(
-        host.spaces()?,
+        host.spaces().unwrap(),
         before,
         "conversation tabs leave backend topology unchanged"
     );
@@ -2062,7 +2090,7 @@ fn native_tabs_share_the_existing_task_and_create_real_backend_windows() -> Test
         .all_sessions()
         .iter()
         .find(|session| session.tag.identity.as_deref() == Some("existing-task"))
-        .ok_or("Task attachment missing")?;
+        .expect("Task attachment missing");
     assert_eq!(session.windows.len(), 3);
     for (record, window) in [
         (&first, &session.windows[1]),
@@ -2077,17 +2105,21 @@ fn native_tabs_share_the_existing_task_and_create_real_backend_windows() -> Test
     let second_window = session.windows[2].id.clone();
     let mut focus = CommandInvocation::new("agents.native.focus", vec![], Caller::Socket);
     focus.target = Some(second.target());
-    success(host.submit(focus)?)?;
+    success(host.submit(focus).unwrap()).unwrap();
     assert_eq!(
         host.state.mux().selected_window(),
         Some(second_window.as_str())
     );
     for index in [1, 2, 3] {
-        success(host.submit(CommandInvocation::new(
-            "select_tab",
-            vec![index.to_string()],
-            Caller::Keybinding,
-        ))?)?;
+        success(
+            host.submit(CommandInvocation::new(
+                "select_tab",
+                vec![index.to_string()],
+                Caller::Keybinding,
+            ))
+            .unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             host.state
                 .mux()
@@ -2108,29 +2140,26 @@ fn native_tabs_share_the_existing_task_and_create_real_backend_windows() -> Test
         rejected.target = Some(target);
         replacement.clone_into(&mut rejected.arguments[index]);
         assert!(matches!(
-            host.submit(rejected)?,
+            host.submit(rejected).unwrap(),
             CommandOutcome::StaleTarget { .. }
         ));
     }
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("owner missing")?
+            .expect("owner missing")
             .activities()
             .len(),
         2
     );
-    Ok(())
 }
 
 #[rstest]
 #[case::tab(false)]
 #[case::resumed_tab(true)]
-fn native_tab_tools_read_the_captured_pane_after_another_task_is_focused(
-    #[case] resume: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
+fn native_tab_tools_read_the_captured_pane_after_another_task_is_focused(#[case] resume: bool) {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
     let mut shell = CommandInvocation::new(
         "session.create",
         vec![
@@ -2143,13 +2172,14 @@ fn native_tab_tools_read_the_captured_pane_after_another_task_is_focused(
         Caller::Socket,
     );
     shell.target = Some(binding.clone());
-    let shell = success(host.submit(shell)?)?;
+    let shell = success(host.submit(shell).unwrap()).unwrap();
     let terminal: CommandTarget = serde_json::from_value(
         shell
             .get("terminal")
             .cloned()
-            .ok_or("Task Terminal missing")?,
-    )?;
+            .expect("Task Terminal missing"),
+    )
+    .unwrap();
     let mut tab = CommandInvocation::new(
         "agents.native.tab",
         vec![
@@ -2166,101 +2196,123 @@ fn native_tab_tools_read_the_captured_pane_after_another_task_is_focused(
         Caller::Socket,
     );
     tab.target = Some(binding);
-    let tab = success(host.submit(tab)?)?;
-    let mut native = record(&tab)?;
-    let native_terminal: CommandTarget = serde_json::from_value(tab["terminal"].clone())?;
+    let tab = success(host.submit(tab).unwrap()).unwrap();
+    let mut native = record(&tab).unwrap();
+    let native_terminal: CommandTarget = serde_json::from_value(tab["terminal"].clone()).unwrap();
     assert_ne!(native_terminal, terminal);
     if resume {
         host.state
             .native_agent_service()
-            .ok_or("Native owner missing")?
-            .stop(&native.target())?;
-        native = serde_json::from_value(success(host.submit(native_command(
-            "agents.native.resume",
-            &native.target(),
-            &[],
-            Caller::Socket,
-        ))?)?)?;
+            .expect("Native owner missing")
+            .stop(&native.target())
+            .unwrap();
+        native = serde_json::from_value(
+            success(
+                host.submit(native_command(
+                    "agents.native.resume",
+                    &native.target(),
+                    &[],
+                    Caller::Socket,
+                ))
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
     }
-    let other = host.binding(true)?;
-    let foreign = host.start(&other, "foreign-task", "foreign-task-id", "")?;
+    let other = host.binding(true).unwrap();
+    let foreign = host
+        .start(&other, "foreign-task", "foreign-task-id", "")
+        .unwrap();
     let foreign_terminal: CommandTarget = serde_json::from_value(
         foreign
             .get("terminal")
             .cloned()
-            .ok_or("Foreign Terminal missing")?,
-    )?;
+            .expect("Foreign Terminal missing"),
+    )
+    .unwrap();
     let mut focus = CommandInvocation::new("agents.focus", Vec::new(), Caller::Internal);
     focus.target = Some(foreign_terminal.clone());
-    success(host.submit(focus)?)?;
-    let capture = success(host.native_tool(&native, "terminal_read", json!({}))?)?;
+    success(host.submit(focus).unwrap()).unwrap();
+    let capture = success(
+        host.native_tool(&native, "terminal_read", json!({}))
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(capture.get("target"), Some(&json!(native_terminal)));
     assert_ne!(capture.get("target"), Some(&json!(foreign_terminal)));
     assert!(capture.get("capture").is_some());
 
-    captured_workspace_reads(&mut host, &native, &native_terminal)?;
+    captured_workspace_reads(&mut host, &native, &native_terminal);
 
     let mut stale = terminal;
     stale.generation = stale
         .generation
         .checked_add(1)
-        .ok_or("Generation overflow")?;
+        .expect("Generation overflow");
     let mut capture = CommandInvocation::new("terminal.capture", Vec::new(), Caller::Socket);
     capture.target = Some(stale);
     assert!(matches!(
-        host.submit(capture)?,
+        host.submit(capture).unwrap(),
         CommandOutcome::StaleTarget { .. }
     ));
-    Ok(())
 }
 
 fn captured_workspace_reads(
     host: &mut Host,
     native: &NativeSessionRecord,
     native_terminal: &CommandTarget,
-) -> TestResult<()> {
-    let reply = host.native_tool_reply(native, "get_workspace_info", json!({}))?;
+) {
+    let reply = host
+        .native_tool_reply(native, "get_workspace_info", json!({}))
+        .unwrap();
     assert_eq!(reply.get("isError"), Some(&json!(false)), "{reply}");
-    let spaces = host.spaces()?;
+    let spaces = host.spaces().unwrap();
     let captured = spaces
         .as_array()
-        .ok_or("Spaces missing")?
+        .expect("Spaces missing")
         .iter()
         .find(|space| space["scope"] == native.binding_id)
-        .ok_or("Captured Space missing")?;
+        .expect("Captured Space missing");
     assert_eq!(
         reply.get("structuredContent"),
         Some(&json!({
             "name":captured["name"],"backend":captured["backend"],"host":captured["host"],
         }))
     );
-    assert!(!captured["active"].as_bool().ok_or("Active flag missing")?);
+    assert!(!captured["active"].as_bool().expect("Active flag missing"));
 
-    let reply = host.native_tool_reply(native, "list_terminals", json!({}))?;
+    let reply = host
+        .native_tool_reply(native, "list_terminals", json!({}))
+        .unwrap();
     assert_eq!(reply.get("isError"), Some(&json!(false)), "{reply}");
     let content = reply
         .get("structuredContent")
-        .ok_or("Structured terminal metadata missing")?;
+        .expect("Structured terminal metadata missing");
     assert_eq!(content.get("truncated"), Some(&json!(false)));
     let terminals = content
         .get("terminals")
         .and_then(Value::as_array)
-        .ok_or("Terminal metadata missing")?;
+        .expect("Terminal metadata missing");
     let terminal = terminals
         .iter()
         .find(|terminal| terminal["session"] == "tool-task")
-        .ok_or("Captured shell missing")?;
+        .expect("Captured shell missing");
     assert!(
         terminals
             .iter()
             .all(|terminal| terminal["session"] != "foreign-task"
                 && terminal["target"] != json!(native_terminal))
     );
-    let target: CommandTarget = serde_json::from_value(terminal["target"].clone())?;
+    let target: CommandTarget = serde_json::from_value(terminal["target"].clone()).unwrap();
     let mut capture = CommandInvocation::new("terminal.capture", Vec::new(), Caller::Socket);
     capture.target = Some(target);
-    assert!(success(host.submit(capture)?)?.get("capture").is_some());
-    Ok(())
+    assert!(
+        success(host.submit(capture).unwrap())
+            .unwrap()
+            .get("capture")
+            .is_some()
+    );
 }
 
 #[rstest]
@@ -2270,39 +2322,67 @@ fn restored_and_forked_native_tools_keep_the_captured_profile(
     #[case] initial_profile: &str,
     #[case] selected_after_restart: &str,
     #[case] expected_profile: Option<&str>,
-) -> TestResult<()> {
-    let mut host = Host::new_with_spawn(true, true)?;
-    let binding = host.binding(false)?;
-    let saved = record(&host.start_with_profile(
-        &binding,
-        "profile-owner",
-        "profile-owner-task",
-        "Saved answer",
-        initial_profile,
-    )?)?;
+) {
+    let mut host = Host::new_with_spawn(true, true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let saved = record(
+        &host
+            .start_with_profile(
+                &binding,
+                "profile-owner",
+                "profile-owner-task",
+                "Saved answer",
+                initial_profile,
+            )
+            .unwrap(),
+    )
+    .unwrap();
     assert_eq!(saved.config.profile.as_deref(), expected_profile);
-    host.restart_with_provider_selection(true, Some(selected_after_restart))?;
+    host.restart_with_provider_selection(true, Some(selected_after_restart));
     let saved = host
         .state
         .native_agent_service()
-        .ok_or("Native owner")?
+        .expect("Native owner")
         .sessions()
         .into_iter()
         .find(|record| record.id == saved.id)
-        .ok_or("Saved conversation")?;
-    let resumed: NativeSessionRecord = serde_json::from_value(success(host.submit(
-        native_command("agents.native.resume", &saved.target(), &[], Caller::Socket),
-    )?)?)?;
-    let forked: NativeSessionRecord = serde_json::from_value(success(host.submit(
-        native_command("agents.native.fork", &resumed.target(), &[], Caller::Socket),
-    )?)?)?;
+        .expect("Saved conversation");
+    let resumed: NativeSessionRecord = serde_json::from_value(
+        success(
+            host.submit(native_command(
+                "agents.native.resume",
+                &saved.target(),
+                &[],
+                Caller::Socket,
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let forked: NativeSessionRecord = serde_json::from_value(
+        success(
+            host.submit(native_command(
+                "agents.native.fork",
+                &resumed.target(),
+                &[],
+                Caller::Socket,
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     for parent in [resumed, forked] {
         assert_eq!(parent.config.profile.as_deref(), expected_profile);
         assert_eq!(
-            host.native_tool_reply(&parent, "inspect_provider", json!({}))?["structuredContent"]["profile"],
+            host.native_tool_reply(&parent, "inspect_provider", json!({}))
+                .unwrap()["structuredContent"]["profile"],
             json!(expected_profile)
         );
-        let profiles = host.native_tool_reply(&parent, "list_profiles", json!({}))?;
+        let profiles = host
+            .native_tool_reply(&parent, "list_profiles", json!({}))
+            .unwrap();
         assert_eq!(profiles["isError"], false);
         assert_eq!(
             profiles["structuredContent"],
@@ -2312,20 +2392,25 @@ fn restored_and_forked_native_tools_keep_the_captured_profile(
             })
         );
         assert_eq!(
-            host.native_tool_reply(&parent, "list_profiles", json!({"provider":"claude"}))?["isError"],
+            host.native_tool_reply(&parent, "list_profiles", json!({"provider":"claude"}))
+                .unwrap()["isError"],
             true
         );
         assert_eq!(
             parent.config.account_directory,
             saved.config.account_directory
         );
-        let child = success(host.native_tool(
-            &parent,
-            "spawn_agent",
-            json!({"name":format!("profile-child-{}",parent.id.replace(':',"-")),
+        let child = success(
+            host.native_tool(
+                &parent,
+                "spawn_agent",
+                json!({"name":format!("profile-child-{}",parent.id.replace(':',"-")),
                    "provider":"codex","profile":expected_profile,"prompt":"Captured work"}),
-        )?)?;
-        let child = host.spawned_record(&child)?;
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let child = host.spawned_record(&child).unwrap();
         assert_eq!(child.config.profile, parent.config.profile);
         assert_eq!(
             child.config.account_directory,
@@ -2342,31 +2427,34 @@ fn restored_and_forked_native_tools_keep_the_captured_profile(
                 "spawn_agent",
                 json!({"name":"wrong-profile-child","provider":"codex",
                    "profile":denied_profile,"prompt":"Wrong account"}),
-            )?["isError"],
+            )
+            .unwrap()["isError"],
             true
         );
     }
-    Ok(())
 }
 
 #[rstest]
-fn concurrent_native_restore_keeps_the_first_launch_and_its_tools() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let launched = host.start(
-        &binding,
-        "restore-owner",
-        "restore-owner-task",
-        "Saved answer",
-    )?;
-    let saved = record(&launched)?;
+fn concurrent_native_restore_keeps_the_first_launch_and_its_tools() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let launched = host
+        .start(
+            &binding,
+            "restore-owner",
+            "restore-owner-task",
+            "Saved answer",
+        )
+        .unwrap();
+    let saved = record(&launched).unwrap();
     host.state
         .native_agent_service()
-        .ok_or("Native owner missing")?
-        .stop(&saved.target())?;
+        .expect("Native owner missing")
+        .stop(&saved.target())
+        .unwrap();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("Resume deadline")?;
+        .expect("Resume deadline");
     let sender = host.state.app_command_sender(Caller::Socket);
     let first = sender
         .submit(
@@ -2374,7 +2462,7 @@ fn concurrent_native_restore_keeps_the_first_launch_and_its_tools() -> TestResul
             deadline,
             CommandCancellation::new(),
         )
-        .map_err(|error| format!("Resume submission: {error:?}"))?;
+        .expect("Resume submission");
     let duplicate = sender
         .submit(
             native_command(
@@ -2386,73 +2474,79 @@ fn concurrent_native_restore_keeps_the_first_launch_and_its_tools() -> TestResul
             deadline,
             CommandCancellation::new(),
         )
-        .map_err(|error| format!("Duplicate submission: {error:?}"))?;
+        .expect("Duplicate submission");
     let resumed: NativeSessionRecord =
-        serde_json::from_value(success(host.receive(&first, deadline)?)?)?;
+        serde_json::from_value(success(host.receive(&first, deadline).unwrap()).unwrap()).unwrap();
     assert!(matches!(
-        host.receive(&duplicate, deadline)?,
+        host.receive(&duplicate, deadline).unwrap(),
         CommandOutcome::Unavailable { .. } | CommandOutcome::StaleTarget { .. }
     ));
-    verify_native_resume(&host, &saved, &resumed)?;
-    success(host.native_tool(&resumed, "terminal_read", json!({}))?)?;
-    Ok(())
+    verify_native_resume(&host, &saved, &resumed);
+    success(
+        host.native_tool(&resumed, "terminal_read", json!({}))
+            .unwrap(),
+    )
+    .unwrap();
 }
 
 #[rstest]
 #[case::detached(false)]
 #[case::restarted(true)]
-fn saved_native_task_keyboard_selection_restores_its_terminal_checkpoint(
-    #[case] restart: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let mut binding = host.binding(false)?;
-    let launched = host.start(
-        &binding,
-        "saved-conversation",
-        "saved-native-task",
-        "Saved answer",
-    )?;
-    let saved_record = record(&launched)?;
+fn saved_native_task_keyboard_selection_restores_its_terminal_checkpoint(#[case] restart: bool) {
+    let mut host = Host::new(true).unwrap();
+    let mut binding = host.binding(false).unwrap();
+    let launched = host
+        .start(
+            &binding,
+            "saved-conversation",
+            "saved-native-task",
+            "Saved answer",
+        )
+        .unwrap();
+    let saved_record = record(&launched).unwrap();
     let native = saved_record.target();
-    let spaces = host.spaces()?;
+    let spaces = host.spaces().unwrap();
     let session = spaces
         .as_array()
-        .ok_or("Spaces missing")?
+        .expect("Spaces missing")
         .iter()
         .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
         .find(|session| session["name"] == "saved-conversation")
-        .ok_or("Task shell missing")?;
+        .expect("Task shell missing");
     let mut close = CommandInvocation::new("session.close", Vec::new(), Caller::Socket);
-    close.target = Some(serde_json::from_value(session["target"].clone())?);
+    close.target = Some(serde_json::from_value(session["target"].clone()).unwrap());
     close.confirmation = Some(close.confirmation());
-    success(host.submit(close)?).map_err(|error| format!("Close saved task: {error}"))?;
+    success(host.submit(close).unwrap()).expect("Close saved task");
     if restart {
-        host.restart()?;
-        binding = host.binding(false)?;
+        host.restart();
+        binding = host.binding(false).unwrap();
         let restored = host
             .state
             .native_agent_service()
-            .ok_or("Restored native owner missing")?
+            .expect("Restored native owner missing")
             .sessions()
             .into_iter()
             .find(|record| record.target() == native)
-            .ok_or("Restored conversation missing")?;
+            .expect("Restored conversation missing");
         assert_eq!(restored.snapshot.status, NativeSessionStatus::Stopped);
         assert_eq!(
             restored.snapshot.transcript,
             saved_record.snapshot.transcript
         );
     }
-    let before = host.spaces()?;
+    let before = host.spaces().unwrap();
     host.effects.clear();
-    success(host.submit(CommandInvocation::new(
-        "ui.sidebar.activate_session",
-        Vec::new(),
-        Caller::Keybinding,
-    ))?)
-    .map_err(|error| format!("Select saved history: {error}"))?;
+    success(
+        host.submit(CommandInvocation::new(
+            "ui.sidebar.activate_session",
+            Vec::new(),
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .expect("Select saved history");
     host.tick();
-    let after = host.spaces()?;
+    let after = host.spaces().unwrap();
     assert_ne!(
         after, before,
         "Selection restores the saved terminal topology"
@@ -2472,18 +2566,17 @@ fn saved_native_task_keyboard_selection_restores_its_terminal_checkpoint(
     );
     let mut saved_command = CommandInvocation::new("session.saved", Vec::new(), Caller::Socket);
     saved_command.target = Some(binding);
-    let saved = success(host.submit(saved_command)?)?;
+    let saved = success(host.submit(saved_command).unwrap()).unwrap();
     let retained = saved
         .as_array()
-        .ok_or("Saved sessions missing")?
+        .expect("Saved sessions missing")
         .iter()
         .find(|session| session["identity"] == "saved-native-task")
-        .ok_or("Saved native task missing")?;
+        .expect("Saved native task missing");
     assert_ne!(retained["attachment"], Value::Null);
-    let resumed = open_saved_native(&mut host, &saved_record)
-        .map_err(|error| format!("Resume captured conversation: {error}"))?;
-    wait_for_native_terminal_read(&mut host, &resumed)?;
-    Ok(())
+    let resumed =
+        open_saved_native(&mut host, &saved_record).expect("Resume captured conversation");
+    wait_for_native_terminal_read(&mut host, &resumed).unwrap();
 }
 
 // Restoring topology accepts the worker before its display stream is ready. Wait on
@@ -2515,7 +2608,7 @@ fn open_saved_native(
     let mut focus = CommandInvocation::new("agents.native.focus", Vec::new(), Caller::Socket);
     focus.target = Some(saved_record.target());
     let resumed: NativeSessionRecord = serde_json::from_value(success(host.submit(focus)?)?)?;
-    verify_native_resume(host, saved_record, &resumed)?;
+    verify_native_resume(host, saved_record, &resumed);
     Ok(resumed)
 }
 
@@ -2523,12 +2616,12 @@ fn verify_native_resume(
     host: &Host,
     saved_record: &NativeSessionRecord,
     resumed: &NativeSessionRecord,
-) -> TestResult<Value> {
+) -> Value {
     let provider_identity = saved_record
         .config
         .session_id
         .as_deref()
-        .ok_or("Captured provider session missing")?;
+        .expect("Captured provider session missing");
     assert_eq!(resumed.id, saved_record.id);
     assert_ne!(resumed.generation, saved_record.generation);
     assert_eq!(
@@ -2546,13 +2639,15 @@ fn verify_native_resume(
     let calls = host
         .state
         .native_agent_service()
-        .ok_or("Native owner missing")?
-        .resolve(&resumed.target())?
-        .rpc("__calls", json!({}))?;
+        .expect("Native owner missing")
+        .resolve(&resumed.target())
+        .unwrap()
+        .rpc("__calls", json!({}))
+        .unwrap();
     let methods = calls
         .get("methods")
         .and_then(Value::as_array)
-        .ok_or("Provider calls missing")?;
+        .expect("Provider calls missing");
     assert!(methods.iter().any(|method| method == "thread/resume"));
     assert!(
         !methods
@@ -2563,7 +2658,7 @@ fn verify_native_resume(
         calls.get("account_directory").and_then(Value::as_str),
         saved_record.config.account_directory.as_deref()
     );
-    Ok(calls)
+    calls
 }
 
 fn legacy_native_conversation(host: &Host) -> TestResult<NativeSessionRecord> {
@@ -2619,28 +2714,32 @@ fn legacy_native_conversation(host: &Host) -> TestResult<NativeSessionRecord> {
 }
 
 #[rstest]
-fn opening_without_a_checkpoint_starts_a_shell_and_resumes_the_same_provider() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let saved_record = legacy_native_conversation(&host)?;
-    host.restart()?;
-    let binding = host.binding(false)?;
-    let saved_before = host.saved(&binding)?;
+fn opening_without_a_checkpoint_starts_a_shell_and_resumes_the_same_provider() {
+    let mut host = Host::new(true).unwrap();
+    let saved_record = legacy_native_conversation(&host).unwrap();
+    host.restart();
+    let binding = host.binding(false).unwrap();
+    let saved_before = host.saved(&binding).unwrap();
     host.effects.clear();
-    success(host.submit(CommandInvocation::new(
-        "ui.sidebar.activate_session",
-        Vec::new(),
-        Caller::Keybinding,
-    ))?)?;
+    success(
+        host.submit(CommandInvocation::new(
+            "ui.sidebar.activate_session",
+            Vec::new(),
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     host.tick();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("Resume deadline")?;
+        .expect("Resume deadline");
     let resumed = loop {
         host.tick();
         if let Some(record) = host
             .state
             .native_agent_service()
-            .ok_or("Native owner missing")?
+            .expect("Native owner missing")
             .sessions()
             .into_iter()
             .find(|record| {
@@ -2655,9 +2754,10 @@ fn opening_without_a_checkpoint_starts_a_shell_and_resumes_the_same_provider() -
             break record;
         }
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
     };
-    let calls = verify_native_resume(&host, &saved_record, &resumed)?;
+    let calls = verify_native_resume(&host, &saved_record, &resumed);
     assert!(host.effects.iter().any(|effect| {
         matches!(effect, AppEffect::NativeConversation(target) if target == &resumed.target())
     }));
@@ -2665,7 +2765,7 @@ fn opening_without_a_checkpoint_starts_a_shell_and_resumes_the_same_provider() -
         matches!(effect, AppEffect::NativeConversation(target) if target == &saved_record.target())
     }), "opening never focuses the stopped generation");
     assert_eq!(calls.get("bootty_tools"), Some(&Value::Bool(true)));
-    let mut saved_after = host.saved(&binding)?;
+    let mut saved_after = host.saved(&binding).unwrap();
     assert!(saved_after[0]["attachment"].is_string());
     saved_after[0]["attachment"] = Value::Null;
     assert_eq!(saved_after, saved_before);
@@ -2678,55 +2778,59 @@ fn opening_without_a_checkpoint_starts_a_shell_and_resumes_the_same_provider() -
             host.directory
                 .path()
                 .to_str()
-                .ok_or("Fixture path is not UTF-8")?
+                .expect("Fixture path is not UTF-8")
         )
     );
-    Ok(())
 }
 
 #[rstest]
-fn disabled_native_resume_does_not_restore_a_dead_task_or_change_its_conversation() -> TestResult<()>
-{
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let saved_record = record(&host.start(
-        &binding,
-        "disabled-resume",
-        "disabled-resume-id",
-        "Saved work",
-    )?)?;
-    let spaces = host.spaces()?;
+fn disabled_native_resume_does_not_restore_a_dead_task_or_change_its_conversation() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let saved_record = record(
+        &host
+            .start(
+                &binding,
+                "disabled-resume",
+                "disabled-resume-id",
+                "Saved work",
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let spaces = host.spaces().unwrap();
     let shell = spaces
         .as_array()
-        .ok_or("Spaces missing")?
+        .expect("Spaces missing")
         .iter()
         .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
         .find(|session| session["name"] == "disabled-resume")
-        .ok_or("Task shell missing")?;
+        .expect("Task shell missing");
     let mut close = CommandInvocation::new("session.close", Vec::new(), Caller::Socket);
-    close.target = Some(serde_json::from_value(shell["target"].clone())?);
+    close.target = Some(serde_json::from_value(shell["target"].clone()).unwrap());
     close.confirmation = Some(close.confirmation());
-    success(host.submit(close)?)?;
-    host.restart_with_provider_enabled(false)?;
-    let before = host.spaces()?;
+    success(host.submit(close).unwrap()).unwrap();
+    host.restart_with_provider_enabled(false);
+    let before = host.spaces().unwrap();
     assert!(matches!(
         host.submit(native_command(
             "agents.native.resume",
             &saved_record.target(),
             &[],
             Caller::Socket
-        ))?,
+        ))
+        .unwrap(),
         CommandOutcome::Denied { .. }
     ));
-    assert_eq!(host.spaces()?, before);
+    assert_eq!(host.spaces().unwrap(), before);
     let restored = host
         .state
         .native_agent_service()
-        .ok_or("Native owner missing")?
+        .expect("Native owner missing")
         .sessions()
         .into_iter()
         .find(|record| record.id == saved_record.id)
-        .ok_or("Saved conversation missing")?;
+        .expect("Saved conversation missing");
     assert_eq!(restored.target(), saved_record.target());
     assert_eq!(restored.snapshot.status, NativeSessionStatus::Stopped);
     assert_eq!(restored.config.session_id, saved_record.config.session_id);
@@ -2734,7 +2838,6 @@ fn disabled_native_resume_does_not_restore_a_dead_task_or_change_its_conversatio
         restored.snapshot.transcript,
         saved_record.snapshot.transcript
     );
-    Ok(())
 }
 
 #[rstest]
@@ -2742,28 +2845,33 @@ fn disabled_native_resume_does_not_restore_a_dead_task_or_change_its_conversatio
 #[case::provider_disabled(true)]
 fn pending_native_lease_revocation_cancels_saved_task_restore_before_acceptance(
     #[case] disable_provider: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let saved_record = record(&host.start(
-        &binding,
-        "pending-restore",
-        "pending-restore-id",
-        "Retained answer",
-    )?)?;
-    let spaces = host.spaces()?;
+) {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let saved_record = record(
+        &host
+            .start(
+                &binding,
+                "pending-restore",
+                "pending-restore-id",
+                "Retained answer",
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    let spaces = host.spaces().unwrap();
     let shell = spaces
         .as_array()
-        .ok_or("Spaces missing")?
+        .expect("Spaces missing")
         .iter()
         .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
         .find(|session| session["name"] == "pending-restore")
-        .ok_or("Task shell missing")?;
+        .expect("Task shell missing");
     let mut close = CommandInvocation::new("session.close", Vec::new(), Caller::Socket);
-    close.target = Some(serde_json::from_value(shell["target"].clone())?);
+    close.target = Some(serde_json::from_value(shell["target"].clone()).unwrap());
     close.confirmation = Some(close.confirmation());
-    success(host.submit(close)?)?;
-    let owner = host.state.terminal_agent_service().ok_or("Tool owner")?;
+    success(host.submit(close).unwrap()).unwrap();
+    let owner = host.state.terminal_agent_service().expect("Tool owner");
     let bridge = ToolBridge::prepare(
         ToolBridgeContext {
             scope: ToolScope {
@@ -2775,18 +2883,21 @@ fn pending_native_lease_revocation_cancels_saved_task_restore_before_acceptance(
             captures: Vec::new(),
             spawn: None,
         },
-        &std::env::current_exe()?,
+        &std::env::current_exe().unwrap(),
         Arc::new(|_: CommandInvocation, _: Instant, _: CommandCancellation| {
             CommandOutcome::Unavailable {
                 message: "This pending attachment has not launched its provider".to_owned(),
             }
         }),
-    )?;
-    let bridge = owner.retain_tool_attachment(AgentKind::Codex, bridge)?;
+    )
+    .unwrap();
+    let bridge = owner
+        .retain_tool_attachment(AgentKind::Codex, bridge)
+        .unwrap();
     let cancellation = CommandCancellation::new();
-    let _launch = bridge.lease().begin_launch(&cancellation)?;
-    let before = host.spaces()?;
-    let saved_before = host.saved(&binding)?;
+    let _launch = bridge.lease().begin_launch(&cancellation).unwrap();
+    let before = host.spaces().unwrap();
+    let saved_before = host.saved(&binding).unwrap();
     // The public mailbox gives an exact pre-admission barrier: no owner frame is pumped
     // between submission and revocation. This exercises the lease-to-restore boundary.
     let mut restore = CommandInvocation::new(
@@ -2797,12 +2908,12 @@ fn pending_native_lease_revocation_cancels_saved_task_restore_before_acceptance(
     restore.target = Some(binding.clone());
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("Deadline")?;
+        .expect("Deadline");
     let response = host
         .state
         .app_command_sender(Caller::Socket)
         .submit(restore, deadline, cancellation.clone())
-        .map_err(|error| format!("Mailbox submission: {error:?}"))?;
+        .expect("Mailbox submission");
     if disable_provider {
         owner.set_provider_tools_enabled(AgentKind::Codex, false);
     } else {
@@ -2810,26 +2921,25 @@ fn pending_native_lease_revocation_cancels_saved_task_restore_before_acceptance(
     }
     assert!(cancellation.is_cancelled());
     assert_eq!(
-        host.receive(&response, deadline)?,
+        host.receive(&response, deadline).unwrap(),
         CommandOutcome::cancelled()
     );
-    assert_eq!(host.spaces()?, before);
-    assert_eq!(host.saved(&binding)?, saved_before);
+    assert_eq!(host.spaces().unwrap(), before);
+    assert_eq!(host.saved(&binding).unwrap(), saved_before);
     let retained = host
         .state
         .native_agent_service()
-        .ok_or("Native owner")?
+        .expect("Native owner")
         .sessions()
         .into_iter()
         .find(|record| record.id == saved_record.id)
-        .ok_or("Retained native conversation")?;
+        .expect("Retained native conversation");
     assert_eq!(retained.target(), saved_record.target());
     assert_eq!(retained.config.session_id, saved_record.config.session_id);
     assert_eq!(
         retained.snapshot.transcript,
         saved_record.snapshot.transcript
     );
-    Ok(())
 }
 
 #[rstest]
@@ -2840,50 +2950,57 @@ fn invalid_surface_choices_leave_a_detached_native_task_closed(
     #[case] kind: &str,
     #[case] argument: &str,
     #[case] provider_enabled: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let native = record(&host.start(&binding, "chooser-restore", "chooser-restore-id", "")?)?;
-    let spaces = host.spaces()?;
+) {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let native = record(
+        &host
+            .start(&binding, "chooser-restore", "chooser-restore-id", "")
+            .unwrap(),
+    )
+    .unwrap();
+    let spaces = host.spaces().unwrap();
     let shell = spaces
         .as_array()
-        .ok_or("Spaces missing")?
+        .expect("Spaces missing")
         .iter()
         .flat_map(|space| space["sessions"].as_array().into_iter().flatten())
         .find(|session| session["name"] == "chooser-restore")
-        .ok_or("Task terminal missing")?;
+        .expect("Task terminal missing");
     let mut close = CommandInvocation::new("session.close", Vec::new(), Caller::Socket);
-    close.target = Some(serde_json::from_value(shell["target"].clone())?);
+    close.target = Some(serde_json::from_value(shell["target"].clone()).unwrap());
     close.confirmation = Some(close.confirmation());
-    success(host.submit(close)?)?;
+    success(host.submit(close).unwrap()).unwrap();
     if !provider_enabled {
-        host.restart_with_provider_enabled(false)?;
+        host.restart_with_provider_enabled(false);
     }
-    let binding = host.binding(false)?;
+    let binding = host.binding(false).unwrap();
     let target = host
         .state
         .native_agent_service()
-        .ok_or("Native owner missing")?
+        .expect("Native owner missing")
         .sessions()
         .into_iter()
         .find(|record| record.id == native.id)
-        .ok_or("Retained conversation missing")?
+        .expect("Retained conversation missing")
         .target();
-    let before = host.spaces()?;
-    let saved_before = host.saved(&binding)?;
+    let before = host.spaces().unwrap();
+    let saved_before = host.saved(&binding).unwrap();
     let mut open = CommandInvocation::from_action("new_tab", Caller::Socket);
     open.target = Some(target);
-    success(host.submit(open)?)?;
+    success(host.submit(open).unwrap()).unwrap();
     let id = host
         .state
         .pending_new_surface()
-        .ok_or("Chooser missing")?
+        .expect("Chooser missing")
         .id;
-    let outcome = host.submit(CommandInvocation::new(
-        "surface.choose",
-        vec![id.to_string(), kind.to_owned(), argument.to_owned()],
-        Caller::Socket,
-    ))?;
+    let outcome = host
+        .submit(CommandInvocation::new(
+            "surface.choose",
+            vec![id.to_string(), kind.to_owned(), argument.to_owned()],
+            Caller::Socket,
+        ))
+        .unwrap();
     assert!(
         matches!(
             outcome,
@@ -2892,19 +3009,18 @@ fn invalid_surface_choices_leave_a_detached_native_task_closed(
         "{outcome:?}"
     );
     assert_eq!(
-        host.spaces()?,
+        host.spaces().unwrap(),
         before,
         "invalid choices cannot restore a terminal"
     );
-    assert_eq!(host.saved(&binding)?, saved_before);
+    assert_eq!(host.saved(&binding).unwrap(), saved_before);
     assert_eq!(
         host.state
             .pending_new_surface()
-            .ok_or("Chooser removed")?
+            .expect("Chooser removed")
             .id,
         id
     );
-    Ok(())
 }
 
 #[rstest]
@@ -2918,15 +3034,19 @@ fn invalid_surface_choices_leave_a_detached_native_task_closed(
 fn captured_agent_creation_admits_desktop_files_without_widening_external_callers(
     #[case] caller: Caller,
     #[case] admitted: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
+) {
+    let mut host = Host::new(true).unwrap();
     let file = host.directory.path().join("review.md");
-    fs::write(&file, "attachment marker")?;
-    success(host.submit(CommandInvocation::from_action("new_tab", caller))?)?;
+    fs::write(&file, "attachment marker").unwrap();
+    success(
+        host.submit(CommandInvocation::from_action("new_tab", caller))
+            .unwrap(),
+    )
+    .unwrap();
     let request = host
         .state
         .pending_new_surface()
-        .ok_or("Chooser missing")?
+        .expect("Chooser missing")
         .clone();
     let invocation = CommandInvocation::new(
         "surface.create_agent",
@@ -2942,13 +3062,13 @@ fn captured_agent_creation_admits_desktop_files_without_widening_external_caller
             "Attachment review".to_owned(),
             "Read the attachment".to_owned(),
             String::new(),
-            serde_json::to_string(&vec![file])?,
+            serde_json::to_string(&vec![file]).unwrap(),
         ],
         caller,
     );
-    let outcome = host.submit(invocation)?;
+    let outcome = host.submit(invocation).unwrap();
     if admitted {
-        let created = record(&success(outcome)?)?;
+        let created = record(&success(outcome).unwrap()).unwrap();
         assert_eq!(created.attachments.len(), 1);
         assert_eq!(created.attachments[0].name, "review.md");
     } else {
@@ -2959,47 +3079,47 @@ fn captured_agent_creation_admits_desktop_files_without_widening_external_caller
         assert!(
             host.state
                 .native_agent_service()
-                .ok_or("Native owner missing")?
+                .expect("Native owner missing")
                 .sessions()
                 .is_empty()
         );
     }
-    Ok(())
 }
 
 #[rstest]
-fn first_prompt_rejection_returns_the_observed_created_conversation() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let value = host.start(
-        &binding,
-        "rejected-prompt",
-        "rejected-prompt-id",
-        "reject-first",
-    )?;
+fn first_prompt_rejection_returns_the_observed_created_conversation() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let value = host
+        .start(
+            &binding,
+            "rejected-prompt",
+            "rejected-prompt-id",
+            "reject-first",
+        )
+        .unwrap();
     let error = value
         .get("first_prompt_error")
         .and_then(Value::as_str)
-        .ok_or("The saved conversation must expose its first prompt rejection")?;
-    let rejection: Value = serde_json::from_str(error)?;
+        .expect("The saved conversation must expose its first prompt rejection");
+    let rejection: Value = serde_json::from_str(error).unwrap();
     assert_eq!(
         rejection.get("message").and_then(Value::as_str),
         Some("first prompt rejected")
     );
-    let record = record(&value)?;
+    let record = record(&value).unwrap();
     assert_eq!(record.snapshot.status, NativeSessionStatus::Error);
     assert_eq!(record.snapshot.first_turn, None);
     assert_eq!(record.task_identity.as_deref(), Some("rejected-prompt-id"));
     assert_eq!(
         host.state
             .native_agent_service()
-            .ok_or("Native owner")?
+            .expect("Native owner")
             .sessions()
             .len(),
         1
     );
     assert_eq!(host.state.mux().all_sessions().len(), 1);
-    Ok(())
 }
 
 fn attach_sibling_tui(
@@ -3054,15 +3174,17 @@ fn attach_sibling_tui(
 }
 
 #[rstest]
-fn legacy_spawn_preserves_the_registered_callers_authority() -> TestResult<()> {
-    let mut host = Host::new_with_spawn(true, true)?;
-    let binding = host.binding(false)?;
-    let created = host.start(&binding, "legacy-parent", "legacy-parent-id", "")?;
-    let record = record(&created)?;
+fn legacy_spawn_preserves_the_registered_callers_authority() {
+    let mut host = Host::new_with_spawn(true, true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let created = host
+        .start(&binding, "legacy-parent", "legacy-parent-id", "")
+        .unwrap();
+    let record = record(&created).unwrap();
     let terminal: CommandTarget =
-        serde_json::from_value(created.get("terminal").cloned().ok_or("Parent terminal")?)?;
-    let _lease = attach_sibling_tui(&host, &binding, &terminal, &record.binding_id)?;
-    let before = host.spaces()?;
+        serde_json::from_value(created.get("terminal").cloned().expect("Parent terminal")).unwrap();
+    let _lease = attach_sibling_tui(&host, &binding, &terminal, &record.binding_id).unwrap();
+    let before = host.spaces().unwrap();
     let mut legacy = CommandInvocation::new(
         "agents.spawn",
         vec![json!({"kind":"shell","name":"legacy-child"}).to_string()],
@@ -3070,49 +3192,52 @@ fn legacy_spawn_preserves_the_registered_callers_authority() -> TestResult<()> {
     );
     legacy.target = Some(terminal);
     assert!(matches!(
-        host.submit(legacy.clone())?,
+        host.submit(legacy.clone()).unwrap(),
         CommandOutcome::Denied { .. }
     ));
-    assert_eq!(host.spaces()?, before);
+    assert_eq!(host.spaces().unwrap(), before);
     legacy.caller = Caller::Socket;
-    let child = success(host.submit(legacy)?)?;
+    let child = success(host.submit(legacy).unwrap()).unwrap();
     let target: CommandTarget =
-        serde_json::from_value(child.get("terminal").cloned().ok_or("Child terminal")?)?;
+        serde_json::from_value(child.get("terminal").cloned().expect("Child terminal")).unwrap();
     assert_eq!(target.kind, ResourceKind::Terminal);
     let identity = child
         .get("task_id")
         .and_then(Value::as_str)
-        .ok_or("Child identity")?;
-    let saved = host.saved(&binding)?;
+        .expect("Child identity");
+    let saved = host.saved(&binding).unwrap();
     assert!(
         saved
             .as_array()
-            .ok_or("Saved sessions missing")?
+            .expect("Saved sessions missing")
             .iter()
             .any(|session| session.get("identity").and_then(Value::as_str) == Some(identity))
     );
-    Ok(())
 }
 
 #[rstest]
-fn spawn_guard_preserves_caller_cancellation_at_durable_creation_acceptance() -> TestResult<()> {
-    let mut host = Host::new_with_spawn(true, true)?;
-    let binding = host.binding(false)?;
-    let created = host.start(&binding, "cancel-parent", "cancel-parent-id", "")?;
-    let record = record(&created)?;
+fn spawn_guard_preserves_caller_cancellation_at_durable_creation_acceptance() {
+    let mut host = Host::new_with_spawn(true, true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let created = host
+        .start(&binding, "cancel-parent", "cancel-parent-id", "")
+        .unwrap();
+    let record = record(&created).unwrap();
     let terminal: CommandTarget =
-        serde_json::from_value(created.get("terminal").cloned().ok_or("Parent terminal")?)?;
-    let lease = attach_sibling_tui(&host, &binding, &terminal, &record.binding_id)?;
+        serde_json::from_value(created.get("terminal").cloned().expect("Parent terminal")).unwrap();
+    let lease = attach_sibling_tui(&host, &binding, &terminal, &record.binding_id).unwrap();
     let incoming = CommandCancellation::new();
-    let guard = lease.begin_spawn_with_cancellation(
-        &ToolSpawnRequest::Shell {
-            name: "cancelled-child".to_owned(),
-            title: None,
-        },
-        incoming.clone(),
-    )?;
-    let before = host.spaces()?;
-    let saved_before = host.saved(&binding)?;
+    let guard = lease
+        .begin_spawn_with_cancellation(
+            &ToolSpawnRequest::Shell {
+                name: "cancelled-child".to_owned(),
+                title: None,
+            },
+            incoming.clone(),
+        )
+        .unwrap();
+    let before = host.spaces().unwrap();
+    let saved_before = host.saved(&binding).unwrap();
     // Exercise the public guard-to-owner boundary: AppState does not expose a nested spawn queue
     // barrier, so this test does not claim to drive agents.spawn through that forwarding step.
     let mut create = CommandInvocation::new(
@@ -3129,29 +3254,28 @@ fn spawn_guard_preserves_caller_cancellation_at_durable_creation_acceptance() ->
     create.target = Some(binding.clone());
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("Deadline")?;
+        .expect("Deadline");
     let response = host
         .state
         .app_command_sender(guard.caller())
         .submit(create, deadline, guard.cancellation())
-        .map_err(|error| format!("Mailbox submission: {error:?}"))?;
+        .expect("Mailbox submission");
     assert!(incoming.cancel());
     assert_eq!(
-        host.receive(&response, deadline)?,
+        host.receive(&response, deadline).unwrap(),
         CommandOutcome::cancelled()
     );
-    assert_eq!(host.spaces()?, before);
-    let saved = host.saved(&binding)?;
+    assert_eq!(host.spaces().unwrap(), before);
+    let saved = host.saved(&binding).unwrap();
     assert_eq!(saved, saved_before);
     assert!(
         !saved
             .as_array()
-            .ok_or("Saved sessions missing")?
+            .expect("Saved sessions missing")
             .iter()
             .any(|session| session.get("identity").and_then(Value::as_str)
                 == Some("cancelled-child-id"))
     );
-    Ok(())
 }
 
 #[rstest]
@@ -3160,16 +3284,25 @@ fn spawn_guard_preserves_caller_cancellation_at_durable_creation_acceptance() ->
 fn native_parent_supervises_only_children_from_its_exact_live_grant(
     #[case] tool: &str,
     #[case] operation: &str,
-) -> TestResult<()> {
-    let mut host = Host::new_with_spawn(true, true)?;
-    let binding = host.binding(false)?;
-    let parent = record(&host.start(&binding, "supervisor", "supervisor-task", "parent work")?)?;
-    let spawned = success(host.native_tool(
-        &parent,
-        "spawn_agent",
-        json!({"name":"supervised-child","provider":"codex","prompt":"child work"}),
-    )?)?;
-    let child = host.spawned_record(&spawned)?;
+) {
+    let mut host = Host::new_with_spawn(true, true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let parent = record(
+        &host
+            .start(&binding, "supervisor", "supervisor-task", "parent work")
+            .unwrap(),
+    )
+    .unwrap();
+    let spawned = success(
+        host.native_tool(
+            &parent,
+            "spawn_agent",
+            json!({"name":"supervised-child","provider":"codex","prompt":"child work"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let child = host.spawned_record(&spawned).unwrap();
     let child_pane = host
         .state
         .mux()
@@ -3178,20 +3311,26 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
         .find(|session| session.tag.identity == child.task_identity)
         .and_then(|session| session.windows.first())
         .and_then(|window| window.panes.first())
-        .ok_or("Child pane")?
+        .expect("Child pane")
         .pane_id
         .clone()
-        .ok_or("Child pane ID")?;
+        .expect("Child pane ID");
     let selected = host.state.mux().selected_session().map(str::to_owned);
-    let foreign_binding = host.binding(true)?;
-    let foreign = record(&host.start(&foreign_binding, "unrelated", "unrelated-task", "")?)?;
+    let foreign_binding = host.binding(true).unwrap();
+    let foreign = record(
+        &host
+            .start(&foreign_binding, "unrelated", "unrelated-task", "")
+            .unwrap(),
+    )
+    .unwrap();
     for (id, generation) in [
         (parent.id.as_str(), parent.generation),
         (foreign.id.as_str(), foreign.generation),
         (child.id.as_str(), child.generation.saturating_add(1)),
     ] {
         assert_eq!(
-            host.native_tool_reply(&parent, tool, json!({"id":id,"generation":generation}))?["isError"],
+            host.native_tool_reply(&parent, tool, json!({"id":id,"generation":generation}))
+                .unwrap()["isError"],
             true
         );
     }
@@ -3200,13 +3339,15 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
             &child,
             tool,
             json!({"id":parent.id,"generation":parent.generation}),
-        )?["isError"],
+        )
+        .unwrap()["isError"],
         true
     );
     // A name reaches only the parent's own children too.
     for name in [parent.full_name(), foreign.full_name()] {
         assert_eq!(
-            host.native_tool_reply(&parent, tool, json!({"id":name}))?["isError"],
+            host.native_tool_reply(&parent, tool, json!({"id":name}))
+                .unwrap()["isError"],
             true
         );
     }
@@ -3215,12 +3356,13 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
             &parent,
             tool,
             json!({"id":child.id,"generation":child.generation,"operation":"stop"}),
-        )?["isError"],
+        )
+        .unwrap()["isError"],
         true
     );
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("Child deadline")?;
+        .expect("Child deadline");
     let waiting = host
         .state
         .app_command_sender(Caller::Socket)
@@ -3234,37 +3376,40 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
             deadline,
             CommandCancellation::new(),
         )
-        .map_err(|error| format!("Child prompt: {error:?}"))?;
-    host.wait_working(&child.target(), deadline)?;
-    let controlled = host.native_tool_reply(
-        &parent,
-        tool,
-        // Interrupting names the child; stopping gives its exact id and generation.
-        if operation == "interrupt" {
-            json!({"id":child.full_name()})
-        } else {
-            json!({"id":child.id,"generation":child.generation})
-        },
-    )?;
+        .expect("Child prompt");
+    host.wait_working(&child.target(), deadline);
+    let controlled = host
+        .native_tool_reply(
+            &parent,
+            tool,
+            // Interrupting names the child; stopping gives its exact id and generation.
+            if operation == "interrupt" {
+                json!({"id":child.full_name()})
+            } else {
+                json!({"id":child.id,"generation":child.generation})
+            },
+        )
+        .unwrap();
     assert_eq!(controlled["isError"], false);
     let outcome: CommandOutcome = serde_json::from_str(
         controlled["content"][0]["text"]
             .as_str()
-            .ok_or("Control reply")?,
-    )?;
-    let value = success(outcome)?;
+            .expect("Control reply"),
+    )
+    .unwrap();
+    let value = success(outcome).unwrap();
     assert_eq!(value["operation"], operation);
     assert_eq!(value["agent"]["id"], child.id);
     assert_eq!(value["agent"]["spawn_parent"], json!(parent.target()));
-    let _completed = host.receive(&waiting, deadline)?;
-    let service = host.state.native_agent_service().ok_or("Native owner")?;
+    let _completed = host.receive(&waiting, deadline).unwrap();
+    let service = host.state.native_agent_service().expect("Native owner");
     if operation == "stop" {
         assert!(service.resolve(&child.target()).is_err());
         let saved = service
             .sessions()
             .into_iter()
             .find(|record| record.target() == child.target())
-            .ok_or("Saved child")?;
+            .expect("Saved child");
         assert_eq!(saved.snapshot.status, NativeSessionStatus::Stopped);
         assert!(
             saved
@@ -3279,12 +3424,13 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
                 &parent,
                 tool,
                 json!({"id":child.id,"generation":child.generation})
-            )?["isError"],
+            )
+            .unwrap()["isError"],
             false
         );
     } else {
         assert_eq!(
-            service.resolve(&child.target())?.snapshot().status,
+            service.resolve(&child.target()).unwrap().snapshot().status,
             NativeSessionStatus::Idle
         );
     }
@@ -3302,23 +3448,23 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
     assert!(
         host.state
             .native_agent_service()
-            .ok_or("Native owner")?
+            .expect("Native owner")
             .resolve(&parent.target())
             .is_ok()
     );
-    host.restart()?;
-    let restored = open_saved_native(&mut host, &parent)?;
+    host.restart();
+    let restored = open_saved_native(&mut host, &parent).unwrap();
     assert_ne!(restored.generation, parent.generation);
     assert_eq!(
         host.native_tool_reply(
             &restored,
             tool,
             json!({"id":child.id,"generation":child.generation}),
-        )?["isError"],
+        )
+        .unwrap()["isError"],
         true,
         "a renewed parent grant cannot inherit old child control"
     );
-    Ok(())
 }
 
 #[rstest]
@@ -3326,24 +3472,31 @@ fn native_parent_supervises_only_children_from_its_exact_live_grant(
 #[case(true)]
 fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
     #[case] sibling_tui: bool,
-) -> TestResult<()> {
-    let mut host = Host::new_with_spawn(true, true)?;
-    let binding = host.binding(false)?;
-    let created = host.start(&binding, "native-parent", "native-parent-id", "parent work")?;
-    let record = record(&created)?;
+) {
+    let mut host = Host::new_with_spawn(true, true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let created = host
+        .start(&binding, "native-parent", "native-parent-id", "parent work")
+        .unwrap();
+    let record = record(&created).unwrap();
     let terminal: CommandTarget =
-        serde_json::from_value(created.get("terminal").cloned().ok_or("Parent terminal")?)?;
-    let service = host.state.terminal_agent_service().ok_or("Tool owner")?;
+        serde_json::from_value(created.get("terminal").cloned().expect("Parent terminal")).unwrap();
+    let service = host.state.terminal_agent_service().expect("Tool owner");
     let sibling_lease = sibling_tui
         .then(|| attach_sibling_tui(&host, &binding, &terminal, &record.binding_id))
-        .transpose()?;
+        .transpose()
+        .unwrap();
     let selected = host.state.mux().selected_session().map(str::to_owned);
-    let child = success(host.native_tool(
-        &record,
-        "spawn_agent",
-        json!({"name":"native-child","provider":"codex","prompt":"captured child work"}),
-    )?)?;
-    let child_record = host.spawned_record(&child)?;
+    let child = success(
+        host.native_tool(
+            &record,
+            "spawn_agent",
+            json!({"name":"native-child","provider":"codex","prompt":"captured child work"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let child_record = host.spawned_record(&child).unwrap();
     assert_eq!(
         child["native"],
         json!({
@@ -3374,21 +3527,24 @@ fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
         "child spawning keeps foreground selection"
     );
     assert_eq!(
-        host.native_tool_reply(&child_record, "terminal_read", json!({}))?["isError"],
+        host.native_tool_reply(&child_record, "terminal_read", json!({}))
+            .unwrap()["isError"],
         false
     );
     assert_eq!(
-        host.native_tool_reply(&child_record, "list_agents", json!({}))?["isError"],
+        host.native_tool_reply(&child_record, "list_agents", json!({}))
+            .unwrap()["isError"],
         true
     );
     assert_eq!(
-        host.native_tool_reply(&child_record, "spawn_shell", json!({"name":"grandchild"}))?["isError"],
+        host.native_tool_reply(&child_record, "spawn_shell", json!({"name":"grandchild"}))
+            .unwrap()["isError"],
         true
     );
     let task = child_record
         .task_identity
         .as_deref()
-        .ok_or("Native child task")?;
+        .expect("Native child task");
     let pane = host
         .state
         .mux()
@@ -3397,7 +3553,7 @@ fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
         .find(|session| session.tag.identity.as_deref() == Some(task))
         .and_then(|session| session.windows.first())
         .and_then(|window| window.panes.first())
-        .ok_or("Child backend pane")?;
+        .expect("Child backend pane");
     assert_eq!(pane.native_agent.as_deref(), Some(child_record.id.as_str()));
     let mut unknown = CommandInvocation::new(
         "agents.spawn",
@@ -3409,7 +3565,7 @@ fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
     );
     unknown.target = Some(terminal.clone());
     assert!(matches!(
-        host.submit(unknown)?,
+        host.submit(unknown).unwrap(),
         CommandOutcome::Denied { .. }
     ));
     let mut unknown_native = CommandInvocation::new(
@@ -3424,15 +3580,17 @@ fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
     );
     unknown_native.target = Some(record.target());
     assert!(matches!(
-        host.submit(unknown_native)?,
+        host.submit(unknown_native).unwrap(),
         CommandOutcome::Denied { .. }
     ));
     host.state
         .native_agent_service()
-        .ok_or("Native owner")?
-        .stop(&record.target())?;
+        .expect("Native owner")
+        .stop(&record.target())
+        .unwrap();
     assert_eq!(
-        host.native_tool_reply(&child_record, "terminal_read", json!({}))?["isError"],
+        host.native_tool_reply(&child_record, "terminal_read", json!({}))
+            .unwrap()["isError"],
         true
     );
     if let Some(sibling) = sibling_lease {
@@ -3448,14 +3606,15 @@ fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
                 .is_some()
         );
     }
-    host.restart()?;
+    host.restart();
     let mut resume = CommandInvocation::new(
         "agents.native.resume",
         vec![child_record.id.clone(), child_record.generation.to_string()],
         Caller::Socket,
     );
     resume.target = Some(child_record.target());
-    let restored: NativeSessionRecord = serde_json::from_value(success(host.submit(resume)?)?)?;
+    let restored: NativeSessionRecord =
+        serde_json::from_value(success(host.submit(resume).unwrap()).unwrap()).unwrap();
     assert_eq!(restored.spawn_parent, Some(record.target()));
     assert_eq!(restored.config.session_id, child_record.config.session_id);
     assert_eq!(
@@ -3465,34 +3624,45 @@ fn native_private_spawn_uses_its_parent_even_when_a_tui_shares_the_terminal(
     let calls = host
         .state
         .native_agent_service()
-        .ok_or("Native service")?
-        .resolve(&restored.target())?
-        .rpc("__calls", json!({}))?;
+        .expect("Native service")
+        .resolve(&restored.target())
+        .unwrap()
+        .rpc("__calls", json!({}))
+        .unwrap();
     assert_eq!(
         calls["bootty_tools"], false,
         "provider restoration cannot renew a parent's revoked grant"
     );
-    Ok(())
 }
 
 #[rstest]
-fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() -> TestResult<()> {
-    let mut host = Host::new_with_spawn(true, true)?;
-    let binding = host.binding(false)?;
-    let created = host.start(&binding, "parent", "parent-terminal-tools", "parent work")?;
-    let parent = record(&created)?;
-    let parent_terminal = created.get("terminal").ok_or("Parent Terminal")?.clone();
-    let other_binding = host.binding(true)?;
-    let other = record(&host.start(
-        &other_binding,
-        "other",
-        "other-terminal-tools",
-        "other work",
-    )?)?;
+fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() {
+    let mut host = Host::new_with_spawn(true, true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let created = host
+        .start(&binding, "parent", "parent-terminal-tools", "parent work")
+        .unwrap();
+    let parent = record(&created).unwrap();
+    let parent_terminal = created.get("terminal").expect("Parent Terminal").clone();
+    let other_binding = host.binding(true).unwrap();
+    let other = record(
+        &host
+            .start(
+                &other_binding,
+                "other",
+                "other-terminal-tools",
+                "other work",
+            )
+            .unwrap(),
+    )
+    .unwrap();
     let selected = host.state.mux().selected_session().map(str::to_owned);
-    let receipt =
-        success(host.native_tool(&parent, "spawn_shell", json!({"name":"owned-shell"}))?)?;
-    let terminal = receipt.get("terminal").ok_or("Created Terminal")?.clone();
+    let receipt = success(
+        host.native_tool(&parent, "spawn_shell", json!({"name":"owned-shell"}))
+            .unwrap(),
+    )
+    .unwrap();
+    let terminal = receipt.get("terminal").expect("Created Terminal").clone();
     for owner in [&parent, &other] {
         let target = if owner.id == parent.id {
             parent_terminal.clone()
@@ -3504,11 +3674,12 @@ fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() -> TestResult<()
                 owner,
                 "paste_spawned_terminal",
                 json!({"terminal":target,"text":"must not be sent"})
-            )?["isError"],
+            )
+            .unwrap()["isError"],
             true
         );
     }
-    let mut stale: CommandTarget = serde_json::from_value(terminal.clone())?;
+    let mut stale: CommandTarget = serde_json::from_value(terminal.clone()).unwrap();
     stale.generation = stale.generation.saturating_add(1);
     for tool in [
         "read_spawned_terminal",
@@ -3517,7 +3688,8 @@ fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() -> TestResult<()
         "close_spawned_terminal",
     ] {
         assert_eq!(
-            host.native_tool_reply(&parent, tool, json!({"terminal":stale}))?["isError"],
+            host.native_tool_reply(&parent, tool, json!({"terminal":stale}))
+                .unwrap()["isError"],
             true
         );
         assert_eq!(
@@ -3525,80 +3697,106 @@ fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() -> TestResult<()
                 &parent,
                 tool,
                 json!({"terminal":terminal,"operation":"close"})
-            )?["isError"],
+            )
+            .unwrap()["isError"],
             true
         );
     }
-    let capture = success(host.native_tool(
-        &parent,
-        "read_spawned_terminal",
-        json!({"terminal":terminal}),
-    )?)?;
-    assert_eq!(capture.get("target"), Some(&terminal));
-    assert!(capture.get("capture").is_some());
-    success(host.native_tool(&parent, "paste_spawned_terminal", json!({"terminal":terminal,"text":"printf '\\123\\103\\117\\120\\105\\104\\137\\123\\110\\105\\114\\114\\137\\117\\113\\n'"}))?)?;
-    success(host.native_tool(
-        &parent,
-        "submit_spawned_terminal",
-        json!({"terminal":terminal}),
-    )?)?;
-    let deadline = Instant::now()
-        .checked_add(FIXTURE_DEADLINE)
-        .ok_or("Shell deadline")?;
-    loop {
-        let captured = success(host.native_tool(
+    let capture = success(
+        host.native_tool(
             &parent,
             "read_spawned_terminal",
             json!({"terminal":terminal}),
-        )?)?;
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(capture.get("target"), Some(&terminal));
+    assert!(capture.get("capture").is_some());
+    success(host.native_tool(&parent, "paste_spawned_terminal", json!({"terminal":terminal,"text":"printf '\\123\\103\\117\\120\\105\\104\\137\\123\\110\\105\\114\\114\\137\\117\\113\\n'"})).unwrap()).unwrap();
+    success(
+        host.native_tool(
+            &parent,
+            "submit_spawned_terminal",
+            json!({"terminal":terminal}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let deadline = Instant::now()
+        .checked_add(FIXTURE_DEADLINE)
+        .expect("Shell deadline");
+    loop {
+        let captured = success(
+            host.native_tool(
+                &parent,
+                "read_spawned_terminal",
+                json!({"terminal":terminal}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let text = captured
             .get("capture")
             .and_then(|capture| capture.get("text"))
             .and_then(Value::as_str)
-            .ok_or("Shell capture text")?;
+            .expect("Shell capture text");
         if text.lines().any(|line| line.trim() == "SCOPED_SHELL_OK") {
             break;
         }
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
     }
-    success(host.native_tool(
-        &parent,
-        "interrupt_spawned_terminal",
-        json!({"terminal":terminal}),
-    )?)?;
+    success(
+        host.native_tool(
+            &parent,
+            "interrupt_spawned_terminal",
+            json!({"terminal":terminal}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(host.state.mux().selected_session(), selected.as_deref());
-    success(host.native_tool(
-        &parent,
-        "close_spawned_terminal",
-        json!({"terminal":terminal}),
-    )?)?;
+    success(
+        host.native_tool(
+            &parent,
+            "close_spawned_terminal",
+            json!({"terminal":terminal}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         host.native_tool_reply(
             &parent,
             "read_spawned_terminal",
             json!({"terminal":terminal})
-        )?["isError"],
+        )
+        .unwrap()["isError"],
         true
     );
     assert_eq!(host.state.mux().selected_session(), selected.as_deref());
-    let renewed_receipt =
-        success(host.native_tool(&parent, "spawn_shell", json!({"name":"retained-shell"}))?)?;
+    let renewed_receipt = success(
+        host.native_tool(&parent, "spawn_shell", json!({"name":"retained-shell"}))
+            .unwrap(),
+    )
+    .unwrap();
     let old_terminal = renewed_receipt
         .get("terminal")
-        .ok_or("Retained Terminal")?
+        .expect("Retained Terminal")
         .clone();
-    host.restart()?;
-    let renewed = open_saved_native(&mut host, &parent)?;
+    host.restart();
+    let renewed = open_saved_native(&mut host, &parent).unwrap();
     assert_eq!(
         host.native_tool_reply(
             &renewed,
             "paste_spawned_terminal",
             json!({"terminal":old_terminal,"text":"must not regain input authority"})
-        )?["isError"],
+        )
+        .unwrap()["isError"],
         true
     );
-    Ok(())
 }
 
 #[rstest]
@@ -3608,18 +3806,18 @@ fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() -> TestResult<()
 #[case(Caller::Cli)]
 #[case(Caller::Socket)]
 #[case(Caller::Internal)]
-fn closing_native_panes_retains_history_and_reopens_the_same_provider(
-    #[case] caller: Caller,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let launched = host.start(&binding, "close-conversation", "close-native-task", "")?;
-    let record = record(&launched)?;
+fn closing_native_panes_retains_history_and_reopens_the_same_provider(#[case] caller: Caller) {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let launched = host
+        .start(&binding, "close-conversation", "close-native-task", "")
+        .unwrap();
+    let record = record(&launched).unwrap();
     let mut close = CommandInvocation::new("agents.native.close", Vec::new(), caller);
     close.target = Some(record.target());
     assert_eq!(
-        success(host.submit(close.clone())?)?,
-        serde_json::to_value(record.target())?
+        success(host.submit(close.clone()).unwrap()).unwrap(),
+        serde_json::to_value(record.target()).unwrap()
     );
     assert!(
         !host
@@ -3634,11 +3832,11 @@ fn closing_native_panes_retains_history_and_reopens_the_same_provider(
     let retained = host
         .state
         .native_agent_service()
-        .ok_or("native owner")?
+        .expect("native owner")
         .sessions()
         .into_iter()
         .find(|saved| saved.id == record.id)
-        .ok_or("Retained conversation missing")?;
+        .expect("Retained conversation missing");
     assert_eq!(retained.snapshot.status, NativeSessionStatus::Stopped);
     assert_eq!(retained.snapshot.transcript, record.snapshot.transcript);
     for target in [
@@ -3653,11 +3851,11 @@ fn closing_native_panes_retains_history_and_reopens_the_same_provider(
     ] {
         close.target = Some(target);
         assert!(matches!(
-            host.submit(close.clone())?,
+            host.submit(close.clone()).unwrap(),
             CommandOutcome::StaleTarget { .. }
         ));
     }
-    let resumed = open_saved_native(&mut host, &record)?;
+    let resumed = open_saved_native(&mut host, &record).unwrap();
     assert!(
         host.state
             .mux()
@@ -3667,8 +3865,11 @@ fn closing_native_panes_retains_history_and_reopens_the_same_provider(
             .flat_map(|window| &window.panes)
             .any(|pane| pane.native_agent.as_deref() == Some(&resumed.id))
     );
-    success(host.native_tool(&resumed, "terminal_read", json!({}))?)?;
-    Ok(())
+    success(
+        host.native_tool(&resumed, "terminal_read", json!({}))
+            .unwrap(),
+    )
+    .unwrap();
 }
 
 #[rstest]
@@ -3676,21 +3877,27 @@ fn closing_native_panes_retains_history_and_reopens_the_same_provider(
 #[case(true)]
 fn palette_surface_choice_retains_its_exact_native_parent_and_rejects_replaced_generation(
     #[case] replace_parent: bool,
-) -> TestResult<()> {
+) {
     use bootty_ui::presentation::dialogs::CommandPaletteEvent;
     use bootty_ui::surface_creation::SurfaceParent;
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let created = host.start(&binding, "palette-parent", "palette-task", "")?;
-    let native = record(&created)?;
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let created = host
+        .start(&binding, "palette-parent", "palette-task", "")
+        .unwrap();
+    let native = record(&created).unwrap();
     let target = native.target();
-    let before = host.spaces()?;
+    let before = host.spaces().unwrap();
     host.state
         .capture_command_palette_native_parent(Some(target.clone()));
-    success(host.submit(CommandInvocation::from_action(
-        "command_palette",
-        Caller::Keybinding,
-    ))?)?;
+    success(
+        host.submit(CommandInvocation::from_action(
+            "command_palette",
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     assert!(
         host.state.modal_dialog().is_some(),
         "palette actually opened"
@@ -3698,11 +3905,22 @@ fn palette_surface_choice_retains_its_exact_native_parent_and_rejects_replaced_g
     if replace_parent {
         host.state
             .native_agent_service()
-            .ok_or("Native owner missing")?
-            .stop(&target)?;
-        let resumed: NativeSessionRecord = serde_json::from_value(success(host.submit(
-            native_command("agents.native.resume", &target, &[], Caller::Socket),
-        )?)?)?;
+            .expect("Native owner missing")
+            .stop(&target)
+            .unwrap();
+        let resumed: NativeSessionRecord = serde_json::from_value(
+            success(
+                host.submit(native_command(
+                    "agents.native.resume",
+                    &target,
+                    &[],
+                    Caller::Socket,
+                ))
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         assert_ne!(resumed.generation, native.generation);
     }
     host.state
@@ -3726,13 +3944,17 @@ fn palette_surface_choice_retains_its_exact_native_parent_and_rejects_replaced_g
             ))
         );
     } else {
-        verify_palette_native_split_cancel(&mut host, &target, &before)?;
+        verify_palette_native_split_cancel(&mut host, &target, &before);
     }
     // A subsequent palette has no captured native parent after the first palette closes.
-    success(host.submit(CommandInvocation::from_action(
-        "command_palette",
-        Caller::Keybinding,
-    ))?)?;
+    success(
+        host.submit(CommandInvocation::from_action(
+            "command_palette",
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     host.state
         .apply_command_palette_event(CommandPaletteEvent::Run(
             bootty_ui::action_catalog::Command::SplitRight,
@@ -3741,27 +3963,26 @@ fn palette_surface_choice_retains_its_exact_native_parent_and_rejects_replaced_g
     let request = host
         .state
         .pending_new_surface()
-        .ok_or("terminal split chooser missing")?
+        .expect("terminal split chooser missing")
         .clone();
     assert!(matches!(request.parent, SurfaceParent::Terminal(_)));
-    success(host.submit(CommandInvocation::new(
-        "surface.cancel",
-        vec![request.id.to_string()],
-        Caller::CommandPalette,
-    ))?)?;
-    Ok(())
+    success(
+        host.submit(CommandInvocation::new(
+            "surface.cancel",
+            vec![request.id.to_string()],
+            Caller::CommandPalette,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
 }
 
-fn verify_palette_native_split_cancel(
-    host: &mut Host,
-    target: &CommandTarget,
-    before: &Value,
-) -> TestResult<()> {
+fn verify_palette_native_split_cancel(host: &mut Host, target: &CommandTarget, before: &Value) {
     use bootty_ui::surface_creation::{SurfaceParent, SurfacePlacement};
     let request = host
         .state
         .pending_new_surface()
-        .ok_or("native split chooser missing")?
+        .expect("native split chooser missing")
         .clone();
     assert_eq!(request.parent, SurfaceParent::Conversation(target.clone()));
     assert_eq!(
@@ -3769,12 +3990,14 @@ fn verify_palette_native_split_cancel(
         SurfacePlacement::Split(bootty_mux::pane_layout::SplitDirection::Right)
     );
     assert_eq!(request.task_identity, "palette-task");
-    let cancelled = host.submit(CommandInvocation::new(
-        "surface.cancel",
-        vec![request.id.to_string()],
-        Caller::CommandPalette,
-    ))?;
-    success(cancelled)?;
+    let cancelled = host
+        .submit(CommandInvocation::new(
+            "surface.cancel",
+            vec![request.id.to_string()],
+            Caller::CommandPalette,
+        ))
+        .unwrap();
+    success(cancelled).unwrap();
     assert!(host.state.pending_new_surface().is_none());
     assert!(
         host.effects.iter().any(
@@ -3784,17 +4007,16 @@ fn verify_palette_native_split_cancel(
     assert!(
         host.state
             .native_agent_service()
-            .ok_or("Native owner missing")?
+            .expect("Native owner missing")
             .sessions()
             .iter()
             .any(|record| record.target() == *target)
     );
     assert_eq!(
-        host.spaces()?,
+        host.spaces().unwrap(),
         *before,
         "cancelling the native split leaves terminal topology unchanged"
     );
-    Ok(())
 }
 
 #[rstest]
@@ -3809,11 +4031,11 @@ fn agent_choice_splits_the_captured_pane_instead_of_creating_a_tab(
         MultiplexerBackendConfig::Tmux
     )]
     backend: MultiplexerBackendConfig,
-) -> TestResult<()> {
+) {
     if matches!(backend, MultiplexerBackendConfig::Native) {
         return agent_choice_split(command, conversation_parent, backend);
     }
-    run_isolated_split(command, conversation_parent, backend)
+    run_isolated_split(command, conversation_parent, backend);
 }
 
 const SPLIT_ENV: &str = "BOOTTY_SPLIT_CHILD";
@@ -3821,14 +4043,10 @@ const SPLIT_CHILD: &str = "isolated_split_child";
 
 /// rmux and tmux keep their servers in process-global, per-user locations, so their splits run
 /// in a child with private `RMUX_TMPDIR` and `TMUX_TMPDIR` instead of the developer's servers.
-fn run_isolated_split(
-    command: &str,
-    conversation_parent: bool,
-    backend: MultiplexerBackendConfig,
-) -> TestResult<()> {
+fn run_isolated_split(command: &str, conversation_parent: bool, backend: MultiplexerBackendConfig) {
     // Socket paths include the development namespace and must fit Unix socket limits.
-    let directory = assert_fs::TempDir::new_in("/tmp")?;
-    let executable = std::env::current_exe()?;
+    let directory = assert_fs::TempDir::new_in("/tmp").unwrap();
+    let executable = std::env::current_exe().unwrap();
     let mut child = std::process::Command::new(&executable);
     child
         .args(["--exact", SPLIT_CHILD, "--nocapture"])
@@ -3846,16 +4064,17 @@ fn run_isolated_split(
                 "#!/bin/sh\nexport BOOTTY_RMUX_PIPE_ENDPOINT=\"$2\"\nexec {} --exact {SPLIT_CHILD} --nocapture\n",
                 bootty_host::shell_quote(&executable.to_string_lossy()),
             ),
-        )?;
+        ).unwrap();
         child
             .env("BOOTTY_DAEMON_BINARY", &helper)
             .env("BOOTTY_SPLIT_BACKEND", "rmux");
     } else {
         child.env("BOOTTY_SPLIT_BACKEND", "tmux");
     }
-    let output = child.output()?;
+    let output = child.output().unwrap();
     // A tmux server outlives its last session; stop the private one with its directory.
-    for socket in fs::read_dir(directory.path())?
+    for socket in fs::read_dir(directory.path())
+        .unwrap()
         .filter_map(Result::ok)
         .filter(|entry| entry.file_name().to_string_lossy().starts_with("tmux-"))
         .flat_map(|entry| fs::read_dir(entry.path()).into_iter().flatten())
@@ -3867,29 +4086,27 @@ fn run_isolated_split(
             .arg("kill-server")
             .output();
     }
-    if !output.status.success() {
-        return Err(format!(
-            "isolated {backend:?} split failed: {}\n{}{}",
-            output.status,
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into());
-    }
-    Ok(())
+    assert!(
+        output.status.success(),
+        "isolated {backend:?} split failed: {}\n{}{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// Runs inside `run_isolated_split`, as the split itself or as its rmux daemon helper.
 #[test]
-fn isolated_split_child() -> TestResult<()> {
+fn isolated_split_child() {
     if let Some(endpoint) = std::env::var_os("BOOTTY_RMUX_PIPE_ENDPOINT") {
-        return bootty_mux::rmux::run_pipe_helper(endpoint.into()).map_err(Into::into);
+        bootty_mux::rmux::run_pipe_helper(endpoint.into()).unwrap();
+        return;
     }
     let Some(spec) = std::env::var_os(SPLIT_ENV) else {
-        return Ok(());
+        return;
     };
     let spec = spec.to_string_lossy();
-    let (command, conversation_parent) = spec.split_once(' ').ok_or("malformed split spec")?;
+    let (command, conversation_parent) = spec.split_once(' ').expect("malformed split spec");
     if std::env::var_os("BOOTTY_SPLIT_BACKEND").is_some_and(|backend| backend == "tmux") {
         return agent_choice_split(
             command,
@@ -3899,54 +4116,55 @@ fn isolated_split_child() -> TestResult<()> {
     }
     // A private daemon at this child's endpoint plays the app's rmux owner.
     let endpoint =
-        bootty_mux::rmux::endpoint_path_for(bootty_config::ApplicationIdentity::for_process())?;
+        bootty_mux::rmux::endpoint_path_for(bootty_config::ApplicationIdentity::for_process())
+            .unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(1)
-        .build()?;
-    let daemon = runtime.block_on(
-        rmux_server::ServerDaemon::new(rmux_server::DaemonConfig::new(endpoint)).bind(),
-    )?;
-    let result = agent_choice_split(
+        .build()
+        .unwrap();
+    let daemon = runtime
+        .block_on(rmux_server::ServerDaemon::new(rmux_server::DaemonConfig::new(endpoint)).bind())
+        .unwrap();
+    agent_choice_split(
         command,
         conversation_parent == "true",
         MultiplexerBackendConfig::Rmux,
     );
-    runtime.block_on(daemon.shutdown())?;
+    runtime.block_on(daemon.shutdown()).unwrap();
     // Pane I/O tasks belong to processes that end with this child; do not wait for them.
     runtime.shutdown_background();
-    result
 }
 
-fn agent_choice_split(
-    command: &str,
-    conversation_parent: bool,
-    backend: MultiplexerBackendConfig,
-) -> TestResult<()> {
-    let mut host = Host::new_with_backend(true, true, backend)?;
-    let binding = host.binding(false)?;
+fn agent_choice_split(command: &str, conversation_parent: bool, backend: MultiplexerBackendConfig) {
+    let mut host = Host::new_with_backend(true, true, backend).unwrap();
+    let binding = host.binding(false).unwrap();
     let fixture = host
         .directory
         .path()
         .file_name()
-        .ok_or("fixture directory")?;
+        .expect("fixture directory");
     let name = format!(
         "split-{}",
         fixture.to_string_lossy().trim_start_matches('.')
     );
     let identity = format!("{name}-task");
-    let started = host.start(&binding, &name, &identity, "")?;
-    let native = record(&started)?;
-    success(host.submit(native_command(
-        "agents.native.history",
-        &native.target(),
-        &["latest"],
-        Caller::Internal,
-    ))?)?;
+    let started = host.start(&binding, &name, &identity, "").unwrap();
+    let native = record(&started).unwrap();
+    success(
+        host.submit(native_command(
+            "agents.native.history",
+            &native.target(),
+            &["latest"],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let parent = if conversation_parent {
         native.target()
     } else {
-        serde_json::from_value(started.get("terminal").cloned().ok_or("terminal target")?)?
+        serde_json::from_value(started.get("terminal").cloned().expect("terminal target")).unwrap()
     };
     let before = host
         .state
@@ -3954,48 +4172,81 @@ fn agent_choice_split(
         .all_sessions()
         .iter()
         .find(|session| session.name == name)
-        .ok_or("parent session")?
+        .expect("parent session")
         .windows
         .clone();
+    let created = choose_agent_in_split(&mut host, command, parent);
+    assert_agents_share_the_parent_window(&host, &name, &before, &native, &created);
+    close_session(&mut host, &name);
+}
+
+/// Split `parent` with `command` and choose a Codex conversation for the new pane.
+fn choose_agent_in_split(
+    host: &mut Host,
+    command: &str,
+    parent: CommandTarget,
+) -> NativeSessionRecord {
     let mut split = CommandInvocation::from_action(command, Caller::Keybinding);
     split.target = Some(parent);
-    success(host.submit(split)?)?;
+    success(host.submit(split).unwrap()).unwrap();
     let request = host
         .state
         .pending_new_surface()
-        .ok_or("split chooser")?
+        .expect("split chooser")
         .clone();
-    success(host.submit(CommandInvocation::new(
-        "surface.choose",
-        vec![request.id.to_string(), "agent".into()],
-        Caller::Keybinding,
-    ))?)?;
-    let created = record(&success(host.submit(CommandInvocation::new(
-        "surface.create_agent",
-        vec![
-            request.id.to_string(),
-            "codex".into(),
-            request.cwd,
-            host.program.clone(),
-            "[]".into(),
-            "split-child".into(),
-            "captured".into(),
-            request.task_identity,
-            "Split child".into(),
-            "reply in the split".into(),
-        ],
-        Caller::Keybinding,
-    ))?)?)?;
+    success(
+        host.submit(CommandInvocation::new(
+            "surface.choose",
+            vec![request.id.to_string(), "agent".into()],
+            Caller::Keybinding,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    record(
+        &success(
+            host.submit(CommandInvocation::new(
+                "surface.create_agent",
+                vec![
+                    request.id.to_string(),
+                    "codex".into(),
+                    request.cwd,
+                    host.program.clone(),
+                    "[]".into(),
+                    "split-child".into(),
+                    "captured".into(),
+                    request.task_identity,
+                    "Split child".into(),
+                    "reply in the split".into(),
+                ],
+                Caller::Keybinding,
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+}
+
+/// The split added a pane to the parent's window rather than a window, holding the new
+/// conversation beside the parent's, in the same task.
+fn assert_agents_share_the_parent_window(
+    host: &Host,
+    name: &str,
+    before: &[bootty_mux::snapshot::MuxWindow],
+    native: &NativeSessionRecord,
+    created: &NativeSessionRecord,
+) {
     let windows = &host
         .state
         .mux()
         .all_sessions()
         .iter()
         .find(|session| session.name == name)
-        .ok_or("parent session")?
+        .expect("parent session")
         .windows;
     assert_eq!(windows.len(), before.len());
-    let (window, before) = windows.first().zip(before.first()).ok_or("parent window")?;
+    let (window, before) = windows.first().zip(before.first()).expect("parent window");
     assert_eq!(window.id, before.id);
     let agents = window
         .panes
@@ -4006,22 +4257,24 @@ fn agent_choice_split(
     assert!(agents.contains(&Some(native.id.as_str())));
     assert!(agents.contains(&Some(created.id.as_str())));
     assert_eq!(created.task_identity, native.task_identity);
-    let spaces = host.spaces()?;
+}
+
+fn close_session(host: &mut Host, name: &str) {
+    let spaces = host.spaces().unwrap();
     let target = spaces
         .as_array()
-        .ok_or("Spaces")?
+        .expect("Spaces")
         .iter()
         .filter_map(|space| space.get("sessions").and_then(serde_json::Value::as_array))
         .flatten()
-        .find(|session| session.get("name").and_then(serde_json::Value::as_str) == Some(&name))
+        .find(|session| session.get("name").and_then(serde_json::Value::as_str) == Some(name))
         .and_then(|session| session.get("target"))
-        .ok_or("created session")?
+        .expect("created session")
         .clone();
     let mut close = CommandInvocation::new("session.close", vec![], Caller::Socket);
-    close.target = Some(serde_json::from_value(target)?);
+    close.target = Some(serde_json::from_value(target).unwrap());
     close.confirmation = Some(close.confirmation());
-    success(host.submit(close)?)?;
-    Ok(())
+    success(host.submit(close).unwrap()).unwrap();
 }
 
 #[rstest]
@@ -4030,20 +4283,29 @@ fn agent_choice_split(
 fn terminal_choice_splits_the_exact_native_pane_instead_of_creating_a_tab(
     #[case] command: &str,
     #[values(Caller::CommandPalette, Caller::Keybinding, Caller::Socket)] caller: Caller,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let native = record(&host.start(&binding, "split-native", "split-native-task", "")?)?;
+) {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let native = record(
+        &host
+            .start(&binding, "split-native", "split-native-task", "")
+            .unwrap(),
+    )
+    .unwrap();
     let before = host.state.mux().all_sessions()[0].windows.clone();
     let mut split = CommandInvocation::from_action(command, caller);
     split.target = Some(native.target());
-    success(host.submit(split)?)?;
-    let request = host.state.pending_new_surface().ok_or("split chooser")?.id;
-    success(host.submit(CommandInvocation::new(
-        "surface.choose",
-        vec![request.to_string(), "terminal".into()],
-        caller,
-    ))?)?;
+    success(host.submit(split).unwrap()).unwrap();
+    let request = host.state.pending_new_surface().expect("split chooser").id;
+    success(
+        host.submit(CommandInvocation::new(
+            "surface.choose",
+            vec![request.to_string(), "terminal".into()],
+            caller,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let windows = &host.state.mux().all_sessions()[0].windows;
     assert_eq!(windows.len(), before.len());
     assert_eq!(windows[0].id, before[0].id);
@@ -4064,19 +4326,30 @@ fn terminal_choice_splits_the_exact_native_pane_instead_of_creating_a_tab(
             .count(),
         1
     );
-    Ok(())
 }
 
 #[rstest]
-fn a_native_fork_occupies_a_real_right_backend_pane_and_preserves_its_source() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let launched = host.start(&binding, "fork-task", "fork-task-id", "source")?;
-    let source = record(&launched)?;
+fn a_native_fork_occupies_a_real_right_backend_pane_and_preserves_its_source() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let launched = host
+        .start(&binding, "fork-task", "fork-task-id", "source")
+        .unwrap();
+    let source = record(&launched).unwrap();
     let before = host.state.mux().all_sessions()[0].windows[0].clone();
-    let child: NativeSessionRecord = serde_json::from_value(success(host.submit(
-        native_command("agents.native.fork", &source.target(), &[], Caller::Socket),
-    )?)?)?;
+    let child: NativeSessionRecord = serde_json::from_value(
+        success(
+            host.submit(native_command(
+                "agents.native.fork",
+                &source.target(),
+                &[],
+                Caller::Socket,
+            ))
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert_ne!(child.id, source.id);
     assert_ne!(child.config.session_id, source.config.session_id);
     let session = host
@@ -4085,7 +4358,7 @@ fn a_native_fork_occupies_a_real_right_backend_pane_and_preserves_its_source() -
         .all_sessions()
         .iter()
         .find(|session| session.tag.identity.as_deref() == Some("fork-task-id"))
-        .ok_or("Source task missing")?;
+        .expect("Source task missing");
     assert_eq!(session.windows.len(), 1);
     let window = &session.windows[0];
     assert_eq!(window.id, before.id);
@@ -4099,13 +4372,10 @@ fn a_native_fork_occupies_a_real_right_backend_pane_and_preserves_its_source() -
         window.panes[1].native_agent.as_deref(),
         Some(child.id.as_str())
     );
-    let child_pane = window.panes[1]
-        .pane_id
-        .clone()
-        .ok_or("Child pane missing")?;
+    let child_pane = window.panes[1].pane_id.clone().expect("Child pane missing");
     let mut focus = CommandInvocation::new("agents.native.focus", vec![], Caller::Socket);
     focus.target = Some(child.target());
-    success(host.submit(focus)?)?;
+    success(host.submit(focus).unwrap()).unwrap();
     assert_eq!(host.state.focused_pane(), Some(child_pane));
     let rects = host.state.pane_rects(
         bootty_terminal::geometry::SurfaceRect {
@@ -4121,23 +4391,43 @@ fn a_native_fork_occupies_a_real_right_backend_pane_and_preserves_its_source() -
     assert!((rects[0].1.min_y - rects[1].1.min_y).abs() < f32::EPSILON);
     assert!(rects[0].1.min_x < rects[1].1.min_x);
 
-    let source_capture = success(host.native_tool(&source, "terminal_read", json!({}))?)?;
-    let child_capture = success(host.native_tool(&child, "terminal_read", json!({}))?)?;
+    let source_capture = success(
+        host.native_tool(&source, "terminal_read", json!({}))
+            .unwrap(),
+    )
+    .unwrap();
+    let child_capture = success(
+        host.native_tool(&child, "terminal_read", json!({}))
+            .unwrap(),
+    )
+    .unwrap();
     assert_ne!(source_capture["target"], child_capture["target"]);
-    success(host.submit(native_command(
-        "agents.native.stop",
-        &child.target(),
-        &[],
-        Caller::Socket,
-    ))?)?;
-    let resumed = open_saved_native(&mut host, &child)?;
-    let resumed_capture = success(host.native_tool(&resumed, "terminal_read", json!({}))?)?;
+    success(
+        host.submit(native_command(
+            "agents.native.stop",
+            &child.target(),
+            &[],
+            Caller::Socket,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let resumed = open_saved_native(&mut host, &child).unwrap();
+    let resumed_capture = success(
+        host.native_tool(&resumed, "terminal_read", json!({}))
+            .unwrap(),
+    )
+    .unwrap();
     assert_ne!(source_capture["target"], resumed_capture["target"]);
     let mut close = CommandInvocation::from_action("agents.native.close", Caller::Socket);
     close.target = Some(resumed.target());
-    success(host.submit(close)?)?;
-    let reopened = open_saved_native(&mut host, &resumed)?;
-    let reopened_capture = success(host.native_tool(&reopened, "terminal_read", json!({}))?)?;
+    success(host.submit(close).unwrap()).unwrap();
+    let reopened = open_saved_native(&mut host, &resumed).unwrap();
+    let reopened_capture = success(
+        host.native_tool(&reopened, "terminal_read", json!({}))
+            .unwrap(),
+    )
+    .unwrap();
     assert_ne!(source_capture["target"], reopened_capture["target"]);
     let session = host
         .state
@@ -4145,35 +4435,35 @@ fn a_native_fork_occupies_a_real_right_backend_pane_and_preserves_its_source() -
         .all_sessions()
         .iter()
         .find(|session| session.tag.identity.as_deref() == Some("fork-task-id"))
-        .ok_or("Source task missing")?;
+        .expect("Source task missing");
     assert_eq!(session.windows.len(), 1);
     assert_eq!(session.windows[0].panes.len(), 2);
-    Ok(())
 }
 
 #[rstest]
-fn closing_a_native_pane_through_the_terminal_command_also_retires_its_provider() -> TestResult<()>
-{
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let launched = host.start(&binding, "mux-close-task", "mux-close-task-id", "")?;
-    let native = record(&launched)?;
+fn closing_a_native_pane_through_the_terminal_command_also_retires_its_provider() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let launched = host
+        .start(&binding, "mux-close-task", "mux-close-task-id", "")
+        .unwrap();
+    let native = record(&launched).unwrap();
     let mut focus = CommandInvocation::new("agents.native.focus", vec![], Caller::Socket);
     focus.target = Some(native.target());
-    success(host.submit(focus)?)?;
+    success(host.submit(focus).unwrap()).unwrap();
     let mut close = CommandInvocation::new("pane.close", vec![], Caller::Socket);
-    close.target = Some(serde_json::from_value(launched["terminal"].clone())?);
+    close.target = Some(serde_json::from_value(launched["terminal"].clone()).unwrap());
     close.confirmation = Some(close.confirmation());
-    success(host.submit(close)?)?;
+    success(host.submit(close).unwrap()).unwrap();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("retirement deadline")?;
+        .expect("retirement deadline");
     loop {
         host.tick();
         if host
             .state
             .native_agent_service()
-            .ok_or("native owner")?
+            .expect("native owner")
             .activities()
             .iter()
             .any(|record| record.id == native.id && record.status == NativeSessionStatus::Stopped)
@@ -4181,29 +4471,29 @@ fn closing_a_native_pane_through_the_terminal_command_also_retires_its_provider(
             break;
         }
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
     }
     assert!(
         host.state
             .native_agent_service()
-            .ok_or("native owner")?
+            .expect("native owner")
             .sessions()
             .iter()
             .any(|record| record.id == native.id)
     );
-    Ok(())
 }
 
 #[rstest]
-fn native_mux_placement_is_published_before_provider_initialization() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    fs::write(host.directory.path().join("hold-thread-start"), "")?;
-    let ready =
-        std::os::unix::net::UnixListener::bind(host.directory.path().join("start-barrier"))?;
+fn native_mux_placement_is_published_before_provider_initialization() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    fs::write(host.directory.path().join("hold-thread-start"), "").unwrap();
+    let ready = std::os::unix::net::UnixListener::bind(host.directory.path().join("start-barrier"))
+        .unwrap();
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("deadline")?;
+        .expect("deadline");
     let mut invocation = CommandInvocation::new(
         "agents.native.start",
         vec![
@@ -4224,13 +4514,13 @@ fn native_mux_placement_is_published_before_provider_initialization() -> TestRes
         .state
         .app_command_sender(Caller::Internal)
         .submit(invocation, deadline, CommandCancellation::new())
-        .map_err(|error| format!("{error:?}"))?;
+        .unwrap();
     let placed_record = loop {
         host.tick();
         let record = host
             .state
             .native_agent_service()
-            .ok_or("native owner")?
+            .expect("native owner")
             .sessions()
             .into_iter()
             .find(|record| {
@@ -4246,38 +4536,38 @@ fn native_mux_placement_is_published_before_provider_initialization() -> TestRes
             break record;
         }
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
     };
     assert_eq!(placed_record.snapshot.status, NativeSessionStatus::Starting);
     assert!(matches!(
         receiver.try_recv(),
         Err(mpsc::TryRecvError::Empty)
     ));
-    let (mut ready_stream, _) = ready.accept()?;
+    let (mut ready_stream, _) = ready.accept().unwrap();
     let mut byte = [0];
-    std::io::Read::read_exact(&mut ready_stream, &mut byte)?;
+    std::io::Read::read_exact(&mut ready_stream, &mut byte).unwrap();
     host.state
         .native_agent_service()
-        .ok_or("native owner")?
-        .resolve(&placed_record.target())?
-        .rpc("__allow_start", json!({}))?;
-    let completed = record(&success(host.receive(&receiver, deadline)?)?)?;
+        .expect("native owner")
+        .resolve(&placed_record.target())
+        .unwrap()
+        .rpc("__allow_start", json!({}))
+        .unwrap();
+    let completed = record(&success(host.receive(&receiver, deadline).unwrap()).unwrap()).unwrap();
     assert_eq!(completed.id, placed_record.id);
     assert_eq!(
         completed.task_identity.as_deref(),
         Some("early-placement-id")
     );
-    Ok(())
 }
 
 #[rstest]
 #[case::active(false)]
 #[case::inactive(true)]
-fn model_catalog_and_favorites_reuse_the_captured_provider_discovery(
-    #[case] inactive: bool,
-) -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(inactive)?;
+fn model_catalog_and_favorites_reuse_the_captured_provider_discovery(#[case] inactive: bool) {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(inactive).unwrap();
     let mut query = CommandInvocation::new(
         "agents.native.catalog",
         vec![
@@ -4291,45 +4581,50 @@ fn model_catalog_and_favorites_reuse_the_captured_provider_discovery(
         Caller::Internal,
     );
     query.target = Some(binding);
-    let models = success(host.submit(query.clone())?)?;
+    let models = success(host.submit(query.clone()).unwrap()).unwrap();
     assert_eq!(models[0]["id"], "qa-model");
     let mut info = query.clone();
     info.command = "agents.native.catalog-info".into();
-    assert_eq!(success(host.submit(info.clone())?)?["models"], models);
-    let target = info.target.as_mut().ok_or("catalog target")?;
+    assert_eq!(
+        success(host.submit(info.clone()).unwrap()).unwrap()["models"],
+        models
+    );
+    let target = info.target.as_mut().expect("catalog target");
     target.generation = target.generation.saturating_add(1);
     assert!(matches!(
-        host.submit(info)?,
+        host.submit(info).unwrap(),
         CommandOutcome::StaleTarget { .. }
     ));
     bootty_test_support::write_executable(
         &host.program,
         "#!/usr/bin/env python3\nraise SystemExit(1)\n",
-    )?;
+    )
+    .unwrap();
     let mut favorite = query.clone();
     favorite.command = "agents.native.catalog-favorite".into();
     favorite.arguments.push("qa-model".into());
     for selected in [true, false] {
-        let models = success(host.submit(favorite.clone())?)?;
+        let models = success(host.submit(favorite.clone()).unwrap()).unwrap();
         assert_eq!(models[0]["is_favorite"], selected);
     }
-    assert_eq!(success(host.submit(query)?)?, models);
-    Ok(())
+    assert_eq!(success(host.submit(query).unwrap()).unwrap(), models);
 }
 
 #[rstest]
-fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let started = host.start(&binding, "creation-parent", "creation-parent-task", "")?;
-    let parent = record(&started)?;
+fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let started = host
+        .start(&binding, "creation-parent", "creation-parent-task", "")
+        .unwrap();
+    let parent = record(&started).unwrap();
     let mut open = CommandInvocation::from_action("new_tab", Caller::Keybinding);
     open.target = Some(parent.target());
-    success(host.submit(open)?)?;
+    success(host.submit(open).unwrap()).unwrap();
     let request = host
         .state
         .pending_new_surface()
-        .ok_or("surface request")?
+        .expect("surface request")
         .clone();
     host.state.open_surface_agent_form(&request);
     let invocation = CommandInvocation::new(
@@ -4358,7 +4653,7 @@ fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestRe
     ));
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
-        .ok_or("deadline")?;
+        .expect("deadline");
     while host.state.pending_new_surface().is_some() || host.state.modal_dialog().is_some() {
         host.tick();
         let _ = host.state.dialog_projection();
@@ -4366,23 +4661,24 @@ fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestRe
             break;
         }
         host.wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))?;
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .unwrap();
     }
     host.tick();
     let selected = host
         .state
         .mux()
         .selected_session_anchor()
-        .ok_or("selected pane")?;
+        .expect("selected pane");
     let selected_agent = selected
         .native_agent
         .as_deref()
-        .ok_or("selected conversation")?;
+        .expect("selected conversation");
     assert_ne!(selected_agent, parent.id);
     let records = host
         .state
         .native_agent_service()
-        .ok_or("native owner")?
+        .expect("native owner")
         .sessions();
     assert!(
         records
@@ -4390,7 +4686,6 @@ fn an_existing_conversation_is_not_the_receipt_for_its_new_agent_tab() -> TestRe
             .any(|record| record.id == selected_agent
                 && record.task_identity == parent.task_identity)
     );
-    Ok(())
 }
 
 fn pi_child_provider(directory: &Path) -> TestResult<String> {
@@ -4429,27 +4724,34 @@ for line in sys.stdin:
 }
 
 #[rstest]
-fn native_child_uses_the_captured_other_provider_account_and_protocol() -> TestResult<()> {
+fn native_child_uses_the_captured_other_provider_account_and_protocol() {
     let mut host = Host::new_with_child_provider(
         true,
         true,
         MultiplexerBackendConfig::Native,
         Some(AgentKind::Pi),
-    )?;
-    let binding = host.binding(false)?;
-    let created = host.start(
-        &binding,
-        "cross-provider-parent",
-        "cross-provider-parent-id",
-        "parent work",
-    )?;
-    let parent = record(&created)?;
-    let child = success(host.native_tool(
-        &parent,
-        "spawn_agent",
-        json!({"name":"pi-reviewer","provider":"pi","prompt":"Review the implementation"}),
-    )?)?;
-    let child = host.spawned_record(&child)?;
+    )
+    .unwrap();
+    let binding = host.binding(false).unwrap();
+    let created = host
+        .start(
+            &binding,
+            "cross-provider-parent",
+            "cross-provider-parent-id",
+            "parent work",
+        )
+        .unwrap();
+    let parent = record(&created).unwrap();
+    let child = success(
+        host.native_tool(
+            &parent,
+            "spawn_agent",
+            json!({"name":"pi-reviewer","provider":"pi","prompt":"Review the implementation"}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let child = host.spawned_record(&child).unwrap();
     assert_eq!(child.config.provider, AgentKind::Pi);
     assert_eq!(child.spawn_parent, Some(parent.target()));
     assert_eq!(child.config.profile.as_deref(), Some("child-account"));
@@ -4460,20 +4762,22 @@ fn native_child_uses_the_captured_other_provider_account_and_protocol() -> TestR
         parent.config.account_directory
     );
     let account = host.directory.path().join("child-account");
-    let launch: Value = serde_json::from_slice(&fs::read(account.join("launch.json"))?)?;
+    let launch: Value =
+        serde_json::from_slice(&fs::read(account.join("launch.json")).unwrap()).unwrap();
     assert_eq!(launch["account"], account.to_string_lossy().as_ref());
     assert!(
         launch["argv"]
             .as_array()
-            .ok_or("argv")?
+            .expect("argv")
             .iter()
             .any(|argument| argument == "rpc")
     );
     let snapshot = host
         .state
         .native_agent_service()
-        .ok_or("owner")?
-        .resolve(&child.target())?
+        .expect("owner")
+        .resolve(&child.target())
+        .unwrap()
         .snapshot();
     assert!(
         snapshot
@@ -4483,24 +4787,28 @@ fn native_child_uses_the_captured_other_provider_account_and_protocol() -> TestR
     );
     host.state
         .native_agent_service()
-        .ok_or("owner")?
-        .stop(&parent.target())?;
-    Ok(())
+        .expect("owner")
+        .stop(&parent.target())
+        .unwrap();
 }
 
 #[rstest]
-fn app_access_is_answered_only_in_bootty_and_always_allow_is_saved() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let record = record(&host.start(&binding, "app-user", "app-user-id", "")?)?;
+fn app_access_is_answered_only_in_bootty_and_always_allow_is_saved() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let record = record(&host.start(&binding, "app-user", "app-user-id", "").unwrap()).unwrap();
     let target = record.target();
     // The first prompt binds the conversation's tools to it.
-    success(host.submit(native_command(
-        "agents.native.prompt",
-        &target,
-        &["hello"],
-        Caller::Internal,
-    ))?)?;
+    success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &target,
+            &["hello"],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let app = bootty_agents::NativeApplication {
         bundle_id: "dev.zed.Zed".into(),
         name: "Zed".into(),
@@ -4508,8 +4816,9 @@ fn app_access_is_answered_only_in_bootty_and_always_allow_is_saved() -> TestResu
     let answer = host
         .state
         .native_agent_service()
-        .ok_or("native owner missing")?
-        .request_application_access(&target, &app, Caller::Socket)?;
+        .expect("native owner missing")
+        .request_application_access(&target, &app, Caller::Socket)
+        .unwrap();
     let approve = |caller| {
         native_command(
             "agents.native.approve",
@@ -4521,7 +4830,7 @@ fn app_access_is_answered_only_in_bootty_and_always_allow_is_saved() -> TestResu
 
     // An agent's shell reaches Bootty as the CLI; it must not approve its own card.
     assert_eq!(
-        host.submit(approve(Caller::Cli))?,
+        host.submit(approve(Caller::Cli)).unwrap(),
         CommandOutcome::Denied {
             message: "Answer app access requests in Bootty".into()
         }
@@ -4536,25 +4845,29 @@ fn app_access_is_answered_only_in_bootty_and_always_allow_is_saved() -> TestResu
         Vec::<String>::new()
     );
 
-    success(host.submit(approve(Caller::Internal))?)?;
+    success(host.submit(approve(Caller::Internal)).unwrap()).unwrap();
     assert_eq!(answer.try_recv(), Ok(true));
     assert_eq!(
         host.state.config().computer.always_allowed_apps,
         ["dev.zed.Zed"]
     );
-    Ok(())
 }
 
 /// A plan carried out in a new conversation starts beside its own, in the same session, with
 /// the plan as its first message.
 #[rstest]
-fn plans_carry_out_in_a_new_conversation_of_the_same_session() -> TestResult<()> {
-    let mut host = Host::new(true)?;
-    let binding = host.binding(false)?;
-    let planned = record(&host.start(&binding, "conversation", "task-plan", "")?)?;
+fn plans_carry_out_in_a_new_conversation_of_the_same_session() {
+    let mut host = Host::new(true).unwrap();
+    let binding = host.binding(false).unwrap();
+    let planned = record(
+        &host
+            .start(&binding, "conversation", "task-plan", "")
+            .unwrap(),
+    )
+    .unwrap();
     let invocation =
         bootty_ui::commands::implement_plan_invocation(&planned, binding, "1. Fix the bug");
-    let created = record(&success(host.submit(invocation)?)?)?;
+    let created = record(&success(host.submit(invocation).unwrap()).unwrap()).unwrap();
     assert_ne!(created.id, planned.id);
     assert_eq!(created.task_identity, planned.task_identity);
     assert_eq!(created.config.provider, planned.config.provider);
@@ -4570,14 +4883,13 @@ fn plans_carry_out_in_a_new_conversation_of_the_same_session() -> TestResult<()>
         first.as_deref(),
         Some("Implement this plan:\n\n1. Fix the bug")
     );
-    Ok(())
 }
 
 /// Each turn keeps its files before and after: the turn's changes show as a diff, rewinding the
 /// conversation can take the files back with it, and the files alone can go back too.
 #[rstest]
-fn turns_keep_their_files_and_rewind_with_them() -> TestResult<()> {
-    let mut host = Host::new(true)?;
+fn turns_keep_their_files_and_rewind_with_them() {
+    let mut host = Host::new(true).unwrap();
     let git = |args: &[&str]| -> TestResult<()> {
         let status = std::process::Command::new("git")
             .arg("-C")
@@ -4599,46 +4911,62 @@ fn turns_keep_their_files_and_rewind_with_them() -> TestResult<()> {
         &["add", "-A"],
         &["commit", "--quiet", "-m", "start"],
     ] {
-        git(args)?;
+        git(args).unwrap();
     }
-    let binding = host.binding(false)?;
-    let conversation =
-        record(&host.start(&binding, "conversation", "task-files", "write first")?)?;
+    let binding = host.binding(false).unwrap();
+    let conversation = record(
+        &host
+            .start(&binding, "conversation", "task-files", "write first")
+            .unwrap(),
+    )
+    .unwrap();
     let target = conversation.target();
-    let [(first, reply)] = checkpointed_turns(&mut host, &target)?;
-    let diff = success(host.submit(native_command(
-        "agents.native.turn-diff",
-        &target,
-        &[&reply],
-        Caller::Internal,
-    ))?)?;
+    let [(first, reply)] = checkpointed_turns(&mut host, &target).unwrap();
+    let diff = success(
+        host.submit(native_command(
+            "agents.native.turn-diff",
+            &target,
+            &[&reply],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let diff = diff["diff"].as_str().unwrap_or_default();
     assert!(
         diff.contains("+++ b/turn.txt") && diff.contains("+first"),
         "{diff}"
     );
-    success(host.submit(native_command(
-        "agents.native.prompt",
-        &target,
-        &["write second"],
-        Caller::Internal,
-    ))?)?;
-    let [_, (second, _)] = checkpointed_turns(&mut host, &target)?;
-    success(host.submit(native_command(
-        "agents.native.rewind",
-        &target,
-        &[&second, "files"],
-        Caller::Internal,
-    ))?)?;
+    success(
+        host.submit(native_command(
+            "agents.native.prompt",
+            &target,
+            &["write second"],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let [_, (second, _)] = checkpointed_turns(&mut host, &target).unwrap();
+    success(
+        host.submit(native_command(
+            "agents.native.rewind",
+            &target,
+            &[&second, "files"],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     let service = host
         .state
         .native_agent_service()
-        .ok_or("native owner missing")?;
+        .expect("native owner missing");
     let shown = service
         .sessions()
         .into_iter()
         .find(|record| record.target() == target)
-        .ok_or("conversation missing")?
+        .expect("conversation missing")
         .snapshot
         .transcript
         .iter()
@@ -4647,30 +4975,39 @@ fn turns_keep_their_files_and_rewind_with_them() -> TestResult<()> {
         .collect::<Vec<_>>();
     assert_eq!(shown, ["write first", "reply: write first"]);
     assert_eq!(
-        fs::read_to_string(host.directory.path().join("turn.txt"))?,
+        fs::read_to_string(host.directory.path().join("turn.txt")).unwrap(),
         "first\n"
     );
-    let calls = service.resolve(&target)?.rpc("__calls", json!({}))?;
+    let calls = service
+        .resolve(&target)
+        .unwrap()
+        .rpc("__calls", json!({}))
+        .unwrap();
     assert_eq!(calls["reverted"], json!(["turn-2"]));
     // The provider and the transcript no longer have the message.
-    let again = host.submit(native_command(
-        "agents.native.rewind",
-        &target,
-        &[&second],
-        Caller::Internal,
-    ))?;
+    let again = host
+        .submit(native_command(
+            "agents.native.rewind",
+            &target,
+            &[&second],
+            Caller::Internal,
+        ))
+        .unwrap();
     assert!(
         format!("{again:?}").contains("That message is no longer in this conversation"),
         "{again:?}"
     );
-    success(host.submit(native_command(
-        "agents.native.rewind-files",
-        &target,
-        &[&first],
-        Caller::Internal,
-    ))?)?;
+    success(
+        host.submit(native_command(
+            "agents.native.rewind-files",
+            &target,
+            &[&first],
+            Caller::Internal,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
     assert!(!host.directory.path().join("turn.txt").exists());
-    Ok(())
 }
 
 /// Waits for the conversation's `N` turns to record their files before and after, and returns

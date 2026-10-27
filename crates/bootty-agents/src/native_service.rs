@@ -175,10 +175,6 @@ impl NativeSessionRecord {
 
 /// Lightweight accepted conversation facts for the sidebar; transcript data stays in records.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "Each flag is an independent fact the sidebar shows"
-)]
 pub struct NativeSessionActivity {
     pub id: String,
     /// What to call the conversation in writing, like `bootty-7c`; see
@@ -263,6 +259,55 @@ enum CreationOrigin {
         message: String,
         attachments: Vec<PathBuf>,
     },
+}
+
+/// A conversation to reserve and launch, as its caller captured it.
+struct Creation<'a> {
+    binding_id: &'a str,
+    task_identity: Option<&'a str>,
+    title: &'a str,
+    config: NativeSessionConfig,
+    tools: Option<Arc<crate::ToolBridge>>,
+    origin: Option<CreationOrigin>,
+}
+
+/// A conversation for an exact Bootty task: where it belongs, its title, its provider settings
+/// and its tools.
+pub struct NativeTaskConversation<'a> {
+    pub binding_id: &'a str,
+    pub task_identity: &'a str,
+    pub title: &'a str,
+    pub config: NativeSessionConfig,
+    pub tools: Option<Arc<crate::ToolBridge>>,
+}
+
+/// The captured binding and title, and the task identity when there is one, must be bounded text.
+fn validate_membership(
+    binding_id: &str,
+    task_identity: Option<&str>,
+    title: &str,
+) -> Result<(), NativeCreationError> {
+    if task_identity.is_some_and(|identity| {
+        identity.is_empty() || identity.len() > 8192 || identity.chars().any(char::is_control)
+    }) {
+        return Err(
+            "Native conversation requires a captured task membership identity"
+                .to_owned()
+                .into(),
+        );
+    }
+    if binding_id.is_empty()
+        || binding_id.len() > 8192
+        || binding_id.chars().any(char::is_control)
+        || title.trim().is_empty()
+        || title.len() > 256
+        || title.chars().any(char::is_control)
+    {
+        return Err("Native session requires a captured binding and valid title"
+            .to_owned()
+            .into());
+    }
+    Ok(())
 }
 
 /// App-owned native sessions and bounded provider model catalogs. Credentials remain with providers.
@@ -1339,8 +1384,18 @@ impl NativeAgentService {
         title: &str,
         config: NativeSessionConfig,
     ) -> Result<NativeSessionRecord, String> {
-        self.create_captured(binding_id, None, title, config, None, None, None)
-            .map_err(|error| error.message)
+        self.create_captured(
+            Creation {
+                binding_id,
+                task_identity: None,
+                title,
+                config,
+                tools: None,
+                origin: None,
+            },
+            None,
+        )
+        .map_err(|error| error.message)
     }
 
     /// Attach to the exact persisted Bootty task captured by the invocation owner.
@@ -1354,12 +1409,14 @@ impl NativeAgentService {
         config: NativeSessionConfig,
     ) -> Result<NativeSessionRecord, NativeCreationError> {
         self.create_captured(
-            binding_id,
-            Some(task_identity),
-            title,
-            config,
-            None,
-            None,
+            Creation {
+                binding_id,
+                task_identity: Some(task_identity),
+                title,
+                config,
+                tools: None,
+                origin: None,
+            },
             None,
         )
     }
@@ -1376,12 +1433,14 @@ impl NativeAgentService {
         tools: Arc<crate::ToolBridge>,
     ) -> Result<NativeSessionRecord, NativeCreationError> {
         self.create_captured(
-            binding_id,
-            Some(task_identity),
-            title,
-            config,
-            Some(tools),
-            None,
+            Creation {
+                binding_id,
+                task_identity: Some(task_identity),
+                title,
+                config,
+                tools: Some(tools),
+                origin: None,
+            },
             None,
         )
     }
@@ -1451,12 +1510,14 @@ impl NativeAgentService {
         config.session_file = None;
         config.fresh_session_id = None;
         self.create_captured(
-            &record.binding_id,
-            Some(task_identity),
-            title,
-            config,
-            Some(tools),
-            Some(CreationOrigin::Spawn(parent.clone())),
+            Creation {
+                binding_id: &record.binding_id,
+                task_identity: Some(task_identity),
+                title,
+                config,
+                tools: Some(tools),
+                origin: Some(CreationOrigin::Spawn(parent.clone())),
+            },
             Some(&place),
         )
     }
@@ -1464,87 +1525,68 @@ impl NativeAgentService {
     /// Publish the real mux placement after reservation and before provider initialization.
     /// # Errors
     /// Returns reservation, placement or provider errors while retaining accepted identity.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "Accepted input and placement share the creation boundary"
-    )]
     pub fn create_for_task_placed(
         &self,
-        binding_id: &str,
-        task_identity: &str,
-        title: &str,
-        config: NativeSessionConfig,
-        tools: Option<Arc<crate::ToolBridge>>,
+        conversation: NativeTaskConversation<'_>,
         initial_message: &str,
         initial_attachments: &[PathBuf],
         place: impl Fn(&NativeSessionRecord) -> Result<(), String>,
     ) -> Result<NativeSessionRecord, NativeCreationError> {
-        self.create_captured(
+        let origin = if initial_message.trim().is_empty() && initial_attachments.is_empty() {
+            None
+        } else {
+            if initial_message.len() > crate::MAX_NATIVE_PROMPT_TEXT_BYTES
+                || initial_message.contains('\0')
+                || initial_attachments.len() > MAX_NATIVE_PROMPT_ATTACHMENTS
+                || initial_attachments.iter().any(|path| !path.is_absolute())
+            {
+                return Err("Invalid accepted initial input".to_owned().into());
+            }
+            if !initial_message.trim().is_empty() {
+                crate::NativePrompt::text(initial_message)?;
+            }
+            Some(CreationOrigin::InitialMessage {
+                message: initial_message.to_owned(),
+                attachments: initial_attachments.to_vec(),
+            })
+        };
+        let NativeTaskConversation {
             binding_id,
-            Some(task_identity),
+            task_identity,
             title,
             config,
             tools,
-            if initial_message.trim().is_empty() && initial_attachments.is_empty() {
-                None
-            } else {
-                if initial_message.len() > crate::MAX_NATIVE_PROMPT_TEXT_BYTES
-                    || initial_message.contains('\0')
-                    || initial_attachments.len() > MAX_NATIVE_PROMPT_ATTACHMENTS
-                    || initial_attachments.iter().any(|path| !path.is_absolute())
-                {
-                    return Err("Invalid accepted initial input".to_owned().into());
-                }
-                if !initial_message.trim().is_empty() {
-                    crate::NativePrompt::text(initial_message)?;
-                }
-                Some(CreationOrigin::InitialMessage {
-                    message: initial_message.to_owned(),
-                    attachments: initial_attachments.to_vec(),
-                })
+        } = conversation;
+        self.create_captured(
+            Creation {
+                binding_id,
+                task_identity: Some(task_identity),
+                title,
+                config,
+                tools,
+                origin,
             },
             Some(&place),
         )
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        clippy::too_many_lines,
-        reason = "Captured creation keeps placement inside its durable acceptance boundary"
-    )]
     fn create_captured(
         &self,
-        binding_id: &str,
-        task_identity: Option<&str>,
-        title: &str,
-        mut config: NativeSessionConfig,
-        tools: Option<Arc<crate::ToolBridge>>,
-        origin: Option<CreationOrigin>,
+        creation: Creation<'_>,
         place: Option<&NativePlacement<'_>>,
     ) -> Result<NativeSessionRecord, NativeCreationError> {
+        let Creation {
+            binding_id,
+            task_identity,
+            title,
+            mut config,
+            tools,
+            origin,
+        } = creation;
         config.prepare_fresh_identity()?;
         config.validate()?;
         validate_tools(config.provider, tools.as_deref())?;
-        if task_identity.is_some_and(|identity| {
-            identity.is_empty() || identity.len() > 8192 || identity.chars().any(char::is_control)
-        }) {
-            return Err(
-                "Native conversation requires a captured task membership identity"
-                    .to_owned()
-                    .into(),
-            );
-        }
-        if binding_id.is_empty()
-            || binding_id.len() > 8192
-            || binding_id.chars().any(char::is_control)
-            || title.trim().is_empty()
-            || title.len() > 256
-            || title.chars().any(char::is_control)
-        {
-            return Err("Native session requires a captured binding and valid title"
-                .to_owned()
-                .into());
-        }
+        validate_membership(binding_id, task_identity, title)?;
         let _mutation = lock(&self.mutation);
         if self.shutdown.load(Ordering::Acquire) {
             return Err("Native agent host is shutting down".to_owned().into());
@@ -1579,67 +1621,8 @@ impl NativeAgentService {
             draft: None,
             seen_turns: 0,
         };
-        if let Some(CreationOrigin::InitialMessage { attachments, .. }) = &origin {
-            for path in attachments {
-                match self.attachment_store.import(&record.id, path) {
-                    Ok(stored) => {
-                        let bytes = record
-                            .attachments
-                            .iter()
-                            .map(|reference| reference.size_bytes)
-                            .sum::<u64>();
-                        if bytes.saturating_add(stored.reference.size_bytes)
-                            > MAX_NATIVE_SESSION_ATTACHMENT_BYTES
-                        {
-                            _ = self.attachment_store.remove_session(&record.id);
-                            return Err("Native session attachments exceed 512 MiB"
-                                .to_owned()
-                                .into());
-                        }
-                        record.attachments.push(stored.reference);
-                    }
-                    Err(error) => {
-                        _ = self.attachment_store.remove_session(&record.id);
-                        return Err(error.into());
-                    }
-                }
-            }
-        }
-        if let Some(CreationOrigin::Spawn(parent)) = &origin {
-            if !candidate
-                .records
-                .iter()
-                .any(|source| source.target() == *parent && source.binding_id == binding_id)
-            {
-                return Err("Spawning conversation changed during creation"
-                    .to_owned()
-                    .into());
-            }
-            record.spawn_parent = Some(parent.clone());
-        }
-        if let Some(CreationOrigin::SideChat(fork)) = origin {
-            if !candidate
-                .records
-                .iter()
-                .any(|source| source.target() == fork.source)
-            {
-                return Err(
-                    "The source conversation changed while creating the side chat"
-                        .to_owned()
-                        .into(),
-                );
-            }
-            self.attachment_store.copy_session(
-                &fork.origin.source_id,
-                &record.id,
-                &fork.attachments,
-            )?;
-            record
-                .snapshot
-                .transcript
-                .clone_from(&fork.origin.transcript);
-            record.side_chat = Some(fork.origin);
-            record.attachments = fork.attachments;
+        if let Some(origin) = origin {
+            self.apply_origin(&mut record, &candidate.records, origin)?;
         }
         candidate.records.push(record.clone());
         if let Err(error) = self.commit(candidate) {
@@ -1651,26 +1634,103 @@ impl NativeAgentService {
         if let Some(place) = place
             && let Err(message) = place(&record)
         {
-            let mut candidate = lock(&self.store).clone();
-            if let Some(saved) = candidate
-                .records
-                .iter_mut()
-                .find(|saved| saved.id == record.id)
-            {
-                saved.snapshot.status = NativeSessionStatus::Error;
-                saved.snapshot.error = Some(bounded_text(message.clone()));
-            }
-            self.commit(candidate)?;
-            return Err(NativeCreationError {
-                message,
-                target: Some(record.target()),
-            });
+            return Err(self.fail_placement(&record, message)?);
         }
         self.launch(&record.id, tools, false)
             .map_err(|message| NativeCreationError {
                 message,
                 target: Some(record.target()),
             })
+    }
+
+    /// Bring what the conversation starts from into its record: the initial message's
+    /// attachments, the spawning parent, or the side chat's source transcript.
+    fn apply_origin(
+        &self,
+        record: &mut NativeSessionRecord,
+        records: &[NativeSessionRecord],
+        origin: CreationOrigin,
+    ) -> Result<(), NativeCreationError> {
+        match origin {
+            CreationOrigin::InitialMessage { attachments, .. } => {
+                for path in attachments {
+                    let stored = match self.attachment_store.import(&record.id, &path) {
+                        Ok(stored) => stored,
+                        Err(error) => {
+                            _ = self.attachment_store.remove_session(&record.id);
+                            return Err(error.into());
+                        }
+                    };
+                    let bytes = record
+                        .attachments
+                        .iter()
+                        .map(|reference| reference.size_bytes)
+                        .sum::<u64>();
+                    if bytes.saturating_add(stored.reference.size_bytes)
+                        > MAX_NATIVE_SESSION_ATTACHMENT_BYTES
+                    {
+                        _ = self.attachment_store.remove_session(&record.id);
+                        return Err("Native session attachments exceed 512 MiB"
+                            .to_owned()
+                            .into());
+                    }
+                    record.attachments.push(stored.reference);
+                }
+            }
+            CreationOrigin::Spawn(parent) => {
+                if !records.iter().any(|source| {
+                    source.target() == parent && source.binding_id == record.binding_id
+                }) {
+                    return Err("Spawning conversation changed during creation"
+                        .to_owned()
+                        .into());
+                }
+                record.spawn_parent = Some(parent);
+            }
+            CreationOrigin::SideChat(fork) => {
+                if !records.iter().any(|source| source.target() == fork.source) {
+                    return Err(
+                        "The source conversation changed while creating the side chat"
+                            .to_owned()
+                            .into(),
+                    );
+                }
+                self.attachment_store.copy_session(
+                    &fork.origin.source_id,
+                    &record.id,
+                    &fork.attachments,
+                )?;
+                record
+                    .snapshot
+                    .transcript
+                    .clone_from(&fork.origin.transcript);
+                record.side_chat = Some(fork.origin);
+                record.attachments = fork.attachments;
+            }
+        }
+        Ok(())
+    }
+
+    /// Keep the reserved conversation, marked failed with the placement's reason.
+    fn fail_placement(
+        &self,
+        record: &NativeSessionRecord,
+        message: String,
+    ) -> Result<NativeCreationError, NativeCreationError> {
+        let mut candidate = lock(&self.store).clone();
+        if let Some(saved) = candidate
+            .records
+            .iter_mut()
+            .find(|saved| saved.id == record.id)
+        {
+            saved.snapshot.status = NativeSessionStatus::Error;
+            saved.snapshot.error = Some(bounded_text(message.clone()));
+        }
+        self.commit(candidate)?;
+        Ok(NativeCreationError {
+            message,
+            target: Some(record.target()),
+        })
     }
 
     fn launch(

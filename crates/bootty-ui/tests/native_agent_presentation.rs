@@ -5333,11 +5333,33 @@ fn compaction_is_an_operation_instead_of_a_model_response(cx: &mut TestAppContex
     }
 }
 
+/// Choose "other" and type a two-line answer, which stays inside its card above its submit
+/// button in a short window.
+fn type_free_text_answer(visual: &mut gpui_kit::VisualTestContext) -> &'static str {
+    let other = visual.debug_bounds("async-other:question:0").unwrap();
+    visual.simulate_click(other.center(), Modifiers::none());
+    visual.simulate_resize(size(px(1000.), px(500.)));
+    redraw(visual);
+    redraw(visual);
+    let input = visual.debug_bounds("async-input:question:0").unwrap();
+    let card = visual.debug_bounds("async-questions:question").unwrap();
+    let send = visual.debug_bounds("async-answer:question").unwrap();
+    assert!(
+        input.top() >= card.top(),
+        "the focused answer stays inside its card"
+    );
+    assert!(
+        input.bottom() <= send.top(),
+        "the focused answer stays above its submit button: {input:?}, {send:?}"
+    );
+    visual.simulate_click(input.center(), Modifiers::none());
+    visual.simulate_input("A custom");
+    visual.simulate_keystrokes("shift-enter");
+    visual.simulate_input("multiline answer");
+    "A custom\nmultiline answer"
+}
+
 #[gpui_kit::test]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Exercise choice and multiline answers with visibility, submission and draft retention"
-)]
 fn async_question_answers_steer_without_consuming_the_composer_draft(cx: &mut TestAppContext) {
     cx.update(|cx| {
         gpui_kit::component::init(cx);
@@ -5381,27 +5403,7 @@ fn async_question_answers_steer_without_consuming_the_composer_draft(cx: &mut Te
             "questions stay above the composer"
         );
         let value = if free_text {
-            let other = visual.debug_bounds("async-other:question:0").unwrap();
-            visual.simulate_click(other.center(), Modifiers::none());
-            visual.simulate_resize(size(px(1000.), px(500.)));
-            redraw(visual);
-            redraw(visual);
-            let input = visual.debug_bounds("async-input:question:0").unwrap();
-            let card = visual.debug_bounds("async-questions:question").unwrap();
-            let send = visual.debug_bounds("async-answer:question").unwrap();
-            assert!(
-                input.top() >= card.top(),
-                "the focused answer stays inside its card"
-            );
-            assert!(
-                input.bottom() <= send.top(),
-                "the focused answer stays above its submit button: {input:?}, {send:?}"
-            );
-            visual.simulate_click(input.center(), Modifiers::none());
-            visual.simulate_input("A custom");
-            visual.simulate_keystrokes("shift-enter");
-            visual.simulate_input("multiline answer");
-            "A custom\nmultiline answer"
+            type_free_text_answer(visual)
         } else {
             let option = visual.debug_bounds("async-option:question:0:B").unwrap();
             visual.simulate_click(option.center(), Modifiers::none());
