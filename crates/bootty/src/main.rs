@@ -1,7 +1,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![cfg_attr(windows, feature(windows_process_exit_code_from))]
 
-use std::{ffi::OsStr, io, process::ExitCode, sync::Arc};
+use std::{io, process::ExitCode, sync::Arc};
 
 use anyhow::Result;
 use bootty::cli::{Cli, Command, EventCommand, RemoteSpaceCommand, TaskCommand};
@@ -16,7 +16,7 @@ mod macos_cli;
 
 fn main() -> ExitCode {
     #[cfg(target_os = "macos")]
-    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--agent-tray-stdio")) {
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("--agent-tray-stdio")) {
         // The helper exits when its parent closes stdin, even while AppKit blocks this thread.
         return report(agent_tray_helper(|failed| {
             std::process::exit(i32::from(failed))

@@ -320,6 +320,8 @@ fn checkpoint(host: &mut Host) -> TestResult<OutputArchive> {
     }
 }
 fn close_original_turn(host: &mut Host) -> TestResult<()> {
+    // Drain its readiness handshake before the next provider uses the same listener.
+    wait_observed(host, &host.terminal.clone())?;
     let mut close = CommandInvocation::new("agents.claude.stop", Vec::new(), Caller::Socket);
     close.target = Some(host.terminal.clone());
     close.confirmation = Some(close.confirmation());
