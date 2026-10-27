@@ -2231,13 +2231,13 @@ proptest! {
         prefix in "[a-zA-Z0-9_-]{0,10}",
         invalid in "[^a-zA-Z0-9_-]",
     ) {
-        let root = TempDir::new().unwrap();
-        let mut config = NativeSessionConfig::new(AgentKind::Codex, root.path());
-        config.program = root.path().join("missing-provider").to_string_lossy().into_owned();
-        config.account_directory = Some(root.path().to_string_lossy().into_owned());
+        let root = support::synthetic_path("invalid-captured-profile");
+        let mut config = NativeSessionConfig::new(AgentKind::Codex, &root);
+        config.program = root.join("missing-provider").to_string_lossy().into_owned();
+        config.account_directory = Some(root.to_string_lossy().into_owned());
         config.profile = Some(format!("{prefix}{invalid}"));
         prop_assert_eq!(
-            spawn(config).err().unwrap(),
+            support::reject_before_launch(config).err().unwrap(),
             "Captured profile requires a simple bounded ID",
         );
     }
@@ -2253,17 +2253,13 @@ proptest! {
 #[case::empty(String::new())]
 #[case::oversized("a".repeat(65))]
 fn captured_profile_ids_are_nonempty_and_bounded(#[case] profile: String) {
-    let root = TempDir::new().unwrap();
-    let mut config = NativeSessionConfig::new(AgentKind::Codex, root.path());
-    config.program = root
-        .path()
-        .join("missing-provider")
-        .to_string_lossy()
-        .into_owned();
-    config.account_directory = Some(root.path().to_string_lossy().into_owned());
+    let root = support::synthetic_path("invalid-captured-profile");
+    let mut config = NativeSessionConfig::new(AgentKind::Codex, &root);
+    config.program = root.join("missing-provider").to_string_lossy().into_owned();
+    config.account_directory = Some(root.to_string_lossy().into_owned());
     config.profile = Some(profile);
     assert_eq!(
-        spawn(config).err().unwrap(),
+        support::reject_before_launch(config).err().unwrap(),
         "Captured profile requires a simple bounded ID",
     );
 }

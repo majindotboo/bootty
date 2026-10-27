@@ -2692,9 +2692,9 @@ struct PublicationState {
 }
 
 /// Deliberate limit: while a reply streams, the catalog commits at most ten times a second,
-/// because each commit rewrites and syncs the streaming conversation's file. Status, request and
-/// identity changes commit at once. Publish live snapshots apart from persistence before raising
-/// the rate.
+/// because each commit rewrites and syncs the streaming conversation's file. Status, request,
+/// identity and file checkpoint changes commit at once. Publish live snapshots apart from
+/// persistence before raising the rate.
 const STREAM_COMMIT_INTERVAL: Duration = Duration::from_millis(100);
 
 fn start_publication_worker(
@@ -2785,6 +2785,19 @@ fn streamed_only(saved: &NativeSessionSnapshot, live: &NativeSessionSnapshot) ->
         && saved.error == live.error
         && saved.session_id == live.session_id
         && saved.session_file == live.session_file
+        && saved
+            .transcript
+            .iter()
+            .filter_map(|item| {
+                item.checkpoint
+                    .as_ref()
+                    .map(|checkpoint| (&item.id, checkpoint))
+            })
+            .eq(live.transcript.iter().filter_map(|item| {
+                item.checkpoint
+                    .as_ref()
+                    .map(|checkpoint| (&item.id, checkpoint))
+            }))
 }
 
 fn publish(revision: &AtomicU64, handler: &Mutex<Option<NativeChangeHandler>>) {

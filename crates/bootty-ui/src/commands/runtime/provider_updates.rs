@@ -83,19 +83,19 @@ impl AppState {
         if !self.config().agents.auto_update || self.commands.terminal_agents.is_none() {
             return;
         }
-        effects.push(AppEffect::RepaintAfter(RETRY));
         if self.commands.provider_updates.pending.is_some() {
             return;
         }
-        for provider in AgentKind::ALL {
-            if !self
-                .config()
-                .agents
-                .provider(&provider.to_string())
-                .is_some_and(|config| config.enabled)
-            {
-                continue;
-            }
+        let enabled = AgentKind::ALL
+            .into_iter()
+            .filter(|provider| {
+                self.config()
+                    .agents
+                    .provider(&provider.to_string())
+                    .is_some_and(|config| config.enabled)
+            })
+            .collect::<Vec<_>>();
+        for provider in enabled.iter().copied() {
             let next = self
                 .commands
                 .provider_updates
@@ -125,6 +125,20 @@ impl AppState {
                 }
             }
             break;
+        }
+        // The worker repaints when it completes. Otherwise wake at the next eligible provider,
+        // including the shorter busy retry, rather than polling every minute after success.
+        if self.commands.provider_updates.pending.is_none()
+            && let Some(after) = self
+                .commands
+                .provider_updates
+                .next
+                .iter()
+                .filter(|(provider, _)| enabled.contains(provider))
+                .map(|(_, next)| next.saturating_duration_since(now))
+                .min()
+        {
+            effects.push(AppEffect::RepaintAfter(after));
         }
     }
 

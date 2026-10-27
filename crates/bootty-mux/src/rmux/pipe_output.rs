@@ -71,7 +71,7 @@ impl PipeOutput {
             "start pane output pipe: {response:?}"
         );
         // This bounds helper startup, not live reads or the image size.
-        let stream = tokio::time::timeout(Duration::from_secs(5), async {
+        let stream = tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 match connect(&endpoint).await {
                     Ok(stream) => break Ok::<_, anyhow::Error>(Some(stream)),

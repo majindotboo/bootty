@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// One host's monotonic time, advanced explicitly when the host drives another frame.
+/// One host's monotonic time. Rendering and receiving events do not advance it.
 pub struct Clock(Arc<Mutex<Instant>>);
 
 impl Default for Clock {
@@ -13,6 +13,11 @@ impl Default for Clock {
 }
 
 impl Clock {
+    /// Capture the host's clock and provider transports.
+    ///
+    /// # Panics
+    /// The captured clock panics if the fixture's clock mutex is poisoned.
+    #[must_use]
     pub fn runtime(
         &self,
         events: bootty_control::ControlEventSender,
@@ -36,12 +41,19 @@ impl Clock {
         }
     }
 
-    pub fn tick(&self, state: &bootty_ui::AppState) -> Instant {
+    /// # Panics
+    /// Panics if another fixture thread poisoned the clock lock.
+    #[must_use]
+    pub fn now(&self) -> Instant {
+        *self.0.lock().expect("fixture clock")
+    }
+
+    /// Advance a product timer and wake the services that use this clock.
+    /// # Panics
+    /// Panics if the clock lock is poisoned or the duration exceeds the clock range.
+    pub fn advance(&self, state: &bootty_ui::AppState, duration: Duration) {
         let mut now = self.0.lock().expect("fixture clock");
-        *now = now
-            .checked_add(Duration::from_secs(1))
-            .expect("fixture time fits");
-        let frame_at = *now;
+        *now = now.checked_add(duration).expect("fixture time fits");
         drop(now);
         if let Some(service) = state.agent_service() {
             service.clock_advanced();
@@ -52,6 +64,5 @@ impl Clock {
         if let Some(service) = state.terminal_agent_service() {
             service.clock_advanced();
         }
-        frame_at
     }
 }

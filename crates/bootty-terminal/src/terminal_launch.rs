@@ -66,9 +66,11 @@ impl Drop for OwnedChild {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        // Hang up before the owner is gone. The killer clone only signals; the child's own kill
+        // then waits up to 200 ms before SIGKILL, so it runs off the dropping thread, which may be
+        // the UI thread.
+        let _ = child.clone_killer().kill();
         let integration = self.integration.take();
-        // portable_pty's kill gives SIGHUP a grace period of up to 200 ms before SIGKILL, so it
-        // runs off the dropping thread, which may be the UI thread.
         thread::spawn(move || {
             let _ = child.kill();
             let _ = child.wait();

@@ -37,7 +37,7 @@ use serde_json::{Value, json};
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[path = "support/agent_clock.rs"]
-mod agent_clock;
+pub mod agent_clock;
 #[path = "support/provider_queries.rs"]
 mod provider_queries;
 
@@ -368,7 +368,7 @@ impl Host {
     fn tick(&mut self) {
         self.effects.extend(
             self.state
-                .update_frame(frames::idle_frame(self.clock.tick(&self.state))),
+                .update_frame(frames::idle_frame(self.clock.now())),
         );
     }
 
@@ -1483,6 +1483,16 @@ fn interrupt_agent_stops_the_conversation_in_the_focused_pane() {
     )
     .unwrap();
     host.wait_working(&target, deadline);
+    let service = host.state.native_agent_service().expect("owner missing");
+    assert_eq!(
+        service.activities()[0].working_elapsed,
+        Some(Duration::ZERO)
+    );
+    host.clock.advance(&host.state, Duration::from_secs(30));
+    assert_eq!(
+        service.activities()[0].working_elapsed,
+        Some(Duration::from_secs(30))
+    );
     success(
         host.submit(CommandInvocation::from_action(
             "interrupt_agent",
@@ -3915,76 +3925,81 @@ fn spawned_terminal_tools_keep_the_exact_shell_and_foreground() {
 }
 
 #[rstest]
-#[case(Caller::CommandPalette)]
-#[case(Caller::Keybinding)]
-#[case(Caller::BuiltinKeybinding)]
-#[case(Caller::Cli)]
-#[case(Caller::Socket)]
-#[case(Caller::Internal)]
-fn closing_native_panes_retains_history_and_reopens_the_same_provider(#[case] caller: Caller) {
+fn closing_native_panes_retains_history_and_reopens_the_same_provider() {
     let mut host = Host::new(true).unwrap();
     let binding = host.binding(false).unwrap();
     let launched = host
         .start(&binding, "close-conversation", "close-native-task", "")
         .unwrap();
-    let record = record(&launched).unwrap();
-    let mut close = CommandInvocation::new("agents.native.close", Vec::new(), caller);
-    close.target = Some(record.target());
-    assert_eq!(
-        success(host.submit(close.clone()).unwrap()).unwrap(),
-        serde_json::to_value(record.target()).unwrap()
-    );
-    assert!(
-        !host
-            .state
-            .mux()
-            .all_sessions()
-            .iter()
-            .flat_map(|session| &session.windows)
-            .flat_map(|window| &window.panes)
-            .any(|pane| pane.native_agent.as_deref() == Some(&record.id))
-    );
-    let retained = host
-        .state
-        .native_agent_service()
-        .expect("native owner")
-        .sessions()
-        .into_iter()
-        .find(|saved| saved.id == record.id)
-        .expect("Retained conversation missing");
-    assert_eq!(retained.snapshot.status, NativeSessionStatus::Stopped);
-    assert_eq!(retained.snapshot.transcript, record.snapshot.transcript);
-    for target in [
-        CommandTarget {
-            generation: record.generation.saturating_add(1),
-            ..record.target()
-        },
-        CommandTarget {
-            handle: "native:codex:foreign".into(),
-            ..record.target()
-        },
+    let mut record = record(&launched).unwrap();
+    // Each caller closes and resumes the same durable conversation at its next generation.
+    for caller in [
+        Caller::CommandPalette,
+        Caller::Keybinding,
+        Caller::BuiltinKeybinding,
+        Caller::Cli,
+        Caller::Socket,
+        Caller::Internal,
     ] {
-        close.target = Some(target);
-        assert!(matches!(
-            host.submit(close.clone()).unwrap(),
-            CommandOutcome::StaleTarget { .. }
-        ));
+        let mut close = CommandInvocation::new("agents.native.close", Vec::new(), caller);
+        close.target = Some(record.target());
+        assert_eq!(
+            success(host.submit(close.clone()).unwrap()).unwrap(),
+            serde_json::to_value(record.target()).unwrap()
+        );
+        assert!(
+            !host
+                .state
+                .mux()
+                .all_sessions()
+                .iter()
+                .flat_map(|session| &session.windows)
+                .flat_map(|window| &window.panes)
+                .any(|pane| pane.native_agent.as_deref() == Some(&record.id))
+        );
+        let retained = host
+            .state
+            .native_agent_service()
+            .expect("native owner")
+            .sessions()
+            .into_iter()
+            .find(|saved| saved.id == record.id)
+            .expect("Retained conversation missing");
+        assert_eq!(retained.snapshot.status, NativeSessionStatus::Stopped);
+        assert_eq!(retained.snapshot.transcript, record.snapshot.transcript);
+        for target in [
+            CommandTarget {
+                generation: record.generation.saturating_add(1),
+                ..record.target()
+            },
+            CommandTarget {
+                handle: "native:codex:foreign".into(),
+                ..record.target()
+            },
+        ] {
+            close.target = Some(target);
+            assert!(matches!(
+                host.submit(close.clone()).unwrap(),
+                CommandOutcome::StaleTarget { .. }
+            ));
+        }
+        let resumed = open_saved_native(&mut host, &record).unwrap();
+        assert!(
+            host.state
+                .mux()
+                .all_sessions()
+                .iter()
+                .flat_map(|session| &session.windows)
+                .flat_map(|window| &window.panes)
+                .any(|pane| pane.native_agent.as_deref() == Some(&resumed.id))
+        );
+        success(
+            host.native_tool(&resumed, "terminal_read", json!({}))
+                .unwrap(),
+        )
+        .unwrap();
+        record = resumed;
     }
-    let resumed = open_saved_native(&mut host, &record).unwrap();
-    assert!(
-        host.state
-            .mux()
-            .all_sessions()
-            .iter()
-            .flat_map(|session| &session.windows)
-            .flat_map(|window| &window.panes)
-            .any(|pane| pane.native_agent.as_deref() == Some(&resumed.id))
-    );
-    success(
-        host.native_tool(&resumed, "terminal_read", json!({}))
-            .unwrap(),
-    )
-    .unwrap();
 }
 
 #[rstest]
@@ -4914,7 +4929,13 @@ fn turns_keep_their_files_and_rewind_with_them() {
     )
     .unwrap();
     let target = conversation.target();
+    let at = host.clock.now();
     let [(first, reply)] = checkpointed_turns(&mut host, &target).unwrap();
+    assert_eq!(
+        host.clock.now(),
+        at,
+        "file checkpoints publish without advancing time"
+    );
     let diff = success(
         host.submit(native_command(
             "agents.native.turn-diff",

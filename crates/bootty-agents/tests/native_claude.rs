@@ -14,7 +14,6 @@ use bootty_agents::{
     NativeTurnOutcome,
 };
 use pretty_assertions::assert_eq;
-use proptest::prelude::*;
 use rstest::rstest;
 use serde_json::{Value, json};
 
@@ -897,18 +896,37 @@ fn claude_receives_only_the_session_attachment_directory_on_launch_and_resume() 
     service.shutdown().unwrap();
 }
 
-proptest! {
-    #[test]
-    fn unsafe_native_launch_options_never_replace_transport_identity_or_permission_policy(
-        option in prop::sample::select(vec!["--input-format", "--output-format", "--session-id", "--resume", "--dangerously-skip-permissions", "--no-session-persistence"]),
-    ) {
-        let root = TempDir::new().unwrap();
-        let mut config = config(root.path());
-        config.arguments = vec![option.to_owned(), "foreign".to_owned()];
-        prop_assert!(spawn(config).is_err());
-        prop_assert!(!root.path().join("launch.json").exists());
-        let launch = AgentLaunch {program:"claude".to_owned(),cwd:Some(root.path().to_string_lossy().into_owned()),arguments:vec!["--no-session-persistence".to_owned()],ephemeral:false,account_directory:Some(root.path().to_string_lossy().into_owned())};
-        prop_assert!(NativeSessionConfig::from_launch(AgentKind::Claude, launch).is_err());
+#[rstest]
+#[case("--input-format")]
+#[case("--output-format")]
+#[case("--session-id")]
+#[case("--resume")]
+#[case("--dangerously-skip-permissions")]
+#[case("--no-session-persistence")]
+fn unsafe_native_launch_options_never_replace_transport_identity_or_permission_policy(
+    #[case] option: &str,
+) {
+    let root = support::synthetic_path("invalid-claude-options");
+    let mut config = config(&root);
+    config.arguments = vec![option.to_owned(), "foreign".to_owned()];
+    assert_eq!(
+        support::reject_before_launch(config).err().unwrap(),
+        "Native Claude requires reusable options; transport and session identity are host-owned",
+    );
+    let launch = AgentLaunch {
+        program: "claude".to_owned(),
+        cwd: Some(root.to_string_lossy().into_owned()),
+        arguments: vec![option.to_owned(), "foreign".to_owned()],
+        ephemeral: false,
+        account_directory: Some(root.to_string_lossy().into_owned()),
+    };
+    let captured = NativeSessionConfig::from_launch(AgentKind::Claude, launch);
+    if option == "--no-session-persistence" {
+        assert!(captured.is_err());
+    } else {
+        let captured = captured.unwrap();
+        assert_eq!(captured.arguments, Vec::<String>::new());
+        assert_ne!(captured.fresh_session_id.as_deref(), Some("foreign"));
     }
 }
 

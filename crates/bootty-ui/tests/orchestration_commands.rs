@@ -26,7 +26,7 @@ use serde_json::json;
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[path = "support/agent_clock.rs"]
-mod agent_clock;
+pub mod agent_clock;
 #[cfg(unix)]
 #[path = "support/provider_queries.rs"]
 mod provider_queries;
@@ -237,7 +237,7 @@ fn submit(
         .submit(invocation, deadline, CommandCancellation::new())
         .map_err(|error| format!("Fixture command submission failed: {error:?}"))?;
     loop {
-        state.update_frame(frames::idle_frame(clock.tick(state)));
+        state.update_frame(frames::idle_frame(clock.now()));
         match response.try_recv() {
             Ok(outcome) => return Ok(outcome),
             Err(mpsc::TryRecvError::Disconnected) => return Err("command disconnected".into()),

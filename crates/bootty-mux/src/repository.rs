@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, Row, Transaction, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -1408,8 +1408,11 @@ pub(crate) fn sqlite_path(config_path: &Path) -> PathBuf {
 }
 
 pub(crate) fn open_db(path: &Path) -> rusqlite::Result<Connection> {
-    let conn = Connection::open(path)?;
+    let mut conn = Connection::open(path)?;
     conn.busy_timeout(Duration::from_millis(250))?;
+    // Transactions here read before they write. A deferred one fails at that upgrade, without
+    // waiting, when another connection has written since; taking the lock at BEGIN waits instead.
+    conn.set_transaction_behavior(TransactionBehavior::Immediate);
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;

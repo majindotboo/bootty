@@ -950,12 +950,14 @@ fn provider_identity_changes_and_handled_prompts_do_not_invent_turn_success() {
 proptest! {
     #[test]
     fn relative_resume_selectors_are_rejected_before_launch(selector in "[a-zA-Z0-9_-]{1,32}") {
-        let root = TempDir::new().unwrap();
-        let mut config = config(root.path());
+        let root = support::synthetic_path("invalid-pi-resume");
+        let mut config = config(&root);
         config.session_id = Some("captured-uuid".to_owned());
         config.session_file = Some(selector);
-        prop_assert!(spawn(config).is_err());
-        prop_assert!(!root.path().join("launch.json").exists());
+        prop_assert_eq!(
+            support::reject_before_launch(config).err().unwrap(),
+            "Pi resume requires its exact absolute session file",
+        );
     }
 }
 

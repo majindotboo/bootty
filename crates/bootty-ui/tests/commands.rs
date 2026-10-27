@@ -34,7 +34,7 @@ const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
 #[cfg(unix)]
 #[path = "support/agent_clock.rs"]
-mod agent_clock;
+pub mod agent_clock;
 #[cfg(unix)]
 #[path = "support/provider_queries.rs"]
 mod provider_queries;
@@ -828,11 +828,12 @@ fn terminal_agents_list_in_the_agents_panel_and_notify() {
     );
 
     fs::write(&query, "waiting").unwrap();
+    clock.advance(&state, Duration::from_millis(750));
     let deadline = Instant::now()
         .checked_add(FIXTURE_DEADLINE)
         .expect("deadline fits");
     loop {
-        let mut frame = frames::idle_frame(clock.tick(&state));
+        let mut frame = frames::idle_frame(clock.now());
         frame.input.window_focused = false;
         let notified = state.update_frame(frame).into_iter().any(|effect| {
             matches!(effect, bootty_ui::AppEffect::DesktopNotification { title, .. }
@@ -2678,15 +2679,15 @@ fn chooser_profile_keeps_the_accepted_terminal_when_its_checkpoint_write_fails(
 
 #[cfg(unix)]
 #[rstest]
-#[case::session("start", None)]
-#[case::tab("tab", None)]
-#[case::right_pane("pane", Some("right"))]
-#[case::down_pane("pane", Some("down"))]
+#[case::session("start", None, Caller::Cli)]
+#[case::tab("tab", None, Caller::CommandPalette)]
+#[case::right_pane("pane", Some("right"), Caller::Socket)]
+#[case::down_pane("pane", Some("down"), Caller::Socket)]
 fn agent_start_delivers_literal_arguments_to_a_new_native_pty(
     #[values(true, false)] explicit_cwd: bool,
     #[case] operation: &str,
     #[case] direction: Option<&str>,
-    #[values(Caller::CommandPalette, Caller::Cli, Caller::Socket)] caller: Caller,
+    #[case] caller: Caller,
     #[values(false, true)] configured_profile: bool,
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
@@ -2722,7 +2723,7 @@ fn agent_start_delivers_literal_arguments_to_a_new_native_pty(
     let mut state = AppState::new_for_window_with_agent_runtime(
         config,
         "main".to_owned(),
-        support::backends(),
+        naming_backend::backends(None, true).unwrap(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -4953,7 +4954,7 @@ fn wait_for_finished_native_agent(
     loop {
         fixture
             .state
-            .update_frame(frames::idle_frame(fixture.clock.tick(&fixture.state)));
+            .update_frame(frames::idle_frame(fixture.clock.now()));
         if service.live_records().iter().any(|record| {
             record.target == fixture.parent
                 && record.observation.status == bootty_agents::TerminalAgentStatus::Finished

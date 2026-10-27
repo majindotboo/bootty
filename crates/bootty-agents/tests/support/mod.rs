@@ -78,3 +78,20 @@ pub fn repair_catalog(path: &Path) -> std::io::Result<()> {
     fs::remove_file(path.with_extension("d"))?;
     fs::remove_dir(path)
 }
+
+/// Reject malformed captured configuration without starting a provider or requiring a project.
+///
+/// # Errors
+/// Returns the configuration validation failure, or a distinct error if validation is bypassed.
+pub fn reject_before_launch(
+    config: bootty_agents::NativeSessionConfig,
+) -> Result<bootty_agents::NativeAgentSession, String> {
+    let launcher: bootty_agents::NativeLauncher = std::sync::Arc::new(|_| {
+        Err("Invalid configuration reached the provider launcher".to_owned())
+    });
+    bootty_agents::NativeAgentSession::spawn_with(
+        config,
+        std::sync::Arc::new(std::time::Instant::now),
+        &launcher,
+    )
+}

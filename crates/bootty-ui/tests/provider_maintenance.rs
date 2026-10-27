@@ -10,7 +10,7 @@ use bootty_agents::{AgentKind, NativeModelOption, NativeSessionConfig, ProviderU
 use bootty_config::config::{AgentProfileConfig, BoottyConfig, MultiplexerBackendConfig};
 use bootty_control::{Caller, CommandCancellation, CommandInvocation, CommandOutcome};
 use bootty_mux::provider::MuxBackendRegistry;
-use bootty_ui::AppState;
+use bootty_ui::{AppEffect, AppState};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
@@ -174,8 +174,8 @@ impl Host {
         })
     }
 
-    fn frame(&mut self, now: Instant) {
-        self.state.update_frame(frames::idle_frame(now));
+    fn frame(&mut self, now: Instant) -> Vec<AppEffect> {
+        self.state.update_frame(frames::idle_frame(now))
     }
 
     fn submit(
@@ -207,13 +207,8 @@ impl Host {
         if remaining.is_zero() {
             return Err("provider update fixture timed out".into());
         }
-        match self
-            .wakes
-            .recv_timeout(remaining.min(Duration::from_millis(10)))
-        {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
-            Err(error) => Err(error.into()),
-        }
+        self.wakes.recv_timeout(remaining)?;
+        Ok(())
     }
 
     fn cached(&self) -> bool {
@@ -222,25 +217,38 @@ impl Host {
             .is_some_and(|service| service.cached_provider_catalog(&self.catalog).is_some())
     }
 
-    fn await_update(&mut self, start: Instant, clock_rate: u32) -> TestResult {
-        let started = Instant::now();
-        let deadline = started.checked_add(DEADLINE).ok_or("deadline overflow")?;
+    fn await_update(&mut self, now: Instant) -> TestResult {
+        let deadline = Instant::now()
+            .checked_add(DEADLINE)
+            .ok_or("deadline overflow")?;
         loop {
-            let now = start
-                .checked_add(started.elapsed().saturating_mul(clock_rate))
-                .ok_or("frame clock overflow")?;
-            self.frame(now);
+            let completed = self.frame(now).into_iter().any(|effect| {
+                matches!(effect, AppEffect::RepaintAfter(after) if after == Duration::from_hours(24))
+            });
             let inspected = self.state.terminal_agent_service().and_then(|service| {
                 service.provider_status(AgentKind::Codex, &self.program, Some(&self.account), None)
             });
-            if !self.cached()
+            if completed
+                && !self.cached()
                 && inspected.is_some_and(|status| {
                     status.version.as_deref() == Some("fixture 2.0")
                         && status.authenticated == Some(false)
                 })
             {
-                // Publish the completed worker reply through the shared mailbox too.
-                self.frame(now);
+                return Ok(());
+            }
+            self.wait(deadline)?;
+        }
+    }
+
+    fn await_retry(&mut self, now: Instant) -> TestResult {
+        let deadline = Instant::now()
+            .checked_add(DEADLINE)
+            .ok_or("deadline overflow")?;
+        loop {
+            if self.frame(now).into_iter().any(|effect| {
+                matches!(effect, AppEffect::RepaintAfter(after) if after == Duration::from_secs(60))
+            }) {
                 return Ok(());
             }
             self.wait(deadline)?;
@@ -315,11 +323,16 @@ fn idle_updates_run_after_the_initial_delay_and_invalidate_cached_models() {
     let mut host = Host::new(true, true).unwrap();
     let now = Instant::now();
     host.frame(now);
-    host.frame(now.checked_add(Duration::from_secs(59)).unwrap());
+    assert!(host.frame(now.checked_add(Duration::from_secs(59)).unwrap()).into_iter().any(
+        |effect| matches!(effect, AppEffect::RepaintAfter(after) if after == Duration::from_secs(1))
+    ));
     assert_eq!(host.updates().unwrap(), Vec::<Vec<String>>::new());
     assert!(host.cached());
-    host.await_update(now.checked_add(Duration::from_secs(61)).unwrap(), 0)
-        .unwrap();
+    let due = now.checked_add(Duration::from_secs(61)).unwrap();
+    host.await_update(due).unwrap();
+    assert!(host.frame(due).into_iter().any(
+        |effect| matches!(effect, AppEffect::RepaintAfter(after) if after == Duration::from_hours(24))
+    ));
     assert_eq!(
         host.updates().unwrap(),
         vec![vec![
@@ -345,13 +358,16 @@ fn busy_provider_keeps_its_catalog_and_updates_after_it_becomes_idle() {
     assert!(matches!(outcome, CommandOutcome::Failed { code, .. } if code == "provider_busy"));
     assert_eq!(host.updates().unwrap(), Vec::<Vec<String>>::new());
     assert!(host.cached());
-    // The automatic attempt shares the explicit command's worker and busy guard.
-    host.frame(due);
-    host.frame(due);
+    // Wait for the automatic busy attempt to schedule its retry before releasing the lease.
+    host.await_retry(due).unwrap();
     drop(busy);
-    // Advance one scheduler minute per real second while waiting. A pending busy
-    // reply can arrive on any frame; it must retry within minutes, not the daily interval.
-    host.await_update(due, 60).unwrap();
+    assert!(host.frame(due.checked_add(Duration::from_secs(59)).unwrap()).into_iter().any(
+        |effect| matches!(effect, AppEffect::RepaintAfter(after) if after == Duration::from_secs(1))
+    ));
+    assert_eq!(host.updates().unwrap(), Vec::<Vec<String>>::new());
+    assert!(host.cached());
+    host.await_update(due.checked_add(Duration::from_secs(60)).unwrap())
+        .unwrap();
     assert_eq!(host.updates().unwrap().len(), 1);
     assert!(!host.cached());
     host.shutdown().unwrap();

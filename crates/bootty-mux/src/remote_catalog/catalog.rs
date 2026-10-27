@@ -281,7 +281,10 @@ impl Catalog {
         if requested_name.is_empty() {
             bail!("remote Space name cannot be empty")
         }
-        let transaction = self.connection.transaction()?;
+        // Reads names before writing one; see `repository::open_db` on deferred upgrades.
+        let transaction = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut names = transaction.prepare("SELECT name FROM remote_spaces")?;
         let existing = names
             .query_map([], |row| row.get::<_, String>(0))?

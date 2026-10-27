@@ -473,6 +473,7 @@ impl NativeAgentSession {
         attachment_directory: Option<&Path>,
         launcher: &NativeLauncher,
     ) -> Result<Self, String> {
+        config.validate()?;
         let provider_use = if config.remote.is_none() {
             crate::ProviderUse::acquire(&config.program)?
         } else {
