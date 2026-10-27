@@ -605,8 +605,7 @@ impl NewSessionDialog {
         }
 
         let form = self.form.as_mut()?;
-        if self.purpose == NewSessionPurpose::CreateSession
-            && let Some(invocation) = form.branch_catalog_invocation()
+        if let Some(invocation) = form.branch_catalog_invocation()
             && let Some(key) = catalog_identity_key(&invocation)
             && self.catalog_requested.insert(key)
         {

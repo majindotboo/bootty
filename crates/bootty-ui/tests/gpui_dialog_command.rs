@@ -1149,6 +1149,64 @@ fn agent_composer_centers_in_a_tall_full_surface_and_keeps_prompt_focus(cx: &Tes
 }
 
 #[gpui_kit::test]
+fn agent_in_existing_session_shows_its_inherited_checkout(cx: &TestAppContext) {
+    for (width, rem) in [(600., 16.), (1200., 24.)] {
+        let mut spec = native_agent_form_spec();
+        spec.footer = Some("/workspace/linked-worktrees/review-project".into());
+        spec.branches.push(bootty_git::changes::GitBranch {
+            name: "review-composer".into(),
+            commit: "abc123".into(),
+            current: true,
+            worktree_path: spec.footer.clone(),
+            upstream: None,
+            ahead: 0,
+            behind: 0,
+        });
+        let (_, mut visual) = full_surface_probe_with_viewport(cx, spec, width, 900., rem);
+        let composer = visual.debug_bounds("agent-session-composer").unwrap();
+        let directory = visual
+            .debug_bounds("dialog-session-directory")
+            .expect("existing sessions must show the inherited checkout directory");
+        let footer = visual
+            .debug_bounds("dialog-prompt-footer")
+            .expect("inherited checkout footer");
+        let branch = visual
+            .debug_bounds("dialog-session-branch")
+            .expect("current branch");
+        for context in [directory, branch] {
+            assert!(context.size.width > px(0.) && context.size.height > px(0.));
+            assert!(context.left() >= footer.left() && context.right() <= footer.right());
+            assert!(context.top() >= composer.bottom());
+            assert!(context.bottom() <= footer.bottom());
+        }
+        assert!(footer.right() <= px(width));
+        assert!(
+            visual
+                .debug_bounds("dialog-field-choice-control-isolation")
+                .is_none()
+        );
+    }
+}
+
+#[gpui_kit::test]
+fn agent_in_existing_session_handles_missing_git_context(cx: &TestAppContext) {
+    for directory in [Some("/workspace/plain-folder"), None] {
+        let mut spec = native_agent_form_spec();
+        spec.footer = directory.map(str::to_owned);
+        let (_, mut visual) = full_surface_probe_with_viewport(cx, spec, 600., 900., 16.);
+        assert_eq!(
+            visual.debug_bounds("dialog-session-directory").is_some(),
+            directory.is_some()
+        );
+        assert_eq!(
+            visual.debug_bounds("dialog-prompt-footer").is_some(),
+            directory.is_some()
+        );
+        assert!(visual.debug_bounds("dialog-session-branch").is_none());
+    }
+}
+
+#[gpui_kit::test]
 fn prompt_validation_is_visible_and_blocks_submit(cx: &TestAppContext) {
     let mut spec = DialogSpec::prompt("prompt", "Rename", "", "name…", DialogAction::new("submit"));
     spec.rows[0].enabled = false;

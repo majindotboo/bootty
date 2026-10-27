@@ -1181,6 +1181,46 @@ fn a_session_in_a_new_worktree_runs_its_project_setup(form: NewSessionForm) {
 }
 
 #[rstest]
+fn native_launcher_reads_the_inherited_branch_without_exposing_checkout_changes(
+    mut form: NewSessionForm,
+) {
+    use bootty_ui::presentation::dialogs::{NewSessionDialog, NewSessionPickerEvent};
+    form.set_worktree_available(true);
+    let invocation = form.branch_catalog_invocation().expect("branch request");
+    let cwd = form.draft.cwd.clone();
+    let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
+    let mut dialog = NewSessionDialog::open_native_form(form, &repaint);
+    assert_eq!(
+        dialog.poll(),
+        Some(NewSessionPickerEvent::Catalog(invocation.clone()))
+    );
+    let (sender, receiver) = std::sync::mpsc::channel();
+    dialog.catalog_started(invocation, receiver);
+    sender
+        .send(bootty_control::CommandOutcome::Success {
+            value: serde_json::json!({"root": cwd, "history": [], "branches": [{
+            "name": "feature/inherited", "commit": "abc123", "current": true,
+            "worktree_path": cwd, "upstream": null
+        }], "stashes": []}),
+            warnings: Vec::new(),
+        })
+        .unwrap();
+    dialog.poll();
+    let spec = dialog.spec();
+    assert_eq!(spec.footer.as_deref(), Some(cwd.as_str()));
+    assert_eq!(
+        spec.branches.first().map(|branch| branch.name.as_str()),
+        Some("feature/inherited")
+    );
+    assert!(
+        !spec
+            .fields
+            .iter()
+            .any(|field| matches!(field.id.as_str(), "host" | "isolation" | "checkout-branch"))
+    );
+}
+
+#[rstest]
 #[case("enter-session")]
 #[case("start-session")]
 fn explicit_native_launcher_starts_without_a_prompt_and_keeps_account_and_terminal_drafts(

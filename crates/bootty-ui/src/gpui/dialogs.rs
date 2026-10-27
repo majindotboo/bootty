@@ -1799,7 +1799,7 @@ impl DialogView {
                         .child(self.agent_session_controls(spec, choices, submit, cx))
                         .children(self.completion.clone()),
                     )
-                    .child(self.agent_session_project_footer(spec, cx)),
+                    .children(self.agent_session_project_footer(spec, cx)),
             )
             .children(self.new_model_error(spec, cx))
             .child(self.new_session_footer(spec, submit, error, cx))
@@ -2074,46 +2074,106 @@ impl DialogView {
         &self,
         spec: &DialogSpec,
         cx: &Context<Self>,
-    ) -> gpui_kit::AnyElement {
-        h_flex()
-            .id("dialog-prompt-footer")
-            .min_w_0()
-            .mx_3()
-            .px_2()
-            .py_1()
-            .bg(cx.theme().muted.opacity(0.35))
-            .border_1()
-            .border_color(cx.theme().border)
-            .rounded_b(cx.theme().radius)
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .child(
-                h_flex().flex_1().min_w_0().gap_2().children(
-                    spec.fields
-                        .iter()
-                        .filter(|field| matches!(field.id.as_str(), "isolation" | "host"))
-                        .filter_map(|field| {
-                            let choice = self.new_session_choice(spec, field, false, cx)?;
-                            Some(
-                                div()
-                                    .when_some(
-                                        self.control_focus.get(field.id.as_str()),
-                                        gpui_kit::InteractiveElement::track_focus,
-                                    )
-                                    .child(choice),
-                            )
-                        }),
-                ),
-            )
-            .when_some(
-                spec.fields
-                    .iter()
-                    .find(|field| matches!(field.id.as_str(), "start-ref" | "checkout-branch"))
-                    .and_then(|field| self.render_worktree_ref_picker(spec, field, true, cx)),
-                |row, picker| row.child(div().min_w_0().max_w(rems(24.)).child(picker)),
-            )
-            .into_any_element()
+    ) -> Option<gpui_kit::AnyElement> {
+        let choices = spec
+            .fields
+            .iter()
+            .filter(|field| matches!(field.id.as_str(), "isolation" | "host"))
+            .filter_map(|field| {
+                let choice = self.new_session_choice(spec, field, false, cx)?;
+                Some(
+                    div()
+                        .when_some(
+                            self.control_focus.get(field.id.as_str()),
+                            gpui_kit::InteractiveElement::track_focus,
+                        )
+                        .child(choice),
+                )
+            })
+            .collect::<Vec<_>>();
+        let picker = spec
+            .fields
+            .iter()
+            .find(|field| matches!(field.id.as_str(), "start-ref" | "checkout-branch"))
+            .and_then(|field| self.render_worktree_ref_picker(spec, field, true, cx));
+        // Agent tabs inherit their session's checkout instead of offering checkout controls.
+        let directory = spec
+            .footer
+            .as_ref()
+            .filter(|path| choices.is_empty() && picker.is_none() && !path.is_empty());
+        if choices.is_empty() && picker.is_none() && directory.is_none() {
+            return None;
+        }
+        Some(
+            h_flex()
+                .id("dialog-prompt-footer")
+                .debug_selector(|| "dialog-prompt-footer".into())
+                .min_w_0()
+                .mx_3()
+                .px_2()
+                .py_1()
+                .bg(cx.theme().muted.opacity(0.35))
+                .border_1()
+                .border_color(cx.theme().border)
+                .rounded_b(cx.theme().radius)
+                .items_center()
+                .justify_between()
+                .gap_2()
+                .when_some(directory, |row, directory| {
+                    row.child(
+                        h_flex()
+                            .id("dialog-session-directory")
+                            .debug_selector(|| "dialog-session-directory".into())
+                            .role(gpui_kit::Role::Label)
+                            .aria_label(directory.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(super::sized_icon(
+                                "folder",
+                                super::IconSize::Small,
+                                cx.theme().muted_foreground,
+                            ))
+                            .child(div().min_w_0().text_ellipsis().child(directory.clone()))
+                            .tooltip({
+                                let directory = directory.clone();
+                                move |window, cx| Tooltip::new(directory.clone()).build(window, cx)
+                            }),
+                    )
+                })
+                .when_some(
+                    directory.and_then(|_| spec.branches.iter().find(|branch| branch.current)),
+                    |row, branch| {
+                        row.child(
+                            h_flex()
+                                .id("dialog-session-branch")
+                                .debug_selector(|| "dialog-session-branch".into())
+                                .role(gpui_kit::Role::Label)
+                                .aria_label(format!("Branch: {}", branch.name))
+                                .min_w_0()
+                                .max_w(gpui_kit::relative(0.5))
+                                .gap_1()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(super::sized_icon(
+                                    "git-branch",
+                                    super::IconSize::Small,
+                                    cx.theme().muted_foreground,
+                                ))
+                                .child(div().min_w_0().text_ellipsis().child(branch.name.clone())),
+                        )
+                    },
+                )
+                .when(!choices.is_empty(), |row| {
+                    row.child(h_flex().flex_1().min_w_0().gap_2().children(choices))
+                })
+                .when_some(picker, |row, picker| {
+                    row.child(div().min_w_0().max_w(rems(24.)).child(picker))
+                })
+                .into_any_element(),
+        )
     }
 
     fn new_session_start(
