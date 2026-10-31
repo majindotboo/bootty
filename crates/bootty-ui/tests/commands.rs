@@ -3621,7 +3621,6 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
 #[case("toggle_right_dock", true)]
 #[case("toggle_tab_bar", false)]
 #[case("toggle_hidden_tabs", false)]
-#[case("show_codexbar", true)]
 #[case("show_spaces", true)]
 #[case("show_sidebar", true)]
 #[case("show_files", true)]

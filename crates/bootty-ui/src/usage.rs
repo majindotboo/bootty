@@ -1,116 +1,26 @@
-//! Quota presentation: what a live conversation's provider last reported, or `CodexBar`'s JSON
-//! when no conversation has reported lately.
-
-use bootty_host::{CancellableCommandRunner, CommandCancellation, CommandRunner};
-use chrono::DateTime;
+//! Quota presentation from native conversation reports.
 use num_traits::ToPrimitive as _;
-use serde_json::Value;
-use std::{
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+use std::time::Instant;
 
-const USAGE_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
-/// How long a provider's own report stands in for `CodexBar`'s.
-const REPORT_FRESH: Duration = Duration::from_mins(10);
-
-/// One bounded background request per supported `CodexBar` provider.
-/// Pending processes are cancelled when this owner is retired; painting only reads snapshots.
 #[derive(Default)]
 pub struct UsageService {
     current: [ProviderUsage; 2],
-    pending: [Option<mpsc::Receiver<ProviderUsage>>; 2],
-    /// When each provider last reported its limits through a live conversation.
-    reported: [Option<Instant>; 2],
-    cancellation: CommandCancellation,
-    last_poll: Option<Instant>,
 }
-
 impl UsageService {
     #[must_use]
     pub const fn current(&self) -> &[ProviderUsage; 2] {
         &self.current
     }
-
-    /// The limits `provider` reported through a live conversation, which stand in for
-    /// `CodexBar`'s for a while.
-    pub fn report(&mut self, provider: UsageProvider, windows: Vec<UsageWindow>, now: Instant) {
-        let index = UsageProvider::ALL
-            .iter()
-            .position(|known| *known == provider)
-            .unwrap_or(0);
-        if let (Some(current), Some(reported)) =
-            (self.current.get_mut(index), self.reported.get_mut(index))
-        {
-            *current = ProviderUsage {
-                windows,
-                error: None,
-            };
-            *reported = Some(now);
-        }
-    }
-
-    pub fn refresh(&mut self, now: Instant) -> bool {
-        let mut changed = false;
-        let fresh = self.reported.map(|reported| {
-            reported.is_some_and(|at| now.saturating_duration_since(at) < REPORT_FRESH)
-        });
-        for ((pending, current), fresh) in self.pending.iter_mut().zip(&mut self.current).zip(fresh)
-        {
-            let result = pending.as_ref().map(std::sync::mpsc::Receiver::try_recv);
-            match result {
-                Some(Ok(_)) if fresh => *pending = None,
-                Some(Ok(updated)) => {
-                    changed |= *current != updated;
-                    *current = updated;
-                    *pending = None;
-                }
-                Some(Err(mpsc::TryRecvError::Disconnected)) => *pending = None,
-                Some(Err(mpsc::TryRecvError::Empty)) | None => {}
-            }
-        }
-
-        let due = self
-            .last_poll
-            .is_none_or(|last| now.saturating_duration_since(last) >= Duration::from_mins(1));
-        if due {
-            let mut started = false;
-            for ((pending, provider), fresh) in
-                self.pending.iter_mut().zip(UsageProvider::ALL).zip(fresh)
-            {
-                if pending.is_some() || fresh {
-                    continue;
-                }
-                *pending = Self::spawn_provider(provider, self.cancellation.clone());
-                started |= pending.is_some();
-            }
-            if started {
-                self.last_poll = Some(now);
-            }
-        }
-        changed
-    }
-
-    fn spawn_provider(
-        provider: UsageProvider,
-        cancellation: CommandCancellation,
-    ) -> Option<mpsc::Receiver<ProviderUsage>> {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let runner = CancellableCommandRunner::with_deadline(
-            cancellation,
-            Instant::now().checked_add(USAGE_COMMAND_TIMEOUT)?,
-        );
-        std::thread::spawn(move || {
-            let usage = query_provider(&runner, provider);
-            let _ = sender.send(usage);
-        });
-        Some(receiver)
-    }
-}
-
-impl Drop for UsageService {
-    fn drop(&mut self) {
-        self.cancellation.cancel();
+    pub fn report(&mut self, provider: UsageProvider, windows: Vec<UsageWindow>, _now: Instant) {
+        let [codex, claude] = &mut self.current;
+        let current = match provider {
+            UsageProvider::Codex => codex,
+            UsageProvider::Claude => claude,
+        };
+        *current = ProviderUsage {
+            windows,
+            error: None,
+        };
     }
 }
 
@@ -140,21 +50,6 @@ impl UsageProvider {
     }
 }
 
-fn query_provider(runner: &CancellableCommandRunner, provider: UsageProvider) -> ProviderUsage {
-    let args = ["usage", "--json", "--provider", provider.id()].map(str::to_owned);
-    match runner.run("codexbar", &args) {
-        Ok(output) if output.success || !output.stdout.is_empty() => parse_usage(&output.stdout),
-        Ok(output) => ProviderUsage {
-            error: Some(short_status(&output.stderr)),
-            ..ProviderUsage::default()
-        },
-        Err(error) => ProviderUsage {
-            error: Some(short_status(&error.to_string())),
-            ..ProviderUsage::default()
-        },
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct UsageWindow {
     pub label: String,
@@ -167,57 +62,6 @@ pub struct UsageWindow {
 pub struct ProviderUsage {
     pub windows: Vec<UsageWindow>,
     pub error: Option<String>,
-}
-
-/// Accept both `CodexBar`'s object and single-provider array responses.
-#[must_use]
-pub fn parse_usage(raw: &str) -> ProviderUsage {
-    if raw.is_empty() {
-        return ProviderUsage::default();
-    }
-    let Ok(data) = serde_json::from_str::<Value>(raw) else {
-        return ProviderUsage {
-            error: Some(short_status(raw)),
-            ..ProviderUsage::default()
-        };
-    };
-    let provider = data.get(0).unwrap_or(&data);
-    if let Some(error) = data
-        .get("error")
-        .or_else(|| provider.get("error"))
-        .and_then(|error| error.get("message"))
-        .and_then(Value::as_str)
-    {
-        return ProviderUsage {
-            error: Some(short_status(error)),
-            ..ProviderUsage::default()
-        };
-    }
-    let usage = provider.get("usage").unwrap_or(provider);
-    let windows = [("primary", "5h", 18_000.0), ("secondary", "7d", 604_800.0)]
-        .into_iter()
-        .filter_map(|(key, label, fallback)| {
-            let value = usage.get(key)?;
-            Some(UsageWindow {
-                label: label.to_owned(),
-                used_percent: value.get("usedPercent")?.as_f64()?.clamp(0.0, 100.0),
-                duration_secs: value
-                    .get("windowMinutes")
-                    .and_then(Value::as_f64)
-                    .filter(|minutes| *minutes > 0.0)
-                    .map_or(fallback, |minutes| minutes * 60.0),
-                resets_at: value
-                    .get("resetsAt")
-                    .and_then(Value::as_str)
-                    .and_then(|date| DateTime::parse_from_rfc3339(date).ok())
-                    .map(|date| date.timestamp()),
-            })
-        })
-        .collect();
-    ProviderUsage {
-        windows,
-        error: None,
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,14 +142,5 @@ fn format_duration(seconds: i64) -> String {
         format!("{}h {}m", seconds / 3600, seconds % 3600 / 60)
     } else {
         format!("{}m", seconds / 60)
-    }
-}
-
-fn short_status(value: &str) -> String {
-    let first = value.lines().next().unwrap_or_default();
-    if first.chars().count() > 42 {
-        format!("{}...", first.chars().take(39).collect::<String>())
-    } else {
-        first.to_owned()
     }
 }

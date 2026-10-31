@@ -275,7 +275,7 @@ fn missing_config_file_loads_with_selected_path() {
 #[test]
 fn sidebar_modules_default_and_override_in_order() {
     let defaults = load_config_source("").expect("valid config");
-    assert_eq!(defaults.sidebar.modules, ["sessions", "codexbar"]);
+    assert_eq!(defaults.sidebar.modules, ["sessions", "usage"]);
     assert_eq!(
         defaults.sidebar.session_modules,
         [

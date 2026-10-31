@@ -154,7 +154,7 @@ runs itself, such as `/cost` or a `/compact` with nothing to compact, show Claud
 output as it laid it out. Codex's and
 Claude's usage limit reports show in the meter's tooltip; a turn a limit stopped says
 when it resets and can wait to send the turn again then. The sidebar's usage meter
-uses those reports while they are fresh, and asks `codexbar` otherwise.
+uses those native provider reports.
 In Codex, `/review` runs its reviewer on the uncommitted changes, or with the words
 after it as instructions, and shows as a review row; commands only Codex's terminal
 app runs, such as `/init` or `/status`, are refused rather than sent to the model as

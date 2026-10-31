@@ -7,7 +7,6 @@ pub enum DockAction {
     ToggleRight,
     ToggleFullView,
     TogglePanel(bootty_config::config::PanelKind),
-    CodexBar,
     Spaces,
     ToggleHiddenTabs,
     ToggleTabBar,
@@ -35,7 +34,7 @@ impl DockAction {
         Some(match self {
             Self::TogglePanel(kind) => kind,
             Self::Sidebar | Self::Spaces => PanelKind::Sessions,
-            Self::Agents | Self::CodexBar => PanelKind::Agents,
+            Self::Agents => PanelKind::Agents,
             Self::Files => PanelKind::Files,
             Self::Changes => PanelKind::Changes,
             Self::Diff => PanelKind::Diff,
@@ -66,7 +65,6 @@ impl DockAction {
             Self::ToggleLeft => Command::ToggleLeftDock,
             Self::ToggleRight => Command::ToggleRightDock,
             Self::ToggleFullView => Command::TogglePanelFullView,
-            Self::CodexBar => Command::ShowCodexBar,
             Self::Spaces => Command::ShowSpaces,
             Self::ToggleHiddenTabs => Command::ToggleHiddenTabs,
             Self::ToggleTabBar => Command::ToggleTabBar,
@@ -86,7 +84,6 @@ impl DockAction {
             Self::ToggleFullView,
             Self::ToggleTabBar,
             Self::ToggleHiddenTabs,
-            Self::CodexBar,
             Self::Spaces,
         ]
         .into_iter()
