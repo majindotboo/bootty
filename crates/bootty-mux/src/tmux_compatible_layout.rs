@@ -28,10 +28,22 @@ pub fn parse(input: &str) -> Result<MuxPaneLayout, TmuxCompatibleLayoutParseErro
     parse_tree(input).and_then(into_mux_layout)
 }
 
-/// Parses a tmux-compatible layout and validates its four-digit checksum.
+/// Parses a tmux JSON V2 layout or a legacy layout with a four-digit checksum.
 /// # Errors
 /// Returns a syntax, checksum, or layout error when validation fails.
 pub fn parse_with_checksum(input: &str) -> Result<MuxPaneLayout, TmuxCompatibleLayoutParseError> {
+    if input.starts_with('{') {
+        let data: serde_json::Value =
+            serde_json::from_str(input).map_err(|_| TmuxCompatibleLayoutParseError::SyntaxError)?;
+        if data.get("V").and_then(serde_json::Value::as_u64) != Some(2) {
+            return Err(TmuxCompatibleLayoutParseError::FormatError);
+        }
+        return json_layout(
+            data.get("L")
+                .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?,
+        )
+        .and_then(into_mux_layout);
+    }
     if input.len() < 5 || input.as_bytes().get(4) != Some(&b',') {
         return Err(TmuxCompatibleLayoutParseError::SyntaxError);
     }
@@ -45,6 +57,46 @@ pub fn parse_with_checksum(input: &str) -> Result<MuxPaneLayout, TmuxCompatibleL
     }
 
     parse(layout)
+}
+
+fn json_layout(value: &serde_json::Value) -> Result<ParsedLayout, TmuxCompatibleLayoutParseError> {
+    let number = |key| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|number| usize::try_from(number).ok())
+            .ok_or(TmuxCompatibleLayoutParseError::FormatError)
+    };
+    let content = match value.get("t").and_then(serde_json::Value::as_str) {
+        Some("p") => ParsedLayoutContent::Pane(
+            value
+                .get("I")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| id.strip_prefix('%'))
+                .and_then(|id| id.parse().ok())
+                .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?,
+        ),
+        Some(kind @ ("h" | "v")) => {
+            let children = value
+                .get("c")
+                .and_then(serde_json::Value::as_array)
+                .ok_or(TmuxCompatibleLayoutParseError::SyntaxError)?
+                .iter()
+                .map(json_layout)
+                .collect::<Result<Vec<_>, _>>()?;
+            if kind == "h" {
+                ParsedLayoutContent::Horizontal(children)
+            } else {
+                ParsedLayoutContent::Vertical(children)
+            }
+        }
+        _ => return Err(TmuxCompatibleLayoutParseError::SyntaxError),
+    };
+    Ok(ParsedLayout {
+        width: number("w")?,
+        height: number("h")?,
+        content,
+    })
 }
 
 #[must_use]

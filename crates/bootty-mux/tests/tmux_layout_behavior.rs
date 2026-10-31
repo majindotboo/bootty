@@ -86,3 +86,27 @@ proptest! {
         prop_assert_eq!(u16::from_str_radix(&encoded, 16), Ok(input.checksum));
     }
 }
+
+#[rstest]
+#[case("h", MuxPaneSplitDirection::Right)]
+#[case("v", MuxPaneSplitDirection::Down)]
+fn json_layout_preserves_panes_and_split_ratio(
+    #[case] kind: &str,
+    #[case] direction: MuxPaneSplitDirection,
+) {
+    let input = serde_json::json!({"V": 2, "L": {
+        "t": kind, "w": 81, "h": 81, "c": [
+            {"t": "p", "w": 20, "h": 20, "I": "%2"},
+            {"t": "p", "w": 60, "h": 60, "I": "%3"}
+        ]
+    }});
+    assert_eq!(
+        parse_with_checksum(&input.to_string()),
+        Ok(MuxPaneLayout::Split {
+            direction,
+            ratio_millis: 250,
+            first: Box::new(MuxPaneLayout::Pane("%2".into())),
+            second: Box::new(MuxPaneLayout::Pane("%3".into())),
+        })
+    );
+}
