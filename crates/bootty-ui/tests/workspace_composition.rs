@@ -282,7 +282,6 @@ fn repairing_duplicate_terminal_leaves_keeps_surviving_geometry(
 
 #[rstest]
 #[case("bootty.sessions", DockPlacement::Left)]
-#[case("bootty.codexbar", DockPlacement::Right)]
 #[case("bootty.spaces", DockPlacement::Left)]
 #[case("bootty.attachment", DockPlacement::Right)]
 #[case("bootty.changes", DockPlacement::Right)]

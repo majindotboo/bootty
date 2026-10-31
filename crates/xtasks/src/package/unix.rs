@@ -272,18 +272,21 @@ fn compile_macos_icon(contents: &Path, resources: &Path) -> Result<()> {
         .with_context(|| format!("failed to resolve {}", resources.display()))?;
     let icon = fs::canonicalize("crates/bootty/assets/bootty.icon")
         .context("failed to resolve the macOS app icon")?;
-    let actool = command::stdout(Command::new("xcrun").args(["--find", "actool"]))
-        .context("Xcode actool is required to package the macOS app icon")?;
-    let actool = actool.trim();
-    if actool_major_version(actool)? < 26 {
-        eprintln!(
-            "actool does not support Liquid Glass icon compilation; using legacy macOS .icns fallback"
-        );
+    let actool = command::stdout(Command::new("xcrun").args(["--find", "actool"]));
+    let actool = actool.as_deref().ok().map(str::trim);
+    if actool.is_none()
+        || actool
+            .map(actool_major_version)
+            .transpose()?
+            .is_some_and(|version| version < 26)
+    {
+        eprintln!("Liquid Glass icon compilation unavailable; using legacy macOS .icns fallback");
         return filesystem::copy_file(
             Path::new("crates/bootty-ui/assets/bootty-icon-macos-fallback.icns"),
             &resources.join("bootty.icns"),
         );
     }
+    let actool = actool.context("failed to locate actool")?;
     let partial = contents.join("assetcatalog-info.plist");
     let output = Command::new(actool)
         .arg(icon)

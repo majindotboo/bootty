@@ -348,8 +348,8 @@ impl GpuiChrome {
         )
     }
 
-    pub(crate) fn dock_codexbar(&self) -> Option<gpui_kit::AnyElement> {
-        sidebar::render_codexbar(self.snapshot.sidebar.as_ref()?, self.snapshot.palette)
+    pub(crate) fn dock_usage(&self) -> Option<gpui_kit::AnyElement> {
+        sidebar::render_usage(self.snapshot.sidebar.as_ref()?, self.snapshot.palette)
     }
 
     pub(crate) const fn dock_presentation(

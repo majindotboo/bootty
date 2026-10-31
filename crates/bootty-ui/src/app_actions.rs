@@ -481,9 +481,6 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::ToggleHiddenTabs => Keybind::App(AppAction::Dock(
             crate::commands::DockAction::ToggleHiddenTabs,
         )),
-        Binding::ShowCodexBar => {
-            Keybind::App(AppAction::Dock(crate::commands::DockAction::CodexBar))
-        }
         Binding::ToggleTabBar => {
             Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleTabBar))
         }

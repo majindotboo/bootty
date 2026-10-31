@@ -51,7 +51,7 @@ impl Default for SidebarConfig {
                 "progress".to_owned(),
             ],
             session_modules_configured: false,
-            modules: vec!["sessions".to_owned(), "codexbar".to_owned()],
+            modules: vec!["sessions".to_owned(), "usage".to_owned()],
         }
     }
 }

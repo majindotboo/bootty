@@ -280,7 +280,7 @@ impl Render for AgentsPanel {
                 )
             })
             .children(rows)
-            .children(self.chrome.read(cx).dock_codexbar())
+            .children(self.chrome.read(cx).dock_usage())
     }
 }
 

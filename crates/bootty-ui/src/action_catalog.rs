@@ -196,9 +196,6 @@ command_catalog! {
     ShowSidebar:
         "Show Sessions", "Open the Sessions panel",
         "show_sidebar", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ShowCodexBar:
-        "Show agent usage", "Show the quota footer in Sessions",
-        "show_codexbar", "chart-no-axes-column", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowSpaces:
         "Show Spaces", "Open the Space switcher in Sessions",
         "show_spaces", "layout-grid", Layout, shown, Write, ApplicationWindow, DockGroup;
