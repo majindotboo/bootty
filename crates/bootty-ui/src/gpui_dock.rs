@@ -1871,7 +1871,7 @@ impl WorkspaceDock {
             DockAction::Files => self.show_files(window, cx),
             DockAction::Changes => self.refresh(window, cx),
             DockAction::Diff => self.show_diff(window, cx),
-            DockAction::Agents | DockAction::CodexBar => self.show_agents(window, cx),
+            DockAction::Agents => self.show_agents(window, cx),
             DockAction::TogglePanel(_) => {
                 return bootty_control::CommandOutcome::Unavailable {
                     message: "The panel action could not be resolved.".into(),

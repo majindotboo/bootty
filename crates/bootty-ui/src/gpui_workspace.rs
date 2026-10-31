@@ -2464,7 +2464,7 @@ impl GpuiWorkspace {
                 .sidebar
                 .modules
                 .iter()
-                .any(|module| module == "codexbar");
+                .any(|module| module == "usage");
         self.launch
             .native_chrome
             .borrow_mut()
@@ -4132,7 +4132,7 @@ impl GpuiWorkspace {
                 .sidebar
                 .modules
                 .iter()
-                .any(|module| module == "codexbar");
+                .any(|module| module == "usage");
         self.launch
             .native_chrome
             .borrow_mut()

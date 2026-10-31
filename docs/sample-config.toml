@@ -139,7 +139,7 @@ auto-settle-after-days = 3
 # hover = "#1e222c"
 # border = "#313244" # edge border and footer separator
 # Overall sidebar modules remain separate from the pieces rendered for every session.
-# modules = ["sessions", "codexbar"]
+# modules = ["sessions", "usage"]
 # session-modules = ["diffs", "process", "agent", "directory", "branch", "ports", "progress"]
 
 [multiplexer]

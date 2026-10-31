@@ -57,7 +57,7 @@ impl Default for NativeChrome {
 }
 
 impl NativeChrome {
-    pub(crate) fn refresh(&mut self, now: std::time::Instant, usage_visible: bool) {
+    pub(crate) fn refresh(&mut self, now: std::time::Instant, _usage_visible: bool) {
         self.local_git.prune(now);
         self.remote_git.retain(|(_, cache, seen)| {
             let current = now.saturating_duration_since(*seen) < std::time::Duration::from_mins(5);
@@ -69,9 +69,6 @@ impl NativeChrome {
             current
         });
         self.metrics.refresh(now);
-        if usage_visible {
-            self.usage.refresh(now);
-        }
         self.clock = ClockSnapshot::now();
     }
 }
@@ -721,7 +718,7 @@ fn sidebar_snapshot(
         footer: if sidebar_config
             .modules
             .iter()
-            .any(|module| module == "codexbar")
+            .any(|module| module == "usage")
         {
             sidebar_footer(native, theme)
         } else {
@@ -1746,8 +1743,8 @@ fn sidebar_footer(
         && let Some(error) = error
     {
         rows.push(crate::gpui::chrome::SidebarFooterItem {
-            key: "codexbar:error".to_owned(),
-            text: format!("codexbar {error}"),
+            key: "usage:error".to_owned(),
+            text: format!("usage {error}"),
             icon: None,
             color: theme.muted,
             meter: None,

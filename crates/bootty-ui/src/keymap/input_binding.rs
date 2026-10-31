@@ -399,7 +399,6 @@ binding_actions! {
     TogglePanelFullView => "toggle_panel_full_view" [unit],
     ShowSpaces => "show_spaces" [unit],
     ToggleHiddenTabs => "toggle_hidden_tabs" [unit],
-    ShowCodexBar => "show_codexbar" [unit],
     ToggleTabBar => "toggle_tab_bar" [unit],
     EditTheme => "edit_theme" [unit],
     ExportTerminal => "export_terminal" [unit],

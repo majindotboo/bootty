@@ -194,7 +194,7 @@ pub(super) fn render(
         .track_scroll(scroll)
         .child(rows.render_content(width, docked).flex_none().min_h_full())
         .vertical_scrollbar(scroll);
-    let status_footer = render_codexbar(snapshot, colors);
+    let status_footer = render_usage(snapshot, colors);
 
     let resize_handle = resize_handle(position, cx);
 
@@ -3002,7 +3002,7 @@ pub(super) fn session_menu(
     .collect()
 }
 
-pub(super) fn render_codexbar(
+pub(super) fn render_usage(
     snapshot: &SidebarSnapshot,
     colors: ChromePalette,
 ) -> Option<gpui_kit::AnyElement> {
