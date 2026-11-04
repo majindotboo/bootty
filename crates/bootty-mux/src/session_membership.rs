@@ -7,7 +7,7 @@ fn label_group(label: &str) -> &str {
     label.split_once('/').map_or("", |(group, _)| group)
 }
 
-/// Durable presentation state for a running session.
+/// Durable state for a running session.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, from = "SavedSessionState")]
 pub struct SessionState {
@@ -16,6 +16,8 @@ pub struct SessionState {
     pub last_activity_at: Option<i64>,
     /// Launch directory and project assignment are separate facts.
     pub projectless: bool,
+    /// Native server process on which this session was last observed attached.
+    pub server_generation: Option<u64>,
 }
 
 /// Saved presentation state, accepting retired fields from older versions.
@@ -37,6 +39,7 @@ struct SavedSessionState {
     #[serde(rename = "auto_settle_disabled")]
     _auto_settle_disabled: Option<serde::de::IgnoredAny>,
     projectless: bool,
+    server_generation: Option<u64>,
 }
 
 impl From<SavedSessionState> for SessionState {
@@ -45,6 +48,7 @@ impl From<SavedSessionState> for SessionState {
             pinned: saved.pinned,
             last_activity_at: saved.last_activity_at,
             projectless: saved.projectless,
+            server_generation: saved.server_generation,
         }
     }
 }
@@ -169,6 +173,12 @@ impl SessionMembership {
         }
         backend_name.clone_into(&mut session.backend_name);
         true
+    }
+
+    pub(crate) fn observe_server_generation(&mut self, identity: &str, generation: Option<u64>) {
+        if let Some(session) = self.session_mut(identity) {
+            session.state.server_generation = generation;
+        }
     }
 
     /// Sets what bootty calls a session, and whether the user chose that name.

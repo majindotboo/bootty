@@ -221,7 +221,6 @@ pub struct BindingRuntime {
     pending_pane_focus: Option<binding_panes::PendingPaneFocus>,
     pub(super) saved_selected_session_identity: Option<String>,
     restored_sessions: HashMap<String, session_snapshots::RestoredSessionMapping>,
-    observed_sessions: (u64, HashSet<String>),
     terminal_facts: BindingTerminalFacts,
 }
 
@@ -330,7 +329,6 @@ impl BindingRuntime {
             pending_pane_focus: None,
             saved_selected_session_identity: None,
             restored_sessions: HashMap::new(),
-            observed_sessions: (0, HashSet::new()),
             terminal_facts: BindingTerminalFacts::default(),
         };
         if let Some(error) = remote_error {
@@ -447,7 +445,7 @@ impl BindingRuntime {
 
     /// Bring this Space's claims in line with what the backend reports.
     ///
-    /// Saved identities survive missing attachments and never adopt another terminal by name.
+    /// Missing sessions survive only when their hosting server is gone or unknown.
     fn reconcile_session_state(&self, candidate: &mut BindingStateCandidate) {
         let backend = self.mux.all_sessions();
         if !self.mux.has_session_snapshot() {
@@ -462,8 +460,8 @@ impl BindingRuntime {
                     session.tag.identity.as_deref() == Some(saved.identity.as_str())
                 });
                 !attached
-                    && ((self.observed_sessions.0 == self.mux.binding_generation()
-                        && self.observed_sessions.1.contains(&saved.identity))
+                    && ((saved.state.server_generation.is_some()
+                        && saved.state.server_generation == self.mux.server_generation())
                         || saved.terminal_snapshot.is_none())
             })
             .map(|saved| saved.identity.clone())
@@ -498,6 +496,9 @@ impl BindingRuntime {
                         .map_or_else(Default::default, |cwd| self.session_cwd(cwd)),
                 });
             }
+            candidate
+                .sessions
+                .observe_server_generation(identity, self.mux.server_generation());
             // The project belongs to the saved session, not the shell's current directory.
             if candidate
                 .sessions
@@ -512,15 +513,6 @@ impl BindingRuntime {
 
     fn publish_session_state(&mut self, candidate: BindingStateCandidate) {
         self.sessions = candidate.sessions;
-        if self.observed_sessions.0 != self.mux.binding_generation() {
-            self.observed_sessions = (self.mux.binding_generation(), HashSet::new());
-        }
-        self.observed_sessions.1.extend(
-            self.mux
-                .all_sessions()
-                .iter()
-                .filter_map(|session| session.tag.identity.clone()),
-        );
         let order = { self.sessions.backend_names() };
         self.mux.apply_session_order(&order);
     }
@@ -1408,8 +1400,8 @@ impl WorkspaceRuntime {
 
     /// Whether `session_id` can move from `from` into `to`.
     ///
-    /// Only within one multiplexer: a session cannot change servers, so a local Space and a remote
-    /// one are never reachable from each other.
+    /// Only local Spaces share a server workspace. Each remote Space has its own workspace,
+    /// even when both use the same SSH remote.
     pub fn session_move_is_possible(&self, from: SpaceId, to: SpaceId) -> bool {
         let Some(source) = self.binding(from) else {
             return false;
@@ -1417,7 +1409,8 @@ impl WorkspaceRuntime {
         {}
         self.space(to).is_some_and(|space| {
             space.binding.scope != from
-                && space.binding.multiplexer.remote == source.multiplexer.remote
+                && source.multiplexer.remote.is_none()
+                && space.binding.multiplexer.remote.is_none()
         })
     }
 

@@ -1334,3 +1334,189 @@ fn literal_native_pane_creation_preserves_captured_placement(
         }
     }
 }
+
+#[rstest]
+#[case::same_server(false)]
+#[case::replacement_server(true)]
+fn sessions_ended_while_app_is_closed_only_recover_on_a_replacement_server(
+    checkpoint: SavedTerminalSession,
+    #[case] replacement_server: bool,
+) -> anyhow::Result<()> {
+    use bootty_config::config::{AppearanceVariant, BoottyConfig};
+    use bootty_mux::workspace::WorkspaceRuntime;
+    let directory = TempDir::new()?;
+    let config = BoottyConfig {
+        config_path: directory.path().join("config.toml"),
+        ..BoottyConfig::default()
+    };
+    bootty_test_support::native_mux::topology(&config.config_path)?;
+    let (mut repository, snapshot) = WorkspaceRepository::open(&config.config_path)?;
+    let space = &snapshot.spaces()[0];
+    let scope = space.id();
+    repository.commit_binding_state(
+        scope,
+        &SessionMembership::from_sessions(vec![WorkspaceSession {
+            identity: "logical".into(),
+            backend_name: "original".into(),
+            display_name: "Purpose".into(),
+            explicit: true,
+            cwd: directory.path().to_string_lossy().into_owned(),
+            state: SessionState::default(),
+            terminal_snapshot: Some(Arc::new(checkpoint)),
+        }]),
+    )?;
+    let backend = NativeBackend::for_workspace(&config.config_path);
+    backend.execute(MuxCommand::CreateProjectSession {
+        session_id: "original".into(),
+        cwd: directory.path().to_string_lossy().into_owned(),
+        tag: MuxSessionTag {
+            identity: Some("logical".into()),
+            space: Some(space.remote_id().into()),
+        },
+        argv: None,
+    })?;
+    let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
+    let mut app = WorkspaceRuntime::open(
+        &config,
+        "main",
+        AppearanceVariant::Light,
+        Arc::clone(&repaint),
+    )?;
+    app.binding_mut(scope).unwrap().mux_mut().refresh_sessions(
+        &repaint,
+        &config.multiplexer,
+        std::time::Duration::ZERO,
+    );
+    app.reconcile_binding_states()?;
+    drop(app);
+    let session = backend.snapshot()?.sessions[0].id.clone();
+    backend.execute(MuxCommand::DitchSession {
+        session_id: session,
+    })?;
+    let replacement = TempDir::new()?;
+    let reopened_config = if replacement_server {
+        std::fs::copy(
+            directory.path().join("session-order.sqlite3"),
+            replacement.path().join("session-order.sqlite3"),
+        )?;
+        BoottyConfig {
+            config_path: replacement.path().join("config.toml"),
+            ..BoottyConfig::default()
+        }
+    } else {
+        config
+    };
+    bootty_test_support::native_mux::topology(&reopened_config.config_path)?;
+    let mut reopened = WorkspaceRuntime::open(
+        &reopened_config,
+        "main",
+        AppearanceVariant::Light,
+        Arc::clone(&repaint),
+    )?;
+    reopened
+        .binding_mut(scope)
+        .unwrap()
+        .mux_mut()
+        .refresh_sessions(
+            &repaint,
+            &reopened_config.multiplexer,
+            std::time::Duration::ZERO,
+        );
+    reopened.reconcile_binding_states()?;
+    anyhow::ensure!(
+        reopened
+            .binding(scope)
+            .unwrap()
+            .sessions()
+            .contains("logical")
+            == replacement_server,
+        "membership must follow server continuity"
+    );
+    if replacement_server {
+        restore_saved_topology(&mut reopened, scope)?;
+    } else {
+        anyhow::ensure!(
+            reopened.begin_session_reopen(scope, "logical").is_err(),
+            "ended session must not restore"
+        );
+    }
+    anyhow::ensure!(
+        NativeBackend::for_workspace(&reopened_config.config_path)
+            .snapshot()?
+            .sessions
+            .len()
+            == usize::from(replacement_server),
+        "only a replacement server restores the checkpoint"
+    );
+    Ok(())
+}
+
+#[rstest]
+fn session_moves_require_two_local_spaces() -> anyhow::Result<()> {
+    use bootty_config::config::{AppearanceVariant, BoottyConfig, SshRemoteConfig};
+    use bootty_mux::repository::{SpaceMuxOverride, SpaceRemoteOverride};
+    let directory = TempDir::new()?;
+    let config = BoottyConfig {
+        config_path: directory.path().join("config.toml"),
+        ..BoottyConfig::default()
+    };
+    bootty_test_support::native_mux::topology(&config.config_path)?;
+    let (mut repository, snapshot) = WorkspaceRepository::open(&config.config_path)?;
+    let local = snapshot.spaces()[0].id();
+    let remote = SpaceRemoteOverride::Inline(
+        SshRemoteConfig {
+            host: "must-not-connect.invalid".into(),
+            user: None,
+            port: None,
+            program: "must-not-run-ssh".into(),
+            args: vec![],
+        }
+        .into(),
+    );
+    let mut ids = Vec::new();
+    for (name, remote) in [
+        ("local", SpaceRemoteOverride::Local),
+        ("remote-a", remote.clone()),
+        ("remote-b", remote),
+    ] {
+        ids.push(
+            repository
+                .create_space(
+                    name,
+                    "terminal",
+                    [1, 2, 3],
+                    false,
+                    SpaceMuxOverride { remote },
+                )?
+                .unwrap()
+                .id(),
+        );
+    }
+    let workspace = bootty_mux::workspace::WorkspaceRuntime::open(
+        &config,
+        "main",
+        AppearanceVariant::Light,
+        Arc::new(|| {}),
+    )?;
+    anyhow::ensure!(
+        workspace.session_move_is_possible(local, ids[0]),
+        "moves require distinct local Spaces"
+    );
+    anyhow::ensure!(
+        !workspace.session_move_is_possible(local, local),
+        "moves require distinct local Spaces"
+    );
+    anyhow::ensure!(
+        !workspace.session_move_is_possible(local, ids[1]),
+        "moves require distinct local Spaces"
+    );
+    anyhow::ensure!(
+        !workspace.session_move_is_possible(ids[1], local),
+        "moves require distinct local Spaces"
+    );
+    anyhow::ensure!(
+        !workspace.session_move_is_possible(ids[1], ids[2]),
+        "moves require distinct local Spaces"
+    );
+    Ok(())
+}
