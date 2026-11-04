@@ -371,7 +371,8 @@ fn live_workspace() -> anyhow::Result<(
             identity: Some(saved.identity),
             space: Some(space.remote_id().to_owned()),
         },
-        argv: None,
+        // A plain sh never retitles its window, so snapshots stay comparable across hosts.
+        argv: Some(vec!["/bin/sh".into()]),
     })?;
     let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
 

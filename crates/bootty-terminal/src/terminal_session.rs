@@ -505,14 +505,14 @@ impl TerminalSession {
         repaint_wakeup: RepaintWakeup,
         clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     ) -> Result<Self> {
-        let size = physical_pty_size(geometry, render_cell, display_scale);
-        let transport = TerminalTransport::launch(size, &config.launch)?;
+        // Reject unsafe history before any process runs.
         let restored_history = config
             .restored_history
             .as_deref()
             .map(crate::terminal_history::styled_history_bytes)
             .transpose()?;
         let pty_size = physical_pty_size(geometry, render_cell, display_scale);
+        let transport = TerminalTransport::launch(pty_size, &config.launch)?;
         let TerminalTransport {
             mut reader,
             writer,
