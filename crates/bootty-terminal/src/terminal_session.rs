@@ -1209,7 +1209,7 @@ impl TerminalWorker {
         self.trace_event("worker_stop", &[]);
     }
 
-    fn should_stop(&self) -> bool {
+    const fn should_stop(&self) -> bool {
         self.command_disconnected && self.pty_disconnected && self.pending_pty.is_empty()
     }
 

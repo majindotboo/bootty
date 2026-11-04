@@ -37,7 +37,7 @@ fn run() -> Result<ExitCode> {
             };
             bootty_host::file_reader::serve(
                 request,
-                std::io::BufReader::new(std::io::stdin().lock()),
+                std::io::stdin().lock(),
                 std::io::stdout().lock(),
             )?;
             Ok(ExitCode::SUCCESS)
@@ -46,11 +46,7 @@ fn run() -> Result<ExitCode> {
             let [request] = arguments else {
                 bail!("media requires one descriptor");
             };
-            bootty_host::media::serve(
-                request,
-                std::io::BufReader::new(std::io::stdin().lock()),
-                std::io::stdout().lock(),
-            )?;
+            bootty_host::media::serve(request, std::io::stdin().lock(), std::io::stdout().lock())?;
             Ok(ExitCode::SUCCESS)
         }
         "transfer" => {

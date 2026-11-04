@@ -370,7 +370,7 @@ pub fn serve_transfer(payload: &str) -> Result<()> {
         "Transfer request exceeds its bound"
     );
     let request: WireRequest = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
-    let mut input = BufReader::new(std::io::stdin().lock());
+    let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     match request {
         WireRequest::Upload { path, bytes } => {

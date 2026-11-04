@@ -69,7 +69,7 @@ impl OutputQueue {
     pub const fn len(&self) -> usize {
         self.data.len().saturating_add(self.queued_bytes)
     }
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.data.is_empty() && self.events.is_empty()
     }
     pub fn push_back(&mut self, event: TerminalOutput) {

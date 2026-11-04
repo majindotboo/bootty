@@ -288,11 +288,10 @@ pub(super) fn render_theme_preview(
         override_color(&["sidebar", "foreground"], cx.theme().sidebar_foreground);
     let selected = override_color(&["sidebar", "selected"], cx.theme().sidebar_accent);
     let hovered = override_color(&["sidebar", "hover"], cx.theme().list_hover);
-    let terminal_background = colors.background.map_or(cx.theme().background, color);
-    let terminal_foreground = colors.foreground.map_or(cx.theme().foreground, color);
-    let selection = colors
-        .selection_background
-        .map_or(cx.theme().selection, color);
+    let theme = cx.theme();
+    let terminal_background = colors.background.map_or(theme.background, color);
+    let terminal_foreground = colors.foreground.map_or(theme.foreground, color);
+    let selection = colors.selection_background.map_or(theme.selection, color);
     let mut palette = div().flex().flex_wrap().gap_1();
     for (index, value) in colors.palette.iter().take(16).enumerate() {
         palette = palette.child(

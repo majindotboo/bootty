@@ -315,7 +315,7 @@ fn new_window_cwd(
         && binding
             .mux()
             .selected_window()
-            .map_or_else(|| session.active_window_id.as_deref(), Some)
+            .map_or(session.active_window_id.as_deref(), Some)
             == window.map(|window| window.id.as_str());
     let live = selected
         .then(|| {

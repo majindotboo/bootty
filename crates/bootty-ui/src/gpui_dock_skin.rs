@@ -150,7 +150,7 @@ impl DockAreaRenderer for WorkspaceDockSkin {
         let color = if handle.is_active() {
             cx.theme().primary
         } else {
-            color.unwrap_or(cx.theme().border)
+            color.unwrap_or_else(|| cx.theme().border)
         };
         Some(
             div()

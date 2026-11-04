@@ -1314,14 +1314,11 @@ fn unreadable_config_paths_are_not_treated_as_missing(#[case] include: Option<&s
     let directory = assert_fs::TempDir::new().unwrap();
     let cycle = directory.path().join("cycle.toml");
     std::os::unix::fs::symlink("cycle.toml", &cycle).unwrap();
-    let path = include.map_or_else(
-        || cycle,
-        |include| {
-            let path = directory.path().join("config.toml");
-            std::fs::write(&path, format!("include = [\"{include}\"]\n")).unwrap();
-            path
-        },
-    );
+    let path = include.map_or(cycle, |include| {
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, format!("include = [\"{include}\"]\n")).unwrap();
+        path
+    });
     let error =
         load_config_from_path(&path).expect_err("unreadable config must not become defaults");
     assert!(error.to_string().contains("cycle.toml"));

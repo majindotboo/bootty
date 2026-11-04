@@ -1,5 +1,6 @@
 [tools]
-rust = { version = "nightly", profile = "minimal", components = ["rustfmt", "clippy", "rust-analyzer"] }
+# Pin the nightly so new lints land with a deliberate bump, not on CI by surprise.
+rust = { version = "nightly-2026-11-04", profile = "minimal", components = ["rustfmt", "clippy", "rust-analyzer"] }
 # The pinned official Ghostty source needs Zig 0.17 for native Windows builds.
 zig = "0.17.0"
 # Prebuilt releases: compiling these would run before the Kache wrapper exists.
