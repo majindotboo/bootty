@@ -3,16 +3,15 @@
 mod new_session;
 pub use new_session::{NewSessionDialog, NewSessionPickerEvent};
 
-use bootty_mux::RemoteSpaceSummary;
 use gpui_kit::component::Colorize as _;
 
 use std::collections::HashMap;
 
 use crate::{
     gpui::{
-        DialogAction, DialogIntent, DialogPayload, DialogRole, DialogRow, DialogSpec,
-        OptionalSpaceEditorChoice, RemoteSpaceSnapshot, RowId, SpaceEditorChoice,
-        SpaceEditorColors, SpaceEditorIcon, SpaceEditorIntent, SpaceEditorSnapshot,
+        DialogAction, DialogIntent, DialogPayload, DialogRole, DialogRow, DialogSpec, RowId,
+        SpaceEditorChoice, SpaceEditorColors, SpaceEditorIcon, SpaceEditorIntent,
+        SpaceEditorSnapshot,
     },
     product_dialogs::{
         keybind_help::KeybindHelpModel,
@@ -23,17 +22,11 @@ use crate::{
         },
     },
 };
-use bootty_config::config::{
-    AppearanceMode, MultiplexerBackendConfig, RemoteConfig, SshProfileConfig,
-};
+use bootty_config::config::{AppearanceMode, SshProfileConfig};
+use bootty_mux::controller::SpaceId;
 use bootty_mux::repository::{RemoteSpaceRef, SpaceMuxOverride, SpaceRemoteOverride};
-use bootty_mux::{RepaintHandle, controller::SpaceId};
 
-use crate::{
-    action_catalog::Command,
-    commands::CommandRegistry,
-    remote_catalog::{RemoteCatalogResult, RemoteCatalogTask},
-};
+use crate::{action_catalog::Command, commands::CommandRegistry};
 use bootty_mux::workspace::{BindingSessionGroup, ScopedSessionTarget};
 
 pub const COMMAND_PALETTE_ID: &str = "command-palette";
@@ -161,10 +154,6 @@ pub enum RenameSessionEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RenameTabEvent {
     Close,
-    RenameNative {
-        target: bootty_control::CommandTarget,
-        name: String,
-    },
     Rename {
         session_id: String,
         window_id: String,
@@ -196,7 +185,7 @@ pub struct SpaceDraft {
     pub icon: String,
     pub color: [u8; 3],
     pub tint_sidebar: bool,
-    pub backend: Option<MultiplexerBackendConfig>,
+
     pub remote_source: SpaceRemoteOverride,
 }
 
@@ -206,24 +195,9 @@ pub enum SpaceEditorEvent {
     Save(SpaceDraft),
 }
 
-#[derive(Default)]
-enum RemoteCatalogState {
-    #[default]
-    Idle,
-    Running(RemoteCatalogTask),
-    Ready(Vec<RemoteSpaceSummary>, Option<String>),
-    Failed(String),
-}
-
 pub struct SpaceEditorDialog {
-    distributions: Vec<bootty_config::config::WslDistribution>,
-    wsl_discovery: Option<crate::remote_catalog::WslDiscoveryTask>,
-    wsl_error: Option<String>,
     draft: SpaceDraft,
     profiles: Vec<(String, SshProfileConfig)>,
-    catalog: RemoteCatalogState,
-    new_remote_space_name: String,
-    new_remote_space_backend: MultiplexerBackendConfig,
     icon_search: String,
 }
 
@@ -267,16 +241,10 @@ impl SpaceEditorDialog {
                 icon,
                 color,
                 tint_sidebar,
-                backend: mux.backend,
+
                 remote_source: mux.remote,
             },
             profiles: Vec::new(),
-            distributions: Vec::new(),
-            wsl_discovery: None,
-            wsl_error: None,
-            catalog: RemoteCatalogState::Idle,
-            new_remote_space_name: String::new(),
-            new_remote_space_backend: MultiplexerBackendConfig::Tmux,
             icon_search: String::new(),
         }
     }
@@ -287,59 +255,7 @@ impl SpaceEditorDialog {
         profiles: impl Iterator<Item = (String, SshProfileConfig)>,
     ) -> Self {
         self.profiles = profiles.collect();
-        if let Some(profile) = self.selected_profile_id() {
-            self.start_catalog(&profile, None);
-        }
         self
-    }
-
-    #[must_use]
-    pub fn with_distributions(
-        mut self,
-        distributions: Vec<bootty_config::config::WslDistribution>,
-    ) -> Self {
-        self.distributions = distributions;
-        self
-    }
-
-    pub(crate) fn discover_wsl(mut self, repaint: RepaintHandle) -> Self {
-        if cfg!(windows) {
-            self.wsl_discovery = Some(crate::remote_catalog::WslDiscoveryTask::start(repaint));
-        }
-        self
-    }
-
-    const fn is_wsl(&self) -> bool {
-        matches!(
-            self.draft.remote_source,
-            SpaceRemoteOverride::Inline(RemoteConfig::Wsl(_))
-        )
-    }
-
-    pub fn poll(&mut self) {
-        if let Some(result) = self
-            .wsl_discovery
-            .as_ref()
-            .and_then(crate::remote_catalog::WslDiscoveryTask::try_recv)
-        {
-            match result {
-                Ok(distributions) => self.distributions = distributions,
-                Err(error) => self.wsl_error = Some(error),
-            }
-            self.wsl_discovery = None;
-        }
-
-        let RemoteCatalogState::Running(task) = &self.catalog else {
-            return;
-        };
-        let Some(result) = task.try_recv() else {
-            return;
-        };
-        let profile_id = task.profile_id.clone();
-        match result {
-            Ok(result) => self.accept_catalog_result(&profile_id, result),
-            Err(error) => self.catalog = RemoteCatalogState::Failed(error),
-        }
     }
 
     #[must_use]
@@ -368,26 +284,12 @@ impl SpaceEditorDialog {
                 .collect(),
             color: self.draft.color,
             tint_sidebar: self.draft.tint_sidebar,
-            backends: backend_choices(self.draft.backend)
-                .into_iter()
-                .filter(|choice| {
-                    !self.is_wsl() || matches!(choice.id.as_deref(), Some("rmux" | "tmux"))
-                })
-                .collect(),
-            backend_enabled: !matches!(self.draft.remote_source, SpaceRemoteOverride::Profile(_)),
+
             locations: self.location_choices(),
-            location_notice: if self.is_wsl() {
-                Some("Linux files and processes stay in the selected WSL distribution. Choose rmux or tmux.".to_owned())
-            } else if matches!(self.draft.remote_source, SpaceRemoteOverride::Inline(_)) {
-                Some(
-                    "Legacy inline SSH settings are preserved. Select an SSH profile to migrate."
-                        .to_owned(),
-                )
-            } else {
-                self.wsl_error.clone()
-            },
-            remote: self.remote_snapshot(),
-            can_save: normalized_name.is_some() && self.remote_ready(),
+            location_notice: matches!(self.draft.remote_source, SpaceRemoteOverride::Inline(_))
+                .then(|| "Legacy inline remote settings are preserved.".to_owned()),
+            remote_error: None,
+            can_save: normalized_name.is_some(),
             colors: SpaceEditorColors::default(),
         }
     }
@@ -399,55 +301,15 @@ impl SpaceEditorDialog {
             SpaceEditorIntent::SelectIcon(icon) => self.draft.icon = icon,
             SpaceEditorIntent::SetColor(color) => self.draft.color = color,
             SpaceEditorIntent::SetTintSidebar(tint) => self.draft.tint_sidebar = tint,
-            SpaceEditorIntent::SelectBackend(backend) => {
-                let backend = backend.as_deref().and_then(parse_backend);
-                if !self.is_wsl()
-                    || matches!(
-                        backend,
-                        Some(MultiplexerBackendConfig::Rmux | MultiplexerBackendConfig::Tmux)
-                    )
-                {
-                    self.draft.backend = backend;
-                }
-            }
             SpaceEditorIntent::SelectLocation(location) => self.select_location(&location),
-            SpaceEditorIntent::SelectRemoteSpace(id) => self.select_remote_space(&id),
-            SpaceEditorIntent::RetryRemoteSpaces => {
-                if let Some(profile) = self.selected_profile_id() {
-                    self.start_catalog(&profile, None);
-                }
-            }
-            SpaceEditorIntent::SetNewRemoteSpaceName(name) => {
-                self.new_remote_space_name = name;
-            }
-            SpaceEditorIntent::SelectNewRemoteSpaceBackend(backend) => {
-                if let Some(backend) = parse_backend(&backend) {
-                    self.new_remote_space_backend = backend;
-                }
-            }
-            SpaceEditorIntent::CreateRemoteSpace { name, backend } => {
-                if let (Some(profile), Some(backend)) =
-                    (self.selected_profile_id(), parse_backend(&backend))
-                {
-                    self.start_catalog(&profile, Some((name, backend)));
-                }
-            }
-            SpaceEditorIntent::Save if self.remote_ready() => {
+            SpaceEditorIntent::Save => {
                 let name = normalized_name(&self.draft.name)?;
                 self.draft.name = name;
                 return Some(SpaceEditorEvent::Save(self.draft.clone()));
             }
             SpaceEditorIntent::Close => return Some(SpaceEditorEvent::Close),
-            SpaceEditorIntent::Save => {}
         }
         None
-    }
-
-    fn selected_profile_id(&self) -> Option<String> {
-        match &self.draft.remote_source {
-            SpaceRemoteOverride::Profile(remote) => Some(remote.profile_id.clone()),
-            _ => None,
-        }
     }
 
     fn location_choices(&self) -> Vec<SpaceEditorChoice> {
@@ -477,19 +339,6 @@ impl SpaceEditorDialog {
             ),
             enabled: true,
         }));
-        let mut distributions = self.distributions.clone();
-        if let SpaceRemoteOverride::Inline(RemoteConfig::Wsl(remote)) = &self.draft.remote_source
-            && !distributions.contains(&remote.distribution)
-        {
-            distributions.push(remote.distribution.clone());
-        }
-        choices.extend(distributions.into_iter().map(|distribution| SpaceEditorChoice {
-            id: format!("wsl:{}", distribution.as_str()),
-            label: format!("WSL: {}", distribution.as_str()),
-            detail: Some("Linux distribution".to_owned()),
-            selected: matches!(&self.draft.remote_source, SpaceRemoteOverride::Inline(RemoteConfig::Wsl(remote)) if remote.distribution == distribution),
-            enabled: true,
-        }));
         choices
     }
 
@@ -497,21 +346,6 @@ impl SpaceEditorDialog {
         self.draft.remote_source = match location {
             "inherit" => SpaceRemoteOverride::Inherit,
             "local" => SpaceRemoteOverride::Local,
-            location if let Some(distribution) = location.strip_prefix("wsl:") => {
-                let Ok(distribution) = bootty_config::config::WslDistribution::new(distribution)
-                else {
-                    return;
-                };
-                if !matches!(
-                    self.draft.backend,
-                    Some(MultiplexerBackendConfig::Rmux | MultiplexerBackendConfig::Tmux)
-                ) {
-                    self.draft.backend = Some(MultiplexerBackendConfig::Rmux);
-                }
-                SpaceRemoteOverride::Inline(RemoteConfig::Wsl(
-                    bootty_config::config::WslRemoteConfig { distribution },
-                ))
-            }
             location => {
                 let Some(profile_id) = location.strip_prefix("profile:") else {
                     return;
@@ -520,147 +354,9 @@ impl SpaceEditorDialog {
                     profile_id: profile_id.to_owned(),
                     remote_space_id: String::new(),
                     remote_space_name: String::new(),
-                    backend: MultiplexerBackendConfig::Tmux,
                 })
             }
         };
-        self.catalog = RemoteCatalogState::Idle;
-        if let Some(profile) = self.selected_profile_id() {
-            self.start_catalog(&profile, None);
-        }
-    }
-
-    fn select_remote_space(&mut self, id: &str) {
-        let RemoteCatalogState::Ready(spaces, _) = &self.catalog else {
-            return;
-        };
-        let Some(space) = spaces.iter().find(|space| space.id == id) else {
-            return;
-        };
-        let Some(profile_id) = self.selected_profile_id() else {
-            return;
-        };
-        self.draft.backend = Some(space.backend);
-        self.draft.remote_source = SpaceRemoteOverride::Profile(RemoteSpaceRef {
-            profile_id,
-            remote_space_id: space.id.clone(),
-            remote_space_name: space.name.clone(),
-            backend: space.backend,
-        });
-    }
-
-    fn remote_snapshot(&self) -> RemoteSpaceSnapshot {
-        if self.selected_profile_id().is_none() {
-            return RemoteSpaceSnapshot::Hidden;
-        }
-        match &self.catalog {
-            RemoteCatalogState::Idle | RemoteCatalogState::Running(_) => {
-                RemoteSpaceSnapshot::Loading
-            }
-            RemoteCatalogState::Failed(message) => RemoteSpaceSnapshot::Failed {
-                message: message.clone(),
-            },
-            RemoteCatalogState::Ready(spaces, warning) => RemoteSpaceSnapshot::Ready {
-                spaces: spaces
-                    .iter()
-                    .map(|space| SpaceEditorChoice {
-                        id: space.id.clone(),
-                        label: space.name.clone(),
-                        detail: Some(backend_label(Some(space.backend)).to_owned()),
-                        selected: matches!(
-                            &self.draft.remote_source,
-                            SpaceRemoteOverride::Profile(remote)
-                                if remote.remote_space_id == space.id
-                        ),
-                        enabled: true,
-                    })
-                    .collect(),
-                warning: warning.clone(),
-                new_name: self.new_remote_space_name.clone(),
-                create_backends: [
-                    MultiplexerBackendConfig::Rmux,
-                    MultiplexerBackendConfig::Tmux,
-                ]
-                .into_iter()
-                .map(|backend| SpaceEditorChoice {
-                    id: backend_id(backend).to_owned(),
-                    label: backend_label(Some(backend)).to_owned(),
-                    detail: None,
-                    selected: backend == self.new_remote_space_backend,
-                    enabled: true,
-                })
-                .collect(),
-                can_create: !self.new_remote_space_name.trim().is_empty(),
-            },
-        }
-    }
-
-    const fn remote_ready(&self) -> bool {
-        if self.is_wsl() {
-            return matches!(
-                self.draft.backend,
-                Some(MultiplexerBackendConfig::Rmux | MultiplexerBackendConfig::Tmux)
-            );
-        }
-
-        !matches!(
-            &self.draft.remote_source,
-            SpaceRemoteOverride::Profile(remote) if remote.remote_space_id.is_empty()
-        )
-    }
-
-    fn start_catalog(
-        &mut self,
-        profile_id: &str,
-        create: Option<(String, MultiplexerBackendConfig)>,
-    ) {
-        let Some(profile) = self
-            .profiles
-            .iter()
-            .find(|(id, _)| id == profile_id)
-            .map(|(_, profile)| profile.clone())
-        else {
-            self.catalog =
-                RemoteCatalogState::Failed(format!("SSH profile '{profile_id}' is unavailable"));
-            return;
-        };
-        self.catalog = match RemoteCatalogTask::start(profile_id.to_owned(), profile, create) {
-            Ok(task) => RemoteCatalogState::Running(task),
-            Err(error) => RemoteCatalogState::Failed(error),
-        };
-    }
-
-    fn accept_catalog_result(&mut self, profile_id: &str, result: RemoteCatalogResult) {
-        if self.selected_profile_id().as_deref() != Some(profile_id) {
-            self.catalog = RemoteCatalogState::Idle;
-            return;
-        }
-        let (spaces, warning) = match result {
-            RemoteCatalogResult::Listed(spaces) => (spaces, None),
-            RemoteCatalogResult::Created {
-                selected,
-                refreshed,
-            } => {
-                self.draft.backend = Some(selected.backend);
-                self.draft.remote_source = SpaceRemoteOverride::Profile(RemoteSpaceRef {
-                    profile_id: profile_id.to_owned(),
-                    remote_space_id: selected.id.clone(),
-                    remote_space_name: selected.name.clone(),
-                    backend: selected.backend,
-                });
-                self.new_remote_space_name.clear();
-                match refreshed {
-                    Ok(spaces) => (spaces, None),
-                    Err(error) => (
-                        vec![selected],
-                        Some(format!(
-                            "Remote Space was created, but refresh failed: {error}"
-                        )),
-                    ),
-                }
-            }
-        };
-        self.catalog = RemoteCatalogState::Ready(spaces, warning);
     }
 }
 
@@ -709,16 +405,7 @@ impl PaletteCommand {
         match self {
             Self::Core(command) => command.icon(),
             Self::Catalog(command) if command.id == "ui.sidebar.toggle_grouping" => "list",
-            Self::Catalog(command) => match command
-                .id
-                .strip_prefix("agents.")
-                .and_then(|id| id.split_once('.').map(|(provider, _)| provider))
-            {
-                Some("codex") => bootty_agents::AgentKind::Codex.icon(),
-                Some("claude") => bootty_agents::AgentKind::Claude.icon(),
-                Some("pi") => bootty_agents::AgentKind::Pi.icon(),
-                _ => "bot",
-            },
+            Self::Catalog(_) => "terminal",
         }
     }
 
@@ -1288,34 +975,17 @@ impl RenameSessionDialog {
 }
 
 pub struct RenameTabDialog {
-    destination: RenameTabDestination,
+    session_id: String,
+    window_id: String,
     name: String,
-}
-
-enum RenameTabDestination {
-    Mux {
-        session_id: String,
-        window_id: String,
-    },
-    Native(bootty_control::CommandTarget),
 }
 
 impl RenameTabDialog {
     #[must_use]
     pub const fn open(session_id: String, window_id: String, name: String) -> Self {
         Self {
-            destination: RenameTabDestination::Mux {
-                session_id,
-                window_id,
-            },
-            name,
-        }
-    }
-
-    #[must_use]
-    pub const fn open_native(target: bootty_control::CommandTarget, name: String) -> Self {
-        Self {
-            destination: RenameTabDestination::Native(target),
+            session_id,
+            window_id,
             name,
         }
     }
@@ -1330,11 +1000,7 @@ impl RenameTabDialog {
             DialogAction::new("submit"),
         );
         spec.icon = Some("square-pen".to_owned());
-        if matches!(self.destination, RenameTabDestination::Mux { .. }) {
-            spec.footer = Some("Clear the field to follow terminal title codes again".to_owned());
-        } else if let Some(row) = spec.rows.first_mut() {
-            row.enabled = !self.name.trim().is_empty();
-        }
+        spec.footer = Some("Clear the field to follow terminal title codes again".to_owned());
         spec
     }
 
@@ -1348,20 +1014,10 @@ impl RenameTabDialog {
                 self.name.clone_from(value);
                 None
             }
-            DialogIntent::Activate { .. } => Some(match &self.destination {
-                RenameTabDestination::Mux {
-                    session_id,
-                    window_id,
-                } => RenameTabEvent::Rename {
-                    session_id: session_id.clone(),
-                    window_id: window_id.clone(),
-                    name: self.name.trim().to_owned(),
-                },
-                RenameTabDestination::Native(_) if self.name.trim().is_empty() => return None,
-                RenameTabDestination::Native(target) => RenameTabEvent::RenameNative {
-                    target: target.clone(),
-                    name: self.name.trim().to_owned(),
-                },
+            DialogIntent::Activate { .. } => Some(RenameTabEvent::Rename {
+                session_id: self.session_id.clone(),
+                window_id: self.window_id.clone(),
+                name: self.name.trim().to_owned(),
             }),
             _ => None,
         }
@@ -1540,56 +1196,6 @@ fn classify_theme(name: &str) -> ThemeKind {
         ThemeKind::Light
     } else {
         ThemeKind::Dark
-    }
-}
-
-fn backend_choices(selected: Option<MultiplexerBackendConfig>) -> Vec<OptionalSpaceEditorChoice> {
-    std::iter::once((None, "Inherit"))
-        .chain(
-            [
-                MultiplexerBackendConfig::Herdr,
-                MultiplexerBackendConfig::Native,
-                MultiplexerBackendConfig::Rmux,
-                MultiplexerBackendConfig::Tmux,
-            ]
-            .into_iter()
-            .map(|backend| (Some(backend), backend_label(Some(backend)))),
-        )
-        .map(|(backend, label)| OptionalSpaceEditorChoice {
-            id: backend.map(|backend| backend_id(backend).to_owned()),
-            label: label.to_owned(),
-            selected: selected == backend,
-            enabled: true,
-        })
-        .collect()
-}
-
-const fn backend_id(backend: MultiplexerBackendConfig) -> &'static str {
-    match backend {
-        MultiplexerBackendConfig::Herdr => "herdr",
-        MultiplexerBackendConfig::Native => "native",
-        MultiplexerBackendConfig::Rmux => "rmux",
-        MultiplexerBackendConfig::Tmux => "tmux",
-    }
-}
-
-fn parse_backend(backend: &str) -> Option<MultiplexerBackendConfig> {
-    match backend {
-        "herdr" => Some(MultiplexerBackendConfig::Herdr),
-        "native" => Some(MultiplexerBackendConfig::Native),
-        "rmux" => Some(MultiplexerBackendConfig::Rmux),
-        "tmux" => Some(MultiplexerBackendConfig::Tmux),
-        _ => None,
-    }
-}
-
-const fn backend_label(backend: Option<MultiplexerBackendConfig>) -> &'static str {
-    match backend {
-        None => "Inherit",
-        Some(MultiplexerBackendConfig::Herdr) => "Herdr",
-        Some(MultiplexerBackendConfig::Native) => "Native",
-        Some(MultiplexerBackendConfig::Rmux) => "Rmux",
-        Some(MultiplexerBackendConfig::Tmux) => "Tmux",
     }
 }
 

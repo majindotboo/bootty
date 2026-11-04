@@ -1,6 +1,5 @@
 //! Workspace header composition over Kit's Dock appearance and behavior.
 
-use crate::gpui::RowLabel as _;
 use std::{
     cell::{Cell, RefCell},
     rc::Rc,
@@ -8,21 +7,18 @@ use std::{
     time::Instant,
 };
 
-use gpui_kit::base::Tab;
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Selectable as _, Sizable as _,
-    button::{Button, ButtonCustomVariant, ButtonVariants as _},
+    ActiveTheme as _, Disableable as _, IconName, Selectable as _,
+    button::{Button, ButtonVariants as _},
     dock::{
         BasePanelView, DockArea, DockAreaRenderer, DockContext, DockEvent, DockPlacement, DockSkin,
-        DragPanel, DropIndicator, NodeId, PanelHandle, PanelState, TabGroupContext,
-        TabGroupRenderer,
+        DragPanel, DropIndicator, NodeId, PanelState, TabGroupContext, TabGroupRenderer,
     },
-    menu::{DropdownMenu as _, PopupMenuItem},
 };
 use gpui_kit::{
-    AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, FocusHandle, IntoElement,
-    ParentElement, Pixels, Render, SharedString, Stateful, Styled, WeakEntity, Window,
-    WindowControlArea, canvas, deferred, div, prelude::*, px,
+    AnyElement, App, AsKeystroke as _, Axis, Context, Div, Entity, IntoElement, ParentElement,
+    Pixels, Render, Stateful, Styled, WeakEntity, Window, WindowControlArea, canvas, deferred, div,
+    prelude::*, px,
 };
 
 use crate::{
@@ -140,6 +136,36 @@ impl DockAreaRenderer for WorkspaceDockSkin {
             })
     }
 
+    fn render_split_handle(
+        &self,
+        handle: &gpui_kit::base::ResizeHandleContext,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<AnyElement> {
+        let _ = window;
+        let (width, color) = self
+            .owner
+            .upgrade()
+            .map_or((1., None), |owner| owner.read(cx).pane_divider);
+        let color = if handle.is_active() {
+            cx.theme().primary
+        } else {
+            color.unwrap_or_else(|| cx.theme().border)
+        };
+        Some(
+            div()
+                .flex_none()
+                .bg(color)
+                .when(handle.axis() == Axis::Horizontal, |line| {
+                    line.w(px(width)).h_full()
+                })
+                .when(handle.axis() == Axis::Vertical, |line| {
+                    line.h(px(width)).w_full()
+                })
+                .into_any_element(),
+        )
+    }
+
     fn split_frame(
         &self,
         node: NodeId,
@@ -228,8 +254,6 @@ impl DockAreaRenderer for WorkspaceDockSkin {
     fn tab_group_renderer(&self) -> Rc<dyn TabGroupRenderer> {
         Rc::new(WorkspaceTabGroup {
             kit: self.kit.tab_group_renderer(),
-            area: self.area.clone(),
-            owner: self.owner.clone(),
             chrome: self.chrome.clone(),
         })
     }
@@ -302,8 +326,6 @@ fn dock_resize_handle(dock: &DockContext, cx: &App) -> Stateful<Div> {
 #[derive(Clone)]
 struct WorkspaceTabGroup {
     kit: Rc<dyn TabGroupRenderer>,
-    area: WeakEntity<DockArea>,
-    owner: WeakEntity<WorkspaceDock>,
     chrome: Entity<GpuiChrome>,
 }
 
@@ -312,8 +334,6 @@ pub struct WorkspaceTitleBar {
     dock: WeakEntity<WorkspaceDock>,
     area: WeakEntity<DockArea>,
     measured_height: Rc<Cell<Pixels>>,
-    conversation: Option<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
-    conversation_subscription: Option<gpui_kit::Subscription>,
 }
 
 impl WorkspaceTitleBar {
@@ -327,27 +347,10 @@ impl WorkspaceTitleBar {
         cx.observe(area, |_, _, cx| cx.notify()).detach();
         Self {
             chrome,
-            conversation: None,
-            conversation_subscription: None,
             dock,
             area: area.downgrade(),
             measured_height: Rc::new(Cell::new(px(crate::gpui::UI_TAB_BAR_HEIGHT))),
         }
-    }
-
-    pub(crate) fn set_conversation(
-        &mut self,
-        conversation: Option<Entity<crate::gpui_agent_session::NativeAgentSessionView>>,
-        cx: &mut Context<Self>,
-    ) {
-        if self.conversation == conversation {
-            return;
-        }
-        self.conversation_subscription = conversation
-            .as_ref()
-            .map(|view| cx.observe(view, |_, _, cx| cx.notify()));
-        self.conversation = conversation;
-        cx.notify();
     }
 
     pub(crate) fn height(&self) -> Pixels {
@@ -389,10 +392,7 @@ impl Render for WorkspaceTitleBar {
                 .hidden(DockPlacement::Left, cx.background_executor().now())
         });
         let left_shown = (left_width - hidden).max(0.0);
-        let right_open = area
-            .as_ref()
-            .is_some_and(|area| area.read(cx).is_dock_open(DockPlacement::Right));
-        let (show_left, show_right, _, _) = self.chrome.read(cx).dock_presentation();
+        let (show_left, _, _) = self.chrome.read(cx).dock_presentation();
         let inset = self.chrome.read(cx).window_controls_inset(window);
         let leading = (inset + f32::from(leading_width(show_left).to_pixels(window.rem_size()))
             - left_shown)
@@ -406,30 +406,11 @@ impl Render for WorkspaceTitleBar {
                 wrap: self.chrome.read(cx).wrap_tabs_at_notch(),
             }
         });
-        let context_button = self
-            .conversation
-            .as_ref()
-            .and_then(|view| view.update(cx, |view, cx| view.render_context_card_button(cx)));
         let tabs = self
             .chrome
             .update(cx, |chrome, cx| chrome.dock_tabs(notch, cx));
-        let leading_controls = context_button.into_iter().collect();
-        let mut trailing_controls = if right_open {
-            Vec::new()
-        } else {
-            vec![sidebar_tab_picker(self.dock.clone(), cx).into_any_element()]
-        };
-        if !right_open && show_right {
-            trailing_controls.push(
-                div()
-                    .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
-                    .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
-                    .flex_none()
-                    .into_any_element(),
-            );
-        }
         let status = self.chrome.update(cx, |chrome, cx| {
-            chrome.dock_status(leading_controls, trailing_controls, cx)
+            chrome.dock_status(Vec::new(), Vec::new(), cx)
         });
         let controls = div()
             .min_w_0()
@@ -477,7 +458,7 @@ impl Render for WorkspaceTitleBar {
 }
 
 /// Window navigation is rendered after `DockArea` releases its update borrow.
-/// It keeps one identity while conversation and tool headers follow their columns.
+/// It keeps one identity while the left dock slides beneath it.
 pub struct WorkspaceNavigation {
     owner: WeakEntity<WorkspaceDock>,
     area: WeakEntity<DockArea>,
@@ -506,7 +487,7 @@ impl Render for WorkspaceNavigation {
         let area = self.area.upgrade();
         let chrome = &self.chrome;
         let owner = &self.owner;
-        let (show_left, show_right, _, _) = chrome.read(cx).dock_presentation();
+        let (show_left, _, _) = chrome.read(cx).dock_presentation();
         let open = |placement| {
             area.as_ref()
                 .is_some_and(|area| area.read(cx).is_dock_open(placement))
@@ -528,38 +509,7 @@ impl Render for WorkspaceNavigation {
                         cx,
                     )),
             )
-            .when(show_right, |bar| {
-                bar.child(
-                    div()
-                        .absolute()
-                        .right(crate::gpui::UI_HEADER_EDGE_PADDING)
-                        .h_full()
-                        .flex()
-                        .items_center()
-                        .child(panel_toggle(
-                            owner.clone(),
-                            DockPlacement::Right,
-                            open(DockPlacement::Right),
-                            chrome,
-                            cx,
-                        )),
-                )
-            })
     }
-}
-
-pub fn group_placement(area: &DockArea, target: NodeId) -> Option<DockPlacement> {
-    [
-        DockPlacement::Center,
-        DockPlacement::Left,
-        DockPlacement::Right,
-        DockPlacement::Bottom,
-    ]
-    .into_iter()
-    .find(|placement| {
-        area.layout(*placement)
-            .is_some_and(|tree| tree.find_node(target).is_some())
-    })
 }
 
 const fn toggle_width() -> gpui_kit::Rems {
@@ -590,7 +540,6 @@ fn leading_controls(
         .when_some(toggle, |leading, open| {
             leading.child(div().w(toggle_width()).flex_none().child(panel_toggle(
                 owner.clone(),
-                DockPlacement::Left,
                 open,
                 chrome,
                 cx,
@@ -654,27 +603,14 @@ fn navigation_button(
 
 fn panel_toggle(
     owner: WeakEntity<WorkspaceDock>,
-    placement: DockPlacement,
     open: bool,
     chrome: &Entity<GpuiChrome>,
     cx: &App,
 ) -> Button {
-    let (id, label, icon) = if placement == DockPlacement::Left {
-        ("toggle-left-dock", "Toggle left dock", IconName::PanelLeft)
-    } else {
-        (
-            "toggle-right-dock",
-            "Toggle right dock",
-            IconName::PanelRight,
-        )
-    };
-    let action = if placement == DockPlacement::Left {
-        crate::commands::DockAction::ToggleLeft
-    } else {
-        crate::commands::DockAction::ToggleRight
-    };
-    Button::new(id)
-        .icon(icon)
+    let label = "Toggle left dock";
+    let action = crate::commands::DockAction::ToggleLeft;
+    Button::new("toggle-left-dock")
+        .icon(IconName::PanelLeft)
         .ghost()
         .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
         .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
@@ -688,291 +624,14 @@ fn panel_toggle(
         .accessibility_label(label)
         .on_click(move |_, window, cx| {
             _ = owner.update(cx, |owner, cx| {
-                owner.invoke_action(
-                    if placement == DockPlacement::Left {
-                        crate::commands::DockAction::ToggleLeft
-                    } else {
-                        crate::commands::DockAction::ToggleRight
-                    },
-                    None,
-                    window,
-                    cx,
-                );
+                owner.invoke_action(action, None, window, cx);
             });
         })
 }
 
-impl WorkspaceTabGroup {
-    fn tabs_visible(&self, group: &TabGroupContext, cx: &App) -> bool {
-        self.area.upgrade().is_some_and(|area| {
-            matches!(
-                group_placement(area.read(cx), group.node()),
-                Some(DockPlacement::Right)
-            )
-        })
-    }
+impl WorkspaceTabGroup {}
 
-    fn render_tabs(
-        &self,
-        group: &TabGroupContext,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let tab_config = self.chrome.read(cx).dock_tabs_config();
-        let visible = group
-            .panels()
-            .iter()
-            .enumerate()
-            .filter(|(_, panel)| panel.visible(cx))
-            .map(|(ix, _)| ix)
-            .collect::<Vec<_>>();
-        let selected = visible
-            .iter()
-            .position(|ix| *ix == group.active_ix())
-            .unwrap_or(0);
-        let focuses = visible
-            .iter()
-            .filter_map(|ix| {
-                let panel = group.panels().get(*ix)?;
-                let id = format!("tool-tab-focus:{:?}", panel.panel_id(cx));
-                let state =
-                    window.use_keyed_state(id, cx, |_, cx| cx.focus_handle().tab_stop(true));
-                Some((*ix, state.read(cx).clone()))
-            })
-            .collect::<Vec<_>>();
-        let tabs = visible
-            .into_iter()
-            .filter_map(|ix| {
-                let panel = group.panels().get(ix)?;
-                let id = format!("{:?}", panel.panel_id(cx));
-                let focus = focuses
-                    .iter()
-                    .find(|(candidate, _)| *candidate == ix)?
-                    .1
-                    .clone();
-                Some(crate::gpui::tabs::ScrollableTab {
-                    id,
-                    title: None,
-                    focus: Some(focus),
-                    tab: self.render_group_tab(group, ix, &focuses, window, cx)?,
-                })
-            })
-            .collect();
-        div()
-            .flex()
-            .items_center()
-            .h_full()
-            .w_full()
-            .when(group.is_zoomed(), |row| {
-                row.pl(px(self.chrome.read(cx).window_controls_inset(window)
-                    + f32::from(
-                        leading_width(self.chrome.read(cx).dock_presentation().0)
-                            .to_pixels(window.rem_size()),
-                    )))
-            })
-            .min_w_0()
-            .child(
-                div()
-                    .flex_1()
-                    .h_full()
-                    .min_w_0()
-                    .child(crate::gpui::tabs::ScrollableTabBar {
-                        id: format!("workspace-tabs-{:?}", group.node()).into(),
-                        config: tab_config,
-                        background: self.chrome.read(cx).panel_background(),
-                        tabs,
-                        selected: Some(selected),
-                        notch: None,
-                        end: div().min_w_1().into_any_element(),
-                        plus: None,
-                    }),
-            )
-            .into_any_element()
-    }
-}
-
-impl WorkspaceTabGroup {
-    fn activation_focus(
-        &self,
-        group: &TabGroupContext,
-        panel_focus: FocusHandle,
-        header_focus: &FocusHandle,
-        cx: &App,
-    ) -> FocusHandle {
-        self.area
-            .upgrade()
-            .filter(|area| {
-                group_placement(area.read(cx), group.node()) == Some(DockPlacement::Center)
-            })
-            .map_or_else(|| header_focus.clone(), |_| panel_focus)
-    }
-
-    /// A document's tab title offers the document's file actions on right-click.
-    fn with_file_menu(
-        &self,
-        title: gpui_kit::Stateful<gpui_kit::Div>,
-        id: gpui_kit::component::dock::PanelId,
-        cx: &App,
-    ) -> gpui_kit::AnyElement {
-        let document = self.owner.upgrade().and_then(|owner| {
-            owner.read(cx).documents().into_iter().find(|document| {
-                gpui_kit::component::dock::PanelId::from(document.entity_id()) == id
-            })
-        });
-        match document {
-            Some(document) => gpui_kit::component::menu::ContextMenuExt::context_menu(
-                title,
-                move |menu, _, cx| {
-                    crate::gpui_document_panel::DocumentPanel::file_items(&document, menu, cx)
-                },
-            )
-            .into_any_element(),
-            None => title.into_any_element(),
-        }
-    }
-
-    fn render_group_tab(
-        &self,
-        group: &TabGroupContext,
-        ix: usize,
-        focuses: &[(usize, FocusHandle)],
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Option<Tab> {
-        let panel = group.panels().get(ix)?;
-        let focus = &focuses.iter().find(|(candidate, _)| *candidate == ix)?.1;
-        let tab_config = self.chrome.read(cx).dock_tabs_config();
-        let accent = self.chrome.read(cx).tab_accent();
-        let id = panel.panel_id(cx);
-        let icon = self
-            .owner
-            .upgrade()
-            .and_then(|owner| owner.read(cx).browser_page_icon(id, cx))
-            .unwrap_or_else(|| panel_identity(panel.panel_name(cx)).1);
-        let handle = PanelHandle::of(panel);
-        let label = handle
-            .and_then(|h| h.tab_name(cx))
-            .unwrap_or_else(|| panel_identity(panel.panel_name(cx)).0.into());
-        let title =
-            handle.map_or_else(|| label.clone().into_any_element(), |h| h.title(window, cx));
-        let selected = !group.is_collapsed() && ix == group.active_ix();
-        let foreground =
-            crate::gpui::tabs::tab_foreground(tab_config.appearance, selected, accent, cx);
-        let suffix = handle.and_then(|h| h.title_suffix(window, cx)).or_else(|| {
-            (panel.closable(cx) && panel.panel_name(cx) != "bootty.sessions")
-                .then(|| close_panel_tab(self.owner.clone(), group, id, &label, foreground, cx))
-        });
-        let hover_group = SharedString::from(format!("panel-tab-hover-{id:?}"));
-        let title = div()
-            .id(SharedString::from(format!("panel-tab-{id:?}")))
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(Icon::new(icon).small().text_color(foreground).flex_none())
-            .child(title);
-        let title = self.with_file_menu(title, id, cx);
-        let select = group.clone();
-        let activate_focus = self.activation_focus(group, panel.focus_handle(cx), focus, cx);
-        let click_focus = activate_focus.clone();
-        let keyboard_group = group.clone();
-        let keyboard_owner = self.owner.clone();
-        let click_owner = self.owner.clone();
-        let keyboard_focuses = focuses.to_vec();
-        let focus_color = cx.theme().primary;
-        let tab = crate::gpui::tabs::tab(
-            hover_group.clone(),
-            tab_config.appearance,
-            selected,
-            accent,
-            cx,
-        )
-        .group(hover_group.clone())
-        .track_focus(focus)
-        .focusable()
-        .tab_index(0_isize)
-        .focus_visible(move |style| style.border_1().border_color(focus_color))
-        .on_key_down(move |event, window, cx| {
-            _ = keyboard_owner.update(cx, |dock, cx| dock.record_browser_interaction(cx));
-            let position = keyboard_focuses
-                .iter()
-                .position(|(candidate, _)| *candidate == ix)
-                .unwrap_or_default();
-            let next = match event.keystroke.key.as_str() {
-                "left" => Some(position.saturating_sub(1)),
-                "right" => Some(
-                    position
-                        .saturating_add(1)
-                        .min(keyboard_focuses.len().saturating_sub(1)),
-                ),
-                "home" => Some(0),
-                "end" => Some(keyboard_focuses.len().saturating_sub(1)),
-                "enter" | "space" => {
-                    keyboard_group.select_tab(ix, window, cx);
-                    activate_focus.focus(window, cx);
-                    cx.stop_propagation();
-                    window.prevent_default();
-                    return;
-                }
-                _ => None,
-            };
-            if let Some(next) = next.and_then(|next| keyboard_focuses.get(next)) {
-                next.1.focus(window, cx);
-                window.prevent_default();
-                cx.stop_propagation();
-            }
-        })
-        .accessibility_label(label.clone())
-        .tooltip(tab_tooltip(panel, &label, cx))
-        .child(crate::gpui::tabs::content(
-            title.into_any_element(),
-            suffix,
-            hover_group,
-            tab_config,
-        ))
-        .selected(
-            !group.is_collapsed() && group.active_panel().is_some_and(|p| p.panel_id(cx) == id),
-        )
-        .on_click(move |_, window, cx| {
-            _ = click_owner.update(cx, |dock, cx| dock.record_browser_interaction(cx));
-            select.select_tab(ix, window, cx);
-            click_focus.focus(window, cx);
-        });
-        Some(tab)
-    }
-}
-
-fn close_panel_tab(
-    owner: WeakEntity<WorkspaceDock>,
-    group: &TabGroupContext,
-    id: gpui_kit::component::dock::PanelId,
-    label: &str,
-    foreground: gpui_kit::Hsla,
-    cx: &App,
-) -> AnyElement {
-    let group = group.clone();
-    Button::new("close-tab")
-        .icon(IconName::Close)
-        .custom(
-            ButtonCustomVariant::new(cx)
-                .foreground(foreground)
-                .hover(cx.theme().secondary_hover)
-                .active(cx.theme().secondary_hover),
-        )
-        .xsmall()
-        .size_4()
-        .tooltip("Close tab")
-        .accessibility_label(format!("Close {label}"))
-        .on_click(move |_, window, cx| {
-            cx.stop_propagation();
-            let closed = owner
-                .update(cx, |dock, cx| dock.close_tool_tab(id, window, cx))
-                .unwrap_or(false);
-            if !closed {
-                group.close(id, window, cx);
-            }
-        })
-        .into_any_element()
-}
+impl WorkspaceTabGroup {}
 
 impl TabGroupRenderer for WorkspaceTabGroup {
     fn frame(&self, group: &TabGroupContext, window: &mut Window, cx: &mut App) -> Stateful<Div> {
@@ -993,66 +652,10 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         self.kit.content_frame(group, window, cx)
     }
 
-    fn render_tab_bar(
-        &self,
-        group: &TabGroupContext,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> AnyElement {
-        let tabs_visible = self.tabs_visible(group, cx);
-        if !tabs_visible {
-            return div().into_any_element();
-        }
-        let tabs = self.render_tabs(group, window, cx);
-        let classic = self.chrome.read(cx).dock_tabs_config().appearance
-            == bootty_config::config::TabAppearance::Classic;
-        div()
-            .id("workspace-header")
-            .flex()
-            .items_center()
-            .gap(crate::gpui::UI_HEADER_GAP)
-            .flex_shrink_0()
-            .w_full()
-            .min_w_0()
-            .h(px(crate::gpui::UI_TAB_BAR_HEIGHT))
-            .overflow_hidden()
-            .bg(if classic {
-                cx.theme().tab_bar
-            } else {
-                self.chrome.read(cx).panel_background()
-            })
-            .window_control_area(WindowControlArea::Drag)
-            .pr(crate::gpui::UI_HEADER_EDGE_PADDING)
-            .child(div().flex_1().min_w_0().h_full().child(tabs))
-            .when(!group.panels().is_empty(), |header| {
-                header.child(navigation_button(
-                    self.owner.clone(),
-                    if group.is_zoomed() {
-                        "Restore view"
-                    } else {
-                        "Full view"
-                    },
-                    if group.is_zoomed() {
-                        IconName::Minimize
-                    } else {
-                        IconName::Maximize
-                    },
-                    "toggle_panel_full_view",
-                    true,
-                    &self.chrome,
-                    cx,
-                ))
-            })
-            .child(sidebar_tab_picker(self.owner.clone(), cx))
-            .when(self.chrome.read(cx).dock_presentation().1, |header| {
-                header.child(
-                    div()
-                        .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
-                        .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
-                        .flex_none(),
-                )
-            })
-            .into_any_element()
+    /// No dock group shows tabs: the left dock holds only Sessions, and the center's mux window
+    /// tabs live in the title bar.
+    fn render_tab_bar(&self, _: &TabGroupContext, _: &mut Window, _: &mut App) -> AnyElement {
+        div().into_any_element()
     }
 
     fn render_active_panel(
@@ -1082,10 +685,10 @@ impl TabGroupRenderer for WorkspaceTabGroup {
             .active_panel()
             .is_some_and(|panel| terminal_panel_name(panel.panel_name(cx)))
         {
-            // Kit allows drops into any unlocked group. The mux-owned center only accepts
-            // terminal pane drags, whose separate type and command path stay inside its view.
+            // Kit gates both drag types with one lock. Keep host-owned AnyDrag drops,
+            // but intercept built-in panel moves before the tab group can apply them.
             return div()
-                .id("locked-terminal-content")
+                .id("terminal-pane-content")
                 .size_full()
                 .flex()
                 .flex_col()
@@ -1115,161 +718,8 @@ impl TabGroupRenderer for WorkspaceTabGroup {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<AnyElement> {
-        if self.tabs_visible(group, cx) {
-            return Some(empty_sidebar(&self.owner, cx));
-        }
         self.kit.render_empty(group, window, cx)
     }
-}
-
-fn sidebar_tools() -> impl Iterator<Item = &'static crate::commands::PanelDescriptor> {
-    crate::commands::PANELS.iter().filter(|panel| {
-        matches!(
-            panel.creation,
-            crate::commands::PanelCreation::Command(
-                crate::commands::DockAction::Files
-                    | crate::commands::DockAction::Changes
-                    | crate::commands::DockAction::Subagents
-            ) | crate::commands::PanelCreation::Browser
-        )
-    })
-}
-
-fn open_tool(
-    owner: &WeakEntity<WorkspaceDock>,
-    action: crate::commands::DockAction,
-    window: &Window,
-    cx: &mut App,
-) {
-    _ = owner.update(cx, |dock, cx| {
-        dock.submit_command(
-            bootty_control::CommandInvocation::from_action(
-                action.command().action(),
-                bootty_control::Caller::Internal,
-            ),
-            window,
-            cx,
-        );
-    });
-}
-
-fn open_browser(owner: &WeakEntity<WorkspaceDock>, window: &Window, cx: &mut App) {
-    _ = owner.update(cx, |dock, cx| {
-        dock.submit_command(
-            bootty_control::CommandInvocation::new(
-                "browser.new_tab",
-                Vec::new(),
-                bootty_control::Caller::Internal,
-            ),
-            window,
-            cx,
-        );
-    });
-}
-
-fn sidebar_tab_picker(owner: WeakEntity<WorkspaceDock>, cx: &App) -> impl IntoElement {
-    let present = |action: crate::commands::DockAction, cx: &App| {
-        owner.upgrade().is_some_and(|owner| {
-            let dock = owner.read(cx);
-            dock.action_panel_present(action, cx)
-        })
-    };
-    let all_open = sidebar_tools().all(|panel| {
-        let crate::commands::PanelCreation::Command(action) = panel.creation else {
-            return false;
-        };
-        present(action, cx)
-    });
-    let menu_owner = owner;
-    Button::new("new-sidebar-tab")
-        .icon(IconName::Plus)
-        .ghost()
-        .w(crate::gpui::UI_HEADER_CONTROL_SIZE)
-        .h(crate::gpui::UI_HEADER_CONTROL_SIZE)
-        .accessibility_label("Open a tool")
-        .disabled(all_open)
-        .tooltip(if all_open {
-            "All tools are open"
-        } else {
-            "Open a tool"
-        })
-        .dropdown_menu(move |mut menu, _, cx| {
-            for panel in sidebar_tools() {
-                if matches!(panel.creation, crate::commands::PanelCreation::Browser) {
-                    let owner = menu_owner.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new(panel.label)
-                            .icon(panel.icon.clone())
-                            .on_click(move |_, window, cx| open_browser(&owner, window, cx)),
-                    );
-                    continue;
-                }
-                let crate::commands::PanelCreation::Command(action) = panel.creation else {
-                    continue;
-                };
-                if menu_owner.upgrade().is_some_and(|owner| {
-                    let dock = owner.read(cx);
-                    dock.action_panel_present(action, cx)
-                }) {
-                    continue;
-                }
-                let owner = menu_owner.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(panel.label)
-                        .icon(panel.icon.clone())
-                        .on_click(move |_, window, cx| {
-                            open_tool(&owner, action, window, cx);
-                        }),
-                );
-            }
-            menu
-        })
-}
-
-fn empty_sidebar(owner: &WeakEntity<WorkspaceDock>, cx: &App) -> AnyElement {
-    div()
-        .id("empty-tool-sidebar")
-        .debug_selector(|| "empty-tool-sidebar".to_owned())
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .p_6()
-        .child(
-            div()
-                .w_full()
-                .max_w_64()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .text_color(cx.theme().foreground)
-                        .mb_2()
-                        .child("Open a tool"),
-                )
-                .children(sidebar_tools().map(|panel| {
-                    let creation = panel.creation;
-                    let owner = owner.clone();
-                    Button::new(SharedString::from(format!("empty-open-{}", panel.name)))
-                        .icon(panel.icon.clone())
-                        .row_label(panel.label)
-                        .outline()
-                        .w_full()
-                        .on_click(move |_, window, cx| match creation {
-                            crate::commands::PanelCreation::Command(action) => {
-                                open_tool(&owner, action, window, cx);
-                            }
-                            crate::commands::PanelCreation::Browser => {
-                                open_browser(&owner, window, cx);
-                            }
-                            crate::commands::PanelCreation::Context => {}
-                        })
-                })),
-        )
-        .into_any_element()
 }
 
 fn empty_terminal_view(
@@ -1299,7 +749,7 @@ fn empty_terminal_view(
             .child("Terminal unavailable")
             .child(div().max_w_full().child(reason))
             .into_any_element(),
-        EmptyTerminalState::Ready { can_create } => {
+        EmptyTerminalState::Ready => {
             let action = crate::action_catalog::Command::NewTab.action();
             let binding_action = crate::gpui_actions::InvokeCommand::new(
                 bootty_control::CommandInvocation::from_action(
@@ -1320,7 +770,6 @@ fn empty_terminal_view(
                         .label("New terminal")
                         .icon(IconName::Plus)
                         .primary()
-                        .disabled(!can_create)
                         .on_click(move |_, window, cx| {
                             _ = owner.update(cx, |owner, cx| {
                                 owner.submit_command(
@@ -1334,47 +783,20 @@ fn empty_terminal_view(
                             });
                         }),
                 )
-                .when(can_create, |content| {
-                    content.when_some(shortcut, |content, binding| {
-                        content.child(div().flex().gap_1().children(
+                .when_some(shortcut, |content, binding| {
+                    content.child(
+                        div().flex().gap_1().children(
                             binding.keystrokes().iter().map(|stroke| {
                                 crate::gpui::keybinding_element(stroke.as_keystroke())
                             }),
-                        ))
-                    })
-                })
-                .when(!can_create, |content| {
-                    content.child("This backend does not support creating terminals.")
+                        ),
+                    )
                 })
                 .into_any_element()
         }
     }
 }
 
-pub fn panel_identity(name: &str) -> (&'static str, IconName) {
-    let name = match name {
-        "bootty.sidebar" => "bootty.sessions",
-        "bootty.attachment" => "bootty.terminal",
-        name => name,
-    };
-    crate::commands::panel_descriptor(name).map_or(("Document", IconName::FileText), |panel| {
-        (panel.label, panel.icon.clone())
-    })
-}
-
 fn terminal_panel_name(name: &str) -> bool {
-    matches!(name, "bootty.terminal" | "bootty.attachment")
-}
-
-fn tab_tooltip(
-    panel: &Arc<dyn BasePanelView>,
-    label: &SharedString,
-    cx: &App,
-) -> impl Fn(&mut Window, &mut App) -> gpui_kit::AnyView + 'static {
-    let tooltip = panel
-        .view()
-        .downcast::<crate::gpui_agent_session::NativeAgentSessionView>()
-        .ok()
-        .map_or_else(|| label.clone(), |view| view.read(cx).tab_tooltip());
-    move |window, cx| gpui_kit::component::tooltip::Tooltip::new(tooltip.clone()).build(window, cx)
+    matches!(name, "bootty.terminal-pane")
 }

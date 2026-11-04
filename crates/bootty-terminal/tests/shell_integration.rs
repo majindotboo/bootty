@@ -1,4 +1,5 @@
 use assert_fs::prelude::*;
+use bootty_os::spawn::CommandSpawn as _;
 use bootty_terminal::{
     SessionLaunchConfig, TerminalSession, TerminalSessionConfig,
     geometry::TerminalGeometry,
@@ -189,7 +190,7 @@ fn zsh_preserves_zdotdir_presence_and_user_startup_redirects(#[case] redirect: b
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .bootty_spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(b"exit\n").unwrap();
     let output = child.wait_with_output().unwrap();
@@ -224,7 +225,7 @@ fn bash_keeps_an_existing_debug_trap() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .bootty_spawn()
         .unwrap();
     child
         .stdin

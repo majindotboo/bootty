@@ -3,6 +3,8 @@ use bootty_mux::command::{MuxCommand, MuxDirection};
 
 command_actions! {
     PaneAction {
+        Resize => ("pane.resize", "Resize Panes", ["window", "layout"], Write),
+        Focus => ("pane.focus", "Focus Pane", ["window", "pane"], Write),
         Merge => ("pane.merge", "Merge Tabs", ["source_window", "target_window"], Write),
         Swap => ("pane.swap", "Swap Panes", ["source", "target"], Write),
         Move => ("pane.move", "Move Pane Beside Another", ["source", "target", "direction"], Write),
@@ -39,6 +41,17 @@ impl PaneAction {
     }
     pub(super) fn command(self, session_id: String, args: &[String]) -> Result<MuxCommand, String> {
         match (self, args) {
+            (Self::Resize, [window, layout]) => Ok(MuxCommand::ResizePanes {
+                session_id,
+                window_id: window.clone(),
+                layout: serde_json::from_str(layout)
+                    .map_err(|error| format!("Invalid pane layout: {error}"))?,
+            }),
+            (Self::Focus, [window, pane]) => Ok(MuxCommand::ActivatePane {
+                session_id,
+                window_id: window.clone(),
+                pane_id: pane.clone(),
+            }),
             (Self::Merge, [source, target]) => Ok(MuxCommand::MergeWindows {
                 session_id,
                 source_window_id: source.clone(),
@@ -67,20 +80,5 @@ impl PaneAction {
             }),
             _ => Err("Invalid pane command arguments".to_owned()),
         }
-    }
-}
-
-impl crate::AppState {
-    pub(crate) fn supports_pane_operation(
-        &self,
-        operation: bootty_mux::capability::BindingOperation,
-    ) -> bool {
-        let binding = &self.workspace.active.binding;
-        matches!(
-            binding
-                .mux()
-                .operation_outcome(binding.multiplexer(), operation),
-            bootty_mux::capability::BindingOperationOutcome::Supported(())
-        )
     }
 }

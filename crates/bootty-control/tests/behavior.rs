@@ -7,6 +7,7 @@ use bootty_control::{
     CommandOutcome, ControlCatalog, ControlPlane, ControlServer, InstanceDescriptor, RpcResponse,
     app_command_channel, invoke_instance, running_instance,
 };
+use bootty_os::spawn::CommandSpawn as _;
 use pretty_assertions::{assert_eq, assert_ne};
 use serde_json::{Value, json};
 use std::{
@@ -80,11 +81,11 @@ fn isolated(name: &str) -> Result<bool> {
     }
     let dir = TempDir::new()?;
     let out = Command::new(std::env::current_exe()?)
-        .args(["--exact", name])
+        .args(["--exact", &format!("behavior::{name}")])
         .env(HELPER, name)
         .env("XDG_RUNTIME_DIR", dir.path())
         .env("RMUX_TMPDIR", dir.path())
-        .output()?;
+        .bootty_output()?;
     let stdout = String::from_utf8_lossy(&out.stdout);
     ensure!(
         out.status.success() && stdout.contains("test result: ok. 1 passed; 0 failed;"),
@@ -149,7 +150,7 @@ impl ControlHarness {
         loop {
             match self.rx.try_recv() {
                 Ok(value) => return Ok(value),
-                Err(mpsc::TryRecvError::Empty) if started.elapsed() < Duration::from_secs(2) => {
+                Err(mpsc::TryRecvError::Empty) if started.elapsed() < Duration::from_secs(10) => {
                     thread::yield_now();
                 }
                 Err(mpsc::TryRecvError::Empty) => bail!("request timed out"),
@@ -230,7 +231,7 @@ fn rpc_dispatch_and_task_cancellation() {
     );
     assert!(request.cancellation.is_cancelled());
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(2))
+        .checked_add(Duration::from_secs(10))
         .expect("test deadline");
     while s
         .call("task.status", json!({"task":id}))

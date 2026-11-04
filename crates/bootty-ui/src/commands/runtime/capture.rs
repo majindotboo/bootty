@@ -1,9 +1,7 @@
 use std::{io::Write as _, path::Path, sync::mpsc, time::Instant};
 
-use bootty_control::{CommandCancellation, CommandOutcome, CommandTarget, ResourceKind};
-use bootty_mux::{
-    backend::PaneCapture, executor, target::ExactMuxTarget, terminal::TerminalRuntime,
-};
+use bootty_control::{CommandCancellation, CommandOutcome, CommandTarget};
+use bootty_mux::{executor, target::ExactMuxTarget};
 use bootty_terminal::terminal_capture::{CaptureFormat, CaptureOptions, CaptureScope};
 
 use super::{CommandDispatch, PendingCommandResult};
@@ -18,7 +16,7 @@ fn failure(message: impl Into<String>) -> CommandOutcome {
 
 impl AppState {
     pub(super) fn dispatch_terminal_capture(
-        &mut self,
+        &self,
         exact: &ExactMuxTarget,
         target: CommandTarget,
         arguments: &[String],
@@ -41,10 +39,6 @@ impl AppState {
             (None, arguments)
         };
         let options = capture_options(args, export);
-        let current = self
-            .current_exact_mux_target_for("terminal.capture", ResourceKind::Terminal)
-            .as_ref()
-            == Some(exact);
         let Some(binding) = self.workspace.binding(exact.scope()) else {
             return CommandDispatch::Complete(failure("Capture binding was closed"));
         };
@@ -53,50 +47,17 @@ impl AppState {
             .remote
             .as_ref()
             .map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label);
-        let backend = format!("{:?}", binding.multiplexer().backend).to_lowercase();
-        let native = binding.uses_native_terminal_layout();
-        let backend_panes = binding.addresses_backend_panes();
-        // A pane runtime is read wherever it lives, on screen or not, in any Space; an attached
-        // client only when it shows the target. A backend pane with neither, such as an rmux
-        // session never shown or a tmux pane off screen, is read by its backend.
-        let has_runtime = native
-            && exact.ids().2.is_some_and(|pane| {
-                self.workspace
-                    .space_terminal_runtime(exact.scope(), pane)
-                    .is_some()
-            });
-        if backend_panes && !has_runtime && (native || !current) {
-            return self.dispatch_backend_capture(
-                exact,
-                target,
-                options,
-                destination,
-                (deadline, cancellation),
-            );
-        }
-        let terminal: Option<&mut dyn TerminalRuntime> = if native {
-            exact
-                .ids()
-                .2
-                .and_then(|pane| self.workspace.space_terminal_runtime(exact.scope(), pane))
-        } else {
-            self.workspace
-                .binding_mut(exact.scope())
-                .map(|binding| -> &mut dyn TerminalRuntime { binding.terminal_mut() })
+        let Some(pane) = exact.ids().2.map(str::to_owned) else {
+            return CommandDispatch::Complete(failure("Capture requires a pane target"));
         };
-        let Some(terminal) = terminal else {
-            return CommandDispatch::Complete(CommandOutcome::Unavailable {
-                message: "The requested terminal has no attached capture runtime".to_owned(),
-            });
-        };
-        let pending = match terminal.capture(options) {
-            Ok(pending) => pending,
-            Err(error) => return CommandDispatch::Complete(failure(error.to_string())),
-        };
+        let backend = binding.mux().native_backend();
         let (sender, result) = mpsc::channel();
         let repaint = self.repaint.clone();
         std::thread::spawn(move || {
-            let result = pending.receive("capturing terminal").and_then(|result| result.map_err(anyhow::Error::msg)).and_then(|mut capture| {
+            let result = backend.request(&bootty_mux::native::protocol::Request::Capture { pane, options }).and_then(|response| match response {
+                bootty_mux::native::protocol::Response::Captured(capture) => Ok(capture),
+                _ => anyhow::bail!("Native mux returned no capture"),
+            }).and_then(|mut capture| {
                 // Capture itself is read-only. Claim the mutation only when ready to publish,
                 // allowing a dismissed form or timed-out caller to cancel while formatting.
                 executor::begin_synchronous_command(Some((deadline, cancellation))).map_err(|error| anyhow::anyhow!("Capture stopped before export: {error:?}"))?;
@@ -109,7 +70,7 @@ impl AppState {
                     "capture": capture,
                     "bytes": bytes,
                     "target": target,
-                    "source": {"host": host, "backend": backend, "kind": if native { "pane_render_state" } else { "client_attachment_render_state" }, "original_output": false},
+                    "source": {"host": host, "kind": "pane_server_state", "original_output": false},
                     "destination": destination,
                 }))
             });
@@ -120,86 +81,6 @@ impl AppState {
                 },
                 Err(error) => failure(error.to_string()),
             };
-            let _ = sender.send(outcome);
-            repaint();
-        });
-        CommandDispatch::Pending(PendingCommandResult::Outcome(result))
-    }
-
-    /// Capture an attached backend pane that is not on screen. It has no local render state, so
-    /// the backend reads it directly and leaves its selection alone.
-    fn dispatch_backend_capture(
-        &self,
-        exact: &ExactMuxTarget,
-        target: CommandTarget,
-        options: CaptureOptions,
-        destination: Option<String>,
-        execution: (Instant, CommandCancellation),
-    ) -> CommandDispatch {
-        let Some(pane) = exact.ids().2 else {
-            return CommandDispatch::Complete(failure("Capture requires a pane target"));
-        };
-        if options.format == CaptureFormat::Html {
-            return CommandDispatch::Complete(CommandOutcome::Unsupported {
-                message: "HTML capture needs the pane on screen".to_owned(),
-            });
-        }
-        let Some(binding) = self.workspace.binding(exact.scope()) else {
-            return CommandDispatch::Complete(failure("Capture binding was closed"));
-        };
-        let source = serde_json::json!({
-            "host": binding.multiplexer().remote.as_ref().map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label),
-            "backend": format!("{:?}", binding.multiplexer().backend).to_lowercase(),
-            "kind": "backend_pane",
-            "original_output": false,
-        });
-        if let Err(message) = options.validate() {
-            return CommandDispatch::Complete(failure(message));
-        }
-        let capture = PaneCapture {
-            history: options.scope == CaptureScope::History,
-            max_lines: options.max_lines,
-            ansi: options.format == CaptureFormat::Ansi,
-        };
-        let (sender, result) = mpsc::channel();
-        let repaint = self.repaint.clone();
-        // Reading stays cancellable; the command is claimed only right before it publishes, so a
-        // dismissed or expired export is never written.
-        binding.capture_backend_pane(pane, capture, None, move |captured| {
-            let outcome = captured.map_or_else(super::command_outcome_for_mux_error, |pane| {
-                if let Err(error) = executor::begin_synchronous_command(Some(execution)) {
-                    return super::command_outcome_for_mux_error(error);
-                }
-                let bytes = pane.text.len();
-                // Same bound as a terminal capture: fail rather than truncate.
-                if bytes > options.max_bytes {
-                    return failure(format!(
-                        "Capture needs {bytes} bytes, exceeding the {} byte limit; request fewer lines",
-                        options.max_bytes
-                    ));
-                }
-                if let Some(path) = &destination
-                    && let Err(error) = write_capture(Path::new(path), pane.text.as_bytes())
-                {
-                    return failure(error.to_string());
-                }
-                CommandOutcome::Success {
-                    value: serde_json::json!({
-                        "capture": {
-                            "scope": options.scope,
-                            "format": options.format,
-                            "captured_lines": pane.captured_lines,
-                            "omitted_lines": pane.omitted_lines,
-                            "text": if destination.is_some() { String::new() } else { pane.text },
-                        },
-                        "bytes": bytes,
-                        "target": target,
-                        "source": source,
-                        "destination": destination,
-                    }),
-                    warnings: Vec::new(),
-                }
-            });
             let _ = sender.send(outcome);
             repaint();
         });

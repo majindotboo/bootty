@@ -21,7 +21,7 @@ impl From<MacosOptionAsAlt> for key::OptionAsAlt {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct KeyInput {
     pub key: TerminalKey,
     pub mods: KeyMods,
@@ -30,7 +30,7 @@ pub struct KeyInput {
     pub unshifted: Option<char>,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyMods {
     pub shift: bool,
     pub alt: bool,
@@ -81,7 +81,7 @@ impl From<KeyMods> for key::Mods {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MouseInput {
     pub action: MouseAction,
     pub button: Option<MouseButton>,
@@ -95,7 +95,7 @@ pub struct MouseInput {
     pub size: MouseEncoderSize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct MouseEncoderSize {
     pub screen_width: u32,
     pub screen_height: u32,
@@ -139,7 +139,7 @@ impl From<MouseEncoderSize> for mouse::EncoderSize {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseAction {
     Press,
     Release,
@@ -156,7 +156,7 @@ impl From<MouseAction> for mouse::Action {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MouseButton {
     Left,
     Right,
@@ -189,7 +189,7 @@ impl From<MouseButton> for mouse::Button {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TerminalKey {
     Backquote,
     Backslash,
@@ -536,3 +536,42 @@ const fn letter_text(
         shifted_utf8: Some(shifted_utf8),
     }
 }
+
+impl<'de> serde::Deserialize<'de> for KeyInput {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Input {
+            key: TerminalKey,
+            mods: KeyMods,
+            repeat: bool,
+            utf8: Option<String>,
+            unshifted: Option<char>,
+        }
+        let input = Input::deserialize(deserializer)?;
+        let utf8 = input
+            .utf8
+            .map(|text| {
+                KEY_TEXTS
+                    .iter()
+                    .copied()
+                    .find(|candidate| *candidate == text)
+                    .ok_or_else(|| serde::de::Error::custom("invalid physical key text"))
+            })
+            .transpose()?;
+        Ok(Self {
+            key: input.key,
+            mods: input.mods,
+            repeat: input.repeat,
+            utf8,
+            unshifted: input.unshifted,
+        })
+    }
+}
+// Limit: key text is physical ASCII; use an owned input payload when arbitrary text is needed.
+const KEY_TEXTS: &[&str] = &[
+    " ", "`", "~", "\\", "|", "[", "{", "]", "}", ",", "<", "0", ")", "1", "!", "2", "@", "3", "#",
+    "4", "$", "5", "%", "6", "^", "7", "&", "8", "*", "9", "(", "=", "+", "-", "_", ".", "/", ">",
+    "'", "\"", ";", ":", "?", "a", "A", "b", "B", "c", "C", "d", "D", "e", "E", "f", "F", "g", "G",
+    "h", "H", "i", "I", "j", "J", "k", "K", "l", "L", "m", "M", "n", "N", "o", "O", "p", "P", "q",
+    "Q", "r", "R", "s", "S", "t", "T", "u", "U", "v", "V", "w", "W", "x", "X", "y", "Y", "z", "Z",
+];

@@ -92,43 +92,6 @@ pub fn run(args: Args) -> Result<()> {
 
     remote_ssh_probes(&mut output, &work)?;
 
-    optional_probe(
-        &mut output,
-        &work,
-        "mosh",
-        "mosh",
-        "BOOTTY_LIVE_MOSH_TARGET",
-        |target| {
-            let mut command = Command::new("mosh");
-            command.args([target, "--", "sh", "-lc", REMOTE_PROBE]);
-            command
-        },
-    )?;
-    optional_probe(
-        &mut output,
-        &work,
-        "docker_exec",
-        "docker_exec",
-        "BOOTTY_LIVE_DOCKER_CONTAINER",
-        |target| {
-            let mut command = Command::new("docker");
-            command.args(["exec", target, "sh", "-lc", REMOTE_PROBE]);
-            command
-        },
-    )?;
-    optional_probe(
-        &mut output,
-        &work,
-        "podman_exec",
-        "podman_exec",
-        "BOOTTY_LIVE_PODMAN_CONTAINER",
-        |target| {
-            let mut command = Command::new("podman");
-            command.args(["exec", target, "sh", "-lc", REMOTE_PROBE]);
-            command
-        },
-    )?;
-
     println!(
         "Wrote live remote benchmark results: {}",
         output_file.display()
@@ -161,23 +124,6 @@ fn remote_ssh_probes(output: &mut File, work: &TempDir) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn optional_probe(
-    output: &mut File,
-    work: &TempDir,
-    name: &str,
-    program: &str,
-    variable: &str,
-    make_command: impl FnOnce(&str) -> Command,
-) -> Result<()> {
-    match std::env::var(variable).ok().filter(|v| !v.is_empty()) {
-        Some(target) if program_exists(program) => {
-            run_probe(output, work, name, name, make_command(&target))
-        }
-        Some(_) => skip(output, name, name, &format!("{program} not found")),
-        None => skip(output, name, name, &format!("{variable} is not set")),
-    }
 }
 
 fn ssh(target: &str, timeout: u8) -> Command {

@@ -25,6 +25,8 @@ impl Identity {
                 self.server_tls(Some(client), ALPN)?,
             )?,
         ));
+        // Permit QUIC peer address changes after path validation.
+        config.migration(true);
         config.transport_config(Arc::new(transport()));
         Ok(config)
     }
@@ -100,8 +102,8 @@ fn transport() -> quinn::TransportConfig {
     let mut config = quinn::TransportConfig::default();
     config.max_concurrent_bidi_streams(64_u32.into());
     config.max_concurrent_uni_streams(0_u32.into());
-    config.max_idle_timeout(Some(quinn::VarInt::from_u32(5_000).into()));
-    config.keep_alive_interval(Some(Duration::from_secs(1)));
+    config.max_idle_timeout(Some(quinn::VarInt::from_u32(30_000).into()));
+    config.keep_alive_interval(Some(Duration::from_secs(5)));
     config.stream_receive_window((2 * 1024 * 1024_u32).into());
     config.receive_window((16 * 1024 * 1024_u32).into());
     config

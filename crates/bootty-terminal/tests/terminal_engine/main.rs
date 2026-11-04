@@ -1,16 +1,11 @@
 pub use anyhow::{Context, Result};
 pub use bootty_terminal::{
-    geometry::*, terminal_engine::*, terminal_frame::*, terminal_image::*, terminal_input_model::*,
-    terminal_palette::*,
+    geometry::*, terminal_engine::*, terminal_frame::*, terminal_input_model::*,
 };
 pub use libghostty_vt::{
-    Terminal, focus, key,
-    kitty::graphics,
-    mouse, paste,
+    Terminal, key, paste,
     render::CursorVisualStyle,
-    selection::gesture,
     style::{RgbColor, Underline},
-    terminal::{ColorScheme, CursorStyle, Mode, Point, PointCoordinate, ScrollViewport},
 };
 pub use std::sync::{Arc, Mutex};
 

@@ -3,7 +3,7 @@ use crate::shell_lifecycle::ShellEvent;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PromptReport {
     Ready {
         shell: String,

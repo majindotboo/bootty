@@ -17,32 +17,13 @@ pub enum KeymapContext {
     Global,
     Sidebar,
     Command,
-    SurfaceChooser,
-    Composer,
-    ComposerCompletion,
     Terminal,
-    Herdr,
-    Native,
-    Rmux,
-    Tmux,
     /// A Zed-compatible GPUI key-context predicate supplied by the user.
     Expression(String),
 }
 
 impl KeymapContext {
-    pub const ALL: [Self; 11] = [
-        Self::Global,
-        Self::Sidebar,
-        Self::Command,
-        Self::SurfaceChooser,
-        Self::Composer,
-        Self::ComposerCompletion,
-        Self::Terminal,
-        Self::Herdr,
-        Self::Native,
-        Self::Rmux,
-        Self::Tmux,
-    ];
+    pub const ALL: [Self; 4] = [Self::Global, Self::Sidebar, Self::Command, Self::Terminal];
 
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -50,14 +31,7 @@ impl KeymapContext {
             Self::Global => "Global",
             Self::Sidebar => "Sidebar",
             Self::Command => "Command",
-            Self::SurfaceChooser => "SurfaceChooser",
-            Self::Composer => "Composer",
-            Self::ComposerCompletion => "ComposerCompletion",
             Self::Terminal => "Terminal",
-            Self::Herdr => "Herdr",
-            Self::Native => "Native",
-            Self::Rmux => "rmux",
-            Self::Tmux => "tmux",
             Self::Expression(expression) => expression,
         }
     }
@@ -77,14 +51,9 @@ impl FromStr for KeymapContext {
             "" | "Global" | "global" | "Workspace" | "workspace" => Ok(Self::Global),
             "Sidebar" | "sidebar" => Ok(Self::Sidebar),
             "Command" | "command" => Ok(Self::Command),
-            "SurfaceChooser" | "surfacechooser" => Ok(Self::SurfaceChooser),
-            "Composer" | "composer" => Ok(Self::Composer),
-            "ComposerCompletion" | "composercompletion" => Ok(Self::ComposerCompletion),
-            "Terminal" | "terminal" => Ok(Self::Terminal),
-            "Herdr" | "herdr" | "Terminal && backend == herdr" => Ok(Self::Herdr),
-            "Native" | "native" | "Terminal && backend == native" => Ok(Self::Native),
-            "rmux" | "Rmux" | "Terminal && backend == rmux" => Ok(Self::Rmux),
-            "tmux" | "Tmux" | "Terminal && backend == tmux" => Ok(Self::Tmux),
+            "Terminal" | "terminal" | "Native" | "native" | "Terminal && backend == native" => {
+                Ok(Self::Terminal)
+            }
             value => Ok(Self::Expression(value.to_owned())),
         }
     }

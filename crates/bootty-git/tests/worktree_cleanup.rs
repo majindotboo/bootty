@@ -1,14 +1,11 @@
 #![cfg(test)]
 //! Bootty's worktree retention on the host that holds the checkouts.
 
+use bootty_os::spawn::CommandSpawn as _;
 use std::{fs, io::Write as _, path::Path, process::Command};
 
-#[path = "support/repository.rs"]
-mod repository_support;
-#[path = "support/runner.rs"]
-mod runner;
-#[path = "support/seed.rs"]
-mod seed;
+use crate::support::runner;
+use crate::support::seed;
 
 use assert_fs::TempDir;
 use bootty_git::{
@@ -24,7 +21,7 @@ fn git(cwd: &Path, args: &[&str]) {
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .output()
+        .bootty_output()
         .unwrap();
     assert!(
         output.status.success(),
@@ -38,7 +35,7 @@ fn git_read(cwd: &Path, args: &[&str]) -> String {
         .arg("-C")
         .arg(cwd)
         .args(args)
-        .output()
+        .bootty_output()
         .unwrap();
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
@@ -242,56 +239,15 @@ fn a_new_checkout_waits_for_its_session() {
     assert!(Path::new(&path).exists());
 }
 
-/// Past the limit, archived work goes before settled work, oldest first. Active and open work
-/// stays even when that leaves too many.
-#[rstest]
-fn the_limit_removes_the_oldest_settled_and_archived_checkouts_first() {
-    let host = Host::new();
-    let active = host.checkout("active", false);
-    let open = host.checkout("open", false);
-    let settled_old = host.checkout("settled-old", false);
-    let settled_new = host.checkout("settled-new", false);
-    let archived = host.checkout("archived", false);
-    let sessions = vec![
-        session(&active, Retention::Active, 1, false),
-        session(&open, Retention::Settled, 1, true),
-        session(&settled_old, Retention::Settled, 10, false),
-        session(&settled_new, Retention::Settled, 20, false),
-        session(&archived, Retention::Archived, 30, false),
-    ];
-    let report = runner::git()
-        .clean_worktrees(&host.request(3, sessions.clone()))
-        .unwrap();
-    assert_eq!(
-        (report.removed, report.remaining),
-        (vec![archived, settled_old], 3)
-    );
-    let report = runner::git()
-        .clean_worktrees(&host.request(1, sessions))
-        .unwrap();
-    assert_eq!((report.removed, report.remaining), (vec![settled_new], 2));
-}
-
 fn claim() -> impl Strategy<Value = Claim> {
-    prop_oneof![
-        Just(Claim::Orphan),
-        Just(Claim::Protected),
-        (
-            prop_oneof![Just(Retention::Archived), Just(Retention::Settled)],
-            0_i64..100
-        )
-            .prop_map(|(retention, last_activity)| Claim::Retained {
-                retention,
-                last_activity
-            }),
-    ]
+    prop_oneof![Just(Claim::Orphan), Just(Claim::Protected),]
 }
 
 proptest! {
     /// The order never offers protected or new checkouts, puts every old orphan first, and ranks
-    /// the rest archived before settled, then by age.
+    /// the rest by age.
     #[test]
-    fn removal_order_ranks_orphans_then_archived_then_settled_by_age(
+    fn removal_order_ranks_orphans_then_archived_by_age(
         claims in prop::collection::vec((claim(), 0_i64..10_000), 0..12),
     ) {
         let now = 10_000;
@@ -308,8 +264,6 @@ proptest! {
         prop_assert!(order.iter().all(|index| worktrees[*index].claim != Claim::Protected));
         let rank = |index: usize| match worktrees[index].claim {
             Claim::Orphan => (0, worktrees[index].created),
-            Claim::Retained { retention: Retention::Archived, last_activity } => (1, last_activity),
-            Claim::Retained { last_activity, .. } => (2, last_activity),
             Claim::Protected => (3, 0),
         };
         prop_assert!(order.windows(2).all(|pair| rank(pair[0]) <= rank(pair[1])));
@@ -318,9 +272,21 @@ proptest! {
             .filter(|worktree| match worktree.claim {
                 Claim::Orphan => now.saturating_sub(worktree.created) >= 60 * 60,
                 Claim::Protected => false,
-                Claim::Retained { .. } => true,
             })
             .count();
         prop_assert_eq!(order.len(), expected);
     }
+}
+
+#[rstest]
+#[case(Retention::Active, false)]
+#[case(Retention::Archived, false)]
+#[case(Retention::Archived, true)]
+fn every_session_reference_protects_its_checkout(#[case] retention: Retention, #[case] open: bool) {
+    let host = Host::new();
+    let path = host.checkout("claimed", false);
+    let report = runner::git()
+        .clean_worktrees(&host.request(1, vec![session(&path, retention, 0, open)]))
+        .unwrap();
+    assert_eq!((report.removed, report.remaining), (vec![], 1));
 }

@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    config::{BackendKeybindConfig, BoottyConfig, MultiplexerBackendConfig, split_keybind_entry},
+    config::{BoottyConfig, split_keybind_entry},
     config_reload::CONFIG_HOT_RELOAD_INTERVAL,
     keymap_file::{
         KeymapAction, KeymapBindingKind, KeymapContext, KeymapDiagnostic, KeymapEdit, KeymapFile,
@@ -1265,13 +1265,7 @@ impl FileStamp {
 pub fn legacy_keymap_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
     let input = &config.input;
     let mut bindings = Vec::new();
-    let mut global_input = input.clone();
-    global_input.backend_keybinds = BackendKeybindConfig::default();
-    extend_legacy_bindings(
-        &mut bindings,
-        &KeymapContext::Global,
-        &global_input.keybinds_for_backend(MultiplexerBackendConfig::Native),
-    );
+    extend_legacy_bindings(&mut bindings, &KeymapContext::Global, &input.keybind);
     for entry in &input.sidebar_keybind {
         let Some((keystrokes, action)) = split_keybind_entry(entry) else {
             continue;
@@ -1289,20 +1283,11 @@ pub fn legacy_keymap_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapsho
             source: KeymapBindingSource::BuiltIn,
         });
     }
-    let mut backend_input = input.clone();
-    backend_input.keybind.clear();
-    for (context, backend) in [
-        (KeymapContext::Herdr, MultiplexerBackendConfig::Herdr),
-        (KeymapContext::Native, MultiplexerBackendConfig::Native),
-        (KeymapContext::Rmux, MultiplexerBackendConfig::Rmux),
-        (KeymapContext::Tmux, MultiplexerBackendConfig::Tmux),
-    ] {
-        extend_legacy_bindings(
-            &mut bindings,
-            &context,
-            &backend_input.keybinds_for_backend(backend),
-        );
-    }
+    extend_legacy_bindings(
+        &mut bindings,
+        &KeymapContext::Terminal,
+        &input.layout_keybind,
+    );
     bindings
 }
 

@@ -9,7 +9,7 @@ pub const DEFAULT_PADDING: f32 = 0.0;
 pub const MIN_COLS: u16 = 20;
 pub const MIN_ROWS: u16 = 8;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalGeometry {
     pub cols: u16,
     pub rows: u16,
@@ -39,7 +39,7 @@ impl TerminalGeometry {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CellMetrics {
     pub width: f32,
     pub height: f32,
@@ -82,7 +82,7 @@ impl Default for CellMetrics {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalPadding {
     pub top: f32,
     pub right: f32,
@@ -165,7 +165,7 @@ pub struct RoundedCellMetrics {
     pub height: u32,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GridDimensions {
     pub cols: u16,
     pub rows: u16,
@@ -197,7 +197,7 @@ pub enum PaddingBalance {
     CappedTop,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SurfacePoint {
     pub x: f32,
     pub y: f32,
@@ -209,7 +209,7 @@ pub struct GridPoint {
     pub y: u16,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SurfaceRect {
     pub min_x: f32,
     pub min_y: f32,
@@ -349,7 +349,7 @@ pub struct MouseSurfaceMetrics {
     pub padding: RoundedPadding,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalSurface {
     pub rect: SurfaceRect,
     pub padding: TerminalPadding,

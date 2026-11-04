@@ -1,7 +1,7 @@
 //! Shell-reported lifecycle. Time is supplied by the host; terminal output is never a heuristic.
 use std::time::{Duration, Instant};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ShellEvent {
     PromptStart,
     PromptEnd,

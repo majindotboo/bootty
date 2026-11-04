@@ -9,11 +9,6 @@ use crate::{
     error_catalog::ErrorNotice,
     gpui::CommandAction,
 };
-use bootty_agents::{
-    AgentKind, AgentService, TerminalAgentService,
-    command_descriptors as agent_command_descriptors, native_command_descriptors,
-    terminal_command_descriptors,
-};
 use bootty_control::{
     ArgumentSchema, Caller, CommandCatalogSource, CommandDescriptor, CommandInvocation,
     CommandOutcome, CompactSchema, ControlCatalog, MutationClass, ResourceKind, ValueType,
@@ -37,36 +32,23 @@ macro_rules! command_actions {
     };
 }
 
-mod browser;
-mod composer;
-mod computer;
 mod dock;
 mod files;
 mod git;
-pub use composer::ComposerRequest;
 mod jobs;
-mod orchestration;
 mod panes;
-mod plans;
-pub use plans::implement_plan_invocation;
 pub(crate) mod runtime;
 mod sessions;
-mod surfaces;
 mod themes;
 
-pub use browser::{BrowserAction, BrowserRequest};
-pub use computer::{ApplicationCommand, ComputerCommand, agent_may_use};
-pub use dock::{DockAction, DockRequest, PANELS, PanelCreation, PanelDescriptor, panel_descriptor};
+pub use dock::{DockAction, DockRequest};
 pub use files::{FileAction, reveal_label};
 pub use git::GitAction;
 pub use jobs::JobAction;
-pub use orchestration::{RunCommand, RunNodeRequest, capture_run_plan};
 pub use panes::PaneAction;
 pub use sessions::SessionAction;
-pub use surfaces::{SurfaceChooserAction, SurfaceCommand};
 pub use themes::ThemeAction;
 
-pub use runtime::AgentRuntimeConfig;
 pub(crate) use runtime::{CommandRuntime, command_outcome_message};
 
 pub(crate) use bootty_mux::target::ExactMuxTarget;
@@ -83,16 +65,10 @@ pub fn command_invocation_from_catalog(
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum CoreCommandExecutor {
-    Surface(SurfaceCommand),
-    Composer(crate::gpui::CommandAction),
     Synchronous(SynchronousCommand),
     Dock(DockAction, Option<u64>),
-    Browser(BrowserAction, Option<u64>),
-    Computer(ComputerCommand),
-    Orchestration(RunCommand),
     Keybind(KeybindAction),
     OpenLink(Vec<String>),
-    AgentWorkspace(AgentWorkspaceAction),
     Forward(&'static str, Vec<String>),
     Job(JobAction, Vec<String>),
     Recovery(&'static str, Vec<String>),
@@ -107,15 +83,6 @@ pub enum CoreCommandExecutor {
     Session(SessionAction, Vec<String>),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AgentWorkspaceAction {
-    List,
-    Focus,
-    Next,
-    /// Switch whether a message sent during a turn waits for it or steers it.
-    ToggleQueueing,
-}
-
 /// Commands that finish on the app thread after their cancellation token is started.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SynchronousCommand {
@@ -126,7 +93,6 @@ pub enum SynchronousCommand {
     PasteTerminal(String),
     Doctor,
     ShellIntegration(String),
-    WslSpace(Vec<String>),
     ReadTerminal,
     SubmitTerminal,
 }
@@ -139,26 +105,19 @@ struct RegisteredCommand {
 
 #[derive(Clone, Copy, Debug)]
 enum CommandExecutorResolver {
-    Surface,
     Dock(DockAction),
-    Browser,
-    Computer,
-    Orchestration,
     Keybind,
     Sidebar(SidebarAction),
     Command(crate::gpui::CommandAction),
-    Composer(crate::gpui::CommandAction),
     CurrentResource,
     PasteTerminal,
     OpenLink,
-    AgentWorkspace(AgentWorkspaceAction),
     Doctor,
     Forward(&'static str),
     Job(JobAction),
     Recovery(&'static str),
     ShellIntegration,
     WslList,
-    WslSpace,
     WorktreeCleanup,
     CaptureTerminal(bool),
     ShellPrompt(&'static str),
@@ -210,20 +169,19 @@ impl CommandRegistry {
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
         let registered = self.registered(&invocation.command)?;
-        let mut descriptor = registered.descriptor.clone();
+        let descriptor = registered.descriptor.clone();
         validate_arguments(&descriptor, &invocation.arguments)?;
-        let executor = Self::resolve_executor(registered.executor, &invocation, &mut descriptor)?;
+        let executor = Self::resolve_executor(registered.executor, &invocation)?;
         Ok(ResolvedCommandInvocation {
             descriptor,
-            executor: CommandExecutor::Core(executor),
             invocation,
+            executor,
         })
     }
 
     fn resolve_executor(
         resolver: CommandExecutorResolver,
         invocation: &CommandInvocation,
-        descriptor: &mut CommandDescriptor,
     ) -> Result<CoreCommandExecutor, CommandOutcome> {
         let invalid_arguments = || CommandOutcome::Failed {
             code: "invalid_arguments".to_owned(),
@@ -232,9 +190,6 @@ impl CommandRegistry {
         let first_argument = || invocation.arguments.first().ok_or_else(invalid_arguments);
         let arguments = || invocation.arguments.clone();
         let executor = match resolver {
-            CommandExecutorResolver::Surface => {
-                CoreCommandExecutor::Surface(surfaces::resolve(invocation)?)
-            }
             CommandExecutorResolver::Dock(action) => CoreCommandExecutor::Dock(
                 action,
                 invocation
@@ -244,14 +199,6 @@ impl CommandRegistry {
                     .transpose()
                     .map_err(|_| invalid_arguments())?,
             ),
-            CommandExecutorResolver::Browser => {
-                let (action, page) = browser::resolve(invocation)?;
-                CoreCommandExecutor::Browser(action, page)
-            }
-            CommandExecutorResolver::Computer => resolve_computer(invocation, descriptor)?,
-            CommandExecutorResolver::Orchestration => {
-                CoreCommandExecutor::Orchestration(RunCommand::parse(invocation)?)
-            }
             CommandExecutorResolver::Keybind => resolve_keybind_command(invocation)?,
             CommandExecutorResolver::Sidebar(action) => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::Sidebar(action))
@@ -259,7 +206,6 @@ impl CommandRegistry {
             CommandExecutorResolver::Command(action) => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::Command(action))
             }
-            CommandExecutorResolver::Composer(action) => CoreCommandExecutor::Composer(action),
             CommandExecutorResolver::CurrentResource => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::CurrentResource(
                     resource_kind(first_argument()?).ok_or_else(invalid_arguments)?,
@@ -290,18 +236,12 @@ impl CommandRegistry {
             CommandExecutorResolver::Doctor => {
                 CoreCommandExecutor::Synchronous(SynchronousCommand::Doctor)
             }
-            CommandExecutorResolver::AgentWorkspace(action) => {
-                CoreCommandExecutor::AgentWorkspace(action)
-            }
             CommandExecutorResolver::OpenLink => CoreCommandExecutor::OpenLink(arguments()),
             CommandExecutorResolver::ShellIntegration => CoreCommandExecutor::Synchronous(
                 SynchronousCommand::ShellIntegration(first_argument()?.clone()),
             ),
             CommandExecutorResolver::WslList => CoreCommandExecutor::WslList,
             CommandExecutorResolver::WorktreeCleanup => CoreCommandExecutor::WorktreeCleanup,
-            CommandExecutorResolver::WslSpace => {
-                CoreCommandExecutor::Synchronous(SynchronousCommand::WslSpace(arguments()))
-            }
             CommandExecutorResolver::CaptureTerminal(export) => {
                 CoreCommandExecutor::CaptureTerminal(arguments(), export)
             }
@@ -346,13 +286,8 @@ impl CommandRegistry {
                 });
         }
         register_navigation_commands(&mut commands);
-        browser::register_commands(&mut commands);
-        surfaces::register_commands(&mut commands);
-        computer::register_commands(&mut commands);
-        orchestration::register_commands(&mut commands);
         register_resource_commands(&mut commands);
         register_capture_commands(&mut commands);
-        register_agents_commands(&mut commands);
         register_shell_prompt_commands(&mut commands);
         register_forward_commands(&mut commands);
         register_feature_commands(&mut commands);
@@ -365,7 +300,6 @@ impl CommandRegistry {
 fn register_navigation_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
     register_sidebar_commands(commands);
     register_picker_commands(commands);
-    register_composer_commands(commands);
 }
 
 fn register_sidebar_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
@@ -431,98 +365,6 @@ fn register_picker_commands(commands: &mut BTreeMap<String, RegisteredCommand>) 
                     palette: false,
                 },
                 executor: CommandExecutorResolver::Command(action),
-            },
-        );
-    }
-}
-
-/// Composer controls and completion menu commands: name, action and title.
-const COMPOSER_COMMANDS: [(&str, CommandAction, &str); 13] = [
-    (
-        "previous",
-        CommandAction::Previous,
-        "Previous Composer Suggestion",
-    ),
-    ("next", CommandAction::Next, "Next Composer Suggestion"),
-    (
-        "confirm",
-        CommandAction::Confirm,
-        "Insert Composer Suggestion",
-    ),
-    (
-        "cancel",
-        CommandAction::Cancel,
-        "Dismiss Composer Suggestions",
-    ),
-    (
-        "effort-down",
-        CommandAction::EffortDown,
-        "Decrease thinking effort",
-    ),
-    (
-        "effort-up",
-        CommandAction::EffortUp,
-        "Increase thinking effort",
-    ),
-    ("dictate", CommandAction::Dictate, "Dictate into composer"),
-    ("voice", CommandAction::Voice, "Toggle voice mode"),
-    ("toggle-plan", CommandAction::TogglePlan, "Toggle plan mode"),
-    ("toggle-fast", CommandAction::ToggleFast, "Toggle fast mode"),
-    (
-        "focus-composer",
-        CommandAction::FocusComposer,
-        "Focus composer",
-    ),
-    ("stash", CommandAction::Stash, "Stash or restore prompt"),
-    (
-        "expand",
-        CommandAction::Expand,
-        "Expand or shrink the composer",
-    ),
-];
-
-fn register_composer_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
-    for (name, action, title) in
-        COMPOSER_COMMANDS
-            .into_iter()
-            .chain(
-                crate::gpui::ComposerControl::ALL
-                    .into_iter()
-                    .map(|control| {
-                        (
-                            control.command(),
-                            CommandAction::Focus(control),
-                            control.title(),
-                        )
-                    }),
-            )
-    {
-        let id = format!("ui.composer.{name}");
-        commands.insert(
-            id.clone(),
-            RegisteredCommand {
-                descriptor: CommandDescriptor {
-                    id,
-                    title: title.into(),
-                    description: "Use the active composer controls or completion menu.".into(),
-                    mutation: MutationClass::Write,
-                    arguments: CompactSchema::default(),
-                    target: Some(ResourceKind::ApplicationWindow),
-                    palette: matches!(
-                        action,
-                        CommandAction::Focus(_)
-                            | CommandAction::EffortDown
-                            | CommandAction::EffortUp
-                            | CommandAction::Dictate
-                            | CommandAction::Voice
-                            | CommandAction::TogglePlan
-                            | CommandAction::ToggleFast
-                            | CommandAction::FocusComposer
-                            | CommandAction::Stash
-                            | CommandAction::Expand
-                    ),
-                },
-                executor: CommandExecutorResolver::Composer(action),
             },
         );
     }
@@ -664,7 +506,7 @@ fn register_capture_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
                 id: "doctor".to_owned(),
                 title: "Workspace Diagnostics".to_owned(),
                 description:
-                    "Read identity, host bindings, backend capabilities and reported failures."
+                    "Read identity, host bindings, native workspace state and reported failures."
                         .to_owned(),
                 mutation: MutationClass::Read,
                 arguments: CompactSchema::default(),
@@ -674,55 +516,6 @@ fn register_capture_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             executor: CommandExecutorResolver::Doctor,
         },
     );
-}
-
-fn register_agents_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
-    for (action, id, title, target) in [
-        (
-            AgentWorkspaceAction::List,
-            "agents.list",
-            "List Agents",
-            ResourceKind::ApplicationWindow,
-        ),
-        (
-            AgentWorkspaceAction::Focus,
-            "agents.focus",
-            "Focus Agent",
-            ResourceKind::Terminal,
-        ),
-        (
-            AgentWorkspaceAction::Next,
-            "agents.next",
-            "Next Unread Agent",
-            ResourceKind::ApplicationWindow,
-        ),
-        (
-            AgentWorkspaceAction::ToggleQueueing,
-            "agents.toggle-queueing",
-            "Toggle Queueing Follow-up Messages",
-            ResourceKind::ApplicationWindow,
-        ),
-    ] {
-        commands.insert(
-            id.to_owned(),
-            RegisteredCommand {
-                descriptor: CommandDescriptor {
-                    id: id.to_owned(),
-                    title: title.to_owned(),
-                    description: title.to_owned(),
-                    arguments: CompactSchema::default(),
-                    mutation: if action == AgentWorkspaceAction::List {
-                        MutationClass::Read
-                    } else {
-                        MutationClass::Write
-                    },
-                    target: Some(target),
-                    palette: false,
-                },
-                executor: CommandExecutorResolver::AgentWorkspace(action),
-            },
-        );
-    }
 }
 
 fn register_shell_prompt_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
@@ -821,8 +614,6 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
         ("recovery.get", vec!["id"], MutationClass::Read),
         ("recovery.export", vec!["id", "path"], MutationClass::Write),
         ("recovery.delete", vec!["id"], MutationClass::Destructive),
-        ("recovery.resume", vec!["id"], MutationClass::Write),
-        ("recovery.fork", vec!["id"], MutationClass::Write),
     ] {
         commands.insert(id.into(), RegisteredCommand { descriptor: CommandDescriptor {
                 id:id.into(), title:id.into(), description:"Browse bounded previous-session output or explicitly relaunch a recorded agent session.".into(),
@@ -880,6 +671,16 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             },
         );
     }
+    let mut close = SessionAction::Close.descriptor();
+    close.id = "close_session".into();
+    close.palette = true;
+    commands.insert(
+        close.id.clone(),
+        RegisteredCommand {
+            descriptor: close,
+            executor: CommandExecutorResolver::Session(SessionAction::Close),
+        },
+    );
     for action in SessionAction::ALL {
         let descriptor = action.descriptor();
         commands.insert(
@@ -940,129 +741,62 @@ fn register_host_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
             executor: CommandExecutorResolver::ShellIntegration,
         },
     );
-    let mut name = argument("name", ValueType::String);
-    name.required = false;
-    let mut backend = argument("backend", ValueType::String);
-    backend.required = false;
-    for (id, title, description, mutation, arguments, executor) in [
-        (
-            "wsl.list",
-            "List WSL Distributions",
-            "List installed Windows Subsystem for Linux distributions.",
-            MutationClass::Read,
-            vec![],
-            CommandExecutorResolver::WslList,
-        ),
-        (
-            "space.wsl",
-            "Create WSL Space",
-            "Create and activate a Space in a WSL distribution. Backend defaults to rmux; tmux is also supported. Connection occurs through the binding runtime.",
-            MutationClass::Write,
-            vec![argument("distribution", ValueType::String), name, backend],
-            CommandExecutorResolver::WslSpace,
-        ),
-    ] {
-        let descriptor = CommandDescriptor {
-            id: id.to_owned(),
-            title: title.to_owned(),
-            description: description.to_owned(),
-            arguments: CompactSchema { arguments },
-            mutation,
-            target: None,
-            palette: false,
-        };
-        commands.insert(
-            id.to_owned(),
-            RegisteredCommand {
-                descriptor,
-                executor,
+    commands.insert(
+        "wsl.list".to_owned(),
+        RegisteredCommand {
+            descriptor: CommandDescriptor {
+                id: "wsl.list".to_owned(),
+                title: "List WSL Distributions".to_owned(),
+                description: "List installed Windows Subsystem for Linux distributions.".to_owned(),
+                arguments: CompactSchema {
+                    arguments: Vec::new(),
+                },
+                mutation: MutationClass::Read,
+                target: None,
+                palette: false,
             },
-        );
-    }
-}
-
-#[derive(Clone)]
-pub enum CommandExecutor {
-    Core(CoreCommandExecutor),
-    Agent(Arc<AgentService>),
-    TerminalAgent,
-    NativeAgent,
-    /// The static agent catalog remains discoverable in tests and uncomposed app states.
-    /// Invocation is rejected explicitly until the host supplies its event transport.
-    UncomposedAgent,
+            executor: CommandExecutorResolver::WslList,
+        },
+    );
 }
 
 #[derive(Clone)]
 pub struct ResolvedCommandInvocation {
     pub descriptor: CommandDescriptor,
     pub invocation: CommandInvocation,
-    pub executor: CommandExecutor,
+    pub executor: CoreCommandExecutor,
 }
 
 #[derive(Clone)]
 pub struct CommandCatalog {
     core: &'static CommandRegistry,
-    agents: Option<Arc<AgentService>>,
-    terminals: Option<Arc<TerminalAgentService>>,
     control: Arc<ControlCatalog>,
 }
 
 // Descriptor factories are static metadata. Keymap compilation resolves hundreds of bindings;
 // retain the schemas once rather than rebuilding every provider's catalog for each lookup.
-fn native_descriptors() -> &'static [CommandDescriptor] {
-    static DESCRIPTORS: OnceLock<Vec<CommandDescriptor>> = OnceLock::new();
-    DESCRIPTORS.get_or_init(native_command_descriptors)
-}
 
-fn terminal_descriptors() -> &'static [CommandDescriptor] {
-    static DESCRIPTORS: OnceLock<Vec<CommandDescriptor>> = OnceLock::new();
-    DESCRIPTORS.get_or_init(terminal_command_descriptors)
-}
-
-fn agent_descriptors() -> &'static [CommandDescriptor] {
-    static DESCRIPTORS: OnceLock<Vec<CommandDescriptor>> = OnceLock::new();
-    DESCRIPTORS.get_or_init(agent_command_descriptors)
-}
-
-struct NativeCatalogSource {
-    agents: Option<Arc<AgentService>>,
+/// Dynamic catalog state beyond the static registry: the job owner's change topic.
+struct JobsCatalogSource {
     jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
 }
 
-impl CommandCatalogSource for NativeCatalogSource {
+impl CommandCatalogSource for JobsCatalogSource {
     fn list(&self) -> Vec<CommandDescriptor> {
-        let mut descriptors = agent_descriptors().to_vec();
-        descriptors.extend_from_slice(native_descriptors());
-        for descriptor in terminal_descriptors() {
-            descriptors.retain(|old| old.id != descriptor.id);
-            descriptors.push(descriptor.clone());
-        }
-        descriptors
+        Vec::new()
     }
 
-    fn describe(&self, id: &str) -> Option<CommandDescriptor> {
-        terminal_descriptors()
-            .iter()
-            .chain(agent_descriptors())
-            .chain(native_descriptors())
-            .find(|command| command.id == id)
-            .cloned()
+    fn describe(&self, _id: &str) -> Option<CommandDescriptor> {
+        None
     }
 
     fn topics(&self) -> std::collections::BTreeSet<String> {
-        let mut topics = self.agents.as_ref().map_or_else(
-            || {
-                AgentKind::ALL
-                    .into_iter()
-                    .map(|provider| provider.topic().to_owned())
-                    .collect()
-            },
-            |agents| agents.topics(),
-        );
-        if self.jobs.upgrade().is_some_and(|jobs| jobs.is_active()) {
-            topics.insert("jobs.changed".to_owned());
-        }
-        topics
+        self.jobs
+            .upgrade()
+            .filter(|jobs| jobs.is_active())
+            .map(|_| "jobs.changed".to_owned())
+            .into_iter()
+            .collect()
     }
 
     fn with_active_topic(
@@ -1072,29 +806,20 @@ impl CommandCatalogSource for NativeCatalogSource {
         topic: &str,
         publish: &mut dyn FnMut(),
     ) -> Result<(), String> {
-        if module == "bootty.jobs" && topic == "jobs.changed" {
-            if self
-                .jobs
-                .upgrade()
-                .is_some_and(|jobs| jobs.is_active() && jobs.generation() == generation)
-            {
-                publish();
-                return Ok(());
-            }
-            return Err("job owner has retired".to_owned());
+        if module != "bootty.jobs" || topic != "jobs.changed" {
+            return Err(format!(
+                "event topic `{topic}` is not registered by `{module}`"
+            ));
         }
-        if AgentKind::ALL
-            .iter()
-            .any(|provider| provider.module() == module && provider.topic() == topic)
+        if self
+            .jobs
+            .upgrade()
+            .is_some_and(|jobs| jobs.is_active() && jobs.generation() == generation)
         {
-            return self.agents.as_ref().map_or_else(
-                || Err("agent service is not composed".to_owned()),
-                |agents| agents.with_active_topic(module, generation, topic, publish),
-            );
+            publish();
+            return Ok(());
         }
-        Err(format!(
-            "agent event topic `{topic}` is not registered by `{module}`"
-        ))
+        Err("job owner has retired".to_owned())
     }
 }
 
@@ -1109,37 +834,19 @@ impl std::fmt::Debug for CommandCatalog {
 
 impl Default for CommandCatalog {
     fn default() -> Self {
-        Self::with_services(None, std::sync::Weak::new())
+        Self::with_jobs(std::sync::Weak::new())
     }
 }
 
 impl CommandCatalog {
-    pub fn with_agent_service(agents: Arc<AgentService>) -> Self {
-        Self::with_services(Some(agents), std::sync::Weak::new())
-    }
-
-    pub(crate) fn with_services(
-        agents: Option<Arc<AgentService>>,
-        jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
-    ) -> Self {
-        Self::with_terminal_services(agents, None, jobs)
-    }
-
-    pub(crate) fn with_terminal_services(
-        agents: Option<Arc<AgentService>>,
-        terminals: Option<Arc<TerminalAgentService>>,
-        jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>,
-    ) -> Self {
+    pub(crate) fn with_jobs(jobs: std::sync::Weak<bootty_host::jobs::JobRegistry>) -> Self {
         let core = CommandRegistry::core();
-        let source = Arc::new(NativeCatalogSource {
-            agents: agents.clone(),
-            jobs,
-        });
         Self {
             core,
-            control: Arc::new(ControlCatalog::new(core.list().cloned().collect(), source)),
-            agents,
-            terminals,
+            control: Arc::new(ControlCatalog::new(
+                core.list().cloned().collect(),
+                Arc::new(JobsCatalogSource { jobs }),
+            )),
         }
     }
 
@@ -1161,59 +868,7 @@ impl CommandCatalog {
         &self,
         invocation: CommandInvocation,
     ) -> Result<ResolvedCommandInvocation, CommandOutcome> {
-        if let Some(descriptor) = native_descriptors()
-            .iter()
-            .find(|descriptor| descriptor.id == invocation.command)
-            .cloned()
-        {
-            validate_arguments(&descriptor, &invocation.arguments)?;
-            return Ok(ResolvedCommandInvocation {
-                descriptor,
-                invocation,
-                executor: CommandExecutor::NativeAgent,
-            });
-        }
-        if let Some(descriptor) = terminal_descriptors()
-            .iter()
-            .find(|descriptor| descriptor.id == invocation.command)
-            .cloned()
-        {
-            validate_arguments(&descriptor, &invocation.arguments)?;
-            let executor = if self.terminals.is_some() {
-                CommandExecutor::TerminalAgent
-            } else {
-                CommandExecutor::UncomposedAgent
-            };
-            return Ok(ResolvedCommandInvocation {
-                descriptor,
-                invocation,
-                executor,
-            });
-        }
-        if let Some(descriptor) = agent_descriptors()
-            .iter()
-            .find(|descriptor| descriptor.id == invocation.command)
-            .cloned()
-        {
-            validate_arguments(&descriptor, &invocation.arguments)?;
-            let executor = self
-                .agents
-                .as_ref()
-                .map_or(CommandExecutor::UncomposedAgent, |agents| {
-                    CommandExecutor::Agent(Arc::clone(agents))
-                });
-            return Ok(ResolvedCommandInvocation {
-                descriptor,
-                invocation,
-                executor,
-            });
-        }
         self.core.resolve(invocation)
-    }
-
-    #[must_use]
-    pub fn agents(&self) -> Option<Arc<AgentService>> {
-        self.agents.clone()
     }
 
     #[must_use]
@@ -1227,10 +882,6 @@ fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
         SidebarAction::ToggleGrouping => (
             "Toggle Session Grouping",
             "Switch between project groups and a flat session list.",
-        ),
-        SidebarAction::ToggleSettled => (
-            "Toggle Settled Sessions",
-            "Open or close the sidebar's settled shelf.",
         ),
         SidebarAction::SortManual => ("Sort Sessions Manually", "Keep the saved session order."),
         SidebarAction::SortRecentActivity => (
@@ -1268,7 +919,6 @@ fn sidebar_descriptor(action: SidebarAction) -> CommandDescriptor {
         palette: matches!(
             action,
             SidebarAction::ToggleGrouping
-                | SidebarAction::ToggleSettled
                 | SidebarAction::SortManual
                 | SidebarAction::SortRecentActivity
         ),
@@ -1369,20 +1019,4 @@ fn resource_kind(value: &str) -> Option<ResourceKind> {
         "terminal" => Some(ResourceKind::Terminal),
         _ => None,
     }
-}
-
-fn resolve_computer(
-    invocation: &CommandInvocation,
-    descriptor: &mut CommandDescriptor,
-) -> Result<CoreCommandExecutor, CommandOutcome> {
-    let command = computer::resolve(invocation)?;
-    if matches!(
-        command,
-        ComputerCommand::HostCapture
-            | ComputerCommand::HostSnapshot
-            | ComputerCommand::HostSnapshotRegion(_)
-    ) {
-        descriptor.target = Some(ResourceKind::ApplicationWindow);
-    }
-    Ok(CoreCommandExecutor::Computer(command))
 }

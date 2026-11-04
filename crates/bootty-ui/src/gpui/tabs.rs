@@ -605,7 +605,7 @@ impl RenderOnce for ScrollRow {
             .when(overflow, |row| {
                 row.child(scroll_button(&self.id, &self.scroll, true, right))
             })
-            .on_scroll_wheel(move |event, window, cx| {
+            .on_scroll(move |event, window, cx| {
                 let delta = event.delta.pixel_delta(px(rem));
                 // Horizontal gestures are handled by Kit. Route a mouse wheel along the strip.
                 if delta.x.abs() < delta.y.abs() {

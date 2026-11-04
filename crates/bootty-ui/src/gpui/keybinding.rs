@@ -54,7 +54,11 @@ pub fn keybinding_contexts_overlap(left: &str, right: &str) -> bool {
 pub fn parse_keybinding(value: &str) -> Option<Vec<KeybindingKeystroke>> {
     let mut strokes = Vec::new();
     for step in split_keybinding_steps(value) {
-        let key = Keystroke::parse(&gpui_keystroke_text(step)).ok()?;
+        let key = Keystroke::parse_with_os(
+            &gpui_keystroke_text(step),
+            gpui_kit::OperatingSystem::Unknown,
+        )
+        .ok()?;
         strokes.push(KeybindingKeystroke::from_keystroke(key));
     }
     (!strokes.is_empty()).then_some(strokes)

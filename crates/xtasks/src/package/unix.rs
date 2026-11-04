@@ -1,12 +1,12 @@
 use std::env;
-use std::ffi::{OsStr, OsString};
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::{Args, Layout, Linkage};
+use super::{Args, Layout};
 use crate::daemon::{DaemonTarget, TARGETS};
 use crate::{command, filesystem};
 
@@ -14,10 +14,9 @@ const BINARY: &str = "bootty";
 const DAEMON: &str = "bootty-daemon";
 
 pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
-    let zig_path = ensure_project_zig(&layout.app_name)?;
     let host_daemon = build_daemon(layout)?;
     fs::create_dir_all(&layout.dist_dir)?;
-    build_application(args, layout, &zig_path)?;
+    crate::build::run(&crate::build::BuildArgs { release: !args.dev })?;
 
     match env::consts::OS {
         "macos" => package_macos(layout, &host_daemon)?,
@@ -25,23 +24,6 @@ pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
         os => bail!("unsupported OS: {os}"),
     }
     super::print_dist_files(layout)
-}
-
-fn build_application(args: Args, layout: &Layout, zig_path: &Path) -> Result<()> {
-    let mut command = Command::new("cargo");
-    command
-        .arg("build")
-        .args(layout.cargo_profile_args())
-        .args(["-p", "bootty", "--bins"]);
-    if args.dev {
-        command.args(["--features", "bootty-dev"]);
-    }
-    let path = prepend_path(zig_path.parent().context("Zig executable has no parent")?)?;
-    command.env("PATH", path);
-    if let Some(flags) = rustflags(layout) {
-        command.env("RUSTFLAGS", flags);
-    }
-    command::run(&mut command)
 }
 
 fn build_daemon(layout: &Layout) -> Result<PathBuf> {
@@ -57,62 +39,11 @@ fn build_daemon(layout: &Layout) -> Result<PathBuf> {
         let mut command = Command::new("cargo");
         command
             .arg("build")
-            .args(layout.daemon_profile_args())
-            .args(["-p", DAEMON, "--bin", DAEMON])
-            .env("RUSTFLAGS", "");
+            .arg("--release")
+            .args(["-p", DAEMON, "--bin", DAEMON]);
         command::run(&mut command)?;
-        Ok(layout.target_root.join(layout.daemon_profile).join(DAEMON))
+        Ok(layout.target_root.join("release").join(DAEMON))
     }
-}
-
-fn ensure_project_zig(app_name: &str) -> Result<PathBuf> {
-    let mise = fs::read_to_string("mise.toml").context("failed to read mise.toml")?;
-    let required = mise
-        .lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once('=')?;
-            (name.trim() == "zig").then(|| value.trim().trim_matches('"'))
-        })
-        .unwrap_or_default();
-    let zig = if command::program_exists("mise") {
-        let output = command::stdout(Command::new("mise").args(["which", "zig"]));
-        output
-            .ok()
-            .map(|path| PathBuf::from(path.trim()))
-            .filter(|path| path.is_file())
-            .unwrap_or_else(|| PathBuf::from("zig"))
-    } else {
-        PathBuf::from("zig")
-    };
-    let version = command::stdout(Command::new(&zig).arg("version")).with_context(|| {
-        format!("Zig {required} is required to package {app_name}; install it with mise")
-    })?;
-    let version = version.trim();
-    if !required.is_empty() && version != required {
-        bail!(
-            "Zig {required} is required to package {app_name}; found {version} at {}",
-            zig.display()
-        );
-    }
-    Ok(zig)
-}
-
-fn rustflags(layout: &Layout) -> Option<OsString> {
-    if layout.linkage == Linkage::Static {
-        return None;
-    }
-    let suffix = match env::consts::OS {
-        "macos" => "-C prefer-dynamic -C link-arg=-Wl,-rpath,@executable_path/../Frameworks",
-        "linux" => "-C link-arg=-Wl,-rpath,$ORIGIN/../lib",
-        _ => return None,
-    };
-    Some(command::append_env("RUSTFLAGS", suffix))
-}
-
-fn prepend_path(directory: &Path) -> Result<OsString> {
-    let mut paths = vec![directory.to_path_buf()];
-    paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-    env::join_paths(paths).context("failed to construct PATH")
 }
 
 fn host_daemon_target() -> Result<DaemonTarget> {
@@ -123,76 +54,6 @@ fn host_daemon_target() -> Result<DaemonTarget> {
         ("linux", "aarch64") => Ok(DaemonTarget::Aarch64UnknownLinuxGnu),
         (os, arch) => bail!("unsupported host daemon target: {os} {arch}"),
     }
-}
-
-fn dynamic_dependencies(binary: &Path) -> Result<Vec<String>> {
-    let output = match env::consts::OS {
-        "macos" => {
-            command::stdout(Command::new("otool").args([OsStr::new("-L"), binary.as_os_str()]))?
-        }
-        "linux" => command::stdout(Command::new("ldd").arg(binary))?,
-        os => bail!("dynamic packaging is unsupported on {os}; pass --static"),
-    };
-    if env::consts::OS == "linux" && output.lines().any(|line| line.contains("=> not found")) {
-        bail!(
-            "unresolved dynamic dependency for {}:\n{output}",
-            binary.display()
-        );
-    }
-    let dependencies = output
-        .lines()
-        .filter_map(|line| {
-            let name = line.split_whitespace().next()?;
-            if env::consts::OS == "macos" {
-                name.strip_prefix("@rpath/").filter(|name| {
-                    // macOS 13+ provides this runtime in its dyld cache. The app's
-                    // Swift rpath resolves it; copying a toolchain runtime is incorrect.
-                    *name != "libswift_Concurrency.dylib"
-                        && Path::new(name)
-                            .extension()
-                            .is_some_and(|extension| extension.eq_ignore_ascii_case("dylib"))
-                })
-            } else {
-                name.starts_with("lib")
-                    .then_some(name)
-                    .filter(|name| name.contains(".so"))
-            }
-        })
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    if dependencies.is_empty() && env::consts::OS == "macos" {
-        bail!(
-            "expected dynamic Rust libraries referenced by {}",
-            binary.display()
-        );
-    }
-    Ok(dependencies)
-}
-
-fn copy_dynamic_libraries(binary: &Path, destination: &Path, layout: &Layout) -> Result<()> {
-    let target_libdir = command::stdout(Command::new("rustc").args(["--print", "target-libdir"]))?;
-    let source_dirs = [
-        layout.target_root.join(layout.profile).join("deps"),
-        PathBuf::from(target_libdir.trim()),
-    ];
-    fs::create_dir_all(destination)?;
-    for name in dynamic_dependencies(binary)? {
-        let source = source_dirs
-            .iter()
-            .map(|directory| directory.join(&name))
-            .find(|path| path.is_file());
-        // Linux ldd also lists host libraries such as X11 and libc; the bundle only owns
-        // libraries from the Cargo output and Rust toolchain.
-        if let Some(source) = source {
-            filesystem::copy_file(&source, &destination.join(name))?;
-        } else if env::consts::OS == "macos" {
-            bail!(
-                "could not find dynamic dependency {name} for {}",
-                binary.display()
-            );
-        }
-    }
-    Ok(())
 }
 
 fn copy_bundled_daemons(layout: &Layout, destination: &Path) -> Result<()> {
@@ -223,21 +84,13 @@ fn package_macos(layout: &Layout, host_daemon: &Path) -> Result<()> {
         &binary,
     )?;
     filesystem::copy_executable(host_daemon, &macos.join(DAEMON))?;
-    filesystem::copy_executable(
-        &layout.target_root.join(layout.profile).join("bootty-voice"),
-        &macos.join("bootty-voice"),
-    )?;
-    crate::voice_runtime::bundle(&layout.target_root, &macos)?;
     copy_bundled_daemons(layout, &resources.join("daemons"))?;
-    if layout.linkage == Linkage::Dynamic {
-        copy_dynamic_libraries(&binary, &contents.join("Frameworks"), layout)?;
-    }
     compile_macos_icon(&contents, &resources)?;
     fs::write(
         contents.join("Info.plist"),
         info_plist(layout, &super::workspace_version()?),
     )?;
-    sign_macos_bundle(layout, &bundle, &contents, &macos)?;
+    sign_macos_bundle(layout, &bundle, &macos)?;
     let archive_name = format!("{}-macos-{}.app.zip", layout.app_name, macos_archive_arch());
     let archive = layout.dist_dir.join(&archive_name);
     remove_file_if_exists(&archive)?;
@@ -351,8 +204,7 @@ fn info_plist(layout: &Layout, version: &str) -> String {
   </dict></array>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>
-  <key>NSMicrophoneUsageDescription</key><string>Hear speech for dictation and voice mode. Programs running in Bootty can also request microphone access.</string>
-  <key>NSSpeechRecognitionUsageDescription</key><string>Turn speech into text on this Mac for dictation when Codex is not signed in.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Programs running in Bootty can request microphone access.</string>
 </dict>
 </plist>
 "#,
@@ -363,35 +215,16 @@ fn info_plist(layout: &Layout, version: &str) -> String {
     )
 }
 
-fn sign_macos_bundle(layout: &Layout, bundle: &Path, contents: &Path, macos: &Path) -> Result<()> {
+fn sign_macos_bundle(layout: &Layout, bundle: &Path, macos: &Path) -> Result<()> {
     if !executable_on_path("codesign") {
         return Ok(());
     }
     let identity = crate::signing::identity();
-    let frameworks = contents.join("Frameworks");
-    if frameworks.is_dir() {
-        for path in crate::filesystem::files_recursive(&frameworks)? {
-            if path.extension() == Some(OsStr::new("dylib")) {
-                command::run(
-                    Command::new("codesign")
-                        .args(["--force", "--sign", &identity])
-                        .arg(path),
-                )?;
-            }
-        }
-    }
     command::run(
         Command::new("codesign")
             .args(["--force", "--sign", &identity])
             .arg(macos.join(DAEMON)),
     )?;
-    for name in ["bootty-voice", "voice-host"] {
-        command::run(
-            Command::new("codesign")
-                .args(["--force", "--sign", &identity])
-                .arg(macos.join(name)),
-        )?;
-    }
     let mut sign = Command::new("codesign");
     sign.args(["--force", "--sign", &identity]);
     // A certificate-backed signature gets codesign's default designated requirement, which
@@ -425,15 +258,7 @@ fn package_linux(layout: &Layout, host_daemon: &Path) -> Result<()> {
         &bin.join(&layout.cli_name),
     )?;
     filesystem::copy_executable(host_daemon, &bin.join(DAEMON))?;
-    filesystem::copy_executable(
-        &layout.target_root.join(layout.profile).join("bootty-voice"),
-        &bin.join("bootty-voice"),
-    )?;
-    crate::voice_runtime::bundle(&layout.target_root, &bin)?;
     copy_bundled_daemons(layout, &root.join("share/bootty/daemons"))?;
-    if layout.linkage == Linkage::Dynamic {
-        copy_dynamic_libraries(&bin.join(&layout.cli_name), &root.join("lib"), layout)?;
-    }
     filesystem::copy_file(Path::new("crates/bootty-ui/assets/bootty-mascot.png"), &png)?;
     filesystem::copy_file(Path::new("crates/bootty-ui/assets/bootty-mascot.svg"), &svg)?;
     fs::write(

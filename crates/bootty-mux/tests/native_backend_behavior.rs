@@ -1,7 +1,6 @@
 use anyhow::{Context as _, Result};
 use assert_fs::TempDir;
 use bootty_mux::{
-    backend::MuxBackend,
     command::{MuxCommand, MuxSplitDirection},
     native::NativeBackend,
     snapshot::{MuxSession, MuxSessionTag},
@@ -40,7 +39,8 @@ impl PaneOperation {
 #[fixture]
 fn backend() -> Result<(TempDir, NativeBackend)> {
     let directory = TempDir::new().context("private backend namespace")?;
-    let mut backend = NativeBackend::for_workspace(directory.path());
+    bootty_test_support::native_mux::topology(directory.path())?;
+    let backend = NativeBackend::for_workspace(directory.path());
     for name in ["foreign", "session"] {
         backend
             .execute(MuxCommand::CreateProjectSession {
@@ -86,7 +86,7 @@ fn explicit_pane_operations_use_the_owning_inactive_window(
     backend: Result<(TempDir, NativeBackend)>,
     #[case] operation: PaneOperation,
 ) -> Result<()> {
-    let (_directory, mut backend) = backend?;
+    let (_directory, backend) = backend?;
     let before = session(&backend)?;
     let source = &before.windows[0];
     let pane = source.panes[0].pane_id.clone().expect("source pane");
@@ -118,7 +118,7 @@ fn stale_or_foreign_panes_never_fall_back_to_the_active_pane(
     backend: Result<(TempDir, NativeBackend)>,
     #[case] operation: PaneOperation,
 ) {
-    let (_directory, mut backend) = backend.expect("native backend fixture");
+    let (_directory, backend) = backend.expect("native backend fixture");
     let before = backend.snapshot().expect("snapshot");
     let foreign = before
         .sessions
@@ -143,7 +143,7 @@ fn only_close_removes_a_window_with_its_last_pane(
     #[case] operation: PaneOperation,
     #[case] removes_window: bool,
 ) -> Result<()> {
-    let (_directory, mut backend) = backend?;
+    let (_directory, backend) = backend?;
     let before = session(&backend)?;
     let target = &before.windows[1];
     backend.execute(operation.command(target.panes[0].pane_id.clone().unwrap()))?;
@@ -164,7 +164,7 @@ fn only_close_removes_a_window_with_its_last_pane(
 fn closing_the_last_native_window_ends_its_attachment_and_preserves_other_sessions(
     backend: Result<(TempDir, NativeBackend)>,
 ) -> Result<()> {
-    let (_directory, mut backend) = backend?;
+    let (_directory, backend) = backend?;
     let before = backend.snapshot()?;
     let closing = before
         .sessions

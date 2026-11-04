@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty"
 version.workspace = true
 edition.workspace = true
@@ -7,17 +8,14 @@ build = "build.rs"
 [lib]
 test = false
 
-[features]
-bootty-dev = ["bootty-ui/bootty-dev", "bootty-config/bootty-dev", "bootty-control/bootty-dev"]
-
 [[bin]]
 name = "bootty"
 test = false
 path = "src/main.rs"
 
 [dependencies]
+bootty-os = { path = "../bootty-os" }
 bootty-config = { path = "../bootty-config" }
-bootty-agents = { path = "../bootty-agents" }
 bootty-host = { path = "../bootty-host" }
 bootty-terminal = { path = "../bootty-terminal" }
 bootty-ui = { path = "../bootty-ui" }
@@ -42,3 +40,7 @@ rstest.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

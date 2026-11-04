@@ -8,7 +8,7 @@ use std::{
 
 use super::{
     ChromeIntent, ChromeSnapshot, Rgba, SessionContextSnapshot, SessionTarget, SidebarPosition,
-    SidebarTask, SpaceSnapshot, TabContextSnapshot, TabDragGesture, TabInsertionTarget, TaskView,
+    SidebarTask, SpaceSnapshot, TabContextSnapshot, TabDragGesture, TabInsertionTarget,
     WindowDragGesture, sidebar, space_switcher, status_bar,
 };
 
@@ -37,13 +37,10 @@ pub struct GpuiChrome {
     pub(super) status_tab_focus_handles: HashMap<String, FocusHandle>,
     pub(super) pointer_hovered_session: Option<SessionTarget>,
     pub(super) sidebar_project: Option<String>,
-    pub(super) sidebar_task_view: TaskView,
     pub(super) sidebar_search: gpui_kit::Entity<InputState>,
     pub(super) sidebar_dragging: bool,
     sidebar_drag_focus: Option<FocusHandle>,
     pub(super) sidebar_drag_order: Option<(String, Option<String>)>,
-    pub(super) sidebar_attention_only: bool,
-    pub(super) sidebar_settled_shelf: sidebar::SettledShelf,
     pub(super) sidebar_reconcile_hover: bool,
     pub(super) sidebar_reveal_current: Rc<Cell<bool>>,
     pub(super) sidebar_row_bounds: sidebar::SidebarRowBounds,
@@ -51,8 +48,6 @@ pub struct GpuiChrome {
     pub(super) sidebar_rename: Option<SidebarRename>,
     /// Saved session rows chosen together for one action, by row key, last chosen last.
     pub(super) sidebar_selection: Vec<String>,
-    /// Saved sessions whose conversations mention the search, by identity, with the line.
-    pub(super) sidebar_conversation_matches: Vec<(String, String)>,
     pub(super) window_drag: WindowDragGesture,
     pub(super) tab_drag: TabDragGesture,
     pub(super) tab_bounds: TabBounds,
@@ -79,20 +74,11 @@ pub(super) enum ContextMenu {
         target: SessionTarget,
         options: SessionContextSnapshot,
         task: Option<SidebarTask>,
-        now: i64,
-        place: SessionPlace,
-        working: bool,
-    },
-    DetachedSession {
-        target: SessionTarget,
-        task: Option<SidebarTask>,
-        now: i64,
         place: SessionPlace,
     },
     /// Several saved sessions chosen together, each with whether its terminal is live.
     Sessions {
         tasks: Vec<(SidebarTask, bool)>,
-        now: i64,
     },
     Space(SpaceSnapshot),
     Tab(TabContextSnapshot),
@@ -145,11 +131,9 @@ impl GpuiChrome {
     #[must_use]
     pub fn new(snapshot: ChromeSnapshot, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let sidebar_search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
-        cx.subscribe(&sidebar_search, |this, search, event: &InputEvent, cx| {
+        cx.subscribe(&sidebar_search, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.sidebar_reveal_current.set(false);
-                let query = search.read(cx).value().trim().to_owned();
-                cx.emit(ChromeIntent::SearchConversations(query));
                 cx.notify();
             }
         })
@@ -164,20 +148,16 @@ impl GpuiChrome {
             status_tab_focus_handles: HashMap::new(),
             pointer_hovered_session: None,
             sidebar_project: None,
-            sidebar_task_view: TaskView::Active,
             sidebar_search,
             sidebar_dragging: false,
             sidebar_drag_focus: None,
             sidebar_drag_order: None,
-            sidebar_attention_only: false,
-            sidebar_settled_shelf: sidebar::SettledShelf::default(),
             sidebar_reconcile_hover: false,
             sidebar_reveal_current: Rc::new(Cell::new(true)),
             sidebar_row_bounds: Rc::new(RefCell::new(Vec::new())),
             sidebar_scroll: gpui_kit::ScrollHandle::new(),
             sidebar_rename: None,
             sidebar_selection: Vec::new(),
-            sidebar_conversation_matches: Vec::new(),
             window_drag: WindowDragGesture::default(),
             tab_drag: TabDragGesture::default(),
             tab_bounds: Rc::new(RefCell::new(HashMap::new())),
@@ -303,13 +283,9 @@ impl GpuiChrome {
         sidebar::SidebarView {
             search: &self.sidebar_search,
             project_filter: self.sidebar_project.as_deref(),
-            task_view: self.sidebar_task_view,
-            attention_only: self.sidebar_attention_only,
-            settled_shelf: self.sidebar_settled_shelf,
             drag_order: self.sidebar_drag_order.as_ref(),
             rename: self.sidebar_rename.as_ref(),
             selection: &self.sidebar_selection,
-            conversation_matches: &self.sidebar_conversation_matches,
             row_bounds: &self.sidebar_row_bounds,
             scroll: &self.sidebar_scroll,
             reveal_current: &self.sidebar_reveal_current,
@@ -348,25 +324,15 @@ impl GpuiChrome {
         )
     }
 
-    pub(crate) fn dock_usage(&self) -> Option<gpui_kit::AnyElement> {
-        sidebar::render_usage(self.snapshot.sidebar.as_ref()?, self.snapshot.palette)
-    }
-
     pub(crate) const fn dock_presentation(
         &self,
     ) -> (
-        bool,
         bool,
         bootty_config::config::PanelTabStyle,
         bootty_config::config::PanelTabs,
     ) {
         let l = &self.snapshot.layout;
-        (
-            l.left_dock_toggle,
-            l.right_dock_toggle,
-            l.panel_tab_style,
-            l.panel_tabs,
-        )
+        (l.left_dock_toggle, l.panel_tab_style, l.panel_tabs)
     }
 
     pub(crate) fn window_controls_inset(&self, window: &Window) -> f32 {
@@ -395,14 +361,6 @@ impl GpuiChrome {
                 .as_ref()
                 .map_or(self.snapshot.palette.base, |sidebar| sidebar.tint),
         )
-    }
-
-    pub(crate) fn tab_accent(&self) -> gpui_kit::Hsla {
-        color(self.snapshot.palette.tab_accent)
-    }
-
-    pub(crate) const fn dock_tabs_config(&self) -> bootty_config::config::TabConfig {
-        self.snapshot.layout.tabs
     }
 
     pub(crate) fn sidebar_defaults(&self) -> (SidebarPosition, f32, bool) {
@@ -513,31 +471,16 @@ impl GpuiChrome {
                 target,
                 options,
                 task,
-                now,
                 place,
-                working,
             } => {
                 let mut rows = sidebar::session_menu(target, *options);
                 rows.extend(sidebar::place_menu(target.scope, place));
                 if let Some(task) = task {
-                    rows.extend(sidebar::saved_session_menu(task, *now, *working));
+                    rows.extend(sidebar::saved_session_menu(task));
                 }
                 rows
             }
-            ContextMenu::DetachedSession {
-                target,
-                task,
-                now,
-                place,
-            } => {
-                let mut rows = sidebar::detached_session_menu(target);
-                rows.extend(sidebar::place_menu(target.scope, place));
-                if let Some(task) = task {
-                    rows.extend(sidebar::saved_session_menu(task, *now, false));
-                }
-                rows
-            }
-            ContextMenu::Sessions { tasks, now } => sidebar::sessions_menu(tasks, *now),
+            ContextMenu::Sessions { tasks } => sidebar::sessions_menu(tasks),
             ContextMenu::Space(space) => space_switcher::space_menu(space),
             ContextMenu::Tab(tab) => status_bar::tab_menu(tab.clone()),
         }
@@ -660,19 +603,6 @@ impl GpuiChrome {
                 cx.stop_propagation();
             }
         }
-    }
-
-    /// Shows the sessions whose conversations mention the sidebar's search.
-    pub fn set_conversation_matches(
-        &mut self,
-        matches: Vec<bootty_agents::NativeSearchMatch>,
-        cx: &mut Context<Self>,
-    ) {
-        self.sidebar_conversation_matches = matches
-            .into_iter()
-            .filter_map(|found| Some((found.task_identity?, found.snippet)))
-            .collect();
-        cx.notify();
     }
 
     /// Lets go of the sessions chosen together.
@@ -1031,7 +961,6 @@ struct SessionMenuRows {
     start: Vec<MenuRow>,
     state: Vec<MenuRow>,
     rename: Vec<MenuRow>,
-    conversation: Vec<MenuRow>,
     copy: Vec<MenuRow>,
     more: Vec<MenuRow>,
     destructive: Vec<MenuRow>,
@@ -1050,31 +979,13 @@ impl SessionMenuRows {
                     ..
                 } => rows.rename.push(row),
                 ChromeIntent::Command(invocation)
-                    if invocation.command.starts_with("agents.native.") =>
-                {
-                    rows.conversation.push(row);
-                }
-                ChromeIntent::Commands(invocations)
-                    if invocations.first().is_some_and(|invocation| {
-                        invocation.command.starts_with("agents.native.")
-                    }) =>
-                {
-                    rows.conversation.push(row);
-                }
-                ChromeIntent::Command(invocation)
-                    if matches!(
-                        invocation.command.as_str(),
-                        "session.archive" | "session.unarchive" | "session.delete"
-                    ) =>
+                    if matches!(invocation.command.as_str(), "close_session") =>
                 {
                     rows.destructive.push(row);
                 }
                 ChromeIntent::Commands(invocations)
                     if invocations.first().is_some_and(|invocation| {
-                        matches!(
-                            invocation.command.as_str(),
-                            "session.archive" | "session.delete"
-                        )
+                        matches!(invocation.command.as_str(), "close_session")
                     }) =>
                 {
                     rows.destructive.push(row);
@@ -1098,60 +1009,32 @@ pub(super) fn popup_session_menu(
     if let ContextMenu::Draft { binding, place, .. } = context {
         return popup_draft_menu(menu, context, binding, place, owner, window, cx);
     }
-    let (task, place, snooze) = match context {
-        ContextMenu::Session {
-            task, place, now, ..
-        }
-        | ContextMenu::DetachedSession {
-            task, place, now, ..
-        } => (
-            task.as_ref(),
-            Some(place),
-            task.as_ref().map_or_else(Vec::new, |task| {
-                sidebar::snooze_menu(std::slice::from_ref(task), *now)
-            }),
-        ),
-        ContextMenu::Sessions { tasks, now } => {
-            let tasks: Vec<SidebarTask> = tasks.iter().map(|(task, _)| task.clone()).collect();
-            (None, None, sidebar::snooze_menu(&tasks, *now))
-        }
+    let (task, place) = match context {
+        ContextMenu::Session { task, place, .. } => (task.as_ref(), Some(place)),
+        ContextMenu::Sessions { .. } => (None, None),
         _ => return popup_menu(menu, context, owner),
     };
     let SessionMenuRows {
         start,
         state,
         rename,
-        conversation,
         mut copy,
         more,
         destructive,
     } = SessionMenuRows::from_context(context);
     menu = append_menu_rows(menu, &start, owner);
     menu = append_menu_rows(menu, &state, owner);
-    if !snooze.is_empty() {
-        let owner = owner.clone();
-        menu = menu.submenu_with_icon(
-            Some(gpui_kit::component::Icon::new(
-                gpui_kit::assets::IconName::Clock,
-            )),
-            "Snooze",
-            window,
-            cx,
-            move |menu, _, _| append_menu_rows(menu, &snooze, &owner),
-        );
-    }
-    if !rename.is_empty() || !conversation.is_empty() {
+
+    if !rename.is_empty() {
         if !start.is_empty() || !state.is_empty() {
             menu = menu.separator();
         }
         menu = append_menu_rows(menu, &rename, owner);
-        menu = append_menu_rows(menu, &conversation, owner);
     }
     if let Some(place) = place {
         menu = popup_project_filter(menu, place, owner, cx);
     }
-    if let Some(task) = task.filter(|task| !task.state.deleted) {
-        menu = popup_auto_settle(menu, task, owner, window, cx);
+    if let Some(task) = task {
         copy.push(MenuRow {
             label: "Session ID".into(),
             enabled: true,
@@ -1245,47 +1128,6 @@ fn popup_draft_menu(
         menu = append_menu_row(menu.separator(), row, owner);
     }
     menu
-}
-
-fn popup_auto_settle(
-    menu: PopupMenu,
-    task: &SidebarTask,
-    owner: &gpui_kit::WeakEntity<GpuiChrome>,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let owner = owner.clone();
-    let task = task.clone();
-    menu.submenu_with_icon(
-        Some(gpui_kit::component::Icon::new(
-            gpui_kit::assets::IconName::Timer,
-        )),
-        "Auto-settle behavior",
-        window,
-        cx,
-        move |mut menu, _, _| {
-            for (label, enabled) in [("Enabled", true), ("Disabled", false)] {
-                let mut invocation = bootty_control::CommandInvocation::new(
-                    "session.auto_settle",
-                    vec![task.identity.clone(), enabled.to_string()],
-                    bootty_control::Caller::Internal,
-                );
-                invocation.target.clone_from(&task.binding);
-                let owner = owner.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(label)
-                        .checked(enabled != task.state.auto_settle_disabled)
-                        .disabled(task.pending)
-                        .on_click(move |_, _, cx| {
-                            _ = owner.update(cx, |_, cx| {
-                                cx.emit(ChromeIntent::Command(invocation.clone()));
-                            });
-                        }),
-                );
-            }
-            menu
-        },
-    )
 }
 
 fn append_menu_rows(
@@ -1414,7 +1256,6 @@ fn menu_icon(intent: &ChromeIntent) -> Option<gpui_kit::assets::IconName> {
             action: super::SessionContextAction::MoveToSpace,
             ..
         } => Some(I::FolderInput),
-        ChromeIntent::ForkConversation(_) => Some(I::GitFork),
         ChromeIntent::NewSessionOnBranch { .. } => Some(I::MessageSquarePlus),
         ChromeIntent::CopyText(_) => Some(I::Copy),
         ChromeIntent::Command(invocation) => command_icon(&invocation.command),
@@ -1428,14 +1269,8 @@ fn command_icon(command: &str) -> Option<gpui_kit::assets::IconName> {
     match command {
         "session.pin" => Some(I::Pin),
         "session.unpin" => Some(I::PinOff),
-        "session.settle" | "session.activate" => Some(I::CircleCheck),
-        "session.snooze" | "session.unsnooze" => Some(I::Clock),
-        "session.archive" => Some(I::Archive),
+        "close_session" => Some(I::X),
         "session.unarchive" => Some(I::ArchiveRestore),
-        "session.delete" => Some(I::Trash),
-        "session.restore" => Some(I::Undo2),
-        "agents.native.regenerate-title" => Some(I::RefreshCw),
-        "agents.native.mark-unread" => Some(I::MailOpen),
         "project.edit" => Some(I::Settings2),
         _ => None,
     }

@@ -35,9 +35,6 @@ fn native_settings_catalog_keeps_the_zed_page_snapshot() {
             ),
             (SettingsCategory::Panels, "panels", "Panels"),
             (SettingsCategory::Terminal, "terminal", "Terminal"),
-            (SettingsCategory::Browser, "browser", "Browser"),
-            (SettingsCategory::Ai, "ai", "AI"),
-            (SettingsCategory::Permissions, "permissions", "Permissions"),
             (SettingsCategory::Remotes, "remotes", "Remotes"),
             (SettingsCategory::Advanced, "advanced", "Advanced"),
         ]
@@ -146,7 +143,7 @@ fn custom_setting_surface(spec: &SettingSpec, editor: SettingEditor) -> NativeSe
         "theme" | "colors.*" => NativeSettingsSurface::Replacement("appearance branches"),
 
         // Remotes are edited as one lifecycle-aware form rather than independent schema leaves.
-        _ if matches!(editor, SettingEditor::Remotes | SettingEditor::Providers) => {
+        _ if matches!(editor, SettingEditor::Remotes) => {
             NativeSettingsSurface::AggregateEditor(editor.name())
         }
 
@@ -192,12 +189,9 @@ fn custom_setting_surface(spec: &SettingSpec, editor: SettingEditor) -> NativeSe
         }
 
         // The dedicated keymap editor is the sole writer for keybinding arrays.
-        "input.keybind"
-        | "input.sidebar-keybind"
-        | "input.backend-keybind.herdr"
-        | "input.backend-keybind.native"
-        | "input.backend-keybind.rmux"
-        | "input.backend-keybind.tmux" => NativeSettingsSurface::Replacement("keymap editor"),
+        "input.keybind" | "input.sidebar-keybind" | "input.backend-keybind.native" => {
+            NativeSettingsSurface::Replacement("keymap editor")
+        }
 
         id => panic!(
             "custom setting {id} owned by {} has no explicit GPUI surface contract",
@@ -280,13 +274,6 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
             ("ssh-profiles.*.proxy-jump".to_owned(), "remotes"),
             ("ssh-profiles.*.program".to_owned(), "remotes"),
             ("ssh-profiles.*.args".to_owned(), "remotes"),
-            ("agents.*.enabled".to_owned(), "providers"),
-            ("agents.*.program".to_owned(), "providers"),
-            ("agents.*.available-efforts".to_owned(), "providers"),
-            ("agents.*.selected".to_owned(), "providers"),
-            ("agents.*.profiles.*.name".to_owned(), "providers"),
-            ("agents.*.profiles.*.directory".to_owned(), "providers"),
-            ("agents.*.profiles.*.arguments".to_owned(), "providers"),
         ]
     );
     assert_eq!(
@@ -298,10 +285,7 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
             ("sidebar.modules".to_owned(), "panel registry"),
             ("input.keybind".to_owned(), "keymap editor"),
             ("input.sidebar-keybind".to_owned(), "keymap editor"),
-            ("input.backend-keybind.herdr".to_owned(), "keymap editor"),
             ("input.backend-keybind.native".to_owned(), "keymap editor"),
-            ("input.backend-keybind.rmux".to_owned(), "keymap editor"),
-            ("input.backend-keybind.tmux".to_owned(), "keymap editor"),
             ("extensions.*".to_owned(), "stored configuration"),
         ]
     );
@@ -310,10 +294,7 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
 #[rstest]
 #[case("input.keybind")]
 #[case("input.sidebar-keybind")]
-#[case("input.backend-keybind.herdr")]
 #[case("input.backend-keybind.native")]
-#[case("input.backend-keybind.rmux")]
-#[case("input.backend-keybind.tmux")]
 #[case("extensions.*")]
 fn compatibility_only_inputs_stay_out_of_settings(#[case] id: &str) {
     assert!(!setting_is_visible_in_native_settings(id));
@@ -493,15 +474,7 @@ fn ui_terminal_font_selection_does_not_hide_unrelated_font_metrics(#[case] id: &
 #[case("default_open_behavior", "general", SettingsCategory::General)]
 #[case("when_closing_with_no_tabs", "general", SettingsCategory::General)]
 #[case("on_last_window_closed", "general", SettingsCategory::General)]
-#[case("multiplexer.backend", "general", SettingsCategory::General)]
-#[case("agents.default-provider", "general", SettingsCategory::Ai)]
-#[case("agents.response-streaming", "general", SettingsCategory::Ai)]
-#[case("agents.follow-up-behavior", "general", SettingsCategory::Ai)]
-#[case("agents.codex.default-model", "providers", SettingsCategory::Ai)]
-#[case("agents.allow-spawn", "permissions", SettingsCategory::Ai)]
-#[case("session.agent-notifications", "general", SettingsCategory::Ai)]
 #[case("session.command-notifications", "general", SettingsCategory::General)]
-#[case("computer.enabled", "permissions", SettingsCategory::Permissions)]
 #[case("appearance.mode", "colors", SettingsCategory::Theme)]
 #[case("font.ui-family", "text", SettingsCategory::Appearance)]
 #[case("font.family", "text", SettingsCategory::Appearance)]
@@ -515,7 +488,7 @@ fn ui_terminal_font_selection_does_not_hide_unrelated_font_metrics(#[case] id: &
 )]
 #[case("input.preset", "keys", SettingsCategory::Keymap)]
 #[case("input.prefix", "keys", SettingsCategory::Keymap)]
-#[case("input.backend-keybind.tmux", "keys", SettingsCategory::Keymap)]
+#[case("input.backend-keybind.native", "keys", SettingsCategory::Keymap)]
 #[case("input.modifier-remap", "keys", SettingsCategory::Keymap)]
 #[case(
     "window.fullscreen-enabled",

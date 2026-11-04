@@ -14,7 +14,6 @@ use bootty_git::{
     discover_worktree_picker_entries, toggle_favorite_project_path,
 };
 use bootty_mux::RepaintHandle;
-use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 pub struct NewSessionDialog {
@@ -24,42 +23,20 @@ pub struct NewSessionDialog {
     purpose: NewSessionPurpose,
     form: Option<crate::presentation::new_session_form::NewSessionForm>,
     launch: Option<PendingCreation>,
-    existing_native_ids: HashSet<String>,
-    catalog_queue: VecDeque<bootty_control::CommandInvocation>,
-    catalog_requested: HashSet<String>,
-    catalog_refresh_after: HashSet<String>,
-    catalog_pending: HashMap<String, PendingCatalog>,
-    checkout: Option<PendingCatalog>,
-    naming: Option<PendingNames>,
+    /// The last `git.overview` requested for the form's branch pickers, and its reply.
+    branches_requested: Option<bootty_control::CommandInvocation>,
+    branches_pending: Option<PendingCommand>,
+    checkout: Option<PendingCommand>,
     starting: bool,
     progress: Vec<DialogProgressStep>,
     failure: Option<String>,
-    launch_direction: LaunchDirection,
-    empty_enter_armed: bool,
-    shell_fallback: bool,
     /// The repository this dialog made a new worktree from, whose setup scripts the session runs
     /// once it starts.
     worktree_repository: Option<String>,
-    surface_request_id: Option<u64>,
     registration_target: Option<bootty_control::CommandTarget>,
-    fan_out: Option<FanOutRun>,
 }
 
-/// A prompt going to several models: the repository their worktrees come from, the names the
-/// first session took, and the models still to start.
-struct FanOutRun {
-    repo: String,
-    names: Option<(String, String)>,
-    remaining: VecDeque<crate::presentation::new_session_form::FanOutModel>,
-}
-
-struct PendingNames {
-    action: String,
-    reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
-    cancellation: bootty_control::CommandCancellation,
-}
-
-struct PendingCatalog {
+struct PendingCommand {
     invocation: bootty_control::CommandInvocation,
     reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
 }
@@ -75,22 +52,9 @@ enum CreationCommand {
     Worktree,
 }
 
-impl Drop for PendingNames {
-    fn drop(&mut self) {
-        _ = self.cancellation.cancel();
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LaunchDirection {
-    Foreground,
-    Background,
-}
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum NewSessionPurpose {
     CreateSession,
-    NativeAgentTab,
     AddProject,
 }
 
@@ -185,22 +149,13 @@ impl NewSessionDialog {
             purpose,
             form: None,
             launch: None,
-            existing_native_ids: HashSet::new(),
-            catalog_queue: VecDeque::new(),
-            catalog_requested: HashSet::new(),
-            catalog_refresh_after: HashSet::new(),
-            catalog_pending: HashMap::new(),
+            branches_requested: None,
+            branches_pending: None,
             checkout: None,
-            naming: None,
             starting: false,
             progress: Vec::new(),
             failure: None,
-            launch_direction: LaunchDirection::Foreground,
-            empty_enter_armed: false,
-            shell_fallback: false,
             worktree_repository: None,
-            fan_out: None,
-            surface_request_id: None,
             registration_target: None,
         }
     }
@@ -232,7 +187,7 @@ impl NewSessionDialog {
         Self::form_with_worker(form, worker)
     }
 
-    fn form_with_worker(
+    const fn form_with_worker(
         form: crate::presentation::new_session_form::NewSessionForm,
         worker: NewSessionWorker,
     ) -> Self {
@@ -243,35 +198,15 @@ impl NewSessionDialog {
             purpose: NewSessionPurpose::CreateSession,
             form: Some(form),
             launch: None,
-            existing_native_ids: HashSet::new(),
-            catalog_queue: VecDeque::new(),
-            catalog_requested: HashSet::new(),
-            catalog_refresh_after: HashSet::new(),
-            catalog_pending: HashMap::new(),
+            branches_requested: None,
+            branches_pending: None,
             checkout: None,
-            naming: None,
             starting: false,
             progress: Vec::new(),
             failure: None,
-            launch_direction: LaunchDirection::Foreground,
-            empty_enter_armed: false,
-            shell_fallback: false,
             worktree_repository: None,
-            fan_out: None,
-            surface_request_id: None,
             registration_target: None,
         }
-    }
-
-    pub fn open_native_form(
-        mut form: crate::presentation::new_session_form::NewSessionForm,
-        repaint: &RepaintHandle,
-    ) -> Self {
-        form.draft.mode = crate::presentation::new_session_form::NewSessionMode::Agent;
-        form.draft.isolated = false;
-        let mut dialog = Self::open_form(form, repaint);
-        dialog.purpose = NewSessionPurpose::NativeAgentTab;
-        dialog
     }
 
     pub(crate) fn with_registration_target(
@@ -284,19 +219,6 @@ impl NewSessionDialog {
 
     pub(crate) fn registration_target(&self) -> Option<bootty_control::CommandTarget> {
         self.registration_target.clone()
-    }
-
-    pub(crate) const fn with_surface_request(mut self, request_id: u64) -> Self {
-        self.surface_request_id = Some(request_id);
-        self
-    }
-
-    pub(crate) const fn surface_request_id(&self) -> Option<u64> {
-        self.surface_request_id
-    }
-
-    pub(crate) fn retains_creation_draft(&self) -> bool {
-        self.purpose != NewSessionPurpose::NativeAgentTab
     }
 
     pub(crate) const fn is_creation_form(&self) -> bool {
@@ -312,7 +234,7 @@ impl NewSessionDialog {
         invocation: bootty_control::CommandInvocation,
         reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
     ) {
-        self.checkout = Some(PendingCatalog { invocation, reply });
+        self.checkout = Some(PendingCommand { invocation, reply });
     }
 
     pub fn checkout_failed(&mut self, invocation: &bootty_control::CommandInvocation, error: &str) {
@@ -361,14 +283,8 @@ impl NewSessionDialog {
     }
 
     fn invalidate_branch_catalog(&mut self) {
-        if let Some(form) = &self.form
-            && let Some(invocation) = form.branch_catalog_invocation()
-            && let Some(key) = catalog_identity_key(&invocation)
-        {
-            self.catalog_requested.remove(&key);
-            self.catalog_pending.remove(&key);
-            self.catalog_queue.retain(|queued| queued != &invocation);
-        }
+        self.branches_requested = None;
+        self.branches_pending = None;
     }
 
     #[must_use]
@@ -378,33 +294,16 @@ impl NewSessionDialog {
 
     pub(crate) fn retained_draft(&self) -> Option<crate::state::creation_draft::CreationDraft> {
         let form = self.form.as_ref()?;
-        self.retains_creation_draft()
-            .then(|| crate::state::creation_draft::CreationDraft {
-                draft: form.draft.clone(),
-                project: (!form.draft.projectless).then(|| form.project_path().to_owned()),
-                title: form.title(),
-            })
+        Some(crate::state::creation_draft::CreationDraft {
+            draft: form.draft.clone(),
+            project: (!form.draft.projectless).then(|| form.project_path().to_owned()),
+            title: form.title(),
+        })
     }
 
     pub fn started(&mut self, launch: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>) {
-        let label = self
-            .form
-            .as_ref()
-            .filter(|form| {
-                form.draft.mode == crate::presentation::new_session_form::NewSessionMode::Agent
-                    && !self.shell_fallback
-            })
-            .and_then(|form| {
-                bootty_agents::AgentKind::ALL
-                    .into_iter()
-                    .find(|provider| provider.to_string() == form.draft.provider)
-            })
-            .map_or_else(
-                || "Start session".to_owned(),
-                |provider| format!("Create {} session", provider.display_name()),
-            );
         let detail = self.form.as_ref().map(|form| form.draft.cwd.clone());
-        self.start_stage("session", label, detail);
+        self.start_stage("session", "Start session".to_owned(), detail);
         self.starting = false;
         self.launch = Some(PendingCreation {
             kind: CreationCommand::Session,
@@ -425,409 +324,57 @@ impl NewSessionDialog {
         });
     }
 
-    pub(crate) fn set_native_creation_baseline(&mut self, ids: HashSet<String>) {
-        self.existing_native_ids = ids;
-    }
-
-    pub(crate) fn matches_native_creation(
-        &self,
-        record: &bootty_agents::NativeSessionRecord,
-    ) -> bool {
-        self.draft().is_some_and(|draft| {
-            draft.mode == crate::presentation::new_session_form::NewSessionMode::Agent
-                && !self.existing_native_ids.contains(&record.id)
-                && record.config.provider.to_string() == draft.provider
-                && record.task_identity.as_deref() == Some(draft.identity.as_str())
-                && record.binding_id == draft.scope.persistence_value().to_string()
-        })
-    }
-
-    /// Leave creation as soon as its persisted conversation owns a real mux pane.
-    pub(crate) fn native_placed(
-        &mut self,
-        record: &bootty_agents::NativeSessionRecord,
-        terminal: &bootty_control::CommandTarget,
-    ) -> Option<(
-        NewSessionPickerEvent,
-        std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
-    )> {
-        if matches!(
-            record.snapshot.status,
-            bootty_agents::NativeSessionStatus::Error | bootty_agents::NativeSessionStatus::Stopped
-        ) || self
-            .launch
-            .as_ref()
-            .is_none_or(|launch| launch.kind != CreationCommand::Session)
-            || !self.matches_native_creation(record)
-        {
-            return None;
-        }
-        let reply = self.launch.take()?.reply;
-        self.complete_stage("session");
-        self.starting = false;
-        Some((
-            NewSessionPickerEvent::Started {
-                value: serde_json::json!({"native": record, "terminal": terminal}),
-                warnings: Vec::new(),
-                foreground: self.launch_direction == LaunchDirection::Foreground,
-                setup: self.worktree_repository.take(),
-            },
-            reply,
-        ))
-    }
-
-    pub(crate) fn background_naming(
-        &self,
-    ) -> Option<(
-        bootty_control::CommandInvocation,
-        bootty_mux::controller::SpaceId,
-        String,
-        String,
-    )> {
-        let form = self.form.as_ref()?;
-        if self.shell_fallback || form.draft.isolated {
-            return None;
-        }
-        Some((
-            form.naming_invocation().ok()??,
-            form.draft.scope,
-            form.draft.identity.clone(),
-            form.title(),
-        ))
-    }
-
-    pub fn catalog_started(
+    pub fn branches_started(
         &mut self,
         invocation: bootty_control::CommandInvocation,
         reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
     ) {
-        if let Some(key) = catalog_request_key(&invocation) {
-            self.catalog_pending
-                .insert(key, PendingCatalog { invocation, reply });
-        }
+        self.branches_pending = Some(PendingCommand { invocation, reply });
     }
 
-    pub fn catalog_failed(
+    pub fn branches_failed(
         &mut self,
         invocation: &bootty_control::CommandInvocation,
         error: String,
     ) {
-        if invocation.command == "git.overview" {
-            if let Some(form) = &mut self.form {
-                form.set_branches_for(invocation, Err(error));
-            }
-        } else if invocation.command == "agents.native.catalog-info" {
-            if let Some(key) = catalog_identity_key(invocation) {
-                self.catalog_requested.remove(&key);
-            }
-            if let Some(form) = &mut self.form {
-                form.set_provider_catalog_for(invocation, Err(error));
-            }
-        } else if let Some(form) = &mut self.form {
-            form.model_error = Some(error);
+        if let Some(form) = &mut self.form {
+            form.set_branches_for(invocation, Err(error));
         }
     }
 
-    pub fn naming_started(
-        &mut self,
-        action: String,
-        reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
-        cancellation: bootty_control::CommandCancellation,
-    ) {
-        self.start_stage("names", "Generate worktree names".to_owned(), None);
-        self.naming = Some(PendingNames {
-            action,
-            reply,
-            cancellation,
-        });
-    }
-
-    fn poll_names(&mut self) -> Option<NewSessionPickerEvent> {
-        let reply = match self.naming.as_ref()?.reply.try_recv() {
-            Ok(reply) => reply,
-            Err(std::sync::mpsc::TryRecvError::Empty) => return None,
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.naming = None;
-                self.failed("Session naming stopped".into());
-                return None;
-            }
-        };
-        let action = self.naming.take()?.action.clone();
-        self.starting = false;
-        let names = match reply {
-            bootty_control::CommandOutcome::Success { value, .. } => {
-                serde_json::from_value(value).map_err(|_| "Invalid generated names".to_owned())
-            }
-            outcome => Err(crate::commands::command_outcome_message(&outcome)
-                .unwrap_or_else(|| "Session naming failed".to_owned())),
-        };
-        let result = names.and_then(|names| {
-            self.form
-                .as_mut()
-                .ok_or("Session form closed")?
-                .set_generated_names(names)
-        });
-        if let Err(error) = result {
-            self.failed(error);
-            return None;
-        }
-        self.complete_stage("names");
-        self.start_form(&action)
-    }
-
-    fn poll_catalog(&mut self) -> Option<NewSessionPickerEvent> {
+    /// Requests the form's branch catalog once per checkout, and applies its reply.
+    fn poll_branches(&mut self) -> Option<NewSessionPickerEvent> {
         if !matches!(self.step, NewSessionStep::Form) || self.is_in_flight() {
             return None;
         }
-        let ready = self.catalog_pending.iter_mut().find_map(|(key, pending)| {
-            match pending.reply.try_recv() {
-                Ok(outcome) => Some((key.clone(), pending.invocation.clone(), Ok(outcome))),
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some((
-                    key.clone(),
-                    pending.invocation.clone(),
-                    Err("Provider catalog owner stopped".to_owned()),
-                )),
-                Err(std::sync::mpsc::TryRecvError::Empty) => None,
-            }
-        });
-        if let Some((request_key, invocation, outcome)) = ready {
-            self.catalog_pending.remove(&request_key);
-            if invocation.command == "agents.native.catalog-info"
-                && let Some(identity) = catalog_identity_key(&invocation)
-                && self.catalog_refresh_after.remove(&identity)
-            {
-                let refresh = refresh_invocation(invocation);
-                self.catalog_queue.push_front(refresh);
-            } else {
-                self.apply_catalog_reply(&invocation, outcome);
-            }
-            return None;
-        }
-
-        let form = self.form.as_mut()?;
-        if let Some(invocation) = form.branch_catalog_invocation()
-            && let Some(key) = catalog_identity_key(&invocation)
-            && self.catalog_requested.insert(key)
-        {
-            self.catalog_queue.push_front(invocation);
-        }
-        form.hydrate_model_catalog();
-        for invocation in form.model_catalog_invocations() {
-            let Some(key) = catalog_identity_key(&invocation) else {
-                continue;
-            };
-            if self.catalog_requested.insert(key) {
-                let request = if form.cached_provider_catalog(&invocation).is_some() {
-                    refresh_invocation(invocation)
-                } else {
-                    invocation
-                };
-                self.catalog_queue.push_back(request);
-            }
-        }
-        self.catalog_queue
-            .pop_front()
-            .map(NewSessionPickerEvent::Catalog)
-    }
-
-    fn apply_catalog_reply(
-        &mut self,
-        invocation: &bootty_control::CommandInvocation,
-        outcome: Result<bootty_control::CommandOutcome, String>,
-    ) {
-        if invocation.command == "agents.native.catalog-info"
-            && let Ok(bootty_control::CommandOutcome::Failed { code, message }) = &outcome
-            && code == "provider_not_installed"
-        {
-            if let Some(form) = &mut self.form {
-                form.set_provider_unavailable_for(invocation, message.clone());
-            }
-            return;
-        }
-        let result = match outcome {
-            Ok(bootty_control::CommandOutcome::Success { value, .. }) => Ok(value),
-            Ok(outcome) => Err(crate::commands::command_outcome_message(&outcome)
-                .unwrap_or_else(|| "Provider catalog unavailable".to_owned())),
-            Err(error) => Err(error),
-        };
-        let Some(form) = &mut self.form else {
-            return;
-        };
-        if invocation.command == "git.overview" {
-            form.set_branches_for(
-                invocation,
-                result.and_then(|value| {
+        if let Some(pending) = &self.branches_pending {
+            let result = match pending.reply.try_recv() {
+                Ok(bootty_control::CommandOutcome::Success { value, .. }) => {
                     serde_json::from_value(value).map_err(|error| error.to_string())
-                }),
-            );
-            return;
-        }
-        if invocation.command == "agents.native.catalog-favorite" {
-            let mut base = invocation.clone();
-            "agents.native.catalog-info".clone_into(&mut base.command);
-            base.arguments.truncate(6);
-            match result {
-                Ok(value) => match serde_json::from_value(value) {
-                    Ok(models) => form.set_favorite_models_for(&base, models),
-                    Err(error)
-                        if form
-                            .model_catalog_invocation()
-                            .as_ref()
-                            .and_then(catalog_identity_key)
-                            == catalog_identity_key(&base) =>
-                    {
-                        form.model_error = Some(error.to_string());
-                    }
-                    Err(_) => {}
-                },
-                Err(error)
-                    if form
-                        .model_catalog_invocation()
-                        .as_ref()
-                        .and_then(catalog_identity_key)
-                        == catalog_identity_key(&base) =>
-                {
-                    form.model_error = Some(error);
                 }
-                Err(_) => {}
+                Ok(outcome) => Err(crate::commands::command_outcome_message(&outcome)
+                    .unwrap_or_else(|| "The branch catalog is unavailable".to_owned())),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    Err("The Git command host stopped".to_owned())
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => return None,
+            };
+            let pending = self.branches_pending.take()?;
+            if let Some(form) = &mut self.form {
+                form.set_branches_for(&pending.invocation, result);
             }
-            return;
-        }
-        let catalog = result
-            .and_then(|value| serde_json::from_value(value).map_err(|error| error.to_string()));
-        form.set_provider_catalog_for(invocation, catalog);
-    }
-
-    pub(crate) fn refresh_provider_catalogs(&mut self) {
-        self.catalog_requested.clear();
-        self.reload_model_catalog();
-    }
-
-    fn reload_model_catalog(&mut self) {
-        let Some(form) = &mut self.form else {
-            return;
-        };
-        let Some(invocation) = form.model_catalog_invocation() else {
-            return;
-        };
-        let Some(identity) = catalog_identity_key(&invocation) else {
-            return;
-        };
-        let has_pending = self.catalog_pending.values().any(|pending| {
-            pending.invocation.command == "agents.native.catalog-info"
-                && catalog_identity_key(&pending.invocation).as_deref() == Some(identity.as_str())
-        });
-        if has_pending {
-            self.catalog_refresh_after.insert(identity);
-            return;
-        }
-        self.catalog_queue
-            .retain(|queued| catalog_identity_key(queued).as_deref() != Some(identity.as_str()));
-        let refresh = refresh_invocation(invocation);
-        self.catalog_requested.insert(identity);
-        self.catalog_queue.push_front(refresh);
-    }
-
-    /// One prompt to several models: every session gets its own worktree, so none of them edit
-    /// another's checkout. Says whether the start can go ahead.
-    fn begin_fan_out(&mut self) -> bool {
-        self.fan_out = None;
-        let Some(form) = self.form.as_mut() else {
-            return true;
-        };
-        if self.shell_fallback
-            || self.purpose != NewSessionPurpose::CreateSession
-            || form.draft.mode != crate::presentation::new_session_form::NewSessionMode::Agent
-            || form.draft.fan_out.is_empty()
-        {
-            return true;
-        }
-        if !form.worktree_available {
-            form.error = Some(
-                "Each model needs its own worktree, and this project can't make worktrees"
-                    .to_owned(),
-            );
-            return false;
-        }
-        form.draft.isolated = true;
-        self.fan_out = Some(FanOutRun {
-            repo: form.draft.cwd.clone(),
-            names: None,
-            remaining: form.draft.fan_out.iter().cloned().collect(),
-        });
-        true
-    }
-
-    /// After a session of a prompt sent to several models starts, starts the next model in a
-    /// new worktree named after the first session's, or returns `None` once all have.
-    pub fn next_fan_out(&mut self) -> Option<NewSessionPickerEvent> {
-        let (Some(run), Some(form)) = (self.fan_out.as_mut(), self.form.as_mut()) else {
             return None;
-        };
-        let Some(next) = run.remaining.pop_front() else {
-            self.fan_out = None;
+        }
+        let invocation = self.form.as_ref()?.branch_catalog_invocation()?;
+        if self.branches_requested.as_ref() == Some(&invocation) {
             return None;
-        };
-        self.progress.clear();
-        let (branch, folder) = run
-            .names
-            .get_or_insert_with(|| (form.draft.branch.clone(), form.draft.folder.clone()))
-            .clone();
-        let suffix = branch_safe(&next.model);
-        let named = |base: &str| {
-            if base.is_empty() {
-                suffix.clone()
-            } else {
-                format!("{base}-{suffix}")
-            }
-        };
-        form.draft.cwd.clone_from(&run.repo);
-        form.worktree_available = true;
-        form.draft.isolated = true;
-        form.draft.branch = named(&branch);
-        form.draft.folder = named(&folder);
-        if let Some(provider) = bootty_agents::AgentKind::ALL
-            .into_iter()
-            .find(|provider| provider.to_string() == next.provider)
-            && !form.draft.permissions.supports(provider)
-        {
-            form.draft.permissions = bootty_agents::NativePermissionMode::ProviderDefault;
         }
-        let plan_mode = form
-            .draft
-            .model_selection
-            .as_ref()
-            .and_then(|selection| selection.plan_mode);
-        form.draft.provider = next.provider;
-        form.draft.model_selection = Some(bootty_agents::NativeModelSelection {
-            plan_mode,
-            fast_mode: None,
-            model: next.model,
-            reasoning_effort: None,
-        });
-        form.draft.identity = bootty_mux::snapshot::new_session_identity();
-        form.draft.suffix.clone_from(&form.draft.identity);
-        self.launch_direction = LaunchDirection::Background;
-        self.starting = true;
-        match form.worktree_request() {
-            Ok(Some(request)) => Some(NewSessionPickerEvent::CreateWorktree {
-                repo: run.repo.clone(),
-                request,
-            }),
-            Ok(None) => None,
-            Err(error) => {
-                form.error = Some(error);
-                self.starting = false;
-                self.fan_out = None;
-                None
-            }
-        }
+        self.branches_requested = Some(invocation.clone());
+        Some(NewSessionPickerEvent::Branches(invocation))
     }
 
     pub fn failed(&mut self, error: String) {
         self.starting = false;
-        // The models after a failed start wait for the user to try again.
-        self.fan_out = None;
         if let Some(step) = self
             .progress
             .iter_mut()
@@ -861,20 +408,13 @@ impl NewSessionDialog {
         } else {
             self.progress.push(step);
         }
-        for (next, label) in [
-            ("worktree", "Create worktree"),
-            ("session", "Start session"),
-        ] {
-            if (id == "names" || (id == "worktree" && next == "session"))
-                && !self.progress.iter().any(|step| step.id == next)
-            {
-                self.progress.push(DialogProgressStep {
-                    id: next.to_owned(),
-                    label: label.to_owned(),
-                    detail: None,
-                    state: DialogProgressState::Pending,
-                });
-            }
+        if id == "worktree" && !self.progress.iter().any(|step| step.id == "session") {
+            self.progress.push(DialogProgressStep {
+                id: "session".to_owned(),
+                label: "Start session".to_owned(),
+                detail: None,
+                state: DialogProgressState::Pending,
+            });
         }
     }
 
@@ -900,10 +440,7 @@ impl NewSessionDialog {
             self.poll_checkout();
             return None;
         }
-        if self.naming.is_some() {
-            return self.poll_names();
-        }
-        if let Some(event) = self.poll_catalog() {
+        if let Some(event) = self.poll_branches() {
             return Some(event);
         }
         if self.launch.is_some() {
@@ -921,9 +458,7 @@ impl NewSessionDialog {
                 self.projects.clone_from(&projects);
                 if let Some(form) = &self.form
                     && matches!(self.step, NewSessionStep::Form)
-                    && form
-                        .destination()
-                        .is_some_and(|destination| destination.worktrees)
+                    && form.destination().is_some()
                     && !form.draft.cwd.is_empty()
                     && !form.draft.projectless
                     && let Some(worker) = &mut self.worker
@@ -1015,7 +550,6 @@ impl NewSessionDialog {
             return Some(NewSessionPickerEvent::Started {
                 value,
                 warnings,
-                foreground: self.launch_direction == LaunchDirection::Foreground,
                 setup: self.worktree_repository.take(),
             });
         }
@@ -1041,12 +575,7 @@ impl NewSessionDialog {
             .get_or_insert_with(|| form.project_path().to_owned());
         // Retain the successful checkout on later launch failure. Retry uses it.
         form.accept_worktree(cwd.clone());
-        let invocation = if self.shell_fallback {
-            form.shell_invocation(&cwd)
-        } else {
-            form.invocation(&cwd)
-        };
-        match invocation {
+        match form.invocation(&cwd) {
             Ok(invocation) => Some(NewSessionPickerEvent::Submit(invocation)),
             Err(error) => {
                 self.failed(error);
@@ -1157,7 +686,6 @@ impl NewSessionDialog {
                     if self.progress.iter().any(|step| {
                         step.id == "worktree" && step.state == DialogProgressState::Complete
                     }) && !form.draft.isolated
-                        && form.draft.fan_out.len() <= 1
                     {
                         "Checkout created. Retry uses this checkout to start the session."
                     } else if self.progress.iter().any(|step| {
@@ -1165,18 +693,10 @@ impl NewSessionDialog {
                     }) {
                         "Review the branch, starting ref and destination above, then try again."
                     } else {
-                        "Your prompt is saved. Resolve the reported issue, then try again."
+                        "Your draft is saved. Resolve the reported issue, then try again."
                     }
                     .to_owned(),
                 );
-        }
-        if self.purpose == NewSessionPurpose::NativeAgentTab {
-            "Agent".clone_into(&mut spec.title);
-            spec.fields.retain(|field| native_tab_field(&field.id));
-            spec.rows.retain(|row| row.id.0 != "choose-project");
-        }
-        if self.empty_enter_armed {
-            spec.hint = Some("Press Enter again to open a terminal".to_owned());
         }
         if busy {
             for row in &mut spec.rows {
@@ -1343,25 +863,6 @@ impl NewSessionDialog {
                 }
             };
         }
-        if field == "model-favorite" {
-            let form = self.form.as_ref()?;
-            if self
-                .catalog_pending
-                .values()
-                .any(|pending| pending.invocation.command == "agents.native.catalog-favorite")
-                || !form.model_options.iter().any(|model| model.id == value)
-            {
-                return None;
-            }
-            let mut invocation = form.model_catalog_invocation()?;
-            "agents.native.catalog-favorite".clone_into(&mut invocation.command);
-            invocation.arguments.push(value.to_owned());
-            return Some(NewSessionPickerEvent::Catalog(invocation));
-        }
-        if self.purpose == NewSessionPurpose::NativeAgentTab && !native_tab_field(field) {
-            return None;
-        }
-        self.empty_enter_armed = false;
         let form = self.form.as_mut()?;
         if form.change_field(field, value) {
             self.failure = None;
@@ -1379,79 +880,28 @@ impl NewSessionDialog {
     fn apply_form(&mut self, intent: &DialogIntent) -> Option<NewSessionPickerEvent> {
         match intent {
             DialogIntent::Dismiss { .. } => Some(NewSessionPickerEvent::Close),
-            DialogIntent::TextChanged { value, .. } if !self.is_in_flight() => {
+            DialogIntent::TextChanged { value, .. } => {
                 let form = self.form.as_mut()?;
-                let previous = match form.draft.mode {
-                    crate::presentation::new_session_form::NewSessionMode::Agent => {
-                        &form.draft.prompt
-                    }
-                    crate::presentation::new_session_form::NewSessionMode::Terminal => {
-                        &form.draft.command
-                    }
-                };
-                if previous != value {
-                    self.empty_enter_armed = false;
+                if &form.draft.command != value {
                     form.change_text(value);
                 }
                 None
             }
-            DialogIntent::FieldChanged { field, value, .. } if !self.is_in_flight() => {
-                self.change_form_field(field, value)
-            }
-            DialogIntent::ProviderMentionsChanged { mentions, .. } if !self.is_in_flight() => {
-                let form = self.form.as_mut()?;
-                form.draft.provider_mentions.clone_from(mentions);
-                self.empty_enter_armed = false;
-                None
-            }
-            DialogIntent::ApplicationsChanged { applications, .. } if !self.is_in_flight() => {
-                let form = self.form.as_mut()?;
-                if applications != &form.draft.applications {
-                    form.draft.applications.clone_from(applications);
-                    self.empty_enter_armed = false;
-                }
-                None
-            }
-            DialogIntent::AttachmentsChanged { attachments, .. } if !self.is_in_flight() => {
-                let form = self.form.as_mut()?;
-                if attachments == &form.draft.attachments {
-                    return None;
-                }
-                self.empty_enter_armed = false;
-                if attachments.len() > 16 {
-                    form.error = Some("Attach at most 16 files".into());
-                    return None;
-                }
-                form.draft.attachments.clone_from(attachments);
-                form.error = None;
-                None
-            }
+            DialogIntent::FieldChanged { field, value, .. } => self.change_form_field(field, value),
             DialogIntent::Activate { action, .. }
-                if !self.worker_busy() && !self.is_in_flight() =>
+                if !self.worker_busy() && action.0 == "start-session" =>
             {
-                if action.0 == "reload-models" {
-                    self.reload_model_catalog();
-                    return None;
-                }
-                if action.0 == "sign-in-provider" {
-                    return self
-                        .form
-                        .as_ref()?
-                        .sign_in_invocation()
-                        .map(NewSessionPickerEvent::Authenticate);
-                }
-                self.start_form(&action.0)
+                self.start_form()
             }
             _ => None,
         }
     }
 
     fn change_project(&mut self, value: &str) -> Option<NewSessionPickerEvent> {
-        if self.purpose == NewSessionPurpose::NativeAgentTab || self.worker_busy() {
+        if self.worker_busy() {
             return None;
         }
         if value.is_empty() {
-            self.empty_enter_armed = false;
             if let Some(worker) = &mut self.worker {
                 worker.start(NewSessionEffect::ResolveHome);
             } else if let Some(form) = &mut self.form {
@@ -1464,91 +914,19 @@ impl NewSessionDialog {
             .iter()
             .find(|project| project.path == value)?
             .clone();
-        self.empty_enter_armed = false;
         self.activate_project(project, &[])
     }
 
-    fn start_form(&mut self, action: &str) -> Option<NewSessionPickerEvent> {
-        if !matches!(
-            action,
-            "start-session" | "start-session-background" | "enter-session"
-        ) {
-            return None;
-        }
-        let retry = self.reset_failed_attempt();
+    fn start_form(&mut self) -> Option<NewSessionPickerEvent> {
+        self.reset_failed_attempt();
         let form = self.form.as_mut()?;
-        let empty = match form.draft.mode {
-            crate::presentation::new_session_form::NewSessionMode::Agent => &form.draft.prompt,
-            crate::presentation::new_session_form::NewSessionMode::Terminal => &form.draft.command,
-        }
-        .trim()
-        .is_empty()
-            && (form.draft.mode == crate::presentation::new_session_form::NewSessionMode::Terminal
-                || (form.draft.attachments.is_empty() && form.draft.applications.is_empty()));
-        let shell_fallback = (action == "enter-session" || (retry && self.shell_fallback))
-            && empty
-            && self.purpose != NewSessionPurpose::NativeAgentTab;
-        if shell_fallback && !self.empty_enter_armed && !retry {
-            self.empty_enter_armed = true;
-            return None;
-        }
-        self.launch_direction = if action == "start-session-background" {
-            LaunchDirection::Background
-        } else {
-            LaunchDirection::Foreground
-        };
-        self.shell_fallback = shell_fallback;
-        self.empty_enter_armed = false;
-        if !self.begin_fan_out() {
-            return None;
-        }
-        let form = self.form.as_mut()?;
-        let invocation = if self.shell_fallback {
-            form.shell_invocation(&form.draft.cwd)
-        } else {
-            form.invocation(&form.draft.cwd)
-        };
-        let invocation = match invocation {
-            Ok(mut invocation) => {
-                if self.purpose == NewSessionPurpose::NativeAgentTab {
-                    "agents.native.tab".clone_into(&mut invocation.command);
-                    if let Some(id) = self.surface_request_id {
-                        "surface.create_agent".clone_into(&mut invocation.command);
-                        invocation.arguments.insert(0, id.to_string());
-                        invocation.target = None;
-                    }
-                }
-                invocation
-            }
+        let invocation = match form.invocation(&form.draft.cwd) {
+            Ok(invocation) => invocation,
             Err(error) => {
                 form.error = Some(error);
                 return None;
             }
         };
-        match form.naming_invocation() {
-            Ok(Some(invocation)) if !self.shell_fallback && form.draft.isolated => {
-                self.starting = true;
-                return Some(NewSessionPickerEvent::Names {
-                    invocation,
-                    action: action.to_owned(),
-                });
-            }
-            Err(error) if !self.shell_fallback && form.draft.isolated => {
-                form.error = Some(error);
-                return None;
-            }
-            _ => {}
-        }
-        if empty && form.draft.isolated && form.draft.branch.is_empty() {
-            let names = bootty_agents::GeneratedSessionNames {
-                title: form.title(),
-                slug: format!("terminal-{}", form.draft.suffix),
-            };
-            if let Err(error) = form.set_generated_names(names) {
-                form.error = Some(error);
-                return None;
-            }
-        }
         match form.worktree_request() {
             Ok(Some(request)) => {
                 self.starting = true;
@@ -1568,12 +946,12 @@ impl NewSessionDialog {
         }
     }
 
-    fn reset_failed_attempt(&mut self) -> bool {
-        let failed = self
+    fn reset_failed_attempt(&mut self) {
+        if self
             .progress
             .iter()
-            .any(|step| step.state == DialogProgressState::Failed);
-        if failed {
+            .any(|step| step.state == DialogProgressState::Failed)
+        {
             self.progress
                 .retain(|step| step.state == DialogProgressState::Complete);
         }
@@ -1581,7 +959,6 @@ impl NewSessionDialog {
         if let Some(form) = &mut self.form {
             form.error = None;
         }
-        failed
     }
 
     fn activate_project(
@@ -1889,17 +1266,12 @@ impl WorktreeDraft {
 pub enum NewSessionPickerEvent {
     Close,
     Submit(bootty_control::CommandInvocation),
-    Catalog(bootty_control::CommandInvocation),
+    /// Load the form's branch catalog through `git.overview`.
+    Branches(bootty_control::CommandInvocation),
     CheckoutBranch(bootty_control::CommandInvocation),
-    Authenticate(bootty_control::CommandInvocation),
-    Names {
-        invocation: bootty_control::CommandInvocation,
-        action: String,
-    },
     Started {
         value: serde_json::Value,
         warnings: Vec<bootty_control::CommandWarning>,
-        foreground: bool,
         /// The repository of the new worktree the session started in, to run its setup scripts.
         setup: Option<String>,
     },
@@ -2062,56 +1434,4 @@ fn select_source<T>(list: &mut SearchableList<T>, source: usize) {
     {
         list.apply(SearchableIntent::Select(visible));
     }
-}
-
-fn catalog_identity_key(invocation: &bootty_control::CommandInvocation) -> Option<String> {
-    let mut identity = invocation.clone();
-    if identity.command == "agents.native.catalog-info"
-        && identity
-            .arguments
-            .get(6)
-            .is_some_and(|argument| argument == "refresh")
-    {
-        identity.arguments.truncate(6);
-    }
-    serde_json::to_string(&identity).ok()
-}
-
-fn catalog_request_key(invocation: &bootty_control::CommandInvocation) -> Option<String> {
-    serde_json::to_string(invocation).ok()
-}
-
-fn refresh_invocation(
-    mut invocation: bootty_control::CommandInvocation,
-) -> bootty_control::CommandInvocation {
-    invocation.arguments.truncate(6);
-    invocation.arguments.push("refresh".to_owned());
-    invocation
-}
-
-fn native_tab_field(field: &str) -> bool {
-    matches!(
-        field,
-        "provider"
-            | "profile"
-            | "model"
-            | "reasoning"
-            | "permissions"
-            | "fast-mode"
-            | "plan-mode"
-            | "goal"
-    )
-}
-
-/// A model id as part of a branch or folder name: letters, digits and dashes.
-fn branch_safe(model: &str) -> String {
-    let mut name = String::new();
-    for character in model.chars() {
-        if character.is_ascii_alphanumeric() {
-            name.push(character.to_ascii_lowercase());
-        } else if !name.is_empty() && !name.ends_with('-') {
-            name.push('-');
-        }
-    }
-    name.trim_end_matches('-').to_owned()
 }

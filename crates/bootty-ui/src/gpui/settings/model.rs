@@ -17,9 +17,6 @@ pub enum SettingsCategory {
     WindowAndLayout,
     Panels,
     Terminal,
-    Browser,
-    Permissions,
-    Ai,
     Remotes,
     Advanced,
 }
@@ -36,9 +33,6 @@ impl SettingsCategory {
             Self::WindowAndLayout => "window-and-layout",
             Self::Panels => "panels",
             Self::Terminal => "terminal",
-            Self::Browser => "browser",
-            Self::Permissions => "permissions",
-            Self::Ai => "ai",
             Self::Remotes => "remotes",
             Self::Advanced => "advanced",
         }
@@ -53,9 +47,6 @@ impl SettingsCategory {
             Self::WindowAndLayout => "Window & layout",
             Self::Panels => "Panels",
             Self::Terminal => "Terminal",
-            Self::Browser => "Browser",
-            Self::Permissions => "Permissions",
-            Self::Ai => "AI",
             Self::Remotes => "Remotes",
             Self::Advanced => "Advanced",
         }
@@ -72,9 +63,6 @@ impl SettingsCategory {
             Self::WindowAndLayout => "app-window",
             Self::Panels => "panels-top-left",
             Self::Terminal => "square-terminal",
-            Self::Browser => "globe",
-            Self::Permissions => "shield-check",
-            Self::Ai => "sparkles",
             Self::Remotes => "server",
             Self::Advanced => "wrench",
         }
@@ -84,12 +72,11 @@ impl SettingsCategory {
     #[must_use]
     pub const fn tint(self, colors: &gpui_kit::component::ThemeColor) -> gpui_kit::Hsla {
         match self {
-            Self::General | Self::Browser => colors.blue,
-            Self::Appearance | Self::Theme | Self::Ai => colors.magenta,
+            Self::General => colors.blue,
+            Self::Appearance | Self::Theme => colors.magenta,
             Self::Keymap | Self::Remotes => colors.cyan,
             Self::WindowAndLayout => colors.yellow,
             Self::Panels => colors.green,
-            Self::Permissions => colors.red,
             Self::Terminal | Self::Advanced => colors.muted_foreground,
         }
     }
@@ -131,28 +118,6 @@ pub enum SettingsPageItem {
         parent: SettingsRow,
         children: Vec<SettingsRow>,
     },
-}
-
-/// Provider cards double as navigation sections without adding a second visible heading.
-pub(super) fn provider_kind_for_settings_row(
-    row: &SettingsRow,
-) -> Option<bootty_agents::AgentKind> {
-    let SettingsRow::Value {
-        id,
-        control: SettingsControl::Toggle,
-        ..
-    } = row
-    else {
-        return None;
-    };
-    let provider = id.strip_prefix("agents.")?.strip_suffix(".enabled")?;
-    bootty_agents::AgentKind::ALL
-        .into_iter()
-        .find(|kind| kind.to_string() == provider)
-}
-
-pub(super) fn provider_navigation_id(provider: bootty_agents::AgentKind) -> String {
-    format!("providers:{provider}")
 }
 
 /// One settings row. Custom editors project into the same small vocabulary as schema rows.
@@ -215,8 +180,6 @@ pub enum SettingsRow {
         help: String,
         editor: FontFeatureEditorSnapshot,
     },
-    /// Native integration controls and any unsupported-source diagnostic for one provider.
-    ModuleIntegrations(ModuleIntegrationsSnapshot),
     Remote(RemoteEditorSnapshot),
 }
 
@@ -288,44 +251,6 @@ pub struct SettingsListItem {
     pub label: String,
     pub detail: Option<String>,
     pub selected: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModuleIntegrationsSnapshot {
-    pub identity: String,
-    pub error: Option<String>,
-    pub integrations: Vec<ModuleIntegrationSnapshot>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ModuleIntegrationStatus {
-    Missing,
-    Partial,
-    Installed,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModuleIntegrationSnapshot {
-    pub module: String,
-    pub id: String,
-    pub title: String,
-    pub summary: String,
-    pub status: ModuleIntegrationStatus,
-}
-
-/// Host-neutral integration operation emitted by the settings presentation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ModuleSourceIntent {
-    InstallIntegration {
-        identity: String,
-        module: String,
-        id: String,
-    },
-    UninstallIntegration {
-        identity: String,
-        module: String,
-        id: String,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -450,7 +375,6 @@ pub enum SettingsIntent {
         offset: isize,
     },
     ReplaceFontFeatures(Vec<FontFeatureDraft>),
-    Module(ModuleSourceIntent),
     TestRemote(RemoteTestIntent),
 }
 

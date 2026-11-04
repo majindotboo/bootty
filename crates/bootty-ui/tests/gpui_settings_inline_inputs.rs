@@ -12,14 +12,11 @@ use gpui_kit::{
     AppContext as _, Bounds, Context, Entity, Modifiers, Pixels, TestAppContext, point, px,
 };
 
-#[path = "support/settings.rs"]
-pub mod settings_support;
+use crate::support::settings as settings_support;
 use settings_support::SettingsProbe as InlineInputProbe;
 
-impl InlineInputProbe {
-    fn new(snapshot: GpuiSettingsSnapshot, cx: &mut Context<Self>) -> Self {
-        Self::with_snapshot(snapshot, cx)
-    }
+fn new(snapshot: GpuiSettingsSnapshot, cx: &mut Context<InlineInputProbe>) -> InlineInputProbe {
+    InlineInputProbe::with_snapshot(snapshot, cx)
 }
 
 #[gpui_kit::test]
@@ -98,7 +95,7 @@ fn rooted_probe(
     let opened_probe = Rc::clone(&probe_slot);
     let window = cx.update(|cx| {
         cx.open_window(gpui_kit::WindowOptions::default(), move |window, cx| {
-            let probe = cx.new(|cx| InlineInputProbe::new(snapshot, cx));
+            let probe = cx.new(|cx| new(snapshot, cx));
             opened_probe.replace(Some(probe.clone()));
             cx.new(|cx| Root::new(probe, window, cx))
         })

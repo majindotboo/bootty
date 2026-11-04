@@ -330,12 +330,9 @@ fn presets_bind_the_shared_session_shortcuts(#[case] preset: &str) {
         .expect("every preset action resolves");
     let macos = cfg!(target_os = "macos");
     let catalog = bootty_ui::commands::CommandCatalog::default();
-    for (key, letter, alt, command) in [
-        (TerminalKey::H, 'h', false, "agent_history"),
-        (TerminalKey::G, 'g', false, "toggle_changes_panel"),
-        (TerminalKey::L, 'l', false, "add_selection_to_conversation"),
-        (TerminalKey::P, 'p', true, "toggle_session_pin"),
-        (TerminalKey::A, 'a', true, "archive_session"),
+    for (key, letter, command) in [
+        (TerminalKey::P, 'p', "toggle_session_pin"),
+        (TerminalKey::A, 'a', "close_session"),
     ] {
         let invocation = bindings
             .invocation_for_input(bootty_terminal::terminal::KeyInput {
@@ -343,8 +340,8 @@ fn presets_bind_the_shared_session_shortcuts(#[case] preset: &str) {
                 mods: bootty_terminal::terminal::KeyMods {
                     command: macos,
                     ctrl: !macos,
-                    shift: !(macos && alt),
-                    alt,
+                    shift: !macos,
+                    alt: true,
                     ..bootty_terminal::terminal::KeyMods::default()
                 },
                 repeat: false,
@@ -353,14 +350,19 @@ fn presets_bind_the_shared_session_shortcuts(#[case] preset: &str) {
             })
             .unwrap_or_else(|| panic!("{preset} binds {command}"));
         assert_eq!(invocation.command, command);
-        if alt {
-            let descriptor = catalog.describe(command).unwrap();
-            assert_eq!(
-                descriptor.target,
-                Some(bootty_control::ResourceKind::Session)
-            );
-            assert_eq!(descriptor.mutation, bootty_control::MutationClass::Write);
-            assert!(descriptor.palette);
-        }
+        let descriptor = catalog.describe(command).unwrap();
+        assert_eq!(
+            descriptor.target,
+            Some(bootty_control::ResourceKind::Session)
+        );
+        assert_eq!(
+            descriptor.mutation,
+            if command == "close_session" {
+                bootty_control::MutationClass::Destructive
+            } else {
+                bootty_control::MutationClass::Write
+            }
+        );
+        assert!(descriptor.palette);
     }
 }

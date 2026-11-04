@@ -25,7 +25,7 @@ use super::{
     font_features::{FontFeatureEditorEvent, FontFeatureEditorSnapshot, GpuiFontFeatureEditor},
     model::{
         SettingsCategory, SettingsContent, SettingsControl, SettingsIntent, SettingsPage,
-        SettingsPageItem, SettingsRow, provider_kind_for_settings_row, provider_navigation_id,
+        SettingsPageItem, SettingsRow,
     },
     search::{SearchIndex, SearchMatches},
 };
@@ -54,9 +54,6 @@ pub struct GpuiSettings {
     pub(super) theme_preview_colors: [bootty_config::config::ColorConfig; 2],
     pub(super) search: String,
     pub(super) active_editor: Option<String>,
-    pub(super) expanded_providers: HashSet<String>,
-    pub(super) provider_catalogs:
-        HashMap<bootty_agents::AgentKind, super::provider_models::ProviderCatalog>,
     pub(super) focus: FocusHandle,
     pub(super) navbar_focus: FocusHandle,
     pub(super) content_focus: FocusHandle,
@@ -112,8 +109,6 @@ impl GpuiSettings {
             ],
             search: String::new(),
             active_editor: None,
-            expanded_providers: HashSet::new(),
-            provider_catalogs: HashMap::new(),
             focus: cx.focus_handle(),
             navbar_focus: cx
                 .focus_handle()
@@ -211,8 +206,7 @@ impl GpuiSettings {
         let structure_changed = old_structure != new_structure;
         self.rebuild_navbar(cx);
         if structure_changed {
-            // Rows that change inside an item, such as a provider's listed connectors, keep the
-            // page where the reader left it.
+            // Rows that change inside an item keep the page where the reader left it.
             let same_items = old_structure.category == new_structure.category
                 && old_structure.top == new_structure.top;
             let top = self.list_state.logical_scroll_top();
@@ -432,9 +426,6 @@ impl GpuiSettings {
     }
 
     fn update_active_section(&mut self, logical_index: usize) {
-        if self.category == SettingsCategory::Ai {
-            return;
-        }
         if self.root_navigation_active {
             if logical_index == 0 {
                 self.active_section = None;
@@ -542,15 +533,10 @@ impl GpuiSettings {
         };
         let category = entry.category;
         let section_id = entry.section_id.clone();
-        let provider = entry.provider;
         let is_root = entry.is_root;
 
         if is_root && expand_collapsed_root {
             entry.expanded = true;
-        }
-        if let Some(provider) = provider {
-            self.expanded_providers
-                .insert(format!("agents.{provider}.enabled"));
         }
         self.active_section = section_id.clone();
         if focus_content {
@@ -1100,10 +1086,7 @@ fn settings_page_item_id(item: &SettingsPageItem, fallback_index: usize) -> Stri
 fn navigation_section_id(item: &SettingsPageItem) -> Option<String> {
     match item {
         SettingsPageItem::SectionHeader { id, .. } => Some(id.clone()),
-        SettingsPageItem::Dependent { parent, .. } => {
-            provider_kind_for_settings_row(parent).map(provider_navigation_id)
-        }
-        SettingsPageItem::Setting(_) => None,
+        SettingsPageItem::Dependent { .. } | SettingsPageItem::Setting(_) => None,
     }
 }
 
@@ -1348,7 +1331,6 @@ fn row_identity(row: &SettingsRow) -> &str {
         | SettingsRow::ModifierRemaps { id, .. }
         | SettingsRow::Environment { id, .. }
         | SettingsRow::FontFeatures { id, .. } => id,
-        SettingsRow::ModuleIntegrations(snapshot) => &snapshot.identity,
         SettingsRow::Remote(snapshot) => &snapshot.id,
     }
 }

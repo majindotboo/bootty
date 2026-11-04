@@ -3,6 +3,7 @@
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bootty_config::config::SshRemoteConfig;
 use bootty_host::remote_link::RemoteProcessRequest;
+use bootty_os::spawn::CommandSpawn as _;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use std::{
@@ -49,7 +50,7 @@ fn unavailable_direct_transport_falls_back_without_repeated_bootstrap() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .bootty_spawn()
             .expect("relay process");
         child
             .stdin
@@ -69,18 +70,17 @@ fn unavailable_direct_transport_falls_back_without_repeated_bootstrap() {
 }
 
 #[rstest]
-#[case(None, "bootty-dev-0000000000000088")]
-#[case(Some("bootty-dev"), "bootty-dev-0000000000000088")]
-#[case(Some("bootty"), "bootty")]
+#[case(None)]
+#[case(Some("bootty-dev"))]
+#[case(Some("bootty"))]
 fn shared_transport_inherits_development_identity_and_preserves_explicit_callers(
     #[case] explicit: Option<&str>,
-    #[case] namespace: &str,
 ) {
     let mut args = Vec::new();
     if let Some(identity) = explicit {
         args.extend(["--application-identity".into(), identity.into()]);
     }
-    args.extend(["remote-space".into(), "list".into()]);
+    args.extend(["remote-project".into(), "list".into()]);
     let effective = bootty_host::daemon_program_args(
         bootty_host::REMOTE_DAEMON_PROGRAM,
         &args,
@@ -91,7 +91,7 @@ fn shared_transport_inherits_development_identity_and_preserves_explicit_callers
         &[
             "--application-identity".to_owned(),
             explicit.unwrap_or("bootty-dev").to_owned(),
-            "remote-space".to_owned(),
+            "remote-project".to_owned(),
             "list".to_owned(),
         ]
     );
@@ -123,16 +123,14 @@ fn shared_transport_inherits_development_identity_and_preserves_explicit_callers
             &URL_SAFE_NO_PAD.encode(serde_json::to_vec(&config).expect("config")),
             &URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).expect("request")),
         ])
-        .env("XDG_CONFIG_HOME", root.path().join("config"))
-        .env("XDG_STATE_HOME", root.path().join("state"))
-        .env_remove("BOOTTY_DAEMON_STATE")
+        .env("HOME", root.path().join("home"))
         .env(
             "BOOTTY_DEVELOPMENT_NAMESPACE",
             "bootty-dev-0000000000000088",
         )
         .env("SSH_CONNECTION", "127.0.0.1 1 127.0.0.1 22")
         .stdin(Stdio::null())
-        .output()
+        .bootty_output()
         .expect("shared transport call");
     let pid: u32 = std::fs::read_to_string(broker_pid)
         .expect("private broker identity")
@@ -140,7 +138,7 @@ fn shared_transport_inherits_development_identity_and_preserves_explicit_callers
         .expect("broker PID");
     let stopped = Command::new("/bin/kill")
         .args(["-TERM", &pid.to_string()])
-        .status()
+        .bootty_status()
         .expect("stop private test relay");
     assert!(stopped.success());
     assert_eq!(
@@ -150,28 +148,47 @@ fn shared_transport_inherits_development_identity_and_preserves_explicit_callers
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("catalog"),
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).expect("project list"),
         serde_json::json!([])
     );
-    assert!(
-        root.path()
-            .join("state")
-            .join(namespace)
-            .join("daemon.sqlite")
-            .is_file()
-    );
-    let other = if namespace == "bootty" {
-        "bootty-dev-0000000000000088"
-    } else {
-        "bootty"
+}
+
+#[rstest]
+fn native_stdio_bridge_exits_on_remote_eof_with_client_stdin_still_open() {
+    let namespace = format!("bootty-dev-{:016x}", std::process::id());
+    let endpoint = bootty_os::ipc::endpoint_for_label(&format!(
+        "{namespace}-mux-v{}",
+        bootty_mux::native::protocol::WIRE_VERSION,
+    ))
+    .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let binding = {
+        let _context = runtime.enter();
+        bootty_mux::native::local::bind(&endpoint).unwrap().unwrap()
     };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
+        .args(["--native-mux-bridge", &namespace])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .bootty_spawn()
+        .unwrap();
+    let input = child.stdin.take().unwrap();
+    let (peer, identity) = runtime.block_on(binding.accept()).unwrap();
+    assert!(identity.is_current_user());
+    drop(peer);
+    let output = child.wait_with_output().unwrap();
+    drop(input);
+    drop(binding);
+    std::fs::remove_file(endpoint.as_path()).unwrap();
+    std::fs::remove_file(endpoint.as_path().with_extension("lock")).unwrap();
     assert!(
-        !root
-            .path()
-            .join("state")
-            .join(other)
-            .join("daemon.sqlite")
-            .exists(),
-        "the other identity was untouched"
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    assert_eq!(output.stdout, Vec::<u8>::new());
 }

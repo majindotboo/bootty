@@ -6,8 +6,7 @@ use crate::presentation::dialogs::{
 /// The one product workflow presented as a floating modal in an application window.
 pub enum ModalDialog {
     NewSession(Box<NewSessionDialog>),
-    TerminalHistory(Box<crate::presentation::terminal_history::TerminalHistoryDialog>),
-    ThemeEditor(crate::presentation::theme_editor::ThemeEditorDialog),
+    ThemeEditor(Box<crate::presentation::theme_editor::ThemeEditorDialog>),
     Capture(crate::presentation::capture::CaptureDialog),
     SpaceEditor(SpaceEditorDialog),
     SessionPicker(SessionPickerDialog),
@@ -19,21 +18,12 @@ pub enum ModalDialog {
     SpacePicker(SpacePickerDialog),
 }
 
-pub(super) struct PendingSessionName {
-    pub scope: bootty_mux::controller::SpaceId,
-    pub identity: String,
-    pub initial_title: String,
-    pub native: Option<(bootty_control::CommandTarget, String)>,
-    pub reply: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>,
-}
-
 #[derive(Default)]
 pub(super) struct DialogRuntime {
     modal: Option<Box<ModalDialog>>,
     creation: Option<Box<ModalDialog>>,
     pub empty_creation_scope: Option<bootty_mux::controller::SpaceId>,
     pub project_settings: Option<crate::presentation::project_editor::ProjectSettingsEditor>,
-    pub session_names: Vec<PendingSessionName>,
     pub creation_replies: Vec<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>,
     pub(super) creation_drafts:
         std::collections::BTreeMap<String, super::creation_draft::CreationDraft>,
@@ -41,7 +31,6 @@ pub(super) struct DialogRuntime {
     pub(super) automatic_creation: bool,
     pub(super) creation_revision: u64,
     pub(super) new_session_isolated: bool,
-    pub(super) command_palette_native_parent: Option<bootty_control::CommandTarget>,
 }
 
 impl DialogRuntime {
@@ -122,11 +111,7 @@ impl DialogRuntime {
                     dialog
                         .draft()
                         .filter(|draft| {
-                            dialog.retains_creation_draft()
-                                && (!self.automatic_creation
-                                    || !draft.prompt.trim().is_empty()
-                                    || !draft.command.trim().is_empty()
-                                    || !draft.attachments.is_empty())
+                            !self.automatic_creation || !draft.command.trim().is_empty()
                         })
                         .map(|draft| draft.identity.as_str())
                 } else {
@@ -163,9 +148,6 @@ impl DialogRuntime {
         if overlays_creation {
             self.creation = self.modal.take();
         }
-        if !matches!(dialog, ModalDialog::CommandPalette(_)) {
-            self.command_palette_native_parent = None;
-        }
         self.modal = Some(Box::new(dialog));
     }
 
@@ -176,7 +158,6 @@ impl DialogRuntime {
         self.remember_creation();
         self.automatic_creation = false;
         self.modal = self.creation.take();
-        self.command_palette_native_parent = None;
     }
 
     pub(super) fn creation_spec(&self) -> Option<crate::gpui::DialogSpec> {
@@ -189,7 +170,6 @@ impl DialogRuntime {
     pub(super) fn is_dismissible(&self) -> bool {
         match self.modal.as_deref() {
             Some(ModalDialog::NewSession(dialog)) => !dialog.is_in_flight(),
-            Some(ModalDialog::TerminalHistory(dialog)) => !dialog.is_in_flight(),
             _ => true,
         }
     }
@@ -238,7 +218,6 @@ impl DialogRuntime {
             self.modal.as_deref(),
             Some(
                 ModalDialog::NewSession(_)
-                    | ModalDialog::TerminalHistory(_)
                     | ModalDialog::SpaceEditor(_)
                     | ModalDialog::SessionPicker(_)
                     | ModalDialog::RenameSession(_)

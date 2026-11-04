@@ -2,7 +2,7 @@ use super::{Job, JobRead, JobRegistry, JobSpec, JobStatus};
 use crate::{CancellableCommandRunner, CommandCancellation, remote::RemoteHost};
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
+use bootty_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},

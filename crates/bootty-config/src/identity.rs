@@ -9,7 +9,6 @@ use thiserror::Error;
 static PROCESS_IDENTITY: OnceLock<ApplicationIdentity> = OnceLock::new();
 static DEVELOPMENT_NAMES: OnceLock<ApplicationNames> = OnceLock::new();
 
-pub const APPLICATION_IDENTITY_ENV: &str = "BOOTTY_APPLICATION_IDENTITY";
 pub const DEVELOPMENT_NAMESPACE_ENV: &str = "BOOTTY_DEVELOPMENT_NAMESPACE";
 
 const PRODUCTION_NAMESPACE: &str = "bootty";
@@ -65,7 +64,7 @@ pub struct ApplicationIdentityConflict {
 impl ApplicationIdentity {
     #[must_use]
     pub const fn current() -> Self {
-        if cfg!(any(debug_assertions, feature = "bootty-dev")) {
+        if cfg!(debug_assertions) {
             Self::Development
         } else {
             Self::Production
@@ -131,6 +130,17 @@ impl ApplicationIdentity {
             "bootty" => Some(Self::Production),
             "bootty-dev" => Some(Self::Development),
             _ => None,
+        }
+    }
+
+    /// Classify an exact IPC namespace; malformed Development names never fall
+    /// back to another worktree or to Production.
+    #[must_use]
+    pub fn parse_namespace(namespace: &str) -> Option<Self> {
+        if namespace == PRODUCTION_NAMESPACE {
+            Some(Self::Production)
+        } else {
+            valid_development_discriminator(OsStr::new(namespace)).map(|_| Self::Development)
         }
     }
 

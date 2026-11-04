@@ -7,9 +7,7 @@ mod remotes;
 mod state;
 mod writeback;
 
-pub use effect::{
-    ModuleOutcome, RemoteOutcome, SettingsEffect, SettingsOutcome, SettingsWriteSource,
-};
+pub use effect::{RemoteOutcome, SettingsEffect, SettingsOutcome, SettingsWriteSource};
 pub use font_features::{FontFeatureDraft, dedupe_font_features};
 pub use numeric::{normalize_number, parse_display_number};
 pub use remotes::{DefaultRemote, RemoteDraft, RemoteEditorSnapshot, RemoteProfile};

@@ -36,129 +36,10 @@ bootty app --config /path/to/config.toml
 Startup flags can override common config values after the file is loaded:
 
 ```sh
-bootty app --defaults --backend native --fullscreen non-native --titlebar hidden --window-decoration none --no-sidebar
+bootty app --defaults --fullscreen non-native --titlebar hidden --window-decoration none --no-sidebar
 ```
 
 Run `bootty --help` for the full flag list.
-
-The Permissions settings page and `[computer]` table control local desktop computer use. `enabled`,
-`capture-enabled`, and `input-enabled` default to `false`. Capture requires both
-`enabled` and `capture-enabled`, plus an existing macOS Screen Recording grant.
-Input requires both `enabled` and `input-enabled`, plus an existing Accessibility
-grant. Changing these settings does not request or grant OS permission.
-`computer.status`, `computer.targets` and `computer.icons` remain readable while disabled.
-Manual browser screenshot attachments use the existing Screen Recording grant
-independently of these agent-command switches.
-
-Agents in native conversations use local apps through `computer_snapshot`,
-`computer_elements` and `computer_input`, naming an app by bundle id or name. The first use of an app in
-a conversation shows an approval card: **Allow for this session** grants it for
-the rest of the conversation, **Always allow** also adds its bundle id to
-`always-allowed-apps`, and **Deny** refuses. An `@` mention of an app window in
-the prompt grants it the same way. This consent replaces the switches above for
-agent app use; macOS Screen Recording and Accessibility grants still apply.
-Input targets the window from the app's latest observation. `computer_elements` reads
-controls without a screenshot or focus change. On macOS and Windows a capture also lists the window's accessibility
-elements in screen order, including disabled and unlabeled ones, and `computer_input`
-can press an element by its number: Bootty uses the element's own action, or clicks
-its center when it has none. Set `allow_click: false` on a press to require an
-accessibility action and forbid pointer fallback. Listing elements on macOS needs the Accessibility grant; Chromium
-and Electron apps are asked to expose their web content, which may take one more
-capture to appear. Agents never use the Bootty instance they run
-in, terminals, or System Settings; another Bootty instance, such as a
-development build, is an ordinary app.
-Native provider conversations use Unix sockets on macOS and Linux and same-user
-named pipes on Windows. Provider stdin/stdout stay private to the conversation;
-stopping it terminates its owned process tree, including Windows descendants.
-
-Computer commands use an exact window token returned by `computer.targets`,
-passed as one JSON window object. Pointer coordinates and snapshot regions are
-screen points inside the token's `bounds`, not window-relative points. Invalid
-arguments fail with `invalid_arguments` and name the argument and the reason.
-Window or process changes invalidate the token, and input is never redirected
-to another window. `computer.elements` lists the window's accessibility elements
-and `computer.press` presses one of them by the element it returned; it follows
-the capture switch and the input switch respectively. Computer use works on
-macOS, Windows and Linux. Linux lists AT-SPI accessibility windows, including
-native Wayland apps exposed by the desktop, alongside EWMH X11/XWayland windows. `computer.snapshot` writes a bounded PNG
-to the supplied absolute local path and never replaces an existing file.
-`computer.set-value <target> <element> <value>` replaces an editable control's value through macOS Accessibility, Windows UIA, or Linux AT-SPI EditableText. The agent equivalent is `computer_input` with `action: "set_value"`, a numbered `element`, and `value`. An empty value clears the control. It does not focus the app, send keyboard/pointer events, submit a form, or navigate a browser. Unsupported and read-only controls fail without input fallback.
-
-The optional third argument to `computer.press`, `allow-click`, defaults to `true`;
-pass `false` for an accessibility-only action.
-
-On macOS, `computer.elements <target> menu_bar` lists the menu bar of the target
-window's app in menu order, read through Accessibility without opening a menu or
-bringing the app forward. These elements carry `"root": "menu_bar"` and no frame.
-`computer.press` presses a listed menu item through Accessibility only, never
-with a click, and refuses menu titles and items with a submenu. The system's
-Apple menu and the app menu's submenus, such as Services, are left out because
-they act outside the app. Enabled states may be stale until a menu opens, and a
-background app disables the menu commands that act on a window, such as Close.
-Windows and Linux report the menu bar as unsupported.
-
-Linux element discovery and semantic actions use the installed AT-SPI accessibility
-bus, with bounded reads and no focus or input events. Presses invoke named activation
-actions; setting a value uses EditableText, and password values are excluded.
-An app must expose its controls through AT-SPI. Numeric Value controls and controls
-without a supported press action or writable EditableText remain unsupported.
-Apps may choose to activate themselves in response to an action.
-
-Linux accessibility targets carry a full `native_id` (bus GUID, owner and object path),
-plus the bus owner's PID and process start time. They are semantic-only: capture,
-focus, keys, coordinate input, and pointer fallback are unsupported for these tokens.
-Their frames are toolkit-reported; native Wayland toolkits may report window-relative
-coordinates or no usable frame. Only visible windows and controls with usable frames
-are listed, and native Wayland moves cannot be detected when the toolkit hides its
-screen origin. Such frames never authorize pointer input or pixel capture.
-
-AT-SPI does not expose an X11 window ID. Bootty keeps accessibility and X11 window
-tokens separate, even when their app, title and geometry match. `computer_elements`
-prefers accessibility targets; `computer_snapshot` selects an X11 target and cannot
-attach AT-SPI elements to that observation. Use a fresh element observation before
-semantic input. The CLI/socket can select either exact token from `computer.targets`.
-X11 capture and XTest input remain available through X11 tokens. Native Wayland
-capture/input need a desktop portal sharing session bound to the exact selected
-window; Bootty does not create that session or capture a whole screen as a fallback.
-
-Windows element discovery uses UI Automation on a background COM thread. It lists
-bounded control labels, values, identifiers, frames and states; password values are
-excluded. Presses use Invoke, Toggle or SelectionItem patterns with automatic focus
-disabled, so supported controls can work behind another app. Apps can still choose
-to activate themselves in response to an action. UIA failures are reported explicitly.
-
-On macOS, capture needs macOS 14 or later, and input goes straight to the target
-window without focusing it, so the window may sit behind other apps and the
-pointer never moves; Bootty shows its own cursor briefly where each click, move
-or scroll landed. Typed text and keys go to the window its app has focused,
-whether or not that app is in front: `computer.focus` makes the target that
-window and lifts it behind the frontmost app without activating its app. Views
-that need their window active, such as web content, ignore clicks while their
-app is in the background, so a left click in an app that is not frontmost
-presses the accessibility element under the point when it has its own press
-action. Other clicks, and every click on the frontmost app, are sent as clicks.
-A background app's menus ignore posted shortcuts, so `computer.key` with
-Command for an app that is not frontmost presses the menu item with that
-shortcut through Accessibility and returns `pressed`. It fails when that item is
-disabled, as commands that act on a window are while their app is in the
-background; press the window's own control instead, such as its close button.
-A Command shortcut in no menu is posted for views that handle keys themselves.
-On Windows and Linux, coordinate and keyboard input drive the shared pointer and keyboard,
-so the target must be the focused window and each point uncovered;
-`computer.focus` brings it to the front, and Command shortcuts are sent as
-Control.
-
-```toml
-[computer]
-enabled = false
-capture-enabled = false
-input-enabled = false
-always-allowed-apps = [] # bundle ids, such as "dev.zed.Zed"
-```
-
-The `[browser]` table chooses the search engine used for address-bar queries
-and whether browser site data persists between launches. The defaults are
-`duckduckgo` and `true`.
 
 ## Example
 
@@ -176,12 +57,8 @@ default_open_behavior = "existing_window"
 when_closing_with_no_tabs = "platform_default"
 on_last_window_closed = "platform_default"
 
-[browser]
-search-engine = "duckduckgo" # duckduckgo, google, bing, or brave
-persist-site-data = true
-
 [window]
-title = "Agent Shell"
+title = "Bootty"
 width = 1220
 height = 760
 fullscreen = "native"
@@ -212,40 +89,14 @@ appearance = "segmented" # classic, underline, pill, outline, segmented
 close-position = "right" # left or right
 close-button = "always" # always, hover, hidden
 
-[multiplexer]
-backend = "rmux"
-
-# native keeps mux state and terminals inside Bootty. rmux renders through
-# rmux-sdk. herdr 0.8+ and tmux attach through their own backend UIs.
-
-# Attach a multiplexer running on another host. Herdr keeps its UI and inner
-# topology inside its attached client and must already be installed on the
-# remote host. Bootty reaches the remote host over SSH and renders its sessions
-# here. For remote Space catalog operations, Bootty uploads the
-# matching daemon bundled with the app. If the bundle has no matching target,
-# Bootty downloads and checksum-verifies the release daemon. New Session uses
-# that daemon to discover projects and Git worktrees on the remote filesystem.
-# The full Bootty app is not required on the remote host.
+# SSH placement runs the native mux server on this host. QUIC is preferred,
+# then direct TCP/TLS, then SSH stdio. WSL native panes remain unavailable.
 [multiplexer.remote]
 host = "devbox" # ~/.ssh/config alias, hostname, or address
 # user = "dev"        # when ~/.ssh/config does not name one
 # port = 2222          # when ~/.ssh/config does not name one
 # program = "ssh"      # the SSH client to run
 # args = ["-i", "~/.ssh/devbox"] # extra flags, passed before the destination
-
-# `bootty app --backend herdr --ssh-remote devbox` does the same for one run.
-# Herdr's composite remote UI accepts an SSH host or `user@host`; put ports,
-# jump hosts, alternate SSH programs, and other connection options in ~/.ssh/config.
-#
-# This is the default every space inherits. A single space can name its own host
-# in the space editor, next to its backend, so remote and local spaces sit side
-# by side; that override lives in the workspace database, not in this file.
-#
-# Bootty dials with ConnectTimeout=5, ServerAliveInterval=5 and
-# ServerAliveCountMax=3, so a lost connection ends in about 15 seconds instead of
-# hanging. The pane then reconnects on its own, with a growing delay between
-# attempts; the sessions stay on the remote host throughout. Flags listed in
-# `args` come first on the command line, so any of these can be set differently.
 
 [input]
 # Every preset opens the command palette with Cmd+K (Ctrl+Shift+K outside macOS).
@@ -261,13 +112,12 @@ modifier-remap = ["right_alt=left_ctrl"]
 bell = "visual" # off | visual | audio | both
 command-notifications = "unfocused" # never | unfocused | always
 command-notification-min-seconds = 10
-shell-integration = false # optional hooks for new bash, zsh and fish PTYs
+shell-integration = true # optional hooks for new bash, zsh and fish PTYs
 output-archives = false # private bounded previous-session snapshots
 clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 shell = "/bin/zsh"
 working-directory = "/Users/example/src"
 worktree-directory = "~/.local/share/bootty/worktrees"
-worktree-limit = 10 # Bootty worktrees kept per host; 0 removes only unused ones
 branch-prefix = "bootty/" # start of new worktree branch names; a project's prefix wins
 env = [{ name = "EDITOR", value = "vim" }]
 term = "xterm-bootty"
@@ -299,14 +149,12 @@ palette = [
 The General lifecycle settings use Zed's stable names and choice tokens, adapted to Bootty's
 model. A workspace is a durable Bootty Space. `last_session` restores the Space selected for the
 application window's persistence key, `last_workspace` restores the primary window's selected
-Space, and `none` opens the first persisted Space. Backend session/window selection remains owned
-by each mux backend's restore policy.
+Space, and `none` opens the first persisted Space. Session/window selection remains owned
+by the native backend's restore policy.
 
 A cold session restore retains its layout, directories and bounded styled history.
-Supported terminal agents resume their saved provider conversation in the original
-pane, using the captured account and current provider enablement. Live mux processes
-reattach instead. Automatic terminal-agent resume is limited to the local POSIX
-host; it does not transfer credentials or permission grants to remote bindings.
+It starts fresh shells in the recorded directories; it never replays commands.
+Live processes reattach instead.
 
 Only set values you want to override. Unknown fields are rejected.
 
@@ -459,7 +307,7 @@ line and block comments are allowed, and trailing commas are allowed.
     },
   },
   {
-    "context": "Terminal && backend == native",
+    "context": "Terminal",
     "bindings": {
       "ctrl-k ctrl-n": "new_tab",
     },
@@ -470,26 +318,12 @@ line and block comments are allowed, and trailing commas are allowed.
 Each section accepts only `context`, `use_key_equivalents`,
 `use_builtin_defaults`, `unbind`, and `bindings`:
 
-- `context` defaults to `Global`. Supported contexts are `Global`, `Sidebar`, `Command`,
-  `SurfaceChooser`, `Composer`, `ComposerCompletion`, `Terminal`, `Herdr`, `Native`, `rmux`, and `tmux`. Backend contexts apply only
-  while a terminal is focused. The Zed-style forms
-  `Terminal && backend == herdr|native|rmux|tmux` are aliases.
+- `context` defaults to `Global`. Supported contexts are `Global`, `Sidebar`,
+  `Command`, and `Terminal`. The old `Native` context and
+  `Terminal && backend == native` load as `Terminal`. Any other value is used as
+  a Zed-style key-context expression.
   `Command` applies to the active command palette or picker; underlying workspace
   shortcuts are inactive while that modal surface is open.
-  `SurfaceChooser` applies only to the new tab or split chooser. Every choice and
-  navigation command is editable here or in the Keymap tab: `ui.surface.agent`,
-  `terminal`, `claude`, `codex`, `pi`, `edit_profiles`, `previous`, `next`, `first`,
-  `last`, `confirm`, and `cancel` (each with the `ui.surface.` prefix).
-  Defaults include arrows and Tab/Shift-Tab, Vim J/K and gg/G, Emacs Ctrl-N/P,
-  Alt-</>, Ctrl-M and Ctrl-G. A/T choose Agent/Terminal, 1–3 choose terminal
-  profiles, E edits profiles, and Escape cancels. Inline keycaps show the effective
-  bindings; removing a shortcut does not reveal a hidden hard-coded fallback.
-  `Composer` applies while an Agent composer is shown: a native conversation or the
-  new-session form. Elsewhere its keys reach the terminal.
-  `ComposerCompletion` applies while an Agent composer has an active suggestion menu.
-  `ui.composer.previous`, `next`, `confirm`, and `cancel` use the same editable keymap.
-  Defaults include Up/Down, Emacs Ctrl-P/N, Ctrl-K/J and Vim Alt-K/J, Enter/Tab to
-  insert, and Escape/Ctrl-G to dismiss. These shortcuts leave normal typing intact.
 - `use_key_equivalents` is optional, defaults to `false`, and is preserved as
   Zed-compatible section metadata.
 - `use_builtin_defaults` is optional and defaults to `true`. Set it to `false`
@@ -505,7 +339,7 @@ Each section accepts only `context`, `use_key_equivalents`,
 Zed-style `ctrl-k` and Bootty-style `ctrl+k` modifiers are both accepted.
 Sections and entries are evaluated in file order, and later matching entries
 win. Action names resolve through Bootty's command catalog and enter the same
-`CommandInvocation` path as the palette, CLI, socket, and native integration callers.
+`CommandInvocation` path as the palette, CLI, and socket callers.
 
 Terminal find has `.*` (regular expression) and `Aa` (case sensitive) switches.
 The commands `toggle_search_regex` and `toggle_search_case_sensitive` expose the
@@ -516,13 +350,10 @@ highlights and show an error in the find bar. Matches span soft-wrapped rows;
 the counter counts logical matches in the current viewport. Regex matches are
 non-overlapping, and zero-length matches have no highlight.
 
-Pasting a clipboard image stages a private PNG and inserts its path. In an SSH
-binding, Bootty uploads it through the matching remote daemon first and inserts
-the remote path only after checksum verification. Uploads accept PNGs up to
-64 MiB. A failed, cancelled, or stale-target paste inserts nothing; it never
-substitutes a local path into the remote terminal. Images stay in the destination
-host's temporary directory so the receiving application can read them. Clipboard
-text and copied file paths keep their existing paste behavior.
+Pasting a clipboard image stages a private PNG, up to 64 MiB, and inserts its
+path. A failed, cancelled, or stale-target paste inserts nothing. Images stay in
+the host's temporary directory so the receiving application can read them.
+Clipboard text and copied file paths keep their existing paste behavior.
 
 The `Command` context exposes `ui.command.previous` (Up, Ctrl+P),
 `ui.command.next` (Down, Ctrl+N), `ui.command.confirm` (Enter),
@@ -542,7 +373,7 @@ commands. For example:
 
 Bootty first resolves the selected `[input].preset` and the existing TOML
 `[input].keybind`, `[input].sidebar-keybind`, and
-`[input.backend-keybind]` arrays. It then applies each context's
+`[input.backend-keybind].native` arrays. It then applies each context's
 `use_builtin_defaults` policy and `keymap.json` user bindings as the final
 layer. Those TOML fields remain supported, live-reloaded compatibility input;
 existing configurations do not need to migrate. New keybinding edits should
@@ -612,7 +443,6 @@ Libghostty-vt logs are bridged to stderr. Set `BOOTTY_LIBGHOSTTY_LOG=error|warn|
 Live-applied fields:
 
 - `[chrome]` sidebar/status visibility, layout, and inactive panel dimming
-- `[multiplexer]` backend selection and backend UI mode
 - `[input]` modifier remaps, macOS Option-as-Meta mode, global keybinds, and sidebar keybinds
 - `theme`, `[colors]` terminal defaults, `[cursor]` defaults, `[font]` metrics,
   and `[session].glyph-protocol`
@@ -730,50 +560,43 @@ Connection tests report results for both saved profiles and unsaved drafts.
   memory, power, date and time at the right, a tab bar tall. `top-bar`, `bottom-bar`,
   `status-bar`, `status-height`, `status-background`, `top-segment`, `status-segment`
   and `bottom-segment` still load and have no effect.
-- Sidebar modules are native implementations; the sidebar includes native session
-  facts and agent integrations. Existing Lua/Luau files under the config tree
-  and raw `[extensions]` values are preserved, but are not executed. Native Pi,
-  Codex, and Claude integration setup is documented in [agent integrations](agent-integrations.md).
-
+- Sidebar modules are native implementations. `sidebar.modules` defaults to
+  `["sessions"]`, and `sidebar.session-modules` to `["diffs", "process",
+  "directory", "branch", "ports", "progress"]`. Existing Lua/Luau files under the
+  config tree and raw `[extensions]` values are preserved, but are not executed.
 - `BOOTTY_SHELL` remains a compatibility override in the session launcher.
   Configured `[session].shell` is passed as the explicit shell setting, then the
   runtime preserves its existing shell precedence.
 - `BOOTTY_STABILITY_TRACE` remains a diagnostics fallback when
   `[diagnostics].stability-trace` is not set.
 - `[input].keybind`, `[input].sidebar-keybind`, and
-  `[input.backend-keybind]` remain supported compatibility input. User overrides
-  in `keymap.json` are applied after them.
+  `[input.backend-keybind].native` remain supported compatibility input. User
+  overrides in `keymap.json` are applied after them.
 - Bootty config is TOML with Ghostty-inspired vocabulary; it is not Ghostty's
   config syntax.
+
 
 ## Session list
 
 `sidebar.group-by-project` defaults to `true`. The sidebar view button and
 `ui.sidebar.toggle_grouping` switch between project groups and a flat list.
-The Settled heading and `ui.sidebar.toggle_settled` open and close the settled
-shelf, saved as `sidebar.settled-collapsed`. The shelf lists the most recently
-active sessions first, ten at a time.
-Each session owns its branch and agent marks; switching views preserves sessions,
-selection and terminal contents. Sessions are grouped into Pinned, Sessions and
-Settled. Working and waiting show on the row, so a row and its numbered shortcut
-stay put while its agent works; a settled session that needs an answer returns
-to Sessions. A session's tooltip shows its short name, like `bootty-7c`, which
-works in place of its target in commands, the CLI and the session switcher; see
-`docs/automation.md`. The search box matches titles, projects, branches, agents and
-short names, and
-finds sessions whose conversations mention the words, showing the line that
-matched; it reads the recent transcript Bootty keeps for each conversation. A
-closed session's row is dimmed and says Closed. Double-click a
-row, or choose **Rename…**, to edit its title in place: Enter or clicking away
-saves it, Escape keeps the old title. A conversation's menu can start a side
-chat from it. Command-click (Control-click on Linux and Windows) chooses several
-sessions and Shift-click a range; right-click one of them to pin, settle, snooze,
-mark unread, archive or delete them together. Escape, a plain click or returning to
-the terminal lets go. Archive retains saved work, asks first
-when the session is working, and offers Undo; Delete asks for confirmation,
-closes the session's terminals and permanently removes its saved record. A failed
-close keeps the saved record. Project tools live under **Project** in a session's
-menu; title, unread, side chat, moving and auto-settle actions live under **More**.
+Each session row shows its branch, diff counts and the branch's pull request;
+switching views preserves sessions, selection and terminal contents. Sessions are
+grouped into Pinned and Sessions. A session's tooltip shows its short
+name, like `bootty-7c`, which works in place of its target in commands, the CLI
+and the session switcher; see `docs/automation.md`. The search box matches titles,
+project names and branches. A closed session's row is dimmed and says Closed.
+Double-click a row, or choose **Rename…**, to edit its title in place: Enter or
+clicking away saves it, Escape keeps the old title. Command-click (Control-click
+on Linux and Windows) chooses several sessions and Shift-click a range; right-click
+one of them to pin or close them together. Escape, a
+plain click or returning to the terminal lets go. Archive retains saved work and
+offers Undo; Delete asks for confirmation, closes the session's terminals and
+permanently removes its saved record. A failed close keeps the saved record.
+
+The pull request badge comes from the host's `gh` account. Bootty asks about the
+selected session's branch once a minute and the rest every five minutes; a failed
+ask keeps the last answer.
 
 Open **Settings → Projects** to add a registered folder, open its settings, or
 remove its registration. Removal preserves files and existing sessions.
@@ -781,8 +604,8 @@ A project header's actions menu starts a session in the project, reveals or
 copies its path, and opens **Project settings…**, the same page in a named,
 closeable settings tab. Switching tabs preserves drafts; closing an unsaved draft asks
 before discarding it.
-The page edits its name, icon or local image, default agent, and defaults for
-creating worktrees (branch prefix and starting ref).
+The page edits its name, icon or local image, and defaults for new sessions:
+current checkout or a new worktree, branch prefix and starting ref.
 It also keeps the project's scripts: named shell commands that a session's menu runs in
 a new terminal tab, in that session's directory (`project.script CWD NAME`). Scripts
 marked **Setup** also run, each in its own tab, in every session that starts in a new
@@ -790,7 +613,11 @@ worktree of the project (`project.setup CWD`), such as installing dependencies.
 **Before removing a worktree** runs in a project's worktree when worktree cleanup is about
 to remove it; if it fails, the worktree stays and the cleanup report says what it said.
 Project settings live in the workspace database and apply to new sessions.
-Existing sessions keep their selected provider and model.
+
+The New Session form starts a terminal. It takes an optional command, the project,
+the Space, and the checkout: the current one, where a searchable branch picker can
+switch branches, or a new worktree with its own branch, base and folder. Unstarted
+forms are kept as drafts in the sidebar.
 
 New worktrees go in `<session.worktree-directory>/<repository>/<name>` on the
 repository's host. Unset, the directory is `~/.local/share/bootty/worktrees` on
@@ -801,13 +628,9 @@ home. Generated names use the task's short slug, and branches start with
 worktree's sessions under its main checkout's project.
 
 Bootty cleans up the worktrees in that directory on each host: hourly, soon after
-a session is deleted, archived or settled, and when the worktree settings change.
-A worktree no saved session or live terminal uses goes after its first hour.
-Past `session.worktree-limit` (default 10), the worktrees of the oldest archived
-sessions go first, then the oldest settled ones. Active sessions and sessions with
-a running terminal keep theirs. A worktree with uncommitted changes or commits no
-remote has always stays, and Bootty says so once. A removed worktree's branch goes
-too when `git branch -d` accepts it. `0` removes only worktrees no session uses.
+a session closes, and when the worktree settings change.
+A worktree no live session uses goes after its first hour.
+A worktree with uncommitted changes or unpushed commits stays.
 The unset directory is only cleaned by the identity's default configuration; another
 configuration path must set `session.worktree-directory`.
 
@@ -815,198 +638,80 @@ configuration path must set `session.worktree-directory`.
 every host and reports what each removed and kept. It asks for confirmation from
 the CLI and socket.
 
-`settle_session` settles the exact current saved session without closing its
-terminal. Settling the session you are viewing from the sidebar, palette or a
-shortcut opens the next active session in sidebar order, wrapping to the top.
-If none remain, it opens the new-session form in the settled session's directory.
-Settling another session, automatic settlement, and CLI or socket commands preserve
-your selection. `toggle_session_pin` pins it, or unpins it when already pinned, and
-`archive_session` archives it. All three are in the palette. Every preset binds:
+`toggle_session_pin` pins the current saved session, or unpins it when already pinned.
+`close_session` closes it and releases its saved membership and checkpoint. Both are in the palette. Every preset binds:
 
-| Command                | macOS         | Linux and Windows  |
-| ---------------------- | ------------- | ------------------ |
-| `agent_history`        | `Cmd+Shift+H` | `Ctrl+Shift+H`     |
-| `toggle_changes_panel` | `Cmd+Shift+G` | `Ctrl+Shift+G`     |
-| `add_selection_to_conversation` | `Cmd+Shift+L` | `Ctrl+Shift+L` |
-| `toggle_session_pin`   | `Cmd+Opt+P`   | `Ctrl+Shift+Alt+P` |
-| `archive_session`      | `Cmd+Opt+A`   | `Ctrl+Shift+Alt+A` |
+| Command              | macOS       | Linux and Windows  |
+| -------------------- | ----------- | ------------------ |
+| `toggle_session_pin` | `Cmd+Opt+P` | `Ctrl+Shift+Alt+P` |
+| `close_session`    | `Cmd+Opt+A` | `Ctrl+Shift+Alt+A` |
 
-`add_selection_to_conversation` adds the focused document's selected lines, as an
-`@path:12-18` mention, or the focused terminal's selected text, as a text file
-chip, to the conversation in the current session, and shows it.
-
-Settle is `Cmd+Opt+X` (`Ctrl+Shift+Alt+X`) in the Bootty and tmux presets and
-`Cmd+Shift+W` in the macOS Ghostty preset. `session.settle`, `session.pin` and
-`session.archive` accept an explicit saved identity with its Binding target for
-detached work and other Spaces.
+`session.pin` accepts an explicit session identity with its Binding target.
+`session.close` remains the wire alias for `close_session`; both accept a Session target.
 
 `sidebar.sort-order` defaults to `"manual"`. Choose **Manual** or **Recent activity**
 from the sidebar view menu or Sidebar settings. Recent activity uses persisted
-accepted session input and native prompts; equal or undated sessions keep their
+accepted session input; equal or undated sessions keep their
 manual order. The shared commands are `ui.sidebar.sort_manual` and
 `ui.sidebar.sort_recent_activity`. Drag a session to move it, or a project
 header to move all of its sessions. A drop in Recent activity order keeps the
 order shown as the manual order and switches to Manual.
 
-`sidebar.animate-working` defaults to `true`. Turn off **Animate Working ring**
-on the Sidebar settings page to keep the Working ring still. Reduced motion also
-keeps it still. Changes apply when configuration reloads.
+## Workspace dock
 
-`sidebar.auto-settle-after-days` defaults to `3`; set it to `0` to disable
-automatic settlement. **Auto-settle behavior** in a session's menu can keep that
-session active. Pinned, snoozed and busy sessions are excluded. Settlement keeps
-the terminal and history; accepted input returns the session to the active list.
-**Snooze → Custom…** chooses a future date and time in the local time zone.
+The window has two regions: Sessions in the left sidebar and the terminal in the
+center. The mux owns terminal tabs, splits and ratios. New tabs and splits open a
+terminal directly.
 
-## Workspace docks
+Each terminal pane is a Dock panel. Drag its handle to an edge to move it, or to
+another pane's center to swap. Right-click the handle to extract into a tab.
+Divider drags commit split weights to the mux server when released. Pane splits
+restore from the mux checkpoint, independently of `native-panels.json`.
+`chrome.pane-divider-width` and `chrome.pane-divider-color` style Dock's separator
+line; the component owns its grab area. The line overlays the boundary and takes
+no terminal grid space.
 
-`toggle_left_dock` and `toggle_right_dock` show or hide their respective docks.
-The palette, keybinding editor, CLI and socket expose the same commands as the
-header buttons. Panel commands are `show_sidebar`, `show_files`, `show_changes`,
-and `show_agents`.
-For example, `[input].keybind = ["ctrl+shift+l=toggle_left_dock"]` binds the left dock.
+`toggle_left_dock` shows or hides the left sidebar. `toggle_sessions_panel`
+toggles the Sessions panel, `show_sidebar` opens it, and `show_spaces` opens it at
+the Space switcher, which sits at the bottom of the sidebar. The palette, keybinding editor, CLI and socket
+expose the same commands as the header button. For example,
+`[input].keybind = ["ctrl+shift+l=toggle_left_dock"]` binds the left dock.
+Cmd+B in the macOS Ghostty preset and Cmd+Shift+E (Ctrl+Shift+E elsewhere) in the
+Bootty and tmux presets invoke `toggle_left_dock`.
 
-Sessions occupy the left sidebar. Files, Changes, Diff and documents open as
-labeled peer tabs in the right tool area. Its plus menu and empty state open
-tools; closing the last tab returns to the empty state. Tools cannot be dragged
-into another region or split into nested groups. The mux owns terminal tabs,
-splits and ratios independently.
+`chrome.left-dock-toggle` controls the header button; its command remains
+available. The sidebar's visibility and width persist per window in
+`native-panels.json`, shared across Spaces; drag its edge to resize. Saved layouts
+from versions with a right dock still load. The legacy `chrome.sidebar` and
+`chrome.sidebar-width` keys seed an unsaved layout. `sidebar.position` no longer
+moves the sidebar. The legacy `chrome.panel-tab-style` and `chrome.panel-tabs`
+keys still load and have no effect, as do the hidden `toggle_tab_bar` and
+`toggle_hidden_tabs` commands.
 
-`chrome.left-dock-toggle` and `chrome.right-dock-toggle` control the header
-buttons; their commands remain available. Side visibility, widths, tool tabs
-and document positions persist per window, shared across Spaces. Older layouts
-are flattened into these fixed homes while retaining their documents.
-The retired `chrome.panel-tab-style`, `chrome.panel-tabs`, `toggle_tab_bar` and
-`toggle_hidden_tabs` no longer hide tool labels or navigation.
-`show_agents` still provides the existing agent controls through the palette;
-Agents has no primary navigation entry. `show_spaces` opens the left sidebar,
-whose Space switcher remains at the bottom.
+The **Tabs** settings (`[chrome.tabs]`) select classic, underline, pill, outline,
+or segmented tabs; close-button side (left/right); and close-button visibility
+(always/on hover/hidden). Hover buttons occupy the tab's side padding without
+reserving a separate column. Hiding a close button keeps the close command and
+context menu available.
 
-## Panel controls
+## Files
 
-Every tool panel has a `toggle_<name>_panel` command, available in the palette,
-keymap, CLI, and control socket. Names are `sessions`, `files`, `changes`, `diff`,
-`agents`, `jobs`, `transfers`, `recovery`, and `shell`. A toggle closes an active,
-visible panel; otherwise it opens and selects that panel. Terminal topology and
-contextual document tabs retain their own close and navigation commands.
-
-The former Sessions shortcuts now invoke `toggle_left_dock`, including Cmd+B in
-the macOS Ghostty preset and Cmd+Shift+E in the macOS Bootty/Tmux presets.
-Toggle Right Dock defaults to Cmd+Option+B on macOS and Ctrl+Alt+B elsewhere.
-Existing custom keybindings are preserved.
-
-The top bar owns panel controls. Legacy panel `dock` and `button` preferences
-remain loadable but have no effect.
-
-The **Dock Tabs** and **Terminal Tabs** settings independently select classic,
-underline, pill, outline, or segmented tabs; close-button side (left/right); and
-close-button visibility (always/on hover/hidden). Hover buttons occupy the tab's
-side padding without reserving a separate column. Hiding a close button keeps the
-close command and context menu available.
-
-Side visibility and widths are saved in `native-panels.json`; drag a side edge
-to resize. Each session keeps its own right side: its tools, documents and
-subagent tabs, and whether it shows. The sessions sidebar on the left is shared. The legacy `chrome.sidebar` and `chrome.sidebar-width` keys seed an
-unsaved layout. `sidebar.position` no longer moves the sidebar.
-
-## Git tool panels
-
-Use **Show Git Changes** in the palette (`show_changes`) or click a sidebar diff
-count. Changes and Diff are peer tabs in the right tool area: switch or close their
-tabs, resize the side, or toggle its visibility. Opening Changes again
-restores closed Changes; selecting a file restores and activates Diff. Layouts are
-saved per window, shared across Spaces, in `native-panels.json` beside the active config file.
-Older tile groups reopen as tabs with the frontmost tile selected; every panel remains available.
-
-Changes separates staged, unstaged, and untracked files, each grouped by folder.
-Stage/Unstage updates the index without changing working files; a group's header
-stages or unstages everything at once. Selecting lines in a file's diff stages or
-unstages their hunk alone. **Discard Changes…** on a file, or **Discard all** on the
-unstaged group, asks first and then puts files back to the last commit, deleting
-untracked ones; ignored files stay. **All changes** shows every change in one diff.
-The diff switches between unified and side by side, wraps long lines, and can hide
-whitespace changes. Commit uses only the index and needs a message and something staged;
-Amend explicitly replaces the last commit, needs a message, and asks before proceeding.
-The sparkle beside them asks the quick model to write the message from the staged changes
-and recent subjects (`git.write-message`); a message typed meanwhile stays. A new pull
-request's **Write with Codex** fills an empty title and description from the branch's
-commits and changes since its base (`git.write-pull-request REPOSITORY BASE`).
-
-The header shows the branch's pull request, with its state and checks, from the host's
-`gh` account (`git.pull-request`); it opens among the pull requests. Sidebar rows and a
-conversation's details panel show the same pull request, asked about once a minute for
-the selected session and every five minutes for the rest. The branch list has a search,
-shows each branch's distance from its upstream, and switches from a tree with changes by
-stashing them first, untracked files included (`git.branch-stash-switch`); the stash
-stays for you to apply.
-
-CLI/socket/keybinding callers use the same commands: `git.open REPOSITORY`,
-`git.status REPOSITORY`, `git.diff REPOSITORY PATH staged|unstaged|untracked [show|ignore]`,
-`git.diff-all REPOSITORY [show|ignore]`, `git.stage REPOSITORY PATH`,
-`git.unstage REPOSITORY PATH`, `git.stage-all REPOSITORY`, `git.unstage-all REPOSITORY`,
-`git.stage-hunk REPOSITORY PATCH [reverse]`, `git.discard REPOSITORY PATH`,
-`git.discard-all REPOSITORY`, `git.write-message REPOSITORY`,
-`git.write-pull-request REPOSITORY BASE`, `git.pull-request REPOSITORY`,
-`git.branch-stash-switch REPOSITORY BRANCH`, `git.commit REPOSITORY MESSAGE`,
-`git.amend REPOSITORY MESSAGE`, `git.fetch REPOSITORY`, `git.pull REPOSITORY` and
-`git.push REPOSITORY`. `git.status` reports the upstream with its ahead and behind
-counts. Repository/file paths belong to the target binding's host. Paths are literal rather than Git pathspec patterns; invalid UTF-8 filenames are
-currently rejected by the text transport. External amend callers use the existing
-command confirmation mechanism. SSH runs through the existing daemon transport.
-
-### Files and document panels
-
-Open Files through the Tools toolbar or `files.browse ABSOLUTE_DIRECTORY`.
-`files.open ABSOLUTE_PATH [LINE [COLUMN]]` opens a document at a one-based
-location on the target binding's host. The Files tree expands directories,
-filters loaded entries, shares Git decorations with Changes, and pages large
-directories. Refresh rereads the displayed directory; reopening a directory
-refreshes its children.
-`files.reveal ABSOLUTE_PATH` shows a file on this computer in its file manager
-(Finder on macOS); a remote host's files have no place there. A document's tab,
-a file link in a conversation, a changed file in Changes, and a session in the
-sidebar offer it on right-click, with Copy Path. A session's menu also starts a
+`files.reveal ABSOLUTE_PATH` shows a file or folder on this computer in its file
+manager (Finder on macOS); a remote host's files have no place there. A session in
+the sidebar offers it on right-click, with Copy Path. A session's menu also starts a
 new session in its project and copies its branch.
 `files.open_in ABSOLUTE_PATH EDITOR` opens a file or folder on this computer in an
 installed editor: `vscode`, `cursor`, `zed`, `windsurf`, `sublime`, `intellij` or
-`xcode`. The same places offer **Open in** each editor Bootty finds: an app in
+`xcode`. The sidebar offers **Open in** each editor Bootty finds: an app in
 `/Applications` or `~/Applications` on macOS, its launcher on `PATH` elsewhere.
-Bootty looks once per run.
+Bootty looks once per run. `files.complete BASE QUERY` finds files under a
+directory on the target binding's host.
 
-PNG, JPEG, GIF, and WebP files open as read-only images fitted to the panel.
-Animated images show their first frame. Encoded media has no document-size cap;
-decoded images are limited to 8192 pixels per side and 16 megapixels.
-On macOS, video previews support playback, seeking, and audio through the same
-seekable media reader used for local, SSH, and WSL sources.
+Command-click (Control-click on Linux and Windows) a terminal link to open it
+(`link.open`). URLs open in the default browser, and file locations open in this
+computer's default application for that file.
 
-Documents support Save (including Command/Ctrl-S), Reload, Markdown Preview, and
-Format Document (Alt/Option-Shift-F). Formatting uses `rustfmt` for Rust, `taplo`
-for TOML, and `prettier` for JavaScript, TypeScript, JSON/JSONC, Markdown,
-HTML, CSS, and YAML. The formatter must be installed on the document's host.
-Formatting reads the current draft through standard input and returns an
-undoable edit; it does not save the file. If the draft changes while formatting
-runs, Bootty leaves it alone and asks you to run Format again.
-
-The document editor supports multiple cursors: Alt/Option-click adds one,
-Alt/Option-Shift-drag selects a column, and Escape returns to one cursor.
-Use Alt-Shift-Up/Down on Linux, Command-Option-Up/Down on macOS, or
-Control-Alt-Up/Down on Windows to add cursors above or below.
-A dirty document's Close button offers Save, Discard, and Cancel. Closing a
-window or quitting with unsaved documents also asks; Save all keeps the window
-open so save errors remain visible. Saving over an external edit is rejected.
-Reload asks before replacing a draft. UTF-8 files up to 512 KiB are editable;
-unsupported binary formats and larger text documents report an error.
-
-Files commands also expose `files.list PATH [OFFSET]`, `files.read PATH`, and
-`files.save PATH EXPECTED_SHA256 CONTENT_BASE64` for the CLI and control socket.
-`files.format PATH CONTENT_BASE64` returns formatted document bytes without
-writing the host file.
-`files.source PATH ROOT` returns a seekable source descriptor after checking that
-the regular file stays inside the captured root. A composer's `@` file mention
-inserts the file's project path instead (`@src/main.rs`, quoted when it has
-spaces), so the agent reads and edits the real file. Choosing a folder opens it;
-**This folder** names the folder itself.
-All paths belong to the selected binding's host, including remote paths.
+## Notifications and shell integration
 
 Shell completion notifications require live OSC 133 command-start and finish
 markers. Bootty measures worker-observed time, ignores replayed markers, and emits
@@ -1020,9 +725,7 @@ no explicit command arguments. Bash/zsh rc files still run, existing Bash DEBUG
 traps are preserved, and Fish's built-in `mark-prompt` support takes precedence.
 Bootty does not replace shell editing, history, prompts or user rc files. Bash
 shells with an existing DEBUG trap need their existing integration to emit markers.
-Backend-owned shells (rmux, tmux, Herdr and remote attachments) retain their launch
-configuration. Their notifications require the backend to forward live OSC 133
-markers; replay snapshots alone cannot establish a command duration. The read-only
+Replay snapshots alone cannot establish a command duration. The read-only
 `shell.integration bash|zsh|fish` command returns the scripts for optional manual
 installation, through the same CLI/socket command catalog.
 
@@ -1037,86 +740,56 @@ command palettes and input placeholders update when reopened; settings labels an
 new notifications follow accepted configuration changes.
 
 The foundation covers settings labels/help/choices, command palette text, terminal
-find controls, Files/Changes/Document controls and completion notifications. Other
-product dialogs and OS-owned UI still need extraction before a complete additional
-language can ship. Terminal output, paths, editable contents, command IDs, config
-keys and backend diagnostics retain their original bytes. Chinese/Japanese Bootty
-translations are not bundled yet.
+find controls and completion notifications. Other product dialogs and OS-owned UI
+still need extraction before a complete additional language can ship. Terminal
+output, paths, editable contents, command IDs, config keys and backend diagnostics
+retain their original bytes. Chinese/Japanese Bootty translations are not bundled
+yet.
 
-### SSH transport
+## Remote placement
 
-Packaged SSH workspaces authenticate and bootstrap through the configured SSH
-client, then prefer a persistent QUIC connection with mutual TLS for terminals
-and host commands. No separate login or permanent transport key is needed.
-When the remote address is unreachable directly or UDP is blocked, Bootty uses
-one persistent SSH TCP tunnel carrying HTTP/2 streams with mutual TLS. This
-requires no firewall changes. If both setups fail, the existing SSH command path
-remains available; failed persistent setup is cached for one minute. Requests
-already sent
-are never replayed after an ambiguous connection loss.
+SSH Spaces run on the host's native mux server, so shells survive disconnects and
+app restarts. WSL placements report `RemoteSpaceUnavailable`.
 
-### WSL workspaces (Windows)
-
-New/Edit Space lists installed WSL distributions alongside local and SSH locations.
-Selecting a distribution uses the rmux backend by default; tmux is also supported
-and must be available in the distribution. Native and Herdr bindings are not
-supported over this transport. Bootty never installs or unregisters distributions.
-
-The same command interface is available to CLI and socket callers:
-
-```sh
-bootty command wsl.list
-bootty command space.wsl Ubuntu "Linux project" rmux
-```
-
-`space.wsl` saves and activates a Space; its response reports `activated` and the
-saved `space_id`. The binding runtime connects afterward, so successful Space
-creation is not a claim that a Linux process has started. Existing backend sessions
-remain owned by the selected distribution's rmux or tmux server across reconnects.
-
-For a default WSL placement, replace the entire SSH remote table with:
+An SSH placement uses the table shown in the example above. A WSL placement
+replaces the SSH fields with a distribution:
 
 ```toml
-[multiplexer]
-backend = "rmux"
 [multiplexer.remote]
 distribution = "Ubuntu"
 ```
 
 Do not combine `distribution` with SSH fields. Existing SSH tables retain their
-serialized format. `--ssh-remote` explicitly selects SSH and preserves SSH options
-when the configured target is already SSH.
+serialized format. `bootty command wsl.list` lists installed WSL distributions on
+Windows and returns Unsupported on other operating systems. Bootty never installs
+or unregisters distributions.
 
-Bootty executes Linux arguments through `wsl.exe --distribution NAME --cd ~ --exec`.
-The host layer installs the matching Linux daemon from packaged assets or the
-existing checksummed release cache. It verifies a private upload's digest and
-protocol before publishing its versioned path. Files, Git operations, project and
-worktree discovery, and clipboard-image uploads all run in that distribution;
-Linux paths never resolve against a Windows or macOS namesake. Loopback URLs rely
-on Windows/WSL localhost forwarding. See Microsoft's [command reference](https://learn.microsoft.com/en-us/windows/wsl/basic-commands)
-and [networking behavior](https://learn.microsoft.com/en-us/windows/wsl/networking).
+### SSH transport
 
-WSL commands return Unsupported on other operating systems. Configuration and
-transport tests run across platforms; the full Windows/WSL GUI workflow has not
-been certified from the macOS development environment.
+Host commands on an SSH host, such as listing its projects and worktrees for New
+Session, run through Bootty's daemon on that host. Bootty uploads the daemon
+bundled with the app, or downloads and checksum-verifies the release daemon when
+the bundle has no matching target; the full Bootty app is not required there.
+The connection authenticates and bootstraps through the configured SSH client,
+then prefers a persistent QUIC connection with mutual TLS. No separate login or
+permanent transport key is needed. When the remote address is unreachable
+directly or UDP is blocked, Bootty uses one persistent SSH TCP tunnel carrying
+HTTP/2 streams with mutual TLS. This requires no firewall changes. If both setups
+fail, the existing SSH command path remains available; failed persistent setup is
+cached for one minute. Requests already sent are never replayed after an
+ambiguous connection loss.
 
-Settings → General → Menu bar & tray controls the optional mascot icon. It is
-hidden by default. `tray.visibility` accepts `"hidden"`, `"always"`, `"working"`
-(while an agent works), or `"attention"` (unread results, input requests or errors).
-`tray.icon-style` selects `"color"` or `"monochrome"`. macOS defaults to monochrome,
-which adapts to the menu bar theme; Windows and Linux default to color. `tray.macos-unread-count = true` adds the unread
-conversation count beside the macOS icon. The tray menu focuses agents across
-open windows. These settings reload live, including hiding the icon and stopping
-its macOS helper. Desktop notifications and the Dock attention badge remain
-independent.
+Bootty dials with ConnectTimeout=5, ServerAliveInterval=5 and
+ServerAliveCountMax=3, so a lost connection ends in about 15 seconds instead of
+hanging. Flags listed in `args` come first on the command line, so any of these
+can be set differently.
 
-Agent alerts use `session.agent-notifications = "unfocused"` by default. Set
-`"always"` to include the focused terminal or `"never"` to disable desktop alerts.
-Unread markers and sequence-safe acknowledgement remain available in all modes.
-Alerts cover native conversations, agents reporting through hooks, and agents
-Bootty starts in a terminal; each also lists in the Agents panel. Alerts play the
-system notification sound, subject to the system's notification settings, and on
-macOS the Dock icon shows how many agents wait on you.
+On Windows, WSL host commands run through `wsl.exe --distribution NAME --cd ~
+--exec`, with the matching Linux daemon installed from packaged assets or the
+checksummed release cache. Linux paths never resolve against a Windows or macOS
+namesake.
+
+## Settings links
 
 See [terminal image clipboard writes](clipboard-writes.md) for host keys, supported
 formats, limits and permission scope.
@@ -1126,196 +799,3 @@ and **Copy setting link**. macOS packages register links such as `bootty://setti
 at that configuration path. The equivalent CLI command is `bootty command open_setting font.size`. Development packages use their own namespace as the
 URL scheme. Fractional number controls use two decimal places; integer controls
 remain integral.
-
-## Agent providers
-
-Settings → AI groups new-session defaults and shared conversation behavior,
-including the default provider, response streaming, composer collapse, send shortcut
-and follow-up behavior, agent notifications and child-agent access. AI also
-contains each provider's executable, enabled state, model and
-thinking defaults, available thinking levels and named account/launch profiles.
-The default account uses the provider's existing store. A named profile can select
-an absolute account directory and literal launch arguments. Credentials and
-conversation history remain provider-owned; Bootty never imports or copies them.
-
-A Codex profile can't pass `--profile`: Bootty runs Codex's app server, which has no
-profiles, so the launch refuses it. Give the profile a `directory` holding its own
-`config.toml` instead.
-
-Pi profiles retain literal `--extension` / `-e` paths on creation and resume.
-Provider credentials, prompt arguments and prior session selectors are still
-excluded from reusable launch metadata.
-
-```toml
-[agents.codex]
-enabled = true
-program = "codex"
-selected = "work"
-
-[agents.codex.profiles.work]
-name = "Work"
-directory = "/absolute/path/to/codex-work"
-arguments = ["--model", "gpt-6.1-sol"]
-```
-
-The same keys apply to `agents.claude` and `agents.pi`. Account directories use `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and `PI_CODING_AGENT_DIR`, respectively. Directory selection works in local Unix and Windows terminals; remote accounts belong to the remote host. It does not change provider permission or credential-store policies. Leaving the directory empty reuses the default account with different launch arguments.
-
-The new-session provider picker removes providers whose executable is missing on the selected local host. An installed provider remains selectable when its account needs authentication or its model query fails. Authentication errors offer **Sign in** beside **Retry**, with the original error available under **Details**. Sign-in opens the provider's own flow inside Bootty, using the composer's selected account and Space, including when that Space has no sessions. The prompt draft is retained for after sign-in.
-
-Start and resume open terminal tabs in the selected session. Changes affect future launches. Sign-in opens the provider's own terminal flow; Pi uses `/login`. Refresh status runs bounded, read-only version and account queries on a worker. Codex reports its account type and plan through its app server; Claude reports its own login state and subscription type; Pi reports the selected provider's existing authentication without inferring a subscription. An older refresh cannot replace a newer account selection. Update runs the proven owning native, Bun-global, npm-global or WinGet installer on a background worker and reports failures. Unknown installations require a manual update; Bootty-owned provider processes prevent updates until they close. Automatic updates use the same command and follow `agents.auto-update` below.
-
-Codex's **Quick model** (`agents.quick-model`) names sessions and worktrees, and writes
-commit messages and pull request text. It defaults to `gpt-6-luna` and uses the selected
-Codex account. Each query runs only when asked, in an ephemeral read-only process without
-tools, and does not create a conversation.
-
-`agents.allow-spawn = false` is the default. Enabling it in Settings → Permissions
-allows an attached agent to create child sessions only in its captured workspace,
-project directory, provider and account. Native parents can interrupt or stop only
-native children created under that exact live grant; stopping retains the history
-and backend pane. Children from an older parent generation remain outside the grant.
-Parents can read, paste, submit, interrupt and close only shell panes created under
-their current grant. Listed terminals and agent carrier panes do not receive input
-authority. Closing, revoking or renewing the parent removes that shell authority;
-historical creation receipts cannot restore it. At most 128 shells are retained
-per live grant, including queued creations.
-Child tools retain their own terminal read access and lose spawning, supervision
-and capture access. Closing or disabling the parent revokes the inherited tool
-authority; existing sessions and processes remain.
-Native parents create native children on either their local or remote host.
-A restored child keeps its provider identity and account but does not regain the
-former parent's tool grant.
-Native conversations retain their resolved profile ID with the account directory.
-Resuming or forking after a profile preference changes keeps that captured pair;
-`inspect_provider` reports the captured ID without exposing account paths. Older
-conversations keep their account and report no profile ID.
-The root-only `list_profiles` tool lists the captured provider's configured IDs
-and display names. It does not switch profiles or authorize another account.
-
-The sidebar's **History** opens a full view of saved conversations across Codex,
-Claude and Pi on the captured host. Provider and project filters are inside the
-view. Sessions group under Today, Yesterday, Previous 7 days, Previous 30 days
-and Older; a search ranks them instead. Each provider lists its 200 most recent
-sessions, and **Load older sessions** fetches the next 200. Opening a result
-resumes its original provider session and account rather than starting a new
-conversation.
-
-`agents.continue-after-restart` defaults to `true`. Bootty resumes interrupted
-work in its captured provider conversation and account after a restart. It sends
-a continuation through the durable follow-up queue, without replaying the
-original prompt. Explicit stops do not trigger a continuation. Repeated restarts
-without a completed turn stop automatic recovery until you resume manually.
-
-`agents.follow-up-behavior` defaults to `"queue"`. Messages sent during an active
-turn wait for it to finish; `"steer"` sends them into the active turn instead,
-waiting in the queue until the turn can take them; `"interrupt"` stops the turn and
-sends them next.
-`agents.send-shortcut` decides which keys send one message with the opposite
-behavior. The queued messages appear above the composer and remain with the
-conversation when its tab closes. Arrows move a waiting message sooner or later.
-Stopping the agent pauses the queue so the next message doesn't go out at once, and
-so does a failed turn; Resume, or sending a message, lets it go again, moving on from
-a failure without restarting the agent. A message that couldn't be sent waits for
-Retry without holding the ones behind it.
-
-`agents.auto-update` defaults to `true`. Bootty checks recognized local provider
-installations after startup and then daily while no Bootty-owned process is using that executable.
-Busy installations are retried after a minute. Updates use the owning installer;
-unknown installations and remote providers remain manual. Turn this setting off
-to use only the explicit Update action. Successful updates invalidate cached
-model catalogs and refresh provider status.
-
-`agents.default-provider` selects the provider for a fresh composer. Each provider's
-`default-model` and `default-effort` prefer advertised selections; empty values resolve
-to the provider's configured model and supported effort. The Settings pickers use
-the same account catalog as the composer. Retained drafts keep their
-explicit selection. Model and permission catalogs persist under the captured
-provider settings, account, remote target and project directory; Bootty stores
-hashed cache identities, and changing that context selects a different entry.
-`agents.codex.fast-mode` requests Codex's fast service tier;
-`agents.claude.fast-mode` enables Claude's fast mode. These are defaults for new
-conversations. Both composers expose **Fast mode** in the model menu; its bolt
-indicates the selected speed. When Codex describes its fast tier, such as "2x
-speed, increased usage", that description shows under the switch. Existing
-conversations save speed changes for the next turn without interrupting active work. Switching Fast mode off explicitly
-clears the provider's previous fast selection. Pi has no fast-mode setting.
-
-New composers inherit the selected provider account's approval policy. The
-permissions control displays the effective policy reported by the provider;
-unknown policies remain inherited. Choosing an explicit policy overrides that
-default. Switching provider or account returns to that account's policy.
-Pi does not advertise approval modes, so its composer hides the permissions
-control and submits the provider default.
-
-
-Provider settings include `agents.<provider>.available-efforts`, an array of effort identifiers.
-An empty array exposes all levels supported by each model. A nonempty array limits
-the picker and the Alt+, / Alt+. shortcuts to those levels, in the model's advertised
-order. The shortcuts decrease or increase effort without wrapping at either end.
-Their commands are `ui.composer.effort-down` and `ui.composer.effort-up`.
-
-On macOS, text fields take the Control keys Cocoa text fields do: Control-B and
-Control-F move by character, Control-D and Control-H delete forward and back, and
-Control-A and Control-E go to the line's ends. In the composer, Control-P and
-Control-N move by line and Control-K deletes to the line's end; an open completion
-menu takes Control-P, Control-N and Control-K for itself.
-
-Composer controls have bindable commands: `ui.composer.focus-space`,
-`ui.composer.focus-provider`, `ui.composer.focus-model`, `ui.composer.focus-effort`,
-`ui.composer.focus-project`, `ui.composer.focus-worktree`, and `ui.composer.focus-permissions`.
-Their default shortcuts are Ctrl+Alt+S/M/P/W/A for space, model,
-project, worktree, and permissions. Provider and effort have no separate default binding.
-Shift+Tab toggles plan mode (`ui.composer.toggle-plan`) when the provider offers it,
-Ctrl+Alt+F toggles fast mode (`ui.composer.toggle-fast`) for a model that offers it,
-Ctrl+Alt+D and Ctrl+Alt+V start dictation (`ui.composer.dictate`) and voice mode
-(`ui.composer.voice`), and Ctrl+Alt+I moves focus back to the composer
-(`ui.composer.focus-composer`), also bound to Cmd+L on macOS and Ctrl+L elsewhere.
-Ctrl+Alt+E (`ui.composer.expand`), also available in the command palette, gives the
-composer the transcript's room to write in. The shrink button, Escape, or sending
-shrinks it back. Cmd+S (Ctrl+S elsewhere, `ui.composer.stash`) puts
-the composer's words aside, in a stash any conversation can use; on an empty
-composer it brings the newest stashed prompt back. The bookmark badge beside the
-controls lists the stash, and choosing a prompt brings it back. Attachments stay in
-the composer. The stash keeps fifty prompts, in `prompt-stash.json` beside the
-configuration.
-These defaults and the effort shortcuts live in the `Composer` context.
-Provider, model, and effort share one picker; their focus commands open it. Control
-tooltips describe their purpose and show the active configured shortcut.
-
-`agents.send-shortcut` accepts `"enter"` (default), `"mod-enter-multiline"`, or
-`"mod-enter"`. It applies to both the new-session and conversation composers.
-With the default shortcut, Shift+Enter inserts a newline and Command/Control+Enter
-sends with the opposite follow-up behavior. When Command/Control+Enter is required,
-adding Shift uses the opposite follow-up behavior for that message.
-
-
-`agents.response-streaming` selects `"live"` (default), `"paragraph"`, or `"complete"`.
-Live mode shows words as they arrive and fades them in, and holds back an inline span
-until its closing marker arrives, so `**`, backticks and links never show raw and then
-change. Paragraph mode waits for completed Markdown blocks and keeps unfinished fenced
-code blocks together. Final replies always display in full.
-
-A reply's image on its own line that names a file shows that file: absolute paths as
-written, relative paths from the conversation's directory, read on the conversation's
-host, remote ones included, up to 32 MiB. One that can't load says why in its place. Web
-and data URL images load as usual. A finished ```` ```mermaid ```` fence shows the drawn
-diagram in the theme's colors; one still streaming, or one Mermaid can't draw, shows its
-source, with the reason. An ```` ```html ```` block offers to open the page in your
-browser from a private file. Code blocks highlight the languages agents write most,
-SQL included.
-`agents.transcript-width` sets how wide messages run: `"wide"` (default, 64rem),
-`"normal"` (48rem), or `"full"`. In a wide window the conversation details card
-sits beside the messages. Narrow conversations open it from the details button in
-the existing top bar. Context usage remains a read-only indicator in the composer.
-The card names its project and directory (with a
-copy button, and a worktree tag in a linked worktree), the branch, its pull request by
-number and title (which opens it), and the provider, model and effort.
-Asynchronous questions stay above the composer until you respond, with selectable
-options and a separate custom-answer choice. New questions raise an in-app notice;
-background questions also follow the agent notification preference. Steering a
-running turn preserves your reading position. The composer uses one primary
-button, switching between Stop and Send as a draft is entered.
-
-`agents.collapse-composer-on-scroll` defaults to true; an empty, unfocused composer
-folds to one line while reading older turns, and opens when focused. Drafts and
-attachments keep the composer expanded.

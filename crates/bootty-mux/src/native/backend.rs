@@ -1,1194 +1,775 @@
-use crate::snapshot::{clamp_move_index, wrap_index};
+//! Client facade. Only the server owns mutable native topology and pane processes.
+use super::protocol::TopologySnapshot;
+use super::protocol::{self, Frame, Hello, Request, Response, WIRE_VERSION, Welcome};
+use crate::{command::MuxCommand, snapshot::MuxSnapshot};
+use anyhow::{Context as _, Result, ensure};
 use std::{
     collections::HashMap,
+    io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, OnceLock},
-};
-
-use anyhow::{Context as _, Result, bail};
-
-use crate::{
-    backend::MuxBackend,
-    capability::{BindingCapabilityDescriptor, BindingOperation},
-    command::MuxCommand,
-    controller::SpaceId,
-    snapshot::{MuxPaneAnchor, MuxSession, MuxSessionTag, MuxSnapshot, MuxWindow},
-    terminal::{
-        BackendPanePolicy, MuxPaneTarget, PaneLayoutResizeRequest, PaneStartRequest,
-        ScopedMuxPaneTarget, StartingNativeTerminal, TerminalRuntime,
+    sync::{
+        Arc, Condvar, Mutex, OnceLock, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
+    thread,
+    time::{Duration, Instant},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct NativePane {
-    id: String,
-    cwd: PathBuf,
-    native_agent: Option<String>,
+pub type StreamShutdown = Arc<dyn Fn() + Send + Sync>;
+pub type SplitDuplex = (Box<dyn Read + Send>, Box<dyn Write + Send>, StreamShutdown);
+
+pub trait Duplex: Read + Write + Send {
+    /// # Errors
+    /// Returns a transport split failure.
+    fn split(self: Box<Self>) -> Result<SplitDuplex>;
+    /// # Errors
+    /// Returns the transport timeout configuration failure.
+    fn read_timeout(&mut self, timeout: std::time::Duration) -> Result<()>;
 }
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct NativeWindow {
-    id: String,
-    index: u32,
-    name: String,
-    active_pane_id: String,
-    panes: Vec<NativePane>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct NativeSession {
-    next_window: u64,
-    id: String,
-    name: String,
-    active_window_id: String,
-    windows: Vec<NativeWindow>,
-    /// Native sessions live and die with the process, so this is only ever the tag the workspace
-    /// handed over when it asked for the session — including when it is recreating one it
-    /// persisted. Nothing outside Bootty can write here, and nothing survives a restart.
-    tag: MuxSessionTag,
-}
-
-#[derive(Debug)]
-struct NativeMuxState {
-    active_session_id: String,
-    sessions: Vec<NativeSession>,
-    next_pane: u64,
-}
-
-impl NativeMuxState {
-    const fn new() -> Self {
-        Self {
-            active_session_id: String::new(),
-            sessions: Vec::new(),
-            next_pane: 1,
-        }
-    }
-
-    fn ensure_session(
-        &mut self,
-        session_id: &str,
-        cwd: impl Into<PathBuf>,
-        tag: MuxSessionTag,
-    ) -> Result<()> {
-        if let Some(session) = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
-            if !tag.is_empty() {
-                session.tag = tag;
-            }
-            session_id.clone_into(&mut self.active_session_id);
-            return Ok(());
-        }
-
-        let pane_id = self.next_pane_id()?;
-        let cwd = cwd.into();
-        let window = NativeWindow {
-            id: "tab-1".to_owned(),
-            index: 1,
-            name: default_window_name(),
-            active_pane_id: pane_id.clone(),
-            panes: vec![NativePane {
-                id: pane_id,
-                cwd,
-                native_agent: None,
-            }],
-        };
-        self.sessions.push(NativeSession {
-            next_window: 2,
-            id: session_id.to_owned(),
-            name: session_id.to_owned(),
-            active_window_id: window.id.clone(),
-            windows: vec![window],
-            tag,
-        });
-        session_id.clone_into(&mut self.active_session_id);
-        Ok(())
-    }
-
-    fn restore_session(
-        &mut self,
-        id: &str,
-        tag: MuxSessionTag,
-        snapshot: &crate::session_snapshot::SavedTerminalSession,
-    ) -> Result<()> {
-        snapshot.validate().map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(
-            tag.identity.as_deref() == Some(snapshot.session_id.as_str()) && tag.space.is_some(),
-            "restored identity does not match its checkpoint"
-        );
-        if self.sessions.iter().any(|session| {
-            session.id == id
-                || session.name == id
-                || (tag.identity.is_some()
-                    && session.tag.identity == tag.identity
-                    && session.tag.space == tag.space)
-        }) {
-            bail!("restored session already exists");
-        }
-        let mut windows = Vec::new();
-        let mut active_window_id = String::new();
-        for (position, saved) in snapshot.windows.iter().enumerate() {
-            let window_id = format!("tab-{}", position.saturating_add(1));
-            let mut panes = Vec::new();
-            let mut active_pane_id = String::new();
-            for pane in &saved.panes {
-                let id = self.next_pane_id()?;
-                if pane.id == saved.focused_pane_id {
-                    active_pane_id.clone_from(&id);
-                }
-                panes.push(NativePane {
-                    id,
-                    cwd: PathBuf::from(&pane.cwd),
-                    native_agent: pane.native_agent.clone(),
-                });
-            }
-            if snapshot.active_window_id.as_deref() == Some(saved.id.as_str())
-                || (active_window_id.is_empty() && position == 0)
-            {
-                active_window_id.clone_from(&window_id);
-            }
-            windows.push(NativeWindow {
-                id: window_id,
-                index: u32::try_from(position.saturating_add(1))?,
-                name: saved.title.clone(),
-                active_pane_id,
-                panes,
-            });
-        }
-        let next_window = u64::try_from(windows.len())?
-            .checked_add(1)
-            .context("native window capacity exhausted")?;
-        self.sessions.push(NativeSession {
-            id: id.to_owned(),
-            name: id.to_owned(),
-            next_window,
-            active_window_id,
-            windows,
-            tag,
-        });
-        id.clone_into(&mut self.active_session_id);
-        Ok(())
-    }
-
-    fn stamp_session(&mut self, session_id: &str, tag: MuxSessionTag) {
-        if let Some(session) = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
-            session.tag = tag;
-        }
-    }
-
-    fn activate_window(&mut self, session_id: &str, window_id: &str) {
-        if let Some(session) = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-            && session.windows.iter().any(|window| window.id == window_id)
-        {
-            window_id.clone_into(&mut session.active_window_id);
-            session_id.clone_into(&mut self.active_session_id);
-        }
-    }
-    fn rename_window(&mut self, session_id: &str, window_id: &str, name: String) {
-        if let Some(window) = self.window_mut(session_id, window_id) {
-            window.name = name;
-        }
-    }
-
-    fn rename_session(&mut self, session_id: &str, name: String) {
-        if let Some(session) = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-        {
-            session.name = name;
-        }
-    }
-
-    fn kill_session(&mut self, session_id: &str) {
-        self.sessions.retain(|session| session.id != session_id);
-        if self.active_session_id == session_id {
-            self.active_session_id = self
-                .sessions
-                .first()
-                .map_or_else(String::new, |session| session.id.clone());
-        }
-    }
-
-    fn active_session_mut(&mut self, session_id: &str) -> Option<&mut NativeSession> {
-        self.sessions
-            .iter_mut()
-            .find(|session| session.id == session_id)
-    }
-
-    fn window_mut(&mut self, session_id: &str, window_id: &str) -> Option<&mut NativeWindow> {
-        self.active_session_mut(session_id)?
-            .windows
-            .iter_mut()
-            .find(|window| window.id == window_id)
-    }
-
-    fn new_window(&mut self, session_id: &str, cwd: Option<PathBuf>) -> Result<()> {
-        let pane_id = self.next_pane_id()?;
-        if let Some(session) = self.active_session_mut(session_id) {
-            let cwd = cwd.unwrap_or_else(|| {
-                session
-                    .windows
-                    .iter()
-                    .find(|window| window.id == session.active_window_id)
-                    .and_then(|window| window.panes.first())
-                    .map_or_else(|| PathBuf::from("."), |pane| pane.cwd.clone())
-            });
-            let index = u32::try_from(session.windows.len())
-                .ok()
-                .and_then(|count| count.checked_add(1))
-                .context("native window capacity exhausted")?;
-            let window = NativeWindow {
-                id: next_window_id(session)?,
-                index,
-                name: default_window_name(),
-                active_pane_id: pane_id.clone(),
-                panes: vec![NativePane {
-                    id: pane_id,
-                    cwd,
-                    native_agent: None,
-                }],
-            };
-            session.active_window_id.clone_from(&window.id);
-            session.windows.push(window);
-            session_id.clone_into(&mut self.active_session_id);
-        }
-        Ok(())
-    }
-
-    fn activate_relative_window(&mut self, session_id: &str, delta: i32) {
-        if let Some(session) = self.active_session_mut(session_id)
-            && let Some(index) = session
-                .windows
-                .iter()
-                .position(|window| window.id == session.active_window_id)
-        {
-            let Some(next) = wrap_index(index, delta, session.windows.len())
-                .and_then(|next| session.windows.get(next))
-            else {
-                return;
-            };
-            session.active_window_id.clone_from(&next.id);
-            session_id.clone_into(&mut self.active_session_id);
-        }
-    }
-
-    fn activate_window_index(&mut self, session_id: &str, index: u32) {
-        if let Some(session) = self.active_session_mut(session_id)
-            && let Some(window) = session.windows.iter().find(|window| window.index == index)
-        {
-            session.active_window_id.clone_from(&window.id);
-            session_id.clone_into(&mut self.active_session_id);
-        }
-    }
-
-    fn move_window(&mut self, session_id: &str, window_id: Option<&str>, delta: i32) {
-        if let Some(session) = self.active_session_mut(session_id) {
-            let target = window_id.unwrap_or(&session.active_window_id).to_owned();
-            if let Some(index) = session
-                .windows
-                .iter()
-                .position(|window| window.id == target)
-            {
-                let next = clamp_move_index(index, delta, session.windows.len());
-                let window = session.windows.remove(index);
-                session.windows.insert(next, window);
-                session.active_window_id = target;
-                for (index, window) in session.windows.iter_mut().enumerate() {
-                    window.index = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
-                }
-            }
-        }
-    }
-
-    fn active_window_mut(&mut self, session_id: &str) -> Option<&mut NativeWindow> {
-        let session = self.active_session_mut(session_id)?;
-        let active_window_id = session.active_window_id.clone();
-        self.window_mut(session_id, &active_window_id)
-    }
-
-    fn split_pane(&mut self, session_id: &str, source_pane_id: Option<&str>) -> Result<()> {
-        let (window_id, cwd) = {
-            let session = self
-                .active_session_mut(session_id)
-                .context("session no longer exists")?;
-            let (window, pane) = target_pane_location(session, source_pane_id)?;
-            let window = session
-                .windows
-                .get(window)
-                .context("window no longer exists")?;
-            (
-                window.id.clone(),
-                window
-                    .panes
-                    .get(pane)
-                    .context("pane no longer exists")?
-                    .cwd
-                    .clone(),
-            )
-        };
-        let pane_id = self.next_pane_id()?;
-        let window = self
-            .window_mut(session_id, &window_id)
-            .context("window no longer exists")?;
-        window.active_pane_id.clone_from(&pane_id);
-        window.panes.push(NativePane {
-            id: pane_id,
-            cwd,
-            native_agent: None,
-        });
-        self.activate_window(session_id, &window_id);
-        Ok(())
-    }
-
-    fn select_relative_pane(&mut self, session_id: &str, delta: i32) {
-        if let Some(window) = self.active_window_mut(session_id)
-            && let Some(index) = window
-                .panes
-                .iter()
-                .position(|pane| pane.id == window.active_pane_id)
-        {
-            let Some(next) = wrap_index(index, delta, window.panes.len())
-                .and_then(|next| window.panes.get(next))
-            else {
-                return;
-            };
-            window.active_pane_id.clone_from(&next.id);
-            session_id.clone_into(&mut self.active_session_id);
-        }
-    }
-
-    fn select_pane(&mut self, session_id: &str, window_id: Option<&str>, delta: i32) {
-        if let Some(window_id) = window_id {
-            self.activate_window(session_id, window_id);
-        }
-        self.select_relative_pane(session_id, delta);
-    }
-
-    fn select_directional_pane(
-        &mut self,
-        session_id: &str,
-        window_id: Option<&str>,
-        direction: crate::command::MuxDirection,
-    ) {
-        let delta = match direction {
-            crate::command::MuxDirection::Left | crate::command::MuxDirection::Up => -1,
-            crate::command::MuxDirection::Right | crate::command::MuxDirection::Down => 1,
-        };
-        self.select_pane(session_id, window_id, delta);
-    }
-
-    fn move_window_preserving_selection(
-        &mut self,
-        session_id: &str,
-        window_id: &str,
-        delta: i32,
-        selected_window_id: &str,
-    ) {
-        self.move_window(session_id, Some(window_id), delta);
-        self.activate_window(session_id, selected_window_id);
-    }
-
-    // Close the requested pane; when it was the last pane in its window, cascade to remove that
-    // window. The target can belong to an inactive tab, so never route through active_window_mut.
-    fn close_pane(
-        &mut self,
-        session_id: &str,
-        pane_id: Option<&str>,
-        close_window: bool,
-    ) -> Result<()> {
-        let changed_active_session = {
-            let session = self
-                .active_session_mut(session_id)
-                .context("session no longer exists")?;
-            let (window_index, pane_index) = target_pane_location(session, pane_id)?;
-            let window = session
-                .windows
-                .get_mut(window_index)
-                .context("window no longer exists")?;
-            if !close_window && window.panes.len() <= 1 {
-                return Ok(());
-            }
-            let target_was_active = window.id == session.active_window_id;
-            let removed_active_pane = window
-                .panes
-                .get(pane_index)
-                .context("pane no longer exists")?
-                .id
-                == window.active_pane_id;
-            window.panes.remove(pane_index);
-            if window.panes.is_empty() {
-                session.windows.remove(window_index);
-                for (position, window) in session.windows.iter_mut().enumerate() {
-                    window.index = u32::try_from(position.saturating_add(1)).unwrap_or(u32::MAX);
-                }
-                if target_was_active {
-                    session.active_window_id = session
-                        .windows
-                        .get(window_index.min(session.windows.len().saturating_sub(1)))
-                        .map_or_else(String::new, |window| window.id.clone());
-                }
-            } else if removed_active_pane
-                && let Some(next) = window
-                    .panes
-                    .get(pane_index.min(window.panes.len().saturating_sub(1)))
-            {
-                window.active_pane_id.clone_from(&next.id);
-            }
-            target_was_active
-        };
-        if self
-            .sessions
-            .iter()
-            .any(|session| session.id == session_id && session.windows.is_empty())
-        {
-            self.kill_session(session_id);
-        } else if changed_active_session {
-            session_id.clone_into(&mut self.active_session_id);
-        }
-        Ok(())
-    }
-
-    fn snapshot(&self) -> MuxSnapshot {
-        MuxSnapshot {
-            active_session_id: (!self.active_session_id.is_empty())
-                .then(|| self.active_session_id.clone()),
-            sessions: self
-                .sessions
-                .iter()
-                .map(|session| self.snapshot_session(session))
-                .collect(),
-            ..MuxSnapshot::default()
-        }
-    }
-
-    fn snapshot_session(&self, session: &NativeSession) -> MuxSession {
-        let active = session.id == self.active_session_id;
-        let windows = session
-            .windows
-            .iter()
-            .map(|window| {
-                let anchor = anchor_for_window(&session.id, window);
-                let panes = window
-                    .panes
-                    .iter()
-                    .map(|pane| anchor_for_pane(&session.id, pane))
-                    .collect();
-                MuxWindow {
-                    id: window.id.clone(),
-                    index: window.index,
-                    name: window.name.clone(),
-                    active: active && window.id == session.active_window_id,
-                    anchor,
-                    panes,
-                    layout: None,
-                    // Native panes each own a PTY, so their progress arrives as OSC 9;4.
-                    progress: None,
-                }
-            })
-            .collect::<Vec<_>>();
-        let anchor = windows
-            .iter()
-            .find(|window| window.id == session.active_window_id)
-            .or_else(|| windows.first())
-            .map_or_else(
-                || MuxPaneAnchor {
-                    native_agent: None,
-                    session_id: session.id.clone(),
-                    pane_id: None,
-                    pane_pid: None,
-                    cwd: None,
-                    process: None,
-                },
-                |window| window.anchor.clone(),
-            );
-
-        MuxSession {
-            id: session.id.clone(),
-            name: session.name.clone(),
-            active,
-            anchor,
-            active_window_id: Some(session.active_window_id.clone()),
-            windows,
-            tag: session.tag.clone(),
-        }
-    }
-
-    fn next_pane_id(&mut self) -> Result<String> {
-        let id = format!("pane-{}", self.next_pane);
-        self.next_pane = self
-            .next_pane
-            .checked_add(1)
-            .context("native pane identities exhausted")?;
-        Ok(id)
+struct LocalConnection(bootty_os::ipc::BlockingLocalStream);
+impl Read for LocalConnection {
+    fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(bytes)
     }
 }
-
-fn anchor_for_window(session_id: &str, window: &NativeWindow) -> MuxPaneAnchor {
-    let pane = window
-        .panes
-        .iter()
-        .find(|pane| pane.id == window.active_pane_id)
-        .or_else(|| window.panes.first());
-    anchor_for_optional_pane(session_id, pane)
-}
-
-fn anchor_for_pane(session_id: &str, pane: &NativePane) -> MuxPaneAnchor {
-    anchor_for_optional_pane(session_id, Some(pane))
-}
-
-fn anchor_for_optional_pane(session_id: &str, pane: Option<&NativePane>) -> MuxPaneAnchor {
-    MuxPaneAnchor {
-        native_agent: pane.and_then(|pane| pane.native_agent.clone()),
-        session_id: session_id.to_owned(),
-        pane_id: pane.map(|pane| pane.id.clone()),
-        pane_pid: None,
-        cwd: pane.map(|pane| pane.cwd.to_string_lossy().into_owned()),
-        process: Some("shell".to_owned()),
+impl Write for LocalConnection {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.write(bytes)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
     }
 }
-
-fn next_window_id(session: &mut NativeSession) -> Result<String> {
-    // Never reuse a closed tab's identity: queued UI commands may still name it.
-    let id = format!("tab-{}", session.next_window);
-    session.next_window = session
-        .next_window
-        .checked_add(1)
-        .context("native window identities exhausted")?;
-    Ok(id)
-}
-
-fn default_window_name() -> String {
-    std::env::var("BOOTTY_SHELL")
-        .ok()
-        .or_else(|| std::env::var("SHELL").ok())
-        .and_then(|shell| {
-            Path::new(&shell)
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_owned)
-        })
-        .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| "shell".to_owned())
-}
-
-impl NativeMuxState {
-    fn merge_windows(&mut self, session_id: &str, source: &str, target: &str) -> Result<()> {
-        let session = self
-            .active_session_mut(session_id)
-            .context("session no longer exists")?;
-        let source_index = session
-            .windows
-            .iter()
-            .position(|window| window.id == source)
-            .context("source tab no longer exists")?;
-        if source == target {
-            bail!("a tab cannot be merged into itself");
-        }
-        let target_index = session
-            .windows
-            .iter()
-            .position(|window| window.id == target)
-            .context("target tab no longer exists")?;
-        let [source, target] = session
-            .windows
-            .get_disjoint_mut([source_index, target_index])
-            .context("tabs must be distinct and live")?;
-        target.panes.append(&mut source.panes);
-        target.active_pane_id.clone_from(&source.active_pane_id);
-        session.active_window_id.clone_from(&target.id);
-        session.windows.remove(source_index);
-        renumber_windows(session);
-        session_id.clone_into(&mut self.active_session_id);
-        Ok(())
-    }
-
-    fn swap_panes(&mut self, session_id: &str, source: &str, target: &str) -> Result<()> {
-        let session = self
-            .active_session_mut(session_id)
-            .context("session no longer exists")?;
-        let (source_window, source_index) =
-            pane_location(session, source).context("source pane no longer exists")?;
-        let (target_window, target_index) =
-            pane_location(session, target).context("target pane no longer exists")?;
-        if source == target {
-            bail!("a pane cannot be swapped with itself");
-        }
-        if source_window == target_window {
-            let window = session
-                .windows
-                .get_mut(source_window)
-                .context("window no longer exists")?;
-            let [source_pane, target_pane] = window
-                .panes
-                .get_disjoint_mut([source_index, target_index])
-                .context("panes must be distinct and live")?;
-            std::mem::swap(source_pane, target_pane);
-            source.clone_into(&mut window.active_pane_id);
-            session.active_window_id.clone_from(&window.id);
-        } else {
-            let [source_window, target_window] = session
-                .windows
-                .get_disjoint_mut([source_window, target_window])
-                .context("windows no longer exist")?;
-            let source_pane = source_window
-                .panes
-                .get_mut(source_index)
-                .context("source pane no longer exists")?;
-            let target_pane = target_window
-                .panes
-                .get_mut(target_index)
-                .context("target pane no longer exists")?;
-            std::mem::swap(source_pane, target_pane);
-            if source_window.active_pane_id == source {
-                target.clone_into(&mut source_window.active_pane_id);
-            }
-            source.clone_into(&mut target_window.active_pane_id);
-            session.active_window_id.clone_from(&target_window.id);
-        }
-        session_id.clone_into(&mut self.active_session_id);
-        Ok(())
-    }
-
-    fn move_pane(
-        &mut self,
-        session_id: &str,
-        source: &str,
-        target: &str,
-        direction: crate::command::MuxDirection,
-    ) -> Result<()> {
-        let session = self
-            .active_session_mut(session_id)
-            .context("session no longer exists")?;
-        let (source_window, source_index) =
-            pane_location(session, source).context("source pane no longer exists")?;
-        let (target_window, _) =
-            pane_location(session, target).context("target pane no longer exists")?;
-        if source == target {
-            bail!("a pane cannot be moved beside itself");
-        }
-        let target_window_id = session
-            .windows
-            .get(target_window)
-            .context("target window no longer exists")?
-            .id
-            .clone();
-        let old = session
-            .windows
-            .get_mut(source_window)
-            .context("source window no longer exists")?;
-        let pane = old.panes.remove(source_index);
-        if old.active_pane_id == source
-            && let Some(neighbor) = old.panes.first()
+impl Duplex for LocalConnection {
+    fn split(self: Box<Self>) -> Result<SplitDuplex> {
+        #[cfg(unix)]
         {
-            old.active_pane_id.clone_from(&neighbor.id);
+            self.0.set_read_timeout(None)?;
+            let writer = self.0.try_clone()?;
+            let closer = self.0.try_clone()?;
+            Ok((
+                Box::new(self.0),
+                Box::new(writer),
+                Arc::new(move || {
+                    let _ = closer.shutdown(std::net::Shutdown::Both);
+                }),
+            ))
         }
-        session.windows.retain(|window| !window.panes.is_empty());
-        let destination = session
-            .windows
-            .iter_mut()
-            .find(|window| window.id == target_window_id)
-            .context("target window no longer exists")?;
-        let target_index = destination
-            .panes
-            .iter()
-            .position(|pane| pane.id == target)
-            .context("target pane no longer exists")?;
-        let after = usize::from(matches!(
-            direction,
-            crate::command::MuxDirection::Right | crate::command::MuxDirection::Down
-        ));
-        destination
-            .panes
-            .insert(target_index.saturating_add(after), pane);
-        source.clone_into(&mut destination.active_pane_id);
-        session.active_window_id = target_window_id;
-        renumber_windows(session);
-        session_id.clone_into(&mut self.active_session_id);
-        Ok(())
+        #[cfg(windows)]
+        {
+            let (runtime, stream) = self.0.into_parts();
+            Box::new(super::stream::AsyncConnection::new(
+                Arc::new(runtime),
+                stream,
+            ))
+            .split()
+        }
     }
-
-    fn extract_pane(&mut self, session_id: &str, pane_id: &str) -> Result<()> {
-        let session = self
-            .active_session_mut(session_id)
-            .context("session no longer exists")?;
-        let (window_index, pane_index) =
-            pane_location(session, pane_id).context("pane no longer exists")?;
-        if session
-            .windows
-            .get(window_index)
-            .context("window no longer exists")?
-            .panes
-            .len()
-            < 2
-        {
-            bail!("this pane already has its own tab");
-        }
-        let window_id = next_window_id(session)?;
-        let source = session
-            .windows
-            .get_mut(window_index)
-            .context("window no longer exists")?;
-        let pane = source.panes.remove(pane_index);
-        if source.active_pane_id == pane_id
-            && let Some(next) = source.panes.first()
-        {
-            source.active_pane_id.clone_from(&next.id);
-        }
-        let name = source.name.clone();
-        session.windows.insert(
-            window_index.saturating_add(1),
-            NativeWindow {
-                id: window_id.clone(),
-                index: 0,
-                name,
-                active_pane_id: pane_id.to_owned(),
-                panes: vec![pane],
-            },
-        );
-        session.active_window_id = window_id;
-        renumber_windows(session);
-        session_id.clone_into(&mut self.active_session_id);
+    fn read_timeout(&mut self, timeout: std::time::Duration) -> Result<()> {
+        self.0.set_read_timeout(Some(timeout))?;
         Ok(())
     }
 }
+pub type Connector = Arc<dyn Fn() -> Result<Box<dyn Duplex>> + Send + Sync>;
 
-fn target_pane_location(session: &NativeSession, pane_id: Option<&str>) -> Result<(usize, usize)> {
-    if let Some(pane_id) = pane_id {
-        return pane_location(session, pane_id).context("pane no longer exists in this session");
-    }
-    let window = session
-        .windows
-        .iter()
-        .position(|window| window.id == session.active_window_id)
-        .context("active window no longer exists")?;
-    let active_window = session
-        .windows
-        .get(window)
-        .context("active window no longer exists")?;
-    let pane = active_window
-        .panes
-        .iter()
-        .position(|pane| pane.id == active_window.active_pane_id)
-        .context("active pane no longer exists")?;
-    Ok((window, pane))
-}
+pub type IdentityVerifier = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
 
-fn pane_location(session: &NativeSession, pane_id: &str) -> Option<(usize, usize)> {
-    session
-        .windows
-        .iter()
-        .enumerate()
-        .find_map(|(window_index, window)| {
-            window
-                .panes
-                .iter()
-                .position(|pane| pane.id == pane_id)
-                .map(|index| (window_index, index))
-        })
+type Persist = Box<dyn FnOnce() -> Result<()> + Send>;
+enum Job {
+    Request {
+        request: Request,
+        deadline: Instant,
+        expected: Option<u64>,
+        reply: mpsc::Sender<Result<Response>>,
+    },
+    Persisted {
+        command: MuxCommand,
+        deadline: Instant,
+        cancellation: bootty_control::CommandCancellation,
+        expected: Option<u64>,
+        persist: Persist,
+        reply: mpsc::Sender<Result<TopologySnapshot>>,
+    },
 }
-fn renumber_windows(session: &mut NativeSession) {
-    for (index, window) in session.windows.iter_mut().enumerate() {
-        window.index = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
-    }
+#[derive(Debug, thiserror::Error)]
+#[error("native mux request expired before execution")]
+pub struct RequestExpired;
+#[derive(Debug, thiserror::Error)]
+#[error("native mux request canceled before execution")]
+pub struct RequestCanceled;
+#[derive(Debug, thiserror::Error)]
+#[error("native mux server changed; refresh the target before retrying")]
+pub struct ServerChanged;
+struct Client {
+    identity_verifier: Option<IdentityVerifier>,
+    retry: super::attachment::ReconnectSchedule,
+    jobs: mpsc::Sender<Job>,
+    connector: Connector,
+    workspace: String,
+    launch: Mutex<Option<bootty_terminal::SessionLaunchConfig>>,
+    vt: Mutex<Option<super::protocol::VtPolicy>>,
+    latest: Mutex<Option<std::result::Result<TopologySnapshot, String>>>,
+    watching: AtomicBool,
+    ready: Mutex<Option<std::result::Result<(), String>>>,
+    ready_changed: Condvar,
+    repaints: Mutex<Vec<Weak<dyn Fn() + Send + Sync>>>,
+    generation: AtomicU64,
+    connected: AtomicBool,
 }
-
+#[derive(Clone)]
 pub struct NativeBackend {
-    state: Arc<Mutex<NativeMuxState>>,
+    client: Arc<Client>,
 }
-
+fn clients() -> &'static Mutex<HashMap<PathBuf, Weak<Client>>> {
+    static CLIENTS: OnceLock<Mutex<HashMap<PathBuf, Weak<Client>>>> = OnceLock::new();
+    CLIENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn connectors() -> &'static Mutex<HashMap<PathBuf, Connector>> {
+    static CONNECTORS: OnceLock<Mutex<HashMap<PathBuf, Connector>>> = OnceLock::new();
+    CONNECTORS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 impl NativeBackend {
-    /// A backend on the state shared by every caller that has no workspace to name.
+    /// Select the transport at the host boundary, before opening this workspace.
+    /// # Errors
+    /// Rejects replacement while a workspace client is live.
+    pub fn configure_connector(workspace: &Path, connector: Connector) -> Result<()> {
+        ensure!(
+            clients()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("native client registry lock poisoned"))?
+                .get(workspace)
+                .and_then(Weak::upgrade)
+                .is_none(),
+            "native workspace client is already open"
+        );
+        connectors()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native connector registry lock poisoned"))?
+            .insert(workspace.to_path_buf(), connector);
+        Ok(())
+    }
     #[must_use]
     pub fn new() -> Self {
         Self::for_workspace(Path::new(""))
     }
-
-    /// The mux state belonging to `workspace`, creating it on first use.
-    ///
-    /// Native sessions live in this process, not in a server, so they have to outlive any single
-    /// `AppState` -- closing and reopening a window keeps its sessions. Keying by workspace gives
-    /// that while stopping two unrelated workspaces from seeing each other's sessions, which is what
-    /// a single process-wide state could not do: in tests it accumulated every session every test
-    /// created, so any assertion on a session list saw all of them and flaked.
+    #[must_use]
     pub fn for_workspace(workspace: &Path) -> Self {
-        static STATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<NativeMuxState>>>>> =
-            OnceLock::new();
-        let mut states = STATES
-            .get_or_init(|| Mutex::new(HashMap::new()))
+        let mut clients = clients()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self {
-            state: Arc::clone(
-                states
-                    .entry(workspace.to_path_buf())
-                    .or_insert_with(|| Arc::new(Mutex::new(NativeMuxState::new()))),
+        if let Some(client) = clients.get(workspace).and_then(Weak::upgrade) {
+            return Self { client };
+        }
+        if let Some(connector) = connectors()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(workspace)
+        {
+            let backend = Self::with_connector(workspace, Arc::clone(connector));
+            clients.insert(workspace.to_path_buf(), Arc::downgrade(&backend.client));
+            return backend;
+        }
+        let identity = bootty_config::ApplicationIdentity::for_process();
+        let backend = Self::with_connector(
+            workspace,
+            Arc::new(move || {
+                #[cfg_attr(
+                    unix,
+                    expect(
+                        unused_mut,
+                        reason = "Windows timeout setters require a mutable stream"
+                    )
+                )]
+                let mut stream = super::local::connect(identity)?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                stream.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+                Ok(Box::new(LocalConnection(stream)))
+            }),
+        );
+        clients.insert(workspace.to_path_buf(), Arc::downgrade(&backend.client));
+        backend
+    }
+    #[must_use]
+    pub fn with_connector(workspace: &Path, connector: Connector) -> Self {
+        Self::with_identity_verifier(workspace, connector, None)
+    }
+    /// The verifier commits or validates identity before launch data is sent.
+    #[must_use]
+    pub fn with_identity_verifier(
+        workspace: &Path,
+        connector: Connector,
+        identity_verifier: Option<IdentityVerifier>,
+    ) -> Self {
+        Self::with_reconnect_schedule(
+            workspace,
+            connector,
+            identity_verifier,
+            super::attachment::ReconnectSchedule::default(),
+        )
+    }
+    #[must_use]
+    pub fn with_reconnect_schedule(
+        workspace: &Path,
+        connector: Connector,
+        identity_verifier: Option<IdentityVerifier>,
+        retry: super::attachment::ReconnectSchedule,
+    ) -> Self {
+        let (jobs, incoming) = mpsc::channel();
+        let remote = identity_verifier.is_some();
+        let client = Arc::new(Client {
+            identity_verifier,
+            retry,
+            jobs,
+            connector,
+            workspace: workspace.to_string_lossy().into_owned(),
+            launch: Mutex::new(Some({
+                let mut launch = bootty_terminal::SessionLaunchConfig::default();
+                if !remote {
+                    launch.capture_environment();
+                }
+                launch
+            })),
+            vt: Mutex::new(None),
+            latest: Mutex::new(None),
+            watching: AtomicBool::new(false),
+            ready: Mutex::new(None),
+            ready_changed: Condvar::new(),
+            repaints: Mutex::new(Vec::new()),
+            generation: AtomicU64::new(0),
+            connected: AtomicBool::new(false),
+        });
+        let owner = Arc::downgrade(&client);
+        thread::spawn(move || {
+            while let Ok(job) = incoming.recv() {
+                let Some(client) = owner.upgrade() else {
+                    break;
+                };
+                job.run(&Self { client });
+            }
+        });
+        Self { client }
+    }
+    #[must_use]
+    pub(crate) fn for_remote(
+        workspace: &Path,
+        scope: crate::controller::SpaceId,
+        space_tag: &str,
+        remote: &bootty_config::config::SshRemoteConfig,
+    ) -> Self {
+        let key = workspace.join(format!("remote-{}-{remote:?}", scope.persistence_value()));
+        let mut clients = clients()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(client) = clients.get(&key).and_then(Weak::upgrade) {
+            return Self { client };
+        }
+        let config = workspace.to_path_buf();
+        let verify: IdentityVerifier = Arc::new(move |server_id| {
+            crate::repository::WorkspaceRepository::pin_remote_server(&config, scope, server_id)
+        });
+        let backend = Self::with_identity_verifier(
+            Path::new(&format!("space:{space_tag}")),
+            super::remote::connector(
+                remote.clone(),
+                format!("space:{space_tag}"),
+                Arc::clone(&verify),
             ),
+            Some(verify),
+        );
+        clients.insert(key, Arc::downgrade(&backend.client));
+        backend
+    }
+    pub(super) fn check_generation(&self, expected: Option<u64>) -> Result<()> {
+        if expected.is_some_and(|expected| Some(expected) != self.peer_generation()) {
+            return Err(ServerChanged.into());
+        }
+        Ok(())
+    }
+    pub(crate) fn peer_generation(&self) -> Option<u64> {
+        self.client
+            .connected
+            .load(Ordering::Acquire)
+            .then(|| self.client.generation.load(Ordering::Acquire))
+    }
+    pub(crate) fn launch_config(&self) -> bootty_terminal::SessionLaunchConfig {
+        self.client
+            .launch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .unwrap_or_default()
+    }
+    pub fn configure_vt(&self, policy: super::protocol::VtPolicy) {
+        *self
+            .client
+            .vt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(policy);
+    }
+    pub fn configure_launch(&self, mut launch: bootty_terminal::SessionLaunchConfig) {
+        if self.client.identity_verifier.is_none() {
+            launch.capture_environment();
+        } else {
+            launch.base_environment = None;
+        }
+        *self
+            .client
+            .launch
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(launch);
+    }
+    /// # Errors
+    /// Returns transport or handshake failures.
+    pub fn connect(&self) -> Result<Box<dyn Duplex>> {
+        let mut stream = (self.client.connector)()?;
+        protocol::write_blocking(
+            &mut stream,
+            &Frame::json(&Hello {
+                version: WIRE_VERSION,
+                workspace: self.client.workspace.clone(),
+                vt: None,
+                launch: None,
+            })?,
+        )?;
+        let frame = protocol::read_blocking(&mut stream)?;
+        if let Ok(Response::Error(error)) = frame.decode::<Response>() {
+            anyhow::bail!(error);
+        }
+        if let Ok(Response::IncompatibleVersion(error)) = frame.decode::<Response>() {
+            return Err(error.into());
+        }
+        let welcome: Welcome = frame.decode()?;
+        validate_welcome(&welcome, self.client.identity_verifier.as_ref())?;
+        protocol::write_blocking(
+            &mut stream,
+            &Frame::json(&Request::Configure {
+                launch: self
+                    .client
+                    .launch
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("native launch policy poisoned"))?
+                    .clone(),
+                vt: self
+                    .client
+                    .vt
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("native VT policy poisoned"))?
+                    .clone(),
+            })?,
+        )?;
+        ensure!(
+            matches!(Self::response(&mut stream)?, Response::Ok),
+            "native mux configuration rejected"
+        );
+        if self
+            .client
+            .generation
+            .swap(welcome.generation, Ordering::AcqRel)
+            != welcome.generation
+        {
+            *self
+                .client
+                .latest
+                .lock()
+                .map_err(|_| anyhow::anyhow!("native snapshot lock poisoned"))? = None;
+        }
+        self.client.connected.store(true, Ordering::Release);
+        Ok(stream)
+    }
+    /// # Errors
+    /// Returns the server's typed wire error or a transport failure. Mutations are never retried.
+    pub fn request(&self, request: &Request) -> Result<Response> {
+        self.submit_request(request.clone())
+            .recv()
+            .context("native mux client worker stopped")?
+    }
+    #[must_use]
+    pub fn submit_request(&self, request: Request) -> mpsc::Receiver<Result<Response>> {
+        self.submit_request_for_generation(request, self.peer_generation())
+    }
+    pub(crate) fn submit_request_for_generation(
+        &self,
+        request: Request,
+        expected: Option<u64>,
+    ) -> mpsc::Receiver<Result<Response>> {
+        let (reply, rx) = mpsc::channel();
+        let Some(deadline) = Instant::now().checked_add(Duration::from_secs(30)) else {
+            let _ = reply.send(Err(RequestExpired.into()));
+            return rx;
+        };
+        if let Err(error) = self.client.jobs.send(Job::Request {
+            request,
+            deadline,
+            expected,
+            reply,
+        }) {
+            error.0.fail("native mux client worker stopped");
+        }
+        rx
+    }
+    pub(crate) fn submit_persisted(
+        &self,
+        command: MuxCommand,
+        persist: impl FnOnce() -> Result<()> + Send + 'static,
+        deadline: Instant,
+        cancellation: bootty_control::CommandCancellation,
+        expected: Option<u64>,
+    ) -> mpsc::Receiver<Result<TopologySnapshot>> {
+        let (reply, rx) = mpsc::channel();
+        if let Err(error) = self.client.jobs.send(Job::Persisted {
+            command,
+            persist: Box::new(persist),
+            deadline,
+            cancellation,
+            expected,
+            reply,
+        }) {
+            error.0.fail("native mux client worker stopped");
+        }
+        rx
+    }
+    fn request_direct(&self, request: &Request, expected: Option<u64>) -> Result<Response> {
+        let mut request = request.clone();
+        if let Request::Respawn { launch, .. } = &mut request {
+            if self.client.identity_verifier.is_none() {
+                launch.capture_environment();
+            } else {
+                launch.base_environment = None;
+            }
+        }
+        let mut stream = self.connect()?;
+        if request.mutates() {
+            self.check_generation(expected)?;
+        }
+        protocol::write_blocking(&mut stream, &Frame::json(&request)?)?;
+        let response = Self::response(&mut stream)?;
+        if let Response::Snapshot(snapshot) = &response {
+            self.client.publish(snapshot.clone())?;
+        }
+        Ok(response)
+    }
+    pub(super) fn response(stream: &mut Box<dyn Duplex>) -> Result<Response> {
+        loop {
+            let response: Response = protocol::read_blocking(stream)?.decode()?;
+            match response {
+                Response::Changed(_) => {}
+                Response::Error(error) => anyhow::bail!(error),
+                Response::LaunchFailed(error) => {
+                    return Err(super::protocol::LaunchFailure(error).into());
+                }
+                response => return Ok(response),
+            }
+        }
+    }
+    /// # Errors
+    /// Returns a connection or server snapshot error.
+    pub fn snapshot(&self) -> Result<MuxSnapshot> {
+        match self.request(&Request::Snapshot)? {
+            Response::Snapshot(snapshot) => Ok(snapshot.snapshot),
+            _ => anyhow::bail!("native mux returned no topology snapshot"),
+        }
+    }
+    /// Consume pushed topology without waiting on the daemon on the UI thread.
+    /// # Errors
+    /// Returns an observed disconnect or protocol failure.
+    pub fn latest_snapshot(
+        &self,
+        repaint: &crate::controller::RepaintHandle,
+    ) -> Result<Option<TopologySnapshot>> {
+        {
+            let mut repaints = self
+                .client
+                .repaints
+                .lock()
+                .map_err(|_| anyhow::anyhow!("native repaint registry lock poisoned"))?;
+            repaints.retain(|callback| callback.strong_count() > 0);
+            let weak = Arc::downgrade(repaint);
+            if !repaints.iter().any(|callback| callback.ptr_eq(&weak)) {
+                repaints.push(weak);
+            }
+        }
+        self.start_watcher();
+        let latest = self
+            .client
+            .latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native mux snapshot lock poisoned"))?;
+        latest.clone().transpose().map_err(anyhow::Error::msg)
+    }
+    fn start_watcher(&self) {
+        if self.client.watching.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        *self
+            .client
+            .ready
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        let weak = Arc::downgrade(&self.client);
+        thread::spawn(move || {
+            let mut backoff = Duration::from_millis(100);
+            while weak.strong_count() > 0 {
+                let result = (|| -> Result<()> {
+                    let backend = Self {
+                        client: weak.upgrade().context("native mux client closed")?,
+                    };
+                    let mut stream = backend.connect()?;
+                    stream.read_timeout(Duration::from_millis(200))?;
+                    backend.client.mark_ready(Ok(()));
+                    protocol::write_blocking(&mut stream, &Frame::json(&Request::Snapshot)?)?;
+                    drop(backend);
+                    let mut reader = protocol::FrameReader::default();
+                    while weak.strong_count() > 0 {
+                        let Some(frame) = reader.poll(&mut stream)? else {
+                            continue;
+                        };
+                        match frame.decode::<Response>()? {
+                            Response::Snapshot(snapshot) | Response::Changed(snapshot) => {
+                                let Some(client) = weak.upgrade() else {
+                                    break;
+                                };
+                                client.publish(snapshot)?;
+                            }
+                            Response::Error(error) => anyhow::bail!(error),
+                            _ => anyhow::bail!("invalid native topology event"),
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = result
+                    && let Some(client) = weak.upgrade()
+                {
+                    let error = format!("native mux disconnected: {error:#}");
+                    if let Ok(mut latest) = client.latest.lock() {
+                        *latest = Some(Err(error.clone()));
+                    }
+                    client.mark_ready(Err(error));
+                    client.connected.store(false, Ordering::Release);
+                    client.repaint();
+                    let wait = Arc::clone(&client.retry.wait);
+                    drop(client);
+                    wait(backoff);
+                    backoff = backoff.saturating_mul(2).min(Duration::from_secs(3));
+                } else {
+                    break;
+                }
+            }
+        });
+    }
+    fn await_watcher(&self, deadline: Instant) -> Result<()> {
+        self.start_watcher();
+        let mut ready = self
+            .client
+            .ready
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native readiness lock poisoned"))?;
+        while ready.is_none() {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(RequestExpired.into());
+            }
+            let (next, wait) = self
+                .client
+                .ready_changed
+                .wait_timeout(ready, remaining)
+                .map_err(|_| anyhow::anyhow!("native readiness lock poisoned"))?;
+            ready = next;
+            if wait.timed_out() && ready.is_none() {
+                return Err(RequestExpired.into());
+            }
+        }
+        ready
+            .as_ref()
+            .context("native client readiness missing")?
+            .clone()
+            .map_err(anyhow::Error::msg)
+    }
+
+    /// # Errors
+    /// Rejects invalid targets and failed server operations.
+    pub fn execute(&self, command: MuxCommand) -> Result<()> {
+        self.request(&Request::Execute(command)).map(|_| ())
+    }
+    fn execute_persisted_direct(
+        &self,
+        command: MuxCommand,
+        persist: impl FnOnce() -> Result<()>,
+        expected: Option<u64>,
+    ) -> Result<TopologySnapshot> {
+        let mut stream = self.connect()?;
+        self.check_generation(expected)?;
+        protocol::write_blocking(&mut stream, &Frame::json(&Request::Prepare(command))?)?;
+        match Self::response(&mut stream) {
+            Ok(Response::Ok) => {}
+            Err(error) if error.is::<super::protocol::LaunchFailure>() => {
+                persist()?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+            Ok(_) => anyhow::bail!("native mux did not prepare command"),
+        }
+
+        if let Err(error) = persist() {
+            let _ = protocol::write_blocking(&mut stream, &Frame::json(&Request::Abort)?);
+            return Err(error);
+        }
+        protocol::write_blocking(&mut stream, &Frame::json(&Request::Commit)?)?;
+        match Self::response(&mut stream)
+            .context("native mux commit outcome unknown; reconcile the server snapshot")?
+        {
+            Response::Snapshot(snapshot) => {
+                self.client.publish(snapshot.clone())?;
+                Ok(snapshot)
+            }
+            _ => anyhow::bail!("native mux commit returned no snapshot"),
         }
     }
 }
-
 impl Default for NativeBackend {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl MuxBackend for NativeBackend {
-    fn snapshot(&self) -> Result<MuxSnapshot> {
-        self.state
+impl Client {
+    fn mark_ready(&self, value: std::result::Result<(), String>) {
+        let mut ready = self
+            .ready
             .lock()
-            .map(|state| state.snapshot())
-            .map_err(|_| anyhow::anyhow!("native mux state lock poisoned"))
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *ready = Some(value);
+        drop(ready);
+        self.ready_changed.notify_all();
     }
-
-    fn execute(&mut self, command: MuxCommand) -> Result<()> {
-        let mut state = self
-            .state
+    fn repaint(&self) {
+        let callbacks: Vec<_> = self
+            .repaints
             .lock()
-            .map_err(|_| anyhow::anyhow!("native mux state lock poisoned"))?;
-        state.execute(command)
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect();
+        for callback in callbacks {
+            callback();
+        }
+    }
+    fn publish(&self, snapshot: TopologySnapshot) -> Result<()> {
+        if snapshot.generation != self.generation.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let mut latest = self
+            .latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("native mux snapshot lock poisoned"))?;
+        let changed = latest.as_ref().is_none_or(|current| {
+            current.as_ref().map_or(true, |current| {
+                current.revision <= snapshot.revision
+                    && (current.revision != snapshot.revision
+                        || current.snapshot != snapshot.snapshot)
+            })
+        });
+        if changed {
+            *latest = Some(Ok(snapshot));
+        }
+        drop(latest);
+        if changed {
+            self.repaint();
+        }
+        Ok(())
     }
 }
 
-impl NativeMuxState {
-    fn activate_pane(&mut self, session_id: &str, window_id: &str, pane_id: String) -> Result<()> {
-        let session = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id || session.name == session_id)
-            .context("native pane session is unavailable")?;
-        let window = session
-            .windows
-            .iter_mut()
-            .find(|window| {
-                window.id == window_id && window.panes.iter().any(|pane| pane.id == pane_id)
-            })
-            .context("native pane window is unavailable")?;
-        window.active_pane_id = pane_id;
-        let session_id = session.id.clone();
-        self.activate_window(&session_id, window_id);
-        Ok(())
+impl Job {
+    fn run(self, backend: &NativeBackend) {
+        let deadline = match &self {
+            Self::Request { deadline, .. } | Self::Persisted { deadline, .. } => *deadline,
+        };
+        if Instant::now() >= deadline {
+            self.fail_error(RequestExpired.into());
+            return;
+        }
+        if matches!(&self, Self::Persisted { cancellation, .. } if cancellation.is_cancelled()) {
+            self.fail_error(RequestCanceled.into());
+            return;
+        }
+        if let Err(error) = backend.await_watcher(deadline) {
+            self.fail_error(error);
+            return;
+        }
+        match self {
+            Self::Request {
+                request,
+                deadline,
+                expected,
+                reply,
+            } => {
+                let result = if Instant::now() >= deadline {
+                    Err(RequestExpired.into())
+                } else {
+                    backend.request_direct(&request, expected)
+                };
+                let _ = reply.send(result);
+            }
+            Self::Persisted {
+                command,
+                deadline,
+                cancellation,
+                expected,
+                persist,
+                reply,
+            } => {
+                let result = if Instant::now() >= deadline {
+                    Err(RequestExpired.into())
+                } else if !cancellation.try_start() {
+                    Err(RequestCanceled.into())
+                } else {
+                    backend.execute_persisted_direct(command, persist, expected)
+                };
+                let _ = reply.send(result);
+            }
+        }
     }
+    fn fail(self, message: &str) {
+        self.fail_error(anyhow::anyhow!(message.to_owned()));
+    }
+    fn fail_error(self, error: anyhow::Error) {
+        match self {
+            Self::Request { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Self::Persisted { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+        }
+    }
+}
 
-    fn set_native_agent(
-        &mut self,
-        session_id: &str,
-        pane_id: &str,
-        agent_id: Option<String>,
-    ) -> Result<()> {
-        anyhow::ensure!(
-            agent_id
-                .as_deref()
-                .is_none_or(crate::snapshot::native_agent_identity_is_valid),
-            "invalid native conversation identity"
+pub(super) fn validate_welcome(
+    welcome: &Welcome,
+    verifier: Option<&IdentityVerifier>,
+) -> Result<()> {
+    protocol::IncompatibleVersion::validate(WIRE_VERSION, welcome.version)?;
+    for capability in [
+        "server-frames",
+        "pane-input",
+        "topology-events",
+        "configure",
+    ] {
+        ensure!(
+            welcome.capabilities.iter().any(|value| value == capability),
+            "native mux server lacks required capability: {capability}"
         );
-        let session = self
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == session_id || session.name == session_id)
-            .context("native panel session is unavailable")?;
-        anyhow::ensure!(
-            !session
-                .windows
+    }
+    if let Some(verify) = verifier {
+        ensure!(
+            welcome
+                .capabilities
                 .iter()
-                .flat_map(|window| &window.panes)
-                .any(|pane| pane.id != pane_id
-                    && agent_id.is_some()
-                    && pane.native_agent == agent_id),
-            "the native conversation already occupies another pane"
+                .any(|value| value == "server-identity"),
+            "remote mux lacks stable server identity capability"
         );
-        let pane = session
-            .windows
-            .iter_mut()
-            .flat_map(|window| &mut window.panes)
-            .find(|pane| pane.id == pane_id)
-            .context("native panel pane is unavailable")?;
-        pane.native_agent = agent_id;
-        Ok(())
+        verify(&welcome.server_id)?;
     }
-
-    fn execute(&mut self, command: MuxCommand) -> Result<()> {
-        match command {
-            MuxCommand::ActivatePane {
-                session_id,
-                window_id,
-                pane_id,
-            } => self.activate_pane(&session_id, &window_id, pane_id)?,
-            MuxCommand::SetPaneNativeAgent {
-                session_id,
-                pane_id,
-                agent_id,
-            } => self.set_native_agent(&session_id, &pane_id, agent_id)?,
-            MuxCommand::ActivateWindow {
-                session_id,
-                window_id,
-            } => self.activate_window(&session_id, &window_id),
-            MuxCommand::NewWindow {
-                session_id, cwd, ..
-            } => {
-                self.new_window(&session_id, cwd.map(PathBuf::from))?;
-            }
-            MuxCommand::RenameWindow {
-                session_id,
-                window_id,
-                name,
-            } => {
-                self.rename_window(&session_id, &window_id, name);
-            }
-            MuxCommand::ActivateNextWindow { session_id } => {
-                self.activate_relative_window(&session_id, 1);
-            }
-            MuxCommand::ActivatePreviousWindow { session_id }
-            | MuxCommand::ActivateLastWindow { session_id } => {
-                self.activate_relative_window(&session_id, -1);
-            }
-            MuxCommand::ActivateWindowIndex { session_id, index } => {
-                self.activate_window_index(&session_id, index);
-            }
-            MuxCommand::MoveWindow {
-                session_id,
-                window_id,
-                delta,
-            } => {
-                self.move_window(&session_id, window_id.as_deref(), delta);
-            }
-            MuxCommand::MoveWindowPreservingSelection {
-                session_id,
-                window_id,
-                delta,
-                selected_window_id,
-            } => {
-                self.move_window_preserving_selection(
-                    &session_id,
-                    &window_id,
-                    delta,
-                    &selected_window_id,
-                );
-            }
-
-            // An explicit create (`argv` set) refuses a taken name. Its argv stays out of this state:
-            // the workspace starts the first pane with it once the session exists, so a restore or a
-            // reopened window never replays it.
-            MuxCommand::CreateProjectSession {
-                session_id,
-                cwd,
-                tag,
-                argv,
-            } => {
-                if argv.is_some()
-                    && self
-                        .sessions
-                        .iter()
-                        .any(|session| session.id == session_id || session.name == session_id)
-                {
-                    bail!("duplicate session: {session_id}")
-                }
-                self.ensure_session(&session_id, cwd, tag)?;
-            }
-            MuxCommand::RestoreSession {
-                session_id,
-                tag,
-                snapshot,
-            } => self.restore_session(&session_id, tag, &snapshot)?,
-            MuxCommand::CreateWorktreeSession {
-                session_id,
-                cwd,
-                tag,
-            } => {
-                self.ensure_session(&session_id, cwd, tag)?;
-            }
-            MuxCommand::RenameSession { session_id, name } => {
-                self.rename_session(&session_id, name);
-            }
-            MuxCommand::DitchSession { session_id } => self.kill_session(&session_id),
-            MuxCommand::StampSession { session_id, tag } => self.stamp_session(&session_id, tag),
-
-            command => self.execute_pane_command(command)?,
-        }
-        Ok(())
-    }
-    fn execute_pane_command(&mut self, command: MuxCommand) -> Result<()> {
-        match command {
-            MuxCommand::SplitPane {
-                session_id,
-                pane_id,
-                ..
-            } => self.split_pane(&session_id, pane_id.as_deref())?,
-            MuxCommand::CreatePane {
-                session_id,
-                pane_id,
-                cwd,
-                ..
-            } => {
-                self.split_pane(&session_id, pane_id.as_deref())?;
-                if let Some(cwd) = cwd {
-                    let window = self
-                        .active_window_mut(&session_id)
-                        .context("created pane window is unavailable")?;
-                    let pane = window
-                        .panes
-                        .last_mut()
-                        .context("created pane is unavailable")?;
-                    pane.cwd = PathBuf::from(cwd);
-                }
-            }
-            MuxCommand::MergeWindows {
-                session_id,
-                source_window_id,
-                target_window_id,
-            } => self.merge_windows(&session_id, &source_window_id, &target_window_id)?,
-            MuxCommand::SwapPanes {
-                session_id,
-                source_pane_id,
-                target_pane_id,
-            } => self.swap_panes(&session_id, &source_pane_id, &target_pane_id)?,
-            MuxCommand::MovePane {
-                session_id,
-                pane_id,
-                target_pane_id,
-                direction,
-            } => self.move_pane(&session_id, &pane_id, &target_pane_id, direction)?,
-            MuxCommand::ExtractPane {
-                session_id,
-                pane_id,
-            } => self.extract_pane(&session_id, &pane_id)?,
-            MuxCommand::SelectPane {
-                session_id,
-                window_id,
-                direction,
-            } => {
-                self.select_directional_pane(&session_id, window_id.as_deref(), direction);
-            }
-            MuxCommand::SelectNextPane {
-                session_id,
-                window_id,
-            } => self.select_pane(&session_id, window_id.as_deref(), 1),
-            MuxCommand::SelectPreviousPane {
-                session_id,
-                window_id,
-            } => self.select_pane(&session_id, window_id.as_deref(), -1),
-            MuxCommand::KillPane {
-                session_id,
-                pane_id,
-            } => self.close_pane(&session_id, pane_id.as_deref(), false)?,
-            MuxCommand::ClosePane {
-                session_id,
-                pane_id,
-            } => self.close_pane(&session_id, pane_id.as_deref(), true)?,
-            MuxCommand::TogglePaneZoom { .. } => {}
-            _ => anyhow::bail!("command is not a pane operation"),
-        }
-        Ok(())
-    }
-}
-
-#[must_use]
-pub fn native_capabilities(scope: SpaceId) -> BindingCapabilityDescriptor {
-    BindingCapabilityDescriptor::new(
-        scope,
-        [
-            BindingOperation::ActivateWindow,
-            BindingOperation::CreateWindow,
-            BindingOperation::RenameWindow,
-            BindingOperation::NavigateWindow,
-            BindingOperation::MoveWindow,
-            BindingOperation::SplitPane,
-            BindingOperation::MergeWindows,
-            BindingOperation::SwapPanes,
-            BindingOperation::MovePane,
-            BindingOperation::ExtractPane,
-            BindingOperation::NavigatePane,
-            BindingOperation::ClosePane,
-            BindingOperation::CreateProjectSession,
-            BindingOperation::StampSession,
-            BindingOperation::CreateWorktreeSession,
-            BindingOperation::RenameSession,
-            BindingOperation::DitchSession,
-        ],
-    )
-}
-
-pub struct NativePanePolicy;
-
-impl BackendPanePolicy for NativePanePolicy {
-    fn remote_target(&self) -> Option<crate::RemoteTarget> {
-        None
-    }
-
-    fn start_terminal(
-        &mut self,
-        request: PaneStartRequest<'_>,
-    ) -> Result<Option<Box<dyn TerminalRuntime>>> {
-        if !matches!(request.target.mux_target(), MuxPaneTarget::Pane { .. }) {
-            return Ok(None);
-        }
-        let mut config = request.terminal_config.clone();
-        config.launch.working_directory =
-            request.target.cwd().map(Path::new).map(Path::to_path_buf);
-        config.launch.pane_id = request.target.pane_id().map(str::to_owned);
-        config.side_effect_pane_id = request.target.side_effect_pane_id();
-        // Apply a single env assignment directly so the actual executable's errors propagate.
-        // Other env forms keep their behavior until the launch contract explicitly supports them.
-        #[cfg(unix)]
-        if config.launch.command_is_argv
-            && config
-                .launch
-                .command
-                .first()
-                .is_some_and(|program| program == "env")
-            && config.launch.command.get(2).is_some_and(|program| {
-                !program.is_empty() && !program.starts_with('-') && !program.contains('=')
-            })
-            && let Some((name, value)) = config
-                .launch
-                .command
-                .get(1)
-                .and_then(|assignment| assignment.split_once('='))
-                .filter(|(name, _)| {
-                    name.as_bytes()
-                        .first()
-                        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
-                        && name
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-                })
-                .map(|(name, value)| (name.to_owned(), value.to_owned()))
-        {
-            config.launch.env.push((name, value));
-            drop(config.launch.command.drain(..2));
-        }
-        // A tmux or rmux the app itself was started under is not this pane's server. Agent hooks
-        // read `$TMUX_PANE` before `$BOOTTY_PANE`, so its pane and socket must not leak in.
-        config
-            .launch
-            .env_remove
-            .extend(["TMUX", "TMUX_PANE", "RMUX"].map(str::to_owned));
-        Ok(Some(Box::new(StartingNativeTerminal::spawn(
-            request.spawn_geometry,
-            request.display_scale,
-            request.render_cell,
-            config,
-            Arc::clone(request.repaint_wakeup),
-        ))))
-    }
-
-    fn sync_target(&mut self, _target: Option<&ScopedMuxPaneTarget>, _hide_tmux_status: bool) {}
-
-    fn set_layout_window(&mut self, _window_id: Option<&str>) {}
-
-    fn resize_layout_window(&mut self, _request: PaneLayoutResizeRequest<'_>) -> Result<bool> {
-        Ok(false)
-    }
-
-    fn deactivate(&mut self) {}
+    Ok(())
 }

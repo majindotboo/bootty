@@ -7,14 +7,13 @@ use bootty_mux::{
     command::MuxCommand,
     controller::{CommandSelection, SpaceId},
     executor,
-    provider::PaneTopology,
-    session_membership::{SessionLifecycle, SessionStateChange},
+    session_membership::SessionStateChange,
     workspace::{PreparedSessionRequest, SessionRequestError, StartingSession},
 };
 
 use super::{
-    CommandDispatch, PendingAppCommand, PendingCommandResult, command_outcome_for_mux_error,
-    command_outcome_message, serialized_command_outcome,
+    CommandDispatch, PendingCommandResult, command_outcome_for_mux_error, command_outcome_message,
+    serialized_command_outcome,
 };
 use crate::{
     commands::{ExactMuxTarget, SessionAction},
@@ -264,7 +263,6 @@ impl AppState {
         let native_panes = self
             .workspace
             .binding(scope)
-            .filter(|binding| binding.backend_policy().panes.topology == PaneTopology::ProcessLocal)
             .and_then(|binding| binding.session_attachment(identity))
             .map(|session| {
                 session
@@ -302,17 +300,6 @@ impl AppState {
                 exact_target.as_ref(),
                 execution,
             );
-        }
-        if action == SessionAction::Delete
-            && let Some(ExactMuxTarget::Binding(scope)) = &exact_target
-            && let [identity] = arguments
-            && let Some(session) = self
-                .workspace
-                .binding(*scope)
-                .and_then(|binding| binding.session_attachment(identity))
-                .map(|session| session.id.clone())
-        {
-            return self.delete_live_session(*scope, identity, session, execution);
         }
         if action == SessionAction::InspectSpace
             && let Some(ExactMuxTarget::Binding(scope)) = exact_target
@@ -401,12 +388,7 @@ impl AppState {
         exact_target: Option<ExactMuxTarget>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        if matches!(
-            action,
-            SessionAction::SettleCurrent
-                | SessionAction::TogglePinCurrent
-                | SessionAction::ArchiveCurrent
-        ) {
+        if matches!(action, SessionAction::TogglePinCurrent) {
             return self.change_captured_session(action, exact_target, execution);
         }
         // Native panes whose processes end once their topology close succeeds.
@@ -417,17 +399,7 @@ impl AppState {
                 | SessionAction::SetTitle
                 | SessionAction::Pin
                 | SessionAction::Unpin
-                | SessionAction::Activity
-                | SessionAction::AcceptedInput
-                | SessionAction::Settle
-                | SessionAction::Activate
-                | SessionAction::Archive
-                | SessionAction::Unarchive
-                | SessionAction::Snooze
-                | SessionAction::Unsnooze
-                | SessionAction::AutoSettle
-                | SessionAction::Delete
-                | SessionAction::Restore,
+                | SessionAction::Activity,
                 Some(ExactMuxTarget::Binding(scope)),
             ) => {
                 return self.saved_session_metadata(action, scope, arguments, execution);
@@ -475,7 +447,7 @@ impl AppState {
                         execution,
                     );
                 }
-                let (command, native) = self.pane_close_command(scope, session, window, pane);
+                let (command, native) = Self::pane_close_command(session, window, pane);
                 closed_native_panes = native;
                 Ok((scope, (command, None)))
             }
@@ -529,13 +501,6 @@ impl AppState {
             Ok(prepared) => {
                 self.submit_prepared_session_command(scope, prepared, &[], execution, selection)
             }
-            Err(SessionRequestError::Pending) => {
-                CommandDispatch::Pending(PendingCommandResult::SessionReopen {
-                    scope,
-                    identity: identity.to_owned(),
-                    selection,
-                })
-            }
             Err(error) => self.reject_command(session_request_outcome(error)),
         }
     }
@@ -554,7 +519,7 @@ impl AppState {
                     };
                     let mux = space.binding.multiplexer();
                     serialized_command_outcome(serde_json::json!({
-                        "name":space.name,"backend":mux.backend,
+                        "name":space.name,
                         "host":mux.remote.as_ref().map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label),
                     }))
                 },
@@ -586,7 +551,7 @@ impl AppState {
                 } else {
                     &window.panes
                 };
-                for pane in panes.iter().filter(|pane| pane.native_agent.is_none()) {
+                for pane in panes {
                     let exact = pane.pane_id.as_ref().map_or_else(
                         || ExactMuxTarget::Session(scope, session.id.clone()),
                         |pane| {
@@ -766,9 +731,7 @@ impl AppState {
         };
         let change = match action {
             SessionAction::TogglePinCurrent if pinned => SessionAction::Unpin,
-            SessionAction::TogglePinCurrent => SessionAction::Pin,
-            SessionAction::ArchiveCurrent => SessionAction::Archive,
-            _ => SessionAction::Settle,
+            _ => SessionAction::Pin,
         };
         self.saved_session_metadata(change, scope, &[identity], execution)
     }
@@ -819,14 +782,13 @@ impl AppState {
         selection: CommandSelection,
     ) -> CommandDispatch {
         let (command, membership) = prepared;
-        let native = self.native_targets_for_close(scope, &command);
         let Some(submitted) = executor::submit_authoritative_command_for_scope(
             &mut self.workspace,
             &self.repaint,
             scope,
             command,
             membership.map(Box::new),
-            execution.clone(),
+            execution,
             selection,
         ) else {
             return self.reject_command(CommandOutcome::StaleTarget {
@@ -848,20 +810,15 @@ impl AppState {
                 &submitted.command,
                 submitted.membership.as_deref(),
                 result,
-                submitted.layout.as_ref(),
             );
-            let dispatch =
-                self.hold_until_session_starts(submitted.scope, &submitted.command, outcome);
-            return Self::retire_native_after_close(dispatch, native, execution);
+            return self.hold_until_session_starts(submitted.scope, &submitted.command, outcome);
         }
-        let dispatch = CommandDispatch::Pending(PendingCommandResult::Mux {
+        CommandDispatch::Pending(PendingCommandResult::Mux {
             scope: submitted.scope,
             command: Box::new(submitted.command),
             membership: submitted.membership,
-            layout: submitted.layout,
             result: submitted.result,
-        });
-        Self::retire_native_after_close(dispatch, native, execution)
+        })
     }
 
     /// Pending backend work disables saved-state menu actions without reading SQLite on a frame.
@@ -870,11 +827,6 @@ impl AppState {
             .pending
             .iter()
             .any(|pending| match &pending.result {
-                PendingCommandResult::SessionDelete {
-                    scope: pending_scope,
-                    identity: pending_identity,
-                    ..
-                } => *pending_scope == scope && pending_identity == identity,
                 PendingCommandResult::Mux {
                     scope: pending_scope,
                     membership: Some(membership),
@@ -882,69 +834,6 @@ impl AppState {
                 } => *pending_scope == scope && membership.identity() == identity,
                 _ => false,
             })
-    }
-
-    fn delete_live_session(
-        &mut self,
-        scope: SpaceId,
-        identity: &str,
-        session: String,
-        execution: Option<(Instant, CommandCancellation)>,
-    ) -> CommandDispatch {
-        let (deadline, cancellation) = executor::command_execution(execution);
-        match self.dispatch_session_command(
-            SessionAction::Close,
-            &[],
-            Some(ExactMuxTarget::Session(scope, session)),
-            Some((deadline, cancellation.clone())),
-        ) {
-            CommandDispatch::Complete(outcome) => {
-                CommandDispatch::Complete(self.finish_session_delete(scope, identity, outcome))
-            }
-            CommandDispatch::Pending(result) => {
-                CommandDispatch::Pending(PendingCommandResult::SessionDelete {
-                    scope,
-                    identity: identity.to_owned(),
-                    command: Box::new(PendingAppCommand {
-                        creation_receipt: None,
-                        label: "Close session before deleting".to_owned(),
-                        user_initiated_annotation_capture: false,
-                        deadline,
-                        cancellation,
-                        response: None,
-                        result,
-                    }),
-                })
-            }
-        }
-    }
-
-    pub(super) fn finish_session_delete(
-        &mut self,
-        scope: SpaceId,
-        identity: &str,
-        outcome: CommandOutcome,
-    ) -> CommandOutcome {
-        let CommandOutcome::Success { warnings, .. } = outcome else {
-            return outcome;
-        };
-        // Closing already admitted the mutation. A failed delete keeps the now-closed saved work.
-        let CommandDispatch::Complete(mut deleted) =
-            self.saved_session_metadata(SessionAction::Delete, scope, &[identity.to_owned()], None)
-        else {
-            return CommandOutcome::Failed {
-                code: "session_state_failed".to_owned(),
-                message: "The closed session could not be deleted".to_owned(),
-            };
-        };
-        if let CommandOutcome::Success {
-            warnings: deleted_warnings,
-            ..
-        } = &mut deleted
-        {
-            deleted_warnings.extend(warnings);
-        }
-        deleted
     }
 
     pub(crate) fn saved_session_invocation(
@@ -966,42 +855,6 @@ impl AppState {
         Some(invocation)
     }
 
-    /// Offers to bring an archived session back. Sessions archived together, before the offer
-    /// shows, come back together.
-    pub(super) fn offer_unarchive(&mut self, scope: SpaceId, identity: String) {
-        let Some(label) = self
-            .workspace
-            .binding(scope)
-            .and_then(|binding| binding.sessions().get(&identity))
-            .map(|saved| saved.label().to_owned())
-        else {
-            return;
-        };
-        let Some(undo) = self.saved_session_invocation(scope, "session.unarchive", vec![identity])
-        else {
-            return;
-        };
-        let mut offer = self
-            .undo_offer
-            .take()
-            .filter(|offer| {
-                offer
-                    .undo
-                    .iter()
-                    .all(|undo| undo.command == "session.unarchive")
-            })
-            .unwrap_or_else(|| crate::state::UndoOffer {
-                message: String::new(),
-                undo: Vec::new(),
-            });
-        offer.undo.push(undo);
-        offer.message = match offer.undo.len() {
-            1 => format!("Archived “{label}”"),
-            count => format!("Archived {count} sessions"),
-        };
-        self.undo_offer = Some(offer);
-    }
-
     /// Capture the exact saved destination before input can complete on a worker.
     pub(crate) fn session_activity_invocation(
         &self,
@@ -1014,16 +867,13 @@ impl AppState {
             .binding(scope)?
             .sessions()
             .get(identity)
-            .is_some_and(|saved| {
-                saved.state.lifecycle != SessionLifecycle::Settled
-                    && saved.state.last_activity_at.is_some_and(|last| last >= at)
-            })
+            .is_some_and(|saved| saved.state.last_activity_at.is_some_and(|last| last >= at))
         {
             return None;
         }
         self.saved_session_invocation(
             scope,
-            "session.input_accepted",
+            "session.activity",
             vec![identity.to_owned(), at.to_string()],
         )
     }
@@ -1034,12 +884,7 @@ impl AppState {
                 return;
             };
             let key = (target, identity.to_owned(), at);
-            let settled = self
-                .workspace
-                .binding(scope)
-                .and_then(|binding| binding.sessions().get(identity))
-                .is_some_and(|saved| saved.state.lifecycle == SessionLifecycle::Settled);
-            if !settled && self.session_activity_receipt.borrow().as_ref() == Some(&key) {
+            if self.session_activity_receipt.borrow().as_ref() == Some(&key) {
                 return;
             }
             if submit_activity_receipt(&self.commands.sender, receipt, at) {
@@ -1112,16 +957,6 @@ impl AppState {
             };
             match self.workspace.set_session_state(scope, identity, change) {
                 Ok(changed) => {
-                    if changed
-                        && matches!(
-                            change,
-                            SessionStateChange::Delete
-                                | SessionStateChange::Archive
-                                | SessionStateChange::SetLifecycle(SessionLifecycle::Settled)
-                        )
-                    {
-                        self.request_worktree_cleanup();
-                    }
                     let saved = self
                         .workspace
                         .binding(scope)
@@ -1189,11 +1024,6 @@ impl AppState {
                 "The created session has no saved logical identity".to_owned(),
             )));
         };
-        if let Some(dispatch) =
-            self.hold_until_terminal_agent_association(scope, &identity, session, &outcome)
-        {
-            return dispatch;
-        }
         let Some(target) = self.mux_resource_target(scope, ResourceKind::Session, session, None)
         else {
             return CommandDispatch::Complete(CommandOutcome::StaleTarget {
@@ -1308,32 +1138,18 @@ impl AppState {
         })
     }
 
-    /// Native panes close in the local topology and then end their process; attach backends kill
-    /// the backend pane, which ends it.
     fn pane_close_command(
-        &self,
-        scope: SpaceId,
         session: String,
         window: String,
         pane: String,
     ) -> (MuxCommand, Vec<(String, String, String)>) {
-        let native = self
-            .workspace
-            .binding(scope)
-            .is_some_and(bootty_mux::workspace::BindingRuntime::uses_native_terminal_layout);
-        if native {
-            let closing = MuxCommand::ClosePane {
+        (
+            MuxCommand::ClosePane {
                 session_id: session.clone(),
                 pane_id: Some(pane.clone()),
-            };
-            (closing, vec![(session, window, pane)])
-        } else {
-            let killing = MuxCommand::KillPane {
-                session_id: session,
-                pane_id: Some(pane),
-            };
-            (killing, Vec::new())
-        }
+            },
+            vec![(session, window, pane)],
+        )
     }
 
     /// Every pane of a native session as (session, window, pane); empty for attach backends,
@@ -1393,11 +1209,7 @@ impl AppState {
     }
 
     fn native_session_panes(&self, scope: SpaceId, session: &str) -> Vec<(String, String, String)> {
-        let Some(binding) = self
-            .workspace
-            .binding(scope)
-            .filter(|binding| binding.uses_native_terminal_layout())
-        else {
+        let Some(binding) = self.workspace.binding(scope) else {
             return Vec::new();
         };
         binding
@@ -1460,7 +1272,6 @@ impl AppState {
                     "scope": scope.persistence_value().to_string(),
                     "name": space.name,
                     "active": space.id == self.workspace.active.id,
-                    "backend": binding.multiplexer().backend,
                     "host": binding
                         .multiplexer()
                         .remote
@@ -1570,11 +1381,7 @@ fn session_request_outcome(error: SessionRequestError) -> CommandOutcome {
             code: "session_exists".to_owned(),
             message,
         },
-        SessionRequestError::Unsupported(message) => CommandOutcome::Unsupported { message },
         SessionRequestError::Unavailable(message) => CommandOutcome::Unavailable { message },
-        SessionRequestError::Pending => CommandOutcome::Unavailable {
-            message: "This session is finishing another terminal operation".into(),
-        },
         SessionRequestError::Persistence(error) => CommandOutcome::Failed {
             code: "persistence_failed".to_owned(),
             message: error.to_string(),
@@ -1587,37 +1394,19 @@ fn session_state_arguments(
     arguments: &[String],
     now: i64,
 ) -> Result<(&str, SessionStateChange), CommandOutcome> {
-    if action == SessionAction::AutoSettle {
-        return match arguments {
-            [identity, enabled] if matches!(enabled.as_str(), "true" | "false") => Ok((
-                identity,
-                SessionStateChange::SetAutoSettle(enabled == "true"),
-            )),
-            _ => Err(CommandOutcome::Failed {
-                code: "invalid_arguments".into(),
-                message: "session.auto_settle expects a saved identity and true or false".into(),
-            }),
-        };
-    }
     let invalid = || CommandOutcome::Failed {
         code: "invalid_arguments".to_owned(),
         message: format!(
             "{} expects a saved identity{}",
             action.descriptor().id,
-            if matches!(
-                action,
-                SessionAction::Snooze | SessionAction::Activity | SessionAction::AcceptedInput
-            ) {
+            if matches!(action, SessionAction::Activity) {
                 " and non-negative absolute UTC seconds"
             } else {
                 ""
             }
         ),
     };
-    if matches!(
-        action,
-        SessionAction::Snooze | SessionAction::Activity | SessionAction::AcceptedInput
-    ) {
+    if matches!(action, SessionAction::Activity) {
         let [identity, until] = arguments else {
             return Err(invalid());
         };
@@ -1626,11 +1415,7 @@ fn session_state_arguments(
             .ok()
             .filter(|until| *until >= 0)
             .ok_or_else(invalid)?;
-        let change = match action {
-            SessionAction::Activity => SessionStateChange::RecordActivity { at: until, now },
-            SessionAction::AcceptedInput => SessionStateChange::AcceptInput { at: until, now },
-            _ => SessionStateChange::SnoozeUntil(until),
-        };
+        let change = SessionStateChange::RecordActivity { at: until, now };
         return Ok((identity, change));
     }
     let [identity] = arguments else {
@@ -1639,13 +1424,6 @@ fn session_state_arguments(
     let change = match action {
         SessionAction::Pin => SessionStateChange::SetPinned(true),
         SessionAction::Unpin => SessionStateChange::SetPinned(false),
-        SessionAction::Settle => SessionStateChange::SetLifecycle(SessionLifecycle::Settled),
-        SessionAction::Activate => SessionStateChange::SetLifecycle(SessionLifecycle::Active),
-        SessionAction::Archive => SessionStateChange::Archive,
-        SessionAction::Unarchive => SessionStateChange::RestoreArchive,
-        SessionAction::Unsnooze => SessionStateChange::ClearSnooze,
-        SessionAction::Delete => SessionStateChange::Delete,
-        SessionAction::Restore => SessionStateChange::RestoreDeleted,
         _ => return Err(invalid()),
     };
     Ok((identity, change))

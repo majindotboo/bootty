@@ -19,29 +19,18 @@ enum Command {
 }
 
 #[rstest]
-fn package_and_install_keep_the_existing_flags() {
-    let cli = Cli::try_parse_from([
-        "xtasks",
-        "package",
-        "--fast",
-        "--static",
-        "--dev",
-        "--all-daemons",
-    ])
-    .unwrap();
+fn package_and_install_select_identity_and_daemons() {
+    let cli = Cli::try_parse_from(["xtasks", "package", "--dev", "--all-daemons"]).unwrap();
     let Command::Package(args) = cli.command else {
         panic!("expected package command");
     };
-    assert!(args.fast);
-    assert!(args.r#static);
     assert!(args.dev);
     assert!(args.all_daemons);
 
-    let cli = Cli::try_parse_from(["xtasks", "install", "--fast", "--dev"]).unwrap();
+    let cli = Cli::try_parse_from(["xtasks", "install", "--dev"]).unwrap();
     let Command::Install(args) = cli.command else {
         panic!("expected install command");
     };
-    assert!(args.package.fast);
     assert!(args.package.dev);
 }
 

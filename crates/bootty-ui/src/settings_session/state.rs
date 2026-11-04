@@ -1,5 +1,5 @@
 use num_traits::ToPrimitive as _;
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use bootty_config::{
     config::{BoottyConfig, ConfigDocument},
@@ -7,9 +7,8 @@ use bootty_config::{
 };
 
 use crate::settings_session::{
-    DraftWriteback, FontFeatureDraft, ModuleOutcome, RemoteDraft, RemoteEditorSnapshot,
-    SettingsEffect, SettingsOutcome, SettingsWriteSource, dedupe_font_features,
-    remotes::RemoteState,
+    DraftWriteback, FontFeatureDraft, RemoteDraft, RemoteEditorSnapshot, SettingsEffect,
+    SettingsOutcome, SettingsWriteSource, dedupe_font_features, remotes::RemoteState,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -40,33 +39,12 @@ pub struct SettingsSession {
     font_families: Arc<[String]>,
     writeback: DraftWriteback,
     remotes: RemoteState,
-    integration_errors: BTreeMap<String, String>,
-    unscoped_integration_error: Option<String>,
     environment: Vec<EnvironmentDraft>,
     environment_unsubmitted: bool,
     effects: Vec<SettingsEffect>,
-    /// What the add-connector forms hold, by `provider:field`. Never configuration: each
-    /// provider owns its connectors.
-    connector_drafts: BTreeMap<String, String>,
 }
 
 impl SettingsSession {
-    /// What an add-connector form holds for `key`, like `claude:name`.
-    #[must_use]
-    pub fn connector_draft(&self, key: &str) -> &str {
-        self.connector_drafts.get(key).map_or("", String::as_str)
-    }
-
-    pub fn set_connector_draft(&mut self, key: &str, value: String) {
-        self.connector_drafts.insert(key.to_owned(), value);
-    }
-
-    /// Empties `provider`'s add-connector form once its connector is on its way.
-    pub fn clear_connector_drafts(&mut self, provider: &str) {
-        self.connector_drafts
-            .retain(|key, _| key.split(':').next() != Some(provider));
-    }
-
     #[must_use]
     pub fn new(accepted: AcceptedSettings, catalogs: Catalogs) -> Self {
         let writeback = DraftWriteback::new(accepted.document, accepted.schema);
@@ -80,12 +58,9 @@ impl SettingsSession {
             font_families: catalogs.font_families,
             writeback,
             remotes,
-            integration_errors: BTreeMap::new(),
-            unscoped_integration_error: None,
             environment,
             environment_unsubmitted: false,
             effects: Vec::new(),
-            connector_drafts: BTreeMap::new(),
         }
     }
 
@@ -151,18 +126,6 @@ impl SettingsSession {
             return false;
         };
         self.writeback.write(&spec, value);
-        self.queue_document_submission();
-        true
-    }
-
-    /// Select the terminal backend without ever leaving an invalid native default remote behind.
-    pub fn set_multiplexer_backend(&mut self, backend: &str) -> bool {
-        let path = ["multiplexer", "backend"];
-        if !self.writeback.schema().allows_write_path(&path) {
-            self.writeback.reject("unknown setting multiplexer.backend");
-            return false;
-        }
-        self.writeback.set_multiplexer_backend(backend);
         self.queue_document_submission();
         true
     }
@@ -386,12 +349,6 @@ impl SettingsSession {
             self.writeback.reject(format!("unknown setting {id}"));
             return false;
         };
-        if id == "multiplexer.backend" {
-            let backend = bootty_config::config::MultiplexerBackendConfig::default()
-                .to_string()
-                .to_ascii_lowercase();
-            self.writeback.set_multiplexer_backend(&backend);
-        }
         for legacy in &spec.supersedes {
             self.writeback
                 .remove(&legacy.iter().map(AsRef::as_ref).collect::<Vec<_>>());
@@ -515,31 +472,6 @@ impl SettingsSession {
         self.writeback.document()
     }
 
-    pub fn install_integration(&mut self, identity: String, module: String, id: String) {
-        self.effects.push(SettingsEffect::InstallIntegration {
-            identity,
-            module,
-            id,
-        });
-    }
-
-    pub fn uninstall_integration(&mut self, identity: String, module: String, id: String) {
-        self.effects.push(SettingsEffect::UninstallIntegration {
-            identity,
-            module,
-            id,
-        });
-    }
-
-    /// Return the last native integration failure for a provider, if any.
-    #[must_use]
-    pub fn integration_error(&self, identity: &str) -> Option<&str> {
-        self.integration_errors
-            .get(identity)
-            .map(String::as_str)
-            .or(self.unscoped_integration_error.as_deref())
-    }
-
     pub fn select_remote(&mut self, id: &str) -> bool {
         self.remotes.select(id)
     }
@@ -585,15 +517,10 @@ impl SettingsSession {
     }
 
     pub fn save_default_remote(&mut self) -> bool {
-        if !self.selected_backend_supports_remote() {
-            self.remotes
-                .reject_default("Choose herdr, rmux, or tmux before saving a default remote.");
-            return false;
-        }
-        let Some(effect) = self.remotes.save_default() else {
+        let Some(profile) = self.remotes.validated_default() else {
             return false;
         };
-        self.effects.push(effect);
+        self.effects.push(SettingsEffect::SetDefaultRemote(profile));
         true
     }
 
@@ -645,17 +572,6 @@ impl SettingsSession {
                     }
                 }
             },
-            SettingsOutcome::Module(ModuleOutcome::IntegrationUpdated { identity }) => {
-                self.integration_errors.remove(&identity);
-                self.unscoped_integration_error = None;
-            }
-            SettingsOutcome::Module(ModuleOutcome::Failed { identity, message }) => {
-                if let Some(identity) = identity {
-                    self.integration_errors.insert(identity, message);
-                } else {
-                    self.unscoped_integration_error = Some(message);
-                }
-            }
             SettingsOutcome::Remote(outcome) => self.remotes.apply(outcome),
         }
     }
@@ -700,18 +616,6 @@ impl SettingsSession {
         // DraftWriteback deliberately owns schema mutation. This accessor avoids mirroring it in
         // the session; it can be removed once SettingsSchema offers an id-to-path DTO projection.
         self.writeback.schema()
-    }
-
-    fn selected_backend_supports_remote(&self) -> bool {
-        if !self.writeback.has_edit("multiplexer.backend") {
-            return self.config.multiplexer.backend.supports_remote();
-        }
-        matches!(
-            self.writeback
-                .document()
-                .str_at(&["multiplexer", "backend"]),
-            Some("herdr" | "rmux" | "tmux")
-        )
     }
 
     fn submit_environment_draft(&mut self) {
@@ -795,9 +699,6 @@ fn custom_scalar(config: &BoottyConfig, id: &str) -> Option<SettingValue> {
 
 fn custom_list<'a>(config: &'a BoottyConfig, id: &str) -> Option<&'a [String]> {
     Some(match id {
-        "agents.codex.available-efforts" => &config.agents.codex.available_efforts,
-        "agents.claude.available-efforts" => &config.agents.claude.available_efforts,
-        "agents.pi.available-efforts" => &config.agents.pi.available_efforts,
         "font.family" => &config.font.family,
         "font.ui-family" => &config.font.ui_family,
         "sidebar.session-modules" => &config.sidebar.session_modules,
@@ -805,10 +706,7 @@ fn custom_list<'a>(config: &'a BoottyConfig, id: &str) -> Option<&'a [String]> {
         "input.modifier-remap" => &config.input.modifier_remap,
         "input.keybind" => &config.input.keybind,
         "input.sidebar-keybind" => &config.input.sidebar_keybind,
-        "input.backend-keybind.herdr" => &config.input.backend_keybinds.herdr,
-        "input.backend-keybind.native" => &config.input.backend_keybinds.native,
-        "input.backend-keybind.rmux" => &config.input.backend_keybinds.rmux,
-        "input.backend-keybind.tmux" => &config.input.backend_keybinds.tmux,
+        "input.backend-keybind.native" => &config.input.layout_keybind,
         _ => return None,
     })
 }

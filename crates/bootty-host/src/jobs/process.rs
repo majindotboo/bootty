@@ -1,6 +1,6 @@
 use super::{Job, JobSpec, JobStatus, JobStream};
 use anyhow::{Context as _, Result, ensure};
-use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
+use bootty_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use std::{
     io::Read,
     process::{Command, Stdio},

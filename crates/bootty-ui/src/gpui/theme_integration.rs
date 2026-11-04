@@ -42,9 +42,6 @@ pub fn init_ui_theme(ui_theme: UiTheme, cx: &mut App) {
     gpui_kit::init(cx);
     super::init_text_menu(cx);
     super::config_editor::init(cx);
-    crate::gpui_agent_session::init_reaction_keys(cx);
-    crate::gpui_agent_session::init_request_keys(cx);
-    crate::gpui_model_picker::init(cx);
     #[cfg(target_os = "macos")]
     bind_cocoa_text_keys(cx);
     cx.set_global(BoottyThemeSettings::default());
@@ -57,15 +54,6 @@ pub fn init_ui_theme(ui_theme: UiTheme, cx: &mut App) {
             },
             crate::gpui_actions::CloseSettingsWindow,
             Some("BoottySettingsWindow"),
-        ),
-        KeyBinding::new(
-            if cfg!(target_os = "macos") {
-                "cmd-w"
-            } else {
-                "ctrl-w"
-            },
-            crate::gpui_actions::CloseBrowserTab,
-            Some("BoottyBrowser"),
         ),
         KeyBinding::new("ctrl-p", gpui_kit::base::actions::SelectUp, Some("Command")),
         KeyBinding::new(
@@ -182,149 +170,149 @@ fn component_colors(palette: UiPalette) -> gpui_kit::component::ThemeColor {
     let info_hover = info.mix_oklab(foreground, 0.9);
     let info_active = info.mix_oklab(background, 0.9);
 
-    gpui_kit::component::ThemeColor {
-        accent: color(palette.element_hover),
-        accent_foreground: color(palette.text),
-        accordion: color(palette.pane),
-        background: color(palette.base),
-        border: color(palette.border),
-        button: color(palette.element_background),
-        button_active: color(palette.element_active),
-        button_foreground: color(palette.text),
-        button_hover: color(palette.element_hover),
-        button_danger: danger,
-        button_danger_active: danger_active,
-        button_danger_foreground: danger_foreground,
-        button_danger_hover: danger_hover,
-        button_info: info,
-        button_info_active: info_active,
-        button_info_foreground: info_foreground,
-        button_info_hover: info_hover,
-        button_primary: primary,
-        button_primary_active: primary_active,
-        button_primary_foreground: primary_foreground,
-        button_primary_hover: primary_hover,
-        button_secondary: secondary,
-        button_secondary_active: secondary_active,
-        button_secondary_foreground: secondary_foreground,
-        button_secondary_hover: secondary_hover,
-        button_success: success,
-        button_success_active: success_active,
-        button_success_foreground: success_foreground,
-        button_success_hover: success_hover,
-        button_warning: warning,
-        button_warning_active: warning_active,
-        button_warning_foreground: warning_foreground,
-        button_warning_hover: warning_hover,
-        group_box: color(palette.surface),
-        group_box_foreground: color(palette.text),
-        caret: color(palette.text_accent),
-        chart_1: color(palette.accent),
-        chart_2: color(palette.success),
-        chart_3: color(palette.warning),
-        chart_4: color(palette.primary),
-        chart_5: color(palette.destructive),
-        chart_bullish: color(palette.success),
-        chart_bearish: color(palette.destructive),
-        chart_grid: color(palette.border),
-        danger,
-        danger_active,
-        danger_foreground,
-        danger_hover,
-        description_list_label: color(palette.pane),
-        description_list_label_foreground: color(palette.subtext),
-        drag_border: color(palette.border_focused),
-        drop_target: color(palette.element_selected).opacity(0.35),
-        foreground: color(palette.text),
-        info,
-        info_active,
-        info_foreground,
-        info_hover,
-        input: color(palette.border_variant),
-        link: color(super::readable_color(palette.base, palette.accent)),
-        link_active: link.mix_oklab(foreground, 0.8),
-        link_hover: link.mix_oklab(foreground, 0.9),
-        list: color(palette.pane),
-        list_active: color(palette.element_selected),
-        list_active_border: color(palette.border_focused),
-        list_even: color(palette.element_background),
-        list_head: color(palette.surface),
-        list_hover: color(palette.element_hover),
-        muted: color(palette.element_disabled),
-        muted_foreground: color(palette.muted),
-        // Tooltips and menus lift toward the theme's own text color, which keeps its tint; white
-        // would wash them gray.
-        popover: color(super::mix(palette.base, palette.text, 0.1)),
-        popover_foreground: color(palette.text),
-        primary,
-        primary_active,
-        primary_foreground,
-        primary_hover,
-        progress_bar: color(palette.accent),
-        ring: color(palette.border_strong),
-        scrollbar: color(palette.base),
-        scrollbar_thumb: color(palette.border),
-        scrollbar_thumb_hover: color(palette.muted),
-        secondary: color(palette.element_background),
-        secondary_active: color(palette.element_active),
-        secondary_foreground: color(palette.text),
-        secondary_hover: color(palette.element_hover),
-        selection: color(palette.element_selected).opacity(0.35),
-        sidebar: color(palette.pane),
-        sidebar_accent: color(palette.element_selected),
-        sidebar_accent_foreground: color(palette.text),
-        sidebar_border: color(palette.border),
-        sidebar_foreground: color(palette.text),
-        sidebar_primary: color(palette.primary),
-        sidebar_primary_foreground: primary_foreground,
-        skeleton: color(palette.element_background),
-        slider_bar: color(palette.muted),
-        slider_thumb: color(palette.text),
-        success,
-        success_foreground,
-        success_hover,
-        success_active,
-        switch: color(palette.element_background),
-        switch_thumb: color(palette.text),
-        tab: color(palette.tab_inactive),
-        tab_active: color(palette.base),
-        tab_active_foreground: color(palette.text),
-        tab_bar: color(palette.tab_bar),
-        tab_bar_segmented: color(palette.tab_bar),
-        tab_foreground: color(palette.muted),
-        table: color(palette.base),
-        table_active: color(palette.element_selected),
-        table_active_border: color(palette.border_focused),
-        table_even: color(palette.pane),
-        table_head: color(palette.pane),
-        table_head_foreground: color(palette.text),
-        table_foot: color(palette.pane),
-        table_foot_foreground: color(palette.subtext),
-        table_hover: color(palette.element_hover),
-        table_row_border: color(palette.border_variant),
-        title_bar: color(palette.tab_bar),
-        title_bar_border: color(palette.border),
-        status_bar: color(palette.mantle),
-        status_bar_border: color(palette.border),
-        warning,
-        warning_active,
-        warning_hover,
-        warning_foreground,
-        overlay: color(palette.mantle).opacity(0.6),
-        window_border: color(palette.border),
-        red: color(palette.destructive),
-        red_light: color(palette.destructive),
-        green: color(palette.success),
-        green_light: color(palette.success),
-        blue: color(palette.accent),
-        blue_light: color(palette.accent),
-        yellow: color(palette.warning),
-        yellow_light: color(palette.warning),
-        magenta: color(palette.primary),
-        magenta_light: color(palette.primary),
-        cyan: color(palette.text_accent),
-        cyan_light: color(palette.text_accent),
-    }
+    let mut colors = gpui_kit::component::ThemeColor::default();
+    colors.accent = color(palette.element_hover);
+    colors.accent_foreground = color(palette.text);
+    colors.accordion = color(palette.pane);
+    colors.background = color(palette.base);
+    colors.border = color(palette.border);
+    colors.button = color(palette.element_background);
+    colors.button_active = color(palette.element_active);
+    colors.button_foreground = color(palette.text);
+    colors.button_hover = color(palette.element_hover);
+    colors.button_danger = danger;
+    colors.button_danger_active = danger_active;
+    colors.button_danger_foreground = danger_foreground;
+    colors.button_danger_hover = danger_hover;
+    colors.button_info = info;
+    colors.button_info_active = info_active;
+    colors.button_info_foreground = info_foreground;
+    colors.button_info_hover = info_hover;
+    colors.button_primary = primary;
+    colors.button_primary_active = primary_active;
+    colors.button_primary_foreground = primary_foreground;
+    colors.button_primary_hover = primary_hover;
+    colors.button_secondary = secondary;
+    colors.button_secondary_active = secondary_active;
+    colors.button_secondary_foreground = secondary_foreground;
+    colors.button_secondary_hover = secondary_hover;
+    colors.button_success = success;
+    colors.button_success_active = success_active;
+    colors.button_success_foreground = success_foreground;
+    colors.button_success_hover = success_hover;
+    colors.button_warning = warning;
+    colors.button_warning_active = warning_active;
+    colors.button_warning_foreground = warning_foreground;
+    colors.button_warning_hover = warning_hover;
+    colors.group_box = color(palette.surface);
+    colors.group_box_foreground = color(palette.text);
+    colors.caret = color(palette.text_accent);
+    colors.chart_1 = color(palette.accent);
+    colors.chart_2 = color(palette.success);
+    colors.chart_3 = color(palette.warning);
+    colors.chart_4 = color(palette.primary);
+    colors.chart_5 = color(palette.destructive);
+    colors.chart_bullish = color(palette.success);
+    colors.chart_bearish = color(palette.destructive);
+    colors.chart_grid = color(palette.border);
+    colors.danger = danger;
+    colors.danger_active = danger_active;
+    colors.danger_foreground = danger_foreground;
+    colors.danger_hover = danger_hover;
+    colors.description_list_label = color(palette.pane);
+    colors.description_list_label_foreground = color(palette.subtext);
+    colors.drag_border = color(palette.border_focused);
+    colors.drop_target = color(palette.element_selected).opacity(0.35);
+    colors.foreground = color(palette.text);
+    colors.info = info;
+    colors.info_active = info_active;
+    colors.info_foreground = info_foreground;
+    colors.info_hover = info_hover;
+    colors.input = color(palette.border_variant);
+    colors.link = color(super::readable_color(palette.base, palette.accent));
+    colors.link_active = link.mix_oklab(foreground, 0.8);
+    colors.link_hover = link.mix_oklab(foreground, 0.9);
+    colors.list = color(palette.pane);
+    colors.list_active = color(palette.element_selected);
+    colors.list_active_border = color(palette.border_focused);
+    colors.list_even = color(palette.element_background);
+    colors.list_head = color(palette.surface);
+    colors.list_hover = color(palette.element_hover);
+    colors.muted = color(palette.element_disabled);
+    colors.muted_foreground = color(palette.muted);
+    // Tooltips and menus lift toward the theme's own text color, which keeps its tint; white
+    // would wash them gray.
+    colors.popover = color(super::mix(palette.base, palette.text, 0.1));
+    colors.popover_foreground = color(palette.text);
+    colors.primary = primary;
+    colors.primary_active = primary_active;
+    colors.primary_foreground = primary_foreground;
+    colors.primary_hover = primary_hover;
+    colors.progress_bar = color(palette.accent);
+    colors.ring = color(palette.border_strong);
+    colors.scrollbar = color(palette.base);
+    colors.scrollbar_thumb = color(palette.border);
+    colors.scrollbar_thumb_hover = color(palette.muted);
+    colors.secondary = color(palette.element_background);
+    colors.secondary_active = color(palette.element_active);
+    colors.secondary_foreground = color(palette.text);
+    colors.secondary_hover = color(palette.element_hover);
+    colors.selection = color(palette.element_selected).opacity(0.35);
+    colors.sidebar = color(palette.pane);
+    colors.sidebar_accent = color(palette.element_selected);
+    colors.sidebar_accent_foreground = color(palette.text);
+    colors.sidebar_border = color(palette.border);
+    colors.sidebar_foreground = color(palette.text);
+    colors.sidebar_primary = color(palette.primary);
+    colors.sidebar_primary_foreground = primary_foreground;
+    colors.skeleton = color(palette.element_background);
+    colors.slider_bar = color(palette.muted);
+    colors.slider_thumb = color(palette.text);
+    colors.success = success;
+    colors.success_foreground = success_foreground;
+    colors.success_hover = success_hover;
+    colors.success_active = success_active;
+    colors.switch = color(palette.element_background);
+    colors.switch_thumb = color(palette.text);
+    colors.tab = color(palette.tab_inactive);
+    colors.tab_active = color(palette.base);
+    colors.tab_active_foreground = color(palette.text);
+    colors.tab_bar = color(palette.tab_bar);
+    colors.tab_bar_segmented = color(palette.tab_bar);
+    colors.tab_foreground = color(palette.muted);
+    colors.table = color(palette.base);
+    colors.table_active = color(palette.element_selected);
+    colors.table_active_border = color(palette.border_focused);
+    colors.table_even = color(palette.pane);
+    colors.table_head = color(palette.pane);
+    colors.table_head_foreground = color(palette.text);
+    colors.table_foot = color(palette.pane);
+    colors.table_foot_foreground = color(palette.subtext);
+    colors.table_hover = color(palette.element_hover);
+    colors.table_row_border = color(palette.border_variant);
+    colors.title_bar = color(palette.tab_bar);
+    colors.title_bar_border = color(palette.border);
+    colors.status_bar = color(palette.mantle);
+    colors.status_bar_border = color(palette.border);
+    colors.warning = warning;
+    colors.warning_active = warning_active;
+    colors.warning_hover = warning_hover;
+    colors.warning_foreground = warning_foreground;
+    colors.overlay = color(palette.mantle).opacity(0.6);
+    colors.window_border = color(palette.border);
+    colors.red = color(palette.destructive);
+    colors.red_light = color(palette.destructive);
+    colors.green = color(palette.success);
+    colors.green_light = color(palette.success);
+    colors.blue = color(palette.accent);
+    colors.blue_light = color(palette.accent);
+    colors.yellow = color(palette.warning);
+    colors.yellow_light = color(palette.warning);
+    colors.magenta = color(palette.primary);
+    colors.magenta_light = color(palette.primary);
+    colors.cyan = color(palette.text_accent);
+    colors.cyan_light = color(palette.text_accent);
+    colors
 }
 
 fn component_highlight_theme(

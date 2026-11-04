@@ -3,13 +3,9 @@
 use bootty_ui::gpui as bootty_gpui;
 use pretty_assertions::{assert_eq, assert_ne};
 
-use std::sync::Arc;
 #[cfg(unix)]
-use std::time::{Duration, Instant};
-
 use assert_fs::{TempDir, fixture::ChildPath, prelude::*};
 #[cfg(unix)]
-use bootty_config::config::MultiplexerBackendConfig;
 use bootty_config::{
     color::Color,
     config::{
@@ -18,23 +14,19 @@ use bootty_config::{
     },
     settings_schema::{SettingValue, SettingsSchema},
 };
-#[cfg(unix)]
-use bootty_mux::snapshot::MuxPaneAnchor;
 use bootty_ui::settings_session::{
     AcceptedSettings, Catalogs, SettingsEffect, SettingsOutcome, SettingsSession,
 };
 use bootty_ui::{AppEffect, AppState, WindowEffect};
 use rstest::rstest;
+use std::sync::Arc;
 
-#[path = "support/events.rs"]
-mod events;
-#[path = "support/frames.rs"]
-mod frames;
-pub mod support;
+use crate::support::events;
+use crate::support::frames;
 
 fn app_state(config: BoottyConfig) -> AppState {
-    AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state")
+    bootty_test_support::native_mux::local(&config.config_path).unwrap();
+    AppState::new(config, Arc::new(|| {}), None, None).expect("start app state")
 }
 
 fn state_from_config(source: &str) -> (TempDir, ChildPath, AppState) {
@@ -583,106 +575,34 @@ fn every_new_window_policy_reports_the_restart_requirement() {
 
 #[cfg(unix)]
 #[test]
-fn a_dead_terminal_warns_after_acceptance_and_new_panes_use_the_accepted_config() {
-    let (_directory, config_file, mut state) = state_from_config(
-        "[multiplexer]\nbackend = \"native\"\n\n[session]\nshell = \"/bootty/missing-shell\"\n",
-    );
-    let failed = pane("failed", "%1");
-    state
-        .terminal_mut()
-        .sync_native_window(
-            std::slice::from_ref(&failed),
-            Some(&failed),
-            Some("window"),
-            MultiplexerBackendConfig::Native,
-            false,
-        )
-        .expect("start failing pane");
-    let failure = wait_for_startup_result(&mut state, "%1").expect_err("startup must fail");
-    assert!(
-        failure.starts_with("spawn shell in PTY: ") && failure.contains("/bootty/missing-shell"),
-        "the startup failure names the step and its cause: {failure}"
-    );
-
+fn failed_server_launch_does_not_block_reload_and_new_panes_use_accepted_config() {
+    let (directory, config_file, mut state) =
+        state_from_config("[session]\nshell = \"/bootty/missing-shell\"\n");
+    bootty_test_support::native_mux::local(config_file.path()).unwrap();
+    let backend = bootty_mux::native::NativeBackend::for_workspace(config_file.path());
+    backend.configure_launch(bootty_terminal::SessionLaunchConfig {
+        shell: Some("/bootty/missing-shell".into()),
+        ..Default::default()
+    });
+    let create = |id: &str| bootty_mux::command::MuxCommand::CreateProjectSession {
+        session_id: id.into(),
+        cwd: directory.path().to_string_lossy().into_owned(),
+        tag: bootty_mux::snapshot::MuxSessionTag::default(),
+        argv: None,
+    };
+    let failure = backend.execute(create("failed")).unwrap_err();
+    assert!(format!("{failure:#}").contains("/bootty/missing-shell"));
+    assert_eq!(backend.snapshot().unwrap().sessions.len(), 0);
     config_file
-        .write_str(
-            r##"
-[multiplexer]
-backend = "native"
-
-[appearance]
-mode = "dark"
-
-[appearance.dark.colors]
-background = "#010203"
-
-[cursor]
-style = "hollow-block"
-blink = false
-
-[session]
-shell = "/bin/sh"
-glyph-protocol = false
-"##,
-        )
-        .expect("write accepted config");
-
+        .write_str("[session]\nshell = \"/bin/sh\"\nglyph-protocol = false\n")
+        .unwrap();
     assert!(state.reload_config(&mut Vec::new()));
     assert_eq!(state.config().session.shell.as_deref(), Some("/bin/sh"));
-    assert!(
-        state
-            .last_error()
-            .is_some_and(|error| error.contains("terminal config publication failed for SpaceId"))
-    );
-
-    state.terminal_mut().discard_active_pane();
-    let replacement = pane("replacement", "%2");
-    state
-        .terminal_mut()
-        .sync_native_window(
-            std::slice::from_ref(&replacement),
-            Some(&replacement),
-            Some("window"),
-            MultiplexerBackendConfig::Native,
-            false,
-        )
-        .expect("start replacement pane");
-    wait_for_startup_result(&mut state, "%2").expect("accepted shell starts replacement pane");
-}
-
-#[cfg(unix)]
-fn pane(session_id: &str, pane_id: &str) -> MuxPaneAnchor {
-    MuxPaneAnchor {
-        native_agent: None,
-        session_id: session_id.to_owned(),
-        pane_id: Some(pane_id.to_owned()),
-        cwd: None,
-        pane_pid: None,
-        process: None,
-    }
-}
-
-#[cfg(unix)]
-fn wait_for_startup_result(state: &mut AppState, pane_id: &str) -> Result<(), String> {
-    // The budget bounds a genuine hang. It stays far above the scheduler jitter that a fully
-    // parallel test run adds to a pane spawn.
-    let deadline = Instant::now()
-        .checked_add(Duration::from_secs(30))
-        .ok_or("startup deadline overflow")?;
-    loop {
-        let runtime = state
-            .terminal_mut()
-            .focused_terminal_runtime(pane_id)
-            .ok_or("focused terminal runtime is missing")?;
-        runtime
-            .current_working_directory()
-            .map_err(|error| error.to_string())?;
-        if runtime.tty_name().is_some() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            return Err("terminal startup timed out".to_owned());
-        }
-        std::thread::yield_now();
-    }
+    backend.execute(create("replacement")).unwrap();
+    assert_eq!(backend.snapshot().unwrap().sessions.len(), 1);
+    backend
+        .execute(bootty_mux::command::MuxCommand::DitchSession {
+            session_id: "replacement".into(),
+        })
+        .unwrap();
 }

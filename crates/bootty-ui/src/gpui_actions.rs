@@ -5,7 +5,6 @@ use crate::keymap::{
 };
 use anyhow::{Context as _, Result, bail};
 use bootty_config::config::InputConfig;
-use bootty_config::config::MultiplexerBackendConfig;
 use bootty_config::keymap_file::{KeymapAction, KeymapBindingKind};
 use bootty_control::CommandInvocation;
 use bootty_terminal::terminal_input_model::TerminalKey;
@@ -51,10 +50,6 @@ pub struct CycleApplicationWindow;
 #[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
 #[action(namespace = bootty, no_json)]
 pub struct CloseSettingsWindow;
-
-#[derive(Clone, Debug, PartialEq, Eq, gpui_kit::Action)]
-#[action(namespace = bootty, no_json)]
-pub struct CloseBrowserTab;
 
 pub fn cycle_application_window(window: &mut Window, cx: &mut App) {
     let current = window.window_handle().window_id();
@@ -123,7 +118,11 @@ impl WorkspaceKeyBindings {
                 }
                 Some((
                     invocation.action_name(),
-                    gpui_kit::Keystroke::parse(&binding.keystrokes).ok()?,
+                    gpui_kit::Keystroke::parse_with_os(
+                        &binding.keystrokes,
+                        gpui_kit::OperatingSystem::Unknown,
+                    )
+                    .ok()?,
                 ))
             })
             .collect()
@@ -146,10 +145,8 @@ impl WorkspaceKeyBindings {
             let Ok(resolved) = catalog.resolve(invocation.clone()) else {
                 continue;
             };
-            let crate::commands::CommandExecutor::Core(
-                crate::commands::CoreCommandExecutor::Synchronous(
-                    crate::commands::SynchronousCommand::Command(action),
-                ),
+            let crate::commands::CoreCommandExecutor::Synchronous(
+                crate::commands::SynchronousCommand::Command(action),
             ) = resolved.executor
             else {
                 continue;
@@ -272,15 +269,6 @@ fn load_workspace_key_bindings(
         KeyBindingContextPredicate::parse(&format!("{context} > Command"))
             .context("parse Bootty command key context")?
             .into();
-    let surface_context: Rc<KeyBindingContextPredicate> =
-        KeyBindingContextPredicate::parse(&format!("{context} > SurfaceChooser"))
-            .context("parse Bootty surface chooser key context")?
-            .into();
-    let composer_context: Rc<KeyBindingContextPredicate> =
-        // Match at the editor's dispatch node so its own arrow/Enter bindings yield.
-        KeyBindingContextPredicate::parse(&format!("{context} > ComposerCompletion > Input"))
-            .context("parse Bootty composer completion context")?
-            .into();
     bindings
         .bindings
         .iter()
@@ -291,16 +279,12 @@ fn load_workspace_key_bindings(
                 binding.action.into_action(),
                 Some(if binding.focus == KeymapFocus::Command {
                     command_context.clone()
-                } else if binding.focus == KeymapFocus::SurfaceChooser {
-                    surface_context.clone()
-                } else if binding.focus == KeymapFocus::ComposerCompletion {
-                    composer_context.clone()
                 } else {
                     workspace_context.clone()
                 }),
                 true,
                 None,
-                cx.keyboard_mapper().as_ref(),
+                cx,
             )
             .with_context(|| format!("load GPUI key binding {:?}", binding.keystrokes))
         })
@@ -406,134 +390,10 @@ pub fn workspace_key_bindings(input: &InputConfig) -> Result<WorkspaceKeyBinding
     ))
 }
 
-/// Keep mux navigation available while the conversation composer owns text input.
-#[must_use]
-pub fn key_bindings_for_native_conversation(
-    snapshot: &KeymapSnapshot,
-    backend: MultiplexerBackendConfig,
-    catalog: &CommandCatalog,
-) -> WorkspaceKeyBindings {
-    let composer = key_bindings_for_snapshot(snapshot, KeymapFocus::Composer, backend, catalog);
-    let terminal = key_bindings_for_snapshot(snapshot, KeymapFocus::Terminal, backend, catalog);
-    // Native panels own input, so attachment backends cannot receive their terminal prefix.
-    let host = key_bindings_for_snapshot(
-        snapshot,
-        KeymapFocus::Terminal,
-        MultiplexerBackendConfig::Native,
-        catalog,
-    );
-    let mut seen = std::collections::HashSet::new();
-    let mut navigation = terminal
-        .bindings
-        .into_iter()
-        .rev()
-        .chain(host.bindings.into_iter().rev())
-        .filter(|binding| {
-            seen.insert(binding.keystrokes.clone())
-                && matches!(&binding.action, WorkspaceBindingAction::Invoke(invocation)
-                if conversation_terminal_navigation(invocation, catalog) || surface_creation_action(invocation,catalog))
-        })
-        .collect::<Vec<_>>();
-    navigation.reverse();
-    navigation.extend(composer.bindings);
-    WorkspaceKeyBindings::new(navigation)
-}
-
-/// Map closing the shown conversation to its exact native target; the shared command closes its backend pane.
-#[must_use]
-pub fn native_conversation_close_invocation(
-    invocation: &CommandInvocation,
-    catalog: &CommandCatalog,
-    target: &bootty_control::CommandTarget,
-) -> Option<CommandInvocation> {
-    if invocation.target.is_some()
-        || !matches!(
-            catalog
-                .resolve(invocation.clone())
-                .map(|resolved| resolved.executor),
-            Ok(crate::commands::CommandExecutor::Core(
-                crate::commands::CoreCommandExecutor::Keybind(
-                    crate::app_actions::KeybindAction::Mux(
-                        crate::app_actions::MuxKeyAction::ClosePane
-                    )
-                )
-            ))
-        )
-    {
-        return None;
-    }
-    let mut close = CommandInvocation::new("agents.native.close", Vec::new(), invocation.caller);
-    close.target = Some(target.clone());
-    Some(close)
-}
-
-/// Capture the focused conversation as the parent of a targetless host tab or split request.
-#[must_use]
-pub fn native_surface_creation_invocation(
-    invocation: &CommandInvocation,
-    catalog: &CommandCatalog,
-    target: &bootty_control::CommandTarget,
-) -> Option<CommandInvocation> {
-    if invocation.target.is_some()
-        || target.kind != bootty_control::ResourceKind::Session
-        || !surface_creation_action(invocation, catalog)
-    {
-        return None;
-    }
-    let mut captured = invocation.clone();
-    captured.target = Some(target.clone());
-    Some(captured)
-}
-
-fn surface_creation_action(invocation: &CommandInvocation, catalog: &CommandCatalog) -> bool {
-    matches!(
-        catalog
-            .resolve(invocation.clone())
-            .map(|resolved| resolved.executor),
-        Ok(crate::commands::CommandExecutor::Core(
-            crate::commands::CoreCommandExecutor::Keybind(crate::app_actions::KeybindAction::Mux(
-                crate::app_actions::MuxKeyAction::NewTab
-                    | crate::app_actions::MuxKeyAction::SplitPane(_)
-            ))
-        ))
-    )
-}
-
-#[must_use]
-pub fn conversation_terminal_navigation(
-    invocation: &CommandInvocation,
-    catalog: &CommandCatalog,
-) -> bool {
-    if surface_creation_action(invocation, catalog) {
-        return false;
-    }
-    matches!(
-        catalog
-            .resolve(invocation.clone())
-            .map(|resolved| resolved.executor),
-        Ok(crate::commands::CommandExecutor::Core(
-            crate::commands::CoreCommandExecutor::Keybind(
-                crate::app_actions::KeybindAction::Mux(_)
-                    | crate::app_actions::KeybindAction::App(
-                        crate::app_actions::AppAction::FocusTerminal
-                    )
-                    // Find and copy mode act on the conversation itself.
-                    | crate::app_actions::KeybindAction::CopyMode
-                    | crate::app_actions::KeybindAction::Find(
-                        crate::app_actions::TerminalFindAction::Prompt
-                            | crate::app_actions::TerminalFindAction::Next
-                            | crate::app_actions::TerminalFindAction::Previous
-                    )
-            ) | crate::commands::CoreCommandExecutor::Pane(_, _)
-                | crate::commands::CoreCommandExecutor::Session(_, _)
-        ))
-    )
-}
-
 pub fn key_bindings_for_snapshot(
     snapshot: &KeymapSnapshot,
     focus: KeymapFocus,
-    backend: MultiplexerBackendConfig,
+
     catalog: &CommandCatalog,
 ) -> WorkspaceKeyBindings {
     // Root's Tab bindings navigate controls. Mask those only in terminal focus; configured
@@ -556,19 +416,11 @@ pub fn key_bindings_for_snapshot(
             action: WorkspaceBindingAction::Unbind,
             focus: KeymapFocus::Command,
         });
-    let surface_keys = ["tab", "shift-tab", "enter", "space", "escape"]
-        .into_iter()
-        .filter(move |_| focus == KeymapFocus::SurfaceChooser)
-        .map(|keystrokes| WorkspaceBinding {
-            keystrokes: keystrokes.to_owned(),
-            action: WorkspaceBindingAction::Unbind,
-            focus: KeymapFocus::SurfaceChooser,
-        });
     let mut effective = Vec::new();
     for binding in snapshot
         .effective_bindings
         .iter()
-        .filter(|binding| context_is_active(&binding.context, focus, backend))
+        .filter(|binding| context_is_active(&binding.context, focus))
     {
         let Ok((sequence, flags)) = parse_sequence_with_flags(&binding.keystrokes) else {
             continue;
@@ -615,12 +467,7 @@ pub fn key_bindings_for_snapshot(
             focus,
         });
     }
-    WorkspaceKeyBindings::new(
-        terminal_keys
-            .chain(command_keys)
-            .chain(surface_keys)
-            .chain(effective),
-    )
+    WorkspaceKeyBindings::new(terminal_keys.chain(command_keys).chain(effective))
 }
 
 fn gpui_keystroke(trigger: &BindingTrigger) -> Option<String> {
@@ -649,7 +496,7 @@ fn gpui_keystroke(trigger: &BindingTrigger) -> Option<String> {
     push_modifier(&mut keystroke, shift, "shift");
     push_modifier(&mut keystroke, trigger.mods.command, "cmd");
     keystroke.push_str(&key);
-    gpui_kit::Keystroke::parse(&keystroke).ok()?;
+    gpui_kit::Keystroke::parse_with_os(&keystroke, gpui_kit::OperatingSystem::Unknown).ok()?;
     Some(keystroke)
 }
 

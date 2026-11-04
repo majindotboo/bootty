@@ -11,18 +11,14 @@ use bootty_ui::terminal_text::{CodepointFontMap, TerminalTextConfig};
 use bootty_ui::{AppEffect, AppState, UiFontEffect};
 use pretty_assertions::assert_eq;
 
-pub mod support;
-
-#[path = "support/frames.rs"]
-mod frame_inputs;
+use crate::support::frames as frame_inputs;
 
 fn state_with_config(source: &str) -> (TempDir, ChildPath, AppState) {
     let directory = TempDir::new().expect("temporary config directory");
     let config = directory.child("config.toml");
     config.write_str(source).expect("write initial config");
     let loaded = load_config_from_path(config.path()).expect("load initial config");
-    let state = AppState::new(loaded, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state");
+    let state = AppState::new(loaded, Arc::new(|| {}), None, None).expect("start app state");
     (directory, config, state)
 }
 

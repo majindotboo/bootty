@@ -1,12 +1,11 @@
 //! Draft editing and the explicit command boundary for new sessions.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
-use bootty_config::config::{AgentProfileConfig, AgentProvidersConfig};
-use bootty_control::{Caller, CommandTarget, ResourceKind};
+use bootty_control::{CommandTarget, ResourceKind};
 use bootty_mux::controller::SpaceId;
 use bootty_ui::presentation::new_session_form::{
-    NewSessionAttachment, NewSessionDraft, NewSessionForm, NewSessionMode, SessionDestination,
+    NewSessionDraft, NewSessionForm, SessionDestination,
 };
 use pretty_assertions::{assert_eq, assert_ne};
 use proptest::test_runner::{Config, TestRunner};
@@ -28,34 +27,13 @@ fn form() -> NewSessionForm {
             handle: format!("issued-host-{}", scope.persistence_value()),
             generation: 7,
         },
-        worktrees: true,
     };
-    let mut providers = AgentProvidersConfig::default();
-    "/provider/custom-codex".clone_into(&mut providers.codex.program);
-    providers.codex.profiles.insert(
-        "work".to_owned(),
-        AgentProfileConfig {
-            name: "Work".to_owned(),
-            directory: Some("/account/work".to_owned()),
-            arguments: vec!["--model".to_owned(), "configured-model".to_owned()],
-        },
-    );
     NewSessionForm::new(
         NewSessionDraft {
             projectless: false,
             scope: local,
             cwd: "/project/current".to_owned(),
-            mode: NewSessionMode::Agent,
-            prompt: String::new(),
-            applications: Vec::new(),
-            provider_mentions: Vec::new(),
-            goal: String::new(),
-            attachments: Vec::new(),
             command: String::new(),
-            provider: "codex".to_owned(),
-            profiles: BTreeMap::new(),
-            model_selection: None,
-            permissions: bootty_agents::NativePermissionMode::ProviderDefault,
             isolated: false,
             isolation_preference: false,
             branch: String::new(),
@@ -63,14 +41,12 @@ fn form() -> NewSessionForm {
             start_ref: String::new(),
             suffix: "a123".to_owned(),
             identity: "0123456789abcdef0123456789abcdef".to_owned(),
-            fan_out: Vec::new(),
             directories: HashMap::new(),
         },
         vec![
             destination(local, "Current host", "/project/current"),
             destination(another, "Another host", "/project/another"),
         ],
-        providers,
     )
 }
 
@@ -187,7 +163,7 @@ fn existing_branch_selection_waits_for_git_and_preserves_failed_drafts(
         presentation::dialogs::{NEW_SESSION_ID, NewSessionDialog, NewSessionPickerEvent},
     };
     form.change_field("host", host);
-    form.change_text("Keep this prompt");
+    form.change_text("Keep this command");
     load_checkout_branches(&mut form).expect("branch catalog");
     let target = form.destination().unwrap().target.clone();
     let cwd = form.draft.cwd.clone();
@@ -244,7 +220,7 @@ fn existing_branch_selection_waits_for_git_and_preserves_failed_drafts(
         selection(&dialog),
         if succeeds { "feature/existing" } else { "main" }
     );
-    assert_eq!(dialog.draft().unwrap().prompt, "Keep this prompt");
+    assert_eq!(dialog.draft().unwrap().command, "Keep this command");
     assert_eq!(dialog.draft().unwrap().cwd, cwd);
     if !succeeds {
         assert!(
@@ -260,11 +236,9 @@ fn existing_branch_selection_waits_for_git_and_preserves_failed_drafts(
 #[rstest]
 fn selecting_a_checked_out_branch_reuses_its_directory(
     mut form: NewSessionForm,
-    #[values(NewSessionMode::Agent, NewSessionMode::Terminal)] mode: NewSessionMode,
     #[values("Current host", "Another host")] host: &str,
 ) {
     form.change_field("host", host);
-    form.draft.mode = mode;
     form.change_text("Keep this draft");
     load_checkout_branches(&mut form).expect("branch catalog");
     let project = form.project_path().to_owned();
@@ -297,21 +271,15 @@ fn selecting_a_checked_out_branch_reuses_its_directory(
     assert_eq!(selection(&form, "checkout-branch"), "main");
     assert_eq!(form.select_checkout_branch("topic/linked"), Ok(None));
     assert_eq!(form.draft.cwd, "/worktrees/project/linked");
-    let text = if mode == NewSessionMode::Agent {
-        &form.draft.prompt
-    } else {
-        &form.draft.command
-    };
-    assert_eq!(text, "Keep this draft");
+    assert_eq!(form.draft.command, "Keep this draft");
 }
 
 #[rstest]
-fn explicit_worktree_branch_has_a_known_destination_without_model_naming(mut form: NewSessionForm) {
+fn explicit_worktree_branch_has_a_known_destination(mut form: NewSessionForm) {
     form.set_worktree_available(true);
     form.change_field("isolation", "New worktree");
     form.change_text("Fix startup");
     form.change_field("branch", "feature/fix-startup");
-    assert_eq!(form.naming_invocation(), Ok(None));
     assert!(
         form.spec(false)
             .footer
@@ -370,7 +338,7 @@ fn creation_progress_keeps_the_checkout_and_explains_a_start_failure(form: NewSe
             dialog: bootty_ui::gpui::DialogId::new(
                 bootty_ui::presentation::dialogs::NEW_SESSION_ID,
             ),
-            value: "Updated prompt for retry".into(),
+            value: "Updated command for retry".into(),
         },
         &[],
     );
@@ -384,24 +352,20 @@ fn creation_progress_keeps_the_checkout_and_explains_a_start_failure(form: NewSe
 }
 
 #[rstest]
-fn prompt_and_command_survive_mode_and_host_switches(form: NewSessionForm) {
+fn command_survives_host_switches(form: NewSessionForm) {
     let form = std::cell::RefCell::new(form);
-    let strategy = ("[^\\x00]{0,256}", "[^\\x00]{0,256}");
+    let strategy = "[^\\x00]{0,256}";
     TestRunner::new(Config {
         cases: 32,
         ..Config::default()
     })
-    .run(&strategy, |(prompt, command)| {
+    .run(&strategy, |command| {
         let mut form = form.borrow_mut();
-        form.change_field("mode", "Agent");
-        form.change_text(&prompt);
-        form.change_field("mode", "Terminal");
         form.change_text(&command);
         assert!(form.change_field("host", "Another host"));
         form.set_directory("/project/another/selected".to_owned());
         assert!(form.change_field("host", "Current host"));
         assert_eq!(form.draft.cwd, "/project/current");
-        assert_eq!(&form.draft.prompt, &prompt);
         assert_eq!(&form.draft.command, &command);
         assert_eq!(form.draft.identity, "0123456789abcdef0123456789abcdef");
         assert!(form.change_field("host", "Another host"));
@@ -413,145 +377,10 @@ fn prompt_and_command_survive_mode_and_host_switches(form: NewSessionForm) {
 }
 
 #[rstest]
-fn native_start_keeps_destination_profile_and_prompt_separate_from_argv(mut form: NewSessionForm) {
-    form.change_text("Fix 'quotes'; $HOME `uname`\nand preserve this line");
-    form.change_field("profile", "Work (work)");
-    let invocation = form.invocation(&form.draft.cwd).expect("valid launch");
-    assert_eq!(invocation.command, "agents.native.start");
-    assert_eq!(invocation.caller, Caller::Internal);
-    assert_eq!(
-        invocation.target,
-        form.destination()
-            .map(|destination| destination.target.clone())
-    );
-    assert_eq!(
-        &invocation.arguments[..3],
-        ["codex", "/project/current", "/provider/custom-codex"]
-    );
-    let argv: Vec<String> = serde_json::from_str(&invocation.arguments[3]).expect("literal argv");
-    assert_eq!(argv, ["--model", "configured-model"]);
-    assert_eq!(
-        &invocation.arguments[4..9],
-        [
-            "task-a123",
-            "work",
-            form.draft.identity.as_str(),
-            "Fix 'quotes'; $HOME `uname`",
-            "Fix 'quotes'; $HOME `uname`\nand preserve this line"
-        ]
-    );
-    assert_eq!(invocation.arguments.get(14).map(String::as_str), None);
-    assert_eq!(form.title(), "Fix 'quotes'; $HOME `uname`");
-    assert!(form.spec(false).multiline);
-    assert_eq!(form.spec(false).rows[0].label, "Start");
-}
-
-#[rstest]
-fn initial_attachments_are_separate_local_paths_and_survive_mode_switches(form: NewSessionForm) {
-    let form = std::cell::RefCell::new(form);
-    TestRunner::new(Config {
-        cases: 32,
-        ..Config::default()
-    })
-    .run(
-        &proptest::collection::vec("[a-z]{1,24}\\.png", 1..17),
-        |names| {
-            let paths = names
-                .iter()
-                .map(|name| {
-                    std::env::temp_dir()
-                        .join(name)
-                        .to_string_lossy()
-                        .into_owned()
-                })
-                .collect::<Vec<_>>();
-            let mut form = form.borrow_mut();
-            form.draft.attachments = paths
-                .iter()
-                .map(|path| NewSessionAttachment {
-                    path: path.as_str().into(),
-                    size_bytes: 10,
-                    prompt_ranges: Vec::new(),
-                    preview: None,
-                    temporary: None,
-                })
-                .collect();
-            form.change_field("mode", "Terminal");
-            assert_eq!(form.spec(false).attachments.len(), 0);
-            form.change_field("mode", "Agent");
-            assert_eq!(form.spec(false).attachments.len(), paths.len());
-            let invocation = form
-                .invocation(&form.draft.cwd)
-                .expect("local attachment draft");
-            assert_eq!(
-                invocation.arguments[9], "",
-                "account remains a separate optional argument"
-            );
-            let submitted: Vec<String> =
-                serde_json::from_str(&invocation.arguments[10]).expect("paths");
-            assert_eq!(submitted, paths);
-            assert!(
-                invocation.arguments[8].is_empty(),
-                "file-only draft keeps the prompt literal"
-            );
-            Ok(())
-        },
-    )
-    .expect("attachment draft properties");
-}
-
-#[rstest]
-fn attachment_only_enter_starts_an_agent_without_shell_fallback(form: NewSessionForm) {
-    use bootty_ui::{
-        gpui::{DialogId, DialogIntent},
-        presentation::dialogs::{NEW_SESSION_ID, NewSessionPickerEvent},
-    };
-    let mut dialog = ready_dialog(form).expect("project discovery");
-    let path = std::env::temp_dir()
-        .join("screenshot.png")
-        .to_string_lossy()
-        .into_owned();
-    let attachment = NewSessionAttachment {
-        path: path.clone().into(),
-        size_bytes: 10,
-        prompt_ranges: Vec::new(),
-        preview: None,
-        temporary: None,
-    };
-    dialog.apply(
-        &DialogIntent::AttachmentsChanged {
-            dialog: DialogId::new(NEW_SESSION_ID),
-            attachments: vec![attachment.clone()],
-        },
-        &[],
-    );
-    assert_eq!(dialog.draft().expect("draft").attachments, vec![attachment]);
-    let Some(NewSessionPickerEvent::Submit(invocation)) =
-        dialog.apply(&start_intent("enter-session"), &[])
-    else {
-        panic!("a file-only draft submits an agent without arming shell fallback");
-    };
-    assert_eq!(invocation.command, "agents.native.start");
-    assert_eq!(
-        invocation.arguments[10],
-        serde_json::to_string(&[path]).unwrap()
-    );
-    assert_eq!(
-        dialog
-            .draft()
-            .expect("retained until launch completes")
-            .attachments
-            .len(),
-        1
-    );
-}
-
-#[rstest]
 #[case("")]
 #[case("  \n\t")]
 #[case("printf 'one\\ntwo'\necho '$HOME'")]
 fn terminal_text_distinguishes_shell_from_command(mut form: NewSessionForm, #[case] text: &str) {
-    form.change_field("mode", "Terminal");
     form.change_text(text);
     let invocation = form.invocation(&form.draft.cwd).expect("terminal launch");
     assert_eq!(invocation.command, "session.create");
@@ -568,7 +397,7 @@ fn terminal_text_distinguishes_shell_from_command(mut form: NewSessionForm, #[ca
 }
 
 #[rstest]
-fn accepted_worktree_is_retained_when_provider_start_fails(
+fn accepted_worktree_is_retained_when_session_start_fails(
     form: NewSessionForm,
 ) -> anyhow::Result<()> {
     use bootty_control::CommandOutcome;
@@ -584,13 +413,13 @@ fn accepted_worktree_is_retained_when_provider_start_fails(
     let Some(NewSessionPickerEvent::Submit(first)) = dialog.poll() else {
         anyhow::bail!("Accepted worktree must submit session creation")
     };
-    assert_eq!(first.command, "agents.native.start");
+    assert_eq!(first.command, "session.create");
     assert_eq!(first.arguments[1], "/project/accepted-checkout");
     let (sender, reply) = std::sync::mpsc::channel();
     dialog.started(reply);
     sender.send(CommandOutcome::Failed {
-        code: "provider_failed".into(),
-        message: "Provider could not start".into(),
+        code: "backend_failed".into(),
+        message: "The backend could not start the session".into(),
     })?;
     assert_eq!(dialog.poll(), None);
     let draft = dialog.draft().expect("retained draft");
@@ -605,129 +434,9 @@ fn accepted_worktree_is_retained_when_provider_start_fails(
     else {
         anyhow::bail!("Retry must submit directly, without creating another worktree")
     };
-    assert_eq!(retry.command, "agents.native.start");
+    assert_eq!(retry.command, "session.create");
     assert_eq!(retry.arguments[1], first.arguments[1]);
     Ok(())
-}
-
-/// One prompt sent to several models starts each in its own worktree, named after the first,
-/// one after another, and creation ends after the last.
-#[rstest]
-fn a_prompt_sent_to_several_models_starts_each_in_its_own_worktree(
-    mut form: NewSessionForm,
-) -> anyhow::Result<()> {
-    use bootty_control::CommandOutcome;
-    use bootty_ui::presentation::{dialogs::NewSessionPickerEvent, new_session_form::FanOutModel};
-    let project = git_project()?;
-    form.set_directory(project.path().to_string_lossy().into_owned());
-    // The start waits for the project to prove it can make worktrees.
-    form.change_field("isolation", "New worktree");
-    form.change_text("Fix the login");
-    form.set_generated_names(bootty_agents::GeneratedSessionNames {
-        title: "Fix the login".to_owned(),
-        slug: "fix-login".to_owned(),
-    })
-    .map_err(anyhow::Error::msg)?;
-    let other = FanOutModel {
-        provider: "claude".to_owned(),
-        model: "claude-opus-5-5".to_owned(),
-        name: "Opus 5.5".to_owned(),
-    };
-    form.change_field("fan-out", &other.encode());
-    let mut dialog = ready_dialog(form)?;
-    let event = dialog.apply(&start_intent("start-session"), &[]);
-    let Some(NewSessionPickerEvent::CreateWorktree { repo, request }) = event else {
-        anyhow::bail!(
-            "several models need a worktree each, the first included: {event:?} {:?}",
-            dialog
-                .spec()
-                .rows
-                .first()
-                .and_then(|row| row.detail.clone())
-        )
-    };
-    assert_eq!(request.name.as_deref(), Some("fix-login"));
-    let start = |dialog: &mut bootty_ui::presentation::dialogs::NewSessionDialog,
-                 checkout: &str|
-     -> anyhow::Result<NewSessionPickerEvent> {
-        let (sender, reply) = std::sync::mpsc::channel();
-        dialog.worktree_started(reply);
-        sender.send(CommandOutcome::Success {
-            value: serde_json::json!(checkout),
-            warnings: Vec::new(),
-        })?;
-        let Some(NewSessionPickerEvent::Submit(invocation)) = dialog.poll() else {
-            anyhow::bail!("a made worktree starts its session")
-        };
-        assert_eq!(invocation.arguments[1], checkout);
-        let (sender, reply) = std::sync::mpsc::channel();
-        dialog.started(reply);
-        sender.send(CommandOutcome::Success {
-            value: serde_json::json!({}),
-            warnings: Vec::new(),
-        })?;
-        dialog
-            .poll()
-            .ok_or_else(|| anyhow::anyhow!("a started session reports it"))
-    };
-    assert_eq!(repo, project.path().to_string_lossy());
-    let first = start(&mut dialog, "/project/fix-login")?;
-    anyhow::ensure!(matches!(first, NewSessionPickerEvent::Started { .. }));
-    let Some(NewSessionPickerEvent::CreateWorktree {
-        repo: next_repo,
-        request: next,
-    }) = dialog.next_fan_out()
-    else {
-        anyhow::bail!("the next model gets its own worktree")
-    };
-    assert_eq!(
-        next_repo, repo,
-        "every worktree comes from the project itself"
-    );
-    assert_eq!(next.name.as_deref(), Some("fix-login-claude-opus-5-5"));
-    assert_eq!(
-        dialog.draft().map(|draft| draft.provider.clone()),
-        Some("claude".to_owned())
-    );
-    let second = start(&mut dialog, "/project/fix-login-claude-opus-5-5")?;
-    anyhow::ensure!(matches!(second, NewSessionPickerEvent::Started { .. }));
-    assert_eq!(
-        dialog.next_fan_out(),
-        None,
-        "creation ends after the last model"
-    );
-    Ok(())
-}
-
-/// A project with one commit, where new worktrees can be made.
-fn git_project() -> anyhow::Result<assert_fs::TempDir> {
-    let repo = assert_fs::TempDir::new()?;
-    for args in [
-        &["init", "--quiet"][..],
-        &[
-            "-c",
-            "user.name=Bootty Test",
-            "-c",
-            "user.email=bootty@example.invalid",
-            "commit",
-            "--quiet",
-            "--allow-empty",
-            "-m",
-            "initial",
-        ],
-    ] {
-        let output = std::process::Command::new("git")
-            .arg("-C")
-            .arg(repo.path())
-            .args(args)
-            .output()?;
-        anyhow::ensure!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(repo)
 }
 
 #[rstest]
@@ -744,14 +453,16 @@ fn worktree_is_optional_generated_editable_and_capability_bounded(mut form: NewS
     form.change_field("isolation", "New worktree");
     assert_eq!(form.draft.branch, "");
     assert_eq!(form.draft.folder, "");
-    form.set_generated_names(bootty_agents::GeneratedSessionNames {
-        title: "Improve composer".into(),
-        slug: "improve-composer".into(),
-    })
-    .expect("valid generated names");
-    assert_eq!(form.title(), "Improve composer");
-    assert_eq!(form.draft.branch, "bootty/improve-composer");
-    assert_eq!(form.draft.folder, "improve-composer");
+    // Empty names fall back to ones generated from the draft's unique suffix.
+    assert_eq!(
+        form.worktree_request(),
+        Ok(Some(bootty_git::WorktreeRequest {
+            branch: "bootty/terminal-a123".to_owned(),
+            name: Some("terminal-a123".to_owned()),
+            start_ref: Some("HEAD".to_owned()),
+            directory: None,
+        }))
+    );
     let footer = form.spec(false).footer;
     form.set_worktree_directory(Some("/srv/checkouts".to_owned()));
     let namespace = bootty_config::ApplicationIdentity::for_process().namespace();
@@ -763,8 +474,8 @@ fn worktree_is_optional_generated_editable_and_capability_bounded(mut form: NewS
     assert_eq!(
         [footer, form.spec(false).footer],
         [
-            Some(format!("{default}/current/improve-composer")),
-            Some("/srv/checkouts/current/improve-composer".to_owned()),
+            Some(format!("{default}/current/terminal-a123")),
+            Some("/srv/checkouts/current/terminal-a123".to_owned()),
         ]
     );
     for (field, value) in [
@@ -798,130 +509,16 @@ fn worktree_is_optional_generated_editable_and_capability_bounded(mut form: NewS
 }
 
 #[rstest]
-fn native_provider_choices_keep_codex_profile_and_disabled_start_keeps_draft(
-    mut form: NewSessionForm,
-) {
-    form.change_text("A useful task title");
-    form.change_field("profile", "Work (work)");
-    form.change_field("provider", "pi");
-    form.change_field("provider", "Claude");
-    assert_eq!(form.draft.provider, "claude");
-    assert_eq!(
-        form.invocation(&form.draft.cwd)
-            .expect("Claude launch")
-            .arguments[0],
-        "claude"
-    );
-    form.change_field("provider", "codex");
-    let spec = form.spec(false);
-    let provider = spec
-        .fields
-        .iter()
-        .find(|field| field.id == "provider")
-        .expect("provider choice");
-    assert_eq!(
-        provider.kind,
-        bootty_ui::gpui::DialogFieldKind::Choice(vec![
-            "Pi".to_owned(),
-            "Codex".to_owned(),
-            "Claude".to_owned()
-        ])
-    );
-    assert_eq!(
-        form.invocation(&form.draft.cwd).expect("launch").arguments[5],
-        "work"
-    );
-    form.error = Some("The host is unavailable".to_owned());
-    let spec = form.spec(true);
-    assert!(!spec.rows[0].enabled);
-    assert_eq!(
-        spec.rows[0].detail.as_deref(),
-        Some("The host is unavailable")
-    );
-    assert_eq!(form.draft.prompt, "A useful task title");
-}
-
-#[rstest]
-#[case::claude("claude", "claude")]
-#[case::pi("pi", "pi")]
-#[case::codex("codex", "codex")]
-#[case::unknown("unknown", "codex")]
-fn retained_native_provider_keeps_supported_selection_and_account_drafts(
-    mut form: NewSessionForm,
-    #[case] provider: &str,
-    #[case] expected: &str,
-) {
-    form.change_text("Keep this native task");
-    provider.clone_into(&mut form.draft.provider);
-    form.draft
-        .profiles
-        .insert(provider.to_owned(), "saved-account".to_owned());
-    let destination = form.destination().expect("current destination").clone();
-    let mut providers = AgentProvidersConfig::default();
-    for (id, config) in [
-        ("codex", &mut providers.codex),
-        ("claude", &mut providers.claude),
-        ("pi", &mut providers.pi),
-    ] {
-        config.profiles.insert(
-            "saved-account".to_owned(),
-            AgentProfileConfig {
-                name: "Saved account".to_owned(),
-                directory: Some(format!("/account/{id}/retained")),
-                arguments: vec!["--model".to_owned(), format!("saved-{id}-model")],
-            },
-        );
-    }
-    let target = destination.target.clone();
-    let form = NewSessionForm::new(form.draft, vec![destination], providers);
-    assert_eq!(form.draft.provider, expected);
-    assert_eq!(form.draft.prompt, "Keep this native task");
-    assert_eq!(
-        form.draft.profiles.get(provider).map(String::as_str),
-        Some("saved-account")
-    );
-    let launch = form.invocation(&form.draft.cwd).expect("native launch");
-    assert_eq!(launch.command, "agents.native.start");
-    assert_eq!(launch.target, Some(target));
-    assert_eq!(launch.arguments[0], expected);
-    assert_eq!(launch.arguments[8], "Keep this native task");
-    let argv: Vec<String> = serde_json::from_str(&launch.arguments[3]).expect("profile argv");
-    if provider == expected {
-        assert_eq!(launch.arguments[5], "saved-account");
-        assert_eq!(
-            argv,
-            ["--model".to_owned(), format!("saved-{provider}-model")]
-        );
-    } else {
-        assert_eq!(launch.arguments[5], "");
-        assert_eq!(argv, Vec::<String>::new());
-    }
-}
-
-#[rstest]
 #[case("")]
 #[case("printf '%s' '$HOME'")]
-fn remote_host_preserves_native_and_terminal_creation(
-    mut form: NewSessionForm,
+fn remote_host_runs_terminal_commands_through_its_login_shell(
+    form: NewSessionForm,
     #[case] command: &str,
 ) {
-    form.change_text("Retain the agent prompt");
     let mut destination = form.destination().expect("destination").clone();
     destination.remote =
         Some(bootty_config::config::SshRemoteConfig::for_host("remote-host").into());
-    let mut form = NewSessionForm::new(
-        form.draft,
-        vec![destination.clone()],
-        AgentProvidersConfig::default(),
-    );
-    let spec = form.spec(false);
-    assert!(spec.rows[0].enabled);
-    let invocation = form
-        .invocation(&form.draft.cwd)
-        .expect("remote native launch");
-    assert_eq!(invocation.command, "agents.native.start");
-    assert_eq!(invocation.target, Some(destination.target.clone()));
-    form.change_field("mode", "Terminal");
+    let mut form = NewSessionForm::new(form.draft, vec![destination.clone()]);
     form.change_text(command);
     let invocation = form
         .invocation(&form.draft.cwd)
@@ -936,21 +533,11 @@ fn remote_host_preserves_native_and_terminal_creation(
     } else {
         assert_eq!(argv, ["/bin/sh", "-lc", command]);
     }
-    form.change_field("mode", "Agent");
-    assert_eq!(form.draft.prompt, "Retain the agent prompt");
     assert_eq!(form.draft.command, command);
-    assert!(form.spec(false).rows[0].enabled);
 }
 
 fn ready_dialog(
     form: NewSessionForm,
-) -> anyhow::Result<bootty_ui::presentation::dialogs::NewSessionDialog> {
-    ready_session_dialog(form, false)
-}
-
-fn ready_session_dialog(
-    form: NewSessionForm,
-    native: bool,
 ) -> anyhow::Result<bootty_ui::presentation::dialogs::NewSessionDialog> {
     use std::{
         sync::{Arc, mpsc},
@@ -960,11 +547,7 @@ fn ready_session_dialog(
     let repaint: bootty_mux::RepaintHandle = Arc::new(move || {
         let _ = sender.send(());
     });
-    let mut dialog = if native {
-        bootty_ui::presentation::dialogs::NewSessionDialog::open_native_form(form, &repaint)
-    } else {
-        bootty_ui::presentation::dialogs::NewSessionDialog::open_form(form, &repaint)
-    };
+    let mut dialog = bootty_ui::presentation::dialogs::NewSessionDialog::open_form(form, &repaint);
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(2))
         .ok_or_else(|| anyhow::anyhow!("discovery deadline overflow"))?;
@@ -989,142 +572,23 @@ fn start_intent(action: &str) -> bootty_ui::gpui::DialogIntent {
 }
 
 #[rstest]
-fn empty_enter_arms_visibly_and_edits_reset_shell_fallback(mut form: NewSessionForm) {
-    use bootty_ui::{
-        gpui::{DialogId, DialogIntent},
-        presentation::dialogs::{NEW_SESSION_ID, NewSessionPickerEvent},
-    };
-    "saved command draft".clone_into(&mut form.draft.command);
+fn start_submits_once_until_its_outcome_is_observed(mut form: NewSessionForm) {
+    use bootty_ui::presentation::dialogs::NewSessionPickerEvent;
+    form.change_text("cargo test");
     let original_target = form.destination().expect("destination").target.clone();
     let mut dialog = ready_dialog(form).expect("project discovery");
-    let enter = start_intent("enter-session");
-    assert_eq!(dialog.apply(&enter, &[]), None);
-    assert!(
-        dialog
-            .spec()
-            .hint
-            .expect("visible hint")
-            .contains("Enter again")
-    );
-    for value in ["edited prompt", ""] {
-        assert_eq!(
-            dialog.apply(
-                &DialogIntent::TextChanged {
-                    dialog: DialogId::new(NEW_SESSION_ID),
-                    value: value.to_owned()
-                },
-                &[]
-            ),
-            None
-        );
-    }
-    assert_eq!(
-        dialog.apply(
-            &DialogIntent::TextChanged {
-                dialog: DialogId::new(NEW_SESSION_ID),
-                value: String::new(),
-            },
-            &[]
-        ),
-        None
-    );
-    assert_eq!(
-        dialog.apply(&enter, &[]),
-        None,
-        "editing reset the first Enter"
-    );
-    let Some(NewSessionPickerEvent::Submit(invocation)) = dialog.apply(&enter, &[]) else {
-        panic!("second empty Enter submits one shell");
-    };
-    assert_eq!(invocation.command, "session.create");
-    assert_eq!(invocation.target, Some(original_target));
-    assert_eq!(invocation.arguments[2], "[]");
-    assert_eq!(
-        dialog.draft().expect("draft").command,
-        "saved command draft"
-    );
-    assert_eq!(dialog.draft().expect("draft").mode, NewSessionMode::Agent);
-    assert_eq!(
-        dialog.apply(&enter, &[]),
-        None,
-        "accepted Start cannot duplicate creation"
-    );
-}
-
-#[rstest]
-fn retry_after_an_empty_enter_failure_starts_the_requested_shell(form: NewSessionForm) {
-    use bootty_ui::presentation::dialogs::NewSessionPickerEvent;
-    let mut dialog = ready_dialog(form).expect("project discovery");
-    let enter = start_intent("enter-session");
-    assert_eq!(dialog.apply(&enter, &[]), None);
-    assert!(matches!(
-        dialog.apply(&enter, &[]),
-        Some(NewSessionPickerEvent::Submit(_))
-    ));
-    let (sender, reply) = std::sync::mpsc::channel();
-    dialog.started(reply);
-    sender
-        .send(bootty_control::CommandOutcome::Failed {
-            code: "backend_failed".into(),
-            message: "Permission denied".into(),
-        })
-        .unwrap();
-    assert_eq!(dialog.poll(), None);
     let Some(NewSessionPickerEvent::Submit(invocation)) =
         dialog.apply(&start_intent("start-session"), &[])
     else {
-        panic!("Retry submits the failed shell request");
+        panic!("creation submits immediately");
     };
-    assert_eq!(invocation.command, "session.create");
-    assert_eq!(invocation.arguments[2], "[]");
-}
-
-#[rstest]
-fn unchanged_composer_echoes_preserve_empty_enter_confirmation(form: NewSessionForm) {
-    use bootty_ui::{
-        gpui::{DialogId, DialogIntent},
-        presentation::dialogs::{NEW_SESSION_ID, NewSessionPickerEvent},
-    };
-    let mut dialog = ready_dialog(form).expect("project discovery");
-    let enter = start_intent("enter-session");
-    assert_eq!(dialog.apply(&enter, &[]), None);
-    for event in [
-        DialogIntent::TextChanged {
-            dialog: DialogId::new(NEW_SESSION_ID),
-            value: String::new(),
-        },
-        DialogIntent::AttachmentsChanged {
-            dialog: DialogId::new(NEW_SESSION_ID),
-            attachments: Vec::new(),
-        },
-    ] {
-        assert_eq!(dialog.apply(&event, &[]), None);
-    }
-    assert!(
-        matches!(dialog.apply(&enter, &[]), Some(NewSessionPickerEvent::Submit(invocation)) if invocation.command == "session.create")
+    assert_eq!(invocation.arguments[4], "cargo test");
+    assert_eq!(
+        dialog.apply(&start_intent("start-session"), &[]),
+        None,
+        "accepted Start cannot duplicate creation"
     );
-}
-
-#[rstest]
-#[case("enter-session", true)]
-#[case("start-session", true)]
-#[case("start-session-background", false)]
-fn launch_direction_is_retained_until_observed_success(
-    mut form: NewSessionForm,
-    #[case] action: &str,
-    #[case] foreground: bool,
-) {
-    use bootty_ui::presentation::dialogs::NewSessionPickerEvent;
-    form.change_text("Fix the native composer");
-    let original_target = form.destination().expect("destination").target.clone();
-    let mut dialog = ready_dialog(form).expect("project discovery");
-    let Some(NewSessionPickerEvent::Submit(invocation)) = dialog.apply(&start_intent(action), &[])
-    else {
-        panic!("Ordinary creation submits immediately without waiting for naming");
-    };
-    assert_eq!(invocation.arguments[8], "Fix the native composer");
-    assert_eq!(dialog.apply(&start_intent(action), &[]), None);
-    assert_eq!(invocation.command, "agents.native.start");
+    assert_eq!(invocation.command, "session.create");
     assert_eq!(invocation.target, Some(original_target));
     let (sender, receiver) = std::sync::mpsc::channel();
     dialog.started(receiver);
@@ -1132,9 +596,10 @@ fn launch_direction_is_retained_until_observed_success(
         value: serde_json::json!({"terminal": {"kind": "terminal", "handle": "issued", "generation": 9}}),
         warnings: Vec::new(),
     }).expect("observed outcome");
-    assert!(
-        matches!(dialog.poll(), Some(NewSessionPickerEvent::Started { foreground: observed, .. }) if observed == foreground)
-    );
+    assert!(matches!(
+        dialog.poll(),
+        Some(NewSessionPickerEvent::Started { setup: None, .. })
+    ));
 }
 
 /// A session that starts in a worktree the dialog just made names that worktree's repository,
@@ -1181,229 +646,6 @@ fn a_session_in_a_new_worktree_runs_its_project_setup(form: NewSessionForm) {
 }
 
 #[rstest]
-fn native_launcher_reads_the_inherited_branch_without_exposing_checkout_changes(
-    mut form: NewSessionForm,
-) {
-    use bootty_ui::presentation::dialogs::{NewSessionDialog, NewSessionPickerEvent};
-    form.set_worktree_available(true);
-    let invocation = form.branch_catalog_invocation().expect("branch request");
-    let cwd = form.draft.cwd.clone();
-    let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
-    let mut dialog = NewSessionDialog::open_native_form(form, &repaint);
-    assert_eq!(
-        dialog.poll(),
-        Some(NewSessionPickerEvent::Catalog(invocation.clone()))
-    );
-    let (sender, receiver) = std::sync::mpsc::channel();
-    dialog.catalog_started(invocation, receiver);
-    sender
-        .send(bootty_control::CommandOutcome::Success {
-            value: serde_json::json!({"root": cwd, "history": [], "branches": [{
-            "name": "feature/inherited", "commit": "abc123", "current": true,
-            "worktree_path": cwd, "upstream": null
-        }], "stashes": []}),
-            warnings: Vec::new(),
-        })
-        .unwrap();
-    dialog.poll();
-    let spec = dialog.spec();
-    assert_eq!(spec.footer.as_deref(), Some(cwd.as_str()));
-    assert_eq!(
-        spec.branches.first().map(|branch| branch.name.as_str()),
-        Some("feature/inherited")
-    );
-    assert!(
-        !spec
-            .fields
-            .iter()
-            .any(|field| matches!(field.id.as_str(), "host" | "isolation" | "checkout-branch"))
-    );
-}
-
-#[rstest]
-#[case("enter-session")]
-#[case("start-session")]
-fn explicit_native_launcher_starts_without_a_prompt_and_keeps_account_and_terminal_drafts(
-    mut form: NewSessionForm,
-    #[case] action: &str,
-) {
-    form.draft.mode = NewSessionMode::Terminal;
-    "saved terminal command".clone_into(&mut form.draft.command);
-    form.change_field("profile", "Work (work)");
-    let target = form.destination().expect("destination").target.clone();
-    let cwd = form.draft.cwd.clone();
-    let identity = form.draft.identity.clone();
-    let mut dialog = ready_session_dialog(form, true).expect("discovery");
-    let spec = dialog.spec();
-    assert!(spec.fields.iter().all(|field| matches!(
-        field.id.as_str(),
-        "provider" | "profile" | "permissions" | "fast-mode" | "plan-mode" | "goal"
-    )));
-    assert!(spec.fields.iter().any(|field| field.id == "permissions"));
-    dialog.apply(
-        &bootty_ui::gpui::DialogIntent::FieldChanged {
-            dialog: bootty_ui::gpui::DialogId::new(
-                bootty_ui::presentation::dialogs::NEW_SESSION_ID,
-            ),
-            field: "permissions".to_owned(),
-            value: "Supervised".to_owned(),
-        },
-        &[],
-    );
-    assert_eq!(
-        dialog.draft().expect("draft").permissions,
-        bootty_agents::NativePermissionMode::Supervised
-    );
-    assert!(spec.rows.iter().all(|row| row.id.0 != "choose-project"));
-    for (field, value) in [("host", "elsewhere"), ("isolation", "New worktree")] {
-        dialog.apply(
-            &bootty_ui::gpui::DialogIntent::FieldChanged {
-                dialog: bootty_ui::gpui::DialogId::new(
-                    bootty_ui::presentation::dialogs::NEW_SESSION_ID,
-                ),
-                field: field.to_owned(),
-                value: value.to_owned(),
-            },
-            &[],
-        );
-    }
-
-    let Some(bootty_ui::presentation::dialogs::NewSessionPickerEvent::Submit(invocation)) =
-        dialog.apply(&start_intent(action), &[])
-    else {
-        panic!("explicit native launch submits on its first activation");
-    };
-    assert_eq!(invocation.command, "agents.native.tab");
-    assert!(invocation.arguments[7].starts_with("codex in "));
-    assert_eq!(invocation.arguments[1], cwd);
-    assert_eq!(invocation.arguments[6], identity);
-    assert_eq!(invocation.target, Some(target));
-    assert_eq!(invocation.arguments[0], "codex");
-    assert_eq!(invocation.arguments[2], "/provider/custom-codex");
-    assert_eq!(invocation.arguments[5], "work");
-    assert_eq!(invocation.arguments[8], "");
-    assert_eq!(
-        dialog.draft().expect("draft").command,
-        "saved terminal command"
-    );
-}
-
-#[rstest]
-#[case(Caller::CommandPalette)]
-#[case(Caller::Keybinding)]
-#[case(Caller::Cli)]
-#[case(Caller::Socket)]
-fn native_launcher_is_discoverable_and_resolves_through_each_shared_caller(#[case] caller: Caller) {
-    let catalog = bootty_ui::commands::CommandCatalog::default();
-    let invocation = bootty_control::CommandInvocation::from_action("agents.native.open", caller);
-    let resolved = catalog.resolve(invocation).expect("shared native launcher");
-    assert!(resolved.descriptor.palette);
-    assert_eq!(
-        resolved.descriptor.target,
-        Some(ResourceKind::ApplicationWindow)
-    );
-    assert_eq!(resolved.invocation.caller, caller);
-    assert!(matches!(
-        resolved.executor,
-        bootty_ui::commands::CommandExecutor::Core(
-            bootty_ui::commands::CoreCommandExecutor::Keybind(
-                bootty_ui::app_actions::KeybindAction::App(
-                    bootty_ui::app_actions::AppAction::NewNativeAgentTab
-                )
-            )
-        )
-    ));
-}
-
-#[rstest]
-#[case(false, "Provider model")]
-#[case(true, "Provider model (provider-model)")]
-fn discovered_creation_controls_send_provider_selectors_and_reset_on_profile_change(
-    mut form: NewSessionForm,
-    #[case] duplicate_name: bool,
-    #[case] model_label: &str,
-    #[values(false, true)] fast_supported: bool,
-) {
-    let model = bootty_agents::NativeModelOption {
-        id: "provider-model".to_owned(),
-        display_name: "Provider model".to_owned(),
-        reasoning_efforts: vec!["medium".to_owned(), "high".to_owned()],
-        default_reasoning_effort: Some("medium".to_owned()),
-        is_default: true,
-        is_legacy: false,
-        is_favorite: false,
-        supports_fast_mode: fast_supported,
-        fast_mode_detail: None,
-    };
-    let mut catalog = vec![model.clone()];
-    if duplicate_name {
-        catalog.push(bootty_agents::NativeModelOption {
-            id: "another-provider-model".to_owned(),
-            is_default: false,
-            is_legacy: false,
-            is_favorite: false,
-            supports_fast_mode: fast_supported,
-            fast_mode_detail: None,
-            ..model
-        });
-    }
-    form.set_model_catalog(Ok(catalog));
-    form.change_field("model", model_label);
-    form.change_field("fast-mode", "true");
-    form.change_field("reasoning", "high");
-    // Changing model or effort keeps the chosen speed in the same captured launch.
-    form.change_field("model", model_label);
-    form.change_field("reasoning", "high");
-    let spec = form.spec(false);
-    assert_eq!(
-        spec.fields
-            .iter()
-            .find(|field| field.id == "model")
-            .unwrap()
-            .value,
-        model_label
-    );
-    assert_eq!(
-        spec.fields
-            .iter()
-            .find(|field| field.id == "reasoning")
-            .unwrap()
-            .value,
-        "high"
-    );
-    let invocation = form.invocation(&form.draft.cwd).unwrap();
-    assert_eq!(invocation.arguments[9], "");
-    assert_eq!(invocation.arguments[10], "");
-    let selected: bootty_agents::NativeModelSelection =
-        serde_json::from_str(&invocation.arguments[11]).unwrap();
-    assert_eq!(selected.fast_mode, Some(fast_supported));
-    assert_eq!(selected.model, "provider-model");
-    assert_eq!(selected.reasoning_effort.as_deref(), Some("high"));
-    let mut surface = invocation.clone();
-    "surface.create_agent".clone_into(&mut surface.command);
-    surface.arguments.insert(0, "41".to_owned());
-    surface.target = None;
-    let resolved = bootty_ui::commands::CommandCatalog::default()
-        .resolve(surface)
-        .expect("captured tab/split admits the same attachment and model arguments");
-    assert!(matches!(
-        resolved.executor,
-        bootty_ui::commands::CommandExecutor::Core(
-            bootty_ui::commands::CoreCommandExecutor::Surface(
-                bootty_ui::commands::SurfaceCommand::CreateAgent { id: 41, arguments }
-            )
-        ) if arguments == invocation.arguments
-    ));
-    let catalog = form.model_catalog_invocation().unwrap();
-    assert_eq!(catalog.command, "agents.native.catalog-info");
-    assert_eq!(catalog.arguments.len(), 6);
-    assert_eq!(catalog.target, invocation.target);
-    form.change_field("profile", "Work (work)");
-    assert!(form.draft.model_selection.is_none());
-    assert_eq!(form.model_options, []);
-}
-
-#[rstest]
 fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessionForm) {
     use assert_fs::{TempDir, prelude::*};
     use bootty_ui::{
@@ -1427,7 +669,6 @@ fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessio
         .unwrap();
     form.set_directory(first.clone());
     form.change_text("Keep the draft when changing projects");
-    let provider = form.draft.provider.clone();
     let (sender, wakes) = mpsc::channel();
     let repaint: bootty_mux::RepaintHandle = Arc::new(move || {
         let _ = sender.send(());
@@ -1456,10 +697,9 @@ fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessio
     assert_eq!(dialog.spec().role, DialogRole::Prompt);
     assert_eq!(dialog.draft().unwrap().cwd, second);
     assert_eq!(
-        dialog.draft().unwrap().prompt,
+        dialog.draft().unwrap().command,
         "Keep the draft when changing projects"
     );
-    assert_eq!(dialog.draft().unwrap().provider, provider);
 }
 
 #[rstest]
@@ -1492,7 +732,6 @@ fn project_discovery_waits_for_the_prior_picker(
     let prior_form = NewSessionForm::new(
         form.draft.clone(),
         vec![form.destination().expect("destination").clone()],
-        AgentProvidersConfig::default(),
     );
     let mut prior = Some(NewSessionDialog::open_registered_form(
         prior_form,
@@ -1534,47 +773,13 @@ fn project_discovery_waits_for_the_prior_picker(
 }
 
 #[rstest]
-fn permission_choices_reset_with_provider_and_use_the_shared_invocation(mut form: NewSessionForm) {
-    form.change_text("Keep this prompt");
-    form.change_field("permissions", "Auto");
-    assert_eq!(
-        form.invocation(&form.draft.cwd).unwrap().arguments[14],
-        "auto"
-    );
-    form.change_field("provider", "Claude");
-    assert_eq!(
-        form.draft.permissions,
-        bootty_agents::NativePermissionMode::ProviderDefault
-    );
-    let spec = form.spec(false);
-    let permissions = spec
-        .fields
-        .iter()
-        .find(|field| field.id == "permissions")
-        .unwrap();
-    let bootty_ui::gpui::DialogFieldKind::Choice(options) = &permissions.kind else {
-        panic!("Permission menu")
-    };
-    assert_eq!(
-        options,
-        &["Supervised", "Auto-accept edits", "Auto", "Full access"]
-    );
-    form.change_field("permissions", "Supervised");
-    assert_eq!(
-        form.invocation(&form.draft.cwd).unwrap().arguments[14],
-        "supervised"
-    );
-    assert_eq!(form.draft.prompt, "Keep this prompt");
-}
-
-#[rstest]
 #[case(bootty_control::CommandOutcome::deadline_exceeded())]
-#[case(bootty_control::CommandOutcome::Failed { code: "launch".into(), message: "Provider failed".into() })]
-fn failed_creation_can_switch_provider_without_reusing_the_failed_task(
+#[case(bootty_control::CommandOutcome::Failed { code: "launch".into(), message: "Backend failed".into() })]
+fn failed_creation_keeps_the_draft_without_reusing_the_failed_task(
     mut form: NewSessionForm,
     #[case] outcome: bootty_control::CommandOutcome,
 ) {
-    form.change_text("Keep this prompt");
+    form.change_text("Keep this command");
     let original = form.draft.identity.clone();
     let mut dialog = ready_dialog(form).expect("discovery");
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -1583,77 +788,14 @@ fn failed_creation_can_switch_provider_without_reusing_the_failed_task(
     assert_eq!(dialog.poll(), None);
     let draft = dialog.draft().expect("draft");
     assert_ne!(draft.identity, original);
-    assert_eq!(draft.prompt, "Keep this prompt");
-    dialog.apply(
-        &bootty_ui::gpui::DialogIntent::FieldChanged {
-            dialog: dialog.spec().id,
-            field: "provider".into(),
-            value: "Pi".into(),
-        },
-        &[],
-    );
-    assert_eq!(dialog.draft().expect("draft").provider, "pi");
+    assert_eq!(draft.command, "Keep this command");
     assert!(!dialog.spec().busy);
-}
-
-#[rstest]
-#[case("preferred", "high")]
-#[case("unavailable", "medium")]
-fn composer_defaults_resolve_advertised_values_and_preserve_explicit_choices(
-    form: NewSessionForm,
-    #[case] preferred: &str,
-    #[case] effort: &str,
-) {
-    let mut providers = AgentProvidersConfig::default();
-    providers.codex.default_model = preferred.to_owned();
-    providers.codex.default_effort = "high".to_owned();
-    let destination = form.destination().unwrap().clone();
-    let mut form = NewSessionForm::new(form.draft, vec![destination], providers);
-    let recommended = bootty_agents::NativeModelOption {
-        id: "recommended".into(),
-        display_name: "Recommended".into(),
-        reasoning_efforts: vec!["medium".into()],
-        default_reasoning_effort: Some("medium".into()),
-        is_default: true,
-        is_legacy: false,
-        is_favorite: false,
-        supports_fast_mode: false,
-        fast_mode_detail: None,
-    };
-    let catalog = vec![
-        recommended.clone(),
-        bootty_agents::NativeModelOption {
-            id: "preferred".into(),
-            display_name: "Preferred".into(),
-            reasoning_efforts: vec!["medium".into(), "high".into()],
-            is_default: false,
-            ..recommended
-        },
-    ];
-    form.set_model_catalog(Ok(catalog.clone()));
-    let selected = form.draft.model_selection.as_ref().unwrap();
-    assert_eq!(
-        selected.model,
-        if preferred == "preferred" {
-            "preferred"
-        } else {
-            "recommended"
-        }
-    );
-    assert_eq!(selected.reasoning_effort.as_deref(), Some(effort));
-    form.change_field("model", "Preferred");
-    form.change_field("reasoning", "medium");
-    form.set_model_catalog(Ok(catalog));
-    let selected: bootty_agents::NativeModelSelection =
-        serde_json::from_str(&form.invocation(&form.draft.cwd).unwrap().arguments[11]).unwrap();
-    assert_eq!(selected.model, "preferred");
-    assert_eq!(selected.reasoning_effort.as_deref(), Some("medium"));
 }
 
 /// A new worktree's branch starts with the configured prefix, unless its project sets its own.
 #[rstest]
-#[case::configured("", "team/improve-composer")]
-#[case::project("work/", "work/improve-composer")]
+#[case::configured("", "team/terminal-a123")]
+#[case::project("work/", "work/terminal-a123")]
 fn worktree_branches_start_with_the_configured_or_project_prefix(
     mut form: NewSessionForm,
     #[case] project_prefix: &str,
@@ -1672,12 +814,12 @@ fn worktree_branches_start_with_the_configured_or_project_prefix(
     }]);
     form.set_worktree_available(true);
     form.change_field("isolation", "New worktree");
-    form.set_generated_names(bootty_agents::GeneratedSessionNames {
-        title: "Improve composer".into(),
-        slug: "improve-composer".into(),
-    })
-    .expect("valid generated names");
-    assert_eq!(form.draft.branch, branch);
+    assert_eq!(
+        form.worktree_request()
+            .expect("valid worktree")
+            .map(|request| request.branch),
+        Some(branch.to_owned())
+    );
 }
 
 #[rstest]
@@ -1689,14 +831,12 @@ fn project_defaults_apply_to_creation_and_survive_a_created_worktree(mut form: N
         collapsed: false,
         settings: ProjectSettings {
             name: "My project".to_owned(),
-            provider: "claude".to_owned(),
             isolated: true,
             branch_prefix: "work/".to_owned(),
             start_ref: "main".to_owned(),
             ..ProjectSettings::default()
         },
     }]);
-    assert_eq!(form.draft.provider, "claude");
     assert_eq!(
         form.spec(false)
             .project_labels
@@ -1706,553 +846,20 @@ fn project_defaults_apply_to_creation_and_survive_a_created_worktree(mut form: N
     );
     assert!(form.draft.isolated);
     assert_eq!(form.draft.start_ref, "main");
-    let selection = bootty_agents::NativeModelSelection {
-        plan_mode: None,
-        fast_mode: None,
-        model: "chosen".to_owned(),
-        reasoning_effort: None,
-    };
-    form.draft.model_selection = Some(selection.clone());
     form.set_directory("/new/worktree".to_owned());
-    assert_eq!(form.draft.provider, "claude");
-    assert_eq!(
-        form.draft
-            .model_selection
-            .as_ref()
-            .map(|value| &value.model),
-        Some(&selection.model)
-    );
+    assert!(form.draft.isolated);
+    assert_eq!(form.draft.start_ref, "main");
 }
 
 #[rstest]
-#[case("provider", "Claude")]
-#[case("profile", "Work (work)")]
-fn permission_defaults_follow_the_selected_account_without_overriding_its_policy(
-    mut form: NewSessionForm,
-    #[case] field: &str,
-    #[case] value: &str,
-) {
-    use bootty_agents::{NativePermissionMode, NativeProviderCatalog};
-    form.change_text("Keep the draft");
-    form.set_provider_catalog(Ok(NativeProviderCatalog {
-        models: Vec::new(),
-        permissions: Some(NativePermissionMode::FullAccess),
-    }));
-    assert_eq!(
-        form.permission_selection(),
-        NativePermissionMode::FullAccess
-    );
-    assert_eq!(
-        form.draft.permissions,
-        NativePermissionMode::ProviderDefault
-    );
-    assert_eq!(
-        form.invocation(&form.draft.cwd).unwrap().arguments.get(14),
-        None
-    );
-    let spec = form.spec(false);
-    assert_eq!(
-        spec.fields
-            .iter()
-            .find(|field| field.id == "permissions")
-            .unwrap()
-            .value,
-        "Full access"
-    );
-    form.change_field("permissions", "Supervised");
-    // An asynchronous catalog refresh must preserve an explicit user choice.
-    form.set_provider_catalog(Ok(NativeProviderCatalog {
-        models: Vec::new(),
-        permissions: Some(NativePermissionMode::FullAccess),
-    }));
-    assert_eq!(
-        form.permission_selection(),
-        NativePermissionMode::Supervised
-    );
-    form.change_field(field, value);
-    assert_eq!(
-        form.draft.permissions,
-        NativePermissionMode::ProviderDefault
-    );
-    assert_eq!(
-        form.permission_selection(),
-        NativePermissionMode::ProviderDefault
-    );
-    form.set_provider_catalog(Ok(NativeProviderCatalog {
-        models: Vec::new(),
-        permissions: Some(NativePermissionMode::AutoAcceptEdits),
-    }));
-    assert_eq!(
-        form.permission_selection(),
-        NativePermissionMode::AutoAcceptEdits
-    );
-    assert_eq!(
-        form.invocation(&form.draft.cwd).unwrap().arguments.get(14),
-        None
-    );
-    assert_eq!(form.draft.prompt, "Keep the draft");
-}
-
-#[rstest]
-fn provider_catalogs_restore_only_for_the_exact_provider_profile_and_target(
-    mut form: NewSessionForm,
-) {
-    use bootty_agents::{NativeModelOption, NativePermissionMode, NativeProviderCatalog};
-
-    let model = |id: &str| NativeModelOption {
-        id: id.to_owned(),
-        display_name: id.to_owned(),
-        reasoning_efforts: Vec::new(),
-        default_reasoning_effort: None,
-        is_default: true,
-        is_legacy: false,
-        is_favorite: false,
-        supports_fast_mode: false,
-        fast_mode_detail: None,
-    };
-    let catalog = |id: &str, permissions| NativeProviderCatalog {
-        models: vec![model(id)],
-        permissions,
-    };
-
-    let codex_default = form
-        .model_catalog_invocation()
-        .expect("current catalog target");
-    form.set_provider_catalog_for(
-        &codex_default,
-        Ok(catalog(
-            "codex-default",
-            Some(NativePermissionMode::FullAccess),
-        )),
-    );
-    form.change_field("provider", "Claude");
-    assert_eq!(
-        form.model_options,
-        Vec::<bootty_agents::NativeModelOption>::new()
-    );
-    let claude = form
-        .model_catalog_invocation()
-        .expect("Claude catalog target");
-    form.set_provider_catalog_for(
-        &claude,
-        Ok(catalog(
-            "claude-default",
-            Some(NativePermissionMode::AutoAcceptEdits),
-        )),
-    );
-    form.change_field("provider", "Codex");
-    assert_eq!(form.model_options[0].id, "codex-default");
-    assert_eq!(
-        form.permission_selection(),
-        NativePermissionMode::FullAccess
-    );
-
-    form.change_field("profile", "Work (work)");
-    assert_eq!(
-        form.model_options,
-        Vec::<bootty_agents::NativeModelOption>::new()
-    );
-    let codex_work = form
-        .model_catalog_invocation()
-        .expect("profile catalog target");
-    assert_ne!(codex_work, codex_default);
-    form.set_provider_catalog_for(
-        &codex_work,
-        Ok(catalog(
-            "codex-work",
-            Some(NativePermissionMode::Supervised),
-        )),
-    );
-    assert_eq!(form.model_options[0].id, "codex-work");
-
-    form.set_directory("/project/other".to_owned());
-    assert_eq!(
-        form.model_options,
-        Vec::<bootty_agents::NativeModelOption>::new()
-    );
-    let other_project = form
-        .model_catalog_invocation()
-        .expect("project catalog target");
-    assert_ne!(other_project, codex_work);
-    assert!(form.models_loading);
-}
-
-#[rstest]
-fn pi_uses_provider_default_and_hides_permission_selection(mut form: NewSessionForm) {
-    use bootty_agents::NativePermissionMode;
-
-    form.change_field("provider", "Pi");
-    assert_eq!(
-        form.draft.permissions,
-        NativePermissionMode::ProviderDefault
-    );
-    form.draft.permissions = NativePermissionMode::Supervised;
-    assert!(
-        form.spec(false)
-            .fields
-            .iter()
-            .all(|field| field.id != "permissions")
-    );
-    assert_eq!(
-        form.invocation(&form.draft.cwd)
-            .expect("Pi launch")
-            .arguments
-            .get(14),
-        None
-    );
-}
-
-#[rstest]
-fn refreshing_a_warm_catalog_preserves_choices_on_failure(mut form: NewSessionForm) {
-    let invocation = form.model_catalog_invocation().unwrap();
-    form.set_provider_catalog_for(
-        &invocation,
-        Ok(bootty_agents::NativeProviderCatalog {
-            models: vec![bootty_agents::NativeModelOption {
-                id: "current".into(),
-                display_name: "Current model".into(),
-                reasoning_efforts: vec!["medium".into()],
-                default_reasoning_effort: Some("medium".into()),
-                is_default: true,
-                is_legacy: false,
-                is_favorite: false,
-                supports_fast_mode: false,
-                fast_mode_detail: None,
-            }],
-            permissions: Some(bootty_agents::NativePermissionMode::FullAccess),
-        }),
-    );
-    form.set_provider_catalog_for(&invocation, Err("Provider unavailable".into()));
-    assert_eq!(form.model_options[0].id, "current");
-    assert!(!form.models_loading);
-    assert_eq!(form.model_error.as_deref(), Some("Provider unavailable"));
-}
-
-#[rstest]
-#[case(NewSessionMode::Agent)]
-#[case(NewSessionMode::Terminal)]
-fn no_project_keeps_launch_directory_separate_from_assignment(
-    mut form: NewSessionForm,
-    #[case] mode: NewSessionMode,
-) {
-    form.draft.mode = mode;
+fn no_project_keeps_launch_directory_separate_from_assignment(mut form: NewSessionForm) {
     form.set_no_project("/host/home".into());
     form.set_worktree_available(true);
     assert!(!form.worktree_available);
     assert!(!form.draft.isolated);
     let invocation = form.invocation(&form.draft.cwd).unwrap();
     assert_eq!(invocation.arguments[1], "/host/home");
-    assert_eq!(
-        invocation.arguments[if mode == NewSessionMode::Agent { 15 } else { 5 }],
-        "true"
-    );
-    assert_eq!(
-        form.shell_invocation(&form.draft.cwd).unwrap().arguments[5],
-        "true"
-    );
+    assert_eq!(invocation.arguments[5], "true");
     form.set_directory("/registered/project".into());
     assert!(!form.draft.projectless);
-}
-
-#[rstest]
-#[case(false)]
-#[case(true)]
-fn provider_references_and_goals_keep_the_existing_launch_slots(
-    mut form: NewSessionForm,
-    #[case] projectless: bool,
-) {
-    use bootty_agents::{NativeCompletionKind, NativeCompletionOption, NativeProviderMention};
-    form.draft.prompt = "@Mail next task".into();
-    form.draft.provider_mentions = vec![NativeProviderMention {
-        option: NativeCompletionOption {
-            icon_url: None,
-            kind: NativeCompletionKind::App,
-            name: "mail".into(),
-            display_name: "Mail".into(),
-            description: None,
-            argument_hint: None,
-            path: Some("app://mail".into()),
-            scope: None,
-        },
-        prompt_range: 0..5,
-    }];
-    form.change_field("goal", "Improve the application");
-    if projectless {
-        form.set_no_project("/host/home".into());
-    }
-    let invocation = form.invocation(&form.draft.cwd).unwrap();
-    assert_eq!(
-        invocation.arguments.get(15).map(String::as_str),
-        Some(if projectless { "true" } else { "" })
-    );
-    assert_eq!(invocation.arguments.get(16).map(String::as_str), Some(""));
-    let mentions: Vec<NativeProviderMention> =
-        serde_json::from_str(invocation.arguments.get(17).unwrap()).unwrap();
-    assert_eq!(mentions, form.draft.provider_mentions);
-    assert_eq!(
-        invocation.arguments.get(18).map(String::as_str),
-        Some("Improve the application")
-    );
-}
-
-#[rstest]
-fn codex_goal_survives_provider_changes_without_blocking_other_providers(mut form: NewSessionForm) {
-    form.change_text("Improve the composer");
-    form.change_field("goal", "Improve the application");
-    form.change_field("provider", "claude");
-    assert_eq!(form.draft.provider, "claude");
-    let invocation = form.invocation(&form.draft.cwd).unwrap();
-    assert!(invocation.arguments.get(18).is_none_or(String::is_empty));
-    form.change_field("provider", "codex");
-    let invocation = form.invocation(&form.draft.cwd).unwrap();
-    assert_eq!(
-        invocation.arguments.get(18).map(String::as_str),
-        Some("Improve the application")
-    );
-}
-
-#[rstest]
-#[case("Codex")]
-#[case("Claude")]
-#[case("Pi")]
-fn changing_model_effort_and_catalog_preserves_plan_mode(
-    mut form: NewSessionForm,
-    #[case] provider: &str,
-) {
-    form.change_field("provider", provider);
-    assert_eq!(form.draft.provider, provider.to_lowercase());
-    let models = vec![bootty_agents::NativeModelOption {
-        id: "available".into(),
-        display_name: "Available".into(),
-        reasoning_efforts: vec!["medium".into(), "high".into()],
-        default_reasoning_effort: Some("medium".into()),
-        is_default: true,
-        is_legacy: false,
-        is_favorite: false,
-        supports_fast_mode: false,
-        fast_mode_detail: None,
-    }];
-    form.set_model_catalog(Ok(models.clone()));
-    form.change_field("plan-mode", "true");
-    form.change_field("model", "available");
-    form.change_field("reasoning", "high");
-    form.change_field("fast-mode", "true");
-    form.set_model_catalog(Ok(models));
-    assert_eq!(
-        form.draft.model_selection.as_ref().unwrap().plan_mode,
-        Some(true)
-    );
-    let invocation = form.invocation(&form.draft.cwd).unwrap();
-    let selection: bootty_agents::NativeModelSelection =
-        serde_json::from_str(invocation.arguments.get(11).unwrap()).unwrap();
-    assert_eq!(selection.plan_mode, Some(true));
-    assert_eq!(selection.reasoning_effort.as_deref(), Some("high"));
-}
-
-#[rstest]
-#[case(false)]
-#[case(true)]
-fn add_menu_task_controls_reach_creation_and_native_tab_drafts(
-    mut form: NewSessionForm,
-    #[case] native_tab: bool,
-) {
-    form.change_field("model", "configured-model");
-    form.draft.model_selection = Some(bootty_agents::NativeModelSelection {
-        model: "configured-model".into(),
-        reasoning_effort: None,
-        fast_mode: None,
-        plan_mode: None,
-    });
-    let repaint: bootty_mux::RepaintHandle = std::sync::Arc::new(|| {});
-    let mut dialog = if native_tab {
-        bootty_ui::presentation::dialogs::NewSessionDialog::open_native_form(form, &repaint)
-    } else {
-        bootty_ui::presentation::dialogs::NewSessionDialog::open_form(form, &repaint)
-    };
-    for (field, value) in [("plan-mode", "true"), ("goal", "Improve the composer")] {
-        dialog.apply(
-            &bootty_ui::gpui::DialogIntent::FieldChanged {
-                dialog: bootty_ui::gpui::DialogId::new(
-                    bootty_ui::presentation::dialogs::NEW_SESSION_ID,
-                ),
-                field: field.into(),
-                value: value.into(),
-            },
-            &[],
-        );
-    }
-    let draft = dialog.draft().expect("retained draft");
-    assert_eq!(
-        draft
-            .model_selection
-            .as_ref()
-            .and_then(|selection| selection.plan_mode),
-        Some(true)
-    );
-    assert_eq!(draft.goal, "Improve the composer");
-    let spec = dialog.spec();
-    assert_eq!(
-        spec.fields
-            .iter()
-            .find(|field| field.id == "plan-mode")
-            .map(|field| field.value.as_str()),
-        Some("true")
-    );
-    assert_eq!(
-        spec.fields
-            .iter()
-            .find(|field| field.id == "goal")
-            .map(|field| field.value.as_str()),
-        Some("Improve the composer")
-    );
-}
-
-fn provider_choices(form: &NewSessionForm) -> Vec<String> {
-    form.spec(false)
-        .fields
-        .into_iter()
-        .find(|field| field.id == "provider")
-        .and_then(|field| match field.kind {
-            bootty_ui::gpui::DialogFieldKind::Choice(choices) => Some(choices),
-            _ => None,
-        })
-        .unwrap_or_default()
-}
-
-#[rstest]
-fn missing_provider_is_hidden_but_auth_and_network_failures_remain_selectable(
-    mut form: NewSessionForm,
-) {
-    let requests = form.model_catalog_invocations();
-    let pi = requests
-        .iter()
-        .find(|request| request.arguments[0] == "pi")
-        .unwrap();
-    let claude = requests
-        .iter()
-        .find(|request| request.arguments[0] == "claude")
-        .unwrap();
-    form.set_provider_unavailable_for(pi, "Pi is not installed".into());
-    form.set_provider_catalog_for(claude, Err("Unable to verify organization for the current authentication token. Run claude auth login".into()));
-    assert_eq!(provider_choices(&form), ["Codex", "Claude"]);
-    form.change_field("provider", "Claude");
-    assert_eq!(form.draft.provider, "claude");
-    assert!(form.sign_in_invocation().is_some());
-    form.set_provider_catalog_for(claude, Err("Network unavailable".into()));
-    assert_eq!(provider_choices(&form), ["Codex", "Claude"]);
-    assert!(form.sign_in_invocation().is_none());
-}
-
-#[rstest]
-fn missing_selected_provider_preserves_draft_and_availability_is_host_scoped(
-    mut form: NewSessionForm,
-) {
-    form.change_text("Keep this prompt");
-    form.change_field("provider", "Pi");
-    let request = form.model_catalog_invocation().unwrap();
-    form.set_provider_unavailable_for(&request, "Pi is not installed".into());
-    assert_eq!(form.draft.provider, "codex");
-    assert_eq!(form.draft.prompt, "Keep this prompt");
-    form.change_field("provider", "Pi");
-    assert_eq!(
-        form.draft.provider, "codex",
-        "hidden providers cannot be selected through a stale event"
-    );
-    form.change_field("host", "Another host");
-    assert!(
-        provider_choices(&form).contains(&"Pi".into()),
-        "another host owns its availability"
-    );
-    form.change_field("host", "Current host");
-    assert!(!provider_choices(&form).contains(&"Pi".into()));
-    form.set_provider_catalog_for(&request, Err("Not logged in".into()));
-    assert!(
-        provider_choices(&form).contains(&"Pi".into()),
-        "a refreshed installed provider reappears"
-    );
-}
-
-#[rstest]
-fn sign_in_captures_selected_profile_program_directory_and_space(mut form: NewSessionForm) {
-    form.change_text("Keep this draft for after sign-in");
-    form.change_field("profile", "Work (work)");
-    let catalog = form.model_catalog_invocation().unwrap();
-    form.set_provider_catalog_for(&catalog, Err("Not logged in".into()));
-    let sign_in = form.sign_in_invocation().unwrap();
-    assert_eq!(sign_in.command, "agents.codex.account.login");
-    assert_eq!(sign_in.target, catalog.target);
-    assert_eq!(
-        sign_in.arguments,
-        ["/project/current", "/provider/custom-codex", "work"]
-    );
-    assert_eq!(form.draft.prompt, "Keep this draft for after sign-in");
-    let mut dialog = ready_dialog(form).unwrap();
-    let event = dialog
-        .apply(&start_intent("sign-in-provider"), &[])
-        .unwrap();
-    let bootty_ui::presentation::dialogs::NewSessionPickerEvent::Authenticate(invocation) = event
-    else {
-        panic!("sign-in must not submit the prompt");
-    };
-    assert_eq!(invocation, sign_in);
-    assert_eq!(
-        dialog.draft().unwrap().prompt,
-        "Keep this draft for after sign-in"
-    );
-}
-
-#[rstest]
-fn launch_auth_failure_uses_the_same_sign_in_surface_and_retains_prompt(mut form: NewSessionForm) {
-    form.change_text("Keep this failed prompt");
-    form.error = Some("Agent process ended: run claude auth login".into());
-    let spec = form.spec(false);
-    assert_eq!(spec.model_error, form.error);
-    assert!(
-        spec.rows[0].detail.is_none(),
-        "auth failure is shown once with its action"
-    );
-    assert!(form.sign_in_invocation().is_some());
-    assert_eq!(form.draft.prompt, "Keep this failed prompt");
-}
-
-#[rstest]
-#[case(false)]
-#[case(true)]
-fn catalog_failures_hide_only_confirmed_missing_executables(
-    form: NewSessionForm,
-    #[case] executable_missing: bool,
-) {
-    let invocation = form.model_catalog_invocation().unwrap();
-    let mut dialog = ready_dialog(form).unwrap();
-    let (sender, receiver) = std::sync::mpsc::channel();
-    dialog.catalog_started(invocation, receiver);
-    let outcome = if executable_missing {
-        bootty_control::CommandOutcome::Failed {
-            code: "provider_not_installed".into(),
-            message: "Codex is not installed".into(),
-        }
-    } else {
-        bootty_control::CommandOutcome::Unavailable {
-            message: "Native conversation storage is unavailable".into(),
-        }
-    };
-    sender.send(outcome).unwrap();
-    let _ = dialog.poll();
-    let spec = dialog.spec();
-    let field = spec
-        .fields
-        .iter()
-        .find(|field| field.id == "provider")
-        .unwrap();
-    let bootty_ui::gpui::DialogFieldKind::Choice(choices) = &field.kind else {
-        panic!("provider chooser");
-    };
-    assert_eq!(choices.contains(&"Codex".to_owned()), !executable_missing);
-    if !executable_missing {
-        assert_eq!(field.value, "Codex");
-        assert_eq!(
-            spec.model_error.as_deref(),
-            Some("Native conversation storage is unavailable")
-        );
-    }
 }

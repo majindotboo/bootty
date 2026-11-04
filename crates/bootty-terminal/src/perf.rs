@@ -38,8 +38,7 @@ impl Drop for FramePathGuard {
 /// `what` names the caller so the panic points at the offending path rather than at this helper.
 ///
 /// Never place a call on a path a `Drop` impl can reach: panicking while already unwinding aborts,
-/// turning a named test failure into a bare SIGABRT. `BackendPaneTerminal::drop` forks `tmux`, so
-/// that constraint is live if this ever extends into `bootty-mux`.
+/// turning a named test failure into a bare SIGABRT.
 ///
 /// # Panics
 ///

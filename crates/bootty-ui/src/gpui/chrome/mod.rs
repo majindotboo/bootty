@@ -9,6 +9,4 @@ mod view;
 pub use model::*;
 pub use view::GpuiChrome;
 
-use view::{
-    Confirmation, ContextMenu, MenuRow, StatusTabFocusMovement, TabBounds, color, popup_menu,
-};
+use view::{ContextMenu, MenuRow, StatusTabFocusMovement, TabBounds, color, popup_menu};

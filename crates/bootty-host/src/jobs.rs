@@ -133,13 +133,13 @@ struct Job {
     state: Mutex<State>,
     changed: Condvar,
     cancel: AtomicBool,
-    controller: Mutex<Option<rmux_os::process_tree::ProcessTreeController>>,
+    controller: Mutex<Option<bootty_os::process_tree::ProcessTreeController>>,
     deadline: Instant,
     wake: Wake,
     changes: Option<std::sync::mpsc::SyncSender<()>>,
 }
 impl Job {
-    fn control(&self, controller: rmux_os::process_tree::ProcessTreeController) -> Result<()> {
+    fn control(&self, controller: bootty_os::process_tree::ProcessTreeController) -> Result<()> {
         let mut current = self
             .controller
             .lock()

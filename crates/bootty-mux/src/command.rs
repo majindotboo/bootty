@@ -2,9 +2,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::snapshot::MuxSessionTag;
 
-#[cfg(feature = "terminal-runtime")]
-use crate::capability::BindingOperation;
-
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum MuxDirection {
     Left,
@@ -19,18 +16,17 @@ pub enum MuxSplitDirection {
     Down,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub enum MuxCommand {
+    ResizePanes {
+        session_id: String,
+        window_id: String,
+        layout: crate::snapshot::MuxPaneLayout,
+    },
     ActivatePane {
         session_id: String,
         window_id: String,
         pane_id: String,
-    },
-    /// Associate native content with a real, exact backend pane without changing selection.
-    SetPaneNativeAgent {
-        session_id: String,
-        pane_id: String,
-        agent_id: Option<String>,
     },
     ActivateWindow {
         session_id: String,
@@ -137,11 +133,6 @@ pub enum MuxCommand {
         /// The pane to close. `None` targets the window's active pane.
         pane_id: Option<String>,
     },
-    TogglePaneZoom {
-        session_id: String,
-        /// The pane to zoom. `None` targets the window's active pane.
-        pane_id: Option<String>,
-    },
     CreateProjectSession {
         session_id: String,
         cwd: String,
@@ -180,10 +171,24 @@ pub enum MuxCommand {
 
 impl MuxCommand {
     #[must_use]
+    pub const fn arranges_panes(&self) -> bool {
+        matches!(
+            self,
+            Self::ResizePanes { .. }
+                | Self::SplitPane { .. }
+                | Self::CreatePane { .. }
+                | Self::MergeWindows { .. }
+                | Self::SwapPanes { .. }
+                | Self::MovePane { .. }
+                | Self::ExtractPane { .. }
+        )
+    }
+
+    #[must_use]
     pub fn session_id(&self) -> &str {
         match self {
-            Self::ActivatePane { session_id, .. }
-            | Self::SetPaneNativeAgent { session_id, .. }
+            Self::ResizePanes { session_id, .. }
+            | Self::ActivatePane { session_id, .. }
             | Self::ActivateWindow { session_id, .. }
             | Self::RestoreSession { session_id, .. }
             | Self::CreatePane { session_id, .. }
@@ -205,7 +210,6 @@ impl MuxCommand {
             | Self::SelectPreviousPane { session_id, .. }
             | Self::KillPane { session_id, .. }
             | Self::ClosePane { session_id, .. }
-            | Self::TogglePaneZoom { session_id, .. }
             | Self::CreateProjectSession { session_id, .. }
             | Self::CreateWorktreeSession { session_id, .. }
             | Self::RenameSession { session_id, .. }
@@ -213,76 +217,16 @@ impl MuxCommand {
             | Self::StampSession { session_id, .. } => session_id,
         }
     }
-
-    /// The existing session whose ownership must be checked before a remote mutation.
-    pub(crate) fn existing_session_id(&self) -> Option<&str> {
-        match self {
-            Self::CreateProjectSession { .. }
-            | Self::CreateWorktreeSession { .. }
-            | Self::RestoreSession { .. } => None,
-            _ => Some(self.session_id()),
-        }
-    }
-
-    /// Whether running the command again is safe when the first attempt's
-    /// outcome is unknown. Relative moves double, creates duplicate, toggles
-    /// flip back, and closes take the next pane along, so only commands that
-    /// name an absolute end state qualify.
-    #[must_use]
-    pub const fn is_repeatable(&self) -> bool {
-        matches!(
-            self,
-            Self::ActivatePane { .. }
-                | Self::SetPaneNativeAgent { .. }
-                | Self::ActivateWindow { .. }
-                | Self::ActivateWindowIndex { .. }
-                | Self::RenameWindow { .. }
-                | Self::RenameSession { .. }
-                | Self::StampSession { .. }
-                // Both create-or-reuse a session under a name Bootty minted, so
-                // a second attempt adopts what the first one made. An explicit
-                // create refuses an existing name, so it cannot repeat.
-                | Self::CreateProjectSession { argv: None, .. }
-                | Self::CreateWorktreeSession { .. }
-        )
-    }
 }
 
-#[cfg(feature = "terminal-runtime")]
-impl MuxCommand {
-    #[must_use]
-    pub const fn operation(&self) -> BindingOperation {
-        match self {
-            Self::ActivateWindow { .. } => BindingOperation::ActivateWindow,
-            Self::NewWindow { .. } => BindingOperation::CreateWindow,
-            Self::RenameWindow { .. } => BindingOperation::RenameWindow,
-            Self::ActivateNextWindow { .. }
-            | Self::ActivatePreviousWindow { .. }
-            | Self::ActivateLastWindow { .. }
-            | Self::ActivateWindowIndex { .. } => BindingOperation::NavigateWindow,
-            Self::MoveWindow { .. } | Self::MoveWindowPreservingSelection { .. } => {
-                BindingOperation::MoveWindow
-            }
-            Self::SplitPane { .. } | Self::CreatePane { .. } => BindingOperation::SplitPane,
-            Self::MergeWindows { .. } => BindingOperation::MergeWindows,
-            Self::SwapPanes { .. } => BindingOperation::SwapPanes,
-            Self::MovePane { .. } => BindingOperation::MovePane,
-            Self::ExtractPane { .. } => BindingOperation::ExtractPane,
-            Self::ActivatePane { .. }
-            | Self::SelectPane { .. }
-            | Self::SelectNextPane { .. }
-            | Self::SelectPreviousPane { .. } => BindingOperation::NavigatePane,
-            Self::KillPane { .. } | Self::ClosePane { .. } => BindingOperation::ClosePane,
-            Self::TogglePaneZoom { .. } => BindingOperation::TogglePaneZoom,
-            Self::CreateProjectSession { .. } | Self::RestoreSession { .. } => {
-                BindingOperation::CreateProjectSession
-            }
-            Self::CreateWorktreeSession { .. } => BindingOperation::CreateWorktreeSession,
-            Self::RenameSession { .. } => BindingOperation::RenameSession,
-            Self::DitchSession { .. } => BindingOperation::DitchSession,
-            Self::StampSession { .. } | Self::SetPaneNativeAgent { .. } => {
-                BindingOperation::StampSession
-            }
-        }
-    }
+/// Input for one backend pane, delivered without changing selection or UI focus.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PaneInput {
+    /// Terminal bytes exactly as typed.
+    Write(#[serde(with = "bootty_terminal::wire_bytes")] Vec<u8>),
+    /// Text pasted the way the pane's application asked for: bracketed when it enabled
+    /// bracketed paste, so multi-line text is not submitted line by line.
+    Paste(String),
+    /// The Enter key, encoded for the pane's keyboard mode.
+    Submit,
 }

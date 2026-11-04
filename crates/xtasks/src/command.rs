@@ -1,5 +1,6 @@
-use std::ffi::{OsStr, OsString};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
+use std::ffi::OsStr;
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
 use std::process::{Command, Output};
 
@@ -32,7 +33,7 @@ pub fn stdout(command: &mut Command) -> Result<String> {
     String::from_utf8(output.stdout).context("command output was not UTF-8")
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 pub fn program_exists(program: impl AsRef<OsStr>) -> bool {
     Command::new(program)
         .arg("--version")
@@ -41,15 +42,6 @@ pub fn program_exists(program: impl AsRef<OsStr>) -> bool {
         .stderr(Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
-}
-
-pub fn append_env(name: &str, suffix: impl AsRef<OsStr>) -> OsString {
-    let mut value = std::env::var_os(name).unwrap_or_default();
-    if !value.is_empty() {
-        value.push(" ");
-    }
-    value.push(suffix);
-    value
 }
 
 pub fn display(command: &Command) -> String {

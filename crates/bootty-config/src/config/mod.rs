@@ -1,10 +1,3 @@
-mod agents;
-pub use agents::{
-    AgentProfileConfig, AgentProviderConfig, AgentProvidersConfig, ComposerSendShortcut,
-    FollowUpBehavior, ResponseStreaming, TranscriptWidth,
-};
-mod tray;
-pub use tray::{TrayConfig, TrayIconStyle, TrayVisibility};
 mod defaults;
 mod keybind_presets;
 mod load;
@@ -28,13 +21,11 @@ pub use load::{
 };
 pub use model::{
     AppearanceBranchConfig, AppearanceConfig, AppearanceMode, AppearanceVariant,
-    BackendKeybindConfig, BackgroundMaterial, BellMode, BoottyConfig, BrowserConfig,
-    BrowserSearchEngine, ChromeConfig, ColorConfig, ComputerConfig, CursorConfig,
+    BackgroundMaterial, BellMode, BoottyConfig, ChromeConfig, ColorConfig, CursorConfig,
     CursorStyleConfig, DiagnosticsConfig, ExtensionSettingValue, FontConfig, InputConfig,
-    KeybindPreset, MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig,
-    MultiplexerConfig, MultiplexerConfigError, NotificationPolicy, OnLastWindowClosed,
-    OpenBehavior, PanelButton, PanelConfig, PanelDock, PanelKind, PanelTabStyle, PanelTabs,
-    ResolvedTheme, RestoreOnStartup, SessionConfig, SidebarConfig, SidebarPosition,
+    KeybindPreset, MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerConfig,
+    MultiplexerConfigError, NotificationPolicy, OnLastWindowClosed, OpenBehavior, PanelTabStyle,
+    PanelTabs, ResolvedTheme, RestoreOnStartup, SessionConfig, SidebarConfig, SidebarPosition,
     SidebarSortOrder, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
     SshRemoteConfig, TabAppearance, TabCloseButton, TabClosePosition, TabConfig, TerminalScrollbar,
     ThemeInfo, WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen,

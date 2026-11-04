@@ -1,22 +1,27 @@
 [tools]
-rust = { version = "nightly", profile = "minimal", components = ["rustfmt", "clippy", "rust-analyzer"] }
+# Pin the nightly so new lints land with a deliberate bump, not on CI by surprise.
+rust = { version = "nightly-2026-11-04", profile = "minimal", components = ["rustfmt", "clippy", "rust-analyzer"] }
 # The pinned official Ghostty source needs Zig 0.17 for native Windows builds.
 zig = "0.17.0"
-"cargo:cargo-xwin" = "0.23.1"
-"cargo:cargo-zigbuild" = "0.24.0"
+# Prebuilt releases: compiling these would run before the Kache wrapper exists.
+"github:rust-cross/cargo-xwin" = "0.23.1"
+"github:rust-cross/cargo-zigbuild" = "0.24.0"
+# Adopt stable Kache releases without Mise's default one-day delay.
+"github:kunobi-ninja/kache" = { version = "latest", minimum_release_age = "0s" }
 
 [tools."http:ghostty-source"]
-version = "3d07ef9e28c4af05065b9e2e546b8ac8f9b62df0"
+version = "521cf2c5d30bd48028ca61546c64e7913764073d"
 url = "https://github.com/ghostty-org/ghostty/archive/{{ version }}.tar.gz"
-checksum = "sha256:3949e4bf93f345c7729faecac6b9916aeb5a2b745de5671a7fe8d4725040046c"
+checksum = "sha256:82f4cac7a9861388800ab64392d7f401609ea9e7586990851f128e9c22b71784"
 strip_components = 1
 
 [env]
+RUSTC_WRAPPER = "kache"
 GHOSTTY_SOURCE_DIR = { value = "{{ tools['http:ghostty-source'].path }}", tools = true }
 ZIG = { value = "{{ tools.zig.path }}/zig", tools = true }
 
 [tasks.build]
-description = "Build the bootty app with dynamic local linkage; pass --static for distribution or --fast for fast-release"
+description = "Build the development app; pass --release for production"
 run = "cargo run --quiet --locked -p xtasks -- build"
 
 [tasks.launch]
@@ -92,19 +97,19 @@ description = "Enforce the daemon artifact size budget"
 run = "cargo run --quiet --locked -p xtasks -- daemon size"
 
 [tasks.package]
-description = "Package with the host daemon; pass --all-daemons for every remote target, --static for distribution, or --fast for fast-release"
+description = "Package the release app with the host daemon; pass --all-daemons for every remote target"
 run = "cargo run --quiet --locked -p xtasks -- package"
 
 [tasks."package:dev"]
-description = "Package this worktree's isolated BoottyDev application"
+description = "Package this worktree's isolated BoottyDev application with the dev profile"
 run = "cargo run --quiet --locked -p xtasks -- package --dev"
 
 [tasks."package:windows"]
-description = "Package the Windows zip from BOOTTY_DAEMON_OUTPUT_DIR; pass --static or --fast"
+description = "Package the Windows release zip from BOOTTY_DAEMON_OUTPUT_DIR"
 run = "cargo run --quiet --locked -p xtasks -- package"
 
 [tasks.install]
-description = "Package and install Bootty with the host daemon; pass --fast for fast-release"
+description = "Package and install the release app with the host daemon"
 run = "cargo run --quiet --locked -p xtasks -- install"
 
 [tasks."sign:setup"]

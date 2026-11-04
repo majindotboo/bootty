@@ -13,7 +13,7 @@ use std::{
 
 use crate::remote::RemoteHost;
 use anyhow::{Context as _, Result, ensure};
-use rmux_os::process_tree::ProcessTreeController;
+use bootty_os::process_tree::ProcessTreeController;
 use serde::{Deserialize, Serialize};
 use transport::RemoteReader;
 

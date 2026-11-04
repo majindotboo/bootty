@@ -1,8 +1,8 @@
 use super::model::{
-    AppearanceMode, BrowserSearchEngine, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
-    MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerBackendConfig, OnLastWindowClosed,
-    OpenBehavior, PanelTabStyle, PanelTabs, RestoreOnStartup, SidebarPosition, SidebarSortOrder,
-    SshProfileConfig, WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
+    AppearanceMode, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
+    MacosOptionAsAltConfig, MacosTitlebarStyle, OnLastWindowClosed, OpenBehavior, PanelTabStyle,
+    PanelTabs, RestoreOnStartup, SidebarPosition, SidebarSortOrder, SshProfileConfig,
+    WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 use crate::color::Color;
 use serde::{Deserialize, Deserializer};
@@ -29,20 +29,14 @@ pub(super) struct RawConfig {
     pub(super) appearance: AppearancePatch,
     pub(super) cursor: CursorPatch,
     pub(super) font: FontPatch,
-    #[serde(deserialize_with = "deserialize_panels")]
-    pub(super) panels: BTreeMap<super::model::PanelKind, super::model::PanelConfig>,
     pub(super) font_feature: Vec<String>,
     pub(super) chrome: ChromePatch,
     pub(super) sidebar: SidebarPatch,
     pub(super) multiplexer: MultiplexerPatch,
     pub(super) ssh_profiles: BTreeMap<String, SshProfileConfig>,
-    pub(super) agents: super::AgentProvidersConfig,
     pub(super) extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
     pub(super) input: InputPatch,
-    pub(super) browser: BrowserPatch,
-    pub(super) computer: ComputerPatch,
     pub(super) session: SessionPatch,
-    pub(super) tray: Option<super::TrayConfig>,
     pub(super) diagnostics: DiagnosticsPatch,
     pub(super) window: WindowPatch,
 }
@@ -100,7 +94,6 @@ pub(super) struct TabPatch {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct ChromePatch {
     pub(super) left_dock_toggle: Option<bool>,
-    pub(super) right_dock_toggle: Option<bool>,
     pub(super) panel_tab_style: Option<PanelTabStyle>,
     pub(super) panel_tabs: Option<PanelTabs>,
     pub(super) tabs_use_session_color: Option<bool>,
@@ -140,10 +133,7 @@ pub(super) struct ChromePatch {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct SidebarPatch {
     pub(super) group_by_project: Option<bool>,
-    pub(super) settled_collapsed: Option<bool>,
     pub(super) sort_order: Option<SidebarSortOrder>,
-    pub(super) animate_working: Option<bool>,
-    pub(super) auto_settle_after_days: Option<u16>,
     pub(super) position: Option<SidebarPosition>,
     pub(super) background: Option<Color>,
     #[serde(rename = "fullscreen-background")]
@@ -161,11 +151,6 @@ pub(super) struct SidebarPatch {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct MultiplexerPatch {
-    pub(super) backend: Option<MultiplexerBackendConfig>,
-    // Older builds exposed this unused setting. Herdr attaches the selected backend session.
-    #[serde(rename = "herdr-session")]
-    pub(super) _herdr_session: Option<String>,
-    pub(super) hide_tmux_status: Option<bool>,
     pub(super) remote: Option<super::RemoteConfig>,
 }
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -182,29 +167,12 @@ pub(super) struct InputPatch {
     pub(super) backend_keybind: Option<BackendKeybindPatch>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub(super) struct ComputerPatch {
-    pub(super) enabled: Option<bool>,
-    pub(super) capture_enabled: Option<bool>,
-    pub(super) input_enabled: Option<bool>,
-    pub(super) always_allowed_apps: Option<Vec<String>>,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub(super) struct BrowserPatch {
-    pub(super) search_engine: Option<BrowserSearchEngine>,
-    pub(super) persist_site_data: Option<bool>,
-}
-
+/// `input.backend-keybind`: only the native table remains. The retired backends' tables are
+/// stripped with a warning before parsing.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct BackendKeybindPatch {
-    pub(super) herdr: Option<Vec<String>>,
     pub(super) native: Option<Vec<String>>,
-    pub(super) rmux: Option<Vec<String>>,
-    pub(super) tmux: Option<Vec<String>>,
 }
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
@@ -213,13 +181,11 @@ pub(super) struct SessionPatch {
     pub(super) clipboard_write_hosts: Option<String>,
     pub(super) bell: Option<super::model::BellMode>,
     pub(super) command_notifications: Option<super::model::NotificationPolicy>,
-    pub(super) agent_notifications: Option<super::model::NotificationPolicy>,
     pub(super) command_notification_min_seconds: Option<u32>,
     pub(super) shell_integration: Option<bool>,
     pub(super) shell: Option<String>,
     pub(super) working_directory: Option<PathBuf>,
     pub(super) worktree_directory: Option<String>,
-    pub(super) worktree_limit: Option<u16>,
     pub(super) branch_prefix: Option<String>,
     pub(super) env: Option<Vec<EnvConfigEntry>>,
     pub(super) term: Option<String>,
@@ -369,19 +335,4 @@ fn parse_macos_titlebar_style(input: &str) -> Option<MacosTitlebarStyle> {
 
 fn normalize_config_value(input: &str) -> String {
     input.trim().to_ascii_lowercase().replace('-', "_")
-}
-
-fn deserialize_panels<'de, D: Deserializer<'de>>(
-    deserializer: D,
-) -> Result<BTreeMap<super::model::PanelKind, super::model::PanelConfig>, D::Error> {
-    use serde::de::IntoDeserializer as _;
-    let panels = BTreeMap::<String, super::model::PanelConfig>::deserialize(deserializer)?;
-    panels
-        .into_iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "jobs" | "transfers" | "recovery" | "shell"))
-        .map(|(name, value)| {
-            let kind = super::model::PanelKind::deserialize(name.into_deserializer())?;
-            Ok((kind, value))
-        })
-        .collect()
 }

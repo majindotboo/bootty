@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use bootty_os::spawn::CommandSpawn as _;
 use std::process::Command;
 
 use anyhow::Result;
@@ -16,7 +17,7 @@ fn compiled_entry(extra: bool) -> Result<String> {
     let output = command
         .env("TERMINFO", database)
         .arg(XTERM_BOOTTY)
-        .output()?;
+        .bootty_output()?;
     anyhow::ensure!(
         output.status.success(),
         "infocmp failed: {}",

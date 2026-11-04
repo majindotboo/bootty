@@ -3,8 +3,8 @@ use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
 
-static_assertions::assert_impl_all!(WorkspaceSession: Clone, Eq, Send, Sync);
-static_assertions::assert_impl_all!(SessionMembership: Clone, Eq, Send, Sync);
+static_assertions::assert_impl_all!(WorkspaceSession: Clone, PartialEq, Send, Sync);
+static_assertions::assert_impl_all!(SessionMembership: Clone, PartialEq, Send, Sync);
 
 #[derive(Arbitrary, Clone, Copy, Debug)]
 struct SessionSeed {
@@ -125,130 +125,6 @@ proptest! {
     }
 }
 
-#[derive(Arbitrary, Clone, Copy, Debug)]
-struct SavedStateSeed {
-    settled: bool,
-    pinned: bool,
-    archived: bool,
-    until: Option<u32>,
-    activity: Option<u32>,
-}
-
-proptest! {
-    #[test]
-    fn deleting_and_restoring_retains_every_saved_value(seed in any::<SavedStateSeed>()) {
-        use bootty_mux::session_membership::{SessionLifecycle, SessionState, SessionStateChange};
-        let mut saved = session("saved", "backend");
-        saved.state = SessionState {
-            lifecycle: if seed.settled { SessionLifecycle::Settled } else { SessionLifecycle::Active },
-            pinned: seed.pinned,
-            archived: seed.archived,
-            snoozed_until: seed.until.map(i64::from),
-            deleted: false,
-            last_activity_at: seed.activity.map(i64::from),
-            ..SessionState::default()
-        };
-        let expected = saved.clone();
-        let sibling = session("sibling", "backend-2");
-        let mut membership = SessionMembership::from_sessions(vec![saved, sibling.clone()]);
-        prop_assert!(membership.set_state("saved", SessionStateChange::Delete));
-        prop_assert!(membership.set_state("saved", SessionStateChange::RestoreDeleted));
-        prop_assert_eq!(membership.sessions(), &[expected, sibling]);
-    }
-
-    #[test]
-    fn snooze_becomes_overdue_at_its_exact_deadline(until in 0_i64..i64::MAX) {
-        use bootty_mux::session_membership::{SessionState, SessionView};
-        let state = SessionState { snoozed_until: Some(until), ..SessionState::default() };
-        let before = until.checked_sub(1).expect("deadline has a preceding UTC second");
-        prop_assert_eq!(state.view(before), SessionView::Snoozed);
-        prop_assert!(!state.is_visible(before));
-        prop_assert!(!state.is_overdue(before));
-        prop_assert_eq!(state.view(until), SessionView::Active);
-        prop_assert!(state.is_visible(until));
-        prop_assert!(state.is_overdue(until));
-    }
-
-    #[test]
-    fn settling_snoozed_work_clears_the_wake_deadline(until in 0_i64..i64::MAX) {
-        use bootty_mux::session_membership::{SessionLifecycle, SessionStateChange, SessionView};
-        let mut membership = SessionMembership::from_sessions(vec![session("saved", "backend")]);
-        membership.set_state("saved", SessionStateChange::SnoozeUntil(until));
-        membership.set_state("saved", SessionStateChange::SetLifecycle(SessionLifecycle::Settled));
-        let state = membership.get("saved").unwrap().state;
-        prop_assert_eq!(state.snoozed_until, None);
-        prop_assert!(!state.is_overdue(until));
-        prop_assert_eq!(state.view(until), SessionView::Settled);
-    }
-
-    #[test]
-    fn pinning_promotes_saved_work_without_changing_order_or_visibility(seed in any::<SavedStateSeed>()) {
-        use bootty_mux::session_membership::{SessionLifecycle, SessionStateChange};
-        let mut saved = session("saved", "backend");
-        saved.state.lifecycle = if seed.settled { SessionLifecycle::Settled } else { SessionLifecycle::Active };
-        saved.state.archived = seed.archived;
-        saved.state.snoozed_until = seed.until.map(i64::from);
-        let sibling = session("sibling", "backend-2");
-        let mut membership = SessionMembership::from_sessions(vec![saved.clone(), sibling.clone()]);
-        prop_assert!(membership.set_state("saved", SessionStateChange::SetPinned(true)));
-        saved.state.pinned = true;
-        saved.state.lifecycle = SessionLifecycle::Active;
-        saved.state.snoozed_until = None;
-        prop_assert_eq!(membership.sessions(), &[saved.clone(), sibling.clone()]);
-        prop_assert!(!membership.set_state("saved", SessionStateChange::SetPinned(true)));
-        prop_assert!(membership.set_state("saved", SessionStateChange::SetPinned(false)));
-        saved.state.pinned = false;
-        prop_assert_eq!(membership.sessions(), &[saved, sibling]);
-    }
-}
-
-#[rstest::rstest]
-#[case(bootty_mux::session_membership::SessionStateChange::Archive)]
-#[case(bootty_mux::session_membership::SessionStateChange::Delete)]
-#[case(bootty_mux::session_membership::SessionStateChange::SnoozeUntil(100))]
-fn parked_saved_work_retains_its_pin_until_settled(
-    #[case] change: bootty_mux::session_membership::SessionStateChange,
-) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionStateChange};
-    let mut membership = SessionMembership::from_sessions(vec![session("saved", "backend")]);
-    assert!(membership.set_state("saved", SessionStateChange::SetPinned(true)));
-    assert!(membership.set_state("saved", change));
-    assert!(membership.get("saved").unwrap().state.pinned);
-    assert!(membership.set_state(
-        "saved",
-        SessionStateChange::SetLifecycle(SessionLifecycle::Settled)
-    ));
-    assert!(!membership.get("saved").unwrap().state.pinned);
-}
-
-#[rstest::rstest]
-#[case(false, false, bootty_mux::session_membership::SessionView::Snoozed)]
-#[case(false, true, bootty_mux::session_membership::SessionView::Archived)]
-#[case(true, true, bootty_mux::session_membership::SessionView::Deleted)]
-fn visibility_preserves_underlying_lifecycle_and_snooze(
-    #[case] deleted: bool,
-    #[case] archived: bool,
-    #[case] expected: bootty_mux::session_membership::SessionView,
-) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    let state = SessionState {
-        lifecycle: SessionLifecycle::Settled,
-        pinned: false,
-        deleted,
-        archived,
-        snoozed_until: Some(100),
-        last_activity_at: Some(90),
-        ..SessionState::default()
-    };
-    assert_eq!(state.view(99), expected);
-    assert_eq!(state.lifecycle, SessionLifecycle::Settled);
-    assert_eq!(state.snoozed_until, Some(100));
-    assert!(!state.is_visible(99));
-    if deleted || archived {
-        assert!(!state.is_overdue(100));
-    }
-}
-
 proptest! {
     #[test]
     fn accepted_activity_is_monotone_and_preserves_saved_state(initial in any::<Option<u32>>(), receipts in proptest::collection::vec(any::<u32>(), 0..32)) {
@@ -278,33 +154,5 @@ fn invalid_activity_preserves_the_saved_record(#[case] at: i64, #[case] now: i64
     let saved = session("saved", "backend");
     let mut membership = SessionMembership::from_sessions(vec![saved.clone()]);
     assert!(!membership.set_state("saved", SessionStateChange::RecordActivity { at, now }));
-    assert_eq!(membership.sessions(), &[saved]);
-}
-
-#[rstest::rstest]
-#[case::new_input(101, 101, true)]
-#[case::same_second(100, 100, true)]
-#[case::stale(99, 101, false)]
-#[case::future(101, 100, false)]
-#[case::negative(-1, 100, false)]
-fn accepted_input_unsettles_atomically_and_preserves_other_saved_values(
-    #[case] at: i64,
-    #[case] now: i64,
-    #[case] accepted: bool,
-) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionStateChange};
-    let mut saved = session("saved", "backend");
-    saved.state.lifecycle = SessionLifecycle::Settled;
-    saved.state.last_activity_at = Some(100);
-    saved.state.archived = true;
-    let mut membership = SessionMembership::from_sessions(vec![saved.clone()]);
-    assert_eq!(
-        membership.set_state("saved", SessionStateChange::AcceptInput { at, now }),
-        accepted
-    );
-    if accepted {
-        saved.state.lifecycle = SessionLifecycle::Active;
-        saved.state.last_activity_at = Some(at);
-    }
     assert_eq!(membership.sessions(), &[saved]);
 }

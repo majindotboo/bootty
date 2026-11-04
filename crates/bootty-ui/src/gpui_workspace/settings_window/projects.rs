@@ -323,10 +323,7 @@ impl GpuiSettingsWindow {
         }
         self.project_error = result.map_or_else(
             |_| Some("The workspace is unavailable. Reopen Settings to try again.".into()),
-            |outcome| {
-                crate::commands::command_outcome_message(&outcome)
-                    .map(|message| bootty_agents::native_error_message(&message))
-            },
+            |outcome| crate::commands::command_outcome_message(&outcome),
         );
         // A removal asked for from a project tab reports there, where the user is looking.
         if command == "project.remove"

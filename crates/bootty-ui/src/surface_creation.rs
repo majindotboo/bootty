@@ -12,7 +12,6 @@ pub enum SurfacePlacement {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SurfaceParent {
     Terminal(CommandTarget),
-    Conversation(CommandTarget),
     Binding(CommandTarget),
 }
 

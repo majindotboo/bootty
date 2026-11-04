@@ -1,17 +1,12 @@
 use super::{
-    HashMap, HashSet, MultiplexerBackendConfig, SessionMembership, SpaceId, SpaceRemoteOverride,
-    Transaction, WorkspaceBinding, WorkspaceBindingSelection, WorkspaceSession, WorkspaceSpace,
+    HashMap, HashSet, SessionMembership, SpaceId, SpaceRemoteOverride, Transaction,
+    WorkspaceBinding, WorkspaceBindingSelection, WorkspaceSession, WorkspaceSpace,
 };
 
-pub(super) struct LoadedSpaces {
-    pub(super) spaces: Vec<WorkspaceSpace>,
-    pub(super) unsupported_ids: HashSet<i64>,
-}
-
-pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<LoadedSpaces> {
+pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<Vec<WorkspaceSpace>> {
     let mut statement = tx.prepare(
         "SELECT id, remote_id, name, icon, color, tint_sidebar, position,
-                backend, hide_tmux_status, unavailable,
+                backend, unavailable,
                 selected_session_id, selected_window_id, remote, selected_session_identity
          FROM workspace_spaces
          ORDER BY position, id",
@@ -21,76 +16,51 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<LoadedSpaces
         if space_id <= 0 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let backend = match backend_from_storage(&row.get::<_, String>(7)?) {
-            StoredBackend::Inherit => None,
-            StoredBackend::Supported(backend) => Some(backend),
-            StoredBackend::Unsupported => return Ok((space_id, None)),
-        };
-        let remote = remote_from_storage(row.get::<_, Option<String>>(12)?.as_deref())?;
+        let remote = remote_from_storage(row.get::<_, Option<String>>(11)?.as_deref())?;
         let color = color_from_hex(&row.get::<_, String>(4)?)
             .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
         let tint_sidebar = bool_from_storage(row.get::<_, i64>(5)?)?;
-        let hide_tmux_status = bool_from_storage(row.get::<_, i64>(8)?)?;
-        let unavailable = bool_from_storage(row.get::<_, i64>(9)?)?;
-        let session_id = row.get::<_, Option<String>>(10)?;
-        let window_id = row.get::<_, Option<String>>(11)?;
+        let unavailable = bool_from_storage(row.get::<_, i64>(8)?)?;
+        let session_id = row.get::<_, Option<String>>(9)?;
+        let window_id = row.get::<_, Option<String>>(10)?;
         if session_id.as_deref().is_some_and(str::is_empty)
             || (session_id.is_none() && window_id.is_some())
         {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        Ok((
-            space_id,
-            Some(WorkspaceSpace {
-                id: SpaceId::from_persistence(space_id),
-                remote_id: row.get(1)?,
-                name: row.get(2)?,
-                icon: row.get(3)?,
-                color,
-                tint_sidebar,
-                position: row.get(6)?,
-                binding: WorkspaceBinding {
-                    scope: SpaceId::from_persistence(space_id),
-                    backend_override: backend,
-                    remote_override: remote,
-                    hide_tmux_status,
-                    unavailable,
-                    selection: session_id.map(|session_id| WorkspaceBindingSelection {
-                        session_id,
-                        window_id,
-                    }),
-                    selected_session_identity: row.get(13)?,
-                    sessions: SessionMembership::default(),
-                },
-            }),
-        ))
+        Ok(WorkspaceSpace {
+            id: SpaceId::from_persistence(space_id),
+            remote_id: row.get(1)?,
+            name: row.get(2)?,
+            icon: row.get(3)?,
+            color,
+            tint_sidebar,
+            position: row.get(6)?,
+            binding: WorkspaceBinding {
+                scope: SpaceId::from_persistence(space_id),
+                remote_override: remote,
+                unavailable,
+                selection: session_id.map(|session_id| WorkspaceBindingSelection {
+                    session_id,
+                    window_id,
+                }),
+                selected_session_identity: row.get(12)?,
+                sessions: SessionMembership::default(),
+            },
+        })
     })?;
-    let mut spaces = Vec::new();
-    let mut unsupported_ids = HashSet::new();
-    for row in rows {
-        let (space_id, space) = row?;
-        match space {
-            Some(space) => spaces.push(space),
-            None => {
-                unsupported_ids.insert(space_id);
-            }
-        }
-    }
+    let mut spaces = rows.collect::<rusqlite::Result<Vec<_>>>()?;
     if spaces.is_empty() {
         return Err(rusqlite::Error::InvalidQuery);
     }
 
-    load_session_membership(tx, &mut spaces, &unsupported_ids)?;
-    Ok(LoadedSpaces {
-        spaces,
-        unsupported_ids,
-    })
+    load_session_membership(tx, &mut spaces)?;
+    Ok(spaces)
 }
 
 fn load_session_membership(
     tx: &Transaction<'_>,
     spaces: &mut [WorkspaceSpace],
-    unsupported_ids: &HashSet<i64>,
 ) -> rusqlite::Result<()> {
     let space_ids = spaces
         .iter()
@@ -123,9 +93,6 @@ fn load_session_membership(
         ))
     })? {
         let (space_id, position, session) = row?;
-        if unsupported_ids.contains(&space_id) {
-            continue;
-        }
         if session.terminal_snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.validate().is_err() || snapshot.session_id != session.identity
         }) {
@@ -133,7 +100,6 @@ fn load_session_membership(
         }
         if session.identity.is_empty()
             || session.backend_name.is_empty()
-            || session.state.snoozed_until.is_some_and(|until| until < 0)
             || session.state.last_activity_at.is_some_and(|at| at < 0)
             || position < 0
             || !space_ids.contains(&space_id)
@@ -166,16 +132,6 @@ fn load_session_membership(
         return Err(rusqlite::Error::InvalidQuery);
     }
     Ok(())
-}
-
-pub(super) const fn backend_to_storage(backend: Option<MultiplexerBackendConfig>) -> &'static str {
-    match backend {
-        None => "inherit",
-        Some(MultiplexerBackendConfig::Herdr) => "herdr",
-        Some(MultiplexerBackendConfig::Rmux) => "rmux",
-        Some(MultiplexerBackendConfig::Native) => "native",
-        Some(MultiplexerBackendConfig::Tmux) => "tmux",
-    }
 }
 
 /// A binding's remote is stored as JSON rather than as columns of its own: it is one value the app
@@ -212,23 +168,6 @@ pub(super) fn color_from_hex(value: &str) -> Option<[u8; 3]> {
     let rgb = u32::from_str_radix(value, 16).ok()?;
     let [_, red, green, blue] = rgb.to_be_bytes();
     (value.len() == 6).then_some([red, green, blue])
-}
-
-pub(super) enum StoredBackend {
-    Inherit,
-    Supported(MultiplexerBackendConfig),
-    Unsupported,
-}
-
-pub(super) fn backend_from_storage(backend: &str) -> StoredBackend {
-    match backend {
-        "inherit" => StoredBackend::Inherit,
-        "herdr" => StoredBackend::Supported(MultiplexerBackendConfig::Herdr),
-        "rmux" => StoredBackend::Supported(MultiplexerBackendConfig::Rmux),
-        "native" => StoredBackend::Supported(MultiplexerBackendConfig::Native),
-        "tmux" => StoredBackend::Supported(MultiplexerBackendConfig::Tmux),
-        _ => StoredBackend::Unsupported,
-    }
 }
 
 pub(super) const fn bool_from_storage(value: i64) -> rusqlite::Result<bool> {

@@ -6,10 +6,10 @@ Bootty keeps GPUI input capture separate from terminal encoding. Each pane's foc
 `TerminalSurface` geometry into UI-free `TerminalInputCommand` values. `TerminalEngine` turns
 those commands into bytes using Ghostty-compatible encoders or direct UTF-8 writes.
 
-The native and rmux workers share `TerminalInputCommand::apply` for encoding and viewport
-policy. Its result tells each worker whether input requires a frame publication; untracked
-pointer motion does not bypass the output quiet window. Workers own transport delivery and
-report encoding failures through their normal terminal error channel.
+The native worker uses `TerminalInputCommand::apply` for encoding and viewport policy. Its
+result tells the worker whether input requires a frame publication; untracked pointer motion
+does not bypass the output quiet window. The worker owns transport delivery and reports
+encoding failures through its normal terminal error channel.
 
 The workspace owns window-focus events. Terminal views observe that state for cursor and input
 cleanup without emitting another focus event for each rendered pane.

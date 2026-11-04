@@ -1,3 +1,17 @@
+# Live terminals and cold restore
+
+The local native mux server owns pane processes, layouts and terminal state.
+Quitting, crashing or updating the desktop app disconnects its VTs; the server
+keeps running. Reopening attaches to the existing sessions with their history,
+cursor, modes, primary screen and alternate screen intact.
+
+After a reboot or mux server loss, saved Space metadata remains in SQLite. A
+missing session can cold-restore from its last validated checkpoint: layout,
+titles, directories and bounded styled history return in new shell processes.
+A cold checkpoint cannot restore a running program. Saved commands are never
+replayed automatically. Existing server sessions always take priority over a
+cold checkpoint.
+
 # Previous-session output
 
 Set `session.output-archives = true` to checkpoint every attached, addressable
@@ -6,21 +20,9 @@ sensitive data. Each archive is private local application state and contains at
 most 256 KiB of formatted plain scrollback plus host/backend, pane, geometry,
 omitted-row and capture-time facts. Bootty keeps the newest 32 per app window.
 Writes are complete-file atomic; malformed, oversized and non-regular files are
-reported and skipped. The `Previous sessions` Dock panel labels output as an
-archive. `recovery.list`, `recovery.get`, `recovery.export` (no overwrite) and
-`recovery.delete` expose the same data through shared commands.
+reported and skipped. `recovery.list`, `recovery.get`, `recovery.export` (no
+overwrite) and `recovery.delete` expose archives through shared commands.
 
 An archive is not a process checkpoint and is never fed back through the terminal
 engine. It cannot ring bells, issue host commands, change the clipboard or send
-input. tmux and Herdr archives contain Bootty's retained client-view history, not
-backend-native history.
-
-When an integration reported a persistent Pi, Codex or Claude session, Bootty
-stores its session ID and the already-filtered reusable launch context. The panel
-can explicitly resume or fork it in a new tab. At execution time Bootty requires
-the original Space and a matching hash of its current host transport, validates
-the launch and session ID again, and uses `new_tab`, `terminal.paste`, and
-`terminal.submit` through the shared command mailbox. Prompts, credentials,
-ephemeral sessions and arbitrary launch overrides are never archived. A replaced
-host binding or missing session disables relaunch; Bootty never redirects it to
-the focused terminal.
+input.

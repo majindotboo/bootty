@@ -8,10 +8,10 @@ use gpui_kit::{
 };
 
 use super::{
-    ChromeIntent, ChromePalette, ContextMenu, GpuiChrome, MenuRow, NativeChromeAction,
-    StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot, StatusProgress,
-    StatusSegmentSnapshot, StatusTabFocusMovement, TabBounds, TabContextAction, TabContextSnapshot,
-    TabInsertionTarget, color, tab_insertion_target,
+    ChromeIntent, ChromePalette, ContextMenu, GpuiChrome, MenuRow, StatusAlignment,
+    StatusBarSnapshot, StatusIntent, StatusItemSnapshot, StatusProgress, StatusSegmentSnapshot,
+    StatusTabFocusMovement, TabBounds, TabContextAction, TabContextSnapshot, TabInsertionTarget,
+    color, tab_insertion_target,
 };
 use crate::gpui::{IconSize, Rgba, sized_icon};
 use gpui_kit::component::{
@@ -613,21 +613,6 @@ fn new_tab_button(
         .into_any_element()
 }
 
-/// A conversation or chooser tab closes through its own owner, not the mux.
-fn native_close_button(
-    items: &[StatusItemSnapshot],
-    label: &str,
-    cx: &Context<GpuiChrome>,
-) -> Option<gpui_kit::AnyElement> {
-    items.iter().find_map(|item| match &item.action {
-        Some(NativeChromeAction::FocusConversation(target)) => {
-            Some(native_tab_close_button(target.clone(), label, cx))
-        }
-        Some(NativeChromeAction::SurfaceChooser(id)) => Some(surface_tab_close_button(*id, cx)),
-        _ => None,
-    })
-}
-
 /// The keystroke hint that selects this tab, by its place in the strip.
 fn tab_shortcut(
     bar: StatusBarStyle<'_>,
@@ -674,7 +659,6 @@ fn render_tab(
     let label = tab_label(items);
     let tab_context = items.iter().find_map(|item| item.tab_context.clone());
     let activation = tab_activation(items, tab_context.as_ref());
-    let native_close = native_close_button(items, &label, cx);
     let source = items.first().and_then(|item| item.reorder_anchor.clone());
     let insertion_here = source.as_ref().is_some_and(|source| {
         matches!(insertion_target, Some(TabInsertionTarget::Before(before)) if before == source)
@@ -702,8 +686,7 @@ fn render_tab(
             cx,
         ),
         cx,
-    )
-    .or(native_close);
+    );
 
     let content = crate::gpui::tabs::content(
         div()
@@ -867,47 +850,6 @@ fn render_tab_items(
         .collect()
 }
 
-fn native_tab_close_button(
-    target: bootty_control::CommandTarget,
-    label: &str,
-    cx: &Context<GpuiChrome>,
-) -> gpui_kit::AnyElement {
-    Button::new(SharedString::from(format!(
-        "native-tab-close-{}",
-        target.handle
-    )))
-    .icon(IconName::Close)
-    .ghost()
-    .xsmall()
-    .size_4()
-    .accessibility_label(format!("Close {label}"))
-    .tooltip(format!("Close {label}"))
-    .on_click(cx.listener(move |_, _, _, cx| {
-        cx.stop_propagation();
-        cx.emit(ChromeIntent::Status(StatusIntent::Action(
-            NativeChromeAction::CloseConversation(target.clone()),
-        )));
-    }))
-    .into_any_element()
-}
-
-fn surface_tab_close_button(id: u64, cx: &Context<GpuiChrome>) -> gpui_kit::AnyElement {
-    Button::new(SharedString::from(format!("surface-tab-close-{id}")))
-        .icon(IconName::Close)
-        .ghost()
-        .xsmall()
-        .size_4()
-        .accessibility_label("Close New tab")
-        .tooltip("Close New tab")
-        .on_click(cx.listener(move |_, _, _, cx| {
-            cx.stop_propagation();
-            cx.emit(ChromeIntent::Status(StatusIntent::Action(
-                NativeChromeAction::CancelSurfaceChooser(id),
-            )));
-        }))
-        .into_any_element()
-}
-
 fn tab_close_button(
     tab_context: Option<&TabContextSnapshot>,
     id: String,
@@ -1032,8 +974,8 @@ fn render_item(
     let tab = tab_active.is_some();
     let action = item.action.clone();
     let bounded = action.is_some() || item.background.is_some();
-    if let Some(super::NativeChromeAction::TogglePanel(kind)) = &item.action {
-        return panel_button(*kind, item, bar, colors, cx);
+    if action == Some(super::NativeChromeAction::ToggleSessions) {
+        return panel_button(item, bar, colors, cx);
     }
     let reorder_anchor = (!tab).then(|| item.reorder_anchor.clone()).flatten();
     let active = tab_active.unwrap_or(false);
@@ -1221,13 +1163,12 @@ fn reorderable_item(
 }
 
 fn panel_button(
-    kind: bootty_config::config::PanelKind,
     item: &StatusItemSnapshot,
     bar: StatusBarStyle<'_>,
     colors: ChromePalette,
     cx: &Context<GpuiChrome>,
 ) -> gpui_kit::AnyElement {
-    let action = crate::commands::DockAction::TogglePanel(kind);
+    let action = crate::commands::DockAction::ToggleSessions;
     let command = action.command();
     let invocation = bootty_control::CommandInvocation::from_action(
         command.action(),

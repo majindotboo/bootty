@@ -32,13 +32,6 @@ include = [
 # next to this config file before falling back to the built-in catalog.
 theme = "One Dark"
 
-# The optional mascot icon is hidden until enabled.
-[tray]
-visibility = "hidden" # hidden | always | working | attention
-# macOS defaults to monochrome; Windows and Linux default to color.
-# icon-style = "monochrome" # color | monochrome
-macos-unread-count = false # count beside the macOS menu bar icon
-
 [window]
 background-opacity = 1.0
 background-image-opacity = 1.0
@@ -103,7 +96,6 @@ black = "auto"
 [chrome]
 tabs-use-session-color = true
 left-dock-toggle = true
-right-dock-toggle = true
 # Live-reloaded app chrome. The status bar has one layout: tabs at the left, the machine's
 # state and the time at the right.
 # In dark mode on notched fullscreen displays, use solid black for sidebar,
@@ -113,6 +105,9 @@ gap = 0
 # Dim inactive panes by overlay opacity in the 0.0-1.0 range.
 unfocused-sidebar-dim = 0.16
 unfocused-terminal-dim = 0.0
+# Dock separator appearance; the grab area is independent of the line width.
+pane-divider-width = 1.0
+# pane-divider-color = "#313244"
 
 [chrome.tabs]
 # Terminal and sidebar tabs share one appearance and close-button setting.
@@ -123,14 +118,8 @@ close-button = "always" # always, hover, hidden
 [sidebar]
 # Turn off for one flat list with project context on each session.
 group-by-project = true
-# Show only the Settled heading and count until you open it.
-settled-collapsed = false
 # Manual order is the default; recent-activity uses accepted session input.
 sort-order = "manual"
-# Rotate the Working ring unless reduced motion is enabled.
-animate-working = true
-# Settle inactive sessions after three days; zero disables auto-settle.
-auto-settle-after-days = 3
 # Sessions colors layer on top of the active theme.
 # Any unset slot falls back to the theme-derived value.
 # background = "#11131a"
@@ -139,38 +128,12 @@ auto-settle-after-days = 3
 # hover = "#1e222c"
 # border = "#313244" # edge border and footer separator
 # Overall sidebar modules remain separate from the pieces rendered for every session.
-# modules = ["sessions", "usage"]
-# session-modules = ["diffs", "process", "agent", "directory", "branch", "ports", "progress"]
+# modules = ["sessions"]
+# session-modules = ["diffs", "process", "directory", "branch", "ports", "progress"]
 
 [multiplexer]
-# native keeps mux state and terminals inside Bootty. rmux renders through
-# rmux-sdk. herdr 0.8+ and tmux attach through their own backend UIs. Herdr keeps
-# every inner workspace, tab, pane, process, and agent fact inside Herdr.
-backend = "native"
-# tmux backend only: hide tmux's own status bar inside Bootty's client by
-# toggling the attached session's status option off (restored on detach), so
-# Bootty's native status bar is the only one shown. Session-scoped and
-# reversible; never a global or permanent disable. If you also attach the same
-# session from another terminal at the same time, its bar is hidden there too
-# until Bootty detaches.
-hide-tmux-status = false
-
-# Reach a multiplexer on another host over SSH and render its sessions here.
-# Herdr must already be installed there. Bootty automatically installs its
-# small headless daemon when remote Space catalog operations need it. The full
-# Bootty app is not required on the remote host.
-# On Windows, a WSL target replaces the entire SSH table below:
-# [multiplexer.remote]
-# distribution = "Ubuntu" # requires backend = "rmux" or "tmux"
-# Do not combine distribution with SSH fields.
-# [multiplexer.remote]
-# host = "devbox"       # ~/.ssh/config alias, hostname, or address
-# user = "dev"         # when ~/.ssh/config does not name one
-# Herdr remote UI reads advanced connection settings from ~/.ssh/config. Its
-# backend rejects port, program, and args here because Herdr cannot represent them.
-# port = 2222           # when ~/.ssh/config does not name one
-# program = "ssh"       # the SSH client to run
-# args = ["-i", "~/.ssh/devbox"] # extra flags, passed before the destination
+# The native mux server owns local or SSH-hosted terminals and survives app exit.
+# [multiplexer.remote] selects an SSH host. WSL native panes remain unavailable.
 
 [input]
 # Preferred user overrides live in the identity-scoped keymap.json beside this
@@ -184,8 +147,6 @@ hide-tmux-status = false
 #       "bindings": { "ctrl-k": "new_tab" }
 #     },
 #   ]
-# The SurfaceChooser context exposes ui.surface.next/previous/confirm/cancel
-# and ui.surface.agent/terminal/claude/codex/pi/edit_profiles for new tabs/splits.
 # Arrow, Vim and Emacs navigation defaults can be changed in the same keymap.
 # Bootty resolves the preset and compatibility arrays below first, then applies
 # Every preset binds Cmd+K to the command palette (Ctrl+Shift+K outside macOS).
@@ -244,7 +205,6 @@ keybind = [
   "cmd+7=select_session:7",
   "cmd+8=select_session:8",
   "cmd+9=select_session:9",
-  "cmd+alt+x=settle_session",
 ]
 
 # Sidebar-local keybinds apply only while the sidebar owns keyboard focus.
@@ -270,7 +230,6 @@ copy-on-select = false
 # Application shortcuts are independent; use left_alt/right_alt for sided bindings.
 macos-option-as-alt = "both"
 
-# Optional backend-specific shards are appended only for the selected backend.
 # Modifier remaps are live-reloaded and apply to GPUI and direct input paths.
 # Supported sides include left/right shift, alt, ctrl, and command.
 modifier-remap = [
@@ -278,84 +237,7 @@ modifier-remap = [
   # "right_command=left_alt",
 ]
 
-[browser]
-search-engine = "duckduckgo" # duckduckgo, google, bing, or brave
-persist-site-data = true
-
-[input.backend-keybind]
-# Empty by default so Herdr receives its own complete keymap, including Ctrl-B.
-herdr = []
-
-tmux = [
-  # Custom CSI relays registered as tmux user-keys in ~/.tmux.conf.
-  "cmd+;=csi:61~",
-  "cmd+ctrl+n=csi:68~",
-  "ctrl+alt+[=csi:69~",
-  "cmd+y=csi:71~",
-  "cmd+c=csi:72~",
-  "alt+n=esc:N",
-  "alt+p=esc:P",
-  "alt+h=esc:H",
-  "alt+j=esc:J",
-  "alt+k=esc:K",
-  "alt+l=esc:L",
-  "alt+x=esc:X",
-  "alt+z=esc:Z",
-  "ctrl+space=text:\\x00",
-]
-
-native = [
-  "ctrl+space>c=new_tab",
-  "ctrl+space>v=split_right",
-  "ctrl+space>-=split_down",
-  "ctrl+space>s=new_mux_session",
-  "ctrl+space>x=settle_session",
-  "ctrl+space>shift+x=settle_session",
-  "ctrl+space>1=select_session:1",
-  "ctrl+space>2=select_session:2",
-  "ctrl+space>3=select_session:3",
-  "ctrl+space>4=select_session:4",
-  "ctrl+space>5=select_session:5",
-  "ctrl+space>6=select_session:6",
-  "ctrl+space>7=select_session:7",
-  "ctrl+space>8=select_session:8",
-  "ctrl+space>9=select_session:9",
-  "ctrl+space>shift+,=move_tab:-1",
-  "ctrl+space>shift+.=move_tab:1",
-  "left_alt+shift+n=next_tab",
-  "left_alt+shift+p=previous_tab",
-  "alt+shift+]=next_tab",
-  "alt+shift+[=previous_tab",
-  "alt+Tab=last_tab",
-  "alt+1=select_tab:1",
-  "alt+2=select_tab:2",
-  "alt+3=select_tab:3",
-  "alt+4=select_tab:4",
-  "alt+5=select_tab:5",
-  "alt+6=select_tab:6",
-  "alt+7=select_tab:7",
-  "alt+8=select_tab:8",
-  "alt+9=select_tab:9",
-  "left_alt+shift+,=move_tab:-1",
-  "left_alt+shift+.=move_tab:1",
-  "alt+shift+h=select_pane:left",
-  "alt+shift+j=select_pane:down",
-  "alt+shift+k=select_pane:up",
-  "alt+shift+l=select_pane:right",
-  "alt+shift+o=next_pane",
-  "alt+shift+x=kill_pane",
-  "alt+shift+z=toggle_pane_zoom",
-  "cmd+y=scroll_page_up",
-  "cmd+shift+y=scroll_page_down",
-  "cmd+ArrowUp=scroll_page_lines:-1",
-  "cmd+ArrowDown=scroll_page_lines:1",
-]
-
-
 [session]
-# Agent completion, approval and error alerts: never, unfocused, always.
-agent-notifications = "unfocused"
-
 bell = "visual" # off | visual | audio | both
 command-notifications = "unfocused" # never | unfocused | always
 command-notification-min-seconds = 10
@@ -374,10 +256,6 @@ clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 # worktree-directory = "~/src/worktrees"
 # What a new worktree's branch name starts with. A project's own prefix wins.
 # branch-prefix = "bootty/"
-# Keep at most this many of Bootty's worktrees on each host. Past it, the oldest
-# archived and settled sessions' worktrees go first; one with uncommitted or
-# unpushed work always stays. 0 removes only worktrees no session uses.
-# worktree-limit = 10
 # env = [
 #   { name = "EDITOR", value = "nvim" },
 # ]
@@ -440,57 +318,3 @@ palette = [
   # "#f5e0dc",
   # "#cba6f7",
 ]
-
-# Agent launch preferences. Credentials remain in the provider's own account store.
-[agents]
-# Parents can control only shells/native children created under this exact live grant.
-default-provider = "codex"
-auto-update = true
-allow-spawn = false
-quick-model = "gpt-6-luna" # names sessions, writes commit messages and PR text
-follow-up-behavior = "queue" # queue | steer | interrupt
-continue-after-restart = true
-send-shortcut = "enter" # enter | mod-enter-multiline | mod-enter
-response-streaming = "live" # live | paragraph | complete
-transcript-width = "wide" # normal | wide | full
-collapse-composer-on-scroll = true
-
-[agents.codex]
-default-model = "" # Resolves the advertised recommended model.
-default-effort = "" # Resolves the model's supported default.
-available-efforts = [] # Empty shows all supported levels; e.g. ["low", "high"].
-fast-mode = false
-enabled = true
-program = ""
-selected = ""
-
-[agents.claude]
-default-model = "" # Resolves the advertised recommended model.
-default-effort = "" # Resolves the model's supported default.
-available-efforts = [] # Empty shows all supported levels; e.g. ["low", "high"].
-fast-mode = false
-enabled = true
-program = ""
-selected = ""
-
-[agents.pi]
-default-model = "" # Resolves the advertised recommended model.
-default-effort = "" # Resolves the model's supported default.
-available-efforts = [] # Empty shows all supported levels; e.g. ["low", "high"].
-enabled = true
-program = ""
-selected = ""
-
-# [agents.codex.profiles.work]
-# name = "Work"
-# directory = "/absolute/path/to/codex-work"
-# arguments = ["--model", "gpt-6.1-sol"]
-
-# Local desktop computer use is separate from macOS Screen Recording and Accessibility.
-# These switches never request an OS grant. Status and window listing remain readable.
-[computer]
-enabled = false
-capture-enabled = false
-input-enabled = false
-# Bundle ids agents may use in any conversation without asking.
-always-allowed-apps = []

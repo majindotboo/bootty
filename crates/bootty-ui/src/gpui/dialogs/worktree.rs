@@ -262,8 +262,6 @@ impl DialogView {
         &self,
         spec: &DialogSpec,
         field: &DialogField,
-        compact: bool,
-        _cx: &Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
         let picker = self.worktree_ref_picker.as_ref()?;
         let checkout = field.id == "checkout-branch";
@@ -284,12 +282,10 @@ impl DialogView {
                 })
                 .menu_width(rems(24.))
                 .menu_max_h(rems(18.))
-                .when(compact || checkout, |select| {
-                    select.small().appearance(false)
-                })
+                .when(checkout, |select| select.small().appearance(false))
                 .disabled(spec.busy),
         );
-        if checkout || compact {
+        if checkout {
             return Some(control);
         }
         Some(Self::prompt_control_row(

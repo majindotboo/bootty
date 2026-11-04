@@ -52,7 +52,7 @@ fn power_stops_continuous_nvidia_sampler_at_the_deadline() {
     let log = plan.log.clone();
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", "continuous_sampler_helper", "--nocapture"])
+        .args(["--exact", "power::continuous_sampler_helper", "--nocapture"])
         .env("BOOTTY_CONTINUOUS_SAMPLER_HELPER", "1");
     let base = Instant::now();
     let elapsed = Arc::new(AtomicU64::new(0));

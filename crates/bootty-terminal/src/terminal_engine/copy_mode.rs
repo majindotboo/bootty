@@ -12,14 +12,14 @@ use crate::terminal_frame::{CursorSnapshot, FrameCopyMode, RenderFrame};
 use super::logical_search::{CopyModeSearchMatch, copy_mode_logical_search_matches};
 use super::{TerminalEngine, TerminalSelectionFormat};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TerminalSearchDirection {
     Previous,
     Current,
     Next,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TerminalCopyModeAction {
     Cancel,
     CancelOrClearSelection,
@@ -44,7 +44,7 @@ pub enum TerminalCopyModeAction {
     Move(TerminalCopyModeMotion),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TerminalCopyModeMotion {
     Left,
     Right,
@@ -69,14 +69,14 @@ pub enum TerminalCopyModeMotion {
     ScrollDown,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalCopyModeOutcome {
     pub copied: Option<Vec<u8>>,
     pub search: Option<TerminalCopyModeSearchOutcome>,
     pub active: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalCopyModeSearchOutcome {
     pub query: String,
     pub found: bool,

@@ -125,71 +125,14 @@ fn remote_port_is_a_nonzero_network_port(#[case] port: &str, #[case] expected: O
 }
 
 #[rstest]
-fn selecting_native_removes_the_default_remote_in_one_valid_document(
-    #[values(false, true)] reset: bool,
-) {
-    let directory = assert_fs::TempDir::new().expect("temporary config directory");
-    let path = directory.path().join("config.toml");
-    std::fs::write(
-        &path,
-        "[multiplexer]\nbackend = \"tmux\"\n\n[multiplexer.remote]\nhost = \"devbox\"\n",
-    )
-    .expect("write remote config");
-    let document = load_or_create_config_document(&path).expect("load remote config document");
-    let mut session = SettingsSession::new(
-        AcceptedSettings {
-            config: std::sync::Arc::new(bootty_config::config::BoottyConfig::default()),
-            revision: 1,
-            document,
-            schema: Arc::new(SettingsSchema::new(
-                SettingsSchema::builtin().specs().to_vec(),
-            )),
-        },
-        Catalogs::default(),
-    );
-
-    assert!(if reset {
-        session.remove_value("multiplexer.backend")
-    } else {
-        session.set_multiplexer_backend("native")
-    });
-
-    let effects = session.take_effects();
-    let [SettingsEffect::SubmitDocument(document)] = effects.as_slice() else {
-        panic!("native selection submits exactly one complete config document");
-    };
-    assert_eq!(
-        document.str_at(&["multiplexer", "backend"]),
-        if reset { None } else { Some("native") }
-    );
-    assert!(!document.contains(&["multiplexer", "remote"]));
-
-    bootty_config::config::commit_config_document(
-        &path,
-        document.clone(),
-        |_| Ok::<(), String>(()),
-    )
-    .expect("the submitted document remains valid");
-    assert_eq!(
-        load_config_from_path(&path)
-            .expect("load committed native config")
-            .multiplexer
-            .remote,
-        None
-    );
-}
-
-#[rstest]
-fn saving_a_default_remote_with_native_selected_is_rejected_without_an_effect() {
+fn saving_a_default_remote_submits_the_validated_host() {
     let mut session = session();
     assert!(session.edit_default_remote("host", "devbox".to_owned()));
-
-    assert!(!session.save_default_remote());
-    assert!(session.take_effects().is_empty());
-    assert_eq!(
-        session.remotes().default.error.as_deref(),
-        Some("Choose herdr, rmux, or tmux before saving a default remote.")
+    assert!(session.save_default_remote());
+    assert!(
+        matches!(session.take_effects().as_slice(), [SettingsEffect::SetDefaultRemote(profile)] if profile.host == "devbox")
     );
+    assert_eq!(session.remotes().default.error, None);
 }
 
 type RemoteSettings = (assert_fs::TempDir, AcceptedSettings, SettingsSession);
@@ -200,7 +143,7 @@ fn remote_settings() -> anyhow::Result<RemoteSettings> {
     let path = directory.path().join("config.toml");
     std::fs::write(
         &path,
-        "[multiplexer]\nbackend = 'tmux'\n[multiplexer.remote]\nhost = 'accepted.test'\n",
+        "[multiplexer]\nbackend = 'native'\n[multiplexer.remote]\nhost = 'accepted.test'\n",
     )?;
     let accepted = AcceptedSettings {
         config: Arc::new(load_config_from_path(&path)?),
@@ -236,15 +179,10 @@ fn accepted_config_is_the_source_of_remote_settings(
 #[rstest]
 fn rejected_default_remote_writes_preserve_the_draft(
     remote_settings: anyhow::Result<RemoteSettings>,
-    #[values(false, true)] clear: bool,
 ) {
     let (_directory, accepted, mut session) = remote_settings.unwrap();
     session.edit_default_remote("host", "draft.test".to_owned());
-    if clear {
-        session.clear_default_remote();
-    } else {
-        assert!(session.save_default_remote());
-    }
+    session.clear_default_remote();
     assert_eq!(session.take_effects().len(), 1);
     session.apply_outcome(SettingsOutcome::DocumentRejected {
         source: SettingsWriteSource::DefaultRemote,
@@ -276,13 +214,9 @@ fn accepting_a_remote_write_preserves_other_unsaved_settings(
     session.add_environment_variable();
     session.set_environment_value(0, "unfinished".to_owned());
     let environment = session.environment().to_vec();
-    session.edit_default_remote("host", "saved.test".to_owned());
-    assert!(session.save_default_remote());
+    session.clear_default_remote();
     session.take_effects();
-    accepted
-        .document
-        .set_str(&["multiplexer", "remote", "host"], "saved.test")
-        .unwrap();
+    accepted.document.remove_multiplexer_remote().unwrap();
     accepted.revision = 2;
     accepted = persist_snapshot(accepted).unwrap();
     session.apply_outcome(SettingsOutcome::DocumentAccepted {
@@ -295,7 +229,7 @@ fn accepting_a_remote_write_preserves_other_unsaved_settings(
         session.value("font.size"),
         Some(bootty_config::settings_schema::SettingValue::Number(19.0))
     );
-    assert_eq!(session.remotes().default.host, "saved.test");
+    assert_eq!(session.remotes().default.host, "");
     assert_eq!(session.environment(), environment);
     assert_eq!(session.write_error(), Some("font write rejected"));
 }
@@ -303,22 +237,13 @@ fn accepting_a_remote_write_preserves_other_unsaved_settings(
 #[rstest]
 fn accepted_default_remote_writes_clear_only_the_saved_draft(
     remote_settings: anyhow::Result<RemoteSettings>,
-    #[values(false, true)] clear: bool,
 ) {
     let (_directory, mut accepted, mut session) = remote_settings.unwrap();
     session.edit_default_remote("host", " saved.test ".to_owned());
     session.new_remote("unfinished".to_owned());
     let profile_draft = session.remotes().draft;
-    if clear {
-        session.clear_default_remote();
-        accepted.document.remove_multiplexer_remote().unwrap();
-    } else {
-        assert!(session.save_default_remote());
-        accepted
-            .document
-            .set_str(&["multiplexer", "remote", "host"], "saved.test")
-            .unwrap();
-    }
+    session.clear_default_remote();
+    accepted.document.remove_multiplexer_remote().unwrap();
     session.take_effects();
     accepted.revision = 2;
     accepted = persist_snapshot(accepted).unwrap();
@@ -327,10 +252,7 @@ fn accepted_default_remote_writes_clear_only_the_saved_draft(
         accepted: Box::new(accepted.clone()),
         warning: None,
     });
-    assert_eq!(
-        session.remotes().default.host,
-        if clear { "" } else { "saved.test" }
-    );
+    assert_eq!(session.remotes().default.host, "");
     assert_eq!(session.remotes().draft, profile_draft);
     // A confirmed write leaves this editor clean, so later accepted reloads follow it.
     accepted.revision = 3;
@@ -405,39 +327,6 @@ fn remote_profile_outcomes_belong_to_the_profile_editor(
         assert_eq!(draft.error.as_deref(), Some("write rejected"));
     }
     assert_eq!(session.remotes().default.host, "unsaved-default.test");
-}
-
-#[rstest]
-#[case("native", false)]
-#[case("rmux", true)]
-#[case("tmux", true)]
-#[case("herdr", true)]
-fn default_remote_validation_uses_the_effective_backend_from_includes(
-    #[case] backend: &str,
-    #[case] supported: bool,
-) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let path = directory.path().join("config.toml");
-    std::fs::write(&path, "include = ['backend.toml']\n").unwrap();
-    std::fs::write(
-        directory.path().join("backend.toml"),
-        format!("[multiplexer]\nbackend = '{backend}'\n"),
-    )
-    .unwrap();
-    let mut session = SettingsSession::new(
-        AcceptedSettings {
-            config: Arc::new(load_config_from_path(&path).unwrap()),
-            revision: 1,
-            document: load_or_create_config_document(&path).unwrap(),
-            schema: Arc::new(SettingsSchema::new(
-                SettingsSchema::builtin().specs().to_vec(),
-            )),
-        },
-        Catalogs::default(),
-    );
-    session.edit_default_remote("host", "server.test".to_owned());
-    assert_eq!(session.save_default_remote(), supported);
-    assert_eq!(session.take_effects().is_empty(), !supported);
 }
 
 #[rstest::fixture]

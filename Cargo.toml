@@ -38,37 +38,13 @@ allow_attributes_without_reason = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
-anstyle-parse = "1"
-# Deliberate limit: code blocks highlight the languages agents write most. Each grammar compiles
-# into the app; add one when conversations need it.
-gpui-kit = { version = "0.8.0", features = [
-    "tree-sitter-bash",
-    "tree-sitter-c",
-    "tree-sitter-cpp",
-    "tree-sitter-css",
-    "tree-sitter-diff",
-    "tree-sitter-go",
-    "tree-sitter-html",
-    "tree-sitter-java",
-    "tree-sitter-javascript",
-    "tree-sitter-lua",
-    "tree-sitter-make",
-    "tree-sitter-markdown",
-    "tree-sitter-python",
-    "tree-sitter-ruby",
-    "tree-sitter-rust",
-    "tree-sitter-sql",
-    "tree-sitter-swift",
-    "tree-sitter-toml",
-    "tree-sitter-tsx",
-    "tree-sitter-typescript",
-    "tree-sitter-yaml",
-] }
+ciborium = "0.2"
+# The settings window edits config.toml; JSON highlighting for keymap.json is built in.
+gpui-kit = { version = "0.9.0", features = ["tree-sitter-toml"] }
 fluent-bundle = "0.16"
 unic-langid = "0.9"
 unicode-segmentation = "1.13.3"
 url = "2.5.8"
-wry = "0.57"
 chrono = "0.4.45"
 ab_glyph = "0.2"
 anyhow = "1"
@@ -86,8 +62,6 @@ getrandom = "0.4"
 fontdb = "0.24"
 font-kit = { package = "zed-font-kit", version = "=0.14.1-zed" }
 image = { version = "0.25", default-features = false }
-markdown = "1.0"
-mermaid-rs-renderer = { version = "=0.3.1", default-features = false }
 iconflow = { version = "2.1", features = [
   "pack-bootstrap",
   "pack-lucide",
@@ -95,17 +69,13 @@ iconflow = { version = "2.1", features = [
   "pack-tabler",
 ] }
 indoc = "2"
-inventory = "0.3"
-libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "0ef80413de1326685743378efbfa06d849e041a7", features = [
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "575ed6b8ceb79ffaf247ecf7e34333876b0d5be4", features = [
   "png",
   "log",
 ] }
 memchr = "2.8"
 regex = "1"
 mslnk = "0.1.8"
-muda = "0.21"
-tray-icon = { version = "0.26", default-features = false }
-ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
 notify-rust = "4.18"
 notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 num-traits = "0.2"
@@ -139,26 +109,18 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
   "std",
 ] }
 png = "0.18"
-portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "e2a98e1b8af156988ad0ac778658ac27b60a55fb" }
-filedescriptor = { git = "https://github.com/wezterm/wezterm.git", rev = "e2a98e1b8af156988ad0ac778658ac27b60a55fb" }
+portable-pty = { git = "https://github.com/wezterm/wezterm.git", rev = "e68a8ec27727fbbda15e07f0a0737cd5e16481f6" }
+filedescriptor = { git = "https://github.com/wezterm/wezterm.git", rev = "e68a8ec27727fbbda15e07f0a0737cd5e16481f6" }
 pretty_assertions = "1.4.1"
 proptest = "1"
 proptest-derive = "0.9"
-# Keep Cargo.lock on rustix 1.1.4 until rmux-client stops importing rustix::runtime.
-# The v0.10.0 pipe subscriber drops overwritten bytes. Keep this bounded lossless
-# patch pinned until an upstream release preserves pipe output under backpressure.
-rmux-client = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
-rmux-sdk = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
 keepawake = "0.6"
-rmux-ipc = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
-rmux-os = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
-rmux-proto = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6" }
-rmux-server = { git = "https://github.com/luan/rmux.git", rev = "1d56e30c62dabf1fea6aa83211d05377b67faad6", default-features = false }
 rstest = "0.28"
 rustybuzz = "0.20"
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.11"
 serde = { version = "1", features = ["derive"] }
+serde_bytes = "0.11"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 signal-hook = "0.4"
 smallvec = "1"
@@ -166,30 +128,29 @@ starship-battery = "0.12"
 static_assertions = "1.1.0"
 strum = { version = "0.28", features = ["derive"] }
 thiserror = "2"
-sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40", default-features = false, features = ["system"] }
 plist = "1.10"
 tempfile = "3"
 time = { version = "0.3", features = ["formatting", "macros"] }
-bytes = "1.11"
-h2 = "0.4.19"
+bytes = "1.12"
+h2 = "0.4.20"
 http = "1.5"
-tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring"] }
 crossterm = { version = "0.29", default-features = false, features = ["windows"] }
 quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["crypto", "ring"] }
-rustls = { version = "0.23.45", default-features = false, features = ["ring", "std"] }
-tokio = "1.53.1"
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+tokio = "1.54.1"
 toml_edit = { version = "0.25", features = ["serde"] }
 unicode-width = "0.2"
 ureq = "3"
-embed-resource = "3.0.11"
+embed-resource = "3.0.12"
 winsafe = { version = "0.0.29", default-features = false, features = ["kernel"] }
 winreg = "0.56"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [profile.dev]
-# Hundreds of test binaries multiply debug maps and incremental graphs. Keep the
-# normal edit/test cycle small; use the profiling profile when symbols are needed.
+# Keep the normal edit/test cycle small.
 debug = false
 incremental = false
 split-debuginfo = "off"
@@ -199,37 +160,10 @@ debug = false
 incremental = false
 split-debuginfo = "off"
 
-[profile.profiling]
-inherits = "release"
-debug = "full"
-lto = false
-strip = false
-
 [profile.release]
-lto = "fat"
-split-debuginfo = "off"
-
-# Rust 1.97's macOS 27 toolchain can produce unloadable stripped proc-macro dylibs and then
-# misreport them as missing crates (E0463). Build dependencies never ship in Bootty's bundle, so
-# keep their Mach-O metadata intact while retaining the release profile for product artifacts.
-[profile.release.build-override]
-strip = false
-
-[profile.daemon-release]
-inherits = "release"
-codegen-units = 1
-opt-level = "z"
-panic = "abort"
+lto = "thin"
 strip = "symbols"
-
-[profile.dynamic-release]
-inherits = "release"
-lto = false
-
-[profile.fast-release]
-inherits = "release"
-lto = false
-codegen-units = 16
+split-debuginfo = "off"
 
 [profile.dev.package."*"]
 opt-level = 2
@@ -241,14 +175,8 @@ debug-assertions = false
 [profile.dev.package.rust-embed]
 debug-assertions = false
 
-[profile.dev.package.gpui-pre-util]
-debug-assertions = false
-
 [profile.test.package.gpui-kit-assets]
 debug-assertions = false
 
 [profile.test.package.rust-embed]
-debug-assertions = false
-
-[profile.test.package.gpui-pre-util]
 debug-assertions = false

@@ -1,15 +1,12 @@
-pub mod agent_attention;
 mod clipboard;
 mod recovery;
 pub use recovery::SessionCheckpointTicket;
-mod settlement;
 mod worktree_cleanup;
 pub use worktree_cleanup::HostResults;
 mod themes;
-use bootty_mux::pane_layout::Divider;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, mpsc},
+    sync::mpsc,
     time::{Duration, Instant},
 };
 
@@ -17,7 +14,7 @@ use crate::gpui::{FrameInputSnapshot, InputEvent, Point, PointerButton};
 use crate::product_dialogs::terminal_find::{TerminalFindModel, TerminalFindOutput};
 use crate::terminal_text::TerminalTextConfig;
 use anyhow::Result;
-use bootty_config::config::{MultiplexerBackendConfig, WindowFullscreen};
+use bootty_config::config::WindowFullscreen;
 use bootty_config::{
     config::{AppearanceMode, AppearanceVariant, BoottyConfig, ConfigDocument, ConfigResult},
     config_reload::CONFIG_HOT_RELOAD_INTERVAL,
@@ -26,7 +23,6 @@ use bootty_control::{CommandInvocation, CommandTarget, ControlEventSender, Resou
 use bootty_mux::{
     RepaintHandle,
     controller::{MuxController, SpaceId},
-    provider::{MuxBackendRegistry, selected_backend},
     snapshot::{MuxSession, MuxWindow},
     terminal::{ActiveTerminal, TerminalRuntime, decode_scoped_pane_id},
 };
@@ -48,8 +44,6 @@ mod input;
 mod keybinds;
 mod mux_actions;
 mod notifications;
-mod terminal_agent_recovery;
-mod terminal_history;
 pub use dialog_runtime::ModalDialog;
 pub use mux_actions::ExactMuxAction;
 mod navigation;
@@ -185,23 +179,11 @@ impl WindowChromeFacts {
     }
 }
 
-/// A file or directory requested on the selected workspace host.
 /// A change that one click can reverse: what happened, and the commands that reverse it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UndoOffer {
     pub message: String,
     pub undo: Vec<CommandInvocation>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OpenFilesRequest {
-    pub scope: bootty_mux::controller::SpaceId,
-    pub target: bootty_control::CommandTarget,
-    pub host: String,
-    pub path: String,
-    pub document: bool,
-    pub line: u32,
-    pub column: u32,
 }
 
 /// Live changes to the fonts of everything but the terminal: settings, sidebar and status.
@@ -230,22 +212,11 @@ pub enum WindowEffect {
 /// Host actions requested by a frame update, applied by the active window adapter.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AppEffect {
-    CustomSnooze(Vec<bootty_control::CommandInvocation>),
-    OpenSurfaceChooser(crate::surface_creation::PendingNewSurface),
-    OpenSurfaceAgentForm(crate::surface_creation::PendingNewSurface),
-    CloseSurfaceChooser(u64),
-    NavigateSurfaceChooser {
-        id: u64,
-        action: crate::commands::SurfaceChooserAction,
-    },
     AttachNewSurface {
-        request_id: u64,
+        request: crate::surface_creation::PendingNewSurface,
         target: bootty_control::CommandTarget,
     },
     Dock(crate::commands::DockRequest),
-    NativeConversation(bootty_control::CommandTarget),
-    CloseNativeConversation(bootty_control::CommandTarget),
-    Browser(crate::commands::BrowserRequest),
     CloseWindow,
     OpenWindow,
     OpenSpaceWindow(bootty_mux::controller::SpaceId),
@@ -267,31 +238,17 @@ pub enum AppEffect {
     OpenSettings,
     OpenThemeSettings,
     OpenSetting(String),
-    OpenFiles(OpenFilesRequest),
     /// Show a local file in this computer's file manager.
     RevealPath(std::path::PathBuf),
     /// Open a local file in the app this computer opens it with.
     OpenWithSystem(std::path::PathBuf),
-    /// A find action for the focused conversation rather than a terminal.
-    ConversationFind(crate::app_actions::TerminalFindAction),
-    /// Enter the focused conversation's keyboard copy mode.
-    ConversationCopyMode,
-    /// Add the focused document's or terminal's selection to the session's conversation.
-    AddSelectionToConversation,
     /// Open a local file or folder in the installed editor with this id.
     OpenInEditor {
         editor: &'static str,
         path: std::path::PathBuf,
     },
     ChooseProjectDirectory(bootty_control::CommandTarget),
-    OpenGitChanges {
-        scope: bootty_mux::controller::SpaceId,
-        target: bootty_control::CommandTarget,
-        directory: String,
-        host: String,
-    },
     CommandAction(crate::gpui::CommandAction),
-    ComposerAction(crate::commands::ComposerRequest),
     /// Open settings to the keybindings page focused on the given action name,
     /// adding an editable row for it if none exists yet.
     ConfigureKeybind(String),
@@ -301,16 +258,12 @@ pub struct AppState {
     pub(super) pending_new_surface: Option<crate::surface_creation::PendingNewSurface>,
     pub(super) next_surface_request_id: u64,
     pub(super) creating_surface_request: Option<(u64, bootty_control::CommandCancellation)>,
-    pub(super) pending_surface_caller: Option<bootty_control::Caller>,
     recovery: recovery::RecoveryState,
-    terminal_agent_recoveries: Vec<mpsc::Receiver<bootty_control::CommandOutcome>>,
     image_clipboard: clipboard::ImageClipboard,
     pub(crate) localizer: crate::i18n::Localizer,
     pub(super) window_state_key: String,
-    pub(crate) native_computer_window: Option<std::num::NonZeroU32>,
     pub(super) commands: CommandRuntime,
     pub(super) session_activity_receipt: std::cell::RefCell<Option<(CommandTarget, String, i64)>>,
-    last_settlement_check: Option<Instant>,
     worktree_cleanup: worktree_cleanup::WorktreeCleanup,
     pub(super) workspace: WorkspaceRuntime,
     repaint_scheduler: RepaintScheduler,
@@ -319,7 +272,6 @@ pub struct AppState {
     pub(super) undo_offer: Option<UndoOffer>,
     last_drain: DrainStats,
     notifications: notifications::TerminalNotifications,
-    agent_notifications: agent_attention::AgentNotifications,
     terminal_surface: Option<TerminalSurface>,
     /// Geometry and optional pane identity captured before each pointer event is encoded. Native
     /// split panes render independent runtimes while the aggregate terminal owns keyboard input.
@@ -328,7 +280,6 @@ pub struct AppState {
     /// after the pointer crosses a split or leaves the terminal surface.
     mouse_input_capture: Option<(PendingMouseInputTarget, PointerButton)>,
     /// The full terminal area the panes were last laid out within, for geometric neighbor lookup.
-    last_pane_area: Option<SurfaceRect>,
     terminal_view_transform: ViewTransform,
     config_runtime: AppConfigRuntime,
     keymap_runtime: KeymapRuntime,
@@ -372,12 +323,11 @@ struct PendingMouseInputTarget {
 }
 fn scoped_terminal_transition_key(
     scope: SpaceId,
-    backend: MultiplexerBackendConfig,
     session_id: &str,
     pane_id: Option<&str>,
 ) -> String {
     format!(
-        "{}:{backend:?}:{session_id}:{}",
+        "{}:{session_id}:{}",
         scope.persistence_value(),
         pane_id.unwrap_or_default(),
     )
@@ -415,7 +365,7 @@ impl AppState {
     /// Returns errors from workspace restoration, backend attachment, or recovery initialization.
     pub fn new(
         config: BoottyConfig,
-        backends: Arc<MuxBackendRegistry>,
+
         repaint: RepaintHandle,
         direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
         modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
@@ -423,7 +373,6 @@ impl AppState {
         Self::new_for_window(
             config,
             PRIMARY_WINDOW_STATE_KEY.to_owned(),
-            backends,
             repaint,
             direct_input_rx,
             modifier_side_rx,
@@ -436,15 +385,14 @@ impl AppState {
     pub fn new_for_window(
         config: BoottyConfig,
         window_state_key: String,
-        backends: Arc<MuxBackendRegistry>,
+
         repaint: RepaintHandle,
         direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
         modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
     ) -> Result<Self> {
-        Self::new_for_window_with_agents(
+        Self::new_for_window_with_events(
             config,
             window_state_key,
-            backends,
             repaint,
             direct_input_rx,
             modifier_side_rx,
@@ -452,48 +400,21 @@ impl AppState {
         )
     }
 
-    /// Construct a window with native agent command and event ownership composed by its host.
-    /// Tests and headless callers use [`Self::new_for_window`] and receive explicit unsupported
-    /// outcomes for the static agent catalog.
+    /// Construct a window whose command runtime publishes job events through its host. Tests and
+    /// headless callers use [`Self::new_for_window`].
     ///
     /// # Errors
     /// Returns errors from workspace restoration, backend attachment, or recovery initialization.
-    pub fn new_for_window_with_agents(
+    pub fn new_for_window_with_events(
         config: BoottyConfig,
         window_state_key: String,
-        backends: Arc<MuxBackendRegistry>,
-        repaint: RepaintHandle,
-        direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
-        modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
-        agent_events: Option<ControlEventSender>,
-    ) -> Result<Self> {
-        Self::new_for_window_with_agent_runtime(
-            config,
-            window_state_key,
-            backends,
-            repaint,
-            direct_input_rx,
-            modifier_side_rx,
-            agent_events.map(crate::commands::AgentRuntimeConfig::new),
-        )
-    }
 
-    /// Construct a window with host-owned agent time and provider transports.
-    ///
-    /// # Errors
-    /// Returns errors from workspace restoration, backend attachment, or recovery initialization.
-    pub fn new_for_window_with_agent_runtime(
-        config: BoottyConfig,
-        window_state_key: String,
-        backends: Arc<MuxBackendRegistry>,
         repaint: RepaintHandle,
         direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
         modifier_side_rx: Option<mpsc::Receiver<ModifierSideState>>,
-        agent_runtime: Option<crate::commands::AgentRuntimeConfig>,
+        events: Option<ControlEventSender>,
     ) -> Result<Self> {
         let config_runtime = AppConfigRuntime::new(config)?;
-        let agent_state =
-            agent_state_path(&config_runtime.current().config_path, &window_state_key);
         let legacy_draft = (window_state_key == "main").then(|| {
             config_runtime
                 .current()
@@ -502,14 +423,11 @@ impl AppState {
         });
         let (creation_drafts, saved_drafts, selected_draft) =
             creation_draft::CreationDraftStore::open(
-                agent_state.with_extension("drafts.json"),
+                drafts_path(&config_runtime.current().config_path, &window_state_key),
                 legacy_draft.as_deref(),
                 repaint.clone(),
             )?;
-        let commands = agent_runtime.map_or_else(
-            || CommandRuntime::new(repaint.clone()),
-            |services| CommandRuntime::new_with_agents(repaint.clone(), services, &agent_state),
-        );
+        let commands = CommandRuntime::new(repaint.clone(), events);
         let keymap_runtime = KeymapRuntime::new(config_runtime.current(), commands.catalog());
         let keymap_diagnostic = keymap_runtime.snapshot().diagnostic_summary();
         let config = config_runtime.current();
@@ -517,12 +435,9 @@ impl AppState {
         let workspace = WorkspaceRuntime::open(
             config,
             &window_state_key,
-            backends,
             active_appearance_variant,
             repaint.clone(),
         )?;
-        commands.refresh_agent_scopes(&workspace);
-        commands.sync_terminal_tools_policy(config);
         let macos_non_native_fullscreen_active = config.window.non_native_fullscreen_enabled();
         let macos_non_native_fullscreen_pending_apply = macos_non_native_fullscreen_active;
 
@@ -530,11 +445,9 @@ impl AppState {
             pending_new_surface: None,
             next_surface_request_id: 1,
             creating_surface_request: None,
-            pending_surface_caller: None,
             localizer: crate::i18n::Localizer::new(&config.locale)?,
             commands,
             session_activity_receipt: std::cell::RefCell::new(None),
-            last_settlement_check: None,
             worktree_cleanup: worktree_cleanup::WorktreeCleanup::default(),
             workspace,
             repaint_scheduler: RepaintScheduler::default(),
@@ -543,16 +456,12 @@ impl AppState {
             undo_offer: None,
             last_drain: DrainStats::default(),
             recovery: recovery::RecoveryState::new(&window_state_key, repaint.clone())?,
-            terminal_agent_recoveries: Vec::new(),
             window_state_key,
-            native_computer_window: None,
             image_clipboard: clipboard::ImageClipboard::default(),
             notifications: notifications::TerminalNotifications::default(),
-            agent_notifications: agent_attention::AgentNotifications::default(),
             terminal_surface: None,
             pending_mouse_input_targets: std::collections::VecDeque::new(),
             mouse_input_capture: None,
-            last_pane_area: None,
             chrome_handle_rects: Vec::new(),
             keep_awake: None,
             terminal_view_transform: ViewTransform::IDENTITY,
@@ -655,12 +564,9 @@ impl AppState {
         &mut self,
         document: ConfigDocument,
     ) -> Result<(ConfigDocument, Option<String>, Vec<AppEffect>)> {
-        let backend = self.workspace.active.binding.multiplexer().backend;
-        let (change, document, outcome) = self.config_runtime.commit_document(
-            document,
-            backend,
-            self.active_appearance_variant,
-        )?;
+        let (change, document, outcome) = self
+            .config_runtime
+            .commit_document(document, self.active_appearance_variant)?;
         let warning = outcome.durability_warning().map(str::to_owned);
         let mut effects = Vec::new();
         self.apply_accepted_config(change, &mut effects);
@@ -698,44 +604,10 @@ impl AppState {
         }
     }
 
-    /// Add an app to `computer.always-allowed-apps`, keeping existing entries.
-    pub(crate) fn always_allow_application(
-        &mut self,
-        bundle_id: &str,
-        effects: &mut Vec<AppEffect>,
-    ) -> bool {
-        let mut apps = self.config().computer.always_allowed_apps.clone();
-        if apps.iter().any(|app| app == bundle_id) {
-            return true;
-        }
-        apps.push(bundle_id.to_owned());
-        self.mutate_config_document(
-            |document| document.set_strings(&["computer", "always-allowed-apps"], &apps),
-            effects,
-        )
-    }
-
-    /// Switches whether a message sent during a turn waits for it or steers it.
-    pub(crate) fn toggle_follow_up_behavior(&mut self, effects: &mut Vec<AppEffect>) -> bool {
-        let next = self.config().agents.follow_up_behavior.opposite();
-        self.mutate_config_document(
-            |document| document.set_str(&["agents", "follow-up-behavior"], next.token()),
-            effects,
-        )
-    }
-
     pub(crate) fn toggle_session_grouping(&mut self, effects: &mut Vec<AppEffect>) -> bool {
         let grouped = !self.config().sidebar.group_by_project;
         self.mutate_config_document(
             |document| document.set_bool(&["sidebar", "group-by-project"], grouped),
-            effects,
-        )
-    }
-
-    pub(crate) fn toggle_settled_shelf(&mut self, effects: &mut Vec<AppEffect>) -> bool {
-        let collapsed = !self.config().sidebar.settled_collapsed;
-        self.mutate_config_document(
-            |document| document.set_bool(&["sidebar", "settled-collapsed"], collapsed),
             effects,
         )
     }
@@ -919,9 +791,6 @@ impl AppState {
     pub(super) const fn active_multiplexer(&self) -> &bootty_config::config::MultiplexerConfig {
         self.workspace.active.binding.multiplexer()
     }
-    pub const fn multiplexer_backend(&self) -> bootty_config::config::MultiplexerBackendConfig {
-        self.workspace.active.binding.multiplexer().backend
-    }
     pub fn terminal_transition_key(&self) -> Option<String> {
         self.workspace
             .active
@@ -931,7 +800,6 @@ impl AppState {
             .map(|anchor| {
                 scoped_terminal_transition_key(
                     self.workspace.active.binding.scope(),
-                    selected_backend(self.active_multiplexer()),
                     &anchor.session_id,
                     anchor.pane_id.as_deref(),
                 )
@@ -1153,9 +1021,6 @@ impl AppState {
     pub fn register_chrome_handle(&mut self, rect: SurfaceRect) {
         self.chrome_handle_rects.push(rect);
     }
-    pub(super) fn uses_native_terminal_layout(&self) -> bool {
-        self.workspace.active.binding.uses_native_terminal_layout()
-    }
     pub fn pane_widget_key(&self, pane_id: &str) -> String {
         self.workspace.active.binding.pane_widget_key(pane_id)
     }
@@ -1171,7 +1036,6 @@ impl AppState {
             *target = None;
         }
         self.mouse_input_capture = None;
-        self.last_pane_area = None;
     }
 
     fn sync_terminal_panes_or_record_error(&mut self) {
@@ -1210,20 +1074,8 @@ impl AppState {
     pub fn pane_rects(&self, area: SurfaceRect, gap: f32) -> Vec<(String, SurfaceRect)> {
         self.workspace.active.binding.pane_rects(area, gap)
     }
-    pub fn pane_dividers(&self, area: SurfaceRect, gap: f32) -> Vec<Divider> {
-        self.workspace.active.binding.pane_dividers(area, gap)
-    }
     pub fn focus_pane(&mut self, pane_id: &str) {
         self.workspace.active.binding.focus_pane(pane_id);
-    }
-    pub fn set_pane_ratio(&mut self, path: &[u8], ratio: f32, min_fraction: f32) {
-        if self.pane_arrangement_pending() {
-            return;
-        }
-        self.workspace
-            .active
-            .binding
-            .set_pane_ratio(path, ratio, min_fraction);
     }
     pub fn terminal_runtime_for_pane(
         &mut self,
@@ -1234,35 +1086,9 @@ impl AppState {
             .binding
             .terminal_runtime_for_pane(pane_id)
     }
-    pub fn pane_terminal_window_size<F>(&self, leaf_size: F) -> Option<(u16, u16)>
-    where
-        F: FnMut(&str) -> Option<(u16, u16)>,
-    {
-        self.workspace
-            .active
-            .binding
-            .pane_terminal_window_size(leaf_size)
-    }
-    /// Resize the active native terminal layout.
-    ///
-    /// # Errors
-    /// Returns an error when the backend cannot resize its window.
-    pub fn resize_native_layout_window(&mut self, cols: u16, rows: u16) -> Result<()> {
-        self.workspace
-            .active
-            .binding
-            .resize_native_layout_window(cols, rows)
-    }
     pub(super) fn sync_terminal_panes_now(&mut self) {
         self.sync_terminal_panes_or_record_error();
     }
-    pub const fn record_pane_area(&mut self, area: SurfaceRect) {
-        self.last_pane_area = Some(area);
-    }
-    pub(crate) fn set_sidebar_session_cursor(&mut self, target: ScopedSessionTarget) {
-        self.sidebar_hovered_session = Some(target);
-    }
-
     pub fn activate_scoped_session_from_ui(&mut self, target: &ScopedSessionTarget) -> bool {
         let started = crate::diagnostics::latency_start();
         // A session that belongs to another Space is switched to there, not dragged over here: its
@@ -1370,7 +1196,7 @@ impl AppState {
                 }
                 let binding = &mut self.workspace.active.binding;
                 binding.terminal_mut().discard_pane(&pane_id);
-                if binding.uses_native_terminal_layout() {
+                {
                     binding.remove_pane_from_layout(&window, &pane_id, target_is_current);
                 }
             }
@@ -1463,9 +1289,7 @@ impl AppState {
     /// and ones a deleted Space left running. A direct backend cannot stamp membership, so its
     /// authoritative sessions already belong to the active binding and never appear here.
     pub fn unclaimed_sessions(&self) -> Vec<UnclaimedSession> {
-        if !self.workspace.active.binding.tracks_session_membership() {
-            return Vec::new();
-        }
+        {}
         let claimed = self
             .workspace
             .all_bindings()
@@ -1767,16 +1591,11 @@ impl AppState {
         }
     }
     fn apply_terminal_window_title(
-        &mut self,
+        &self,
         source_pane_id: Option<&str>,
         title: String,
         effects: &mut Vec<AppEffect>,
     ) {
-        self.workspace.active.binding.apply_window_title(
-            source_pane_id,
-            title.clone(),
-            &self.repaint,
-        );
         if source_pane_id.is_none()
             || self.workspace.active.binding.terminal().focused_pane_id() == source_pane_id
         {
@@ -1808,7 +1627,7 @@ impl AppState {
         self.observe_modifier_sides(modifier_sides, window_focused);
         let mut effects = Vec::new();
 
-        self.process_frame_commands(viewport, window_focused, &mut effects);
+        self.process_frame_commands(viewport, &mut effects);
         self.keep_creation_draft(now);
 
         self.sync_macos_non_native_fullscreen_presentation(&mut effects);
@@ -1854,10 +1673,6 @@ impl AppState {
             terminal_scale_factor,
         );
         let workspace_frame = self.advance_workspace_frame(now, window_focused);
-        self.restore_terminal_agents(now);
-        self.reconcile_agent_ownership();
-        self.poll_provider_updates(now, &mut effects);
-        self.poll_session_settlement(now, &mut effects);
         self.poll_worktree_cleanup(now);
         if let Some(after) = workspace_frame.next_wake {
             effects.push(AppEffect::RepaintAfter(after));
@@ -1889,18 +1704,8 @@ impl AppState {
         effects
     }
 
-    fn process_frame_commands(
-        &mut self,
-        viewport: ViewportSnapshot,
-        window_focused: bool,
-        effects: &mut Vec<AppEffect>,
-    ) {
-        self.commands.refresh_agent_scopes(&self.workspace);
+    fn process_frame_commands(&mut self, viewport: ViewportSnapshot, effects: &mut Vec<AppEffect>) {
         self.drain_app_commands(viewport, effects);
-        self.reconcile_orchestration();
-        self.sync_agent_attention(window_focused, effects);
-        self.sync_native_attention(window_focused, effects);
-        self.sync_terminal_attention(window_focused, effects);
 
         // A command-palette choice from the previous frame runs as soon as viewport/effects are
         // available, before mux refresh can retarget selected-window actions back to backend-active.
@@ -1911,7 +1716,7 @@ impl AppState {
 
     fn advance_workspace_frame(
         &mut self,
-        now: Instant,
+        _now: Instant,
         window_focused: bool,
     ) -> bootty_mux::workspace::WorkspaceFrameOutcome {
         let config = self.config().clone();
@@ -1920,7 +1725,6 @@ impl AppState {
             &config,
             self.active_appearance_variant,
             &self.repaint,
-            now,
             window_focused,
         )
     }
@@ -1953,14 +1757,13 @@ impl AppState {
         input_commands: usize,
         effects: &mut Vec<AppEffect>,
     ) {
-        let pending_pty_bytes = self.workspace.active.binding.terminal().pending_pty_len();
         let (cols, rows) = self.workspace.active.binding.terminal().grid_size();
         let last_error = self.last_error.as_ref().map(ErrorNotice::raw_message);
         self.config_runtime.record_stability(StabilityTraceSample {
             selected_session: self.workspace.active.binding.mux().selected_session(),
             cols,
             rows,
-            pending_pty_bytes,
+            pending_pty_bytes: 0,
             drain_bytes: self.last_drain.bytes,
             drain_elapsed_us: self.last_drain.elapsed_us,
             text_runs: renderer_metrics.text_runs,
@@ -1969,7 +1772,7 @@ impl AppState {
         let repaint = self.repaint_scheduler.recommend(RepaintSignal {
             drained_bytes: self.last_drain.bytes,
             drain_elapsed_us: self.last_drain.elapsed_us,
-            pending_bytes: pending_pty_bytes,
+            pending_bytes: 0,
             dirty_rows: renderer_metrics.dirty_rows,
             // Each GPUI TerminalView owns its cursor timer and invalidates only itself.
             cursor_blinking: false,
@@ -1990,10 +1793,7 @@ impl AppState {
 
     /// Only one floating dialog is shown at a time; opening one closes the rest.
     pub fn reload_config(&mut self, effects: &mut Vec<AppEffect>) -> bool {
-        let change = match self.config_runtime.reload(
-            self.workspace.active.binding.multiplexer().backend,
-            self.active_appearance_variant,
-        ) {
+        let change = match self.config_runtime.reload(self.active_appearance_variant) {
             Ok(change) => change,
             Err(error) => {
                 self.record_error("Could not reload settings", &error);
@@ -2016,9 +1816,6 @@ impl AppState {
             restore_config.clone_from(&change.config);
             *restore_variant = change.config.appearance.mode.variant(*restore_variant);
         }
-        self.commands.sync_terminal_tools_policy(&change.config);
-        self.commands
-            .sync_browser_capture_policy(&change.config.computer);
         if self.localizer.locale() != self.config().locale {
             match crate::i18n::Localizer::new(&self.config().locale) {
                 Ok(localizer) => self.localizer = localizer,
@@ -2123,15 +1920,16 @@ impl AppState {
         events: Vec<InputEvent>,
     ) -> (Vec<InputEvent>, Vec<CommandInvocation>) {
         let focus = self.keymap_focus();
-        let backend = self.workspace.multiplexer_backend();
         self.keymap_runtime
-            .split_events(events, self.modifier_sides, focus, backend)
+            .split_events(events, self.modifier_sides, focus)
     }
 }
 
 /// Where one window's reported agent state survives restarts: beside the workspace database,
 /// named for the window so two windows never overwrite each other.
-fn agent_state_path(config_path: &Path, window_state_key: &str) -> PathBuf {
+/// Unstarted session drafts for one window. The file keeps the `agent-state-` name it had while
+/// it sat beside native agent state, so existing drafts still load.
+fn drafts_path(config_path: &Path, window_state_key: &str) -> PathBuf {
     let key = window_state_key
         .chars()
         .map(|character| {
@@ -2145,5 +1943,5 @@ fn agent_state_path(config_path: &Path, window_state_key: &str) -> PathBuf {
     config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join(format!("agent-state-{key}.json"))
+        .join(format!("agent-state-{key}.drafts.json"))
 }

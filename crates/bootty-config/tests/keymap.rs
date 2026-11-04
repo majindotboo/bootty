@@ -186,7 +186,7 @@ fn effective_file_layers_disable_exact_context_defaults_and_keep_user_entries() 
             source: KeymapBindingSource::BuiltIn,
         },
         KeymapBindingSnapshot {
-            context: KeymapContext::Native,
+            context: KeymapContext::Terminal,
             keystrokes: "ctrl-k".to_owned(),
             action: KeymapAction::command("native"),
             kind: KeymapBindingKind::Binding,
@@ -200,11 +200,11 @@ fn effective_file_layers_disable_exact_context_defaults_and_keep_user_entries() 
             && entry.action.name() == Some("global")
     }));
     assert!(!effective.iter().any(|entry| {
-        entry.context == KeymapContext::Native
+        entry.context == KeymapContext::Terminal
             && entry.source == KeymapBindingSource::User
             && entry.action.name() == Some("native")
     }));
     assert!(effective.iter().any(|entry| {
-        entry.context == KeymapContext::Native && entry.action.name() == Some("new_window")
+        entry.context == KeymapContext::Terminal && entry.action.name() == Some("new_window")
     }));
 }

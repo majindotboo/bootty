@@ -7,13 +7,12 @@ use bootty_ui::gpui::{
 };
 use gpui_kit::{
     AppContext as _, Context, Entity, Focusable as _, IntoElement, Modifiers, Render, ScrollDelta,
-    ScrollWheelEvent, TestAppContext, TouchPhase, Window, point,
+    ScrollEvent, TestAppContext, TouchPhase, Window, point,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
-#[path = "support/settings.rs"]
-pub mod settings_support;
+use crate::support::settings as settings_support;
 use settings_support::{GpuiSettingsSnapshot, SettingsProbe};
 
 #[rstest]
@@ -329,7 +328,8 @@ fn named_theme_editor_stacks_and_scrolls_with_the_preview_at_narrow_width(cx: &m
 
         if verify_scroll {
             let preview_top = preview.top();
-            visual.simulate_event(ScrollWheelEvent {
+            visual.simulate_event(ScrollEvent {
+                source: gpui_kit::ScrollSource::default(),
                 position: gpui_kit::Bounds::new(
                     point(gpui_kit::px(0.0), gpui_kit::px(0.0)),
                     viewport,

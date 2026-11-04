@@ -16,7 +16,7 @@ use std::{
 };
 use tokio::io::AsyncWriteExt as _;
 
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub(super) struct Bootstrap {
     pub address: SocketAddr,
     pub certificate: Vec<u8>,
@@ -30,6 +30,7 @@ pub struct RemoteLinkServer {
     identity: Identity,
     tcp: tokio::net::TcpListener,
     acceptor: tokio_rustls::TlsAcceptor,
+    mux_connector: Option<super::mux::MuxConnector>,
 }
 
 impl RemoteLinkServer {
@@ -41,7 +42,14 @@ impl RemoteLinkServer {
             identity.server_tls(Some(client.clone()), b"h2")?,
         ));
         let endpoint = Endpoint::server(identity.server(client)?, address)?;
-        let tcp = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+        let tcp = std::net::TcpListener::bind((
+            if address.is_ipv4() {
+                IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+            } else {
+                IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+            },
+            0,
+        ))?;
         tcp.set_nonblocking(true)?;
         let tcp = tokio::net::TcpListener::from_std(tcp)?;
         Ok(Self {
@@ -49,7 +57,14 @@ impl RemoteLinkServer {
             identity,
             tcp,
             acceptor,
+            mux_connector: None,
         })
+    }
+
+    #[must_use]
+    pub fn with_mux_connector(mut self, connector: super::mux::MuxConnector) -> Self {
+        self.mux_connector = Some(connector);
+        self
     }
 
     /// # Errors
@@ -102,14 +117,19 @@ impl RemoteLinkServer {
                 () = tokio::time::sleep_until(deadline) => bail!("remote authentication deadline elapsed"),
             }
         };
-        handshakes.abort_all();
+        self.serve_connection(connection).await?;
+
+        self.endpoint.close(0_u32.into(), b"client disconnected");
+        Ok(())
+    }
+    async fn serve_connection(&self, connection: Accepted) -> Result<()> {
         let mut processes = tokio::task::JoinSet::new();
         match connection {
             Accepted::Quic(connection) => loop {
                 tokio::select! {
                     stream = connection.accept_bi() => {
                         let Ok((send, recv)) = stream else { break; };
-                        processes.spawn(serve_process(Box::new(send), Box::new(recv)));
+                        processes.spawn(serve_process(Box::new(send), Box::new(recv), self.mux_connector.clone()));
                     }
                     _ = processes.join_next(), if !processes.is_empty() => {},
                 }
@@ -123,7 +143,7 @@ impl RemoteLinkServer {
                             continue;
                         }
                         let send = reply.send_response(http::Response::new(()), false)?;
-                        processes.spawn(serve_process(Box::new(super::http2::Writer::new(send)), Box::new(super::http2::Reader::new(request.into_body()))));
+                        processes.spawn(serve_process(Box::new(super::http2::Writer::new(send)), Box::new(super::http2::Reader::new(request.into_body())), self.mux_connector.clone()));
                     }
                     _ = processes.join_next(), if !processes.is_empty() => {},
                 }
@@ -132,7 +152,38 @@ impl RemoteLinkServer {
         // A disconnected client never leaves an execution process or attach client behind.
         processes.abort_all();
         while processes.join_next().await.is_some() {}
-        self.endpoint.close(0_u32.into(), b"client disconnected");
+        Ok(())
+    }
+
+    /// Accept replacement routes without making the mux process a child of a route.
+    /// # Errors
+    /// Returns listener failures.
+    pub async fn serve_reconnecting(self) -> Result<()> {
+        let server = Arc::new(self);
+        let mut clients = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                incoming = server.endpoint.accept(), if clients.len() < 64 => {
+                    let incoming = incoming.context("remote listener closed")?;
+                    let server = Arc::clone(&server);
+                    clients.spawn(async move {
+                        let connection = tokio::time::timeout(Duration::from_secs(10), incoming).await??;
+                        server.serve_connection(Accepted::Quic(connection)).await
+                    });
+                }
+                accepted = server.tcp.accept(), if clients.len() < 64 => {
+                    let (socket, _) = accepted?;
+                    let server = Arc::clone(&server);
+                    clients.spawn(async move {
+                        let socket = tokio::time::timeout(Duration::from_secs(10), server.acceptor.accept(socket)).await??;
+                        let connection = h2::server::Builder::new().max_concurrent_streams(64).handshake(socket).await?;
+                        server.serve_connection(Accepted::Tcp(Box::new(connection))).await
+                    });
+                }
+                _ = clients.join_next(), if !clients.is_empty() => {},
+                () = tokio::time::sleep(Duration::from_secs(30)), if clients.is_empty() => break,
+            }
+        }
         Ok(())
     }
 }
@@ -152,11 +203,24 @@ enum Accepted {
 async fn serve_process(
     mut send: protocol::RemoteWriter,
     mut recv: protocol::RemoteReader,
+    mux_connector: Option<super::mux::MuxConnector>,
 ) -> Result<()> {
     let (kind, bytes) = protocol::read_frame(&mut recv).await?;
     if kind == protocol::PROBE && bytes.is_empty() {
         protocol::write_frame(&mut send, protocol::PROBE, &[]).await?;
         send.shutdown().await?;
+        return Ok(());
+    }
+    if kind == protocol::MUX {
+        let namespace = String::from_utf8(bytes)?;
+        if bootty_config::ApplicationIdentity::parse_namespace(&namespace).is_none() {
+            bail!("invalid native mux namespace");
+        }
+        let connect = mux_connector.context("native mux bridge capability unavailable")?;
+        let mut stream = connect(namespace).await?;
+        send.write_u8(1).await?;
+        let mut remote = tokio::io::join(recv, send);
+        tokio::io::copy_bidirectional(&mut remote, &mut stream).await?;
         return Ok(());
     }
     if kind != 0 {
@@ -256,8 +320,7 @@ pub fn run_bootstrap() -> Result<()> {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    rmux_os::daemon::configure_hidden_daemon_command(&mut command, true);
-    let mut child = rmux_os::daemon::spawn_hidden_daemon_command(&mut command)?;
+    let mut child = bootty_os::daemon::spawn_hidden(&mut command)?;
     child
         .stdin
         .take()
@@ -277,7 +340,7 @@ pub fn run_bootstrap() -> Result<()> {
 
 /// # Errors
 /// Returns missing SSH metadata, invalid certificate, listener, or authentication errors.
-pub fn run_server() -> Result<()> {
+pub fn run_server(mux_connector: super::mux::MuxConnector) -> Result<()> {
     let mut certificate = Vec::new();
     std::io::stdin()
         .lock()
@@ -297,7 +360,8 @@ pub fn run_server() -> Result<()> {
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let server = RemoteLinkServer::bind(SocketAddr::new(address, 0), certificate.into())?;
+        let server = RemoteLinkServer::bind(SocketAddr::new(address, 0), certificate.into())?
+            .with_mux_connector(mux_connector);
         let response = Bootstrap {
             address: server.address()?,
             certificate: server.certificate().to_vec(),
@@ -307,6 +371,6 @@ pub fn run_server() -> Result<()> {
         writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
         stdout.flush()?;
         drop(stdout);
-        server.serve().await
+        server.serve_reconnecting().await
     })
 }

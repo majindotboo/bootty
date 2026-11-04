@@ -7,17 +7,15 @@ owners.
 Four things shape almost every decision in this repo:
 
 1. **One owner per fact.** Every durable value and every live mutation has
-   exactly one crate that owns it. `docs/architecture.md` has the authority
-   table. When you are unsure where code goes, that table is the answer.
-2. **The terminal is not the multiplexer.** Bootty renders terminals; a mux
-   backend owns processes and native topology. `native`, `rmux`, and `tmux` are
-   interchangeable backends behind one contract; Herdr uses opaque client attachment.
-3. **Frames, not blocking.** The UI thread never waits on terminal, Git,
-   or agent work. Terminal state is published as immutable frames and painted
-   from a plan.
-4. **One invocation path.** The palette, keybindings, CLI, local socket, and
-   native agent integrations all submit the same `CommandInvocation`. There is no second
-   way to do a thing.
+   exactly one crate that owns it.
+2. **The terminal is not the multiplexer.** Bootty renders terminals; the
+   native multiplexer in `bootty-mux` owns session/window/pane topology and pane
+   runtimes.
+3. **Frames, not blocking.** The UI thread never waits on terminal or Git
+   work. Terminal state is published as immutable frames and painted from a
+   plan.
+4. **One invocation path.** The palette, keybindings, CLI, and local socket all
+   submit the same `CommandInvocation`. There is no second way to do a thing.
 
 ## A small glossary
 
@@ -25,50 +23,37 @@ Use this language when you write code and when you talk to us.
 
 - **you** - the agent doing the work. **we/us** - the maintainers. **user** -
   the person directing you.
-- **Space** - a persisted workspace with backend bindings. Lives in SQLite,
+- **Space** - a persisted workspace with a native multiplexer binding. Lives in SQLite,
   owned by `bootty-mux`.
-- **binding** - one Space's attachment to one mux backend, plus its pane layout,
-  focus, and titles. `BindingRuntime` owns the live one.
-- **backend** / **provider** - `native`, `rmux`, or `tmux`. Owns real processes
-  and native session/window/pane topology.
-- **pane** / **session** / **window** - backend-native topology. Bootty maps it;
-  Bootty does not invent it.
+- **binding** - one Space's native sessions, pane layout,
+  focus, and titles. The native mux server owns the live one; `BindingRuntime` projects it.
+- **multiplexer** - Bootty's concrete native implementation. It owns real pane
+  processes and session/window/pane topology in a long-lived server. There are no selectable backends or providers.
+- **pane** / **session** / **window** - native multiplexer topology, owned by
+  `bootty-mux`. Hosts project it and submit commands to it.
 - **surface** - host-neutral terminal geometry (`bootty-terminal`). Host
   coordinates convert at the adapter seam, not in the middle.
 - **frame** - an immutable published snapshot of VT state. Consumers read
   frames; they do not read the engine.
-- **native integration** - a built-in agent provider with bounded protocol state
-  and explicit lifetime. Existing custom Lua and Luau files are preserved and
-  reported as unsupported; do not execute or delete them.
 - **identity** - Production (`bootty`) or Development (`bootty-dev`). Selects
-  config tree, state tree, control endpoint, rmux endpoint, and tmux server.
+  config tree, state tree, control endpoint, and versioned native mux server endpoint.
 
-## The three ways to hurt yourself
+## The two ways to hurt yourself
 
 **A release build from your tree is the user's real app.** Identity is
-`Development` only under `debug_assertions` or the `bootty-dev` feature. So
-`cargo run` is safely `BoottyDev`, but a release-profile build without the
-`bootty-dev` feature takes the Production namespace: the user's `config.toml`,
-their workspace SQLite, their control endpoint, their rmux endpoint, and their
-tmux server. A Production app launch exits when that identity already has a
-live owner. A Production command invocation instead targets that live owner and
-can mutate the user's real Spaces. Use `mise run launch` for normal development
+`Development` only under `debug_assertions`. So
+`cargo run` is safely `BoottyDev`, but a release-profile build takes the Production namespace: the user's `config.toml`,
+their workspace SQLite, their control endpoint, and their native mux server. A Production app launch
+exits when that identity already has a live owner. A Production command
+invocation instead targets that live owner and can mutate the user's real
+Spaces. Use `mise run launch` for normal development
 and UI acceptance. On macOS it packages and runs this worktree's uniquely named
 `BoottyDev-<workspace-hash>.app` under `dist/<development-namespace>/`, so native
 automation can address the app. Other platforms run the isolated development
 binary directly. Nothing is installed. Use `mise run package:dev` to package
 without launching. There is intentionally no `install:dev`
 task because installing per-worktree builds would litter `/Applications`.
-`launch` and `package:dev` enable the `bootty-dev` feature and keep Production
-state apart.
-
-**Never reach for the standalone `rmux` executable.** Bootty owns rmux through
-the embedded Rust API - `rmux-sdk`, `rmux-client`, `rmux-proto`, `rmux-server`,
-and Bootty's own protocol surfaces. The CLI binary is outside the architecture:
-do not execute, discover, install, or depend on it from production code, tests,
-scripts, packaging, or remote commands. Test the positive SDK behavior. Do not
-police this with source-text scans or forbidden-word assertions - those tests
-fail for the wrong reasons and teach nothing.
+`launch` and `package:dev` use the dev profile and keep Production state apart.
 
 **Never patch `libghostty-rs` in-tree.** It is a pinned external binding crate.
 Anything you can do by preprocessing input, postprocessing frames, or calling
@@ -81,11 +66,12 @@ Ghostty internals the C API does not expose is unsupported. See
 Bootty fans out. Fixing one arm is not fixing the feature.
 
 - **Commands** reach the same `CommandInvocation` from the palette, keybindings,
-  CLI, socket, native integrations, and internal callers. A command that only
+  CLI, socket, and internal callers. A command that only
   works from the palette is unfinished. Preserve wire caller values for existing clients.
-- **Mux backends** have explicit capabilities. A change to session, window, or
-  pane behavior needs a `native`, `rmux`, and `tmux` answer, locally and remotely.
-  Preserve Herdr's opaque attachment boundary rather than inventing inner topology.
+- **The native multiplexer** owns session, window, and pane changes. Use its
+  concrete command path and serializable `MuxCommand`/`MuxSnapshot`; hosts do not
+  invent topology. SSH Spaces use the same native server through the daemon remote link.
+  Unsupported placements such as WSL report typed `RemoteSpaceUnavailable`.
 - **Config fields** are not one edit. A new field needs a typed config value, a
   default, and one `SettingSpec` whose path the loader reads and whose page owns
   its editor. Scalar specs render their own settings row; only non-scalar
@@ -98,8 +84,6 @@ Bootty fans out. Fixing one arm is not fixing the feature.
   skills before UI changes; verify APIs against the pinned checkout.
 - **Identities** are two. Anything touching paths, endpoints, or namespaces must
   keep Production and Development apart.
-- **Ownership moves belong in `docs/architecture.md`.** If your change moves a
-  durable fact to a different crate, that table is now wrong.
 
 ## Releases
 
@@ -132,7 +116,7 @@ Nextest does not run doctests, so executable documentation examples live in
 integration tests.
 
 **GUI changes need a window.** Output in the launching terminal does not prove a
-render path works. `cargo run -p bootty --bin bootty` should show tmux chrome,
+render path works. `cargo run -p bootty --bin bootty` should show the tab bar,
 status metrics, and real glyphs; the two examples should each open their own
 native window. For a glyph smoke check, run
 `printf '%s\n' 'bootty glyph probe: 🥟 ABC █ ┃'` inside the app.
@@ -143,7 +127,7 @@ native window. For a glyph smoke check, run
   caller should never reconstruct an invariant or mirror state it does not own.
 - Persistence commits before live publication. A failed commit leaves the prior
   state active. Never publish a half-applied mutation and reconcile later.
-- Backend failure is reported, never invented. Bootty does not fake success it
+- Multiplexer failure is reported, never invented. Bootty does not fake success it
   did not observe.
 - `mod.rs` and `lib.rs` hold module declarations and re-exports. Nothing else.
 - Keep test code out of production source: no `#[cfg(test)]`, fixtures, or test
@@ -152,8 +136,8 @@ native window. For a glyph smoke check, run
   only for cross-crate product behavior and executable boundaries.
 - Large files are allowed while each keeps one cohesive owner and a small
   interface. File size is a signal for review, not proof of depth.
-- `unsafe` is denied workspace-wide. Clippy runs `all` at deny and `pedantic` at
-  warn.
+- `unsafe` is denied workspace-wide. Clippy runs `all`, `pedantic`, and `nursery`
+  at deny.
 - Reuse the names already in this repo. New vocabulary for an existing concept
   is a bug.
 
@@ -163,15 +147,12 @@ quietly working around it. These are the defaults we hold, not law.
 ## Plans and work artifacts
 
 Do not commit implementation plans, research notes, or scratch files. The vault
-owns product language, plans, rationale, and durable decisions. `docs/` owns the
-current production structure - update it when the structure changes, so the next
-agent reads facts instead of history.
+owns product language, plans, rationale, and durable decisions. The code is the
+source of truth for structure; `docs/` holds process and user reference only.
 
 ## Where to read next
 
-`README.md` has the crate map, the run and packaging commands, and the full doc
-index. Beyond that, the three you will want most:
+`README.md` has the run and packaging commands and the doc index. Beyond that:
 
-- `docs/architecture.md` - ownership, authority table, and crate boundaries.
 - `docs/configuration.md` - config path, schema, reload, and writeback.
 - `docs/input-encoders.md` - the terminal input contract.

@@ -1,3 +1,4 @@
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     io::{BufRead, BufReader, Read, Write},
     process::Command as ProcessCommand,
@@ -6,7 +7,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rmux_ipc::{LocalEndpoint, connect_blocking};
+use bootty_os::ipc::{LocalEndpoint, connect_blocking};
 use serde_json::{Value, json};
 
 use crate::{
@@ -44,7 +45,7 @@ fn start_instance() -> Result<InstanceDescriptor> {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn()
+        .bootty_spawn()
         .context("start Bootty instance")?;
     let started = Instant::now();
     loop {

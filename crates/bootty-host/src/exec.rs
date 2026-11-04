@@ -1,4 +1,5 @@
 use bootty_config::ApplicationIdentity;
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     borrow::Cow,
     fmt::Write as _,
@@ -170,7 +171,7 @@ pub fn run_remote_command(payload: &str) -> Result<i32> {
         child.env("TERM", "xterm-256color");
     }
     let status = child
-        .status()
+        .bootty_status()
         .with_context(|| format!("run remote command {}", command.program))?;
     Ok(status.code().unwrap_or(1))
 }

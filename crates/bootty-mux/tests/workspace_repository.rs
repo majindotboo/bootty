@@ -1,11 +1,10 @@
 use assert_fs::{TempDir, prelude::*};
-use bootty_config::config::{MultiplexerBackendConfig, SshRemoteConfig};
+use bootty_config::config::SshRemoteConfig;
 use bootty_mux::{
     controller::SpaceId,
-    membership::BackendMembership,
     repository::{
-        BindingMembershipMutation, DEFAULT_SPACE_COLOR, DEFAULT_SPACE_ICON, SpaceMuxOverride,
-        SpaceRemoteOverride, WorkspaceRepository, WorkspaceSnapshot,
+        DEFAULT_SPACE_COLOR, DEFAULT_SPACE_ICON, SpaceMuxOverride, SpaceRemoteOverride,
+        WorkspaceRepository, WorkspaceSnapshot,
     },
     session_membership::{SessionMembership, SessionState, WorkspaceSession},
 };
@@ -60,14 +59,6 @@ fn session(identity: &str, backend_name: &str) -> WorkspaceSession {
 
 fn backend_names(sessions: &SessionMembership) -> Vec<String> {
     sessions.backend_names()
-}
-
-fn membership(id: &str, name: &str, identity: &str) -> BackendMembership {
-    BackendMembership {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        identity: Some(identity.to_owned()),
-    }
 }
 
 impl std::ops::Deref for LoadedRepository {
@@ -177,38 +168,26 @@ fn name_keyed_storage_is_rejected_without_importing_or_deleting_records() -> any
     Ok(())
 }
 
+/// Spaces saved on the retired external backends keep loading, now on the native backend.
 #[rstest]
-fn unsupported_backend_spaces_do_not_block_supported_workspace_state(
+fn spaces_saved_on_retired_backends_load_as_native(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
+    #[values("native", "rmux", "tmux", "herdr", "future-backend")] stored: &str,
 ) {
-    let (directory, mut repository) = repository.expect("workspace fixture");
-    let supported = repository
-        .create_space(
-            "Supported",
-            "folder",
-            [0x7A, 0xA2, 0xF7],
-            false,
-            SpaceMuxOverride {
-                backend: Some(MultiplexerBackendConfig::Rmux),
-                remote: SpaceRemoteOverride::Local,
-            },
-            false,
-        )
-        .expect("create supported Space")
-        .expect("supported Space");
+    let (directory, repository) = repository.expect("workspace fixture");
     drop(repository);
-    let database = directory.path().join("session-order.sqlite3");
-    Connection::open(database)
+    Connection::open(directory.path().join("session-order.sqlite3"))
         .expect("open workspace database")
         .execute(
-            "UPDATE workspace_spaces SET backend = 'future-backend' WHERE name = 'Default Space'",
-            [],
+            "UPDATE workspace_spaces SET backend = ?1 WHERE name = 'Default Space'",
+            [stored],
         )
-        .expect("store unsupported backend");
+        .expect("store retired backend");
 
     let (_, snapshot) = WorkspaceRepository::open(&directory.path().join("config.toml"))
-        .expect("supported workspace state remains available");
-    assert_eq!(snapshot.spaces(), &[supported]);
+        .expect("workspace with a retired backend loads");
+    assert_eq!(snapshot.spaces().len(), 1);
+    assert_eq!(snapshot.spaces()[0].name(), "Default Space");
 }
 
 #[rstest]
@@ -241,7 +220,6 @@ fn a_space_update_that_fails_leaves_every_field_as_it_was(
             [9, 8, 7],
             true,
             &SpaceMuxOverride {
-                backend: Some(MultiplexerBackendConfig::Tmux),
                 remote: SpaceRemoteOverride::Local,
             },
         )
@@ -266,12 +244,10 @@ fn a_space_update_that_fails_leaves_every_field_as_it_was(
 
     let stored_binding = stored_space.binding();
     assert_eq!(stored_binding.mux_scope(), space_id);
-    assert_eq!(stored_binding.backend_override(), None);
     assert_eq!(
         stored_binding.remote_override(),
         &SpaceRemoteOverride::Inherit
     );
-    assert!(!stored_binding.hide_tmux_status());
 }
 
 #[rstest]
@@ -287,7 +263,6 @@ fn a_two_space_commit_is_atomic_when_the_second_space_fails(
             DEFAULT_SPACE_COLOR,
             false,
             SpaceMuxOverride::default(),
-            false,
         )
         .expect("create second space")
         .expect("second space");
@@ -348,195 +323,6 @@ fn a_two_space_commit_is_atomic_when_the_second_space_fails(
 }
 
 #[rstest]
-#[case(false)]
-#[case(true)]
-fn a_remote_backend_success_is_recovered_after_its_metadata_commit_fails(
-    #[case] projectless: bool,
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-) {
-    let (directory, mut repository) = repository.expect("workspace fixture");
-    let binding = repository.spaces()[0].binding().clone();
-    let scope = binding.mux_scope();
-    let mutation = BindingMembershipMutation::Create {
-        initial_state: SessionState {
-            projectless,
-            ..SessionState::default()
-        },
-        identity: "id-1".to_owned(),
-        session_name: "created-name".to_owned(),
-        display_name: "created-name".to_owned(),
-        explicit: true,
-        cwd: "/worktree".to_owned(),
-    };
-    repository
-        .begin_binding_membership_mutation(scope, &mutation)
-        .expect("journal remote create before backend execution");
-
-    let database = directory.path().join("session-order.sqlite3");
-    let connection = Connection::open(&database).expect("open workspace database");
-    connection
-        .execute_batch(
-            "CREATE TRIGGER fail_remote_metadata_commit
-             BEFORE INSERT ON workspace_sessions
-             WHEN NEW.backend_name = 'created-name'
-             BEGIN
-                 SELECT RAISE(ABORT, 'forced remote metadata failure');
-             END;",
-        )
-        .expect("install metadata failure");
-    let mut sessions = binding.sessions().clone();
-    repository
-        .commit_binding_membership_mutation(scope, &mutation, &mut sessions)
-        .expect_err("metadata failure must retain the binding operation journal");
-    assert!(sessions.is_empty());
-    assert_eq!(
-        repository
-            .pending_binding_membership_mutations(scope)
-            .expect("read pending mutations")
-            .iter()
-            .map(bootty_mux::repository::PendingBindingMembershipMutation::mutation)
-            .collect::<Vec<_>>(),
-        [&mutation]
-    );
-
-    connection
-        .execute("DROP TRIGGER fail_remote_metadata_commit", [])
-        .expect("remove metadata failure");
-    drop(connection);
-    assert!(
-        repository
-            .reconcile_binding_membership_mutations(
-                scope,
-                &[membership("$4", "created-name-2", "id-1")],
-                &mut sessions,
-            )
-            .expect("reconcile authoritative backend snapshot"),
-    );
-    assert_eq!(backend_names(&sessions), vec!["created-name"]);
-    assert_eq!(
-        repository
-            .pending_binding_membership_mutations(scope)
-            .expect("read cleared mutations"),
-        Vec::<bootty_mux::repository::PendingBindingMembershipMutation>::new()
-    );
-    assert_eq!(sessions.get("id-1").unwrap().state.projectless, projectless);
-    drop(repository);
-
-    let reopened = LoadedRepository::open(&directory.path().join("config.toml"))
-        .expect("workspace repository");
-    assert_eq!(
-        backend_names(reopened.spaces()[0].binding().sessions()),
-        vec!["created-name"]
-    );
-}
-
-#[rstest]
-fn remote_rename_and_ditch_mutations_commit_binding_membership(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-) {
-    let (_directory, mut repository) = repository.expect("workspace fixture");
-    let binding = repository.spaces()[0].binding().clone();
-    let scope = binding.mux_scope();
-    let mut sessions = binding.sessions().clone();
-    sessions.claim(session("id-1", "old-name"));
-    repository
-        .commit_binding_state(scope, &sessions)
-        .expect("commit baseline membership");
-
-    let rename = BindingMembershipMutation::Rename {
-        identity: "id-1".to_owned(),
-        old_name: "old-name".to_owned(),
-        new_name: "new-name".to_owned(),
-        display_name: "New name".to_owned(),
-        explicit: true,
-    };
-    repository
-        .begin_binding_membership_mutation(scope, &rename)
-        .expect("journal rename");
-    repository
-        .commit_binding_membership_mutation(scope, &rename, &mut sessions)
-        .expect("commit rename");
-    assert_eq!(backend_names(&sessions), vec!["new-name"]);
-    assert_eq!(
-        sessions
-            .get("id-1")
-            .map(bootty_mux::session_membership::WorkspaceSession::label),
-        Some("New name"),
-        "the claim keeps its identity across the rename"
-    );
-
-    let ditch = BindingMembershipMutation::Ditch {
-        identity: "id-1".to_owned(),
-        old_name: "new-name".to_owned(),
-    };
-    repository
-        .begin_binding_membership_mutation(scope, &ditch)
-        .expect("journal ditch");
-    repository
-        .commit_binding_membership_mutation(scope, &ditch, &mut sessions)
-        .expect("commit ditch");
-    assert_eq!(
-        sessions
-            .get("id-1")
-            .map(bootty_mux::session_membership::WorkspaceSession::label),
-        Some("New name")
-    );
-
-    let replacement = BindingMembershipMutation::Create {
-        initial_state: SessionState::default(),
-        identity: "id-2".to_owned(),
-        session_name: "new-name".to_owned(),
-        display_name: "new-name".to_owned(),
-        explicit: false,
-        cwd: "/worktree".to_owned(),
-    };
-    repository
-        .begin_binding_membership_mutation(scope, &replacement)
-        .expect("journal the replacement create");
-    repository
-        .commit_binding_membership_mutation(scope, &replacement, &mut sessions)
-        .expect("commit the replacement create");
-
-    assert_eq!(
-        sessions
-            .get("id-2")
-            .map(bootty_mux::session_membership::WorkspaceSession::label),
-        Some("new-name"),
-        "the ditched session's display name is not reused"
-    );
-    assert_eq!(
-        sessions
-            .get("id-1")
-            .map(bootty_mux::session_membership::WorkspaceSession::label),
-        Some("New name")
-    );
-}
-
-#[rstest]
-#[case::ditch_with_create_fields(
-    "INSERT INTO workspace_pending_binding_operations (space_id, operation, identity, old_name, new_name, cwd) VALUES (?1, 'ditch', 'id-1', 'old-name', 'forbidden', '/forbidden')"
-)]
-#[case::create_with_invalid_explicit(
-    "INSERT INTO workspace_pending_binding_operations (space_id, operation, identity, new_name, display_name, explicit, cwd) VALUES (?1, 'create', 'id-1', 'backend-name', 'display-name', 2, '/worktree')"
-)]
-fn malformed_pending_operations_are_rejected_on_reopen(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-    #[case] statement: &str,
-) {
-    let (directory, repository) = repository.expect("workspace fixture");
-    let scope = repository.spaces()[0].binding().mux_scope();
-    drop(repository);
-    let database = directory.path().join("session-order.sqlite3");
-    let connection = Connection::open(database).expect("open workspace database");
-    connection
-        .execute(statement, [scope.persistence_value()])
-        .expect("insert invalid pending operation");
-    drop(connection);
-
-    assert!(WorkspaceRepository::open(&directory.path().join("config.toml")).is_err());
-}
-
-#[rstest]
 fn spaces_preserve_identity_appearance_and_remote_placement(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
 ) {
@@ -556,10 +342,8 @@ fn spaces_preserve_identity_appearance_and_remote_placement(
             [1, 2, 3],
             true,
             SpaceMuxOverride {
-                backend: Some(MultiplexerBackendConfig::Tmux),
                 remote: SpaceRemoteOverride::Inline(remote.clone().into()),
             },
-            false,
         )
         .expect("create space")
         .expect("valid space");
@@ -571,7 +355,6 @@ fn spaces_preserve_identity_appearance_and_remote_placement(
                 DEFAULT_SPACE_COLOR,
                 false,
                 SpaceMuxOverride::default(),
-                false,
             )
             .expect("reject blank name")
             .is_none()
@@ -583,7 +366,6 @@ fn spaces_preserve_identity_appearance_and_remote_placement(
             DEFAULT_SPACE_COLOR,
             false,
             SpaceMuxOverride::default(),
-            false,
         )
         .expect("create duplicate")
         .expect("valid duplicate");
@@ -619,7 +401,6 @@ fn session_membership_is_binding_scoped_and_persists(
             DEFAULT_SPACE_COLOR,
             false,
             SpaceMuxOverride::default(),
-            false,
         )
         .expect("create second space")
         .expect("second space");
@@ -706,58 +487,6 @@ fn a_failed_binding_commit_keeps_the_committed_snapshot_and_database(
 }
 
 #[rstest]
-fn a_stranded_mutation_does_not_block_a_change_to_another_session(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-) {
-    let (_directory, mut repository) = repository.expect("workspace fixture");
-    let scope = repository.spaces()[0].binding().mux_scope();
-    let stranded = BindingMembershipMutation::Create {
-        initial_state: SessionState::default(),
-        identity: "stranded-id".to_owned(),
-        session_name: "stranded-name".to_owned(),
-        display_name: "stranded-name".to_owned(),
-        explicit: true,
-        cwd: String::new(),
-    };
-    repository
-        .begin_binding_membership_mutation(scope, &stranded)
-        .expect("journal the first mutation");
-
-    let next = BindingMembershipMutation::Create {
-        initial_state: SessionState::default(),
-        identity: "next-id".to_owned(),
-        session_name: "next-name".to_owned(),
-        display_name: "next-name".to_owned(),
-        explicit: true,
-        cwd: String::new(),
-    };
-    repository
-        .begin_binding_membership_mutation(scope, &next)
-        .expect("a stranded entry does not block the next change");
-    let replacement = BindingMembershipMutation::Create {
-        initial_state: SessionState::default(),
-        identity: "next-id".to_owned(),
-        session_name: "replacement".to_owned(),
-        display_name: "replacement".to_owned(),
-        explicit: true,
-        cwd: String::new(),
-    };
-    repository
-        .begin_binding_membership_mutation(scope, &replacement)
-        .unwrap();
-    let pending = repository
-        .pending_binding_membership_mutations(scope)
-        .expect("read the pending mutations");
-    assert_eq!(
-        pending
-            .iter()
-            .map(bootty_mux::repository::PendingBindingMembershipMutation::mutation)
-            .collect::<Vec<_>>(),
-        [&replacement, &stranded],
-    );
-}
-
-#[rstest]
 fn wsl_space_placement_survives_repository_reopen(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
 ) {
@@ -772,10 +501,8 @@ fn wsl_space_placement_survives_repository_reopen(
             DEFAULT_SPACE_COLOR,
             false,
             SpaceMuxOverride {
-                backend: Some(MultiplexerBackendConfig::Rmux),
                 remote: SpaceRemoteOverride::Inline(remote.clone().into()),
             },
-            false,
         )
         .unwrap()
         .unwrap();
@@ -816,8 +543,7 @@ fn supported_saved_identity_schema_gains_state_without_losing_session_data(
 #[rstest]
 #[case(None, SessionState::default())]
 #[case(Some("active"), SessionState::default())]
-#[case(Some("settled"), SessionState { lifecycle: bootty_mux::session_membership::SessionLifecycle::Settled, ..SessionState::default() })]
-#[case(Some("archived"), SessionState { archived: true, ..SessionState::default() })]
+#[case(Some("settled"), SessionState::default())]
 fn prototype_task_lifecycle_preserves_saved_work(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
     #[case] lifecycle: Option<&str>,
@@ -850,8 +576,6 @@ fn prototype_task_lifecycle_preserves_saved_work(
 }
 
 #[rstest]
-#[case::unknown_lifecycle("{\"lifecycle\":\"unknown\"}")]
-#[case::negative_deadline("{\"snoozed_until\":-1}")]
 #[case::negative_activity("{\"last_activity_at\":-1}")]
 #[case::unknown_field("{\"unknown\":true}")]
 fn malformed_session_state_is_reported_without_rewriting_the_record(
@@ -880,75 +604,7 @@ fn malformed_session_state_is_reported_without_rewriting_the_record(
     Ok(())
 }
 
-#[rstest]
-fn saved_lifecycle_round_trips_through_membership_recovery(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-) -> anyhow::Result<()> {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    let (directory, mut repository) = repository?;
-    let scope = repository.default_space().expect("Space");
-    let mut saved = session("saved", "backend");
-    saved.state = SessionState {
-        lifecycle: SessionLifecycle::Settled,
-        pinned: true,
-        archived: true,
-        deleted: true,
-        snoozed_until: Some(100),
-        last_activity_at: Some(90),
-        projectless: true,
-        auto_settle_disabled: true,
-    };
-    let expected = SessionMembership::from_sessions(vec![saved]);
-    repository.commit_binding_state(scope, &expected)?;
-    let mutation = BindingMembershipMutation::Rename {
-        identity: "saved".to_owned(),
-        old_name: "backend".to_owned(),
-        new_name: "renamed".to_owned(),
-        display_name: "Purpose".to_owned(),
-        explicit: true,
-    };
-    repository.begin_binding_membership_mutation(scope, &mutation)?;
-    let mut recovered = expected.clone();
-    repository.reconcile_binding_membership_mutations(
-        scope,
-        &[membership("backend-id", "renamed", "saved")],
-        &mut recovered,
-    )?;
-    let (_, reopened) = WorkspaceRepository::open(&directory.path().join("config.toml"))?;
-    let loaded = reopened.spaces()[0].binding().sessions();
-    assert_eq!(
-        loaded.get("saved").expect("saved").state,
-        expected.get("saved").expect("saved").state
-    );
-    assert_eq!(loaded.get("saved").expect("saved").backend_name, "renamed");
-    Ok(())
-}
-
 /// Older saved state loads with pin off, and a session saved hidden comes back archived.
-#[rstest]
-fn existing_saved_state_defaults_pin_without_losing_its_other_values(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-) -> anyhow::Result<()> {
-    use bootty_mux::session_membership::SessionLifecycle;
-    let (directory, mut repository) = repository?;
-    let scope = repository.default_space().expect("Space");
-    let mut saved = session("saved", "backend");
-    saved.state.lifecycle = SessionLifecycle::Settled;
-    saved.state.archived = true;
-    saved.state.snoozed_until = Some(100);
-    let expected = SessionMembership::from_sessions(vec![saved]);
-    repository.commit_binding_state(scope, &expected)?;
-    drop(repository);
-    let database = Connection::open(directory.path().join("session-order.sqlite3"))?;
-    database.execute(
-        "UPDATE workspace_sessions SET session_state = ?1",
-        [r#"{"lifecycle":"settled","archived":false,"deleted":false,"hidden":true,"snoozed_until":100}"#],
-    )?;
-    let (_, reopened) = WorkspaceRepository::open(&directory.path().join("config.toml"))?;
-    assert_eq!(reopened.spaces()[0].binding().sessions(), &expected);
-    Ok(())
-}
-
 #[rstest]
 fn registered_empty_projects_and_disclosure_survive_reopening(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
@@ -1079,7 +735,6 @@ fn removing_a_project_preserves_files_and_other_space_registration(
             DEFAULT_SPACE_COLOR,
             false,
             SpaceMuxOverride::default(),
-            false,
         )
         .unwrap()
         .unwrap();
@@ -1101,4 +756,91 @@ fn removing_a_project_preserves_files_and_other_space_registration(
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0].scope, other.id());
     assert_eq!(projects[0].cwd, cwd);
+}
+
+#[rstest]
+fn remote_server_pin_survives_reopen_and_refuses_another_host() {
+    let directory = TempDir::new().unwrap();
+    let config = directory.path().join("config.toml");
+    let (_repository, snapshot) = WorkspaceRepository::open(&config).unwrap();
+    let scope = snapshot.spaces().first().unwrap().id();
+    WorkspaceRepository::pin_remote_server(&config, scope, "server-a").unwrap();
+    WorkspaceRepository::open(&config).unwrap();
+    WorkspaceRepository::pin_remote_server(&config, scope, "server-a").unwrap();
+    assert!(
+        WorkspaceRepository::pin_remote_server(&config, scope, "server-b")
+            .unwrap_err()
+            .to_string()
+            .contains("identity mismatch")
+    );
+    WorkspaceRepository::pin_remote_server(&config, scope, "server-a").unwrap();
+}
+#[rstest]
+fn native_server_identity_is_atomic_stable_and_never_replaces_corruption() {
+    let directory = TempDir::new().unwrap();
+    let config = directory.path().join("config.toml");
+    let id = bootty_mux::native::identity::load_server_id(&config).unwrap();
+    assert_eq!(id.len(), 32);
+    assert_eq!(
+        bootty_mux::native::identity::load_server_id(&config).unwrap(),
+        id
+    );
+    std::fs::write(directory.path().join("mux-server-id"), "").unwrap();
+    assert!(bootty_mux::native::identity::load_server_id(&config).is_err());
+    assert_eq!(
+        std::fs::read_to_string(directory.path().join("mux-server-id")).unwrap(),
+        ""
+    );
+}
+
+#[test]
+fn legacy_session_state_ignores_retired_fields() {
+    let state: SessionState = serde_json::from_value(serde_json::json!({
+        "lifecycle": "settled",
+        "snoozed_until": 4_102_444_800_i64,
+        "auto_settle_disabled": true
+    }))
+    .unwrap();
+    assert_eq!(state, SessionState::default());
+}
+
+#[rstest]
+#[case("archived")]
+#[case("deleted")]
+#[case("hidden")]
+fn retired_saved_sessions_are_dropped(
+    repository: anyhow::Result<(TempDir, LoadedRepository)>,
+    #[case] flag: &str,
+) -> anyhow::Result<()> {
+    let (directory, mut repository) = repository?;
+    let scope = repository.default_space().unwrap();
+    repository.commit_binding_state(
+        scope,
+        &SessionMembership::from_sessions(vec![session("old", "old"), session("live", "live")]),
+    )?;
+    drop(repository);
+    let database = Connection::open(directory.path().join("session-order.sqlite3"))?;
+    database.execute(
+        "UPDATE workspace_sessions SET session_state = ?1 WHERE identity = 'old'",
+        [format!("{{\"{flag}\":true,\"last_activity_at\":123}}")],
+    )?;
+    let (_, reopened) = WorkspaceRepository::open(&directory.path().join("config.toml"))?;
+    let sessions = reopened.spaces()[0].binding().sessions();
+    assert_eq!(
+        sessions
+            .sessions()
+            .iter()
+            .map(|session| session.identity.as_str())
+            .collect::<Vec<_>>(),
+        vec!["live"]
+    );
+    assert_eq!(
+        database.query_row(
+            "SELECT count(*) FROM workspace_sessions WHERE identity = 'old'",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        0
+    );
+    Ok(())
 }

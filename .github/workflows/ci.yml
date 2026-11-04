@@ -73,16 +73,14 @@ jobs:
         with:
           tool: nextest
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # Kache caches rustc outputs by content; only main pushes publish the store.
+      - name: Set up Kache
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
         with:
-          shared-key: linux-validation
-          cache-on-failure: true
-
-      # zig compiles libghostty for the build machine's exact CPU, so its
-      # cached output can SIGILL on a runner with a different microarch.
-      - name: Evict CPU-specific zig artifacts
-        run: cargo clean -p libghostty-vt-sys
+          cache-key-prefix: bootty-linux-validation
+          manifest-key: linux-validation
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          pr-comment: false
 
       - name: Run clippy
         run: mise run clippy
@@ -90,11 +88,11 @@ jobs:
       - name: Run tests with nextest
         run: mise run test -- --no-fail-fast
 
-      - name: Build size-optimized daemon
+      - name: Build release daemon
         if: github.event_name == 'pull_request'
         run: |
           mise run daemon:build-one -- x86_64-unknown-linux-gnu
-          mise run daemon:size -- target/x86_64-unknown-linux-gnu/daemon-release/bootty-daemon
+          mise run daemon:size -- target/x86_64-unknown-linux-gnu/release/bootty-daemon
 
       - name: Compile and smoke benchmark suite
         run: mise run bench -- --ci-smoke --output artifacts/benchmark-reproduction/ci
@@ -130,18 +128,20 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu libc6-dev-arm64-cross gcc-mingw-w64-x86-64
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # Kache caches rustc outputs by content; only main pushes publish the store.
+      - name: Set up Kache
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
         with:
-          shared-key: cross-${{ matrix.target }}
-          cache-on-failure: true
+          cache-key-prefix: bootty-cross-${{ matrix.target }}
+          manifest-key: cross-${{ matrix.target }}
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          pr-comment: false
 
       - name: Cross-compile portable crates and daemon
         run: >
           cargo check
           -p bootty-daemon
           -p bootty-terminal
-          -p bootty-agents
           --target ${{ matrix.target }}
 
   daemon-artifacts:
@@ -198,16 +198,14 @@ jobs:
       - name: Set up mise toolchain
         uses: jdx/mise-action@v5
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # Kache caches rustc outputs by content; only main pushes publish the store.
+      - name: Set up Kache
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
         with:
-          shared-key: native-${{ matrix.name }}
-          cache-on-failure: true
-
-      # zig compiles libghostty for the build machine's exact CPU, so its
-      # cached output can SIGILL on a runner with a different microarch.
-      - name: Evict CPU-specific zig artifacts
-        run: cargo clean -p libghostty-vt-sys
+          cache-key-prefix: bootty-native-${{ matrix.name }}
+          manifest-key: native-${{ matrix.name }}
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          pr-comment: false
 
       - name: Download daemon matrix
         uses: actions/download-artifact@v8
@@ -220,7 +218,7 @@ jobs:
         env:
           BOOTTY_STRICT_MACOS_ICON: "1"
           BOOTTY_DAEMON_OUTPUT_DIR: target/bootty-daemons
-        run: mise run package -- --static
+        run: mise run package
 
       - name: Upload native app bundle
         uses: actions/upload-artifact@v7

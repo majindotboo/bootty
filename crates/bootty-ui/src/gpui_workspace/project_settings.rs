@@ -243,8 +243,7 @@ impl ProjectSettingsView {
                                 this.baseline = saved;
                                 None
                             }
-                            Ok(outcome) => crate::commands::command_outcome_message(&outcome)
-                                .map(|message| bootty_agents::native_error_message(&message)),
+                            Ok(outcome) => crate::commands::command_outcome_message(&outcome),
                             Err(_) => Some("The application command owner stopped".into()),
                         };
                         cx.notify();
@@ -273,7 +272,6 @@ impl ProjectSettingsView {
         let content = Self::choice_content(id, selected, &label, cx);
         let field = match id {
             "project-icon" => "Icon",
-            "project-provider" => "Default agent",
             "project-isolation" => "New sessions",
             _ => id,
         };
@@ -325,12 +323,6 @@ impl ProjectSettingsView {
                     value
                 }
             }
-            "project-provider" => match value {
-                "codex" => bootty_agents::AgentKind::Codex.icon(),
-                "claude" => bootty_agents::AgentKind::Claude.icon(),
-                "pi" => bootty_agents::AgentKind::Pi.icon(),
-                _ => "bot",
-            },
             _ => {
                 if value == "worktree" {
                     "git-branch"
@@ -403,7 +395,7 @@ impl ProjectSettingsView {
             })
     }
 
-    fn project_choices(&self, cx: &Context<Self>) -> [gpui_kit::AnyElement; 3] {
+    fn project_choices(&self, cx: &Context<Self>) -> [gpui_kit::AnyElement; 2] {
         let icon = self.choice(
             "project-icon",
             &[
@@ -425,18 +417,6 @@ impl ProjectSettingsView {
             },
             cx,
         );
-        let provider = self.choice(
-            "project-provider",
-            &[
-                ("", "Use app settings"),
-                ("codex", "Codex"),
-                ("claude", "Claude"),
-                ("pi", "Pi"),
-            ],
-            &self.model.settings.provider,
-            |settings, value| settings.provider = value.into(),
-            cx,
-        );
         let isolation = self.choice(
             "project-isolation",
             &[
@@ -451,7 +431,7 @@ impl ProjectSettingsView {
             |settings, value| settings.isolated = value == "worktree",
             cx,
         );
-        [icon, provider, isolation]
+        [icon, isolation]
     }
 
     fn row(
@@ -657,7 +637,7 @@ impl ProjectSettingsView {
 
 impl Render for ProjectSettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let [icon, provider, isolation] = self.project_choices(cx);
+        let [icon, isolation] = self.project_choices(cx);
         let dirty = self.is_dirty(cx);
         div()
             .id("project-settings-page")
@@ -682,13 +662,6 @@ impl Render for ProjectSettingsView {
                     ))
                     .child(Self::row("Icon", "", icon, cx))
                     .child(Self::row("Custom image", "", self.image_control(cx), cx))
-                    .child(Self::section("Agent defaults", cx))
-                    .child(Self::row(
-                        "Default agent",
-                        "Applies to new sessions.",
-                        provider,
-                        cx,
-                    ))
                     .child(Self::section("Workspace", cx))
                     .child(Self::row(
                         "New sessions",

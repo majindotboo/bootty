@@ -1,7 +1,5 @@
 use bootty_control::{CommandDescriptor, CompactSchema, ResourceKind, ValueType};
-use bootty_mux::workspace::{
-    SESSION_ARGV_MAX_BYTES, SESSION_ARGV_MAX_ELEMENTS, SESSION_NAME_MAX_BYTES,
-};
+use bootty_mux::workspace::{SESSION_ARGV_MAX_ELEMENTS, SESSION_NAME_MAX_BYTES};
 
 command_actions! {
     SessionAction {
@@ -21,19 +19,7 @@ command_actions! {
         Pin => ("session.pin", "Pin session", ["identity"], Write),
         Unpin => ("session.unpin", "Unpin session", ["identity"], Write),
         Activity => ("session.activity", "Record accepted session activity", ["identity", "at"], Write),
-        AcceptedInput => ("session.input_accepted", "Record new session input", ["identity", "at"], Write),
-        SettleCurrent => ("settle_session", "Settle Session", [], Write),
         TogglePinCurrent => ("toggle_session_pin", "Pin or Unpin Session", [], Write),
-        ArchiveCurrent => ("archive_session", "Archive Session", [], Write),
-        Settle => ("session.settle", "Settle session", ["identity"], Write),
-        Activate => ("session.activate", "Mark session active", ["identity"], Write),
-        Archive => ("session.archive", "Archive session", ["identity"], Write),
-        Unarchive => ("session.unarchive", "Restore archived session", ["identity"], Write),
-        Snooze => ("session.snooze", "Snooze session", ["identity", "until"], Write),
-        Unsnooze => ("session.unsnooze", "Clear session snooze", ["identity"], Write),
-        AutoSettle => ("session.auto_settle", "Set auto-settle behavior", ["identity", "enabled"], Write),
-        Delete => ("session.delete", "Delete saved session", ["identity"], Destructive),
-        Restore => ("session.restore", "Restore deleted session", ["identity"], Write),
         Reopen => ("session.reopen", "Reopen saved session", ["identity", "selection"], Write),
         Create => ("session.create", "Create Session", ["name", "cwd", "argv", "identity", "title", "projectless"], Write),
         CreateTab => ("terminal.create_tab", "Create Terminal Tab", ["argv", "cwd"], Write),
@@ -96,31 +82,19 @@ impl SessionAction {
             Self::RunSetup => ("Run each of the registered project's setup scripts in a new terminal tab of the target terminal's session, in that session's directory, as a new worktree's session does when it starts.".to_owned(), Some(ResourceKind::Terminal)),
             Self::ListSaved => ("List saved identities, purpose titles, project directories and observed attachments in the exact Space. Attachment is not agent or process status.".to_owned(), Some(ResourceKind::Binding)),
             Self::SetTitle => ("Edit the saved purpose title without changing the backend name or starting/stopping any terminal. The title must be 1–256 bytes without control characters. An optional expected_title prevents a delayed generated title from replacing a newer edit.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Pin => ("Pin saved work, mark it active and clear its snooze. Preserve its identity, order and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Unpin => ("Remove the saved pin while preserving lifecycle, visibility, order and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
+            Self::Pin => ("Pin saved work. Preserve its identity, order and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
+            Self::Unpin => ("Remove the saved pin while preserving visibility, order and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
             Self::Activity => ("Record accepted input at non-negative absolute UTC seconds no later than the host clock. Preserve newer activity, identity, manual order and attachment.".to_owned(), Some(ResourceKind::Binding)),
-            Self::AcceptedInput => ("Record newly accepted input and return settled work to the active list. Preserve newer activity, identity, order and attachment.".to_owned(), Some(ResourceKind::Binding)),
-            Self::SettleCurrent => ("Resolve the exact issued session to its saved identity and settle that work without closing a terminal. Reject stale or unsaved sessions.".to_owned(), Some(ResourceKind::Session)),
             Self::TogglePinCurrent => ("Resolve the exact issued session to its saved identity and pin it, or unpin it when already pinned. Reject stale or unsaved sessions.".to_owned(), Some(ResourceKind::Session)),
-            Self::ArchiveCurrent => ("Resolve the exact issued session to its saved identity and archive that work without closing a terminal. Reject stale or unsaved sessions.".to_owned(), Some(ResourceKind::Session)),
-            Self::Settle => ("Mark saved work settled and remove its pin without closing any backend terminal.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Activate => ("Mark saved work active without starting or selecting any backend terminal.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Archive => ("Archive saved work while retaining its lifecycle, visibility, snooze and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Unarchive => ("Restore archived work with its previous lifecycle and snooze.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Snooze => ("Snooze saved work until non-negative absolute UTC seconds. Its previous lifecycle and attachment remain unchanged.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Unsnooze => ("Clear the saved snooze deadline while preserving lifecycle.".to_owned(), Some(ResourceKind::Binding)),
-            Self::AutoSettle => ("Enable inactivity-based settlement or keep the saved session active. enabled is true or false. Never closes its terminal.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Delete => ("Close the exact session's terminals, then permanently remove its saved record and terminal checkpoint from this Space. A failed close preserves saved work. Native agent history remains; worktree cleanup then removes its Bootty worktree unless it holds uncommitted or unpushed work.".to_owned(), Some(ResourceKind::Binding)),
-            Self::Restore => ("Restore a deleted saved identity with its previous lifecycle, archive and snooze. Never start a terminal implicitly.".to_owned(), Some(ResourceKind::Binding)),
             Self::Reopen => ("Reattach the exact original terminal when live; otherwise restore its saved layout, panes, directories and plain history, or start a fresh shell in the saved directory when no checkpoint exists. Preserve logical identity, title and order; never adopt by name or replay shell commands or prompts.".to_owned(), Some(ResourceKind::Binding)),
             Self::Create => (
                 format!(
-                    "Create a detached backend session in the target Space without changing selection, focus or the active Space. The name (at most {SESSION_NAME_MAX_BYTES} bytes, no control characters, ':', '.', '\\' or '#', not starting with '-', '$', '@', '%' or '=') must be free on the Space's server; an existing session is never reused. cwd is an absolute path on the Space's host. argv is an optional JSON array of strings (at most {SESSION_ARGV_MAX_ELEMENTS} elements and {SESSION_ARGV_MAX_BYTES} bytes) for the first pane: absent or empty starts the default shell; every element otherwise remains a literal executable or argument. Optional identity and title retain one saved task across failed launches; retry requires the same detached, nondeleted identity and directory, preserves saved state and purpose, and never adopts a live terminal. Returns the created session and its first pane's terminal target."
+                    "Create a detached backend session in the target Space without changing selection, focus or the active Space. The name (at most {SESSION_NAME_MAX_BYTES} bytes, no control characters) must be free on the Space's server; an existing session is never reused. cwd is an absolute path on the Space's host. argv is an optional JSON array of strings (at most {SESSION_ARGV_MAX_ELEMENTS} elements) for the first pane: absent or empty starts the default shell; every element otherwise remains a literal executable or argument. Optional identity and title retain one saved task across failed launches; retry requires the same detached, nondeleted identity and directory, preserves saved state and purpose, and never adopts a live terminal. Returns the created session and its first pane's terminal target."
                 ),
                 Some(ResourceKind::Binding),
             ),
             Self::Close => (
-                "Close the target terminal session in any Space without changing selection or focus. Its saved identity/title/project remain detached; worktrees and branches are left alone.".to_owned(),
+                "Close the target terminal session in any Space without changing selection or focus. Its saved membership and checkpoint are released.".to_owned(),
                 Some(ResourceKind::Session),
             ),
             Self::CreateTab => (
@@ -155,10 +129,7 @@ impl SessionAction {
             arguments: CompactSchema { arguments },
             mutation,
             target,
-            palette: matches!(
-                self,
-                Self::SettleCurrent | Self::TogglePinCurrent | Self::ArchiveCurrent
-            ),
+            palette: matches!(self, Self::TogglePinCurrent),
         }
     }
 }

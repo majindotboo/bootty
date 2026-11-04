@@ -4,27 +4,21 @@ use bootty_ui::gpui as bootty_gpui;
 use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
-#[cfg(unix)]
-use std::path::PathBuf;
 use std::{
     fs,
     path::Path,
-    process::Command,
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
-use bootty_config::config::MultiplexerBackendConfig;
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, MutationClass,
     ResourceKind, ValueType,
 };
 use bootty_mux::repository::{SpaceMuxOverride, WorkspaceRepository};
-use bootty_mux::workspace::{
-    SESSION_ARGV_MAX_BYTES, SESSION_ARGV_MAX_ELEMENTS, SESSION_NAME_MAX_BYTES,
-};
+use bootty_mux::workspace::{SESSION_ARGV_MAX_ELEMENTS, SESSION_NAME_MAX_BYTES};
 use bootty_terminal::geometry::SurfaceRect;
-use bootty_ui::commands::{BrowserAction, CommandCatalog, CommandExecutor, CoreCommandExecutor};
+use bootty_ui::commands::CommandCatalog;
 use bootty_ui::{AppState, ModalDialog, presentation::dialogs::NewSessionPickerEvent};
 use rusqlite::Connection;
 
@@ -32,27 +26,9 @@ use rusqlite::Connection;
 /// only a broken fixture reaches this, so it is generous enough for a loaded machine.
 const FIXTURE_DEADLINE: Duration = Duration::from_secs(30);
 
-#[cfg(unix)]
-#[path = "support/agent_clock.rs"]
-pub mod agent_clock;
-#[cfg(unix)]
-#[path = "support/provider_queries.rs"]
-mod provider_queries;
+use crate::support::idle_frames as frames;
 
-#[path = "support/idle_frames.rs"]
-mod frames;
-#[path = "support/naming_backend.rs"]
-mod naming_backend;
-
-#[cfg(unix)]
-#[path = "support/orchestration_provider.rs"]
-mod orchestration_provider;
-pub mod support;
-#[cfg(unix)]
-#[path = "support/terminal_provider.rs"]
-mod terminal_provider;
-#[path = "support/config.rs"]
-mod test_config;
+use crate::support::config as test_config;
 
 fn event_repaint(repaint: impl Fn() + Send + Sync + 'static) -> bootty_mux::RepaintHandle {
     let host = std::thread::current();
@@ -62,46 +38,43 @@ fn event_repaint(repaint: impl Fn() + Send + Sync + 'static) -> bootty_mux::Repa
     })
 }
 
-fn agent_runtime(
-    events: bootty_control::ControlEventSender,
-) -> bootty_ui::commands::AgentRuntimeConfig {
-    let mut runtime = bootty_ui::commands::AgentRuntimeConfig::new(events);
-    runtime.launcher = Arc::new(|launch| {
-        Err(format!(
-            "No native provider fixture for {}",
-            launch.config.program
-        ))
-    });
-    #[cfg(unix)]
-    let runtime = bootty_ui::commands::AgentRuntimeConfig {
-        terminal_transport: terminal_provider::transport(false, None),
-        ..runtime
-    };
-    runtime
-}
-
 fn metadata_state(directory: &Path) -> AppState {
-    state_with_backends(directory, naming_backend::backends(None, false).unwrap())
+    state_with_backends(directory)
 }
 
 fn focus_state(directory: &Path) -> AppState {
-    state_with_backends(directory, naming_backend::backends(None, true).unwrap())
+    state_with_backends(directory)
 }
 
 fn terminal_state(directory: &Path) -> AppState {
-    state_with_backends(directory, support::backends())
+    state_with_backends(directory)
 }
 
-fn state_with_backends(
-    directory: &Path,
-    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
-) -> AppState {
-    let mut config = test_config::config(
-        directory.join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+fn state_with_backends(directory: &Path) -> AppState {
+    let mut config = test_config::config(directory.join("config.toml"));
     config.session.working_directory = Some(directory.to_owned());
-    AppState::new(config, backends, event_repaint(|| {}), None, None).expect("app state")
+    AppState::new(config, event_repaint(|| {}), None, None).expect("app state")
+}
+
+fn wait_for_saved_attachment(state: &mut AppState, identity: &str) {
+    let deadline = Instant::now().checked_add(FIXTURE_DEADLINE).unwrap();
+    loop {
+        state.update_frame(frames::idle_frame(Instant::now()));
+        if state
+            .mux()
+            .all_sessions()
+            .iter()
+            .any(|session| session.tag.identity.as_deref() == Some(identity))
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "saved session did not reattach: {:?}",
+            state.last_error()
+        );
+        std::thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
 }
 
 fn open_native_session(state: &mut AppState, cwd: &Path, started: Instant) {
@@ -110,20 +83,9 @@ fn open_native_session(state: &mut AppState, cwd: &Path, started: Instant) {
         matches!(outcome, CommandOutcome::Success { .. }),
         "{outcome:?}"
     );
-    let id = state
-        .modal_dialog()
-        .and_then(|dialog| match dialog {
-            ModalDialog::NewSession(dialog) => Some(dialog.spec().id),
-            _ => None,
-        })
-        .expect("new session form is open");
-    state.apply_dialog_intent(
-        &bootty_gpui::DialogIntent::FieldChanged {
-            dialog: id,
-            field: "mode".to_owned(),
-            value: "Terminal".to_owned(),
-        },
-        &mut Vec::new(),
+    assert!(
+        matches!(state.modal_dialog(), Some(ModalDialog::NewSession(_))),
+        "new session form is open"
     );
     // Directory-picker compatibility keeps the fixture's backend session names.
     state.apply_picker_event(NewSessionPickerEvent::CreateSession {
@@ -160,15 +122,11 @@ fn open_native_session(state: &mut AppState, cwd: &Path, started: Instant) {
 #[fixture]
 fn native_terminal_form() -> (assert_fs::TempDir, AppState, mpsc::Receiver<()>) {
     let directory = assert_fs::TempDir::new().expect("private workspace");
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let mut config = test_config::config(directory.path().join("config.toml"));
     config.session.working_directory = Some(directory.path().to_owned());
     let (wake, wakes) = mpsc::channel();
     let state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -249,14 +207,6 @@ fn empty_terminal_form_starts_one_shell_only_after_explicit_start(
         panic!("new session form");
     };
     let id = dialog.spec().id;
-    state.apply_dialog_intent(
-        &bootty_gpui::DialogIntent::FieldChanged {
-            dialog: id.clone(),
-            field: "mode".to_owned(),
-            value: "Terminal".to_owned(),
-        },
-        &mut Vec::new(),
-    );
     if cancel {
         state.apply_dialog_intent(
             &bootty_gpui::DialogIntent::Dismiss { dialog: id },
@@ -276,16 +226,7 @@ fn empty_terminal_form_starts_one_shell_only_after_explicit_start(
         let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
             panic!("new session form");
         };
-        let spec = dialog.spec();
-        assert_eq!(spec.text_label.as_deref(), Some("Prompt"));
-        state.apply_dialog_intent(
-            &bootty_gpui::DialogIntent::FieldChanged {
-                dialog: spec.id,
-                field: "mode".to_owned(),
-                value: "Terminal".to_owned(),
-            },
-            &mut Vec::new(),
-        );
+        assert_eq!(dialog.spec().text_label.as_deref(), Some("Terminal"));
     }
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(1))
@@ -364,13 +305,13 @@ fn creating_a_session_selects_it_and_keeps_it_selected_after_refresh() {
 #[rstest]
 #[case::dot_and_space(
     ".project.v1 notes".to_owned(),
-    "_project_v1 notes".to_owned(),
-    "_project_v1 notes-2".to_owned()
+    ".project.v1 notes".to_owned(),
+    ".project.v1 notes-2".to_owned()
 )]
 #[case::bounded_utf8(
     format!(".{}é", "x".repeat(252)),
-    format!("_{}é", "x".repeat(252)),
-    format!("_{}-2", "x".repeat(252))
+    format!(".{}é", "x".repeat(252)),
+    format!(".{}-2", "x".repeat(252))
 )]
 fn directory_picker_generates_valid_unique_names_without_changing_cwd(
     #[case] directory_name: String,
@@ -381,19 +322,10 @@ fn directory_picker_generates_valid_unique_names_without_changing_cwd(
     let cwd = directory.path().join(directory_name);
     fs::create_dir(&cwd).expect("project directory");
     let canonical_cwd = cwd.canonicalize().expect("canonical project directory");
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let mut config = test_config::config(directory.path().join("config.toml"));
     config.session.working_directory = Some(directory.path().to_owned());
-    let mut state = AppState::new(
-        config,
-        naming_backend::backends(None, false).unwrap(),
-        event_repaint(|| {}),
-        None,
-        None,
-    )
-    .expect("session naming fixture");
+    let mut state =
+        AppState::new(config, event_repaint(|| {}), None, None).expect("session naming fixture");
     for expected in [first, second] {
         open_native_session(&mut state, &cwd, Instant::now());
         assert_eq!(state.mux().selected_session(), Some(expected.as_str()));
@@ -458,24 +390,6 @@ fn modal_dismissal_restores_the_underlying_input_route(#[case] sidebar: bool) {
     "new_mux_session",
     MutationClass::Write,
     Some(ResourceKind::ApplicationWindow)
-)]
-#[case("git.status", MutationClass::Read, Some(ResourceKind::Binding))]
-#[case("git.stage", MutationClass::Write, Some(ResourceKind::Binding))]
-#[case("git.amend", MutationClass::Destructive, Some(ResourceKind::Binding))]
-#[case("git.stage-all", MutationClass::Write, Some(ResourceKind::Binding))]
-#[case("git.stage-hunk", MutationClass::Write, Some(ResourceKind::Binding))]
-#[case("git.discard", MutationClass::Destructive, Some(ResourceKind::Binding))]
-#[case(
-    "git.discard-all",
-    MutationClass::Destructive,
-    Some(ResourceKind::Binding)
-)]
-#[case("git.diff-all", MutationClass::Read, Some(ResourceKind::Binding))]
-#[case("git.write-message", MutationClass::Read, Some(ResourceKind::Binding))]
-#[case(
-    "git.write-pull-request",
-    MutationClass::Read,
-    Some(ResourceKind::Binding)
 )]
 #[case("terminal.read", MutationClass::Read, Some(ResourceKind::Terminal))]
 #[case("terminal.write", MutationClass::Write, Some(ResourceKind::Terminal))]
@@ -550,16 +464,12 @@ fn find_switches_share_command_and_button_state(
 #[test]
 fn core_command_resolution_reports_executor_and_argument_boundaries() {
     let catalog = CommandCatalog::default();
-    assert!(matches!(
-        catalog
-            .resolve(CommandInvocation::from_action(
-                "terminal.read",
-                Caller::Socket,
-            ))
-            .expect("resolve core command")
-            .executor,
-        CommandExecutor::Core(_)
-    ));
+    catalog
+        .resolve(CommandInvocation::from_action(
+            "terminal.read",
+            Caller::Socket,
+        ))
+        .expect("resolve core command");
     assert!(matches!(
         catalog.resolve(CommandInvocation::from_action(
             "terminal.write",
@@ -573,403 +483,6 @@ fn core_command_resolution_reports_executor_and_argument_boundaries() {
             Caller::Socket,
         )),
         Err(CommandOutcome::Failed { code, .. }) if code == "unknown_command"
-    ));
-}
-
-#[rstest]
-fn browser_commands_resolve_typed_page_targets() {
-    let catalog = CommandCatalog::default();
-    let open = catalog
-        .resolve(CommandInvocation::new(
-            "browser.open",
-            vec!["http://localhost:48159".to_owned(), "19".to_owned()],
-            Caller::Socket,
-        ))
-        .expect("resolve browser open");
-    assert!(matches!(
-        open.executor,
-        CommandExecutor::Core(CoreCommandExecutor::Browser(
-            BrowserAction::Open(address),
-            Some(19)
-        )) if address == "http://localhost:48159"
-    ));
-
-    let close = catalog
-        .resolve(CommandInvocation::new(
-            "browser.close_tab",
-            vec!["19".to_owned()],
-            Caller::Socket,
-        ))
-        .expect("resolve browser close");
-    assert!(matches!(
-        close.executor,
-        CommandExecutor::Core(CoreCommandExecutor::Browser(
-            BrowserAction::CloseTab(19),
-            Some(19)
-        ))
-    ));
-    assert!(matches!(
-        catalog.resolve(CommandInvocation::new(
-            "browser.address",
-            vec!["0".to_owned()],
-            Caller::Socket,
-        )),
-        Err(CommandOutcome::Failed { code, .. }) if code == "invalid_arguments"
-    ));
-
-    let descriptor = catalog
-        .describe("browser.address")
-        .expect("browser address descriptor");
-    let [page_id] = descriptor.arguments.arguments.as_slice() else {
-        panic!("browser page argument schema: {:?}", descriptor.arguments);
-    };
-    assert_eq!(page_id.name, "page-id");
-    assert_eq!(page_id.value_type, ValueType::Integer);
-    assert!(!page_id.required);
-    assert_eq!(page_id.minimum, Some(1));
-}
-
-#[rstest]
-fn browser_request_honors_command_cancellation() {
-    let directory = assert_fs::TempDir::new().expect("isolated config");
-    let mut state = metadata_state(directory.path());
-    let started = Instant::now();
-    let cancellation = CommandCancellation::new();
-    let outcomes = state
-        .app_command_sender(Caller::Socket)
-        .submit(
-            CommandInvocation::from_action("browser.reload", Caller::Socket),
-            started
-                .checked_add(Duration::from_secs(5))
-                .expect("test deadline fits"),
-            cancellation.clone(),
-        )
-        .expect("submit browser command");
-    let effects = state.update_frame(frames::idle_frame(started));
-    let request = effects
-        .into_iter()
-        .find_map(|effect| match effect {
-            bootty_ui::AppEffect::Browser(request) => Some(request),
-            _ => None,
-        })
-        .expect("window receives the browser request");
-    assert!(matches!(
-        outcomes.try_recv(),
-        Err(mpsc::TryRecvError::Empty)
-    ));
-
-    assert!(cancellation.cancel());
-    state.update_frame(frames::idle_frame(
-        started
-            .checked_add(Duration::from_millis(1))
-            .expect("test timestamp fits"),
-    ));
-    assert!(matches!(
-        outcomes.try_recv(),
-        Ok(CommandOutcome::Failed { code, .. }) if code == "cancelled"
-    ));
-    request.complete(CommandOutcome::success());
-}
-
-#[test]
-fn native_agent_commands_are_static_and_explicitly_unsupported_until_composed() {
-    let catalog = CommandCatalog::default();
-    let native = catalog
-        .list()
-        .into_iter()
-        .filter(|descriptor| descriptor.id.starts_with("agents."))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        native
-            .iter()
-            .map(|command| &command.id)
-            .collect::<std::collections::BTreeSet<_>>()
-            .len(),
-        native.len()
-    );
-    assert_eq!(
-        catalog
-            .describe("agents.pi.start")
-            .expect("Pi start descriptor")
-            .target,
-        Some(ResourceKind::Session)
-    );
-    assert!(matches!(
-        catalog
-            .resolve(CommandInvocation::from_action(
-                "agents.pi.state",
-                Caller::Socket
-            ))
-            .expect("resolve static native command")
-            .executor,
-        CommandExecutor::UncomposedAgent
-    ));
-}
-
-#[cfg(unix)]
-fn wait_for_native_agent_input(
-    state: &mut AppState,
-    wakes: &mpsc::Receiver<()>,
-    target: &CommandTarget,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let service = state
-        .terminal_agent_service()
-        .ok_or("native agent service is unavailable")?;
-    let deadline = Instant::now()
-        .checked_add(FIXTURE_DEADLINE)
-        .ok_or("observation deadline does not fit")?;
-    loop {
-        state.update_frame(frames::idle_frame(Instant::now()));
-        if service.live_records().iter().any(|record| {
-            record.target == *target
-                && matches!(
-                    record.observation.status,
-                    bootty_agents::TerminalAgentStatus::Idle
-                        | bootty_agents::TerminalAgentStatus::Working
-                        | bootty_agents::TerminalAgentStatus::Waiting
-                )
-        }) {
-            return Ok(());
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(format!(
-                "native observation did not become ready for {target:?}: {:?}",
-                service
-                    .live_records()
-                    .into_iter()
-                    .map(|record| (record.target, record.observation))
-                    .collect::<Vec<_>>()
-            )
-            .into());
-        }
-        match wakes.recv_timeout(remaining) {
-            Ok(()) | Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(error) => return Err(error.into()),
-        }
-    }
-}
-
-/// A terminal agent Bootty started appears in the Agents panel, and turning to wait for the
-/// person notifies them.
-#[cfg(unix)]
-#[rstest]
-fn terminal_agents_list_in_the_agents_panel_and_notify() {
-    let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    let account = directory.path().join("account");
-    fs::create_dir(&account).unwrap();
-    let program = directory.path().join("provider.py");
-    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n").unwrap();
-    config.agents.claude.program = program.to_string_lossy().into_owned();
-    config.agents.claude.selected = "fixture".into();
-    config.agents.claude.profiles.insert(
-        "fixture".into(),
-        bootty_config::config::AgentProfileConfig {
-            name: "Fixture".into(),
-            directory: Some(account.to_string_lossy().into_owned()),
-            arguments: Vec::new(),
-        },
-    );
-    let fixture = orchestration_provider::Fixture::new(directory.path(), None);
-    let (wake, wakes) = mpsc::channel();
-    let (agent_events, _agent_event_receiver) = bootty_control::event_queue();
-    let clock = agent_clock::Clock::default();
-    let mut runtime = clock.runtime(agent_events);
-    runtime.terminal_transport = fixture.transport();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        fixture.backends().unwrap(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(runtime),
-    )
-    .expect("composed app state");
-    let started = Instant::now();
-    open_native_session(&mut state, directory.path(), started);
-    let session_id = "00000000-0000-4000-8000-000000000011";
-    let query = account.join("state");
-    fs::write(&query, "busy").unwrap();
-    let launched = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.start",
-            vec![
-                directory.path().to_string_lossy().into_owned(),
-                program.to_string_lossy().into_owned(),
-                serde_json::to_string(&["--session-id", session_id]).unwrap(),
-            ],
-            Caller::Socket,
-        ),
-        started,
-    );
-    let CommandOutcome::Success { value, .. } = launched else {
-        panic!("terminal agent launch failed: {launched:?}");
-    };
-    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
-    wait_for_native_agent_input(&mut state, &wakes, &target).unwrap();
-    let listed = state
-        .agent_overview()
-        .into_iter()
-        .find(|entry| entry.target == target)
-        .expect("the terminal agent is listed");
-    assert_eq!(
-        (listed.source.as_str(), listed.status.as_str()),
-        ("terminal", "working")
-    );
-
-    fs::write(&query, "waiting").unwrap();
-    clock.advance(&state, Duration::from_millis(750));
-    let deadline = Instant::now()
-        .checked_add(FIXTURE_DEADLINE)
-        .expect("deadline fits");
-    loop {
-        let mut frame = frames::idle_frame(clock.now());
-        frame.input.window_focused = false;
-        let notified = state.update_frame(frame).into_iter().any(|effect| {
-            matches!(effect, bootty_ui::AppEffect::DesktopNotification { title, .. }
-                if title == "Claude: Needs input")
-        });
-        if notified {
-            break;
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(!remaining.is_zero(), "no Needs input notification");
-        let _ = wakes.recv_timeout(remaining);
-    }
-}
-
-#[cfg(unix)]
-#[rstest]
-fn composed_native_agent_prompt_uses_the_same_mailbox_for_every_caller() {
-    let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    let (wake, wakes) = mpsc::channel();
-    let (agent_events, _agent_event_receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(agent_events)),
-    )
-    .expect("composed app state");
-    let started = Instant::now();
-    open_native_session(&mut state, directory.path(), started);
-    let program = claude_terminal_fixture(directory.path()).unwrap();
-    let session_id = "00000000-0000-4000-8000-000000000007";
-    // This test exercises caller routing, so make the provider query ready before launch.
-    fs::write(
-        directory.path().join("query-session"),
-        serde_json::to_vec(&serde_json::json!({"session_id":session_id})).unwrap(),
-    )
-    .unwrap();
-    let launched = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.start",
-            vec![
-                directory.path().to_string_lossy().into_owned(),
-                program.to_string_lossy().into_owned(),
-                serde_json::to_string(&["--session-id", session_id]).unwrap(),
-            ],
-            Caller::Socket,
-        ),
-        started,
-    );
-    let CommandOutcome::Success { value, .. } = launched else {
-        panic!("native agent launch failed: {launched:?}");
-    };
-    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
-    wait_for_native_agent_input(&mut state, &wakes, &target).unwrap();
-    let selected = state.mux().selected_session().map(str::to_owned);
-
-    let callers = [
-        Caller::CommandPalette,
-        Caller::Keybinding,
-        Caller::BuiltinKeybinding,
-        Caller::Cli,
-        Caller::Socket,
-        Caller::Luau,
-        Caller::Internal,
-    ];
-    for (index, caller) in callers.into_iter().enumerate() {
-        let mut invocation = CommandInvocation::new(
-            "agents.claude.prompt",
-            vec![format!("caller-{index}")],
-            caller,
-        );
-        invocation.target = Some(target.clone());
-        let outcome = submit_command_from_caller(
-            &mut state,
-            &wakes,
-            caller,
-            invocation,
-            started
-                .checked_add(Duration::from_millis(
-                    20_u64
-                        .checked_add(u64::try_from(index).expect("caller index fits"))
-                        .expect("test tick fits"),
-                ))
-                .expect("test timestamp fits"),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Success { .. }),
-            "{outcome:?}"
-        );
-        assert_eq!(state.mux().selected_session(), selected.as_deref());
-    }
-    let messages = directory.path().join("agent-input");
-    loop {
-        state.update_frame(frames::idle_frame(started));
-        if let Ok(text) = fs::read_to_string(&messages) {
-            let received: Vec<String> = text
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            if received.len() == callers.len() {
-                assert_eq!(
-                    received,
-                    (0..callers.len())
-                        .map(|index| format!("caller-{index}"))
-                        .collect::<Vec<_>>()
-                );
-                break;
-            }
-        }
-        wakes
-            .recv_timeout(Duration::from_secs(5))
-            .expect("provider terminal receives submitted prompts");
-    }
-    let mut stale = target;
-    stale.generation = stale.generation.checked_add(1).unwrap();
-    let mut invocation = CommandInvocation::new(
-        "agents.claude.prompt",
-        vec!["must not arrive".to_owned()],
-        Caller::Socket,
-    );
-    invocation.target = Some(stale);
-    assert!(matches!(
-        submit_command_from_caller(&mut state, &wakes, Caller::Socket, invocation, started),
-        CommandOutcome::StaleTarget { .. }
     ));
 }
 
@@ -1033,19 +546,10 @@ fn command_specs_keep_presentation_policy_and_arguments_together() {
 #[test]
 fn discovered_resource_target_cannot_retarget_a_replacement_binding() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let started = Instant::now();
-    let mut first = AppState::new(
-        config.clone(),
-        support::backends(),
-        event_repaint(|| {}),
-        None,
-        None,
-    )
-    .expect("first app state");
+    let mut first =
+        AppState::new(config.clone(), event_repaint(|| {}), None, None).expect("first app state");
     let current = submit_command(
         &mut first,
         CommandInvocation::new(
@@ -1062,14 +566,8 @@ fn discovered_resource_target_cannot_retarget_a_replacement_binding() {
         serde_json::from_value(value["target"].clone()).expect("current binding target");
     drop(first);
 
-    let mut replacement = AppState::new(
-        config,
-        support::backends(),
-        event_repaint(|| {}),
-        None,
-        None,
-    )
-    .expect("replacement app state");
+    let mut replacement =
+        AppState::new(config, event_repaint(|| {}), None, None).expect("replacement app state");
     let mut invocation = CommandInvocation::new("edit_space", Vec::new(), Caller::Socket);
     invocation.target = Some(target);
     let outcome = submit_command(
@@ -1082,6 +580,63 @@ fn discovered_resource_target_cannot_retarget_a_replacement_binding() {
     assert!(matches!(outcome, CommandOutcome::StaleTarget { .. }));
 }
 
+#[cfg(unix)]
+#[test]
+fn palette_split_launches_in_shell_process_directory_without_osc7() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let changed = directory.path().join("changed");
+    fs::create_dir(&changed).unwrap();
+    let expected = changed.canonicalize().unwrap();
+    let launches = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&launches);
+    let target = expected.clone();
+    let base = bootty_mux::native::local_launcher();
+    bootty_test_support::native_mux::configure(
+        &directory.path().join("config.toml"),
+        Arc::new(move |size, config| {
+            let mut launches = recorded.lock().unwrap();
+            launches.push(config.working_directory.clone());
+            let first = launches.len() == 1;
+            drop(launches);
+            if !first {
+                return base(size, config);
+            }
+            let launch = bootty_terminal::SessionLaunchConfig {
+                shell: Some("/bin/sh".into()),
+                args: vec![
+                    "-c".into(),
+                    "cd \"$1\" && printf READY && read line".into(),
+                    "sh".into(),
+                    target.to_string_lossy().into_owned(),
+                ],
+                shell_integration: false,
+                ..config.clone()
+            };
+            let mut transport = base(size, &launch)?;
+            let mut ready = Vec::new();
+            while !ready.ends_with(b"READY") {
+                let Some(bootty_terminal::terminal_output::TerminalOutput::Bytes { bytes, .. }) =
+                    transport.reader.next_output()?
+                else {
+                    anyhow::bail!("shell exited before cd");
+                };
+                ready.extend(bytes);
+            }
+            Ok(transport)
+        }),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let mut state = focus_state(directory.path());
+    open_native_session(&mut state, directory.path(), started);
+    let outcome = submit_action(&mut state, "split_right", Caller::CommandPalette, started);
+    assert!(
+        matches!(outcome, CommandOutcome::Success { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(launches.lock().unwrap().last(), Some(&Some(expected)));
+}
+
 #[test]
 fn native_split_command_publishes_the_binding_owned_layout() {
     let directory = assert_fs::TempDir::new().expect("temporary workspace");
@@ -1089,7 +644,7 @@ fn native_split_command_publishes_the_binding_owned_layout() {
     let mut state = focus_state(directory.path());
     open_native_session(&mut state, directory.path(), started);
 
-    let outcome = submit_terminal_choice(
+    let outcome = submit_action(
         &mut state,
         "split_right",
         Caller::Socket,
@@ -1106,7 +661,7 @@ fn native_split_command_publishes_the_binding_owned_layout() {
     assert_eq!(pane_count(&state), 2);
     assert!(state.focused_pane().is_some());
 
-    let direct = submit_terminal_choice(
+    let direct = submit_action(
         &mut state,
         "split_right",
         Caller::Keybinding,
@@ -1119,17 +674,6 @@ fn native_split_command_publishes_the_binding_owned_layout() {
         "{direct:?}"
     );
     assert_eq!(pane_count(&state), 3);
-
-    let unsupported = submit_action(
-        &mut state,
-        "toggle_pane_zoom",
-        Caller::Socket,
-        started
-            .checked_add(Duration::from_millis(20))
-            .expect("test timestamp fits"),
-    );
-    assert!(matches!(unsupported, CommandOutcome::Unsupported { .. }));
-    assert_eq!(pane_count(&state), 3);
 }
 
 #[test]
@@ -1141,7 +685,7 @@ fn native_window_actions_use_the_binding_owned_plan() {
 
     let session = state.mux().sessions()[0].clone();
     let first_window = session.windows[0].id.clone();
-    let outcome = submit_terminal_choice(
+    let outcome = submit_action(
         &mut state,
         "new_tab",
         Caller::Keybinding,
@@ -1266,20 +810,10 @@ fn close_window_policy_only_applies_to_the_last_workspace_surface(
     #[values(Caller::Keybinding, Caller::Socket)] caller: Caller,
 ) {
     let directory = assert_fs::TempDir::new().expect("isolated workspace");
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let mut config = test_config::config(directory.path().join("config.toml"));
     config.session.working_directory = Some(directory.path().to_owned());
     config.when_closing_with_no_tabs = bootty_config::config::WhenClosingWithNoTabs::CloseWindow;
-    let mut state = AppState::new(
-        config,
-        support::backends(),
-        event_repaint(|| {}),
-        None,
-        None,
-    )
-    .unwrap();
+    let mut state = AppState::new(config, event_repaint(|| {}), None, None).unwrap();
     for index in 0..session_count {
         let cwd = directory.path().join(format!("session-{index}"));
         fs::create_dir(&cwd).unwrap();
@@ -1346,20 +880,10 @@ fn keeping_the_window_open_still_closes_its_last_backend_pane(
     #[values(Caller::Keybinding, Caller::Socket)] caller: Caller,
 ) {
     let directory = assert_fs::TempDir::new().expect("isolated workspace");
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let mut config = test_config::config(directory.path().join("config.toml"));
     config.session.working_directory = Some(directory.path().to_owned());
     config.when_closing_with_no_tabs = bootty_config::config::WhenClosingWithNoTabs::KeepWindowOpen;
-    let mut state = AppState::new(
-        config,
-        support::backends(),
-        event_repaint(|| {}),
-        None,
-        None,
-    )
-    .unwrap();
+    let mut state = AppState::new(config, event_repaint(|| {}), None, None).unwrap();
     open_native_session(&mut state, directory.path(), Instant::now());
     let mut invocation = CommandInvocation::from_action("close_surface", caller);
     if caller == Caller::Socket {
@@ -1398,77 +922,6 @@ fn keeping_the_window_open_still_closes_its_last_backend_pane(
         "{outcome:?}"
     );
     assert_eq!(state.mux().sessions(), []);
-}
-
-fn submit_terminal_choice(
-    state: &mut AppState,
-    action: &str,
-    caller: Caller,
-    started: Instant,
-) -> CommandOutcome {
-    let before = (
-        state
-            .mux()
-            .all_sessions()
-            .iter()
-            .map(|session| session.id.clone())
-            .collect::<Vec<_>>(),
-        state
-            .mux()
-            .all_sessions()
-            .iter()
-            .flat_map(|session| session.windows.iter().map(|window| window.id.clone()))
-            .collect::<Vec<_>>(),
-        pane_count(state),
-    );
-    let opened = submit_action(state, action, caller, started);
-    assert!(
-        matches!(opened, CommandOutcome::Success { .. }),
-        "{opened:?}"
-    );
-    assert_eq!(
-        (
-            state
-                .mux()
-                .all_sessions()
-                .iter()
-                .map(|session| session.id.clone())
-                .collect::<Vec<_>>(),
-            state
-                .mux()
-                .all_sessions()
-                .iter()
-                .flat_map(|session| session.windows.iter().map(|window| window.id.clone()))
-                .collect::<Vec<_>>(),
-            pane_count(state)
-        ),
-        before,
-        "Opening a chooser must not create a backend terminal"
-    );
-    let request = state.pending_new_surface().expect("retained chooser").id;
-    let created = submit_command(
-        state,
-        CommandInvocation::new(
-            "surface.choose",
-            vec![request.to_string(), "terminal".to_owned()],
-            caller,
-        ),
-        started,
-    );
-    if let CommandOutcome::Success { value, .. } = &created {
-        let target = value
-            .get("terminal")
-            .or_else(|| value.get("created"))
-            .expect("actual created terminal target");
-        let mut focus = CommandInvocation::new("agents.focus", Vec::new(), caller);
-        focus.target = Some(serde_json::from_value(target.clone()).expect("issued target"));
-        let focused = submit_command(state, focus, started);
-        assert!(
-            matches!(focused, CommandOutcome::Success { .. }),
-            "{focused:?}"
-        );
-    }
-    created
 }
 
 fn submit_command(
@@ -1540,365 +993,59 @@ fn submit_command_from_caller(
     }
 }
 
-/// Writing a commit message hands Git's staged changes to the configured Codex quick model on the
-/// repository's host, and returns what it wrote as one message. Nothing staged stops before Codex.
-#[cfg(unix)]
-#[rstest]
-fn commit_messages_are_written_by_codex_from_the_staged_changes() {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let root = directory.path().to_string_lossy().into_owned();
-    let git = |args: &[&str]| {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(&root)
-                .args(args)
-                .status()
-                .unwrap()
-                .success()
-        );
-    };
-    git(&["init", "--quiet"]);
-    let codex = directory.path().join("codex.py");
-    bootty_test_support::write_executable(
-        &codex,
-        r#"#!/bin/sh
-prior=
-output=
-model=
-last=
-for argument do
-    case "$prior" in
-        --model) model=$argument ;;
-        --output-last-message) output=$argument ;;
-    esac
-    prior=$argument
-    last=$argument
-done
-[ "$model" = quick-model ] && [ -n "$output" ] || exit 2
-case "$last" in *+contents*) ;; *) exit 3 ;; esac
-printf '%s' '{"subject":"Add notes","body":"They start the list."}' > "$output"
-"#,
-    )
-    .unwrap();
-    let (wake, wakes) = mpsc::channel();
-    let mut config = test_config::config(
-        directory.path().join("settings/config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.agents.codex.enabled = true;
-    config.agents.codex.program = codex.to_string_lossy().into_owned();
-    config.agents.quick_model = "quick-model".to_owned();
-    let mut state = AppState::new(
-        config,
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-    )
-    .unwrap();
-    let started = Instant::now();
-    let write = |state: &mut AppState| {
-        let mut invocation = CommandInvocation::from_action("git.write-message", Caller::Socket);
-        invocation.arguments = vec![root.clone()];
-        submit_command_from_caller(state, &wakes, Caller::Socket, invocation, started)
-    };
-    assert!(
-        format!("{:?}", write(&mut state)).contains("Stage the changes to describe first"),
-        "nothing staged"
-    );
-    fs::write(directory.path().join("notes.txt"), "contents\n").unwrap();
-    git(&["add", "notes.txt"]);
-    let CommandOutcome::Success { value, .. } = write(&mut state) else {
-        panic!("writing the message failed");
-    };
-    assert_eq!(
-        value,
-        serde_json::json!({"message": "Add notes\n\nThey start the list."})
-    );
-}
-
-#[rstest]
-#[case(Caller::Socket)]
-#[case(Caller::Keybinding)]
-fn git_commands_complete_through_the_shared_mailbox(#[case] caller: Caller) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let root = directory.path().to_string_lossy().into_owned();
-    assert!(
-        Command::new("git")
-            .args(["-C", &root, "init", "--quiet"])
-            .status()
-            .unwrap()
-            .success()
-    );
-    fs::write(directory.path().join("file[a].txt"), "contents\n").unwrap();
-    let (wake, wakes) = mpsc::channel();
-    let checkouts = assert_fs::TempDir::new().unwrap();
-    let mut config = test_config::config(
-        directory.path().join("settings/config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.session.worktree_directory = Some(checkouts.path().to_string_lossy().into_owned());
-    let mut state = AppState::new(
-        config,
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-    )
-    .unwrap();
-    let mut run = |command: &str, arguments: Vec<String>| {
-        let deadline = Instant::now()
-            .checked_add(FIXTURE_DEADLINE)
-            .expect("fixture deadline");
-        let mut invocation = CommandInvocation::from_action(command, caller);
-        invocation.arguments = arguments;
-        let response = state
-            .app_command_sender(caller)
-            .submit(invocation, deadline, CommandCancellation::new())
-            .unwrap();
-        loop {
-            state.update_frame(frames::idle_frame(Instant::now()));
-            if let Ok(outcome) = response.try_recv() {
-                break outcome;
-            }
-            wakes
-                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                .unwrap_or_else(|error| panic!("{command} worker completion: {error}"));
-        }
-    };
-    assert!(matches!(
-        run("git.stage", vec![root.clone(), "file[a].txt".to_owned()]),
-        CommandOutcome::Success { .. }
-    ));
-    let CommandOutcome::Success { value, .. } = run("git.status", vec![root.clone()]) else {
-        panic!("Git status failed");
-    };
-    let changes: bootty_git::changes::RepositoryChanges = serde_json::from_value(value).unwrap();
-    let file = changes
-        .files
-        .iter()
-        .find(|file| file.path == "file[a].txt")
-        .unwrap();
-    assert_eq!(file.index, 'A');
-    let CommandOutcome::Success { value, .. } = run("git.diff-all", vec![root.clone()]) else {
-        panic!("Git diff of all changes failed");
-    };
-    assert!(value.as_str().unwrap().contains("b/file[a].txt"), "{value}");
-    assert_eq!(
-        fs::read_to_string(directory.path().join("file[a].txt")).unwrap(),
-        "contents\n"
-    );
-    assert!(
-        Command::new("git")
-            .args([
-                "-C",
-                &root,
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.com",
-                "commit",
-                "-qm",
-                "initial"
-            ])
-            .status()
-            .unwrap()
-            .success()
-    );
-    let name = format!(
-        "{}-checkout",
-        directory.path().file_name().unwrap().to_str().unwrap()
-    );
-    let outcome = run(
-        "worktree.create",
-        vec![
-            root.clone(),
-            "topic/new".to_owned(),
-            name,
-            "HEAD".to_owned(),
-        ],
-    );
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("worktree creation failed: {outcome:?}");
-    };
-    let checkout = value.as_str().unwrap();
-    assert!(
-        std::path::Path::new(checkout).starts_with(checkouts.path()),
-        "{checkout} is outside the configured worktree directory"
-    );
-    assert_eq!(
-        fs::read_to_string(std::path::Path::new(checkout).join("file[a].txt")).unwrap(),
-        "contents\n"
-    );
-    assert!(
-        Command::new("git")
-            .args(["-C", &root, "worktree", "remove", "--", checkout])
-            .status()
-            .unwrap()
-            .success()
-    );
-    // Amend keeps the existing confirmation contract for external callers.
-    if caller == Caller::Socket {
-        assert!(matches!(
-            run("git.amend", vec![root, "message".to_owned()]),
-            CommandOutcome::ConfirmationRequired { .. }
-        ));
-    }
-}
-
-#[rstest]
-#[case(Caller::Socket)]
-#[case(Caller::Keybinding)]
-fn document_commands_keep_revision_checks_on_the_shared_invocation_path(#[case] caller: Caller) {
-    use bootty_host::files::{FileResponse, decode_document, encode_document};
-    let directory = assert_fs::TempDir::new().unwrap();
-    let path = directory.path().join("document.rs");
-    fs::write(&path, "original").unwrap();
-    let name = path.to_str().unwrap().to_owned();
-    let (wake, wakes) = mpsc::channel();
-    let config = test_config::config(
-        directory.path().join("settings/config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    let mut state = AppState::new(
-        config,
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-    )
-    .unwrap();
-    let started = Instant::now();
-    let mut run = |command: &str, arguments: Vec<String>| {
-        let mut invocation = CommandInvocation::from_action(command, caller);
-        invocation.arguments = arguments;
-        let response = state
-            .app_command_sender(caller)
-            .submit(
-                invocation,
-                started
-                    .checked_add(Duration::from_secs(5))
-                    .expect("test timestamp fits"),
-                CommandCancellation::new(),
-            )
-            .unwrap();
-        loop {
-            state.update_frame(frames::idle_frame(started));
-            if let Ok(outcome) = response.try_recv() {
-                break outcome;
-            }
-            wakes
-                .recv_timeout(Duration::from_secs(5))
-                .expect("worker completion");
-        }
-    };
-    let CommandOutcome::Success { value, .. } = run("files.read", vec![name.clone()]) else {
-        panic!("read");
-    };
-    let FileResponse::Document(snapshot) = serde_json::from_value(value).unwrap() else {
-        panic!("document");
-    };
-    assert_eq!(snapshot.contents().unwrap(), "original");
-    let CommandOutcome::Success { value, .. } = run(
-        "files.source",
-        vec![
-            name.clone(),
-            directory.path().to_string_lossy().into_owned(),
-        ],
-    ) else {
-        panic!("read bounded source")
-    };
-    let FileResponse::Source(source) = serde_json::from_value(value).unwrap() else {
-        panic!("file source descriptor")
-    };
-    assert_eq!(source.name, "document.rs");
-    assert_eq!(source.len, 8);
-    let outside = directory.path().join("restricted");
-    fs::create_dir(&outside).unwrap();
-    assert!(
-        matches!(run("files.source", vec![name.clone(), outside.to_string_lossy().into_owned()]),
-        CommandOutcome::Failed { code, .. } if code == "file_failed")
-    );
-    let CommandOutcome::Success { value, .. } = run(
-        "files.format",
-        vec![
-            name.clone(),
-            encode_document("fn main(){println!(\"hi\");}").unwrap(),
-        ],
-    ) else {
-        panic!("format");
-    };
-    let FileResponse::Formatted { content_base64 } = serde_json::from_value(value).unwrap() else {
-        panic!("formatted document");
-    };
-    assert_eq!(
-        decode_document(&content_base64).unwrap(),
-        ["fn main() {", "    println!(\"hi\");", "}", ""].join(if cfg!(windows) {
-            "\r\n"
-        } else {
-            "\n"
-        })
-    );
-    assert_eq!(fs::read_to_string(&path).unwrap(), "original");
-    let arguments = vec![name, snapshot.digest, encode_document("saved").unwrap()];
-    assert!(matches!(
-        run("files.save", arguments.clone()),
-        CommandOutcome::Success { .. }
-    ));
-    fs::write(&path, "external").unwrap();
-    assert!(
-        matches!(run("files.save",arguments),CommandOutcome::Failed{code,..} if code=="file_failed")
-    );
-    assert_eq!(fs::read_to_string(&path).unwrap(), "external");
-    let image = b"\x89PNG\r\n\x1a\n\0\xff";
-    fs::write(&path, image).unwrap();
-    let CommandOutcome::Success { value, .. } =
-        run("files.read", vec![path.to_string_lossy().into_owned()])
-    else {
-        panic!("read image")
-    };
-    let FileResponse::Media(snapshot) = serde_json::from_value(value).unwrap() else {
-        panic!("image");
-    };
-    assert_eq!(snapshot.len, u64::try_from(image.len()).unwrap());
-    assert_eq!(snapshot.kind, bootty_host::media::MediaKind::Image);
-}
-
 #[rstest]
 fn native_pane_arrangement_preserves_ids_and_publishes_only_completed_layouts() {
     let directory = assert_fs::TempDir::new().expect("isolated workspace");
     let started = Instant::now();
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let mut config = test_config::config(directory.path().join("config.toml"));
     // OSC titles are independent of layout mutations; keep this fixture's shell title stable.
     config.session.shell = cfg!(unix).then(|| "/bin/sh".to_owned());
-    let mut state = AppState::new(
-        config,
-        support::backends(),
-        event_repaint(|| {}),
-        None,
-        None,
-    )
-    .expect("app state");
+    let mut state = AppState::new(config, event_repaint(|| {}), None, None).expect("app state");
     open_native_session(&mut state, directory.path(), started);
     let first_window = state.mux().selected_window().expect("window").to_owned();
     let first = state.focused_pane().expect("first pane");
     assert!(matches!(
-        submit_terminal_choice(&mut state, "split_right", Caller::Socket, started),
+        submit_action(&mut state, "split_right", Caller::Socket, started),
         CommandOutcome::Success { .. }
     ));
     let second = state.focused_pane().expect("second pane");
     let area = SurfaceRect::from_min_size(0., 0., 600., 400.);
-    state.set_pane_ratio(&[], 0.3, 0.05);
+    let layout = bootty_mux::snapshot::MuxPaneLayout::Split {
+        direction: bootty_mux::snapshot::MuxPaneSplitDirection::Right,
+        weights: vec![0.3, 0.7],
+        children: vec![
+            bootty_mux::snapshot::MuxPaneLayout::Pane(first.clone()),
+            bootty_mux::snapshot::MuxPaneLayout::Pane(second.clone()),
+        ],
+    };
+    assert!(matches!(
+        submit_command(
+            &mut state,
+            CommandInvocation::new(
+                "pane.resize",
+                vec![
+                    first_window.clone(),
+                    serde_json::to_string(&layout).unwrap()
+                ],
+                Caller::Socket
+            ),
+            started
+        ),
+        CommandOutcome::Success { .. }
+    ));
+    assert!(matches!(
+        submit_command(
+            &mut state,
+            CommandInvocation::new(
+                "pane.focus",
+                vec![first_window.clone(), first.clone()],
+                Caller::Socket
+            ),
+            started
+        ),
+        CommandOutcome::Success { .. }
+    ));
+    assert_eq!(state.focused_pane().as_deref(), Some(first.as_str()));
     let before = state.pane_rects(area, 0.);
     let invoke = |state: &mut AppState, command: &str, args: Vec<String>| {
         let outcome = submit_command(
@@ -1965,7 +1112,7 @@ fn native_pane_arrangement_preserves_ids_and_publishes_only_completed_layouts() 
     assert_eq!(panes, expected);
     assert_eq!(state.mux().all_sessions()[0].windows.len(), 1);
     assert!(matches!(
-        submit_terminal_choice(&mut state, "new_tab", Caller::Socket, started),
+        submit_action(&mut state, "new_tab", Caller::Socket, started),
         CommandOutcome::Success { .. }
     ));
     assert_ne!(
@@ -1990,7 +1137,7 @@ fn native_pane_arrangement_preserves_ids_and_publishes_only_completed_layouts() 
 #[case(false, false)]
 #[case(false, true)]
 #[case(true, false)]
-fn link_commands_open_the_resolved_document_and_honor_cancellation(
+fn link_commands_open_the_resolved_file_and_honor_cancellation(
     #[case] cancel: bool,
     #[case] uri_cwd: bool,
 ) {
@@ -1998,13 +1145,9 @@ fn link_commands_open_the_resolved_document_and_honor_cancellation(
     let directory = assert_fs::TempDir::new().unwrap();
     fs::write(directory.path().join("target.rs"), "first\nsecond\n").unwrap();
     let (wake, wakes) = mpsc::channel();
-    let config = test_config::config(
-        directory.path().join("settings/config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("settings/config.toml"));
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -2051,15 +1194,10 @@ fn link_commands_open_the_resolved_document_and_honor_cancellation(
             .recv_timeout(Duration::from_secs(5))
             .expect("link worker completion");
     };
-    let documents = effects
+    let opened = effects
         .iter()
         .filter_map(|effect| match effect {
-            AppEffect::OpenFiles(request) => Some((
-                request.path.clone(),
-                request.document,
-                request.line,
-                request.column,
-            )),
+            AppEffect::OpenWithSystem(path) => Some(path.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -2068,26 +1206,15 @@ fn link_commands_open_the_resolved_document_and_honor_cancellation(
             !matches!(outcome, CommandOutcome::Success { .. }),
             "{outcome:?}"
         );
-        assert_eq!(
-            documents,
-            Vec::<(std::string::String, bool, u32, u32)>::new()
-        );
+        assert_eq!(opened, Vec::<std::path::PathBuf>::new());
     } else {
         assert!(
             matches!(outcome, CommandOutcome::Success { .. }),
             "{outcome:?}"
         );
         assert_eq!(
-            documents,
-            vec![(
-                fs::canonicalize(directory.path().join("target.rs"))
-                    .unwrap()
-                    .to_string_lossy()
-                    .into_owned(),
-                true,
-                2,
-                3
-            )]
+            opened,
+            vec![fs::canonicalize(directory.path().join("target.rs")).unwrap()]
         );
     }
 }
@@ -2101,14 +1228,10 @@ fn capture_and_export_use_the_attached_pane_and_never_replace_a_file() {
     let shell = directory.path().join("capture-shell");
     bootty_test_support::write_executable(&shell, "#!/bin/sh\nprintf 'first-capture-line\\r\\n'\ni=0; while [ $i -lt 100 ]; do printf 'line-%s\\r\\n' \"$i\"; i=$((i + 1)); done\nprintf 'capture-ready'\nread line\n").unwrap();
     let (wake, wakes) = mpsc::channel();
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let mut config = test_config::config(directory.path().join("config.toml"));
     config.session.shell = Some(shell.to_string_lossy().into_owned());
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -2149,7 +1272,7 @@ fn capture_and_export_use_the_attached_pane_and_never_replace_a_file() {
     let text = value["capture"]["text"].as_str().unwrap();
     assert!(text.contains("first-capture-line"));
     assert!(text.contains("capture-ready"));
-    assert_eq!(value["source"]["kind"], "pane_render_state");
+    assert_eq!(value["source"]["kind"], "pane_server_state");
     let destination = directory.path().join("capture.txt");
     let args = vec![
         destination.to_string_lossy().into_owned(),
@@ -2181,13 +1304,9 @@ fn authored_theme_preview_restore_save_and_apply_share_command_path(
 ) {
     let directory = assert_fs::TempDir::new().unwrap();
     let (wake, wakes) = mpsc::channel();
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -2386,890 +1505,6 @@ fn named_theme_restore_preserves_accepted_theme_and_unrelated_settings(
     assert_eq!(fs::read_to_string(path).unwrap(), accepted_source);
 }
 
-#[cfg(unix)]
-fn claude_terminal_fixture(directory: &Path) -> std::io::Result<PathBuf> {
-    let program = directory.join("claude-fixture.py");
-    bootty_test_support::write_executable(
-        &program,
-        r"#!/usr/bin/env python3
-import json, os, pathlib, sys
-directory = pathlib.Path(__file__).parent
-arguments = sys.argv[1:]
-session_id = arguments[1]
-arguments = arguments[2:]
-tool_configs = []
-while '--mcp-config' in arguments:
-    index = arguments.index('--mcp-config')
-    tool_configs.append(arguments[index + 1])
-    del arguments[index:index + 2]
-path = directory / 'agent-output'
-temporary = directory / 'agent-output.tmp'
-temporary.write_text(json.dumps({'argv': arguments, 'session_id': session_id,
-                                 'cwd': os.getcwd(), 'tty': os.isatty(0),
-                                 'account_directory': os.environ.get('CLAUDE_CONFIG_DIR'),
-                                 'tool_configs': tool_configs}))
-os.replace(temporary, path)
-print('agent ready', flush=True)
-with open(directory / 'agent-input', 'a') as received:
-    for line in sys.stdin:
-        received.write(json.dumps(line.rstrip('\n')) + '\n')
-        received.flush()
-        print('received prompt', flush=True)
-",
-    )?;
-    Ok(program)
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case("start", Vec::new())]
-#[case("tab", Vec::new())]
-#[case("pane", vec!["right".to_owned()])]
-#[case("resume", vec!["existing-conversation".to_owned()])]
-#[case("fork", vec!["existing-conversation".to_owned()])]
-fn disabled_providers_do_not_launch_or_mutate_terminals(
-    #[case] operation: &str,
-    #[case] arguments: Vec<String>,
-    #[values("codex", "claude", "pi")] provider: &str,
-) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    for preferences in [
-        &mut config.agents.codex,
-        &mut config.agents.claude,
-        &mut config.agents.pi,
-    ] {
-        preferences.enabled = false;
-        preferences.program = directory
-            .path()
-            .join("not-installed")
-            .to_string_lossy()
-            .into_owned();
-    }
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .unwrap();
-    let now = Instant::now();
-    open_native_session(&mut state, directory.path(), now);
-    // Shell startup can change a window title while the denied command is polled.
-    // Compare backend topology and focus, rather than asynchronous process facts.
-    let topology = |state: &AppState| {
-        state
-            .mux()
-            .all_sessions()
-            .iter()
-            .map(|session| {
-                (
-                    session.id.clone(),
-                    session.name.clone(),
-                    session
-                        .windows
-                        .iter()
-                        .map(|window| {
-                            (
-                                window.id.clone(),
-                                window.layout.clone(),
-                                window
-                                    .panes
-                                    .iter()
-                                    .map(|pane| pane.pane_id.clone())
-                                    .collect::<Vec<_>>(),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    let before = topology(&state);
-    let focus = selection(&state);
-    let outcome = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            format!("agents.{provider}.{operation}"),
-            arguments,
-            Caller::Socket,
-        ),
-        now,
-    );
-    assert!(
-        matches!(outcome, CommandOutcome::Denied { .. }),
-        "{outcome:?}"
-    );
-    assert_eq!(topology(&state), before);
-    assert_eq!(selection(&state), focus);
-    assert!(state.terminal_agent_service().unwrap().records().is_empty());
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case::tab("new_tab")]
-#[case::pane("split_right")]
-fn chooser_profile_keeps_the_accepted_terminal_when_its_checkpoint_write_fails(
-    #[case] action: &str,
-) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.agents.claude.program = claude_terminal_fixture(directory.path())
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
-    config.agents.claude.selected = "work".to_owned();
-    config.agents.claude.profiles.insert(
-        "work".to_owned(),
-        bootty_config::config::AgentProfileConfig {
-            name: "Work".to_owned(),
-            directory: Some(
-                directory
-                    .path()
-                    .join("account")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            arguments: Vec::new(),
-        },
-    );
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .unwrap();
-    let started = Instant::now();
-    open_native_session(&mut state, directory.path(), started);
-    let database_path = directory.path().join("session-order.sqlite3");
-    let (identity, prior): (String, String) = {
-        let database = Connection::open(&database_path).unwrap();
-        let saved = database
-            .query_row(
-                "SELECT identity, terminal_snapshot FROM workspace_sessions LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        database.execute_batch("CREATE TRIGGER reject_created_checkpoint BEFORE UPDATE OF terminal_snapshot ON workspace_sessions BEGIN SELECT RAISE(ABORT, 'injected checkpoint write failure'); END;").unwrap();
-        saved
-    };
-    let opened = submit_action(&mut state, action, Caller::Socket, started);
-    assert!(
-        matches!(opened, CommandOutcome::Success { .. }),
-        "{opened:?}"
-    );
-    let pending = state.pending_new_surface().unwrap();
-    let request = pending.id;
-    let bootty_ui::surface_creation::SurfaceParent::Terminal(parent) = &pending.parent else {
-        panic!("profile creation has an exact terminal parent");
-    };
-    let parent = parent.clone();
-    let response = state
-        .app_command_sender(Caller::Socket)
-        .submit(
-            CommandInvocation::new(
-                "surface.choose",
-                vec![
-                    request.to_string(),
-                    "profile".to_owned(),
-                    "claude".to_owned(),
-                ],
-                Caller::Socket,
-            ),
-            Instant::now().checked_add(Duration::from_secs(5)).unwrap(),
-            CommandCancellation::new(),
-        )
-        .unwrap();
-    let mut effects = Vec::new();
-    let outcome = loop {
-        effects.extend(state.update_frame(frames::idle_frame(started)));
-        if let Ok(outcome) = response.try_recv() {
-            break outcome;
-        }
-        wakes.recv_timeout(Duration::from_secs(5)).unwrap();
-    };
-    assert!(
-        matches!(&outcome, CommandOutcome::Failed { code, message }
-        if code == "session_checkpoint_failed" && message.contains("injected checkpoint write failure")),
-        "{outcome:?}"
-    );
-    let target = effects
-        .iter()
-        .find_map(|effect| match effect {
-            bootty_ui::AppEffect::AttachNewSurface { request_id, target }
-                if *request_id == request =>
-            {
-                Some(target.clone())
-            }
-            _ => None,
-        })
-        .expect("the accepted child stays visible despite failed persistence");
-    assert_eq!(target.kind, ResourceKind::Terminal);
-    assert_ne!(target, parent, "the receipt attaches the admitted child");
-    assert!(state.pending_new_surface().is_none());
-    let sessions = state.mux().all_sessions();
-    assert_eq!(sessions.len(), 1);
-    assert_eq!(
-        sessions[0].windows.len(),
-        if action == "new_tab" { 2 } else { 1 },
-        "tabs add a window while splits add a pane to the original window"
-    );
-    assert_eq!(
-        sessions[0]
-            .windows
-            .iter()
-            .map(|window| window.panes.len())
-            .sum::<usize>(),
-        2,
-        "the backend retains both real terminal panes"
-    );
-    let mut capture = CommandInvocation::new("terminal.capture", Vec::new(), Caller::Socket);
-    capture.target = Some(target);
-    let captured = submit_command(&mut state, capture, started);
-    assert!(
-        matches!(captured, CommandOutcome::Success { .. }),
-        "{captured:?}"
-    );
-    let mut capture = CommandInvocation::new("terminal.capture", Vec::new(), Caller::Socket);
-    capture.target = Some(parent);
-    let captured = submit_command(&mut state, capture, started);
-    assert!(
-        matches!(captured, CommandOutcome::Success { .. }),
-        "the original terminal remains live: {captured:?}"
-    );
-    let after: String = {
-        let database = Connection::open(&database_path).unwrap();
-        database
-            .query_row(
-                "SELECT terminal_snapshot FROM workspace_sessions WHERE identity = ?1",
-                [&identity],
-                |row| row.get(0),
-            )
-            .unwrap()
-    };
-    assert_eq!(
-        after, prior,
-        "failure preserves the prior committed checkpoint"
-    );
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case::session("start", None, Caller::Cli)]
-#[case::tab("tab", None, Caller::CommandPalette)]
-#[case::right_pane("pane", Some("right"), Caller::Socket)]
-#[case::down_pane("pane", Some("down"), Caller::Socket)]
-fn agent_start_delivers_literal_arguments_to_a_new_native_pty(
-    #[values(true, false)] explicit_cwd: bool,
-    #[case] operation: &str,
-    #[case] direction: Option<&str>,
-    #[case] caller: Caller,
-    #[values(false, true)] configured_profile: bool,
-) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    let configured_cwd = directory.path().join("configured-directory");
-    fs::create_dir(&configured_cwd).unwrap();
-    config.session.working_directory = Some(configured_cwd);
-    let program = claude_terminal_fixture(directory.path()).unwrap();
-    let output = directory.path().join("agent-output");
-    let literal = "quoted ' value; $HOME `uname`\nsecond line\tend";
-    let account = directory.path().join("account ' ; $HOME");
-    if configured_profile {
-        config.agents.claude.program = program.to_string_lossy().into_owned();
-        config.agents.claude.selected = if direction.is_some() {
-            String::new()
-        } else {
-            "work".to_owned()
-        };
-        config.agents.claude.profiles.insert(
-            "work".to_owned(),
-            bootty_config::config::AgentProfileConfig {
-                name: "Work".to_owned(),
-                directory: Some(account.to_string_lossy().into_owned()),
-                arguments: vec![literal.to_owned(), output.to_string_lossy().into_owned()],
-            },
-        );
-    }
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        naming_backend::backends(None, true).unwrap(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .unwrap();
-    let started = Instant::now();
-    open_native_session(&mut state, directory.path(), started);
-    let argv = serde_json::to_string(&[literal, output.to_str().unwrap()]).unwrap();
-    let mut arguments = vec![
-        if explicit_cwd {
-            directory.path().to_string_lossy().into_owned()
-        } else {
-            String::new()
-        },
-        if configured_profile {
-            String::new()
-        } else {
-            program.to_string_lossy().into_owned()
-        },
-        if configured_profile {
-            String::new()
-        } else {
-            argv
-        },
-    ];
-    if let Some(direction) = direction {
-        arguments.insert(0, direction.to_owned());
-        arguments.push(if configured_profile {
-            "work".to_owned()
-        } else {
-            String::new()
-        });
-    }
-    let mut invocation =
-        CommandInvocation::new(format!("agents.claude.{operation}"), arguments, caller);
-    if direction.is_some() {
-        let current = submit_command(
-            &mut state,
-            CommandInvocation::new("resource.current", owned(&["terminal"]), caller),
-            started,
-        );
-        let CommandOutcome::Success { value, .. } = current else {
-            panic!("{current:?}");
-        };
-        invocation.target = Some(serde_json::from_value(value["target"].clone()).unwrap());
-    }
-    let outcome = submit_command_from_caller(&mut state, &wakes, caller, invocation, started);
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-    loop {
-        state.update_frame(frames::idle_frame(started));
-        if let Ok(text) = fs::read_to_string(&output) {
-            let observed: serde_json::Value = serde_json::from_str(&text).unwrap();
-            assert_eq!(observed["argv"][0], literal);
-            assert_eq!(observed["argv"][1], output.to_str().unwrap());
-            assert_eq!(observed["session_id"].as_str().unwrap().len(), 36);
-            assert_eq!(
-                Path::new(observed["cwd"].as_str().unwrap())
-                    .canonicalize()
-                    .unwrap(),
-                directory.path().canonicalize().unwrap()
-            );
-            assert_eq!(observed["tty"], true);
-            let captured_account = state
-                .terminal_agent_service()
-                .unwrap()
-                .records()
-                .last()
-                .unwrap()
-                .launch
-                .account_directory
-                .clone()
-                .expect("native launch freezes its effective account directory");
-            assert_eq!(
-                observed["account_directory"].as_str(),
-                Some(if configured_profile {
-                    account.to_str().unwrap()
-                } else {
-                    captured_account.as_str()
-                })
-            );
-            assert_eq!(
-                state.mux().all_sessions().len(),
-                1,
-                "Agent launch adds a tab or pane, never a session"
-            );
-            let CommandOutcome::Success { value, .. } = &outcome else {
-                panic!("native launch failed: {outcome:?}");
-            };
-            let target: CommandTarget = serde_json::from_value(value["created"].clone()).unwrap();
-            let record = state
-                .terminal_agent_service()
-                .unwrap()
-                .record(&target)
-                .unwrap();
-            assert_eq!(record.provider, bootty_agents::AgentKind::Claude);
-            assert_eq!(record.launch.program, program.to_string_lossy());
-            assert_eq!(record.launch.arguments, Vec::<String>::new());
-            if direction.is_some() {
-                assert_eq!(state.mux().sessions()[0].windows.len(), 1);
-                assert_eq!(pane_count(&state), 2);
-            }
-            break;
-        }
-        wakes
-            .recv_timeout(Duration::from_secs(5))
-            .expect("native agent output");
-    }
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case::invalid_direction("direction")]
-#[case::stale_generation("stale")]
-#[case::retired_parent("retired")]
-#[case::disabled_provider("disabled")]
-fn provider_splits_reject_invalid_or_retired_destinations_before_launch(#[case] boundary: &str) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.agents.claude.enabled = boundary != "disabled";
-    config.agents.claude.program = directory
-        .path()
-        .join("must-not-launch")
-        .to_string_lossy()
-        .into_owned();
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .unwrap();
-    let now = Instant::now();
-    open_native_session(&mut state, directory.path(), now);
-    let current = submit_command(
-        &mut state,
-        CommandInvocation::new("resource.current", owned(&["terminal"]), Caller::Socket),
-        now,
-    );
-    let CommandOutcome::Success { value, .. } = current else {
-        panic!("{current:?}");
-    };
-    let mut parent: CommandTarget = serde_json::from_value(value["target"].clone()).unwrap();
-    if boundary == "stale" {
-        parent.generation = parent.generation.checked_add(1).unwrap();
-    }
-    if boundary == "retired" {
-        let mut close = CommandInvocation::new("pane.close", Vec::new(), Caller::Socket);
-        close.target = Some(parent.clone());
-        close.confirmation = Some(close.confirmation());
-        let closed = submit_command_from_caller(&mut state, &wakes, Caller::Socket, close, now);
-        assert!(
-            matches!(closed, CommandOutcome::Success { .. }),
-            "{closed:?}"
-        );
-    }
-    let before = state.mux().all_sessions().to_vec();
-    let mut launch = CommandInvocation::new(
-        "agents.claude.pane",
-        owned(&[if boundary == "direction" {
-            "left"
-        } else {
-            "right"
-        }]),
-        Caller::Socket,
-    );
-    launch.target = Some(parent);
-    let outcome = submit_command_from_caller(&mut state, &wakes, Caller::Socket, launch, now);
-    match boundary {
-        "direction" => assert!(
-            matches!(outcome, CommandOutcome::Failed { .. }),
-            "{outcome:?}"
-        ),
-        "disabled" => assert!(
-            matches!(outcome, CommandOutcome::Denied { .. }),
-            "{outcome:?}"
-        ),
-        _ => assert!(
-            matches!(outcome, CommandOutcome::StaleTarget { .. }),
-            "{outcome:?}"
-        ),
-    }
-    assert_eq!(state.mux().all_sessions(), before);
-    assert!(state.terminal_agent_service().unwrap().records().is_empty());
-}
-
-#[cfg(unix)]
-#[rstest]
-fn native_state_is_bounded_and_saved_provider_history_keeps_selected_account_and_space() {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let elsewhere = WorkspaceRepository::open(&directory.path().join("config.toml"))
-        .expect("workspace")
-        .0
-        .create_space(
-            "Elsewhere",
-            "2",
-            [1, 2, 3],
-            false,
-            SpaceMuxOverride::default(),
-            false,
-        )
-        .expect("create Space")
-        .expect("valid Space")
-        .id();
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let account = directory.path().join("selected-history-account");
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.agents.claude.selected = "work".to_owned();
-    config.agents.claude.profiles.insert(
-        "work".to_owned(),
-        bootty_config::config::AgentProfileConfig {
-            name: "Work".to_owned(),
-            directory: Some(account.to_string_lossy().into_owned()),
-            arguments: Vec::new(),
-        },
-    );
-    fs::create_dir_all(&account).unwrap();
-    fs::write(account.join("state"), "busy").unwrap();
-    let detail = "é".repeat(8 * 1024);
-    fs::write(account.join("detail"), &detail).unwrap();
-    let program = directory.path().join("provider.py");
-    bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n").unwrap();
-    config.agents.claude.program = program.to_string_lossy().into_owned();
-    let fixture = orchestration_provider::Fixture::new(directory.path(), None);
-    let mut runtime = agent_runtime(events);
-    runtime.terminal_transport = fixture.transport();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        fixture.backends().unwrap(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(runtime),
-    )
-    .unwrap();
-    let now = Instant::now();
-    open_native_session(&mut state, directory.path(), now);
-    let session = "8ea5a4d1-9c09-4e2a-93e2-c4d2d9658b60";
-    let argv = serde_json::to_string(&[
-        "--session-id",
-        session,
-        "--model",
-        "configured-model",
-        "private prompt",
-    ])
-    .unwrap();
-    let outcome = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.start",
-            vec![
-                directory.path().to_string_lossy().into_owned(),
-                program.to_string_lossy().into_owned(),
-                argv,
-            ],
-            Caller::Socket,
-        ),
-        now,
-    );
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("native terminal launch failed: {outcome:?}");
-    };
-    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
-    let service = state.terminal_agent_service().unwrap();
-    loop {
-        if service.activity(&target).unwrap().session_id.as_deref() == Some(session) {
-            break;
-        }
-        state.update_frame(frames::idle_frame(now));
-        wakes
-            .recv_timeout(Duration::from_secs(5))
-            .expect("native identity published");
-    }
-    let session_count = state.mux().all_sessions().len();
-    let window_count = state.mux().selected_session_windows().len();
-    let resumed = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.resume",
-            vec![
-                session.to_owned(),
-                directory.path().to_string_lossy().into_owned(),
-                program.to_string_lossy().into_owned(),
-            ],
-            Caller::Socket,
-        ),
-        now,
-    );
-    assert!(
-        matches!(resumed, CommandOutcome::Success { .. }),
-        "{resumed:?}"
-    );
-    assert_eq!(state.mux().all_sessions().len(), session_count);
-    assert_eq!(
-        state.mux().selected_session_windows().len(),
-        window_count,
-        "Resuming a live identity selects its existing tab"
-    );
-    assert_eq!(service.records().len(), 1);
-    assert!(state.activate_space_from_ui(elsewhere));
-    // Give the other Space a settled, distinct selection; its initial snapshot arrives on a frame.
-    let elsewhere_cwd = directory.path().join("elsewhere");
-    fs::create_dir(&elsewhere_cwd).unwrap();
-    open_native_session(&mut state, &elsewhere_cwd, now);
-    let selected = state.mux().selected_session().map(str::to_owned);
-    assert_eq!(selected.as_deref(), Some("elsewhere"));
-    let mut read = CommandInvocation::new("agents.claude.state", Vec::new(), Caller::Socket);
-    read.target = Some(target.clone());
-    let outcome = submit_command_from_caller(&mut state, &wakes, Caller::Socket, read, now);
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("exact native state failed: {outcome:?}");
-    };
-    assert_eq!(value["target"], serde_json::to_value(&target).unwrap());
-    assert_eq!(value["observation"]["status"], "working");
-    assert_eq!(value["observation"]["session_id"], session);
-    let bounded = value["observation"]["detail"].as_str().unwrap();
-    assert_eq!(bounded.len(), 4096);
-    assert!(detail.starts_with(bounded));
-    assert_eq!(
-        value["launch"]["arguments"],
-        serde_json::json!(["--model", "configured-model"])
-    );
-    let saved_root = account.join("projects/provider-project");
-    fs::create_dir_all(&saved_root).unwrap();
-    for (id, cwd) in [
-        ("saved-original", directory.path()),
-        ("saved-elsewhere", elsewhere_cwd.as_path()),
-    ] {
-        let records = [
-            serde_json::json!({"type":"user", "sessionId":id, "cwd":cwd, "timestamp":"2026-01-01T00:00:00Z", "message":{"content":"private saved prompt"}}),
-            serde_json::json!({"type":"custom-title", "sessionId":id, "customTitle":"Saved purpose"}),
-        ];
-        fs::write(
-            saved_root.join(format!("{id}.jsonl")),
-            records
-                .iter()
-                .map(serde_json::Value::to_string)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-        .unwrap();
-    }
-    let history = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new("agents.claude.history", Vec::new(), Caller::Socket),
-        now,
-    );
-    let CommandOutcome::Success { value: history, .. } = history else {
-        panic!("saved provider history failed: {history:?}");
-    };
-    assert_eq!(history["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(history["entries"][0]["session_id"], "saved-elsewhere");
-    assert_eq!(history["entries"][0]["title"], "Saved purpose");
-    assert_eq!(
-        history["entries"][0]["account_directory"],
-        account.to_string_lossy().as_ref()
-    );
-    assert!(
-        !serde_json::to_string(&history)
-            .unwrap()
-            .contains("private saved prompt")
-    );
-    let all = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.history",
-            vec![String::new(), "work".to_owned()],
-            Caller::Socket,
-        ),
-        now,
-    );
-    let CommandOutcome::Success { value: all, .. } = all else {
-        panic!("all selected-account history: {all:?}")
-    };
-    assert_eq!(all["entries"].as_array().unwrap().len(), 2);
-    let crossed = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.history",
-            vec![
-                String::new(),
-                "work".to_owned(),
-                directory
-                    .path()
-                    .join("foreign-account")
-                    .to_string_lossy()
-                    .into_owned(),
-            ],
-            Caller::Socket,
-        ),
-        now,
-    );
-    assert!(
-        matches!(crossed, CommandOutcome::Failed { .. }),
-        "{crossed:?}"
-    );
-    let unknown = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.history",
-            vec![String::new(), "missing-profile".to_owned()],
-            Caller::Socket,
-        ),
-        now,
-    );
-    assert!(
-        matches!(unknown, CommandOutcome::Failed { .. }),
-        "{unknown:?}"
-    );
-    assert_eq!(state.active_space_id(), elsewhere);
-    assert_eq!(state.mux().selected_session(), selected.as_deref());
-    let mut stale = target;
-    stale.generation = stale.generation.checked_add(1).unwrap();
-    let mut read = CommandInvocation::new("agents.claude.state", Vec::new(), Caller::Socket);
-    read.target = Some(stale);
-    assert!(matches!(
-        submit_command_from_caller(&mut state, &wakes, Caller::Socket, read, now),
-        CommandOutcome::StaleTarget { .. }
-    ));
-}
-
-#[rstest]
-#[case(bootty_config::config::NotificationPolicy::Never, true, 0)]
-#[case(bootty_config::config::NotificationPolicy::Unfocused, true, 0)]
-#[case(bootty_config::config::NotificationPolicy::Unfocused, false, 1)]
-#[case(bootty_config::config::NotificationPolicy::Always, true, 1)]
-fn agent_attention_projects_live_targets_and_notifies_once(
-    #[case] policy: bootty_config::config::NotificationPolicy,
-    #[case] focused: bool,
-    #[case] notifications: usize,
-) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.session.agent_notifications = policy;
-    let (wake, wakes) = mpsc::channel();
-    let (events, receiver) = bootty_control::event_queue();
-    drop(receiver); // Publication failure must not erase the provider's observed state.
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "main".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .unwrap();
-    let now = Instant::now();
-    open_native_session(&mut state, directory.path(), now);
-    let pane = state.focused_pane().unwrap();
-    let service = state.agent_service().unwrap();
-    for event in ["agent_start", "agent_settled"] {
-        let outcome = service.ingest(
-            bootty_agents::AgentKind::Pi,
-            Some(&pane),
-            serde_json::json!({"type": event, "sessionId":"session-a"}),
-            Instant::now()
-                .checked_add(Duration::from_secs(1))
-                .expect("test timestamp fits"),
-            &CommandCancellation::new(),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Success { .. }),
-            "{outcome:?}"
-        );
-    }
-    let entries = state.agent_overview();
-    assert_eq!(entries.len(), 1);
-    let entry = &entries[0];
-    assert!(entry.unread && entry.can_resume);
-    assert_eq!(entry.status, "complete");
-    let mut frame = frames::idle_frame(now);
-    frame.input.window_focused = focused;
-    let effects = state.update_frame(frame.clone());
-    assert_eq!(
-        effects
-            .iter()
-            .filter(|effect| matches!(effect, bootty_ui::AppEffect::DesktopNotification { .. }))
-            .count(),
-        notifications
-    );
-    assert!(
-        !state
-            .update_frame(frame)
-            .iter()
-            .any(|effect| matches!(effect, bootty_ui::AppEffect::DesktopNotification { .. }))
-    );
-    let mut focus = CommandInvocation::from_action("agents.focus", Caller::Socket);
-    focus.target = Some(entry.target.clone());
-    let outcome =
-        submit_command_from_caller(&mut state, &wakes, Caller::Socket, focus.clone(), now);
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-    assert!(state.terminal_focused());
-    let target = focus.target.as_mut().unwrap();
-    target.generation = target
-        .generation
-        .checked_add(1)
-        .expect("next generation fits");
-    assert!(matches!(
-        submit_command_from_caller(&mut state, &wakes, Caller::Socket, focus, now),
-        CommandOutcome::StaleTarget { .. }
-    ));
-}
-
 #[rstest]
 fn doctor_reports_the_live_binding_without_creating_processes() {
     let directory = assert_fs::TempDir::new().unwrap();
@@ -3281,15 +1516,7 @@ fn doctor_reports_the_live_binding_without_creating_processes() {
     assert_eq!(value["bindings"].as_array().unwrap().len(), 1);
     let binding = &value["bindings"][0];
     assert_eq!(binding["sessions"], 0);
-    assert_eq!(binding["backend"], "native");
     assert_eq!(binding["host"], "Local");
-    assert!(
-        binding["capabilities"]["operations"]
-            .as_array()
-            .unwrap()
-            .contains(&serde_json::json!("split_pane"))
-    );
-    assert_eq!(value["reported_agents"], 0);
 }
 
 #[cfg(unix)]
@@ -3299,14 +1526,10 @@ fn doctor_reports_the_live_binding_without_creating_processes() {
 #[case(Caller::Internal)]
 fn jobs_use_the_shared_mailbox_and_preserve_process_results(#[case] caller: Caller) {
     let directory = assert_fs::TempDir::new().unwrap();
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let (wake, wakes) = mpsc::channel();
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -3337,7 +1560,7 @@ fn jobs_use_the_shared_mailbox_and_preserve_process_results(#[case] caller: Call
     };
     let job: bootty_host::jobs::JobSummary = serde_json::from_value(value).unwrap();
     let mut cursor = 0;
-    let mut output = Vec::new();
+    let mut output = String::new();
     loop {
         let result = submit_command_from_caller(
             &mut state,
@@ -3356,12 +1579,7 @@ fn jobs_use_the_shared_mailbox_and_preserve_process_results(#[case] caller: Call
         let batch: bootty_host::jobs::JobRead = serde_json::from_value(value).unwrap();
         cursor = batch.cursor;
         for chunk in batch.chunks {
-            use base64::Engine as _;
-            output.extend(
-                base64::engine::general_purpose::STANDARD
-                    .decode(chunk.data)
-                    .unwrap(),
-            );
+            output.push_str(&bootty_host::files::decode_document(&chunk.data).unwrap());
         }
         if batch.job.status.finished() && cursor == batch.job.next_cursor {
             assert_eq!(
@@ -3374,7 +1592,7 @@ fn jobs_use_the_shared_mailbox_and_preserve_process_results(#[case] caller: Call
             break;
         }
     }
-    assert_eq!(output, b"job-proof");
+    assert_eq!(output, "job-proof");
     assert!(matches!(
         submit_command_from_caller(
             &mut state,
@@ -3395,22 +1613,18 @@ fn jobs_use_the_shared_mailbox_and_preserve_process_results(#[case] caller: Call
 #[rstest]
 fn job_events_are_owned_by_the_live_window_registry() {
     let directory = assert_fs::TempDir::new().unwrap();
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let (wake, wakes) = mpsc::channel();
     let (events, receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
+    let mut state = AppState::new_for_window_with_events(
         config,
         "main".to_owned(),
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
         None,
         None,
-        Some(agent_runtime(events)),
+        Some(events),
     )
     .unwrap();
     let source = state.command_catalog().control_catalog();
@@ -3475,13 +1689,9 @@ fn shell_history_uses_shared_commands_and_keeps_the_shell_file(
     let path = directory.path().join("history");
     fs::write(&path, "git status\necho hello\n").unwrap();
     let (wake, wakes) = mpsc::channel();
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -3541,13 +1751,9 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
     let destination = directory.path().join("destination");
     fs::write(&source, b"transfer through command mailbox").unwrap();
     let (wake, wakes) = mpsc::channel();
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -3613,19 +1819,11 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
 
 #[rstest]
 #[case("toggle_sessions_panel", true)]
-#[case("toggle_files_panel", true)]
-#[case("toggle_changes_panel", true)]
-#[case("toggle_diff_panel", true)]
-#[case("toggle_agents_panel", false)]
 #[case("toggle_left_dock", true)]
-#[case("toggle_right_dock", true)]
 #[case("toggle_tab_bar", false)]
 #[case("toggle_hidden_tabs", false)]
 #[case("show_spaces", true)]
 #[case("show_sidebar", true)]
-#[case("show_files", true)]
-#[case("show_changes", true)]
-#[case("show_agents", false)]
 fn dock_commands_share_palette_bindings_and_window_completion(
     #[case] command: &str,
     #[case] palette: bool,
@@ -3694,12 +1892,16 @@ proptest::proptest! {
     #[test]
     fn panel_commands_preserve_valid_group_ids(group in 1u64..=u64::try_from(i64::MAX).expect("positive bound fits")) {
         let catalog = CommandCatalog::default();
-        for action in bootty_ui::commands::DockAction::PANELS {
+        for action in [
+            bootty_ui::commands::DockAction::ToggleSessions,
+            bootty_ui::commands::DockAction::Sidebar,
+            bootty_ui::commands::DockAction::Spaces,
+        ] {
             let resolved = catalog.resolve(CommandInvocation::new(
                 action.command().action(), vec![group.to_string()], Caller::Socket,
             )).unwrap();
             assert!(matches!(resolved.executor,
-                CommandExecutor::Core(bootty_ui::commands::CoreCommandExecutor::Dock(actual, Some(id)))
+                bootty_ui::commands::CoreCommandExecutor::Dock(actual, Some(id))
                     if actual == action && id == group));
         }
     }
@@ -3714,14 +1916,14 @@ proptest::proptest! {
 fn panel_commands_reject_invalid_group_ids(#[case] group: &str) {
     let catalog = CommandCatalog::default();
     assert!(matches!(catalog.resolve(CommandInvocation::new(
-        "show_files", vec![group.into()], Caller::Socket,
+        "show_sidebar", vec![group.into()], Caller::Socket,
     )), Err(CommandOutcome::Failed { code, .. }) if code == "invalid_arguments"));
 }
 
 #[rstest]
 #[case(
     "toggle_sidebar_visibility",
-    bootty_ui::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Sessions)
+    bootty_ui::commands::DockAction::ToggleSessions
 )]
 #[case("toggle_sidebar_focus", bootty_ui::commands::DockAction::Sidebar)]
 fn legacy_sidebar_commands_request_dock_mutations(
@@ -3820,12 +2022,7 @@ fn failure_kind(outcome: &CommandOutcome) -> &str {
 #[rstest]
 #[case::missing_cwd(owned(&["agent"]), "invalid_arguments")]
 #[case::empty_name(owned(&["", "/tmp"]), "invalid_arguments")]
-#[case::name_tmux_rewrites(owned(&["crash:12", "/tmp"]), "invalid_arguments")]
-#[case::name_with_dot(owned(&["v1.2", "/tmp"]), "invalid_arguments")]
-#[case::name_like_a_flag(owned(&["-w", "/tmp"]), "invalid_arguments")]
-#[case::name_like_a_session_id(owned(&["$1", "/tmp"]), "invalid_arguments")]
 #[case::name_with_control_character(owned(&["crash\t12", "/tmp"]), "invalid_arguments")]
-#[case::name_with_format(owned(&["#{host}", "/tmp"]), "invalid_arguments")]
 #[case::name_too_long(vec!["n".repeat(SESSION_NAME_MAX_BYTES + 1), "/tmp".to_owned()], "invalid_arguments")]
 #[case::relative_cwd(owned(&["agent", "src/arc"]), "invalid_arguments")]
 #[case::argv_not_json(owned(&["agent", "/tmp", "claude -w agent"]), "invalid_arguments")]
@@ -3834,10 +2031,6 @@ fn failure_kind(outcome: &CommandOutcome) -> &str {
 #[case::argv_empty_program(owned(&["agent", "/tmp", "[\"\"]"]), "invalid_arguments")]
 #[case::argv_too_many(
     owned(&["agent", "/tmp", &json_argv(&vec!["a".to_owned(); SESSION_ARGV_MAX_ELEMENTS + 1])]),
-    "invalid_arguments"
-)]
-#[case::argv_too_large(
-    owned(&["agent", "/tmp", &json_argv(&["a".repeat(SESSION_ARGV_MAX_BYTES)])]),
     "invalid_arguments"
 )]
 fn session_create_refuses_a_bad_request_before_the_backend(
@@ -3891,33 +2084,6 @@ fn closing_the_last_space_says_why() {
     assert_eq!(
         state.last_error_notice(),
         Some(bootty_ui::error_catalog::ErrorNotice::LastSpaceCannotClose)
-    );
-}
-
-/// A guard Bootty writes itself shows its own sentence, not the generic failure.
-#[test]
-fn a_stale_surface_chooser_says_why() {
-    use bootty_ui::surface_creation::{PendingNewSurface, SurfaceParent, SurfacePlacement};
-    let directory = assert_fs::TempDir::new().expect("temporary workspace");
-    let mut state = metadata_state(directory.path());
-    let binding = CommandTarget {
-        kind: ResourceKind::Binding,
-        handle: "captured-binding".to_owned(),
-        generation: 7,
-    };
-    state.open_surface_agent_form(&PendingNewSurface {
-        id: 41,
-        binding: binding.clone(),
-        task_identity: "saved-task".to_owned(),
-        cwd: "/tmp/project".to_owned(),
-        parent: SurfaceParent::Binding(binding),
-        placement: SurfacePlacement::Tab,
-    });
-    assert_eq!(
-        state.last_error_notice(),
-        Some(bootty_ui::error_catalog::ErrorNotice::Message(
-            "The new surface chooser was closed or replaced".to_owned()
-        ))
     );
 }
 
@@ -3982,7 +2148,6 @@ fn session_requests_leave_selection_and_the_active_space_alone() {
             [1, 2, 3],
             false,
             SpaceMuxOverride::default(),
-            false,
         )
         .expect("create Space")
         .expect("valid Space");
@@ -4085,14 +2250,10 @@ fn session_requests_leave_selection_and_the_active_space_alone() {
 #[rstest]
 fn project_scripts_open_in_new_tabs() {
     let directory = assert_fs::TempDir::new().expect("private workspace");
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let (wake, wakes) = mpsc::channel();
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -4173,14 +2334,10 @@ fn explicit_tab_starts_literal_argv_and_failure_preserves_the_session(
     #[case] fails: bool,
 ) {
     let directory = assert_fs::TempDir::new().expect("private workspace");
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let config = test_config::config(directory.path().join("config.toml"));
     let (wake, wakes) = mpsc::channel();
     let mut state = AppState::new(
         config,
-        support::backends(),
         event_repaint(move || {
             let _ = wake.send(());
         }),
@@ -4295,33 +2452,6 @@ fn session_grouping_command_persists_without_changing_sessions(#[case] caller: C
     assert!(state.config().sidebar.group_by_project);
 }
 
-/// The queueing toggle saves the opposite follow-up behavior, and toggling again restores it.
-#[rstest]
-#[case(Caller::CommandPalette)]
-#[case(Caller::Internal)]
-fn follow_up_queueing_toggles_and_persists(#[case] caller: Caller) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let mut state = metadata_state(directory.path());
-    let now = Instant::now();
-    let before = state.config().agents.follow_up_behavior;
-    for expected in [before.opposite(), before] {
-        assert!(matches!(
-            submit_action(&mut state, "agents.toggle-queueing", caller, now),
-            CommandOutcome::Success { .. }
-        ));
-        let loaded =
-            bootty_config::config::load_config_from_path(directory.path().join("config.toml"))
-                .unwrap();
-        assert_eq!(
-            (
-                state.config().agents.follow_up_behavior,
-                loaded.agents.follow_up_behavior
-            ),
-            (expected, expected)
-        );
-    }
-}
-
 #[rstest]
 fn rejected_session_view_save_keeps_the_accepted_view() {
     let directory = assert_fs::TempDir::new().unwrap();
@@ -4402,6 +2532,7 @@ fn selected_saved_session_restores_on_start_and_reattaches_without_changing_iden
         )
         .expect("preserve committed database including WAL");
     let mut state = terminal_state(restarted.path());
+    wait_for_saved_attachment(&mut state, identity);
     let space = spaces_listing(&mut state).remove(0);
     let restored = saved_sessions(&mut state, &space);
     assert_eq!(restored.len(), 1);
@@ -4448,57 +2579,6 @@ fn selected_saved_session_restores_on_start_and_reattaches_without_changing_iden
         "repeated reattachment uses the same restored process"
     );
     assert_eq!(state.mux().all_sessions().len(), 1);
-}
-
-#[rstest]
-fn closed_session_keeps_its_saved_identity_and_does_not_adopt_a_name_collision() {
-    let directory = assert_fs::TempDir::new().expect("private workspace");
-    let project = directory.path().join("project");
-    fs::create_dir(&project).expect("project directory");
-    let mut state = terminal_state(directory.path());
-    open_native_session(&mut state, &project, Instant::now());
-    let space = spaces_listing(&mut state).remove(0);
-    let original = saved_sessions(&mut state, &space).remove(0);
-    let identity = original["identity"].as_str().expect("identity");
-    let mut close = session_request(
-        "session.close",
-        Vec::new(),
-        space["sessions"][0]["target"].clone(),
-    );
-    close.confirmation = Some(close.confirmation());
-    let closed = submit_command(&mut state, close, Instant::now());
-    assert_eq!(failure_kind(&closed), "success", "{closed:?}");
-    assert_eq!(state.mux().all_sessions(), []);
-    assert_eq!(
-        saved_sessions(&mut state, &space)[0]["identity"],
-        original["identity"]
-    );
-    let created = submit_command(
-        &mut state,
-        session_request(
-            "session.create",
-            owned(&["project", &project.to_string_lossy()]),
-            space["target"].clone(),
-        ),
-        Instant::now(),
-    );
-    assert_eq!(failure_kind(&created), "success", "{created:?}");
-    let reopened = submit_command(
-        &mut state,
-        session_request(
-            "session.reopen",
-            owned(&[identity]),
-            space["target"].clone(),
-        ),
-        Instant::now(),
-    );
-    assert_eq!(failure_kind(&reopened), "success", "{reopened:?}");
-    assert_eq!(state.mux().all_sessions().len(), 2);
-    let saved = saved_sessions(&mut state, &space);
-    assert_eq!(saved.len(), 2);
-    assert_eq!(saved[0]["identity"], original["identity"]);
-    assert_ne!(saved[0]["identity"], saved[1]["identity"]);
-    assert_ne!(saved[0]["attachment"], saved[1]["attachment"]);
 }
 
 #[rstest]
@@ -4617,6 +2697,7 @@ fn failed_saved_title_commit_keeps_live_and_restarted_metadata_unchanged() {
         )
         .expect("preserve committed database including WAL");
     let mut state = metadata_state(restarted.path());
+    wait_for_saved_attachment(&mut state, before[0]["identity"].as_str().unwrap());
     let space = spaces_listing(&mut state).remove(0);
     let after = saved_sessions(&mut state, &space);
     assert_eq!(after[0]["identity"], before[0]["identity"]);
@@ -4624,972 +2705,6 @@ fn failed_saved_title_commit_keeps_live_and_restarted_metadata_unchanged() {
     assert_eq!(after[0]["cwd"], before[0]["cwd"]);
     assert_eq!(state.mux().all_sessions().len(), 1);
     assert_eq!(after[0]["attachment"], before[0]["attachment"]);
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case::default_account("", false, false)]
-#[case::selected_account("work", false, false)]
-#[case::captured_destination("", true, false)]
-#[case::saved_task("", false, true)]
-fn named_agent_start_creates_exactly_one_task_directly_on_its_issued_binding(
-    #[case] profile: &str,
-    #[case] switch_space: bool,
-    #[case] saved_task: bool,
-    #[values(false, true)] supply_destination: bool,
-) {
-    let directory = assert_fs::TempDir::new().expect("isolated task");
-    let program = claude_terminal_fixture(directory.path()).expect("native provider fixture");
-    let account = directory.path().join("selected-account");
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.agents.claude.selected = "work".to_owned();
-    config.agents.claude.profiles.insert(
-        "work".to_owned(),
-        bootty_config::config::AgentProfileConfig {
-            name: "Work".to_owned(),
-            directory: Some(account.to_string_lossy().into_owned()),
-            arguments: Vec::new(),
-        },
-    );
-    let elsewhere = switch_space.then(|| {
-        WorkspaceRepository::open(&directory.path().join("config.toml"))
-            .expect("repository")
-            .0
-            .create_space(
-                "Elsewhere",
-                "2",
-                [1, 2, 3],
-                false,
-                SpaceMuxOverride::default(),
-                false,
-            )
-            .expect("create other Space")
-            .expect("other Space")
-            .id()
-    });
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "named-task".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .expect("native state");
-    let now = Instant::now();
-    assert_eq!(state.mux().all_sessions().len(), 0);
-    let binding = submit_command(
-        &mut state,
-        CommandInvocation::new(
-            "resource.current",
-            vec!["binding".to_owned()],
-            Caller::Socket,
-        ),
-        now,
-    );
-    let CommandOutcome::Success { value, .. } = binding else {
-        panic!("issued binding: {binding:?}")
-    };
-    let destination: CommandTarget =
-        serde_json::from_value(value["target"].clone()).expect("issued binding target");
-    let captured_scope = state.mux_scope();
-    if let Some(elsewhere) = elsewhere {
-        assert!(state.activate_space_from_ui(elsewhere));
-    }
-    let literal = "Fix 'quotes'; $HOME `uname`\nand preserve this line";
-    let mut invocation = CommandInvocation::new(
-        "agents.claude.start",
-        vec![
-            directory.path().to_string_lossy().into_owned(),
-            program.to_string_lossy().into_owned(),
-            serde_json::to_string(&["--", literal]).expect("literal prompt argv"),
-            "useful-task".to_owned(),
-            profile.to_owned(),
-        ],
-        Caller::Internal,
-    );
-    let identity = bootty_mux::snapshot::new_session_identity();
-    let title = "Fix literal prompt handling";
-    if saved_task {
-        invocation
-            .arguments
-            .extend([identity.clone(), title.to_owned()]);
-    }
-    if supply_destination {
-        invocation.target = Some(destination);
-    }
-    let outcome = submit_command_from_caller(&mut state, &wakes, Caller::Internal, invocation, now);
-    if !supply_destination {
-        assert!(
-            matches!(outcome, CommandOutcome::Denied { .. }),
-            "{outcome:?}"
-        );
-        assert!(
-            state.mux().all_sessions().is_empty(),
-            "no destination never launches"
-        );
-        assert!(
-            state
-                .terminal_agent_service()
-                .expect("agent owner")
-                .records()
-                .is_empty()
-        );
-        return;
-    }
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("named task creation: {outcome:?}")
-    };
-    assert_eq!(
-        state.mux().all_sessions().len(),
-        1,
-        "one task, no throwaway shell"
-    );
-    assert_eq!(state.mux().all_sessions()[0].name, "useful-task");
-    assert_eq!(state.mux().all_sessions()[0].windows.len(), 1);
-    if saved_task {
-        assert_eq!(
-            state.mux().all_sessions()[0].tag.identity.as_deref(),
-            Some(identity.as_str())
-        );
-        let current = submit_command(
-            &mut state,
-            CommandInvocation::new(
-                "resource.current",
-                vec!["binding".to_owned()],
-                Caller::Socket,
-            ),
-            now,
-        );
-        let CommandOutcome::Success { value: space, .. } = current else {
-            panic!("current Space: {current:?}")
-        };
-        let saved = saved_sessions(&mut state, &space);
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0]["identity"], identity);
-        assert_eq!(saved[0]["title"], title);
-    }
-    let terminal: CommandTarget =
-        serde_json::from_value(value["terminal"].clone()).expect("observed terminal");
-    let record = state
-        .terminal_agent_service()
-        .expect("native owner")
-        .record(&terminal)
-        .expect("observer belongs to the created terminal");
-    assert_eq!(record.target, terminal);
-    assert_eq!(
-        record
-            .location
-            .as_ref()
-            .map(|location| location.task_identity.as_str()),
-        state.mux().all_sessions()[0].tag.identity.as_deref(),
-        "captured destination registration retains its saved task association"
-    );
-    assert!(record.launch.account_directory.is_some());
-    if !profile.is_empty() {
-        assert_eq!(record.launch.account_directory.as_deref(), account.to_str());
-    }
-    assert_eq!(
-        record.binding_id,
-        captured_scope.persistence_value().to_string()
-    );
-    assert_eq!(
-        state.mux_scope(),
-        captured_scope,
-        "the issued destination survives a Space switch"
-    );
-    loop {
-        state.update_frame(frames::idle_frame(now));
-        if let Ok(source) = fs::read_to_string(directory.path().join("agent-output")) {
-            let observed: serde_json::Value =
-                serde_json::from_str(&source).expect("provider output");
-            assert_eq!(observed["argv"], serde_json::json!(["--", literal]));
-            assert_eq!(observed["tool_configs"].as_array().map(Vec::len), Some(1));
-            assert_eq!(observed["tty"], true);
-            assert_eq!(
-                observed["account_directory"].as_str(),
-                record.launch.account_directory.as_deref()
-            );
-            break;
-        }
-        wakes
-            .recv_timeout(Duration::from_secs(5))
-            .expect("native provider publishes output");
-    }
-}
-
-#[cfg(unix)]
-#[rstest]
-fn native_agent_retry_reuses_saved_identity_and_user_title_after_launch_failure() {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let program = claude_terminal_fixture(directory.path()).unwrap();
-    // The first launch fails: the provider isn't there yet.
-    fs::remove_file(&program).unwrap();
-    let config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "retry-agent".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .unwrap();
-    let space = spaces_listing(&mut state).remove(0);
-    let identity = bootty_mux::snapshot::new_session_identity();
-    let mut invocation = CommandInvocation::new(
-        "agents.claude.start",
-        vec![
-            directory.path().to_string_lossy().into_owned(),
-            program.to_string_lossy().into_owned(),
-            serde_json::to_string(&["--model", "selected", "--", "private retry prompt"]).unwrap(),
-            "retry-agent".to_owned(),
-            String::new(),
-            identity.clone(),
-            "Initial purpose".to_owned(),
-        ],
-        Caller::Socket,
-    );
-    invocation.target = Some(serde_json::from_value(space["target"].clone()).unwrap());
-    for attempt in 0..2 {
-        let outcome = submit_command_from_caller(
-            &mut state,
-            &wakes,
-            Caller::Socket,
-            invocation.clone(),
-            Instant::now(),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Failed { .. }),
-            "{outcome:?}"
-        );
-        assert_eq!(state.mux().all_sessions().len(), 0);
-        assert_eq!(state.terminal_agent_service().unwrap().records().len(), 0);
-        let saved = saved_sessions(&mut state, &space);
-        assert_eq!(saved.len(), 1);
-        assert_eq!(saved[0]["identity"], identity);
-        if attempt == 0 {
-            let edited = submit_command(
-                &mut state,
-                session_request(
-                    "session.set_title",
-                    owned(&[identity.as_str(), "User title survives retry"]),
-                    space["target"].clone(),
-                ),
-                Instant::now(),
-            );
-            assert!(
-                matches!(edited, CommandOutcome::Success { .. }),
-                "{edited:?}"
-            );
-        } else {
-            assert_eq!(saved[0]["title"], "User title survives retry");
-        }
-    }
-    claude_terminal_fixture(directory.path()).unwrap();
-    let outcome = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        invocation,
-        Instant::now(),
-    );
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-    assert_eq!(state.mux().all_sessions().len(), 1);
-    let saved = saved_sessions(&mut state, &space);
-    assert_eq!(saved.len(), 1);
-    assert_eq!(saved[0]["identity"], identity);
-    assert_eq!(saved[0]["title"], "User title survives retry");
-    assert_eq!(state.terminal_agent_service().unwrap().records().len(), 1);
-}
-
-#[cfg(unix)]
-fn finished_claude_terminal_fixture(
-    directory: &Path,
-) -> Result<(PathBuf, Arc<std::os::unix::net::UnixListener>), Box<dyn std::error::Error>> {
-    let program = claude_terminal_fixture(directory)?;
-    let gate = Arc::new(std::os::unix::net::UnixListener::bind(
-        directory.join("query-ready.sock"),
-    )?);
-    // The first query waits for the real session ID, without waiting for an observer poll.
-    let script = fs::read_to_string(&program)?.replace(
-        "os.replace(temporary, path)\n",
-        "os.replace(temporary, path)\nimport socket\nwith socket.socket(socket.AF_UNIX) as ready:\n    ready.connect(str(directory / 'query-ready.sock'))\n",
-    );
-    bootty_test_support::write_executable(&program, script)?;
-    Ok((program, gate))
-}
-
-#[cfg(unix)]
-fn wait_for_finished_native_agent(
-    fixture: &mut NativeSpawnFixture,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let service = fixture
-        .state
-        .terminal_agent_service()
-        .ok_or("agent service unavailable")?;
-    let deadline = Instant::now()
-        .checked_add(FIXTURE_DEADLINE)
-        .ok_or("deadline overflow")?;
-    loop {
-        fixture
-            .state
-            .update_frame(frames::idle_frame(fixture.clock.now()));
-        if service.live_records().iter().any(|record| {
-            record.target == fixture.parent
-                && record.observation.status == bootty_agents::TerminalAgentStatus::Finished
-        }) {
-            return Ok(());
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err("provider did not report a completed turn".into());
-        }
-        fixture.wakes.recv_timeout(remaining)?;
-    }
-}
-
-#[cfg(unix)]
-struct NativeSpawnFixture {
-    clock: agent_clock::Clock,
-    directory: assert_fs::TempDir,
-    state: AppState,
-    wakes: mpsc::Receiver<()>,
-    parent: CommandTarget,
-    other: bootty_mux::controller::SpaceId,
-    _query_gate: Option<Arc<std::os::unix::net::UnixListener>>,
-}
-
-#[cfg(unix)]
-fn native_spawn_fixture(enabled: bool) -> Result<NativeSpawnFixture, Box<dyn std::error::Error>> {
-    native_spawn_fixture_for_turn(enabled, false)
-}
-
-#[cfg(unix)]
-fn native_spawn_fixture_for_turn(
-    enabled: bool,
-    finished: bool,
-) -> Result<NativeSpawnFixture, Box<dyn std::error::Error>> {
-    native_spawn_fixture_with_pi(enabled, finished, false)
-}
-
-#[cfg(unix)]
-fn configure_pi_child(
-    preferences: &mut bootty_config::config::AgentProviderConfig,
-    directory: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let child = directory.join("pi-terminal.py");
-    bootty_test_support::write_executable(
-        &child,
-        "#!/usr/bin/env python3\nimport json,os,sys\nwith open(os.path.join(os.environ['PI_CODING_AGENT_DIR'],'launch.json'),'w') as out: json.dump({'argv':sys.argv,'account':os.environ['PI_CODING_AGENT_DIR']},out)\nprint('PI_CHILD_READY',flush=True)\nfor line in sys.stdin: pass\n",
-    )?;
-    preferences.program = child.to_string_lossy().into_owned();
-    preferences.selected = "review".into();
-    let account = directory.join("pi-account");
-    fs::create_dir(&account)?;
-    preferences.profiles.insert(
-        "review".into(),
-        bootty_config::config::AgentProfileConfig {
-            name: "Review".into(),
-            directory: Some(account.to_string_lossy().into_owned()),
-            arguments: Vec::new(),
-        },
-    );
-    Ok(())
-}
-
-#[cfg(unix)]
-fn native_spawn_backends(
-    directory: &Path,
-    finished: bool,
-    pi: bool,
-    runtime: &mut bootty_ui::commands::AgentRuntimeConfig,
-) -> Result<Arc<bootty_mux::provider::MuxBackendRegistry>, Box<dyn std::error::Error>> {
-    if finished {
-        return Ok(support::backends());
-    }
-    let account = directory.join("account");
-    fs::create_dir_all(&account)?;
-    fs::write(account.join("state"), "busy")?;
-    let fixture = orchestration_provider::Fixture::new(
-        directory,
-        pi.then(|| directory.join("pi-terminal.py")),
-    );
-    runtime.terminal_transport = fixture.transport();
-    Ok(fixture.backends()?)
-}
-
-#[cfg(unix)]
-fn native_spawn_fixture_with_pi(
-    enabled: bool,
-    finished: bool,
-    pi: bool,
-) -> Result<NativeSpawnFixture, Box<dyn std::error::Error>> {
-    let directory = assert_fs::TempDir::new()?;
-    let (program, query_gate) = if finished {
-        let (program, gate) = finished_claude_terminal_fixture(directory.path())?;
-        (program, Some(gate))
-    } else {
-        let program = directory.path().join("claude-fixture.py");
-        bootty_test_support::write_executable(&program, "#!/bin/sh\nexit 77\n")?;
-        (program, None)
-    };
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.session.working_directory = Some(directory.path().to_path_buf());
-    config.agents.allow_spawn = enabled;
-    config.agents.codex.enabled = false;
-    config.agents.pi.enabled = pi;
-    if pi {
-        configure_pi_child(&mut config.agents.pi, directory.path())?;
-    }
-    config.agents.claude.selected = "work".to_owned();
-    config.agents.claude.profiles.insert(
-        "work".to_owned(),
-        bootty_config::config::AgentProfileConfig {
-            name: "Work".to_owned(),
-            directory: Some(
-                directory
-                    .path()
-                    .join("account")
-                    .to_string_lossy()
-                    .into_owned(),
-            ),
-            arguments: Vec::new(),
-        },
-    );
-    let other = WorkspaceRepository::open(&config.config_path)?
-        .0
-        .create_space(
-            "Other",
-            "2",
-            [1, 2, 3],
-            false,
-            SpaceMuxOverride::default(),
-            false,
-        )?
-        .ok_or("Other Space was not created")?
-        .id();
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let clock = agent_clock::Clock::default();
-    let mut runtime = clock.runtime(events);
-    runtime.terminal_transport = terminal_provider::transport(finished, query_gate.clone());
-    let backends = native_spawn_backends(directory.path(), finished, pi, &mut runtime)?;
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "spawn-test".to_owned(),
-        backends,
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(runtime),
-    )?;
-    let current = submit_command(
-        &mut state,
-        CommandInvocation::new("resource.current", owned(&["binding"]), Caller::Socket),
-        Instant::now(),
-    );
-    let CommandOutcome::Success { value, .. } = current else {
-        return Err(format!("Binding: {current:?}").into());
-    };
-    let mut start = CommandInvocation::new(
-        "agents.claude.start",
-        vec![
-            directory.path().to_string_lossy().into_owned(),
-            program.to_string_lossy().into_owned(),
-            serde_json::to_string(&["--model", "captured-model", "--", "parent prompt"])?,
-            "parent-task".to_owned(),
-            "work".to_owned(),
-        ],
-        Caller::Socket,
-    );
-    start.target = Some(serde_json::from_value(value["target"].clone())?);
-    let outcome =
-        submit_command_from_caller(&mut state, &wakes, Caller::Socket, start, Instant::now());
-    let CommandOutcome::Success { value, .. } = outcome else {
-        return Err(format!("Parent: {outcome:?}").into());
-    };
-    let parent = serde_json::from_value(value["terminal"].clone())?;
-    Ok(NativeSpawnFixture {
-        clock,
-        directory,
-        state,
-        wakes,
-        parent,
-        other,
-        _query_gate: query_gate,
-    })
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case::shell(false)]
-#[case::agent(true)]
-fn opted_in_child_tasks_keep_parent_account_and_do_not_change_focus(
-    #[case] agent: bool,
-    #[values(false, true)] inactive_parent: bool,
-) {
-    let mut fixture = native_spawn_fixture(true).unwrap();
-    let parent_scope = fixture.state.mux_scope();
-    if inactive_parent {
-        assert!(fixture.state.activate_space_from_ui(fixture.other));
-        // Activation's first snapshot must settle before comparing a detached spawn's selection.
-        let elsewhere_cwd = fixture.directory.path().join("elsewhere");
-        fs::create_dir(&elsewhere_cwd).unwrap();
-        open_native_session(&mut fixture.state, &elsewhere_cwd, Instant::now());
-        assert_eq!(fixture.state.mux().selected_session(), Some("elsewhere"));
-    }
-    let before = selection(&fixture.state);
-    let focus = (
-        fixture.state.terminal_focused(),
-        fixture.state.sidebar_focused(),
-    );
-    let active = fixture.state.mux_scope();
-    let request = if agent {
-        serde_json::json!({"kind":"agent","name":"child-task","title":"Child purpose","provider":"claude","profile":"work","prompt":"Child 'quotes'; $HOME `uname`\nnext line"})
-    } else {
-        serde_json::json!({"kind":"shell","name":"child-task","title":"Child purpose"})
-    };
-    let mut invocation =
-        CommandInvocation::new("agents.spawn", vec![request.to_string()], Caller::Socket);
-    invocation.target = Some(fixture.parent.clone());
-    let outcome = submit_command_from_caller(
-        &mut fixture.state,
-        &fixture.wakes,
-        Caller::Socket,
-        invocation,
-        Instant::now(),
-    );
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("Detached child: {outcome:?}");
-    };
-    assert_eq!(fixture.state.mux_scope(), active);
-    assert_eq!(selection(&fixture.state), before);
-    assert_eq!(
-        (
-            fixture.state.terminal_focused(),
-            fixture.state.sidebar_focused()
-        ),
-        focus
-    );
-    let parent_scope = parent_scope.persistence_value().to_string();
-    let space = spaces_listing(&mut fixture.state)
-        .into_iter()
-        .find(|space| space["scope"].as_str() == Some(parent_scope.as_str()))
-        .unwrap();
-    let saved = saved_sessions(&mut fixture.state, &space);
-    assert_eq!(fixture.state.mux_scope(), active);
-    assert_eq!(selection(&fixture.state), before);
-    assert_eq!(saved.len(), 2);
-    let child = saved
-        .iter()
-        .find(|saved| saved["identity"] == value["task_id"])
-        .unwrap();
-    assert_eq!(child["title"], "Child purpose");
-    assert_eq!(child["cwd"], saved[0]["cwd"]);
-    let service = fixture.state.terminal_agent_service().unwrap();
-    if agent {
-        let terminal: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
-        let (child, lease) = service.spawn_parent(&terminal).unwrap();
-        let parent = service.record(&fixture.parent).unwrap();
-        assert_eq!(
-            child
-                .location
-                .as_ref()
-                .map(|location| location.task_identity.as_str()),
-            value["task_id"].as_str(),
-            "detached child registration retains its saved task association"
-        );
-        assert_eq!(
-            parent.launch.account_directory,
-            Some(
-                fixture
-                    .directory
-                    .path()
-                    .join("account")
-                    .to_string_lossy()
-                    .into_owned()
-            )
-        );
-        assert_eq!(
-            child.launch.account_directory,
-            parent.launch.account_directory
-        );
-        assert_eq!(child.launch.program, parent.launch.program);
-        assert_eq!(
-            child.launch.arguments,
-            owned(&["--model", "captured-model"])
-        );
-        assert!(lease.enabled(None));
-        assert_eq!(lease.caller(), Caller::Socket);
-        assert!(!lease.spawn_enabled());
-        assert!(!lease.enabled(Some(bootty_agents::ToolCapture::Browser)));
-        service.revoke_terminal_tools(&fixture.parent);
-        assert!(!lease.enabled(None));
-    } else {
-        assert_eq!(service.records().len(), 1);
-    }
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case::default_disabled(false, false)]
-#[case::disabled_after_launch(true, true)]
-#[case::changed_provider(true, false)]
-fn child_spawning_denies_disabled_and_changed_provider_authority(
-    #[case] enabled: bool,
-    #[case] revoke: bool,
-) {
-    let mut fixture = native_spawn_fixture(enabled).unwrap();
-    let service = fixture.state.terminal_agent_service().unwrap();
-    if revoke {
-        service.set_agent_spawning_enabled(false);
-        service.set_agent_spawning_enabled(true);
-    }
-    let mut requests = vec![
-        serde_json::json!({"kind":"agent","name":"blocked","provider":"pi","prompt":"task"}),
-        serde_json::json!({"kind":"agent","name":"blocked","provider":"claude","profile":"foreign","prompt":"task"}),
-    ];
-    if !enabled || revoke {
-        requests.push(serde_json::json!({"kind":"shell","name":"blocked"}));
-    }
-    for request in requests {
-        let mut invocation =
-            CommandInvocation::new("agents.spawn", vec![request.to_string()], Caller::Socket);
-        invocation.target = Some(fixture.parent.clone());
-        let outcome = submit_command_from_caller(
-            &mut fixture.state,
-            &fixture.wakes,
-            Caller::Socket,
-            invocation,
-            Instant::now(),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Denied { .. }),
-            "{outcome:?}"
-        );
-    }
-    assert_eq!(fixture.state.mux().all_sessions().len(), 1);
-    assert_eq!(service.records().len(), 1);
-}
-
-#[cfg(unix)]
-#[rstest]
-fn saved_provider_history_bounds_actual_json_without_cutting_complete_metadata() {
-    let directory = assert_fs::TempDir::new().expect("private history");
-    let account = directory.path().join("account");
-    let store = account.join("projects/provider-project");
-    fs::create_dir_all(&store).expect("provider store");
-    let cwd = format!("/project/{}", "x".repeat(4000));
-    let title = "\"".repeat(512);
-    for index in 0..64 {
-        let id = format!("complete-id-{index}");
-        let records = [
-            serde_json::json!({"type":"user", "sessionId":id, "cwd":cwd, "timestamp":"2026-01-01T00:00:00Z"}),
-            serde_json::json!({"type":"custom-title", "sessionId":id, "customTitle":title}),
-        ];
-        fs::write(
-            store.join(format!("{id}.jsonl")),
-            records
-                .iter()
-                .map(serde_json::Value::to_string)
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
-        .expect("saved metadata");
-    }
-    let mut config = test_config::config(
-        directory.path().join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
-    config.agents.claude.selected = "work".to_owned();
-    config.agents.claude.profiles.insert(
-        "work".to_owned(),
-        bootty_config::config::AgentProfileConfig {
-            name: "Work".to_owned(),
-            directory: Some(account.to_string_lossy().into_owned()),
-            arguments: Vec::new(),
-        },
-    );
-    let (wake, wakes) = mpsc::channel();
-    let (events, _receiver) = bootty_control::event_queue();
-    let mut state = AppState::new_for_window_with_agent_runtime(
-        config,
-        "history-bounds".to_owned(),
-        support::backends(),
-        event_repaint(move || {
-            let _ = wake.send(());
-        }),
-        None,
-        None,
-        Some(agent_runtime(events)),
-    )
-    .expect("native history owner");
-    let outcome = submit_command_from_caller(
-        &mut state,
-        &wakes,
-        Caller::Socket,
-        CommandInvocation::new(
-            "agents.claude.history",
-            vec![String::new(), "work".to_owned()],
-            Caller::Socket,
-        ),
-        Instant::now(),
-    );
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("bounded history: {outcome:?}")
-    };
-    assert!(serde_json::to_vec(&value).expect("encoded envelope").len() <= 96 * 1024);
-    assert_eq!(
-        value["account_directory"],
-        account.to_string_lossy().as_ref()
-    );
-    let entries = value["entries"].as_array().expect("complete entries");
-    assert_ne!(entries.len(), 0);
-    let omitted = value["omitted_entries"].as_u64().expect("omitted count");
-    assert!(omitted > 0);
-    assert_eq!(
-        entries
-            .len()
-            .saturating_add(usize::try_from(omitted).expect("bounded count")),
-        64
-    );
-    for entry in entries {
-        assert_eq!(entry["cwd"], cwd);
-        assert_eq!(entry["title"], title);
-        assert_eq!(entry["resume_id"], entry["session_id"]);
-        let id = entry["session_id"].as_str().expect("provider identity");
-        assert!(
-            store.join(format!("{id}.jsonl")).is_file(),
-            "identity remains complete"
-        );
-    }
-}
-
-#[cfg(unix)]
-fn close_native_spawn_fixture(
-    fixture: &mut NativeSpawnFixture,
-) -> Result<(), Box<dyn std::error::Error>> {
-    fixture
-        .state
-        .terminal_agent_service()
-        .ok_or("agent service unavailable")?
-        .shutdown_and_wait()?;
-    let mut close = CommandInvocation::new("pane.close", Vec::new(), Caller::Socket);
-    close.target = Some(fixture.parent.clone());
-    close.confirmation = Some(close.confirmation());
-    let outcome = submit_command_from_caller(
-        &mut fixture.state,
-        &fixture.wakes,
-        Caller::Socket,
-        close,
-        Instant::now(),
-    );
-    if matches!(outcome, CommandOutcome::Success { .. }) {
-        Ok(())
-    } else {
-        Err(format!("fixture terminal close: {outcome:?}").into())
-    }
-}
-
-#[cfg(unix)]
-#[rstest]
-#[case("prompt")]
-#[case("follow_up")]
-#[case("steer")]
-fn completed_live_turn_accepts_next_prompt_on_exact_captured_terminal(
-    #[case] operation: &str,
-    #[values(false, true)] inactive: bool,
-) {
-    let mut fixture = native_spawn_fixture_for_turn(false, true).unwrap();
-    wait_for_finished_native_agent(&mut fixture).unwrap();
-    if inactive {
-        assert!(fixture.state.activate_space_from_ui(fixture.other));
-        let elsewhere = fixture.directory.path().join("elsewhere");
-        fs::create_dir(&elsewhere).unwrap();
-        open_native_session(&mut fixture.state, &elsewhere, Instant::now());
-    }
-    let before = selection(&fixture.state);
-    for stopped_operation in ["abort", "interrupt"] {
-        let mut invocation = CommandInvocation::new(
-            format!("agents.claude.{stopped_operation}"),
-            Vec::new(),
-            Caller::Socket,
-        );
-        invocation.target = Some(fixture.parent.clone());
-        invocation.confirmation = Some(invocation.confirmation());
-        let outcome = submit_command_from_caller(
-            &mut fixture.state,
-            &fixture.wakes,
-            Caller::Socket,
-            invocation,
-            Instant::now(),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Unavailable { .. }),
-            "{outcome:?}"
-        );
-    }
-    let message = format!("next turn via {operation}");
-    let mut invocation = CommandInvocation::new(
-        format!("agents.claude.{operation}"),
-        vec![message.clone()],
-        Caller::Socket,
-    );
-    invocation.target = Some(fixture.parent.clone());
-    let outcome = submit_command_from_caller(
-        &mut fixture.state,
-        &fixture.wakes,
-        Caller::Socket,
-        invocation,
-        Instant::now(),
-    );
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-    assert_eq!(selection(&fixture.state), before);
-    let service = fixture.state.terminal_agent_service().unwrap();
-    assert_eq!(
-        service.record(&fixture.parent).unwrap().target,
-        fixture.parent
-    );
-    loop {
-        fixture
-            .state
-            .update_frame(frames::idle_frame(Instant::now()));
-        if let Ok(text) = fs::read_to_string(fixture.directory.path().join("agent-input"))
-            && !text.is_empty()
-        {
-            assert_eq!(
-                text,
-                format!("{}\n", serde_json::to_string(&message).unwrap())
-            );
-            break;
-        }
-        fixture
-            .wakes
-            .recv_timeout(FIXTURE_DEADLINE)
-            .expect("submitted next prompt arrives");
-    }
-    close_native_spawn_fixture(&mut fixture).unwrap();
-}
-
-#[cfg(unix)]
-#[rstest]
-fn retained_finished_provider_records_cannot_route_input_after_observation_shutdown() {
-    let mut fixture = native_spawn_fixture_for_turn(false, true).unwrap();
-    wait_for_finished_native_agent(&mut fixture).unwrap();
-    let service = fixture.state.terminal_agent_service().unwrap();
-    assert!(
-        service
-            .live_records()
-            .iter()
-            .any(|record| record.target == fixture.parent)
-    );
-    service.shutdown_and_wait().unwrap();
-    assert!(service.live_records().is_empty());
-    assert!(service.record(&fixture.parent).is_some());
-    for operation in ["prompt", "steer", "follow_up", "abort", "interrupt"] {
-        let arguments = if matches!(operation, "abort" | "interrupt") {
-            Vec::new()
-        } else {
-            owned(&["must not reach the terminal"])
-        };
-        let mut invocation = CommandInvocation::new(
-            format!("agents.claude.{operation}"),
-            arguments,
-            Caller::Socket,
-        );
-        invocation.target = Some(fixture.parent.clone());
-        if matches!(operation, "abort" | "interrupt") {
-            invocation.confirmation = Some(invocation.confirmation());
-        }
-        let outcome = submit_command_from_caller(
-            &mut fixture.state,
-            &fixture.wakes,
-            Caller::Socket,
-            invocation,
-            Instant::now(),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Unavailable { .. }),
-            "{operation}: {outcome:?}"
-        );
-    }
-    let mut read = CommandInvocation::new("agents.claude.state", Vec::new(), Caller::Socket);
-    read.target = Some(fixture.parent.clone());
-    let outcome = submit_command_from_caller(
-        &mut fixture.state,
-        &fixture.wakes,
-        Caller::Socket,
-        read,
-        Instant::now(),
-    );
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-    // A subsequent raw submission proves rejected controls neither pasted nor interrupted the TUI.
-    for (command, arguments) in [
-        ("terminal.paste", owned(&["still interactive"])),
-        ("terminal.submit", Vec::new()),
-    ] {
-        let mut invocation = CommandInvocation::new(command, arguments, Caller::Socket);
-        invocation.target = Some(fixture.parent.clone());
-        let outcome = submit_command_from_caller(
-            &mut fixture.state,
-            &fixture.wakes,
-            Caller::Socket,
-            invocation,
-            Instant::now(),
-        );
-        assert!(
-            matches!(outcome, CommandOutcome::Success { .. }),
-            "{outcome:?}"
-        );
-    }
-    let received = fixture.directory.path().join("agent-input");
-    loop {
-        fixture
-            .state
-            .update_frame(frames::idle_frame(Instant::now()));
-        if let Ok(text) = fs::read_to_string(&received)
-            && !text.is_empty()
-        {
-            assert_eq!(text, "\"still interactive\"\n");
-            break;
-        }
-        fixture
-            .wakes
-            .recv_timeout(Duration::from_secs(1))
-            .expect("native terminal publishes the untouched provider's submission");
-    }
-    close_native_spawn_fixture(&mut fixture).unwrap();
 }
 
 fn accepted_activity_receipt(
@@ -5835,10 +2950,10 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
     ));
     state.dialog_projection();
     let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
-        panic!("registration must preserve the prompt");
+        panic!("registration must preserve the draft");
     };
     assert_eq!(dialog.spec().id, dialog_id);
-    assert_eq!(dialog.draft().unwrap().prompt, "Keep this draft");
+    assert_eq!(dialog.draft().unwrap().command, "Keep this draft");
     assert_eq!(dialog.spec().projects[0].path, "/work/empty");
     let result = submit_command(
         &mut state,
@@ -6039,61 +3154,4 @@ fn close_surface_on_creation_preserves_the_underlying_workspace(
         !has_session
     );
     assert_eq!(state.last_error(), None);
-}
-
-#[cfg(unix)]
-#[rstest]
-fn terminal_child_uses_the_captured_other_provider_executable_and_account() {
-    let mut fixture = native_spawn_fixture_with_pi(true, false, true).unwrap();
-    let mut invocation = CommandInvocation::new("agents.spawn", vec![serde_json::json!({"kind":"agent","name":"pi-review","provider":"pi","prompt":"Review changes"}).to_string()], Caller::Socket);
-    invocation.target = Some(fixture.parent.clone());
-    let outcome = submit_command_from_caller(
-        &mut fixture.state,
-        &fixture.wakes,
-        Caller::Socket,
-        invocation,
-        Instant::now(),
-    );
-    let CommandOutcome::Success { value, .. } = outcome else {
-        panic!("Child: {outcome:?}");
-    };
-    let target: CommandTarget = serde_json::from_value(value["terminal"].clone()).unwrap();
-    let service = fixture.state.terminal_agent_service().unwrap();
-    let child = service.record(&target).unwrap();
-    assert_eq!(child.provider, bootty_agents::AgentKind::Pi);
-    assert_eq!(
-        child.launch.program,
-        fixture
-            .directory
-            .path()
-            .join("pi-terminal.py")
-            .to_string_lossy()
-    );
-    let account = fixture.directory.path().join("pi-account");
-    assert_eq!(child.launch.account_directory.as_deref(), account.to_str());
-    let file = account.join("launch.json");
-    let deadline = Instant::now().checked_add(Duration::from_secs(5)).unwrap();
-    while !file.exists() {
-        fixture
-            .state
-            .update_frame(frames::idle_frame(Instant::now()));
-        fixture
-            .wakes
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .unwrap();
-    }
-    let launch: serde_json::Value = serde_json::from_slice(&fs::read(file).unwrap()).unwrap();
-    assert_eq!(launch["account"], account.to_string_lossy().as_ref());
-    assert!(
-        launch["argv"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|arg| arg == "Review changes")
-    );
-    let (_, lease) = service.spawn_parent(&target).unwrap();
-    assert_eq!(lease.scope().provider, bootty_agents::AgentKind::Pi);
-    assert!(!lease.spawn_enabled());
-    service.revoke_terminal_tools(&fixture.parent);
-    assert!(!lease.enabled(None));
 }

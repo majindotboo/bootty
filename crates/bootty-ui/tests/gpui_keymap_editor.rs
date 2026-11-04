@@ -14,8 +14,8 @@ use bootty_ui::gpui::{
 use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, Half, IntoElement, Modifiers, MouseButton,
-    Render, ScrollDelta, ScrollWheelEvent, Subscription, TestAppContext, TouchPhase,
-    VisualTestContext, Window, div, point, prelude::*, px,
+    Render, ScrollDelta, ScrollEvent, Subscription, TestAppContext, TouchPhase, VisualTestContext,
+    Window, div, point, prelude::*, px,
 };
 use pretty_assertions::assert_eq;
 
@@ -1464,7 +1464,8 @@ fn recording_modal_captures_wheel_as_a_trigger_step(cx: &mut TestAppContext) {
         .expect("record trigger action");
     cx.simulate_click(bounds_center(record), Modifiers::none());
     let modal = cx.debug_bounds("keymap-modal").expect("keymap modal");
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
+        source: gpui_kit::ScrollSource::default(),
         position: bounds_center(modal),
         delta: ScrollDelta::Lines(point(0.0, 1.0)),
         modifiers: Modifiers::none(),

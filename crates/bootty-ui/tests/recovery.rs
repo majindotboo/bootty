@@ -20,7 +20,6 @@ fn archive(id: usize, saved: u64) -> OutputArchive {
         rows: 24,
         omitted_lines: 3,
         text: format!("output {id}"),
-        agent: None,
     }
 }
 #[rstest]

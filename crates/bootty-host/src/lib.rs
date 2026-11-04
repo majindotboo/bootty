@@ -35,7 +35,5 @@ pub mod wsl;
 
 pub mod semantic_history;
 pub mod shell_history;
-pub mod speech;
 
 pub mod private_files;
-pub mod private_stdio;

@@ -5,11 +5,11 @@ use memchr::memmem::find;
 
 use crate::terminal_engine::write_ingress::{find_osc_terminator, split_osc_payload};
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TerminalSideEffect {
     Bell,
     ClipboardWrite(String),
-    ClipboardPacket(Vec<u8>),
+    ClipboardPacket(#[serde(with = "crate::wire_bytes")] Vec<u8>),
     ClipboardReset,
     ClipboardQuery { selection: String },
     WindowTitle(String),
@@ -204,7 +204,7 @@ impl TerminalSideEffectCollector {
     }
 
     /// The queue depth, so a replay of historical bytes can drop the effects it
-    /// would repeat. See [`super::terminal_engine::TerminalEngine::write_vt_without_pty_responses`].
+    /// would repeat. See [`super::terminal_engine::TerminalEngine::import_history`].
     pub(crate) fn mark(&self) -> (usize, usize) {
         (self.effects.len(), self.callback_effects.borrow().len())
     }
@@ -532,6 +532,25 @@ impl ItermCopyCapture {
                 },
                 _ => ItermCopyEscape::None,
             };
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct WireSideEffectEvent {
+    pub source_pane_id: Option<String>,
+    pub effect: TerminalSideEffect,
+    pub elapsed: Option<std::time::Duration>,
+}
+impl TerminalSideEffectEvent {
+    #[must_use]
+    pub fn to_wire(&self, origin: std::time::Instant) -> WireSideEffectEvent {
+        WireSideEffectEvent {
+            source_pane_id: self.source_pane_id.clone(),
+            effect: self.effect.clone(),
+            elapsed: self
+                .observed_at
+                .map(|time| time.saturating_duration_since(origin)),
         }
     }
 }

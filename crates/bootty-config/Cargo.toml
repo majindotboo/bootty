@@ -1,12 +1,10 @@
 [package]
+autotests = false
 name = "bootty-config"
 edition.workspace = true
 
 [lib]
 test = false
-
-[features]
-bootty-dev = []
 
 [lints]
 workspace = true
@@ -24,8 +22,13 @@ toml_edit.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+bootty-os = { path = "../bootty-os" }
 assert_fs.workspace = true
 indoc.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
 rstest.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

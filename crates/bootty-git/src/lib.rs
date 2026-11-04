@@ -1,11 +1,10 @@
 pub mod changes;
-pub mod checkpoint;
 pub mod cleanup;
-pub mod diff;
 pub mod facts;
 mod favorite_paths;
 pub mod github;
 pub mod project;
+pub mod remote;
 pub mod runner;
 pub mod worktree;
 

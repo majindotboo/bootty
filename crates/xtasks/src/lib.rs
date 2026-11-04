@@ -1,3 +1,8 @@
+#![allow(
+    clippy::disallowed_methods,
+    reason = "Developer tooling does not share product PTY descriptors"
+)]
+
 pub mod benchmark;
 pub mod build;
 pub mod cancellation;
@@ -13,7 +18,6 @@ pub mod pre_commit;
 mod process;
 pub mod release;
 pub mod signing;
-mod voice_runtime;
 
 pub use cli::run;
 pub(crate) use filesystem::{development_names, workspace_root};

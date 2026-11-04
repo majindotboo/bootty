@@ -1,4 +1,4 @@
-//! Bootty keeps a bounded number of the worktrees it created.
+//! Bootty removes its worktrees when no session needs them.
 //!
 //! A checkout is Bootty's when it is a linked worktree at `<directory>/<repository>/<name>`.
 //! This runs on the host that holds the checkouts: in the app for local ones, in the daemon for
@@ -14,13 +14,12 @@ use crate::{runner::CommandRunner, worktree::Git};
 /// being created in it can't lose it. Raise it if session creation can take longer.
 const ORPHAN_GRACE_SECONDS: i64 = 60 * 60;
 
-/// What a saved session's state says about keeping its checkout.
+/// Legacy wire values accepted from existing cleanup clients. Session references always protect a checkout.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub enum Retention {
     /// Archived work is the first to go when there are too many checkouts.
     Archived,
-    Settled,
     /// Active work is never removed.
     Active,
 }
@@ -44,7 +43,7 @@ pub struct CleanupRequest {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
-    /// At most this many checkouts stay. 0 keeps every checkout a session still has.
+    /// Retired wire field, retained for existing daemon clients.
     pub limit: u16,
     /// Every saved session on this host, from every Space.
     pub sessions: Vec<SessionCheckout>,
@@ -74,15 +73,10 @@ pub struct KeptWorktree {
 /// Who still needs a checkout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Claim {
-    /// No saved session uses it: its session was deleted, or it was never used.
+    /// No session references it.
     Orphan,
     /// An active or open session uses it.
     Protected,
-    /// Only settled or archived sessions use it.
-    Retained {
-        retention: Retention,
-        last_activity: i64,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -95,63 +89,32 @@ pub struct OwnedWorktree {
 
 /// The checkouts to try removing, in order.
 ///
-/// Every orphan older than its grace period comes first, oldest first; then archived and settled
-/// work, oldest activity first. The caller removes orphans unconditionally and the rest only
-/// while more than the limit remain. Protected work never appears.
+/// Orphans past the creation grace period go oldest first. Referenced work never appears.
 #[must_use]
 pub fn removal_order(worktrees: &[OwnedWorktree], now: i64) -> Vec<usize> {
     let mut orphans = Vec::new();
-    let mut retained = Vec::new();
     for (index, worktree) in worktrees.iter().enumerate() {
         match worktree.claim {
             Claim::Orphan if now.saturating_sub(worktree.created) >= ORPHAN_GRACE_SECONDS => {
                 orphans.push((worktree.created, index));
             }
-            Claim::Retained {
-                retention,
-                last_activity,
-            } if retention != Retention::Active => {
-                retained.push(((retention, last_activity), index));
-            }
-            Claim::Orphan | Claim::Retained { .. } | Claim::Protected => {}
+            Claim::Orphan | Claim::Protected => {}
         }
     }
     orphans.sort_unstable();
-    retained.sort_unstable();
-    orphans
-        .into_iter()
-        .map(|(_, index)| index)
-        .chain(retained.into_iter().map(|(_, index)| index))
-        .collect()
+    orphans.into_iter().map(|(_, index)| index).collect()
 }
 
 /// The strongest claim the sessions in a checkout make on it.
-fn claim(sessions: &[&SessionCheckout]) -> Claim {
+const fn claim(sessions: &[&SessionCheckout]) -> Claim {
     if sessions.is_empty() {
         return Claim::Orphan;
     }
-    if sessions
-        .iter()
-        .any(|session| session.open || session.retention == Retention::Active)
-    {
-        return Claim::Protected;
-    }
-    Claim::Retained {
-        retention: sessions
-            .iter()
-            .map(|session| session.retention)
-            .max()
-            .unwrap_or(Retention::Archived),
-        last_activity: sessions
-            .iter()
-            .map(|session| session.last_activity)
-            .max()
-            .unwrap_or_default(),
-    }
+    Claim::Protected
 }
 
 impl<R: CommandRunner> Git<R> {
-    /// Remove orphaned checkouts and, past the limit, the oldest settled and archived ones. A
+    /// Remove orphaned checkouts. A
     /// checkout with uncommitted changes or commits no remote has always stays, and the report
     /// says why. A removed checkout's branch goes too when Git's safe delete accepts it.
     /// # Errors
@@ -163,14 +126,10 @@ impl<R: CommandRunner> Git<R> {
             remaining: worktrees.len(),
             ..CleanupReport::default()
         };
-        let limit = usize::from(request.limit);
         for index in removal_order(&worktrees, request.now) {
             let Some(worktree) = worktrees.get(index) else {
                 continue;
             };
-            if worktree.claim != Claim::Orphan && (limit == 0 || report.remaining <= limit) {
-                break;
-            }
             match self.remove_owned_worktree(&worktree.path, &request.teardown) {
                 Ok(()) => {
                     report.remaining = report.remaining.saturating_sub(1);

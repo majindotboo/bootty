@@ -3,6 +3,7 @@ use anyhow::{Context as _, ensure};
 use assert_fs::prelude::*;
 use bootty_config::config::{WslDistribution, WslRemoteConfig};
 use bootty_host::{CommandOutput, CommandRunner, wsl::WslRemote};
+use bootty_os::spawn::CommandSpawn as _;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use std::{
@@ -36,7 +37,7 @@ impl LinuxProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        let mut child = command.spawn()?;
+        let mut child = command.bootty_spawn()?;
         if let Some(mut input) = input {
             if self.corrupt {
                 input.push(b'x');

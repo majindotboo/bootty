@@ -1,0 +1,33 @@
+[package]
+name = "bootty-os"
+version.workspace = true
+edition.workspace = true
+description = "Bootty's local IPC, process-tree and detached-spawn boundary. Adapted from rmux-ipc and rmux-os (https://github.com/luan/rmux, MIT OR Apache-2.0)."
+
+[lib]
+test = false
+
+[dependencies]
+tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "time"] }
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.6", features = ["event", "fs", "net", "process"] }
+
+# Linux reads peer credentials through rustix instead.
+[target.'cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))'.dependencies]
+nix = { version = "0.31.3", default-features = false, features = ["user", "socket"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Authorization",
+  "Win32_System_Console",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_JobObjects",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

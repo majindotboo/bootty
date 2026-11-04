@@ -199,29 +199,20 @@ pub(super) fn space_menu(space: &SpaceSnapshot) -> Vec<MenuRow> {
         starts_group,
         intent,
     };
-    let mut rows = Vec::new();
-    if space.error.is_some() {
-        rows.push(row(
-            "Reconnect",
+    vec![
+        row(
+            "Edit Space",
             true,
             false,
             false,
-            ChromeIntent::ReconnectSpace(space.key),
-        ));
-    }
-    rows.push(row(
-        "Edit Space",
-        true,
-        false,
-        !rows.is_empty(),
-        ChromeIntent::EditSpace(space.key),
-    ));
-    rows.push(row(
-        "Close",
-        space.can_close,
-        true,
-        true,
-        ChromeIntent::CloseSpace(space.key),
-    ));
-    rows
+            ChromeIntent::EditSpace(space.key),
+        ),
+        row(
+            "Close",
+            space.can_close,
+            true,
+            true,
+            ChromeIntent::CloseSpace(space.key),
+        ),
+    ]
 }

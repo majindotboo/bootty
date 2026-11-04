@@ -212,12 +212,12 @@ const UI_FONT_FAMILY_DEPENDENCY: SettingsDependency = SettingsDependency {
     }],
 };
 
-const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 12] = [
+const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 9] = [
     SettingsCatalogPage {
         category: SettingsCategory::General,
         id: SettingsCategory::General.id(),
         label: SettingsCategory::General.label(),
-        search_terms: "tray|menu bar|mascot|general|startup|restore|reopen|window|workspace|session|open behavior|close|quit|update|multiplexer|backend|terminal provider|native|herdr|rmux|tmux",
+        search_terms: "menu bar|mascot|general|startup|restore|reopen|window|workspace|session|open behavior|close|quit|update",
     },
     SettingsCatalogPage {
         category: SettingsCategory::Appearance,
@@ -254,24 +254,6 @@ const SETTINGS_CATALOG_PAGES: [SettingsCatalogPage; 12] = [
         id: SettingsCategory::Terminal.id(),
         label: SettingsCategory::Terminal.label(),
         search_terms: "terminal|session|shell|scrollback|copy on select|option as meta|environment|protocol",
-    },
-    SettingsCatalogPage {
-        category: SettingsCategory::Browser,
-        id: SettingsCategory::Browser.id(),
-        label: SettingsCategory::Browser.label(),
-        search_terms: "browser|search engine|cookies|site data|private",
-    },
-    SettingsCatalogPage {
-        category: SettingsCategory::Ai,
-        id: SettingsCategory::Ai.id(),
-        label: SettingsCategory::Ai.label(),
-        search_terms: "ai|providers|agents|codex|claude|pi|account|profile|sign in|installation|update|default provider|composer|send|follow-up|queue|steer|streaming|subagents",
-    },
-    SettingsCatalogPage {
-        category: SettingsCategory::Permissions,
-        id: SettingsCategory::Permissions.id(),
-        label: SettingsCategory::Permissions.label(),
-        search_terms: "permissions|computer use|capture|screen recording|accessibility|input",
     },
     SettingsCatalogPage {
         category: SettingsCategory::Remotes,
@@ -315,10 +297,7 @@ pub fn setting_is_visible_in_native_settings(id: &str) -> bool {
         id,
         "input.keybind"
             | "input.sidebar-keybind"
-            | "input.backend-keybind.herdr"
             | "input.backend-keybind.native"
-            | "input.backend-keybind.rmux"
-            | "input.backend-keybind.tmux"
             | "sidebar.session-modules"
             | "sidebar.modules"
             | "extensions.*"
@@ -332,9 +311,6 @@ pub fn setting_is_visible_in_native_settings(id: &str) -> bool {
 #[must_use]
 pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
     match id {
-        id if id.starts_with("agents.") || id == "session.agent-notifications" => {
-            SettingsCategory::Ai
-        }
         id if id == "theme"
             || id == "appearance.mode"
             || id.starts_with("appearance.light.")
@@ -353,10 +329,6 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
         {
             SettingsCategory::Theme
         }
-        // General owns app-wide defaults. Backend choice controls the default binding for new
-        // Spaces; panel and window choices deliberately stay on their dedicated pages.
-        "multiplexer.backend" => SettingsCategory::General,
-
         // Appearance owns the visual language of the application, including interface text.
         "input.hide-mouse-pointer-while-typing" => SettingsCategory::Appearance,
         id if id.starts_with("font.") || id.starts_with("cursor.") => SettingsCategory::Appearance,
@@ -365,22 +337,18 @@ pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
         "input.copy-on-select" | "input.macos-option-as-alt" => SettingsCategory::Terminal,
 
         // Panels own docking and visibility. Fullscreen chrome stays layout.
-        "chrome.left-dock-toggle"
-        | "chrome.right-dock-toggle"
-        | "chrome.panel-tab-style"
-        | "chrome.panel-tabs" => SettingsCategory::Panels,
+        "chrome.left-dock-toggle" | "chrome.panel-tab-style" | "chrome.panel-tabs" => {
+            SettingsCategory::Panels
+        }
         "chrome.notched-fullscreen-black-chrome" => SettingsCategory::WindowAndLayout,
 
         _ => match legacy_page {
             "appearance" | "colors" | "text" => SettingsCategory::Appearance,
             "shell" => SettingsCategory::Terminal,
-            "browser" => SettingsCategory::Browser,
-            "permissions" => SettingsCategory::Permissions,
             "keys" => SettingsCategory::Keymap,
             "window" => SettingsCategory::WindowAndLayout,
             "panels" | "sidebar" => SettingsCategory::Panels,
             "remotes" => SettingsCategory::Remotes,
-            "providers" => SettingsCategory::Ai,
             "general" => SettingsCategory::General,
             // Keep unknown schema pages accessible in Advanced.
             _ => SettingsCategory::Advanced,
@@ -396,21 +364,10 @@ pub fn settings_section<'a>(
     source_section: &'a str,
 ) -> &'a str {
     match category {
-        SettingsCategory::Ai => match id {
-            "agents.default-provider" => "NEW SESSIONS",
-            "agents.response-streaming"
-            | "agents.transcript-width"
-            | "agents.collapse-composer-on-scroll"
-            | "agents.send-shortcut"
-            | "agents.follow-up-behavior" => "CONVERSATION",
-            "agents.allow-spawn" => "AGENT TOOLS",
-            _ => source_section,
-        },
         SettingsCategory::General => match id {
             "restore_on_startup" => "STARTUP",
             "cli_default_open_behavior" | "default_open_behavior" => "OPENING",
             "when_closing_with_no_tabs" | "on_last_window_closed" => "WINDOWS",
-            "multiplexer.backend" => "DEFAULT SPACE",
             _ => source_section,
         },
         SettingsCategory::Appearance | SettingsCategory::Theme => match id {
@@ -430,10 +387,9 @@ pub fn settings_section<'a>(
             _ => source_section,
         },
         SettingsCategory::Panels => match id {
-            "chrome.left-dock-toggle"
-            | "chrome.right-dock-toggle"
-            | "chrome.panel-tab-style"
-            | "chrome.panel-tabs" => "SIDEBARS",
+            "chrome.left-dock-toggle" | "chrome.panel-tab-style" | "chrome.panel-tabs" => {
+                "SIDEBARS"
+            }
             _ => source_section,
         },
         _ => source_section,
@@ -469,18 +425,6 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
             "default_open_behavior" => 11,
             "when_closing_with_no_tabs" => 20,
             "on_last_window_closed" => 21,
-            "multiplexer.backend" => 30,
-            _ => 100,
-        },
-        SettingsCategory::Ai => match id {
-            "agents.default-provider" => 0,
-            "agents.response-streaming" => 10,
-            "agents.transcript-width" => 11,
-            "agents.collapse-composer-on-scroll" => 12,
-            "agents.send-shortcut" => 13,
-            "agents.follow-up-behavior" => 14,
-            "session.agent-notifications" => 20,
-            "agents.allow-spawn" => 30,
             _ => 100,
         },
         SettingsCategory::Appearance | SettingsCategory::Theme => match id {
@@ -509,7 +453,7 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
             "input.prefix" => 1,
             "input.keybind" => 10,
             "input.sidebar-keybind" => 20,
-            id if id.starts_with("input.backend-keybind.") => 30,
+            "input.backend-keybind.native" => 30,
             "input.modifier-remap" => 40,
             _ => 100,
         },
@@ -529,7 +473,6 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
         },
         SettingsCategory::Panels => match id {
             "chrome.left-dock-toggle" => 1,
-            "chrome.right-dock-toggle" => 2,
             "chrome.tabs-use-session-color" => 9,
             id if id.starts_with("chrome.tabs.") => 10,
             _ => 100,
@@ -654,10 +597,7 @@ fn settings_row_id(row: &SettingsRow) -> Option<&str> {
         | SettingsRow::Environment { id, .. }
         | SettingsRow::FontFeatures { id, .. }
         | SettingsRow::AnsiPalette { id, .. } => Some(id),
-        SettingsRow::Section(_)
-        | SettingsRow::Notice { .. }
-        | SettingsRow::ModuleIntegrations(_)
-        | SettingsRow::Remote(_) => None,
+        SettingsRow::Section(_) | SettingsRow::Notice { .. } | SettingsRow::Remote(_) => None,
     }
 }
 

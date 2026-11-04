@@ -1,13 +1,10 @@
 use super::AppState;
-use crate::recovery::{ArchiveListing, ArchiveStore, ArchivedAgent, OutputArchive, fingerprint};
+use crate::recovery::{ArchiveListing, ArchiveStore, OutputArchive, fingerprint};
 use anyhow::Context as _;
-use bootty_agents::AgentKind;
 use bootty_mux::controller::SpaceId;
 use bootty_mux::session_snapshot::SessionPaneCapture;
 use bootty_mux::workspace::{PreparedSessionCheckpoint, SavedSessionCheckpoint};
-use bootty_terminal::terminal_capture::{
-    CaptureFormat, CaptureOptions, CaptureScope, TerminalCapture,
-};
+use bootty_terminal::terminal_capture::{CaptureFormat, CaptureOptions, CaptureScope};
 use serde::Serialize;
 use std::{
     sync::{
@@ -26,22 +23,12 @@ pub struct RecoveryOverview {
     pub saved_at_ms: u64,
     pub bytes: usize,
     pub omitted_lines: u64,
-    pub resumable: bool,
-}
-enum PendingCapture {
-    /// A local terminal worker already queued this capture and answers from memory.
-    Queued(
-        bootty_terminal::terminal_session::PendingWorkerResponse<Result<TerminalCapture, String>>,
-    ),
-    /// The save worker starts backend captures one at a time. Starting them together opens one
-    /// remote session per pane at once, which can exceed what one SSH connection will carry.
-    Backend(Box<dyn FnOnce() -> Result<TerminalCapture, String> + Send>),
 }
 struct PendingArchive {
     archive: Option<OutputArchive>,
-    pane: String,
-    cwd: Option<String>,
-    capture: PendingCapture,
+    capture: bootty_terminal::terminal_session::PendingWorkerResponse<
+        Result<SessionPaneCapture, String>,
+    >,
 }
 struct PendingSessionCheckpoint {
     prepared: Option<PreparedSessionCheckpoint>,
@@ -90,7 +77,6 @@ struct ArchiveCapture {
     host: String,
     fingerprint: String,
     backend: String,
-    agent: Option<ArchivedAgent>,
 }
 
 pub(super) struct RecoveryState {
@@ -181,7 +167,6 @@ impl AppState {
                 saved_at_ms: a.saved_at_ms,
                 bytes: a.text.len(),
                 omitted_lines: a.omitted_lines,
-                resumable: a.agent.is_some(),
             })
             .collect()
     }
@@ -237,6 +222,9 @@ impl AppState {
         let binding = &self.workspace.active.binding;
         let scope = binding.scope();
         let generation = binding.mux().binding_generation();
+        if !binding.mux().has_session_snapshot() {
+            return;
+        }
         if self
             .recovery
             .restored_bindings
@@ -246,176 +234,90 @@ impl AppState {
         }
         // Automatic restore belongs to binding activation, not a later deliberate session close.
         self.recovery.restored_bindings.insert((scope, generation));
-        let Some(identity) = binding.saved_selected_session_identity().map(str::to_owned) else {
-            return;
-        };
-        if binding.session_attachment(&identity).is_some() {
-            return;
-        }
-        let Some(saved) = binding.sessions().get(&identity).filter(|saved| {
-            saved
-                .state
-                .is_visible(crate::clock::ClockSnapshot::now().epoch)
-        }) else {
-            return;
-        };
-        let identity = saved.identity.clone();
-        let Some(invocation) = self.saved_session_invocation(
-            scope,
-            "session.reopen",
-            vec![identity, "preserve".into()],
-        ) else {
-            return;
-        };
-        let Some(deadline) = now.checked_add(Duration::from_secs(30)) else {
-            return;
-        };
-        if self
-            .app_command_sender(bootty_control::Caller::Internal)
-            .submit(
-                invocation,
-                deadline,
-                bootty_control::CommandCancellation::new(),
-            )
-            .is_err()
-        {
-            self.recovery.restored_bindings.remove(&(scope, generation));
+        let identities = binding
+            .sessions()
+            .sessions()
+            .iter()
+            .filter(|saved| {
+                binding.session_attachment(&saved.identity).is_none()
+                    && saved.terminal_snapshot.is_some()
+            })
+            .map(|saved| saved.identity.clone())
+            .collect::<Vec<_>>();
+        for identity in identities {
+            let Some(invocation) = self.saved_session_invocation(
+                scope,
+                "session.reopen",
+                vec![identity, "preserve".into()],
+            ) else {
+                continue;
+            };
+            let Some(deadline) = now.checked_add(Duration::from_secs(30)) else {
+                return;
+            };
+            if self
+                .app_command_sender(bootty_control::Caller::Internal)
+                .submit(
+                    invocation,
+                    deadline,
+                    bootty_control::CommandCancellation::new(),
+                )
+                .is_err()
+            {
+                self.recovery.restored_bindings.remove(&(scope, generation));
+            }
         }
     }
 
-    pub(crate) fn poll_session_checkpoints(&mut self) {
-        let mut errors = Vec::new();
-        let mut checkpoints = Vec::new();
-        self.recovery.saves.retain(|rx| {
+    pub fn poll_session_checkpoints(&mut self) {
+        let mut events = Vec::new();
+        self.recovery.saves.retain(|receiver| {
             loop {
-                match rx.try_recv() {
-                    Ok(CheckpointEvent::Failed(error)) => {
+                match receiver.try_recv() {
+                    Ok(event) => events.push(event),
+                    Err(mpsc::TryRecvError::Empty) => return true,
+                    Err(mpsc::TryRecvError::Disconnected) => return false,
+                }
+            }
+        });
+        for event in events {
+            match event {
+                CheckpointEvent::Saved(receipt) => {
+                    if let Err(error) = self.workspace.publish_session_checkpoint(receipt) {
                         self.recovery.checkpoint_failed = true;
                         if let Some(ticket) = &self.recovery.checkpoint_ticket {
                             ticket.record_failure(&error);
                         }
-                        errors.push(error);
+                        self.record_error("Could not publish session checkpoint", &error);
                     }
-                    Ok(CheckpointEvent::ArchiveFailed(error)) => errors.push(error),
-                    Ok(CheckpointEvent::Saved(saved)) => checkpoints.push(saved),
-                    Ok(CheckpointEvent::Finished) => self.recovery.checkpoint_finished = true,
-                    Err(mpsc::TryRecvError::Disconnected) => break false,
-                    Err(mpsc::TryRecvError::Empty) => break true,
                 }
-            }
-        });
-        for checkpoint in checkpoints {
-            match self.workspace.publish_session_checkpoint(checkpoint) {
-                Ok(true) => {}
-                Ok(false) => {
-                    self.recovery.checkpoint_failed = true;
-                    let error =
-                        anyhow::anyhow!("Session checkpoint owner was replaced before publication");
-                    if let Some(ticket) = &self.recovery.checkpoint_ticket {
-                        ticket.record_failure(&error);
-                    }
-                    errors.push(error);
-                }
-                Err(error) => {
+                CheckpointEvent::Failed(error) => {
                     self.recovery.checkpoint_failed = true;
                     if let Some(ticket) = &self.recovery.checkpoint_ticket {
                         ticket.record_failure(&error);
                     }
-                    errors.push(error.into());
+                    self.record_error("Could not save session checkpoint", &error);
                 }
+                CheckpointEvent::ArchiveFailed(error) => {
+                    self.record_error("Could not save output archive", &error);
+                }
+                CheckpointEvent::Finished => self.recovery.checkpoint_finished = true,
             }
-        }
-        for e in errors {
-            self.record_error("Could not save session checkpoints", &e);
         }
         if self.recovery.saves.is_empty()
             && let Some(ticket) = self.recovery.checkpoint_ticket.take()
         {
-            let accepted = !self.recovery.checkpoint_failed && self.recovery.checkpoint_finished;
-            if !accepted && ticket.failure().is_none() {
-                ticket.record_failure("Session checkpoint worker ended before its final receipt");
-            }
-            ticket
-                .state
-                .store(if accepted { 1 } else { 2 }, Ordering::Release);
-        }
-    }
-    fn archived_agent(
-        &self,
-        scope: SpaceId,
-        session: &str,
-        window: &str,
-        pane: &str,
-    ) -> Option<ArchivedAgent> {
-        let binding = self.workspace.binding(scope)?;
-        let scope_id = scope.persistence_value().to_string();
-        let handle = self.binding_target_handle(scope, binding.mux().binding_generation());
-        if let Some(service) = self.terminal_agent_service() {
-            for record in service
-                .records()
-                .into_iter()
-                .filter(|record| record.binding_id == scope_id)
-            {
-                let Some(exact) = bootty_mux::target::exact_mux_target(
-                    scope,
-                    binding.mux(),
-                    &record.target,
-                    &handle,
-                ) else {
-                    continue;
-                };
-                if exact.ids() != (Some(session), Some(window), Some(pane)) {
-                    continue;
-                }
-                let session = if record.provider == AgentKind::Pi {
-                    record
-                        .observation
-                        .session_file
-                        .or(record.observation.session_id)
+            ticket.state.store(
+                if self.recovery.checkpoint_failed || !self.recovery.checkpoint_finished {
+                    2
                 } else {
-                    record.observation.session_id
-                }?;
-                let launch = record.launch.retained(record.provider);
-                if launch.ephemeral
-                    || launch.account_directory.is_none()
-                    || launch
-                        .session_arguments(record.provider, &session, false)
-                        .is_err()
-                {
-                    return None;
-                }
-                return Some(ArchivedAgent {
-                    provider: record.provider,
-                    session,
-                    launch,
-                });
-            }
+                    1
+                },
+                Ordering::Release,
+            );
         }
-        let service = self.agent_service()?;
-        for provider in AgentKind::ALL {
-            let state = service.snapshot_scoped(provider, Some(&scope_id), Some(pane));
-            let Some(launch) = state.launch.map(|launch| launch.retained(provider)) else {
-                continue;
-            };
-            let session = match provider {
-                AgentKind::Pi => state.session_file.or(state.session_id),
-                AgentKind::Codex => state.thread_id,
-                AgentKind::Claude => state.session_id,
-            };
-            let Some(session) = session else {
-                continue;
-            };
-            if launch.ephemeral || launch.session_arguments(provider, &session, false).is_err() {
-                continue;
-            }
-            return Some(ArchivedAgent {
-                provider,
-                session,
-                launch,
-            });
-        }
-        None
     }
+
     fn checkpoint_specs(&self) -> Vec<ArchiveCapture> {
         let mut specs = Vec::new();
         for binding in self.workspace.all_bindings() {
@@ -426,7 +328,7 @@ impl AppState {
             let fingerprint = remote
                 .and_then(|r| serde_json::to_vec(r).ok())
                 .map_or_else(|| "local".into(), |v| fingerprint(&v));
-            let backend = format!("{:?}", binding.multiplexer().backend).to_lowercase();
+            let backend = "native".to_owned();
             for session in binding.member_sessions() {
                 for window in &session.windows {
                     for anchor in std::iter::once(&window.anchor).chain(&window.panes) {
@@ -442,7 +344,6 @@ impl AppState {
                                 host: host.clone(),
                                 fingerprint: fingerprint.clone(),
                                 backend: backend.clone(),
-                                agent: self.archived_agent(scope, &session.id, &window.id, pane),
                             });
                         }
                     }
@@ -584,7 +485,7 @@ impl AppState {
         Some(ticket)
     }
     fn prepare_checkpoint_capture(
-        &mut self,
+        &self,
         specs: Vec<ArchiveCapture>,
         captured_at: i64,
         saved_at_ms: u64,
@@ -606,8 +507,7 @@ impl AppState {
             .transpose()?;
         let mut panes = Vec::new();
         for spec in specs {
-            let (capture, cwd) = self.capture_checkpoint_pane(&spec)?;
-            let pane = spec.pane.clone();
+            let capture = self.capture_checkpoint_pane(&spec)?;
             let archive = if self.config().session.output_archives
                 && *archive_count < crate::recovery::MAX_ARCHIVES
             {
@@ -616,41 +516,26 @@ impl AppState {
             } else {
                 None
             };
-            panes.push(PendingArchive {
-                archive,
-                pane,
-                cwd,
-                capture,
-            });
+            panes.push(PendingArchive { archive, capture });
         }
         // Every capture must queue successfully before this complete session can replace its prior state.
         Ok(PendingSessionCheckpoint { prepared, panes })
     }
 
-    fn checkpoint_capture_pending(&mut self, spec: &ArchiveCapture) -> bool {
-        let Some(binding) = self.workspace.binding(spec.scope) else {
-            return false;
-        };
-        let topology = binding.backend_policy().panes.topology;
-        if topology == bootty_mux::provider::PaneTopology::Attach
-            || (topology == bootty_mux::provider::PaneTopology::BackendReconciled
-                && binding.terminal().can_capture_without_renderer()
-                && !binding.has_restored_terminal_pane(&spec.pane))
-        {
-            return false;
-        }
+    fn checkpoint_capture_pending(&self, spec: &ArchiveCapture) -> bool {
         self.workspace
-            .space_terminal_runtime(spec.scope, &spec.pane)
-            .map_or(
-                topology == bootty_mux::provider::PaneTopology::ProcessLocal,
-                |runtime| matches!(runtime.started(), Ok(false)),
-            )
+            .binding(spec.scope)
+            .is_some_and(|binding| !binding.mux().has_session_snapshot())
     }
 
     fn capture_checkpoint_pane(
-        &mut self,
+        &self,
         spec: &ArchiveCapture,
-    ) -> anyhow::Result<(PendingCapture, Option<String>)> {
+    ) -> anyhow::Result<
+        bootty_terminal::terminal_session::PendingWorkerResponse<
+            Result<SessionPaneCapture, String>,
+        >,
+    > {
         let options = CaptureOptions {
             scope: CaptureScope::History,
             format: CaptureFormat::Ansi,
@@ -658,72 +543,8 @@ impl AppState {
             max_bytes: crate::recovery::MAX_TEXT,
             ..Default::default()
         };
-        let topology = self
-            .workspace
-            .binding(spec.scope)
-            .map(|binding| binding.backend_policy().panes.topology);
-        let backend_capture = self
-            .workspace
-            .binding(spec.scope)
-            .is_some_and(|binding| binding.terminal().can_capture_without_renderer());
-        if topology != Some(bootty_mux::provider::PaneTopology::Attach)
-            && let Some(runtime) = self
-                .workspace
-                .space_terminal_runtime(spec.scope, &spec.pane)
-            && (!backend_capture || runtime.started()?)
-        {
-            let cwd = runtime
-                .current_working_directory()?
-                .map(|reported| {
-                    // OSC 7 reports a file URI; persisted restore directories are host paths.
-                    if std::path::Path::new(&reported).is_absolute() {
-                        return Ok(reported);
-                    }
-                    let mut uri = url::Url::parse(&reported).map_err(|_| {
-                        anyhow::anyhow!("Terminal directory is not a valid file URI")
-                    })?;
-                    anyhow::ensure!(
-                        uri.scheme() == "file",
-                        "Terminal directory is not a file URI"
-                    );
-                    if let Some(host) = uri.host_str() {
-                        let local_host = sysinfo::System::host_name();
-                        anyhow::ensure!(
-                            host.eq_ignore_ascii_case("localhost")
-                                || local_host
-                                    .as_deref()
-                                    .is_some_and(|local| host.eq_ignore_ascii_case(local)),
-                            "Terminal directory URI does not name this host"
-                        );
-                        uri.set_host(Some("localhost")).map_err(|_| {
-                            anyhow::anyhow!("Terminal directory URI host is invalid")
-                        })?;
-                    }
-                    let path = uri.to_file_path().map_err(|()| {
-                        anyhow::anyhow!("Terminal directory URI does not name a local host path")
-                    })?;
-                    path.into_os_string()
-                        .into_string()
-                        .map_err(|_| anyhow::anyhow!("Terminal directory is not valid UTF-8"))
-                })
-                .transpose()?;
-            return runtime
-                .capture_checkpoint(options)
-                .map(|capture| (PendingCapture::Queued(capture), cwd));
-        }
-        // Backend-owned panes can checkpoint before their display stream's first frame.
-        let binding = self
-            .workspace
-            .binding(spec.scope)
-            .filter(|binding| binding.addresses_backend_panes())
-            .context("Session checkpoint pane is unavailable")?;
-        let capture = binding.checkpoint_pane_capture(&spec.pane, options);
-        Ok((
-            PendingCapture::Backend(Box::new(move || {
-                capture().map_err(|error| error.to_string())
-            })),
-            None,
-        ))
+        self.workspace
+            .capture_session_pane(spec.scope, &spec.pane, options)
     }
 
     fn checkpoint_archive(&self, spec: ArchiveCapture, saved_at_ms: u64) -> OutputArchive {
@@ -744,7 +565,6 @@ impl AppState {
             rows: 0,
             omitted_lines: 0,
             text: String::new(),
-            agent: spec.agent,
         }
     }
     /// Whether a requested checkpoint still has capture or persistence work outstanding.
@@ -809,16 +629,10 @@ impl PendingSessionCheckpoint {
         let mut captures = Vec::new();
         let mut archives = Vec::new();
         for mut item in self.panes {
-            let mut capture = match item.capture {
-                // The budget only bounds a stalled worker; it never covers network round trips.
-                PendingCapture::Queued(response) => {
-                    response.receive_for("checkpoint terminal", Duration::from_secs(5))?
-                }
-                // Network captures already run off the UI thread. Keep ownership until the
-                // backend answers so later checkpoints cannot overlap an abandoned request.
-                PendingCapture::Backend(capture) => capture(),
-            }
-            .map_err(anyhow::Error::msg)?;
+            let mut capture = item
+                .capture
+                .receive_for("checkpoint terminal", Duration::from_secs(5))?
+                .map_err(anyhow::Error::msg)?;
             capture.text = bootty_terminal::terminal_history::sanitize_history(&capture.text)?;
             if let Some(archive) = &mut item.archive {
                 archive.cols = capture.cols;
@@ -827,14 +641,7 @@ impl PendingSessionCheckpoint {
                 archive.text =
                     bootty_terminal::terminal_history::history_plain_text(&capture.text)?;
             }
-            captures.push(SessionPaneCapture {
-                pane_id: item.pane,
-                cwd: item.cwd,
-                cols: capture.cols,
-                rows: capture.rows,
-                omitted_lines: capture.omitted_lines,
-                text: capture.text,
-            });
+            captures.push(capture);
             archives.extend(item.archive);
         }
         let saved = self

@@ -25,7 +25,6 @@ pub struct SessionProgressView {
 pub struct SessionView {
     pub id: String,
     pub identity: Option<String>,
-    pub detached: bool,
     /// The backend's name, which is what every command and every membership record targets.
     pub name: String,
     /// The name bootty shows, free of any uniqueness suffix the backend name needed. Empty means

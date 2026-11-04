@@ -5,7 +5,7 @@ use super::{
     },
     tls::Identity,
 };
-use anyhow::{Result, bail};
+use anyhow::{Context as _, Result, bail};
 use bytes::Bytes;
 use quinn::{Connection, Endpoint};
 use rustls::pki_types::CertificateDer;
@@ -17,7 +17,7 @@ use std::{
 /// One pinned, mutually authenticated connection shared by every remote process.
 pub struct RemoteLink {
     transport: Transport,
-    tunnel: Option<rmux_os::process_tree::ProcessTreeChild>,
+    tunnel: Option<bootty_os::process_tree::ProcessTreeChild>,
 }
 
 enum Transport {
@@ -91,15 +91,27 @@ impl RemoteLink {
                 socket,
             )
             .await?;
-        let (client, connection) = h2::client::Builder::new()
+        let (client, mut connection) = h2::client::Builder::new()
             .initial_window_size(2 * 1024 * 1024)
             .initial_connection_window_size(16 * 1024 * 1024)
             .max_send_buffer_size(protocol::CHUNK)
             .handshake(socket)
             .await?;
         let (closed_tx, closed) = tokio::sync::watch::channel(false);
+        let mut ping = connection
+            .ping_pong()
+            .context("remote TLS ping unavailable")?;
         let driver = tokio::spawn(async move {
-            _ = connection.await;
+            let heartbeat = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::time::timeout(Duration::from_secs(10), ping.ping(h2::Ping::opaque()))
+                        .await??;
+                }
+                #[expect(unreachable_code, reason = "heartbeat runs until a transport failure")]
+                Ok::<(), anyhow::Error>(())
+            };
+            tokio::select! { _ = connection => {}, _ = heartbeat => {} }
             _ = closed_tx.send(true);
         });
         let link = Self {
@@ -126,7 +138,7 @@ impl RemoteLink {
         Ok(())
     }
 
-    pub(super) fn with_tunnel(mut self, tunnel: rmux_os::process_tree::ProcessTreeChild) -> Self {
+    pub(super) fn with_tunnel(mut self, tunnel: bootty_os::process_tree::ProcessTreeChild) -> Self {
         self.tunnel = Some(tunnel);
         self
     }
@@ -147,6 +159,31 @@ impl RemoteLink {
         let (mut input, output) = self.open_stream().await?;
         protocol::write_json(&mut input, request).await?;
         Ok(RemoteProcess { input, output })
+    }
+
+    /// Open a raw native mux protocol stream after authenticating this route.
+    /// # Errors
+    /// Returns a missing bridge capability or stream failure.
+    pub async fn open_mux(&self, namespace: &str) -> Result<super::mux::MuxStream> {
+        use tokio::io::AsyncReadExt as _;
+        let (mut input, mut output) = self.open_stream().await?;
+        protocol::write_frame(&mut input, protocol::MUX, namespace.as_bytes()).await?;
+        if output
+            .read_u8()
+            .await
+            .context("remote daemon lacks native mux bridge capability")?
+            != 1
+        {
+            bail!("remote daemon lacks the native mux bridge");
+        }
+        Ok(super::mux::MuxStream::new(tokio::io::join(output, input)))
+    }
+
+    pub(super) fn close(&self) {
+        match &self.transport {
+            Transport::Quic { connection, .. } => connection.close(0_u32.into(), b"route replaced"),
+            Transport::Tcp { driver, .. } => driver.abort(),
+        }
     }
 
     pub(super) async fn open_stream(&self) -> Result<(RemoteWriter, RemoteReader)> {

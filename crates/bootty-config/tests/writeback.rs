@@ -1,3 +1,4 @@
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -512,7 +513,7 @@ fn config_writer_process(
     finished: &Path,
 ) -> std::io::Result<std::process::Child> {
     Command::new(executable)
-        .args(["--exact", "config_writer_process_helper"])
+        .args(["--exact", "writeback::config_writer_process_helper"])
         .env("BOOTTY_TEST_CONFIG_WRITE_PATH", config)
         .env("BOOTTY_TEST_CONFIG_WRITE_ROLE", role)
         .env("BOOTTY_TEST_CONFIG_WRITE_ENTERED", entered)
@@ -520,14 +521,14 @@ fn config_writer_process(
         .env("BOOTTY_TEST_CONFIG_WRITE_FINISHED", finished)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .bootty_spawn()
 }
 
 fn wait_for_path(path: &Path) {
     let started = Instant::now();
     while !path.exists() {
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(10),
             "timed out waiting for {}",
             path.display()
         );

@@ -7,9 +7,7 @@ use bootty::cli::Cli;
 use bootty_config::{
     FontFeature,
     color::Color,
-    config::{
-        AppearanceMode, AppearanceVariant, BoottyConfig, MultiplexerBackendConfig, SshRemoteConfig,
-    },
+    config::{AppearanceMode, AppearanceVariant, BoottyConfig},
 };
 use clap::Parser;
 use pretty_assertions::assert_eq;
@@ -178,42 +176,6 @@ fn invalid_font_feature_reports_the_rejected_value(config_dir: TempDir) {
         .expect_err("invalid font feature must fail");
 
     assert_eq!(error.to_string(), "invalid font feature: toolong");
-}
-
-proptest! {
-    /// Property: replacing an SSH host preserves every independently configured remote field.
-    #[test]
-    fn ssh_host_override_changes_only_the_host(host in "[a-z][a-z0-9-]{0,30}") {
-        let directory = TempDir::new().expect("temporary config directory");
-        let config = load_with_overrides(
-            &directory,
-            r#"
-                [multiplexer]
-                backend = "tmux"
-
-                [multiplexer.remote]
-                host = "old-host"
-                user = "dev"
-                port = 2222
-                program = "ssh-wrapper"
-                args = ["-i", "key"]
-            "#,
-            &["--ssh-remote".to_owned(), host.clone()],
-        )
-        .expect("apply SSH host override");
-
-        assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Tmux);
-        assert_eq!(
-            config.multiplexer.remote,
-            Some(SshRemoteConfig {
-                host,
-                user: Some("dev".to_owned()),
-                port: Some(2222),
-                program: "ssh-wrapper".to_owned(),
-                args: vec!["-i".to_owned(), "key".to_owned()],
-            }.into())
-        );
-    }
 }
 
 proptest! {

@@ -80,7 +80,7 @@ fn engine_streaming_and_replay_keep_clipboard_effects_separate(#[case] chunk: us
             b"type=write:id=x".to_vec()
         )]
     );
-    engine.write_vt_without_pty_responses(packet);
+    engine.import_history(packet);
     assert_eq!(
         engine.drain_side_effects(),
         vec![TerminalSideEffect::ClipboardReset]
@@ -112,12 +112,12 @@ fn replay_cancels_live_clipboard_assembly_even_without_clipboard_data() {
     .unwrap();
     engine.write_vt(b"\x1b]5522;type=write\x07");
     engine.drain_side_effects();
-    engine.write_vt_without_pty_responses(b"restored screen");
+    engine.import_history(b"restored screen");
     assert_eq!(
         engine.drain_side_effects(),
         vec![TerminalSideEffect::ClipboardReset]
     );
-    engine.write_vt_without_pty_responses(b"another frame");
+    engine.import_history(b"another frame");
     assert_eq!(
         engine.drain_side_effects(),
         Vec::<bootty_terminal::terminal_engine::TerminalSideEffect>::new()

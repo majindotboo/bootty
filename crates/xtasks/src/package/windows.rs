@@ -8,15 +8,12 @@ use anyhow::{Context, Result, bail};
 use zip::CompressionMethod;
 use zip::write::{SimpleFileOptions, ZipWriter};
 
-use super::{Args, Layout, Linkage, print_dist_files};
+use super::{Args, Layout, print_dist_files};
 use crate::command;
 use crate::daemon::{DaemonTarget, TARGETS};
 use crate::filesystem::{copy_file, files_recursive, recreate_dir};
 
-pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
-    if args.dev {
-        bail!("Windows packaging does not support --dev");
-    }
+pub(super) fn run(_args: Args, layout: &Layout) -> Result<()> {
     let host_daemon = build_daemon(layout)?;
 
     let architecture = if cfg!(target_arch = "aarch64") {
@@ -38,11 +35,6 @@ pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
         bail!("expected built binary at {}", binary.display());
     }
     copy_file(&binary, &bundle_root.join("bootty.exe"))?;
-    copy_file(
-        &profile_dir.join("bootty-voice.exe"),
-        &bundle_root.join("bootty-voice.exe"),
-    )?;
-    crate::voice_runtime::bundle(&layout.target_root, &bundle_root)?;
 
     copy_file(&host_daemon, &bundle_root.join("bootty-daemon.exe"))?;
     if layout.all_daemons {
@@ -58,9 +50,6 @@ pub(super) fn run(args: Args, layout: &Layout) -> Result<()> {
         }
     }
 
-    if layout.linkage == Linkage::Dynamic {
-        copy_dynamic_libraries(&profile_dir, &bundle_root)?;
-    }
     copy_runtime_library(&profile_dir, &bundle_root, "ghostty-vt.dll")?;
 
     let archive = layout.dist_dir.join(format!("{bundle_name}.zip"));
@@ -75,52 +64,20 @@ fn build_daemon(layout: &Layout) -> Result<PathBuf> {
             .daemon_output_dir
             .join(DaemonTarget::X86_64PcWindowsMsvc.artifact_name()))
     } else {
-        command::run(
-            Command::new("cargo")
-                .arg("build")
-                .args(layout.daemon_profile_args())
-                .args(["-p", "bootty-daemon", "--bin", "bootty-daemon"])
-                .env("RUSTFLAGS", ""),
-        )?;
-        Ok(layout
-            .target_root
-            .join(layout.daemon_profile)
-            .join("bootty-daemon.exe"))
+        command::run(Command::new("cargo").arg("build").arg("--release").args([
+            "-p",
+            "bootty-daemon",
+            "--bin",
+            "bootty-daemon",
+        ]))?;
+        Ok(layout.target_root.join("release").join("bootty-daemon.exe"))
     }
 }
 
 fn build_bootty(layout: &Layout) -> Result<()> {
-    crate::build::run_with_features(
-        &crate::build::BuildArgs {
-            fast: layout.profile == "fast-release",
-            static_linkage: layout.linkage == Linkage::Static,
-        },
-        false,
-    )
-}
-
-fn copy_dynamic_libraries(profile_dir: &Path, bundle_root: &Path) -> Result<()> {
-    let rustc_libdir =
-        command::stdout(std::process::Command::new("rustc").args(["--print", "target-libdir"]))?;
-    for directory in [profile_dir.join("deps"), PathBuf::from(rustc_libdir.trim())] {
-        if !directory.is_dir() {
-            continue;
-        }
-        for entry in fs::read_dir(&directory)
-            .with_context(|| format!("failed to read {}", directory.display()))?
-        {
-            let entry = entry?;
-            let path = entry.path();
-            if path.is_file()
-                && path
-                    .extension()
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("dll"))
-            {
-                copy_file(&path, &bundle_root.join(entry.file_name()))?;
-            }
-        }
-    }
-    Ok(())
+    crate::build::run(&crate::build::BuildArgs {
+        release: layout.profile == "release",
+    })
 }
 
 fn copy_runtime_library(profile_dir: &Path, bundle_root: &Path, name: &str) -> Result<()> {

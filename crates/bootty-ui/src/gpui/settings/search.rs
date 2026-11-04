@@ -182,7 +182,6 @@ fn row_search_parts(row: &SettingsRow) -> Vec<String> {
             id, label, help, ..
         } => vec![id.clone(), label.clone(), help.clone()],
         SettingsRow::AnsiPalette { label, help, .. } => vec![label.clone(), help.clone()],
-        SettingsRow::ModuleIntegrations(editor) => vec![editor.identity.clone()],
         SettingsRow::Remote(remote) => {
             let mut parts = vec![
                 remote.id.clone(),

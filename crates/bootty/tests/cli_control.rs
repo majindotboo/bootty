@@ -1,6 +1,7 @@
 #![cfg(test)]
 #![cfg(unix)]
 
+use bootty_os::spawn::CommandSpawn as _;
 use clap::Parser as _;
 use pretty_assertions::assert_eq;
 
@@ -29,10 +30,9 @@ fn app_command_channel(capacity: usize) -> (AppCommandSender, AppCommandReceiver
 fn one_executable_uses_the_live_owner_without_a_second_gui() {
     let runtime = assert_fs::TempDir::new().expect("temporary runtime directory");
     let status = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "cli_control_helper"])
+        .args(["--exact", "cli_control::cli_control_helper"])
         .env(HELPER_ENV, "1")
         .env("XDG_RUNTIME_DIR", runtime.path())
-        .env("RMUX_TMPDIR", runtime.path())
         .env("HOME", runtime.path().join("home"))
         .env("USERPROFILE", runtime.path().join("home"))
         .env("XDG_CONFIG_HOME", runtime.path().join("config"))
@@ -41,7 +41,7 @@ fn one_executable_uses_the_live_owner_without_a_second_gui() {
         .env("APPDATA", runtime.path().join("config"))
         .env("PATH", "/usr/bin:/bin")
         .env_remove("BASH_ENV")
-        .status()
+        .bootty_status()
         .expect("run isolated CLI control check");
 
     assert!(status.success());
@@ -76,22 +76,20 @@ fn cli_control_helper() {
         .expect("complete CLI command");
     assert!(child.join().unwrap().unwrap());
 
-    let event = r#"{"type":"session_start"}"#;
+    let event = r#"{"text":"ls"}"#;
     let stdin_event = invoke(
-        &["command", "agents.pi.ingest", "--stdin-json"],
+        &["command", "files.complete", "--stdin-json"],
         serde_json::to_vec(&[event, "%1"]).unwrap(),
     );
     let request = receive_request(&receiver);
-    assert_eq!(request.invocation.command, "agents.pi.ingest");
+    assert_eq!(request.invocation.command, "files.complete");
     assert_eq!(request.invocation.arguments, vec![event, "%1"]);
     request.response.send(CommandOutcome::success()).unwrap();
     assert!(stdin_event.join().unwrap().unwrap());
 
-    let payload =
-        serde_json::json!({"hook_event_name":"PostToolUse", "result":"x".repeat(128 * 1024)})
-            .to_string();
+    let payload = serde_json::json!({"text":"x".repeat(128 * 1024)}).to_string();
     let raw_event = invoke(
-        &["command", "agents.codex.ingest", "--stdin", "%1", ""],
+        &["command", "jobs.read", "--stdin", "%1", ""],
         payload.as_bytes().to_vec(),
     );
     let request = receive_request(&receiver);
@@ -103,9 +101,9 @@ fn cli_control_helper() {
     assert!(raw_event.join().unwrap().unwrap());
 
     for (arguments, expected) in [
-        (vec!["agents.pi.start"], vec![]),
-        (vec!["agents.pi.state"], vec![]),
-        (vec!["agents.pi.ingest", event, "%1"], vec![event, "%1"]),
+        (vec!["new_tab"], vec![]),
+        (vec!["jobs.list"], vec![]),
+        (vec!["files.complete", event, "%1"], vec![event, "%1"]),
     ] {
         let child = spawn_bootty(&arguments);
         let request = receive_request(&receiver);
@@ -133,38 +131,38 @@ fn assert_targeted_commands_use_live_owner(receiver: &AppCommandReceiver) {
     // Both CLI paths deliver the same exact target, wherever `--target` appears.
     let target = Some(bootty_control::CommandTarget {
         kind: bootty_control::ResourceKind::Session,
-        handle: "native:claude:26".to_owned(),
+        handle: "session-26".to_owned(),
         generation: 43,
     });
     for arguments in [
         &[
             "command",
-            "agents.native.status",
+            "terminal.create_tab",
             "--target",
-            "native:claude:26@43",
-            "native:claude:26",
+            "session-26@43",
+            "session-26",
             "43",
         ][..],
         &[
             "command",
-            "agents.native.status",
-            "native:claude:26",
+            "terminal.create_tab",
+            "session-26",
             "43",
             "--target",
-            "native:claude:26@43",
+            "session-26@43",
         ],
         &[
-            "agents.native.status",
+            "terminal.create_tab",
             "--target",
-            "native:claude:26@43",
-            "native:claude:26",
+            "session-26@43",
+            "session-26",
             "43",
         ],
     ] {
         let child = spawn_bootty(arguments);
         let request = receive_request(receiver);
-        assert_eq!(request.invocation.command, "agents.native.status");
-        assert_eq!(request.invocation.arguments, vec!["native:claude:26", "43"]);
+        assert_eq!(request.invocation.command, "terminal.create_tab");
+        assert_eq!(request.invocation.arguments, vec!["session-26", "43"]);
         assert_eq!(request.invocation.target, target, "{arguments:?}");
         request.response.send(CommandOutcome::success()).unwrap();
         assert!(child.join().unwrap().unwrap());
@@ -172,15 +170,15 @@ fn assert_targeted_commands_use_live_owner(receiver: &AppCommandReceiver) {
     let targeted_stdin = invoke(
         &[
             "command",
-            "agents.native.status",
+            "terminal.create_tab",
             "--target",
-            "native:claude:26@43",
+            "session-26@43",
             "--stdin-json",
         ],
-        br#"["native:claude:26","43"]"#.to_vec(),
+        br#"["session-26","43"]"#.to_vec(),
     );
     let request = receive_request(receiver);
-    assert_eq!(request.invocation.arguments, vec!["native:claude:26", "43"]);
+    assert_eq!(request.invocation.arguments, vec!["session-26", "43"]);
     assert_eq!(request.invocation.target, target);
     request.response.send(CommandOutcome::success()).unwrap();
     assert!(targeted_stdin.join().unwrap().unwrap());
@@ -228,7 +226,7 @@ fn assert_bare_invocation_uses_live_owner() {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()
+        .bootty_spawn()
         .expect("start bare Bootty invocation");
     let deadline = Instant::now()
         .checked_add(CLI_BUDGET)

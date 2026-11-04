@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use regex::{Regex, RegexBuilder};
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalSearchOptions {
     pub regex: bool,
     pub case_sensitive: bool,

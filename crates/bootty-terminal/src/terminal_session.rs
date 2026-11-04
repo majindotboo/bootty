@@ -4,7 +4,7 @@ use crate::terminal_search::TerminalSearchOptions;
 use num_traits::ToPrimitive as _;
 use std::{
     fmt::{self, Display, Formatter},
-    io::{Read, Write},
+    io::Write,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -17,9 +17,10 @@ use std::{
 
 use crate::benchmark_trace::{BenchmarkTrace, TraceValue};
 pub use crate::pty_backlog::DrainStats;
-use crate::pty_backlog::{PtyBacklog, drain_pty_backlog, drain_pty_backlog_with_limits};
+use crate::terminal_output::{OutputQueue, OutputSlice, TerminalOutput};
+use crate::terminal_transport::{TerminalControl, TerminalTransport};
 use anyhow::{Context, Result};
-use portable_pty::{MasterPty, PtySize};
+use portable_pty::PtySize;
 
 use crate::geometry::{CellMetrics, TerminalGeometry};
 use crate::{
@@ -94,7 +95,7 @@ pub struct TerminalSessionConfig {
     /// Saved text and styles initialized before the worker consumes any live process output.
     pub restored_history: Option<std::sync::Arc<str>>,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SessionLaunchConfig {
     pub shell_integration: bool,
     pub shell: Option<String>,
@@ -110,6 +111,9 @@ pub struct SessionLaunchConfig {
     /// that spawn the pane's own PTY know it, so it stays unset for a tmux attach, where tmux
     /// exports the same id as `$TMUX_PANE`.
     pub pane_id: Option<String>,
+    /// Client process environment; `None` inherits the process that spawns the PTY.
+    #[serde(default)]
+    pub base_environment: Option<Vec<(std::ffi::OsString, std::ffi::OsString)>>,
     pub env: Vec<(String, String)>,
     pub env_remove: Vec<String>,
     pub term: String,
@@ -127,6 +131,7 @@ impl Default for SessionLaunchConfig {
             command_is_argv: false,
             working_directory: None,
             pane_id: None,
+            base_environment: None,
             env: Vec::new(),
             env_remove: Vec::new(),
             term: TERMINAL_TERM.to_owned(),
@@ -146,8 +151,15 @@ pub struct TerminalSession {
     geometry: TerminalGeometry,
     display_scale: f32,
     render_cell: CellMetrics,
-    child: crate::terminal_launch::OwnedChild,
+    control: Arc<dyn TerminalControl>,
     tty_name: Option<String>,
+}
+
+impl Drop for TerminalSession {
+    fn drop(&mut self) {
+        self.control.close();
+        let _ = self.command_tx.send(TerminalCommand::Stop);
+    }
 }
 
 type RepaintWakeup = Arc<dyn Fn() + Send + Sync + 'static>;
@@ -305,6 +317,17 @@ impl<T> WorkerRequest<T> {
 }
 
 impl<T> PendingWorkerResponse<T> {
+    /// Polls without waiting for the worker.
+    /// # Errors
+    /// Returns an error when the worker disconnected.
+    pub fn try_receive(&self) -> Result<Option<T>> {
+        match self.receiver.try_recv() {
+            Ok(value) => Ok(Some(value)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => anyhow::bail!("terminal worker disconnected"),
+        }
+    }
+
     /// Waits for the worker response, naming `operation` in any error.
     ///
     /// # Errors
@@ -357,6 +380,7 @@ impl<T> PendingWorkerResponse<T> {
 }
 
 enum TerminalCommand {
+    Stop,
     PtyReady,
     DisplayScale {
         display_scale: f32,
@@ -481,23 +505,20 @@ impl TerminalSession {
         repaint_wakeup: RepaintWakeup,
         clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     ) -> Result<Self> {
+        // Reject unsafe history before any process runs.
         let restored_history = config
             .restored_history
             .as_deref()
             .map(crate::terminal_history::styled_history_bytes)
             .transpose()?;
         let pty_size = physical_pty_size(geometry, render_cell, display_scale);
-        let (pty_master, child, tty_name) =
-            crate::terminal_launch::spawn(pty_size, &config.launch)?.into_parts();
-        let mut reader = pty_master.try_clone_reader()?;
-        // portable-pty's Unix writer sends newline + Ctrl+D on drop. An attachment must
-        // close without injecting input into a persistent backend pane.
-        #[cfg(unix)]
-        let writer: Box<dyn Write + Send> = Box::new(filedescriptor::FileDescriptor::dup(
-            &pty_master.as_raw_fd().context("terminal PTY descriptor")?,
-        )?);
-        #[cfg(not(unix))]
-        let writer = pty_master.take_writer()?;
+        let transport = TerminalTransport::launch(pty_size, &config.launch)?;
+        let TerminalTransport {
+            mut reader,
+            writer,
+            control,
+            tty_name,
+        } = transport;
         let pty_writer = Arc::new(Mutex::new(writer));
         let (pty_tx, pty_rx) = mpsc::sync_channel(MAX_READER_QUEUE_CHUNKS);
         let (command_tx, command_rx) = mpsc::channel();
@@ -505,12 +526,8 @@ impl TerminalSession {
         let pty_wakeup_pending = Arc::new(AtomicBool::new(false));
         let reader_wakeup_pending = Arc::clone(&pty_wakeup_pending);
         thread::spawn(move || {
-            let mut buf = [0_u8; PTY_READ_BYTES];
-            while let Ok(n) = reader.read(&mut buf) {
-                let Some(bytes) = buf.get(..n) else {
-                    break;
-                };
-                if bytes.is_empty() || pty_tx.send(bytes.to_vec()).is_err() {
+            while let Ok(Some(output)) = reader.next_output() {
+                if pty_tx.send(output).is_err() {
                     break;
                 }
                 if !reader_wakeup_pending.swap(true, Ordering::AcqRel)
@@ -543,8 +560,9 @@ impl TerminalSession {
             features: config.features,
             max_scrollback: config.max_scrollback,
             restored_history,
+
             macos_option_as_alt: config.macos_option_as_alt,
-            pty_master,
+            control: Arc::clone(&control),
             pty_rx,
             pty_wakeup_pending,
             pty_writer,
@@ -571,7 +589,7 @@ impl TerminalSession {
             geometry,
             display_scale,
             render_cell,
-            child,
+            control,
             tty_name,
         })
     }
@@ -682,7 +700,7 @@ impl TerminalSession {
     /// Returns an error if the worker failed or the shell process cannot be polled.
     pub fn child_exited(&mut self) -> Result<bool> {
         self.check_worker_error()?;
-        self.child.exited()
+        self.control.exited()
     }
 
     #[must_use]
@@ -849,12 +867,13 @@ impl TerminalSession {
     ///
     /// # Errors
     /// Returns an error if the worker fails, times out, disconnects, or rejects the requested terminal operation.
-    pub fn format_selection(&mut self, format: TerminalSelectionFormat) -> Result<Option<Vec<u8>>> {
+    pub fn format_selection(
+        &mut self,
+        format: TerminalSelectionFormat,
+    ) -> Result<PendingWorkerResponse<std::result::Result<Option<Vec<u8>>, String>>> {
         let (done, response) = worker_request();
         self.send_command(TerminalCommand::FormatSelection { format, done })?;
-        response
-            .receive("formatting selection")?
-            .map_err(anyhow::Error::msg)
+        Ok(response)
     }
 
     ///
@@ -941,6 +960,10 @@ impl TerminalSession {
     }
 
     fn check_worker_error(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.control.is_connected(),
+            "native pane disconnected; reconnecting"
+        );
         if let Some(failure) = self.worker_health.take()? {
             anyhow::bail!(failure);
         }
@@ -959,9 +982,10 @@ struct TerminalWorkerConfig {
     features: TerminalFeatureConfig,
     max_scrollback: usize,
     restored_history: Option<Vec<u8>>,
+
     macos_option_as_alt: MacosOptionAsAlt,
-    pty_master: Box<dyn MasterPty + Send>,
-    pty_rx: Receiver<Vec<u8>>,
+    control: Arc<dyn TerminalControl>,
+    pty_rx: Receiver<TerminalOutput>,
     pty_wakeup_pending: Arc<AtomicBool>,
     pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
     command_rx: Receiver<TerminalCommand>,
@@ -1010,11 +1034,12 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
                 return;
             }
         };
-        if let Some(history) = &config.restored_history {
-            engine.write_vt_without_pty_responses(history);
-        }
         engine.set_display_scale(config.display_scale);
         engine.set_render_cell_metrics(config.render_cell);
+        if let Some(history) = &config.restored_history {
+            engine.import_history(history);
+        }
+        drop(config.restored_history);
         let callback_writer = config.pty_writer.clone();
         let callback_health = Arc::clone(&config.worker_health);
         if let Err(error) = engine.on_pty_write(move |_terminal, bytes| {
@@ -1029,7 +1054,7 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             clock: config.clock,
             shell_prompt: ShellPrompt::default(),
             engine,
-            pty_master: config.pty_master,
+            control: config.control,
             pty_size: config.pty_size,
             pty_rx: config.pty_rx,
             pty_wakeup_pending: config.pty_wakeup_pending,
@@ -1046,7 +1071,7 @@ fn spawn_terminal_worker(config: TerminalWorkerConfig) -> Result<()> {
             super_key_input_tx: config.super_key_input_tx,
             benchmark_trace: config.benchmark_trace,
             output_buf: Vec::with_capacity(1024),
-            pending_pty: PtyBacklog::with_capacity(MAX_COLLECT_CHUNKS_PER_TICK),
+            pending_pty: OutputQueue::with_capacity(MAX_COLLECT_CHUNKS_PER_TICK),
             pending_resize_ack: None,
             last_frame_publish: now.checked_sub(WORKER_READY_FRAME_INTERVAL).unwrap_or(now),
             has_unpublished_frame: false,
@@ -1082,9 +1107,9 @@ struct TerminalWorker {
     clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     shell_prompt: ShellPrompt,
     engine: TerminalEngine,
-    pty_master: Box<dyn MasterPty + Send>,
+    control: Arc<dyn TerminalControl>,
     pty_size: PtySize,
-    pty_rx: Receiver<Vec<u8>>,
+    pty_rx: Receiver<TerminalOutput>,
     pty_wakeup_pending: Arc<AtomicBool>,
     pty_writer: Arc<Mutex<Box<dyn Write + Send>>>,
     command_rx: Receiver<TerminalCommand>,
@@ -1100,7 +1125,7 @@ struct TerminalWorker {
     side_effect_pane_id: Option<String>,
     super_key_input_tx: Option<Sender<Vec<u8>>>,
     output_buf: Vec<u8>,
-    pending_pty: PtyBacklog,
+    pending_pty: OutputQueue,
     last_frame_publish: Instant,
     has_unpublished_frame: bool,
     sync_output_since: Option<Instant>,
@@ -1126,6 +1151,9 @@ struct WorkerCommandStats {
 impl TerminalWorker {
     fn run(&mut self) {
         loop {
+            if self.command_disconnected {
+                break;
+            }
             let command_stats = self.process_commands();
             let mut did_work = command_stats.did_work;
             let mut terminal_changed = command_stats.terminal_changed;
@@ -1286,6 +1314,7 @@ impl TerminalWorker {
 
     fn process_command(&mut self, command: TerminalCommand, stats: &mut WorkerCommandStats) {
         match command {
+            TerminalCommand::Stop => self.command_disconnected = true,
             TerminalCommand::PtyReady => {}
             TerminalCommand::DisplayScale {
                 display_scale,
@@ -1321,7 +1350,7 @@ impl TerminalWorker {
             }
             TerminalCommand::RawInput(bytes) => self.raw_input_command(&bytes, stats),
             TerminalCommand::RestoreHistory(bytes) => {
-                self.engine.write_vt_without_pty_responses(&bytes);
+                self.engine.import_history(&bytes);
                 stats.terminal_changed = true;
             }
             TerminalCommand::MouseViewportScroll { delta } => {
@@ -1627,7 +1656,7 @@ impl TerminalWorker {
         if pty_size == self.pty_size {
             return;
         }
-        match self.pty_master.resize(pty_size) {
+        match self.control.resize(pty_size) {
             Ok(()) => self.pty_size = pty_size,
             Err(error) => self.worker_health.record("resize PTY pixels", error),
         }
@@ -1636,10 +1665,10 @@ impl TerminalWorker {
     fn resize(&mut self, geometry: TerminalGeometry, pty_size: PtySize) -> Result<()> {
         let previous = self.engine.geometry();
         let previous_pty_size = self.pty_size;
-        self.pty_master.resize(pty_size)?;
+        self.control.resize(pty_size)?;
         if let Err(error) = self.engine.resize(geometry) {
             let engine_rollback = self.engine.resize(previous).err();
-            let pty_rollback = self.pty_master.resize(previous_pty_size).err();
+            let pty_rollback = self.control.resize(previous_pty_size).err();
             if engine_rollback.is_none() && pty_rollback.is_none() {
                 return Err(error);
             }
@@ -1741,22 +1770,27 @@ impl TerminalWorker {
         let engine = &mut self.engine;
         let worker_health = Arc::clone(&self.worker_health);
         let mut observed_sync_output = synchronized_output_state(engine, &worker_health);
-        let mut write = |bytes: &[u8]| {
+        let mut apply = |OutputSlice::Bytes(bytes): OutputSlice<'_>| {
             engine.write_vt(bytes);
             observed_sync_output |= engine.take_synchronized_output_observed();
             observed_sync_output |= synchronized_output_state(engine, &worker_health);
         };
-        let stats = if self.force_next_frame_publish {
-            drain_pty_backlog_with_limits(
-                &mut self.pending_pty,
+        let (max_bytes, max_chunks, max_time) = if self.force_next_frame_publish {
+            (
                 INPUT_FAST_PATH_DRAIN_BYTES,
                 INPUT_FAST_PATH_DRAIN_CHUNKS,
                 INPUT_FAST_PATH_DRAIN_TIME_US,
-                &mut write,
             )
         } else {
-            drain_pty_backlog(&mut self.pending_pty, &mut write)
+            (
+                crate::pty_backlog::MAX_DRAIN_BYTES,
+                crate::pty_backlog::MAX_DRAIN_CHUNKS,
+                crate::pty_backlog::MAX_DRAIN_TIME_US,
+            )
         };
+        let stats = self
+            .pending_pty
+            .drain(max_bytes, max_chunks, max_time, &mut apply);
         self.sync_output_batch_pending |= observed_sync_output;
         if stats.bytes > 0 {
             self.publish_current_working_directory();

@@ -120,7 +120,6 @@ pub(super) fn migrate_task_lifecycle(tx: &Transaction<'_>) -> rusqlite::Result<(
     tx.execute_batch(
         "ALTER TABLE workspace_sessions ADD COLUMN session_state TEXT NOT NULL DEFAULT '{}';
          UPDATE workspace_sessions SET session_state = CASE task_lifecycle
-             WHEN 'settled' THEN '{\"lifecycle\":\"settled\"}'
              WHEN 'archived' THEN '{\"archived\":true}'
              ELSE '{}' END;",
     )
@@ -150,7 +149,11 @@ fn table_has_columns(conn: &Connection, table: &str, required: &[&str]) -> rusql
 
 pub(super) fn create_workspace_schema(tx: &Transaction<'_>) -> rusqlite::Result<()> {
     tx.execute_batch(
-        "CREATE TABLE IF NOT EXISTS workspace_spaces (
+        "CREATE TABLE IF NOT EXISTS workspace_remote_servers (
+            space_id INTEGER PRIMARY KEY REFERENCES workspace_spaces(id) ON DELETE CASCADE,
+            server_id TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS workspace_spaces (
             id INTEGER PRIMARY KEY,
             remote_id TEXT UNIQUE,
             name TEXT NOT NULL,

@@ -1,5 +1,6 @@
 //! Real Git behavior without the host runner's cancellation polling interval.
 use bootty_git::{CommandOutput, CommandRunner};
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     io::Write as _,
     process::{Command, Output, Stdio},
@@ -26,7 +27,7 @@ impl CommandRunner for RepositoryRunner {
             Command::new(program)
                 .args(args)
                 .envs(env.iter().copied())
-                .output()?,
+                .bootty_output()?,
         )
     }
 
@@ -39,7 +40,7 @@ impl CommandRunner for RepositoryRunner {
     }
 
     fn run(&self, program: &str, args: &[String]) -> anyhow::Result<CommandOutput> {
-        output(Command::new(program).args(args).output()?)
+        output(Command::new(program).args(args).bootty_output()?)
     }
 
     fn run_with_input(
@@ -54,7 +55,7 @@ impl CommandRunner for RepositoryRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()?;
+            .bootty_spawn()?;
         let mut stdin = child.stdin.take().context("Git input pipe")?;
         let writer = std::thread::spawn(move || stdin.write_all(&input));
         let captured = child.wait_with_output()?;
@@ -89,7 +90,7 @@ impl CommandRunner for RepositoryRunner {
                 .env("USERPROFILE", cwd)
                 .env("ENV", "")
                 .env_remove("BASH_ENV")
-                .output()?,
+                .bootty_output()?,
         )
     }
 }

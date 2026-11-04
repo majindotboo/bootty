@@ -53,16 +53,14 @@ jobs:
       - name: Set up mise toolchain
         uses: jdx/mise-action@v5
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # Kache caches rustc outputs by content; only main pushes publish the store.
+      - name: Set up Kache
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
         with:
-          shared-key: nightly-benchmarks
-          cache-on-failure: true
-
-      # zig compiles libghostty for the build machine's exact CPU, so its
-      # cached output can SIGILL on a runner with a different microarch.
-      - name: Evict CPU-specific zig artifacts
-        run: cargo clean -p libghostty-vt-sys
+          cache-key-prefix: bootty-nightly-benchmarks
+          manifest-key: nightly-benchmarks
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          pr-comment: false
 
       - name: Run full benchmark reproduction suite
         run: mise run bench -- --quick --output artifacts/benchmark-reproduction/overnight

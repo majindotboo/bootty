@@ -3,14 +3,13 @@
 use std::{cell::RefCell, rc::Rc};
 
 use bootty_ui::gpui::{
-    GpuiSpaceEditor, OptionalSpaceEditorChoice, RemoteSpaceSnapshot, SpaceEditorChoice,
-    SpaceEditorColors, SpaceEditorIcon, SpaceEditorIntent, SpaceEditorSnapshot, UiPalette,
-    init_theme,
+    GpuiSpaceEditor, SpaceEditorChoice, SpaceEditorColors, SpaceEditorIcon, SpaceEditorIntent,
+    SpaceEditorSnapshot, UiPalette, init_theme,
 };
 use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::{
-    AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, Pixels, Render, ScrollDelta,
-    ScrollWheelEvent, TestAppContext, Window, div, point, prelude::*, px,
+    AppContext as _, Bounds, Context, Entity, IntoElement, Modifiers, Pixels, Render,
+    TestAppContext, Window, div, point, prelude::*, px,
 };
 
 struct SpaceEditorProbe {
@@ -58,7 +57,6 @@ fn editor_inputs_and_choices_emit_domain_intents(cx: &TestAppContext) {
         "ctrl-a"
     });
     cx.simulate_input("Renamed");
-    click(&mut cx, "space-backend-default");
     click(&mut cx, "space-tint-sidebar");
 
     probe.update(&mut cx, |probe, _| {
@@ -67,11 +65,6 @@ fn editor_inputs_and_choices_emit_domain_intents(cx: &TestAppContext) {
             intent,
             SpaceEditorIntent::SetName(name) if name == "Renamed"
         )));
-        assert!(
-            intents
-                .iter()
-                .any(|intent| matches!(intent, SpaceEditorIntent::SelectBackend(None)))
-        );
         assert!(
             intents
                 .iter()
@@ -175,59 +168,6 @@ fn color_editor_uses_the_shared_color_picker(cx: &TestAppContext) {
 }
 
 #[gpui_kit::test]
-fn remote_loading_error_and_create_controls_keep_their_intents(cx: &TestAppContext) {
-    let (probe, mut cx) = rooted_probe(
-        cx,
-        remote_snapshot(RemoteSpaceSnapshot::Failed {
-            message: "connection failed".to_owned(),
-        }),
-    );
-    scroll_editor(&mut cx);
-    click(&mut cx, "space-remote-retry");
-
-    probe.update(&mut cx, |probe, _| {
-        assert!(
-            probe
-                .intents
-                .borrow()
-                .iter()
-                .any(|intent| matches!(intent, SpaceEditorIntent::RetryRemoteSpaces))
-        );
-    });
-
-    probe.update(&mut cx, |probe, cx| {
-        probe.editor.update(cx, |editor, cx| {
-            editor.set_snapshot(
-                remote_snapshot(RemoteSpaceSnapshot::Ready {
-                    spaces: Vec::new(),
-                    warning: None,
-                    new_name: "Created remotely".to_owned(),
-                    create_backends: vec![SpaceEditorChoice {
-                        id: "native".to_owned(),
-                        label: "Native".to_owned(),
-                        detail: None,
-                        selected: true,
-                        enabled: true,
-                    }],
-                    can_create: true,
-                }),
-                cx,
-            );
-        });
-    });
-    cx.run_until_parked();
-    click(&mut cx, "space-create-remote");
-
-    probe.update(&mut cx, |probe, _| {
-        assert!(probe.intents.borrow().iter().any(|intent| matches!(
-            intent,
-            SpaceEditorIntent::CreateRemoteSpace { name, backend }
-                if name == "Created remotely" && backend == "native"
-        )));
-    });
-}
-
-#[gpui_kit::test]
 fn disabled_save_and_name_validation_are_visible(cx: &TestAppContext) {
     let mut snapshot = snapshot();
     snapshot.can_save = false;
@@ -281,31 +221,10 @@ fn icon_search_filters_and_selects_by_domain_identity(cx: &TestAppContext) {
 #[gpui_kit::test]
 fn disabled_space_editor_controls_are_pointer_noops(cx: &TestAppContext) {
     let mut snapshot = snapshot();
-    snapshot.backend_enabled = false;
-    snapshot
-        .backends
-        .iter_mut()
-        .for_each(|choice| choice.enabled = false);
     snapshot.locations[0].enabled = false;
-    snapshot.remote = RemoteSpaceSnapshot::Ready {
-        spaces: Vec::new(),
-        warning: None,
-        new_name: "Remote".to_owned(),
-        create_backends: vec![SpaceEditorChoice {
-            id: "native".to_owned(),
-            label: "Native".to_owned(),
-            detail: None,
-            selected: true,
-            enabled: true,
-        }],
-        can_create: false,
-    };
     let (probe, mut cx) = rooted_probe(cx, snapshot);
 
-    click(&mut cx, "space-backend-default");
     click(&mut cx, "space-location-local");
-    scroll_editor(&mut cx);
-    click(&mut cx, "space-create-remote");
 
     probe.update(&mut cx, |probe, _| {
         assert!(probe.intents.borrow().is_empty());
@@ -428,18 +347,6 @@ fn click(cx: &mut gpui_kit::VisualTestContext, selector: &'static str) {
     cx.run_until_parked();
 }
 
-fn scroll_editor(cx: &mut gpui_kit::VisualTestContext) {
-    let bounds = cx
-        .debug_bounds("space-editor-scroll")
-        .expect("editor scroll region");
-    cx.simulate_event(ScrollWheelEvent {
-        position: bounds.center(),
-        delta: ScrollDelta::Pixels(point(px(0.0), px(-1000.0))),
-        ..Default::default()
-    });
-    cx.refresh().expect("refresh after editor scroll");
-}
-
 fn center(bounds: Bounds<Pixels>) -> gpui_kit::Point<Pixels> {
     let left: f32 = bounds.origin.x.into();
     let top: f32 = bounds.origin.y.into();
@@ -462,21 +369,6 @@ fn snapshot() -> SpaceEditorSnapshot {
         }],
         color: [32, 64, 128],
         tint_sidebar: false,
-        backends: vec![
-            OptionalSpaceEditorChoice {
-                id: Some("native".to_owned()),
-                label: "Native".to_owned(),
-                selected: true,
-                enabled: true,
-            },
-            OptionalSpaceEditorChoice {
-                id: None,
-                label: "Default".to_owned(),
-                selected: false,
-                enabled: true,
-            },
-        ],
-        backend_enabled: true,
         locations: vec![SpaceEditorChoice {
             id: "local".to_owned(),
             label: "Local".to_owned(),
@@ -485,14 +377,8 @@ fn snapshot() -> SpaceEditorSnapshot {
             enabled: true,
         }],
         location_notice: None,
-        remote: RemoteSpaceSnapshot::Hidden,
+        remote_error: None,
         can_save: true,
         colors: SpaceEditorColors::default(),
     }
-}
-
-fn remote_snapshot(remote: RemoteSpaceSnapshot) -> SpaceEditorSnapshot {
-    let mut snapshot = snapshot();
-    snapshot.remote = remote;
-    snapshot
 }

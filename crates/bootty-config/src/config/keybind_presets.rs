@@ -72,7 +72,6 @@ pub(super) const fn common_keybinds_macos() -> &'static [&'static str] {
         "cmd+7=select_session:7",
         "cmd+8=select_session:8",
         "cmd+9=select_session:9",
-        "cmd+alt+x=settle_session",
     ]
 }
 
@@ -121,7 +120,6 @@ pub(super) const fn common_keybinds_other() -> &'static [&'static str] {
         "ctrl+shift+7=select_session:7",
         "ctrl+shift+8=select_session:8",
         "ctrl+shift+9=select_session:9",
-        "ctrl+shift+alt+x=settle_session",
     ]
 }
 
@@ -168,7 +166,6 @@ pub(super) const fn common_keybinds_windows() -> &'static [&'static str] {
         "ctrl+shift+7=select_session:7",
         "ctrl+shift+8=select_session:8",
         "ctrl+shift+9=select_session:9",
-        "ctrl+shift+alt+x=settle_session",
     ]
 }
 
@@ -196,8 +193,6 @@ pub(super) const BOOTTY_PREFIX_KEYBINDS: &[(&str, &str)] = &[
     ("k", "select_pane:up"),
     ("l", "select_pane:right"),
     ("s", "new_mux_session"),
-    ("x", "settle_session"),
-    ("shift+x", "settle_session"),
     ("r", "rename_session"),
     ("[", "copy_mode"),
     ("?", "show_keybinds"),
@@ -230,7 +225,6 @@ pub(super) const TMUX_PREFIX_KEYBINDS: &[(&str, &str)] = &[
     ("%", "split_right"),
     ("\"", "split_down"),
     ("x", "kill_pane"),
-    ("z", "toggle_pane_zoom"),
     (";", "next_pane"),
     ("o", "next_pane"),
     ("ArrowUp", "select_pane:up"),
@@ -303,7 +297,6 @@ pub(super) const fn navigation_keybinds() -> &'static [&'static str] {
         "alt+shift+l=select_pane:right",
         "alt+shift+o=next_pane",
         "alt+shift+x=kill_pane",
-        "alt+shift+z=toggle_pane_zoom",
     ]
 }
 
@@ -362,7 +355,6 @@ pub(super) const fn ghostty_common_keybinds_macos() -> &'static [&'static str] {
         "cmd+p=session_picker",
         "cmd+q=quit",
         "ctrl+cmd+w=close_window",
-        "cmd+shift+w=settle_session",
         "cmd+w=close_surface",
         "cmd+shift+n=new_window",
         "ctrl+cmd+f=toggle_fullscreen",
@@ -426,7 +418,6 @@ pub(super) const fn ghostty_layout_keybinds_macos() -> &'static [&'static str] {
         "cmd+alt+w=close_surface",
         "cmd+d=split_right",
         "cmd+shift+d=split_down",
-        "cmd+shift+Enter=toggle_pane_zoom",
         "ctrl+Tab=next_tab",
         "ctrl+shift+Tab=previous_tab",
         "cmd+shift+]=next_tab",
@@ -460,7 +451,6 @@ pub(super) const fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
         "ctrl+shift+t=new_tab",
         "ctrl+shift+o=split_right",
         "ctrl+shift+e=split_down",
-        "ctrl+shift+Enter=toggle_pane_zoom",
         "ctrl+Tab=next_tab",
         "ctrl+shift+Tab=previous_tab",
         "ctrl+PageDown=next_tab",
@@ -483,41 +473,6 @@ pub(super) const fn ghostty_layout_keybinds_other() -> &'static [&'static str] {
     ]
 }
 
-pub(super) const fn tmux_keybinds() -> &'static [&'static str] {
-    &[
-        "cmd+;=csi:61~",
-        "cmd+ctrl+n=csi:68~",
-        "ctrl+alt+[=csi:69~",
-        "cmd+y=csi:71~",
-        "cmd+c=csi:72~",
-        "cmd+j=csi:90;1~",
-        "cmd+s=csi:90;2~",
-        "cmd+shift+c=csi:90;3~",
-        "cmd+alt+shift+c=csi:90;4~",
-        "cmd+.=csi:90;6~",
-        "cmd+e=csi:90;7~",
-        "cmd+b=csi:90;8~",
-        "cmd+i=csi:90;9~",
-        "cmd+l=csi:90;10~",
-        "cmd+shift+i=csi:90;11~",
-        "cmd+alt+v=csi:90;13~",
-        "cmd+d=csi:90;14~",
-        "cmd+shift+d=csi:90;15~",
-        "cmd+u=csi:90;16~",
-        "cmd+shift+u=csi:90;17~",
-        "cmd+alt+k=csi:90;18~",
-        "cmd+alt+j=csi:90;19~",
-        "cmd+alt+shift+k=csi:90;20~",
-        "cmd+alt+shift+j=csi:90;21~",
-        // Non-navigation tmux actions still relay to the user's tmux config; tab/pane navigation is
-        // handled by bootty directly (see navigation_keybinds).
-        "alt+\\=esc:\\",
-        "alt+shift+c=esc:C",
-        "ctrl+alt+]=text:\\x1b\\x1d",
-        "alt+r=esc:R",
-    ]
-}
-
 /// The raw control byte a `ctrl+space`/`ctrl+letter` prefix produces in a terminal; `None` for
 /// prefixes outside that family.
 fn prefix_control_byte(prefix: &str) -> Option<u8> {
@@ -534,10 +489,6 @@ fn prefix_control_byte(prefix: &str) -> Option<u8> {
 // The external tmux must receive its prefix as the raw control byte even when bootty's own
 // direct-input path wouldn't encode it (ctrl+space -> NUL). Prefixes outside the ctrl+key
 // family already reach the terminal unmodified, so no passthrough entry is needed for them.
-pub(super) fn prefix_passthrough_keybind(prefix: &str) -> Option<String> {
-    let byte = prefix_control_byte(prefix)?;
-    Some(format!("{prefix}=text:\\x{byte:02x}"))
-}
 
 // tmux's `send-prefix` (prefix pressed twice): deliver the literal prefix byte to the terminal.
 fn send_prefix_keybind(prefix: &str) -> Option<String> {
@@ -564,26 +515,12 @@ pub(super) fn preset_global_keybinds(preset: KeybindPreset) -> Vec<String> {
     } else {
         "ctrl+shift+k=command_palette".to_owned()
     });
-    keybinds.push(if cfg!(target_os = "macos") {
-        "cmd+alt+b=toggle_right_dock".to_owned()
-    } else {
-        "ctrl+alt+b=toggle_right_dock".to_owned()
-    });
     keybinds.extend(owned_keybinds(if cfg!(target_os = "macos") {
-        &[
-            "cmd+shift+h=agent_history",
-            "cmd+shift+g=toggle_changes_panel",
-            "cmd+shift+l=add_selection_to_conversation",
-            "cmd+alt+p=toggle_session_pin",
-            "cmd+alt+a=archive_session",
-        ]
+        &["cmd+alt+p=toggle_session_pin", "cmd+alt+a=close_session"]
     } else {
         &[
-            "ctrl+shift+h=agent_history",
-            "ctrl+shift+g=toggle_changes_panel",
-            "ctrl+shift+l=add_selection_to_conversation",
             "ctrl+shift+alt+p=toggle_session_pin",
-            "ctrl+shift+alt+a=archive_session",
+            "ctrl+shift+alt+a=close_session",
         ]
     }));
     if cfg!(target_os = "macos") {
@@ -605,20 +542,4 @@ pub(super) fn preset_layout_keybinds(preset: KeybindPreset, prefix: Option<&str>
     }
     keybinds.extend(owned_keybinds(native_scroll_keybinds()));
     keybinds
-}
-
-pub(super) fn preset_tmux_backend_keybinds(
-    preset: KeybindPreset,
-    prefix: Option<&str>,
-) -> Vec<String> {
-    match preset {
-        KeybindPreset::Bootty => {
-            let mut keybinds = owned_keybinds(tmux_keybinds());
-            keybinds.extend(prefix.and_then(prefix_passthrough_keybind));
-            keybinds
-        }
-        KeybindPreset::Ghostty => owned_keybinds(ghostty_layout_keybinds()),
-        // An unbound prefix reaches the external tmux's own key table.
-        KeybindPreset::Tmux => Vec::new(),
-    }
 }

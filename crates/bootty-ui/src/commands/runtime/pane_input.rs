@@ -1,26 +1,25 @@
 use std::{sync::mpsc, time::Instant};
 
 use bootty_control::{CommandCancellation, CommandOutcome};
-use bootty_mux::{backend::PaneInput, target::ExactMuxTarget};
+use bootty_mux::{command::PaneInput, target::ExactMuxTarget};
 
 use super::{
-    CommandDispatch, CommandExecutor, CoreCommandExecutor, PendingCommandResult,
-    command_outcome_for_mux_error,
+    CommandDispatch, CoreCommandExecutor, PendingCommandResult, command_outcome_for_mux_error,
 };
 use crate::{AppState, app_actions::KeybindAction, commands::SynchronousCommand};
 
 /// The pane input a terminal command performs when it names its own target.
-pub(super) fn targeted_pane_input(executor: &CommandExecutor) -> Option<PaneInput> {
+pub(super) fn targeted_pane_input(executor: &CoreCommandExecutor) -> Option<PaneInput> {
     match executor {
-        CommandExecutor::Core(CoreCommandExecutor::Keybind(KeybindAction::Write(bytes))) => {
+        CoreCommandExecutor::Keybind(KeybindAction::Write(bytes)) => {
             Some(PaneInput::Write(bytes.clone()))
         }
-        CommandExecutor::Core(CoreCommandExecutor::Synchronous(
-            SynchronousCommand::PasteTerminal(text),
-        )) => Some(PaneInput::Paste(text.clone())),
-        CommandExecutor::Core(CoreCommandExecutor::Synchronous(
-            SynchronousCommand::SubmitTerminal,
-        )) => Some(PaneInput::Submit),
+        CoreCommandExecutor::Synchronous(SynchronousCommand::PasteTerminal(text)) => {
+            Some(PaneInput::Paste(text.clone()))
+        }
+        CoreCommandExecutor::Synchronous(SynchronousCommand::SubmitTerminal) => {
+            Some(PaneInput::Submit)
+        }
         _ => None,
     }
 }
@@ -30,7 +29,7 @@ impl AppState {
     pub(super) fn dispatch_pane_input(
         &mut self,
         exact: &ExactMuxTarget,
-        input: PaneInput,
+        input: &PaneInput,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
         let (_, _, Some(pane)) = exact.ids() else {
@@ -41,7 +40,7 @@ impl AppState {
         let (sender, result) = mpsc::channel();
         let repaint = self.repaint.clone();
         let scope = exact.scope();
-        let records_activity = match &input {
+        let records_activity = match input {
             PaneInput::Write(bytes) => !bytes.is_empty(),
             PaneInput::Paste(text) => !text.is_empty(),
             PaneInput::Submit => true,

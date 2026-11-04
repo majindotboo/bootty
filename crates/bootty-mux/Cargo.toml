@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty-mux"
 edition.workspace = true
 version.workspace = true
@@ -6,41 +7,26 @@ version.workspace = true
 [lib]
 test = false
 
-[features]
-# Desktop composition needs terminal attachment and pane runtime policy. Keep this
-# optional so the installed daemon can use mux providers and catalog policy without
-# pulling Ghostty VT or local PTY support.
-default = ["terminal-runtime"]
-terminal-runtime = [
-  "dep:bootty-terminal",
-  "dep:derive_more",
-]
-
 [dependencies]
 num-traits.workspace = true
-anstyle-parse.workspace = true
 bootty-git = { path = "../bootty-git" }
 bootty-config = { path = "../bootty-config" }
 bootty-host = { path = "../bootty-host" }
 bootty-control = { path = "../bootty-control" }
 anyhow.workspace = true
-base64.workspace = true
-derive_more = { workspace = true, optional = true }
+derive_more.workspace = true
 getrandom.workspace = true
-inventory.workspace = true
 rusqlite.workspace = true
-rmux-client.workspace = true
-rmux-ipc.workspace = true
-rmux-os.workspace = true
-rmux-proto.workspace = true
-rmux-sdk.workspace = true
-rmux-server.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
+sysinfo.workspace = true
 strum.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "io-std"] }
-bootty-terminal = { path = "../bootty-terminal", optional = true }
+bootty-terminal = { path = "../bootty-terminal" }
+bootty-write = { path = "../bootty-write" }
+bootty-os = { path = "../bootty-os" }
+tokio = { workspace = true, features = ["io-util", "io-std", "net", "rt-multi-thread", "sync", "time", "macros"] }
 
 [dev-dependencies]
 bootty-test-support = { path = "../bootty-test-support" }
@@ -54,3 +40,7 @@ static_assertions.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

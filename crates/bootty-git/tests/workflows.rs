@@ -1,10 +1,7 @@
-#[path = "support/repository.rs"]
-mod repository_support;
-#[path = "support/seed.rs"]
-mod seed;
+use crate::support::seed;
+use bootty_os::spawn::CommandSpawn as _;
 
-#[path = "support/runner.rs"]
-mod runner;
+use crate::support::runner;
 
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -14,7 +11,7 @@ fn git(root: &std::path::Path, args: &[&str]) -> anyhow::Result<()> {
         .arg("-C")
         .arg(root)
         .args(args)
-        .status()?;
+        .bootty_status()?;
     anyhow::ensure!(status.success(), "git {args:?}");
     Ok(())
 }
@@ -24,7 +21,7 @@ fn fixture() -> anyhow::Result<assert_fs::TempDir> {
     Ok(root)
 }
 #[rstest]
-fn overview_branch_history_diff_and_clean_switch_are_consistent() {
+fn overview_branch_history_and_clean_switch_are_consistent() {
     let root = fixture().expect("repository fixture");
     let path = root.path().to_str().unwrap();
     let client = runner::git();
@@ -32,15 +29,7 @@ fn overview_branch_history_diff_and_clean_switch_are_consistent() {
     assert_eq!(overview.history.len(), 1);
     assert_eq!(overview.history[0].subject, "initial");
     assert!(overview.branches[0].current);
-    assert!(
-        client
-            .commit_diff(path, &overview.history[0].id)
-            .expect("test operation succeeds")
-            .contains("initial")
-    );
-    client
-        .create_branch(path, "feature", "HEAD")
-        .expect("test operation succeeds");
+    git(root.path(), &["switch", "-qc", "feature"]).expect("git setup command");
     assert_eq!(
         client
             .overview(path, 100)
@@ -99,52 +88,12 @@ fn branch_catalog_identifies_existing_worktree_checkouts() {
     }
 }
 #[rstest]
-fn stash_apply_keeps_record_until_explicit_drop_and_includes_untracked() {
-    let root = fixture().expect("repository fixture");
-    let path = root.path().to_str().unwrap();
-    let client = runner::git();
-    std::fs::write(root.path().join("file.txt"), "changed\n").unwrap();
-    std::fs::write(root.path().join("new.txt"), "new\n").unwrap();
-    client
-        .stash_push(path, "saved", true)
-        .expect("test operation succeeds");
-    let overview = client.overview(path, 20).expect("test operation succeeds");
-    let stash = &overview.stashes[0];
-    assert!(!root.path().join("new.txt").exists());
-    client
-        .stash_apply(path, &stash.reference, &stash.commit)
-        .expect("test operation succeeds");
-    assert!(root.path().join("new.txt").exists());
-    assert_eq!(
-        client
-            .overview(path, 20)
-            .expect("test operation succeeds")
-            .stashes
-            .len(),
-        1
-    );
-    git(root.path(), &["reset", "--hard", "-q"]).expect("git setup command");
-    std::fs::remove_file(root.path().join("new.txt")).unwrap();
-    client
-        .stash_drop(path, &stash.reference, &stash.commit)
-        .expect("test operation succeeds");
-    assert_eq!(
-        client
-            .overview(path, 20)
-            .expect("test operation succeeds")
-            .stashes,
-        Vec::<bootty_git::changes::GitStash>::new()
-    );
-}
-#[rstest]
 fn references_are_validated_against_current_repository() {
     let root = fixture().expect("repository fixture");
     let path = root.path().to_str().unwrap();
     let client = runner::git();
     assert!(client.checkout_branch(path, "--detach").is_err());
-    assert!(client.stash_apply(path, "stash@{99}", "missing").is_err());
-    assert!(client.commit_diff(path, "HEAD").is_err());
-    assert!(client.create_branch(path, "bad..name", "HEAD").is_err());
+    assert!(client.checkout_branch(path, "missing").is_err());
 }
 
 #[rstest]
@@ -152,9 +101,7 @@ fn checkout_preserves_ignored_files_that_the_destination_tracks() {
     let root = fixture().expect("repository fixture");
     let path = root.path().to_str().unwrap();
     let client = runner::git();
-    client
-        .create_branch(path, "other", "HEAD")
-        .expect("test operation succeeds");
+    git(root.path(), &["switch", "-qc", "other"]).expect("git setup command");
     std::fs::write(root.path().join("cache.txt"), "tracked in other\n").unwrap();
     git(root.path(), &["add", "cache.txt"]).expect("git setup command");
     git(root.path(), &["commit", "-qm", "track cache"]).expect("git setup command");

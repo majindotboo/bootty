@@ -11,54 +11,13 @@ impl AppState {
         scope: SpaceId,
         action: FileAction,
         arguments: &[String],
-        target: Option<bootty_control::CommandTarget>,
         effects: &mut Vec<crate::state::AppEffect>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
         if matches!(action, FileAction::Reveal | FileAction::OpenIn) {
             return self.hand_file_to_desktop(scope, action, arguments, effects, execution);
         }
-        if matches!(action, FileAction::Open | FileAction::Browse) {
-            if let Err(error) = executor::begin_synchronous_command(execution) {
-                return self.reject_command(super::command_outcome_for_mux_error(error));
-            }
-            let (Some(binding), Some(target)) = (self.workspace.binding(scope), target) else {
-                return self.reject_command(CommandOutcome::StaleTarget {
-                    message: "Binding is no longer available".to_owned(),
-                });
-            };
-            let Some(path) = arguments.first() else {
-                return self.reject_command(CommandOutcome::Failed {
-                    code: "invalid_arguments".to_owned(),
-                    message: "A path is required".to_owned(),
-                });
-            };
-            let host = binding
-                .multiplexer()
-                .remote
-                .as_ref()
-                .map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label);
-            effects.push(crate::state::AppEffect::OpenFiles(
-                crate::state::OpenFilesRequest {
-                    scope,
-                    target,
-                    host,
-                    path: path.clone(),
-                    document: action == FileAction::Open,
-                    line: arguments
-                        .get(1)
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(1),
-                    column: arguments
-                        .get(2)
-                        .and_then(|value| value.parse().ok())
-                        .unwrap_or(1),
-                },
-            ));
-            CommandDispatch::Complete(CommandOutcome::success())
-        } else {
-            self.dispatch_file_command(scope, action, arguments, execution)
-        }
+        self.dispatch_file_command(scope, action, arguments, execution)
     }
 
     /// Shows a file in this computer's file manager, or opens it in an installed editor. A

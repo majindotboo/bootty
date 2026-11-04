@@ -87,21 +87,11 @@ impl AppState {
             .and_then(|target| target.ids().0)
             .or_else(|| current.then(|| binding.mux().selected_session()).flatten())
             .and_then(|session| self.workspace.session_identity(scope, session));
-        let recovery_pane = exact
-            .as_ref()
-            .and_then(|target| target.ids().2)
-            .map(str::to_owned)
-            .or_else(|| if current { self.focused_pane() } else { None });
         let Some(binding) = self.workspace.binding_mut(scope) else {
             return CommandOutcome::StaleTarget {
                 message: "clipboard destination was closed".to_owned(),
             };
         };
-        if !text.is_empty()
-            && let Some(pane) = recovery_pane
-        {
-            binding.revoke_restored_agent_terminal(&pane);
-        }
         let terminal = binding.terminal_mut();
         let runtime: &mut dyn TerminalRuntime =
             if let Some(target::ExactMuxTarget::Pane(_, _, _, pane)) = exact {

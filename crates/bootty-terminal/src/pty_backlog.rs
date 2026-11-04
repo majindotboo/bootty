@@ -1,9 +1,9 @@
 use std::{collections::VecDeque, time::Instant};
 
-const MAX_DRAIN_BYTES: usize = 4 * 1024 * 1024;
-const MAX_DRAIN_CHUNKS: usize = 32;
+pub const MAX_DRAIN_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_DRAIN_CHUNKS: usize = 32;
 const MAX_DRAIN_SLICE_BYTES: usize = 64 * 1024;
-const MAX_DRAIN_TIME_US: u128 = 20_000;
+pub const MAX_DRAIN_TIME_US: u128 = 20_000;
 
 #[derive(Clone, Debug, Default)]
 pub struct OutputBacklog {
@@ -166,4 +166,3 @@ const fn drain_budget_exhausted_with_limits(
 
 pub use OutputBacklog as PtyBacklog;
 pub use drain_output_backlog as drain_pty_backlog;
-pub use drain_output_backlog_with_limits as drain_pty_backlog_with_limits;

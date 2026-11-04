@@ -1,7 +1,7 @@
 use super::protocol::{CHUNK, RemoteOutput, RemoteProcessRequest, RemoteTerminalSize};
 use anyhow::{Context as _, Result};
+use bootty_os::process_tree::ProcessTreeChild;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
-use rmux_os::process_tree::ProcessTreeChild;
 use std::{
     io::{Read, Write},
     process::{Command, Stdio},
@@ -112,6 +112,11 @@ fn spawn_terminal(
     program: &std::ffi::OsStr,
     size: RemoteTerminalSize,
 ) -> Result<Process> {
+    let spawn = bootty_os::spawn::lock();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "The spawn lock is held through PTY creation and spawning"
+    )]
     let pair = native_pty_system().openpty(pty_size(size))?;
     let mut command = CommandBuilder::new(program);
     command.args(
@@ -126,8 +131,13 @@ fn spawn_terminal(
     if let Some(cwd) = &request.cwd {
         command.cwd(cwd);
     }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "The spawn lock is held through PTY creation and spawning"
+    )]
     let mut child = pair.slave.spawn_command(command)?;
     drop(pair.slave);
+    drop(spawn);
     #[cfg(unix)]
     let control = TerminalControl::new(&*child)?;
     #[cfg(not(unix))]

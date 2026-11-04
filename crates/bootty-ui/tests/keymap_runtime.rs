@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 
 use assert_fs::{TempDir, prelude::*};
 use bootty_config::{
-    config::{BoottyConfig, MultiplexerBackendConfig},
+    config::BoottyConfig,
     keymap_file::{KeymapBindingSource, KeymapContext},
 };
 use bootty_ui::gpui::{InputEvent, Key, Modifiers, Point, ScrollPhase, WheelUnit};
@@ -13,11 +13,8 @@ use bootty_ui::{AppEffect, AppState};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
-#[path = "support/events.rs"]
-mod events;
-#[path = "support/frames.rs"]
-mod frames;
-pub mod support;
+use crate::support::events;
+use crate::support::frames;
 
 fn state(directory: &TempDir, toml_binding: &str, keymap: &str) -> AppState {
     let config_path = directory.path().join("config.toml");
@@ -29,10 +26,9 @@ fn state(directory: &TempDir, toml_binding: &str, keymap: &str) -> AppState {
         config_path,
         ..BoottyConfig::default()
     };
-    config.multiplexer.backend = MultiplexerBackendConfig::Native;
+
     config.input.keybind = vec![toml_binding.to_owned()];
-    AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state")
+    AppState::new(config, Arc::new(|| {}), None, None).expect("start app state")
 }
 
 fn ctrl_key(key: char) -> bootty_gpui::InputEvent {
@@ -194,18 +190,17 @@ fn disabling_one_backend_context_keeps_global_defaults() {
         config_path,
         ..BoottyConfig::default()
     };
-    config.multiplexer.backend = MultiplexerBackendConfig::Native;
+
     config.input.keybind = vec!["ctrl+k=open_settings".to_owned()];
-    config.input.backend_keybinds.native = vec!["ctrl+j=new_window".to_owned()];
-    let mut state = AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state");
+    config.input.layout_keybind = vec!["ctrl+j=new_window".to_owned()];
+    let mut state = AppState::new(config, Arc::new(|| {}), None, None).expect("start app state");
 
     let snapshot = state.keymap_snapshot();
     assert!(snapshot.effective_bindings.iter().any(|binding| {
         binding.context == KeymapContext::Global && binding.source == KeymapBindingSource::BuiltIn
     }));
     assert!(!snapshot.effective_bindings.iter().any(|binding| {
-        binding.context == KeymapContext::Native && binding.source == KeymapBindingSource::BuiltIn
+        binding.context == KeymapContext::Terminal && binding.source == KeymapBindingSource::BuiltIn
     }));
 
     let global_effects = state.update_frame(frames::frame(
@@ -249,7 +244,7 @@ fn later_user_sections_win_and_backend_contexts_are_active_in_the_terminal() {
             .next_back()
             .expect("backend section")
             .context,
-        KeymapContext::Native
+        KeymapContext::Terminal
     );
 }
 

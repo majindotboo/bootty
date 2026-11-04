@@ -1,5 +1,6 @@
 #![cfg(test)]
 
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     io::Write,
     process::{Command, Stdio},
@@ -31,7 +32,6 @@ fn daemon_proxy_preserves_binary_input_and_rejects_truncation(#[case] truncate: 
     let payload = args.last().unwrap().split_whitespace().last().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
         .args(["remote-exec", payload])
-        .env(bootty_config::APPLICATION_IDENTITY_ENV, "bootty-dev")
         .env("XDG_CONFIG_HOME", directory.path())
         .env("XDG_STATE_HOME", directory.path())
         .env("TMPDIR", directory.path())
@@ -40,7 +40,7 @@ fn daemon_proxy_preserves_binary_input_and_rejects_truncation(#[case] truncate: 
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .bootty_spawn()
         .unwrap();
     child
         .stdin

@@ -18,24 +18,12 @@ use toml_edit::DocumentMut;
 
 #[derive(Clone, Copy, Debug, Default, ClapArgs)]
 pub struct Args {
-    /// Use the fast-release Cargo profile.
-    #[arg(long)]
-    pub fast: bool,
-    /// Link the application statically where supported.
-    #[arg(long)]
-    pub r#static: bool,
     /// Package the isolated `BoottyDev` identity.
     #[arg(long)]
     pub dev: bool,
     /// Build and bundle daemons for every supported target.
     #[arg(long)]
     pub all_daemons: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Linkage {
-    Dynamic,
-    Static,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,8 +35,6 @@ pub(crate) struct Layout {
     #[cfg(unix)]
     pub bundle_identifier: String,
     pub profile: &'static str,
-    pub daemon_profile: &'static str,
-    pub linkage: Linkage,
     pub dist_dir: PathBuf,
     pub target_root: PathBuf,
     pub daemon_output_dir: PathBuf,
@@ -81,18 +67,6 @@ impl Layout {
         let daemon_output_dir = env::var_os("BOOTTY_DAEMON_OUTPUT_DIR")
             .map_or_else(|| target_root.join("bootty-daemons"), PathBuf::from);
         let daemon_output_dir = absolute_workspace_path(&root, daemon_output_dir);
-        let linkage = if args.r#static {
-            Linkage::Static
-        } else {
-            Linkage::Dynamic
-        };
-        let profile = if args.fast {
-            "fast-release"
-        } else if linkage == Linkage::Dynamic {
-            "dynamic-release"
-        } else {
-            "release"
-        };
         Ok(Self {
             development_namespace,
             app_name: names.display_name().to_owned(),
@@ -100,33 +74,12 @@ impl Layout {
             cli_name: names.cli_name().to_owned(),
             #[cfg(unix)]
             bundle_identifier: names.bundle_identifier().to_owned(),
-            profile,
-            daemon_profile: if args.fast {
-                "fast-release"
-            } else {
-                "daemon-release"
-            },
-            linkage,
+            profile: if args.dev { "debug" } else { "release" },
             dist_dir,
             target_root,
             daemon_output_dir,
             all_daemons: args.all_daemons || env::var_os("BOOTTY_DAEMON_OUTPUT_DIR").is_some(),
         })
-    }
-
-    #[cfg(unix)]
-    pub(crate) fn cargo_profile_args(&self) -> Vec<&'static str> {
-        match self.profile {
-            "release" => vec!["--release"],
-            profile => vec!["--profile", profile],
-        }
-    }
-
-    pub(crate) fn daemon_profile_args(&self) -> Vec<&'static str> {
-        match self.daemon_profile {
-            "release" => vec!["--release"],
-            profile => vec!["--profile", profile],
-        }
     }
 }
 

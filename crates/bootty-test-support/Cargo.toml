@@ -6,5 +6,10 @@ publish = false
 [lib]
 test = false
 
+[dependencies]
+anyhow.workspace = true
+bootty-mux = { path = "../bootty-mux" }
+bootty-terminal = { path = "../bootty-terminal" }
+
 [lints]
 workspace = true

@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -10,11 +10,15 @@ use bootty_git::{
 };
 use pretty_assertions::assert_eq;
 
+use crate::support::wait::eventually;
+
 type RecordedCalls = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 
 #[derive(Clone, Default)]
 struct RecordingRunner {
     calls: RecordedCalls,
+    /// Signalled after each recorded call so tests wait on background workers without spinning.
+    recorded: Arc<Condvar>,
 }
 
 impl RecordingRunner {
@@ -37,12 +41,21 @@ impl RecordingRunner {
     }
 
     fn wait_for_diff_calls(&self, expected: usize) {
-        for _ in 0..10_000 {
-            if self.diff_calls() >= expected {
-                return;
-            }
-            thread::yield_now();
-        }
+        let calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let calls = self
+            .recorded
+            .wait_while(calls, |calls| {
+                calls
+                    .iter()
+                    .filter(|(_, args)| args.iter().any(|arg| arg == "diff"))
+                    .count()
+                    < expected
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(calls);
         assert_eq!(self.diff_calls(), expected);
     }
 }
@@ -59,13 +72,11 @@ fn unchanged_branch_checks_follow_focus_cadence(
     let start = Instant::now();
     cache.refresh("session", "/remote/repo", selected, start);
     // Reading the published branch also establishes that the worker has cleared live_running.
-    for _ in 0..10_000 {
-        if cache.get("session", start).unwrap().branch.is_some() {
-            break;
-        }
-        thread::yield_now();
-    }
-    assert!(cache.get("session", start).unwrap().branch.is_some());
+    assert!(eventually(|| cache
+        .get("session", start)
+        .unwrap()
+        .branch
+        .is_some()));
     assert_eq!(runner.branch_calls(), 1);
 
     for millis in (250..u64::try_from(interval.as_millis()).unwrap()).step_by(250) {
@@ -86,12 +97,7 @@ fn unchanged_branch_checks_follow_focus_cadence(
         selected,
         start.checked_add(interval).expect("test interval"),
     );
-    for _ in 0..10_000 {
-        if runner.branch_calls() == 2 {
-            break;
-        }
-        thread::yield_now();
-    }
+    assert!(eventually(|| runner.branch_calls() >= 2));
     assert_eq!(runner.branch_calls(), 2);
 }
 
@@ -101,6 +107,7 @@ impl CommandRunner for RecordingRunner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((program.to_owned(), args.to_vec()));
+        self.recorded.notify_all();
         Ok(CommandOutput {
             success: true,
             stdout: "/remote/repo\n".to_owned(),

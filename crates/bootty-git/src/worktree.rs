@@ -565,9 +565,14 @@ pub fn suggested_session_name(cwd: &str) -> String {
 }
 
 /// Local Git for `cwd`, or `None` where Git could find no work tree, so plain directories on
-/// the frame path start no process.
+/// the frame path start no process. An ancestor must hold `.git`, or the environment must name
+/// the Git directory.
 fn local(cwd: &str) -> Option<Git> {
-    crate::checkpoint::may_capture_locally(Path::new(cwd)).then(Git::new)
+    let directory = Path::new(cwd);
+    (directory.is_relative()
+        || std::env::var_os("GIT_DIR").is_some()
+        || directory.ancestors().any(|dir| dir.join(".git").exists()))
+    .then(Git::new)
 }
 
 #[must_use]

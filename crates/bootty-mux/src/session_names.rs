@@ -2,22 +2,18 @@ use std::{collections::HashSet, path::Path};
 
 pub const SESSION_NAME_MAX_BYTES: usize = 256;
 
-/// Keep generated names valid across native, rmux, and tmux backends.
-#[cfg(feature = "terminal-runtime")]
+/// Keep generated names within the characters a session name accepts.
 pub(crate) fn generated_session_name(candidate: &str) -> String {
     let mut name: String = candidate
         .chars()
         .map(|character| {
-            if character.is_control() || matches!(character, ':' | '.' | '\\' | '#') {
+            if character.is_control() {
                 '_'
             } else {
                 character
             }
         })
         .collect();
-    if name.starts_with(['-', '$', '@', '%', '=']) {
-        name.insert(0, '_');
-    }
     truncate_session_name(&mut name, SESSION_NAME_MAX_BYTES);
     if name.is_empty() {
         "bootty".clone_into(&mut name);

@@ -99,6 +99,25 @@ impl AppState {
         })
     }
 
+    /// Select a terminal a foreground creation just made, so its session and pane are current.
+    ///
+    /// # Errors
+    /// Returns a stale target, or a Space or session that could not be activated.
+    pub(crate) fn activate_created_terminal(
+        &mut self,
+        target: &CommandTarget,
+    ) -> Result<(), CommandOutcome> {
+        let (_, exact) = self.resolve_command_target(
+            "terminal.capture",
+            Some(ResourceKind::Terminal),
+            Some(target),
+        )?;
+        let exact = exact.ok_or_else(|| CommandOutcome::StaleTarget {
+            message: "The created terminal has no mux target".to_owned(),
+        })?;
+        self.activate_terminal_target(&exact)
+    }
+
     pub(crate) fn activate_terminal_target(
         &mut self,
         target: &ExactMuxTarget,
@@ -234,7 +253,7 @@ impl AppState {
                 .find(|candidate| candidate.id == session)
                 .and_then(|candidate| candidate.active_window_id.clone())
         });
-        let pane = if self.uses_native_terminal_layout() {
+        let pane = {
             binding.terminal().focused_pane_id().map(|pane_id| {
                 decode_scoped_pane_id(pane_id).map_or_else(
                     || pane_id.to_owned(),
@@ -244,15 +263,6 @@ impl AppState {
                     },
                 )
             })
-        } else {
-            mux_window
-                .as_deref()
-                .and_then(|window| {
-                    binding
-                        .window_focused_pane(&session, window)
-                        .map(str::to_owned)
-                })
-                .or_else(|| anchor.pane_id.clone())
         };
         (Some(session), mux_window, pane)
     }
@@ -393,15 +403,6 @@ fn binding_command_crosses(command: &str) -> bool {
                 | "session.pin"
                 | "session.unpin"
                 | "session.activity"
-                | "session.settle"
-                | "session.activate"
-                | "session.snooze"
-                | "session.unsnooze"
-                | "session.auto_settle"
-                | "session.archive"
-                | "session.unarchive"
-                | "session.delete"
-                | "session.restore"
                 | "session.reopen"
         )
 }
@@ -412,9 +413,8 @@ fn session_command_crosses(command: &str) -> bool {
             command,
             "session.close"
                 | "terminal.create_tab"
-                | "settle_session"
                 | "toggle_session_pin"
-                | "archive_session"
+                | "close_session"
                 | "new_tab"
         )
         || (command.starts_with("agents.") && command.rsplit('.').next() == Some("tab"))

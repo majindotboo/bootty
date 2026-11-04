@@ -1774,7 +1774,8 @@ impl GpuiKeymapEditor {
                             .id("keymap-search-action")
                             .debug_selector(|| "keymap-search-action".to_owned())
                             .key_context({
-                                let mut context = KeyContext::new_with_defaults();
+                                let mut context =
+                                    KeyContext::new_with_defaults(cx.platform_info().os);
                                 context.add("BufferSearchBar");
                                 context
                             })
@@ -2380,18 +2381,16 @@ impl GpuiKeymapEditor {
             .debug_selector(|| "keymap-modal".to_owned())
             .track_focus(modal_focus)
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_scroll_wheel(
-                cx.listener(|this, event: &gpui_kit::ScrollWheelEvent, _, cx| {
-                    if this.modal.as_ref().is_some_and(|modal| modal.recording)
-                        && !event.delta.pixel_delta(px(1.0)).y.is_zero()
-                    {
-                        let up = event.delta.pixel_delta(px(1.0)).y > px(0.0);
-                        let step = wheel_keystroke(up, event.modifiers);
-                        this.record_modal_keystroke(&step, cx);
-                        cx.stop_propagation();
-                    }
-                }),
-            )
+            .on_scroll(cx.listener(|this, event: &gpui_kit::ScrollEvent, _, cx| {
+                if this.modal.as_ref().is_some_and(|modal| modal.recording)
+                    && !event.delta.pixel_delta(px(1.0)).y.is_zero()
+                {
+                    let up = event.delta.pixel_delta(px(1.0)).y > px(0.0);
+                    let step = wheel_keystroke(up, event.modifiers);
+                    this.record_modal_keystroke(&step, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .into_any_element()
     }
 }
@@ -2422,24 +2421,22 @@ impl Render for GpuiKeymapEditor {
             .track_focus(&self.focus)
             .key_context("KeymapEditor")
             .on_key_down(cx.listener(Self::on_key_down))
-            .on_scroll_wheel(
-                cx.listener(|this, event: &gpui_kit::ScrollWheelEvent, _, cx| {
-                    if this.modal.as_ref().is_some_and(|modal| modal.recording)
-                        && !event.delta.pixel_delta(px(1.0)).y.is_zero()
-                    {
-                        let up = event.delta.pixel_delta(px(1.0)).y > px(0.0);
-                        let step = wheel_keystroke(up, event.modifiers);
-                        this.record_modal_keystroke(&step, cx);
-                        cx.stop_propagation();
-                        return;
-                    }
-                    if !event.delta.pixel_delta(px(1.0)).y.is_zero()
-                        && this.context_menu.take().is_some()
-                    {
-                        cx.notify();
-                    }
-                }),
-            )
+            .on_scroll(cx.listener(|this, event: &gpui_kit::ScrollEvent, _, cx| {
+                if this.modal.as_ref().is_some_and(|modal| modal.recording)
+                    && !event.delta.pixel_delta(px(1.0)).y.is_zero()
+                {
+                    let up = event.delta.pixel_delta(px(1.0)).y > px(0.0);
+                    let step = wheel_keystroke(up, event.modifiers);
+                    this.record_modal_keystroke(&step, cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if !event.delta.pixel_delta(px(1.0)).y.is_zero()
+                    && this.context_menu.take().is_some()
+                {
+                    cx.notify();
+                }
+            }))
             .size_full()
             .min_h_0()
             .overflow_hidden()

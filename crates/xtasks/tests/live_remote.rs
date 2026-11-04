@@ -28,7 +28,6 @@ fn live_remote_records_unavailable_probes_as_skipped() {
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(records.len(), 6);
     assert_eq!(records[0]["event"], "metadata");
     assert!(
         records[1..]

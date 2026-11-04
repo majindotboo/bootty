@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty-host"
 version.workspace = true
 edition.workspace = true
@@ -22,8 +23,7 @@ base64.workspace = true
 bootty-config = { path = "../bootty-config" }
 bootty-write = { path = "../bootty-write" }
 getrandom.workspace = true
-rmux-os.workspace = true
-rmux-ipc.workspace = true
+bootty-os = { path = "../bootty-os" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -33,7 +33,7 @@ url.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 filedescriptor.workspace = true
-rustix = { version = "=1.1.4", features = ["fs", "process", "termios"] }
+rustix = { version = "1.1.6", features = ["fs", "process", "termios"] }
 
 [target.'cfg(windows)'.dependencies]
 crossterm.workspace = true
@@ -49,3 +49,7 @@ static_assertions.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

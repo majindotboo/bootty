@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use bootty_os::spawn::CommandSpawn as _;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use std::{
@@ -10,7 +11,6 @@ use std::{
 
 fn transfer(request: &serde_json::Value, input: &[u8]) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
-        .env(bootty_config::APPLICATION_IDENTITY_ENV, "bootty-dev")
         .args([
             "--application-identity",
             "bootty-dev",
@@ -20,7 +20,7 @@ fn transfer(request: &serde_json::Value, input: &[u8]) -> std::process::Output {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .bootty_spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(input).unwrap();
     child.wait_with_output().unwrap()
@@ -173,7 +173,6 @@ fn incomplete_or_corrupt_uploads_never_publish_and_remove_staging(#[case] input:
     let request =
         serde_json::json!({"operation":"upload","path":destination.to_string_lossy(),"bytes":5});
     let mut child = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
-        .env(bootty_config::APPLICATION_IDENTITY_ENV, "bootty-dev")
         .args([
             "transfer",
             &URL_SAFE_NO_PAD.encode(serde_json::to_vec(&request).unwrap()),
@@ -181,7 +180,7 @@ fn incomplete_or_corrupt_uploads_never_publish_and_remove_staging(#[case] input:
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .bootty_spawn()
         .unwrap();
     child.stdin.take().unwrap().write_all(input).unwrap();
     let output = child.wait_with_output().unwrap();

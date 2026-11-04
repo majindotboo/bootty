@@ -1,10 +1,9 @@
 use super::model::{
-    AppearanceBranchConfig, AppearanceConfig, AppearanceMode, BackendKeybindConfig, BoottyConfig,
-    BrowserConfig, BrowserSearchEngine, ChromeConfig, ComputerConfig, CursorConfig,
-    DiagnosticsConfig, FontConfig, InputConfig, KeybindPreset, MacosOptionAsAltConfig,
-    MacosTitlebarStyle, MultiplexerConfig, OnLastWindowClosed, OpenBehavior, RestoreOnStartup,
-    SessionConfig, SidebarConfig, SidebarPosition, SidebarSortOrder, WhenClosingWithNoTabs,
-    WindowConfig, WindowDecoration, WindowFullscreen,
+    AppearanceBranchConfig, AppearanceConfig, AppearanceMode, BoottyConfig, ChromeConfig,
+    CursorConfig, DiagnosticsConfig, FontConfig, InputConfig, KeybindPreset,
+    MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerConfig, OnLastWindowClosed,
+    OpenBehavior, RestoreOnStartup, SessionConfig, SidebarConfig, SidebarPosition,
+    SidebarSortOrder, WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen,
 };
 use super::theme_catalog::{
     DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME, default_dark_colors, default_light_colors,
@@ -32,10 +31,7 @@ impl Default for SidebarConfig {
     fn default() -> Self {
         Self {
             group_by_project: true,
-            settled_collapsed: false,
             sort_order: SidebarSortOrder::Manual,
-            animate_working: true,
-            auto_settle_after_days: 3,
             position: SidebarPosition::Left,
             background: None,
             foreground: None,
@@ -51,15 +47,7 @@ impl Default for SidebarConfig {
                 "progress".to_owned(),
             ],
             session_modules_configured: false,
-            modules: vec!["sessions".to_owned(), "usage".to_owned()],
-        }
-    }
-}
-impl Default for BrowserConfig {
-    fn default() -> Self {
-        Self {
-            search_engine: BrowserSearchEngine::DuckDuckGo,
-            persist_site_data: true,
+            modules: vec!["sessions".to_owned()],
         }
     }
 }
@@ -91,7 +79,6 @@ impl Default for ChromeConfig {
     fn default() -> Self {
         Self {
             left_dock_toggle: true,
-            right_dock_toggle: true,
             panel_tab_style: super::model::PanelTabStyle::default(),
             panel_tabs: super::model::PanelTabs::default(),
             tabs_use_session_color: true,
@@ -122,13 +109,11 @@ impl Default for SessionConfig {
             clipboard_write_hosts: String::new(),
             bell: super::model::BellMode::default(),
             command_notifications: super::model::NotificationPolicy::default(),
-            agent_notifications: super::model::NotificationPolicy::default(),
             command_notification_min_seconds: 10,
             shell_integration: false,
             shell: None,
             working_directory: None,
             worktree_directory: None,
-            worktree_limit: 10,
             branch_prefix: DEFAULT_BRANCH_PREFIX.to_owned(),
             env: Vec::new(),
             term: DEFAULT_TERM.to_owned(),
@@ -201,7 +186,7 @@ impl Default for InputConfig {
             prefix: None,
             keybind: Vec::new(),
             sidebar_keybind: Vec::new(),
-            backend_keybinds: BackendKeybindConfig::default(),
+            layout_keybind: Vec::new(),
         };
         input.reset_default_keybinds();
         input
@@ -222,17 +207,12 @@ impl Default for BoottyConfig {
             cursor: CursorConfig::default(),
             font: FontConfig::default(),
             chrome: ChromeConfig::default(),
-            panels: BTreeMap::new(),
             sidebar: SidebarConfig::default(),
             multiplexer: MultiplexerConfig::default(),
             ssh_profiles: BTreeMap::new(),
-            agents: super::AgentProvidersConfig::default(),
             extensions: BTreeMap::new(),
             input: InputConfig::default(),
-            browser: BrowserConfig::default(),
-            computer: ComputerConfig::default(),
             session: SessionConfig::default(),
-            tray: super::TrayConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             window: WindowConfig {
                 background_opacity: 1.0,

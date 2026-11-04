@@ -1,35 +1,12 @@
 use super::RemoteConfig;
 use super::keybind_presets::{
-    owned_keybinds, preset_global_keybinds, preset_layout_keybinds, preset_tmux_backend_keybinds,
-    sidebar_keybinds,
+    owned_keybinds, preset_global_keybinds, preset_layout_keybinds, sidebar_keybinds,
 };
 use crate::FontFeature;
 use crate::color::Color;
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::PathBuf};
-use strum::{Display, EnumIter};
 use thiserror::Error;
-
-/// A backend that Bootty can drive for one terminal binding.
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Display, EnumIter, Hash, Serialize, PartialEq, Eq,
-)]
-#[serde(rename_all = "kebab-case")]
-pub enum MultiplexerBackendConfig {
-    Herdr,
-    Rmux,
-    #[default]
-    Native,
-    Tmux,
-}
-
-impl MultiplexerBackendConfig {
-    /// Returns whether the backend has a client that can run on another host.
-    #[must_use]
-    pub const fn supports_remote(self) -> bool {
-        matches!(self, Self::Herdr | Self::Rmux | Self::Tmux)
-    }
-}
 
 /// One resolved SSH process target.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -71,57 +48,10 @@ impl SshRemoteConfig {
 /// The operational configuration for one multiplexer binding.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MultiplexerConfig {
-    pub backend: MultiplexerBackendConfig,
-    /// Hide tmux's own status bar in Bootty's client.
-    pub hide_tmux_status: bool,
     /// Reach the multiplexer through SSH or a WSL distribution.
     pub remote: Option<RemoteConfig>,
     /// The remote-owned Space selected through a named SSH profile.
     pub remote_space_id: Option<String>,
-}
-
-/// Search provider used by the built-in browser's address bar.
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "lowercase")]
-#[strum(serialize_all = "lowercase")]
-pub enum BrowserSearchEngine {
-    #[default]
-    DuckDuckGo,
-    Google,
-    Bing,
-    Brave,
-}
-
-impl BrowserSearchEngine {
-    /// Base URL used for searches. The browser adds and encodes the query parameter.
-    #[must_use]
-    pub const fn address(self) -> &'static str {
-        match self {
-            Self::DuckDuckGo => "https://duckduckgo.com/",
-            Self::Google => "https://www.google.com/search",
-            Self::Bing => "https://www.bing.com/search",
-            Self::Brave => "https://search.brave.com/search",
-        }
-    }
-}
-
-/// User policy for local desktop capture and input, separate from OS permissions.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ComputerConfig {
-    pub enabled: bool,
-    pub capture_enabled: bool,
-    pub input_enabled: bool,
-    /// Bundle ids agents may use in any conversation without asking.
-    pub always_allowed_apps: Vec<String>,
-}
-
-/// Settings for Bootty's built-in browser.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BrowserConfig {
-    pub search_engine: BrowserSearchEngine,
-    pub persist_site_data: bool,
 }
 
 /// Validation failure for an operational multiplexer binding.
@@ -129,39 +59,23 @@ pub struct BrowserConfig {
 pub enum MultiplexerConfigError {
     #[error("multiplexer.remote.host must name a host")]
     EmptyRemoteHost,
-    #[error("WSL supports rmux and tmux bindings; Herdr requires an SSH public-client connection")]
-    UnsupportedWslBackend,
-    #[error("multiplexer.remote needs a backend with a client to run there, got {backend:?}")]
-    UnsupportedRemoteBackend { backend: MultiplexerBackendConfig },
 }
 
 impl MultiplexerConfig {
     /// Validate remote placement without changing the configuration.
     ///
     /// # Errors
-    /// Rejects an empty remote host or a backend that cannot use the selected transport.
+    /// Rejects an empty remote host. Remote placement itself is kept even though no backend can
+    /// open it yet; opening such a Space reports it unavailable.
     pub fn validate_remote(&self) -> Result<(), MultiplexerConfigError> {
-        let Some(remote) = &self.remote else {
-            return Ok(());
-        };
-        if remote.host().trim().is_empty() {
+        if self
+            .remote
+            .as_ref()
+            .is_some_and(|remote| remote.host().trim().is_empty())
+        {
             return Err(MultiplexerConfigError::EmptyRemoteHost);
         }
-        if matches!(remote, RemoteConfig::Wsl(_)) && self.backend == MultiplexerBackendConfig::Herdr
-        {
-            return Err(MultiplexerConfigError::UnsupportedWslBackend);
-        }
-        if matches!(
-            self.backend,
-            MultiplexerBackendConfig::Herdr
-                | MultiplexerBackendConfig::Rmux
-                | MultiplexerBackendConfig::Tmux
-        ) {
-            return Ok(());
-        }
-        Err(MultiplexerConfigError::UnsupportedRemoteBackend {
-            backend: self.backend,
-        })
+        Ok(())
     }
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -177,19 +91,14 @@ pub struct BoottyConfig {
     pub cursor: CursorConfig,
     pub font: FontConfig,
     pub chrome: ChromeConfig,
-    pub panels: BTreeMap<PanelKind, PanelConfig>,
     pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub ssh_profiles: BTreeMap<String, SshProfileConfig>,
-    pub agents: super::AgentProvidersConfig,
     /// Raw extension settings retained for compatibility and unsupported-source display, keyed by
     /// module stem then setting key. The native host does not interpret or execute this table.
     pub extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
     pub input: InputConfig,
-    pub browser: BrowserConfig,
-    pub computer: ComputerConfig,
     pub session: SessionConfig,
-    pub tray: super::TrayConfig,
     pub diagnostics: DiagnosticsConfig,
     pub window: WindowConfig,
     pub config_path: PathBuf,
@@ -444,7 +353,6 @@ pub struct TabConfig {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeConfig {
     pub left_dock_toggle: bool,
-    pub right_dock_toggle: bool,
     pub panel_tab_style: PanelTabStyle,
     pub panel_tabs: PanelTabs,
     pub tabs_use_session_color: bool,
@@ -476,12 +384,7 @@ pub struct ChromeConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SidebarConfig {
     pub group_by_project: bool,
-    /// The Settled shelf shows only its heading.
-    pub settled_collapsed: bool,
     pub sort_order: SidebarSortOrder,
-    pub animate_working: bool,
-    /// Inactive sessions settle after this many days; zero disables automatic settlement.
-    pub auto_settle_after_days: u16,
     pub position: SidebarPosition,
     pub background: Option<Color>,
     pub foreground: Option<Color>,
@@ -629,7 +532,9 @@ pub struct InputConfig {
     pub prefix: Option<String>,
     pub keybind: Vec<String>,
     pub sidebar_keybind: Vec<String>,
-    pub backend_keybinds: BackendKeybindConfig,
+    /// Native layout bindings (tabs, panes, scrolling) built from the preset and layered with
+    /// `input.backend-keybind.native`.
+    pub layout_keybind: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
@@ -687,14 +592,6 @@ pub enum MacosOptionAsAltConfig {
     Both,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct BackendKeybindConfig {
-    pub herdr: Vec<String>,
-    pub native: Vec<String>,
-    pub rmux: Vec<String>,
-    pub tmux: Vec<String>,
-}
-
 #[derive(
     Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
 )]
@@ -714,15 +611,12 @@ pub struct SessionConfig {
     pub clipboard_write_hosts: String,
     pub bell: BellMode,
     pub command_notifications: NotificationPolicy,
-    pub agent_notifications: NotificationPolicy,
     pub command_notification_min_seconds: u32,
     pub shell_integration: bool,
     pub shell: Option<String>,
     pub working_directory: Option<PathBuf>,
     /// Parent of new worktrees, resolved on the repository's host. `None` uses the host default.
     pub worktree_directory: Option<String>,
-    /// At most this many of Bootty's worktrees stay on each host; 0 keeps every one still used.
-    pub worktree_limit: u16,
     /// What a new worktree's branch name starts with, unless its project sets its own.
     pub branch_prefix: String,
     pub env: Vec<(String, String)>,
@@ -785,8 +679,8 @@ pub struct DiagnosticsConfig {
     pub stability_trace: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "kebab-case")]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct ColorConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub background: Option<Color>,
@@ -924,17 +818,11 @@ impl BoottyConfig {
     }
 }
 impl InputConfig {
+    /// Every application binding: global entries, then the native layout entries.
     #[must_use]
-    pub fn keybinds_for_backend(&self, backend: MultiplexerBackendConfig) -> Vec<String> {
+    pub fn keybinds(&self) -> Vec<String> {
         let mut keybinds = self.keybind.clone();
-        let backend_keybinds = match backend {
-            MultiplexerBackendConfig::Herdr => &self.backend_keybinds.herdr,
-            MultiplexerBackendConfig::Native => &self.backend_keybinds.native,
-            MultiplexerBackendConfig::Rmux => &self.backend_keybinds.rmux,
-            MultiplexerBackendConfig::Tmux => &self.backend_keybinds.tmux,
-        };
-        keybinds.extend(backend_keybinds.iter().cloned());
-        // Option-as-Meta controls terminal encoding, not application shortcuts.
+        keybinds.extend(self.layout_keybind.iter().cloned());
         keybinds
     }
 
@@ -956,13 +844,7 @@ impl InputConfig {
         let prefix = self.effective_prefix();
         self.keybind = preset_global_keybinds(self.preset);
         self.sidebar_keybind = owned_keybinds(sidebar_keybinds());
-        self.backend_keybinds = BackendKeybindConfig {
-            // Herdr owns its complete client UI and keymap inside Bootty's terminal surface.
-            herdr: Vec::new(),
-            native: preset_layout_keybinds(self.preset, prefix.as_deref()),
-            rmux: preset_layout_keybinds(self.preset, prefix.as_deref()),
-            tmux: preset_tmux_backend_keybinds(self.preset, prefix.as_deref()),
-        };
+        self.layout_keybind = preset_layout_keybinds(self.preset, prefix.as_deref());
     }
 }
 
@@ -1012,76 +894,5 @@ impl WindowConfig {
         cfg!(target_os = "macos")
             && self.decorations_enabled()
             && self.macos_titlebar_style == MacosTitlebarStyle::Transparent
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[serde(rename_all = "kebab-case")]
-pub enum PanelKind {
-    Sessions,
-    Files,
-    Changes,
-    Diff,
-    Agents,
-}
-impl PanelKind {
-    pub const ALL: [Self; 5] = [
-        Self::Sessions,
-        Self::Files,
-        Self::Changes,
-        Self::Diff,
-        Self::Agents,
-    ];
-    #[must_use]
-    pub const fn name(self) -> &'static str {
-        match self {
-            Self::Sessions => "sessions",
-            Self::Files => "files",
-            Self::Changes => "changes",
-            Self::Diff => "diff",
-            Self::Agents => "agents",
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelDock {
-    Left,
-    Right,
-    Bottom,
-}
-#[derive(
-    Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq, strum::IntoStaticStr,
-)]
-#[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case")]
-pub enum PanelButton {
-    #[default]
-    None,
-    Top,
-    Bottom,
-}
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields, default)]
-pub struct PanelConfig {
-    pub dock: Option<PanelDock>,
-    /// Retired status bar placement; accepted for compatibility without affecting the UI.
-    pub button: PanelButton,
-}
-impl PanelConfig {
-    #[must_use]
-    pub fn dock(self, kind: PanelKind) -> PanelDock {
-        self.dock.unwrap_or(if kind == PanelKind::Sessions {
-            PanelDock::Left
-        } else {
-            PanelDock::Right
-        })
-    }
-}
-impl BoottyConfig {
-    #[must_use]
-    pub fn panel(&self, kind: PanelKind) -> PanelConfig {
-        self.panels.get(&kind).copied().unwrap_or_default()
     }
 }

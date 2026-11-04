@@ -1,19 +1,18 @@
 #![cfg(test)]
 
-use settings_support::{GpuiSettingsSnapshot, SettingsProbe as ScrollbarProbe};
-#[path = "support/settings.rs"]
-pub mod settings_support;
+use crate::support::settings as settings_support;
 use bootty_ui::gpui::{
     ScalarValue, SettingsCategory, SettingsControl, SettingsPage, SettingsPageItem, SettingsRow,
     UiPalette, init_theme,
 };
+use settings_support::{GpuiSettingsSnapshot, SettingsProbe as ScrollbarProbe};
 
 fn init_zed_ui(cx: &TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
 }
 use gpui_kit::{
-    Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
-    VisualTestContext, point,
+    Entity, Modifiers, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase, VisualTestContext,
+    point,
 };
 
 fn scrollable_snapshot() -> GpuiSettingsSnapshot {
@@ -51,7 +50,8 @@ fn scroll_first_row_out_of_view(cx: &mut VisualTestContext) {
     let content = cx
         .debug_bounds("settings-scrollbar-track")
         .expect("settings content surface");
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
+        source: gpui_kit::ScrollSource::default(),
         position: content.center(),
         delta: ScrollDelta::Lines(point(0.0, -18.0)),
         modifiers: Modifiers::none(),
@@ -124,7 +124,8 @@ fn scrolling_selects_the_visible_subsection_instead_of_the_category(cx: &mut Tes
         let content = cx
             .debug_bounds("settings-scrollbar-track")
             .expect("content scroll surface");
-        cx.simulate_event(ScrollWheelEvent {
+        cx.simulate_event(ScrollEvent {
+            source: gpui_kit::ScrollSource::default(),
             position: content.center(),
             delta: ScrollDelta::Lines(point(0.0, delta)),
             modifiers: Modifiers::none(),

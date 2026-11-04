@@ -85,11 +85,22 @@ pub struct TerminalDirectInputOutcome {
     pub(super) focus_intent: TerminalFocusIntent,
 }
 
+type SelectionResponse =
+    bootty_terminal::terminal_session::PendingWorkerResponse<Result<Option<Vec<u8>>, String>>;
+struct PendingSelection {
+    plain: SelectionResponse,
+    html: Option<SelectionResponse>,
+    plain_value: Option<Vec<u8>>,
+    format: Option<CopyToClipboard>,
+}
+
 pub struct TerminalInteractionRuntime {
     selection: TerminalSelectionRouter,
+    pending_selections: Vec<PendingSelection>,
     find_dialog: Option<TerminalFindModel>,
     find_return_focus: bool,
     last_search: String,
+    pending_word_search: bool,
     search_options: TerminalSearchOptions,
     last_search_direction: TerminalSearchDirection,
     last_error: Option<ErrorNotice>,
@@ -100,9 +111,11 @@ impl Default for TerminalInteractionRuntime {
     fn default() -> Self {
         Self {
             selection: TerminalSelectionRouter::default(),
+            pending_selections: Vec::new(),
             find_dialog: None,
             find_return_focus: false,
             last_search: String::new(),
+            pending_word_search: false,
             search_options: TerminalSearchOptions::default(),
             last_search_direction: TerminalSearchDirection::Next,
             last_error: None,
@@ -178,8 +191,8 @@ impl TerminalInteractionRuntime {
             TerminalFindOutput::Search { query, direction } => {
                 self.search_options = dialog.options();
                 let direction = terminal_find_direction(direction);
-                let result = self.search_terminal(terminal, focused_pane_id, &query, direction);
-                dialog.set_result(result);
+                self.search_terminal(terminal, focused_pane_id, &query, direction);
+                dialog.clear_result();
                 dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
                 if direction != TerminalSearchDirection::Current && self.find_return_focus {
                     outcome.focus_intent = TerminalFocusIntent::Terminal;
@@ -205,13 +218,13 @@ impl TerminalInteractionRuntime {
         );
         dialog.set_options(self.search_options);
         if !query.is_empty() {
-            let result = self.search_terminal(
+            let _result = self.search_terminal(
                 terminal,
                 focused_pane_id,
                 &query,
                 TerminalSearchDirection::Current,
             );
-            dialog.set_result(result);
+            dialog.clear_result();
             dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
         }
         self.find_dialog = Some(dialog);
@@ -262,15 +275,7 @@ impl TerminalInteractionRuntime {
                 );
             }
             crate::app_actions::TerminalFindAction::SearchSelection => {
-                let Some(query) = self.selected_terminal_text(terminal) else {
-                    return self.finish(outcome);
-                };
-                self.search_terminal(
-                    terminal,
-                    focused_pane_id,
-                    &query,
-                    TerminalSearchDirection::Current,
-                );
+                self.request_selection(terminal, None);
             }
             action @ (crate::app_actions::TerminalFindAction::Previous
             | crate::app_actions::TerminalFindAction::Next) => {
@@ -354,6 +359,21 @@ impl TerminalInteractionRuntime {
         input: TerminalInteractionInput<'_>,
     ) -> TerminalInteractionOutcome {
         self.begin_operation();
+        self.poll_selections(terminal);
+        if self.pending_word_search
+            && let Ok(frame) = terminal.extract_frame()
+            && !frame.search_query.is_empty()
+            && frame.search_query != self.last_search
+        {
+            self.last_search.clone_from(&frame.search_query);
+            self.search_options = TerminalSearchOptions::default();
+            self.pending_word_search = false;
+        }
+        if let Ok(frame) = terminal.extract_frame()
+            && let Some(dialog) = self.find_dialog.as_mut()
+        {
+            dialog.update_from_frame(&frame);
+        }
         let TerminalInteractionInput {
             events,
             modifiers,
@@ -610,11 +630,11 @@ impl TerminalInteractionRuntime {
                 let direction = repeat.direction(self.last_search_direction);
                 let query = self.last_search.clone();
                 if !query.trim().is_empty() {
-                    let result = self.search_terminal_with_direction_recording(
+                    let _result = self.search_terminal_with_direction_recording(
                         terminal, None, &query, direction, false,
                     );
                     if let Some(dialog) = self.find_dialog.as_mut() {
-                        dialog.set_result(result);
+                        dialog.clear_result();
                         dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
                     }
                     effects.push(AppEffect::RequestRepaint);
@@ -630,10 +650,24 @@ impl TerminalInteractionRuntime {
         action: TerminalCopyModeAction,
         effects: &mut Vec<AppEffect>,
     ) -> bool {
+        if let TerminalCopyModeAction::SearchWord(direction) = &action {
+            self.pending_word_search = true;
+            self.record_search_direction(*direction);
+        }
         let search_direction = match &action {
             TerminalCopyModeAction::Search { direction, .. }
             | TerminalCopyModeAction::SearchWord(direction) => Some(*direction),
             _ => None,
+        };
+        // Route later events in this batch after an ordered cancellation.
+        let cancels = match &action {
+            TerminalCopyModeAction::Cancel
+            | TerminalCopyModeAction::CopySelectionAndCancel
+            | TerminalCopyModeAction::CopyEndOfLineAndCancel => true,
+            TerminalCopyModeAction::CancelOrClearSelection => terminal
+                .extract_frame()
+                .is_ok_and(|frame| frame.copy_mode.is_none_or(|mode| !mode.selecting)),
+            _ => false,
         };
         match TerminalRuntime::handle_copy_mode_action(terminal, action) {
             Ok(outcome) => {
@@ -651,14 +685,13 @@ impl TerminalInteractionRuntime {
                     if let Some(direction) = search_direction {
                         self.record_search_direction(direction);
                     }
-                    let result = self.terminal_find_result_from_frame(terminal, search.found);
                     if let Some(dialog) = self.find_dialog.as_mut() {
-                        dialog.set_result(result);
+                        dialog.clear_result();
                         dialog.set_error(self.last_error.as_ref().map(ErrorNotice::raw_message));
                     }
                 }
                 effects.push(AppEffect::RequestRepaint);
-                outcome.active
+                !cancels && outcome.active
             }
             Err(error) => {
                 self.record_error("Could not use copy mode", &error);
@@ -668,43 +701,44 @@ impl TerminalInteractionRuntime {
     }
 
     fn copy_selection(&mut self, terminal: &mut ActiveTerminal, format: CopyToClipboard) -> bool {
-        let result = (|| -> Result<bool> {
-            let mut selection = |format| terminal.format_selection(format);
-            match format {
-                format @ (CopyToClipboard::Plain | CopyToClipboard::Vt) => {
-                    let selection_format = if format == CopyToClipboard::Plain {
-                        TerminalSelectionFormat::PlainText
-                    } else {
-                        TerminalSelectionFormat::Vt
-                    };
-                    let Some(bytes) = selection(selection_format)? else {
-                        return Ok(false);
-                    };
-                    write_clipboard_text(&String::from_utf8_lossy(&bytes))?;
-                }
-                CopyToClipboard::Html => {
-                    let Some(bytes) = selection(TerminalSelectionFormat::Html)? else {
-                        return Ok(false);
-                    };
-                    write_clipboard_html(&String::from_utf8_lossy(&bytes), None)?;
-                }
-                CopyToClipboard::Mixed => {
-                    let Some(plain) = selection(TerminalSelectionFormat::PlainText)? else {
-                        return Ok(false);
-                    };
-                    let Some(html) = selection(TerminalSelectionFormat::Html)? else {
-                        return Ok(false);
-                    };
-                    write_clipboard_html(
-                        &String::from_utf8_lossy(&html),
-                        Some(&String::from_utf8_lossy(&plain)),
-                    )?;
-                }
-            }
-            Ok(true)
+        if terminal
+            .extract_frame()
+            .is_ok_and(|frame| frame.selections.is_empty())
+        {
+            return false;
+        }
+        self.request_selection(terminal, Some(format))
+    }
+
+    fn request_selection(
+        &mut self,
+        terminal: &mut ActiveTerminal,
+        format: Option<CopyToClipboard>,
+    ) -> bool {
+        let result = (|| -> Result<PendingSelection> {
+            let kind = match format {
+                Some(CopyToClipboard::Html) => TerminalSelectionFormat::Html,
+                Some(CopyToClipboard::Vt) => TerminalSelectionFormat::Vt,
+                _ => TerminalSelectionFormat::PlainText,
+            };
+            let plain = terminal.format_selection(kind)?;
+            let html = if format == Some(CopyToClipboard::Mixed) {
+                Some(terminal.format_selection(TerminalSelectionFormat::Html)?)
+            } else {
+                None
+            };
+            Ok(PendingSelection {
+                plain,
+                html,
+                plain_value: None,
+                format,
+            })
         })();
         match result {
-            Ok(copied) => copied,
+            Ok(pending) => {
+                self.pending_selections.push(pending);
+                true
+            }
             Err(error) => {
                 self.record_error("Could not copy the selection", &error);
                 false
@@ -712,14 +746,53 @@ impl TerminalInteractionRuntime {
         }
     }
 
-    fn selected_terminal_text(&mut self, terminal: &mut ActiveTerminal) -> Option<String> {
-        match terminal.format_selection(TerminalSelectionFormat::PlainText) {
-            Ok(Some(bytes)) => Some(String::from_utf8_lossy(&bytes).trim().to_owned())
-                .filter(|text| !text.is_empty()),
-            Ok(None) => None,
-            Err(error) => {
-                self.record_error("Could not copy the selection", &error);
-                None
+    fn poll_selections(&mut self, terminal: &mut ActiveTerminal) {
+        let pending = std::mem::take(&mut self.pending_selections);
+        for mut request in pending {
+            let result = (|| -> Result<bool> {
+                if request.plain_value.is_none() {
+                    let Some(value) = request.plain.try_receive()? else {
+                        return Ok(false);
+                    };
+                    let Some(value) = value.map_err(anyhow::Error::msg)? else {
+                        return Ok(true);
+                    };
+                    request.plain_value = Some(value);
+                }
+                let html = if let Some(response) = &request.html {
+                    let Some(value) = response.try_receive()? else {
+                        return Ok(false);
+                    };
+                    value.map_err(anyhow::Error::msg)?
+                } else {
+                    None
+                };
+                if let Some(bytes) = request.plain_value.take() {
+                    let text = String::from_utf8_lossy(&bytes);
+                    match request.format {
+                        None => {
+                            self.search_terminal(
+                                terminal,
+                                None,
+                                text.trim(),
+                                TerminalSearchDirection::Current,
+                            );
+                        }
+                        Some(CopyToClipboard::Html) => write_clipboard_html(&text, None)?,
+                        Some(CopyToClipboard::Mixed) => {
+                            if let Some(html) = html {
+                                write_clipboard_html(&String::from_utf8_lossy(&html), Some(&text))?;
+                            }
+                        }
+                        _ => write_clipboard_text(&text)?,
+                    }
+                }
+                Ok(true)
+            })();
+            match result {
+                Ok(false) => self.pending_selections.push(request),
+                Ok(true) => {}
+                Err(error) => self.record_error("Could not copy the selection", &error),
             }
         }
     }
@@ -763,6 +836,7 @@ impl TerminalInteractionRuntime {
             self.clear_search(terminal);
             return TerminalFindResult::default();
         }
+        self.pending_word_search = false;
         query.clone_into(&mut self.last_search);
         if record_direction {
             self.record_search_direction(direction);
@@ -819,34 +893,11 @@ impl TerminalInteractionRuntime {
                 direction,
             },
         ) {
-            Ok(outcome) => outcome
-                .search
-                .map_or_else(TerminalFindResult::default, |search| {
-                    self.terminal_find_result_from_frame(terminal, search.found)
-                }),
+            Ok(_) => TerminalFindResult::default(),
             Err(error) => {
                 self.record_error("Could not search the terminal", &error);
                 TerminalFindResult::default()
             }
-        }
-    }
-
-    fn terminal_find_result_from_frame(
-        &mut self,
-        terminal: &mut ActiveTerminal,
-        found: bool,
-    ) -> TerminalFindResult {
-        let (active_index, match_count) = terminal.extract_frame().map_or_else(
-            |error| {
-                self.record_error("Could not search the terminal", &error);
-                (None, 0)
-            },
-            |frame| (frame.active_search_match_index, frame.search_match_count),
-        );
-        TerminalFindResult {
-            found,
-            active_index,
-            match_count,
         }
     }
 
@@ -896,11 +947,6 @@ fn search_runtime(
     direction: TerminalSearchDirection,
     options: TerminalSearchOptions,
 ) -> Result<TerminalFindResult> {
-    let found = terminal.search_viewport_with_options(query, direction, options)?;
-    let frame = terminal.extract_frame()?;
-    Ok(TerminalFindResult {
-        found,
-        active_index: frame.active_search_match_index,
-        match_count: frame.search_match_count,
-    })
+    terminal.search_viewport_with_options(query, direction, options)?;
+    Ok(TerminalFindResult::default())
 }

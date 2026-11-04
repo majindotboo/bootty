@@ -170,19 +170,6 @@ impl DraftWriteback {
         self.mutate_setting(path, |document| document.set_str(path, value));
     }
 
-    /// A native terminal backend cannot have a default remote. Keep the pair in one document
-    /// mutation so persistence validates and publishes only the complete configuration.
-    pub fn set_multiplexer_backend(&mut self, backend: &str) {
-        let path = ["multiplexer", "backend"];
-        self.mutate_setting(&path, |document| {
-            document.set_str(&path, backend)?;
-            if backend == "native" {
-                document.remove_multiplexer_remote()?;
-            }
-            Ok(())
-        });
-    }
-
     pub fn set_strings(&mut self, path: &[&str], value: &[String]) {
         self.mutate_setting(path, |document| document.set_strings(path, value));
     }

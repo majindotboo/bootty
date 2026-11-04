@@ -1,256 +1,119 @@
-use bootty_mux::pane_layout::{Direction, PaneId, PaneLayout, SplitDirection};
-use bootty_mux::snapshot::{MuxPaneLayout, MuxPaneSplitDirection};
-use bootty_terminal::geometry::{SurfacePoint, SurfaceRect};
+use bootty_mux::{
+    pane_layout::{Direction, PaneLayout, SplitDirection},
+    snapshot::{MuxPaneLayout, MuxPaneSplitDirection},
+};
+use bootty_terminal::geometry::SurfaceRect;
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
+use rstest::rstest;
 
-fn area() -> SurfaceRect {
-    SurfaceRect::from_min_size(0.0, 0.0, 100.0, 80.0)
+fn normalized(layout: &MuxPaneLayout, parent: Option<&MuxPaneSplitDirection>) -> bool {
+    match layout {
+        MuxPaneLayout::Pane(_) => true,
+        MuxPaneLayout::Split {
+            direction,
+            children,
+            weights,
+        } => {
+            parent != Some(direction)
+                && children.len() >= 2
+                && children.len() == weights.len()
+                && weights
+                    .iter()
+                    .all(|weight| weight.is_finite() && *weight > 0.)
+                && (weights.iter().sum::<f32>() - 1.).abs() < 0.000_01
+                && children
+                    .iter()
+                    .all(|child| normalized(child, Some(direction)))
+        }
+    }
 }
-
-fn rect_for<'a>(rects: &'a [(PaneId, SurfaceRect)], pane: &str) -> Option<&'a SurfaceRect> {
-    rects
-        .iter()
-        .find_map(|(id, rect)| (id == pane).then_some(rect))
+#[derive(Clone, Debug, proptest_derive::Arbitrary)]
+enum Mutation {
+    Split(bool),
+    Close(u8),
+    Move(u8, u8, bool),
+    Swap(u8, u8),
+    Extract(u8),
+    Merge(bool),
+    Resize(u16),
+    Reconcile(u8),
+    Focus(u8),
 }
-
-fn approx(actual: f32, expected: f32) {
-    assert!((actual - expected).abs() < 0.01, "{actual} != {expected}");
+proptest! {
+    #[test]
+    fn every_mutation_keeps_a_canonical_tree(operations in prop::collection::vec(any::<Mutation>(), 0..100)) {
+        let mut layout = PaneLayout::single("pane-0".into());
+        let mut next = 1_u32;
+        for op in operations {
+            let panes = layout.panes();
+            let at = |ix: u8| panes[usize::from(ix).checked_rem(panes.len()).unwrap()].as_str();
+            match op {
+                Mutation::Split(vertical) => { layout.split_focused(format!("pane-{next}"), if vertical { SplitDirection::Down } else { SplitDirection::Right }); next = next.saturating_add(1); }
+                Mutation::Close(ix) | Mutation::Extract(ix) => { layout.remove(at(ix)); }
+                Mutation::Move(a,b,vertical) => { layout.move_beside(at(a),at(b), if vertical { Direction::Up } else { Direction::Right }); }
+                Mutation::Swap(a,b) => { layout.swap(at(a),at(b)); }
+                Mutation::Merge(vertical) => {
+                    let mut other = PaneLayout::single(format!("pane-{next}")); next = next.saturating_add(1);
+                    other.split_focused(format!("pane-{next}"), if vertical { SplitDirection::Down } else { SplitDirection::Right }); next = next.saturating_add(1);
+                    prop_assert!(layout.merge(other));
+                }
+                Mutation::Resize(seed) => {
+                    let mut snapshot = layout.snapshot();
+                    if let MuxPaneLayout::Split { weights, .. } = &mut snapshot {
+                        for (ix,weight) in weights.iter_mut().enumerate() { *weight = f32::from(seed) + num_traits::ToPrimitive::to_f32(&ix).unwrap() + 1.; }
+                    }
+                    prop_assert!(layout.resize(&snapshot));
+                }
+                Mutation::Reconcile(ix) => { let mut live = panes.clone(); live.remove(usize::from(ix).checked_rem(live.len()).unwrap()); if !live.is_empty() { layout.reconcile(&live); } }
+                Mutation::Focus(ix) => { prop_assert!(layout.set_focus(at(ix))); }
+            }
+            let snapshot = layout.snapshot();
+            prop_assert!(normalized(&snapshot,None), "{snapshot:?}");
+            let leaves = layout.panes(); let unique = leaves.iter().collect::<std::collections::HashSet<_>>();
+            prop_assert_eq!(leaves.len(),unique.len()); prop_assert!(layout.contains(layout.focused()));
+            let roundtrip: MuxPaneLayout = serde_json::from_str(&serde_json::to_string(&snapshot).unwrap()).unwrap();
+            prop_assert!(normalized(&roundtrip,None));
+            prop_assert_eq!(PaneLayout::from_mux_layout(&roundtrip).unwrap().panes(),leaves);
+        }
+    }
+    #[test]
+    fn swaps_preserve_geometry_and_focus(count in 2usize..15, a in any::<usize>(), b in any::<usize>()) {
+        let mut layout = PaneLayout::single("0".into());
+        for ix in 1..count { layout.split_focused(ix.to_string(), if ix%2 == 0 { SplitDirection::Down } else { SplitDirection::Right }); }
+        let (a,b) = ((a.checked_rem(count).unwrap()).to_string(),(b.checked_rem(count).unwrap()).to_string());
+        let area = SurfaceRect::from_min_size(0.,0.,1000.,800.);
+        let before = layout.rects(area,0.); let focus = layout.focused().to_owned();
+        prop_assert_eq!(layout.swap(&a,&b),a != b);
+        let after = layout.rects(area,0.);
+        prop_assert_eq!(layout.focused(),focus);
+        for (id,rect) in before { let expected = if id==a { &b } else if id==b { &a } else { &id }; prop_assert_eq!(after.iter().find(|(id,_)| id==expected).unwrap().1,rect); }
+    }
 }
-
-#[derive(Clone, Copy, Debug, proptest_derive::Arbitrary)]
-struct SplitLayoutInput {
-    #[proptest(strategy = "10u16..2_000")]
-    width: u16,
-    #[proptest(strategy = "10u16..2_000")]
-    height: u16,
-    #[proptest(strategy = "0u8..=25")]
-    gap_percent: u8,
-    horizontal: bool,
+#[rstest]
+fn legacy_binary_splits_load_as_scaled_nary_weights() {
+    let layout: MuxPaneLayout = serde_json::from_value(serde_json::json!({"Split": {"direction":"Right","ratio_millis":250,
+        "first":{"Pane":"a"},"second":{"Split":{"direction":"Right","ratio_millis":400,"first":{"Pane":"b"},"second":{"Pane":"c"}}}}})).unwrap();
+    assert_eq!(
+        layout,
+        MuxPaneLayout::Split {
+            direction: MuxPaneSplitDirection::Right,
+            weights: vec![0.25, 0.3, 0.450_000_02],
+            children: ["a", "b", "c"]
+                .map(|id| MuxPaneLayout::Pane(id.into()))
+                .into()
+        }
+    );
+    assert!(normalized(&layout, None));
 }
-
-#[test]
-fn dividers_keep_their_split_direction_and_tree_path() {
-    let mut layout = PaneLayout::single("a".to_owned());
-    layout.split_focused("b".to_owned(), SplitDirection::Right);
-    layout.split_focused("c".to_owned(), SplitDirection::Down);
-
-    let dividers = layout.dividers(area(), 4.0);
-    assert_eq!(dividers.len(), 2);
-    assert_eq!(dividers[0].path, Vec::<u8>::new());
-    assert_eq!(dividers[0].direction, SplitDirection::Right);
-    assert_eq!(dividers[1].path, vec![1]);
-    assert_eq!(dividers[1].direction, SplitDirection::Down);
-}
-
-#[test]
-fn reconciliation_removes_closed_panes_and_adopts_new_panes() {
-    let mut layout = PaneLayout::single("a".to_owned());
-    layout.split_focused("b".to_owned(), SplitDirection::Right);
-    layout.split_focused("c".to_owned(), SplitDirection::Down);
-
-    layout.reconcile(&["a".to_owned(), "c".to_owned(), "d".to_owned()]);
-
-    let mut panes = layout.panes();
-    panes.sort();
-    assert_eq!(panes, vec!["a".to_owned(), "c".to_owned(), "d".to_owned()]);
-    assert!(layout.contains("d"));
-    assert!(!layout.contains("b"));
-
+#[rstest]
+fn resize_cannot_replace_topology_and_invalid_mutations_are_atomic() {
+    let mut layout = PaneLayout::single("a".into());
+    layout.split_focused("b".into(), SplitDirection::Right);
     let before = layout.clone();
-    layout.reconcile(&["a".to_owned(), "c".to_owned(), "d".to_owned()]);
+    assert!(!layout.resize(&MuxPaneLayout::Pane("a".into())));
+    assert!(!layout.move_beside("a", "missing", Direction::Left));
+    assert!(!layout.insert_beside("a".into(), "b", Direction::Right));
+    assert!(!layout.merge(before.clone()));
     assert_eq!(layout, before);
-}
-
-#[test]
-fn reconciliation_uses_the_requested_direction_for_an_async_pane() {
-    let mut layout = PaneLayout::single("a".to_owned());
-
-    layout
-        .reconcile_with_new_pane_direction(&["a".to_owned(), "b".to_owned()], SplitDirection::Down);
-
-    let dividers = layout.dividers(area(), 4.0);
-    assert_eq!(dividers.len(), 1);
-    assert_eq!(dividers[0].direction, SplitDirection::Down);
-    assert_eq!(layout.focused(), "b");
-}
-
-#[test]
-fn backend_layout_restores_split_orientation_and_ratio() {
-    let layout = PaneLayout::from_mux_layout(&MuxPaneLayout::Split {
-        direction: MuxPaneSplitDirection::Down,
-        ratio_millis: 250,
-        first: Box::new(MuxPaneLayout::Pane("a".to_owned())),
-        second: Box::new(MuxPaneLayout::Pane("b".to_owned())),
-    })
-    .expect("mux layout should convert");
-
-    let dividers = layout.dividers(area(), 0.0);
-    assert_eq!(dividers.len(), 1);
-    assert_eq!(dividers[0].direction, SplitDirection::Down);
-    let rects = layout.rects(area(), 0.0);
-    approx(rect_for(&rects, "a").expect("pane present").height(), 20.0);
-    approx(rect_for(&rects, "b").expect("pane present").height(), 60.0);
-}
-
-#[test]
-fn terminal_window_size_includes_internal_split_borders() {
-    let mut right = PaneLayout::single("a".to_owned());
-    right.split_focused("b".to_owned(), SplitDirection::Right);
-
-    assert_eq!(
-        right.terminal_window_size(|pane| match pane {
-            "a" | "b" => Some((58, 40)),
-            _ => None,
-        }),
-        Some((117, 40))
-    );
-
-    let mut nested = PaneLayout::single("a".to_owned());
-    nested.split_focused("b".to_owned(), SplitDirection::Right);
-    nested.split_focused("c".to_owned(), SplitDirection::Down);
-
-    assert_eq!(
-        nested.terminal_window_size(|pane| match pane {
-            "a" => Some((58, 39)),
-            "b" | "c" => Some((58, 19)),
-            _ => None,
-        }),
-        Some((117, 39))
-    );
-}
-
-proptest! {
-    /// Property: a split partitions the available axis exactly once, accounting for its gap.
-    #[test]
-    fn split_rectangles_conserve_available_space(input in any::<SplitLayoutInput>()) {
-        let SplitLayoutInput { width, height, gap_percent, horizontal } = input;
-        let width = f32::from(width);
-        let height = f32::from(height);
-        let area = SurfaceRect::from_min_size(0.0, 0.0, width, height);
-        let gap = f32::from(gap_percent) / 100.0 * if horizontal { width } else { height };
-        let single = PaneLayout::single("a".to_owned());
-        prop_assert_eq!(*rect_for(&single.rects(area, gap), "a").expect("pane present"), area);
-        prop_assert!(single.dividers(area, gap).is_empty() && single.is_single());
-        let direction = if horizontal { SplitDirection::Right } else { SplitDirection::Down };
-        let mut layout = PaneLayout::single("a".to_owned());
-        layout.split_focused("b".to_owned(), direction);
-        prop_assert_eq!(layout.focused(), "b");
-        prop_assert_eq!(layout.panes(), vec!["a".to_owned(), "b".to_owned()]);
-        let rects = layout.rects(area, gap);
-        let divider = layout.dividers(area, gap).remove(0);
-        let center = SurfacePoint { x: width * 0.5, y: height * 0.5 };
-        prop_assert!((divider.ratio_at(center, 0.0) - 0.5).abs() < 0.01);
-        let first = rect_for(&rects, "a").expect("pane present");
-        let second = rect_for(&rects, "b").expect("pane present");
-        let occupied = if horizontal {
-            first.width() + gap + second.width()
-        } else {
-            first.height() + gap + second.height()
-        };
-
-        prop_assert!((occupied - if horizontal { width } else { height }).abs() < 0.01,
-            "first={first:?}, second={second:?}, gap={gap}, area={area:?}");
-        let separated = if horizontal {
-            first.max_x <= second.min_x
-        } else {
-            first.max_y <= second.min_y
-        };
-        prop_assert!(separated, "split panes overlap: {first:?}, {second:?}");
-        if horizontal {
-            prop_assert_eq!(first.height().to_bits(), height.to_bits());
-            prop_assert_eq!(second.height().to_bits(), height.to_bits());
-        } else {
-            prop_assert_eq!(first.width().to_bits(), width.to_bits());
-            prop_assert_eq!(second.width().to_bits(), width.to_bits());
-        }
-
-        let (forward, backward, outside) = if horizontal {
-            (Direction::Right, Direction::Left, Direction::Up)
-        } else {
-            (Direction::Down, Direction::Up, Direction::Left)
-        };
-        prop_assert_eq!(layout.neighbor("a", forward, area, gap), Some("b".to_owned()));
-        prop_assert_eq!(layout.neighbor("b", backward, area, gap), Some("a".to_owned()));
-        prop_assert_eq!(layout.neighbor("a", outside, area, gap), None);
-
-        let mut nested = layout.clone();
-        nested.split_focused("c".to_owned(), if horizontal { SplitDirection::Down } else { SplitDirection::Right });
-        prop_assert_eq!(nested.panes(), vec!["a".to_owned(), "b".to_owned(), "c".to_owned()]);
-        let nested_rects = nested.rects(area, 0.0);
-        let primary = |rect: &SurfaceRect| if horizontal { rect.width() / width } else { rect.height() / height };
-        let secondary = |rect: &SurfaceRect| if horizontal { rect.height() / height } else { rect.width() / width };
-        prop_assert!((primary(rect_for(&nested_rects, "a").expect("pane present")) - 0.5).abs() < 0.01);
-        prop_assert!((primary(rect_for(&nested_rects, "b").expect("pane present")) - 0.5).abs() < 0.01);
-        prop_assert!((secondary(rect_for(&nested_rects, "b").expect("pane present")) - 0.5).abs() < 0.01);
-        nested.reconcile(&["a".to_owned(), "b".to_owned()]);
-        let reconciled = nested.rects(area, 0.0);
-        prop_assert!((secondary(rect_for(&reconciled, "b").expect("pane present")) - 1.0).abs() < 0.01);
-
-        layout.set_ratio_at(&[], 0.99, 0.1, 0.2);
-        let clamped = layout.rects(area, 0.0);
-        let first_fraction = if horizontal {
-            rect_for(&clamped, "a").expect("pane present").width() / width
-        } else {
-            rect_for(&clamped, "a").expect("pane present").height() / height
-        };
-        prop_assert!((first_fraction - 0.8).abs() < 0.01, "clamped ratio={first_fraction}");
-
-        let mut collapsed = layout;
-        prop_assert!(collapsed.remove("b"));
-        prop_assert_eq!(collapsed.panes(), vec!["a".to_owned()]);
-        prop_assert_eq!(collapsed.focused(), "a");
-        prop_assert_eq!(*rect_for(&collapsed.rects(area, gap), "a").expect("pane present"), area);
-        prop_assert!(!collapsed.remove("a"));
-    }
-}
-
-proptest! {
-    #[test]
-    fn pane_moves_preserve_identities_and_swaps_preserve_geometry(count in 2usize..20, first in 0usize..20, second in 0usize..20, vertical in any::<bool>(), before in any::<bool>()) {
-        let ids=(0..count).map(|index|format!("pane-{index}")).collect::<Vec<_>>();
-        let mut layout=PaneLayout::single(ids[0].clone());
-        for (index,pane) in ids.iter().enumerate().skip(1) { layout.split_focused(pane.clone(),if index%2==0{SplitDirection::Down}else{SplitDirection::Right}); }
-        let source=&ids[first.checked_rem(count).expect("nonzero count")];let target=&ids[second.checked_rem(count).expect("nonzero count")];
-        let original=layout.clone();
-        if source==target {
-            prop_assert!(!layout.move_beside(source,target,Direction::Left));
-            prop_assert_eq!(layout,original); return Ok(());
-        }
-        let rects=layout.rects(area(),0.0);
-        prop_assert!(layout.swap(source,target));
-        let swapped=layout.rects(area(),0.0);
-        prop_assert_eq!(rect_for(&swapped,source).expect("pane present"),rect_for(&rects,target).expect("pane present"));
-        prop_assert_eq!(rect_for(&swapped,target).expect("pane present"),rect_for(&rects,source).expect("pane present"));
-        prop_assert_eq!(layout.focused(),original.focused());
-        prop_assert!(layout.swap(source,target));prop_assert_eq!(&layout,&original);
-        let direction=match (vertical,before){(true,true)=>Direction::Up,(true,false)=>Direction::Down,(false,true)=>Direction::Left,(false,false)=>Direction::Right};
-        prop_assert!(layout.move_beside(source,target,direction));
-        let mut actual=layout.panes();actual.sort();let mut expected=ids.clone();expected.sort();
-        prop_assert_eq!(actual,expected);prop_assert_eq!(layout.focused(),source);
-        let rects=layout.rects(area(),0.0);let source_rect=rect_for(&rects,source).expect("pane present");let target_rect=rect_for(&rects,target).expect("pane present");
-        match direction {Direction::Left=>prop_assert!(source_rect.max_x<=target_rect.min_x),Direction::Right=>prop_assert!(target_rect.max_x<=source_rect.min_x),Direction::Up=>prop_assert!(source_rect.max_y<=target_rect.min_y),Direction::Down=>prop_assert!(target_rect.max_y<=source_rect.min_y)}
-        let saved=layout.clone();prop_assert!(!layout.move_beside(source,"missing",direction));prop_assert!(!layout.insert_beside(source.clone(),target,direction));prop_assert_eq!(layout,saved);
-    }
-}
-
-proptest! {
-    #[test]
-    fn merging_preserves_both_trees_and_rejects_overlapping_identities(ratio in 0.1f32..0.9) {
-        let mut left = PaneLayout::single("a".to_owned());
-        left.split_focused("b".to_owned(), SplitDirection::Down);
-        left.set_ratio_at(&[], ratio, 0.05, 0.05);
-        let mut right = PaneLayout::single("c".to_owned());
-        right.split_focused("d".to_owned(), SplitDirection::Right);
-        let duplicate = left.clone();
-        prop_assert!(!left.merge(duplicate.clone())); prop_assert_eq!(&left, &duplicate);
-        prop_assert!(left.merge(right));
-        prop_assert_eq!(left.panes(), vec!["a", "b", "c", "d"]);
-        prop_assert_eq!(left.focused(), "d");
-        let rects = left.rects(area(), 0.);
-        prop_assert!((rect_for(&rects,"a").expect("pane present").height() / area().height() - ratio).abs() < 0.001);
-        prop_assert!(!left.replace("a", "c".to_owned()));
-        prop_assert!(left.replace("a", "replacement".to_owned()));
-        prop_assert_eq!(left.panes(), vec!["replacement", "b", "c", "d"]);
-    }
 }

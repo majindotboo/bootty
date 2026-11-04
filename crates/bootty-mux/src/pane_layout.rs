@@ -1,20 +1,17 @@
-//! Binding-owned pane topology, split ratios, and focus in host-neutral coordinates.
-//! Providers keep their native topology; this tree records Bootty-managed pane placement.
+//! Canonical server-owned pane layout and geometry for directional navigation.
 
 use crate::snapshot::{MuxPaneLayout, MuxPaneSplitDirection};
-use bootty_terminal::geometry::{SurfacePoint, SurfaceRect};
+use bootty_terminal::geometry::SurfaceRect;
+use serde::{Deserialize, Deserializer};
 
 pub type PaneId = String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SplitDirection {
-    /// New pane opens to the right; children sit side by side.
     Right,
-    /// New pane opens below; children stack vertically.
     Down,
 }
 
-/// A focus-movement direction for keyboard pane navigation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Left,
@@ -23,47 +20,120 @@ pub enum Direction {
     Down,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum Node {
-    Leaf(PaneId),
-    Split {
-        direction: SplitDirection,
-        /// Fraction of the splittable extent given to `first` (left/top), in (0, 1).
-        ratio: f32,
-        first: Box<Self>,
-        second: Box<Self>,
+// Only the read boundary knows the retired binary representation.
+#[derive(Deserialize)]
+enum SavedLayout {
+    Pane(String),
+    Split(SavedSplit),
+}
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SavedSplit {
+    Children {
+        direction: MuxPaneSplitDirection,
+        weights: Vec<f32>,
+        children: Vec<MuxPaneLayout>,
+    },
+    Binary {
+        direction: MuxPaneSplitDirection,
+        ratio_millis: u16,
+        first: Box<MuxPaneLayout>,
+        second: Box<MuxPaneLayout>,
     },
 }
 
-/// A draggable divider between a split node's two children.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Divider {
-    /// Path of `0` (first) / `1` (second) steps from the root to the split node this divider
-    /// controls. Stable while the tree shape is unchanged, which holds for the duration of a drag.
-    pub path: Vec<u8>,
-    pub direction: SplitDirection,
-    /// Screen rect of the gap strip the user grabs.
-    pub rect: SurfaceRect,
-    /// The full area this split divides, for converting a pointer position into a new ratio.
-    pub area: SurfaceRect,
+impl<'de> Deserialize<'de> for MuxPaneLayout {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let layout = match SavedLayout::deserialize(deserializer)? {
+            SavedLayout::Pane(id) => Self::Pane(id),
+            SavedLayout::Split(SavedSplit::Children {
+                direction,
+                weights,
+                children,
+            }) => Self::Split {
+                direction,
+                weights,
+                children,
+            },
+            SavedLayout::Split(SavedSplit::Binary {
+                direction,
+                ratio_millis,
+                first,
+                second,
+            }) => {
+                if !(1..=999).contains(&ratio_millis) {
+                    return Err(serde::de::Error::custom("invalid split ratio"));
+                }
+                let ratio = f32::from(ratio_millis) / 1000.;
+                Self::Split {
+                    direction,
+                    weights: vec![ratio, 1. - ratio],
+                    children: vec![*first, *second],
+                }
+            }
+        };
+        normalize(layout)
+            .ok_or_else(|| serde::de::Error::custom("invalid split weights or children"))
+    }
 }
 
-impl Divider {
-    /// The ratio (fraction for the first/left/top child) implied by dragging this divider to
-    /// `pointer`, before any min-size clamping.
-    #[must_use]
-    pub fn ratio_at(&self, pointer: SurfacePoint, gap: f32) -> f32 {
-        let (extent, offset) = match self.direction {
-            SplitDirection::Right => (self.area.width(), pointer.x - self.area.min_x),
-            SplitDirection::Down => (self.area.height(), pointer.y - self.area.min_y),
-        };
-        offset / (extent - gap).max(1.0)
+/// The same post-order collapse and scaled same-axis splice as GPUI Kit's Dock.
+fn normalize(node: MuxPaneLayout) -> Option<MuxPaneLayout> {
+    let MuxPaneLayout::Split {
+        direction,
+        weights,
+        children,
+    } = node
+    else {
+        return Some(node);
+    };
+    if children.is_empty()
+        || children.len() != weights.len()
+        || weights
+            .iter()
+            .any(|weight| !weight.is_finite() || *weight <= 0.)
+    {
+        return None;
     }
+    let total: f32 = weights.iter().sum();
+    if !total.is_finite() {
+        return None;
+    }
+    let mut flat_children = Vec::new();
+    let mut flat_weights = Vec::new();
+    for (child, weight) in children.into_iter().zip(weights) {
+        let weight = weight / total;
+        match normalize(child)? {
+            MuxPaneLayout::Split {
+                direction: inner,
+                weights,
+                children,
+            } if inner == direction => {
+                flat_weights.extend(weights.into_iter().map(|inner| weight * inner));
+                flat_children.extend(children);
+            }
+            child => {
+                flat_children.push(child);
+                flat_weights.push(weight);
+            }
+        }
+    }
+    if flat_children.len() == 1 {
+        return flat_children.pop();
+    }
+    if flat_weights.iter().any(|weight| *weight <= 0.) {
+        return None;
+    }
+    Some(MuxPaneLayout::Split {
+        direction,
+        weights: flat_weights,
+        children: flat_children,
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PaneLayout {
-    root: Node,
+    root: MuxPaneLayout,
     focused: PaneId,
 }
 
@@ -71,261 +141,228 @@ impl PaneLayout {
     #[must_use]
     pub fn single(pane: PaneId) -> Self {
         Self {
-            root: Node::Leaf(pane.clone()),
+            root: MuxPaneLayout::Pane(pane.clone()),
             focused: pane,
         }
     }
 
     #[must_use]
     pub fn from_mux_layout(layout: &MuxPaneLayout) -> Option<Self> {
-        let root = Self::node_from_mux_layout(layout)?;
-        let focused = Self::first_leaf(&root).to_owned();
-        Some(Self { root, focused })
-    }
-
-    fn node_from_mux_layout(layout: &MuxPaneLayout) -> Option<Node> {
-        match layout {
-            MuxPaneLayout::Pane(pane) => Some(Node::Leaf(pane.clone())),
-            MuxPaneLayout::Split {
-                direction,
-                ratio_millis,
-                first,
-                second,
-            } => Some(Node::Split {
-                direction: match direction {
-                    MuxPaneSplitDirection::Right => SplitDirection::Right,
-                    MuxPaneSplitDirection::Down => SplitDirection::Down,
-                },
-                ratio: (f32::from(*ratio_millis) / 1000.0).clamp(0.001, 0.999),
-                first: Box::new(Self::node_from_mux_layout(first)?),
-                second: Box::new(Self::node_from_mux_layout(second)?),
-            }),
-        }
+        let root = normalize(layout.clone())?;
+        let focused = first_leaf(&root)?.to_owned();
+        let layout = Self { root, focused };
+        let panes = layout.panes();
+        let unique: std::collections::HashSet<_> = panes.iter().collect();
+        (unique.len() == panes.len()).then_some(layout)
     }
 
     #[must_use]
     pub fn snapshot(&self) -> MuxPaneLayout {
-        fn node_snapshot(node: &Node) -> MuxPaneLayout {
-            match node {
-                Node::Leaf(id) => MuxPaneLayout::Pane(id.clone()),
-                Node::Split {
-                    direction,
-                    ratio,
-                    first,
-                    second,
-                } => MuxPaneLayout::Split {
-                    direction: match direction {
-                        SplitDirection::Right => MuxPaneSplitDirection::Right,
-                        SplitDirection::Down => MuxPaneSplitDirection::Down,
-                    },
-                    ratio_millis: num_traits::ToPrimitive::to_u16(
-                        &(*ratio * 1000.0).round().clamp(1.0, 999.0),
-                    )
-                    .unwrap_or(500),
-                    first: Box::new(node_snapshot(first)),
-                    second: Box::new(node_snapshot(second)),
-                },
-            }
-        }
-        node_snapshot(&self.root)
+        self.root.clone()
     }
-
     #[must_use]
     pub fn focused(&self) -> &str {
         &self.focused
     }
-
     #[must_use]
     pub const fn is_single(&self) -> bool {
-        matches!(self.root, Node::Leaf(_))
+        matches!(self.root, MuxPaneLayout::Pane(_))
     }
-
     #[must_use]
     pub fn contains(&self, pane: &str) -> bool {
-        Self::node_contains(&self.root, pane)
+        contains(&self.root, pane)
     }
-
-    /// All pane ids, left-to-right / top-to-bottom (in-order leaf traversal).
     #[must_use]
     pub fn panes(&self) -> Vec<PaneId> {
+        fn collect(node: &MuxPaneLayout, out: &mut Vec<PaneId>) {
+            match node {
+                MuxPaneLayout::Pane(id) => out.push(id.clone()),
+                MuxPaneLayout::Split { children, .. } => {
+                    for child in children {
+                        collect(child, out);
+                    }
+                }
+            }
+        }
         let mut out = Vec::new();
-        Self::collect_leaves(&self.root, &mut out);
+        collect(&self.root, &mut out);
         out
     }
-
-    /// Move focus to `pane` if it is a leaf of this layout.
     pub fn set_focus(&mut self, pane: &str) -> bool {
-        let found = self.contains(pane);
-        if found {
-            pane.clone_into(&mut self.focused);
+        if !self.contains(pane) {
+            return false;
         }
-        found
+        pane.clone_into(&mut self.focused);
+        true
     }
-
-    /// Replace the focused leaf with a split whose first child is the old pane and second child is
-    /// `new_pane`, then focus the new pane.
-    pub fn split_focused(&mut self, new_pane: PaneId, direction: SplitDirection) {
+    pub fn split_focused(&mut self, pane: PaneId, direction: SplitDirection) {
+        let direction = match direction {
+            SplitDirection::Right => Direction::Right,
+            SplitDirection::Down => Direction::Down,
+        };
         let focused = self.focused.clone();
-        Self::split_leaf(&mut self.root, &focused, &new_pane, direction);
-        self.focused = new_pane;
+        self.insert_beside(pane, &focused, direction);
     }
-
-    /// Join two disjoint trees side by side, preserving their internal splits and ratios.
     pub fn merge(&mut self, other: Self) -> bool {
         if other.panes().iter().any(|pane| self.contains(pane)) {
             return false;
         }
-        self.root = Node::Split {
-            direction: SplitDirection::Right,
-            ratio: 0.5,
-            first: Box::new(self.root.clone()),
-            second: Box::new(other.root),
+        let Some(root) = normalize(MuxPaneLayout::Split {
+            direction: MuxPaneSplitDirection::Right,
+            weights: vec![0.5, 0.5],
+            children: vec![self.root.clone(), other.root],
+        }) else {
+            return false;
         };
+        self.root = root;
         self.focused = other.focused;
         true
     }
-
-    /// Swap two existing pane slots without changing split geometry or the focused process.
     pub fn swap(&mut self, first: &str, second: &str) -> bool {
         if first == second || !self.contains(first) || !self.contains(second) {
             return false;
         }
-        Self::swap_leaves(&mut self.root, first, second);
+        swap_leaves(&mut self.root, first, second);
         true
     }
-
-    /// Replace a transferred slot while retaining this window's geometry.
     pub fn replace(&mut self, pane: &str, replacement: PaneId) -> bool {
         if !self.contains(pane) || self.contains(&replacement) {
             return false;
         }
-        Self::swap_leaves(&mut self.root, pane, &replacement);
+        swap_leaves(&mut self.root, pane, &replacement);
         if self.focused == pane {
             self.focused = replacement;
         }
         true
     }
-
-    /// Insert a pane beside a known destination. Rejection leaves this layout untouched.
     pub fn insert_beside(&mut self, pane: PaneId, target: &str, direction: Direction) -> bool {
         if self.contains(&pane) || !self.contains(target) {
             return false;
         }
-        let split = match direction {
-            Direction::Left | Direction::Right => SplitDirection::Right,
-            Direction::Up | Direction::Down => SplitDirection::Down,
+        let mut root = self.root.clone();
+        insert_leaf(&mut root, &pane, target, direction);
+        let Some(root) = normalize(root) else {
+            return false;
         };
-        Self::split_leaf(&mut self.root, target, &pane, split);
-        if matches!(direction, Direction::Left | Direction::Up) {
-            Self::swap_leaves(&mut self.root, target, &pane);
-        }
+        self.root = root;
         self.focused = pane;
         true
     }
-
-    /// Move an existing pane beside another, preserving all pane identities.
     pub fn move_beside(&mut self, pane: &str, target: &str, direction: Direction) -> bool {
         if pane == target || !self.contains(pane) || !self.contains(target) {
             return false;
         }
-        self.remove(pane);
-        self.insert_beside(pane.to_owned(), target, direction)
-    }
-
-    fn swap_leaves(node: &mut Node, first_id: &str, second_id: &str) {
-        match node {
-            Node::Leaf(id) if id == first_id => second_id.clone_into(id),
-            Node::Leaf(id) if id == second_id => first_id.clone_into(id),
-            Node::Leaf(_) => {}
-            Node::Split { first, second, .. } => {
-                Self::swap_leaves(first, first_id, second_id);
-                Self::swap_leaves(second, first_id, second_id);
-            }
-        }
-    }
-
-    /// Remove `pane`, collapsing its parent so the sibling takes the parent's slot. Refuses to
-    /// remove the last pane. Returns whether a pane was removed; if the focused pane went away,
-    /// focus moves to the surviving neighbor.
-    pub fn remove(&mut self, pane: &str) -> bool {
-        if !Self::remove_node(&mut self.root, pane) {
+        let mut candidate = self.clone();
+        if !candidate.remove(pane) || !candidate.insert_beside(pane.to_owned(), target, direction) {
             return false;
         }
-        if !Self::node_contains(&self.root, &self.focused) {
-            self.focused = Self::first_leaf(&self.root).to_owned();
+        *self = candidate;
+        true
+    }
+    pub fn remove(&mut self, pane: &str) -> bool {
+        if self.is_single() || !self.contains(pane) {
+            return false;
+        }
+        let mut root = self.root.clone();
+        prune_leaf(&mut root, pane);
+        let Some(root) = normalize(root) else {
+            return false;
+        };
+        self.root = root;
+        if !self.contains(&self.focused)
+            && let Some(focused) = first_leaf(&self.root)
+        {
+            self.focused = focused.to_owned();
         }
         true
     }
-
-    /// Bring the tree in line with the backend's pane set: drop leaves whose pane has gone away
-    /// (closed or exited elsewhere) and adopt any pane that appeared outside the UI split path by
-    /// splitting the focused leaf in the supplied direction. No-ops when already in sync.
-    pub fn reconcile(&mut self, pane_ids: &[PaneId]) {
-        self.reconcile_with_new_pane_direction(pane_ids, SplitDirection::Right);
+    pub fn reconcile(&mut self, ids: &[PaneId]) {
+        self.reconcile_with_new_pane_direction(ids, SplitDirection::Right);
     }
-
-    pub fn reconcile_with_new_pane_direction(
-        &mut self,
-        pane_ids: &[PaneId],
-        new_pane_direction: SplitDirection,
-    ) {
-        for existing in self.panes() {
-            if !pane_ids.contains(&existing) {
-                self.remove(&existing);
+    pub fn reconcile_with_new_pane_direction(&mut self, ids: &[PaneId], direction: SplitDirection) {
+        if let Some(first) = ids.first() {
+            if !self.panes().iter().any(|pane| ids.contains(pane)) {
+                *self = Self::single(first.clone());
             }
-        }
-        for id in pane_ids {
-            if !self.contains(id) {
-                self.split_focused(id.clone(), new_pane_direction);
+            for pane in self.panes() {
+                if !ids.contains(&pane) {
+                    self.remove(&pane);
+                }
+            }
+            for pane in ids {
+                if !self.contains(pane) {
+                    self.split_focused(pane.clone(), direction);
+                }
             }
         }
     }
 
-    /// Pane id → screen rect for every leaf, dividing `area` by each split's ratio with a `gap`
-    /// reserved between children for the divider.
+    /// Accept weights only for the current structure; delayed drags cannot undo a topology edit.
+    pub fn resize(&mut self, proposed: &MuxPaneLayout) -> bool {
+        let Some(proposed) = Self::from_mux_layout(proposed) else {
+            return false;
+        };
+        if !same_structure(&self.root, &proposed.root) {
+            return false;
+        }
+        self.root = proposed.root;
+        true
+    }
+
+    /// Server navigation geometry. UI geometry comes exclusively from Dock.
     #[must_use]
     pub fn rects(&self, area: SurfaceRect, gap: f32) -> Vec<(PaneId, SurfaceRect)> {
-        let mut out = Vec::new();
-        Self::layout_node(&self.root, area, gap, &mut out);
-        out
-    }
-
-    /// The draggable divider strips, one per split node.
-    #[must_use]
-    pub fn dividers(&self, area: SurfaceRect, gap: f32) -> Vec<Divider> {
-        let mut out = Vec::new();
-        Self::collect_dividers(&self.root, area, gap, &mut Vec::new(), &mut out);
-        out
-    }
-    /// The rmux window size needed for this split tree when each leaf has the supplied terminal
-    /// cell size. Rmux panes share a single window layout, so every internal split consumes one
-    /// server-side separator cell even though Bootty paints its own divider chrome.
-    pub fn terminal_window_size<F>(&self, mut leaf_size: F) -> Option<(u16, u16)>
-    where
-        F: FnMut(&str) -> Option<(u16, u16)>,
-    {
-        Self::node_terminal_window_size(&self.root, &mut leaf_size)
-    }
-
-    /// Set the ratio of the split node addressed by `path` (sequence of 0=first / 1=second steps),
-    /// clamped to keep both children at least `min_first`/`min_second` fraction of the extent.
-    pub fn set_ratio_at(&mut self, path: &[u8], ratio: f32, min_first: f32, min_second: f32) {
-        let mut node = &mut self.root;
-        for step in path {
+        fn visit(
+            node: &MuxPaneLayout,
+            area: SurfaceRect,
+            gap: f32,
+            out: &mut Vec<(PaneId, SurfaceRect)>,
+        ) {
             match node {
-                Node::Split { first, second, .. } => {
-                    node = if *step == 0 { first } else { second };
+                MuxPaneLayout::Pane(id) => out.push((id.clone(), area)),
+                MuxPaneLayout::Split {
+                    direction,
+                    children,
+                    weights,
+                } => {
+                    let horizontal = *direction == MuxPaneSplitDirection::Right;
+                    let gaps = num_traits::ToPrimitive::to_f32(&children.len().saturating_sub(1))
+                        .unwrap_or(0.);
+                    let extent = if horizontal {
+                        area.width()
+                    } else {
+                        area.height()
+                    };
+                    let usable = gap.mul_add(-gaps, extent).max(0.);
+                    let mut offset = 0.;
+                    for (child, weight) in children.iter().zip(weights) {
+                        let size = usable * weight;
+                        let rect = if horizontal {
+                            SurfaceRect::from_min_size(
+                                area.min_x + offset,
+                                area.min_y,
+                                size,
+                                area.height(),
+                            )
+                        } else {
+                            SurfaceRect::from_min_size(
+                                area.min_x,
+                                area.min_y + offset,
+                                area.width(),
+                                size,
+                            )
+                        };
+                        visit(child, rect, gap, out);
+                        offset += size + gap;
+                    }
                 }
-                Node::Leaf(_) => return,
             }
         }
-        if let Node::Split { ratio: r, .. } = node {
-            *r = ratio.clamp(min_first, 1.0 - min_second);
-        }
+        let mut out = Vec::new();
+        visit(&self.root, area, gap, &mut out);
+        out
     }
 
-    /// The pane geometrically adjacent to `from` in `direction`, using the laid-out rects. Returns
-    /// `None` at the edge of the layout.
     #[must_use]
     pub fn neighbor(
         &self,
@@ -335,224 +372,59 @@ impl PaneLayout {
         gap: f32,
     ) -> Option<PaneId> {
         let rects = self.rects(area, gap);
-        let origin = rects
+        let origin = rects.iter().find(|(pane, _)| pane == from)?.1;
+        rects
             .iter()
-            .find(|(pane, _)| pane == from)
-            .map(|(_, rect)| *rect)?;
-        let mut best: Option<(f32, PaneId)> = None;
-        for (pane, rect) in &rects {
-            if pane == from {
-                continue;
-            }
-            let Some((primary, overlap)) = directional_gap(origin, *rect, direction) else {
-                continue;
-            };
-            // Prefer the nearest candidate along the movement axis, breaking ties toward the one
-            // with the most perpendicular overlap with the origin.
-            let score = f32::mul_add(overlap, -0.001, primary);
-            if best
-                .as_ref()
-                .is_none_or(|(best_score, _)| score < *best_score)
-            {
-                best = Some((score, pane.clone()));
-            }
-        }
-        best.map(|(_, pane)| pane)
+            .filter(|(pane, _)| pane != from)
+            .filter_map(|(pane, rect)| {
+                let (primary, overlap) = directional_gap(origin, *rect, direction)?;
+                Some((f32::mul_add(overlap, -0.001, primary), pane))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, pane)| pane.clone())
     }
+}
 
-    fn node_contains(node: &Node, pane: &str) -> bool {
-        match node {
-            Node::Leaf(id) => id == pane,
-            Node::Split { first, second, .. } => {
-                Self::node_contains(first, pane) || Self::node_contains(second, pane)
-            }
-        }
+fn first_leaf(node: &MuxPaneLayout) -> Option<&str> {
+    match node {
+        MuxPaneLayout::Pane(id) => Some(id),
+        MuxPaneLayout::Split { children, .. } => first_leaf(children.first()?),
     }
-
-    fn collect_leaves(node: &Node, out: &mut Vec<PaneId>) {
-        match node {
-            Node::Leaf(id) => out.push(id.clone()),
-            Node::Split { first, second, .. } => {
-                Self::collect_leaves(first, out);
-                Self::collect_leaves(second, out);
+}
+fn contains(node: &MuxPaneLayout, pane: &str) -> bool {
+    match node {
+        MuxPaneLayout::Pane(id) => id == pane,
+        MuxPaneLayout::Split { children, .. } => children.iter().any(|child| contains(child, pane)),
+    }
+}
+fn swap_leaves(node: &mut MuxPaneLayout, first: &str, second: &str) {
+    match node {
+        MuxPaneLayout::Pane(id) if id == first => second.clone_into(id),
+        MuxPaneLayout::Pane(id) if id == second => first.clone_into(id),
+        MuxPaneLayout::Pane(_) => {}
+        MuxPaneLayout::Split { children, .. } => {
+            for child in children {
+                swap_leaves(child, first, second);
             }
         }
     }
-
-    fn first_leaf(node: &Node) -> &str {
-        match node {
-            Node::Leaf(id) => id,
-            Node::Split { first, .. } => Self::first_leaf(first),
-        }
-    }
-
-    fn split_leaf(
-        node: &mut Node,
-        target: &str,
-        new_pane: &str,
-        direction: SplitDirection,
-    ) -> bool {
-        match node {
-            Node::Leaf(id) if id == target => {
-                let old = std::mem::replace(node, Node::Leaf(new_pane.to_owned()));
-                *node = Node::Split {
-                    direction,
-                    ratio: 0.5,
-                    first: Box::new(old),
-                    second: Box::new(Node::Leaf(new_pane.to_owned())),
-                };
-                true
-            }
-            Node::Leaf(_) => false,
-            Node::Split { first, second, .. } => {
-                Self::split_leaf(first, target, new_pane, direction)
-                    || Self::split_leaf(second, target, new_pane, direction)
-            }
-        }
-    }
-
-    fn remove_node(node: &mut Node, pane: &str) -> bool {
-        let Node::Split { first, second, .. } = node else {
-            return false;
-        };
-        if matches!(&**first, Node::Leaf(id) if id == pane) {
-            let replacement = (**second).clone();
-            *node = replacement;
-            return true;
-        }
-        if matches!(&**second, Node::Leaf(id) if id == pane) {
-            let replacement = (**first).clone();
-            *node = replacement;
-            return true;
-        }
-        Self::remove_node(first, pane) || Self::remove_node(second, pane)
-    }
-
-    fn layout_node(node: &Node, area: SurfaceRect, gap: f32, out: &mut Vec<(PaneId, SurfaceRect)>) {
-        match node {
-            Node::Leaf(id) => out.push((id.clone(), area)),
-            Node::Split {
-                direction,
-                ratio,
-                first,
-                second,
-            } => {
-                let (first_area, second_area) = split_area(area, *direction, *ratio, gap);
-                Self::layout_node(first, first_area, gap, out);
-                Self::layout_node(second, second_area, gap, out);
-            }
-        }
-    }
-
-    fn collect_dividers(
-        node: &Node,
-        area: SurfaceRect,
-        gap: f32,
-        path: &mut Vec<u8>,
-        out: &mut Vec<Divider>,
-    ) {
-        if let Node::Split {
-            direction,
-            ratio,
-            first,
-            second,
-        } = node
-        {
-            out.push(Divider {
-                path: path.clone(),
-                direction: *direction,
-                rect: divider_rect(area, *direction, *ratio, gap),
-                area,
-            });
-            let (first_area, second_area) = split_area(area, *direction, *ratio, gap);
-            path.push(0);
-            Self::collect_dividers(first, first_area, gap, path, out);
-            path.pop();
-            path.push(1);
-            Self::collect_dividers(second, second_area, gap, path, out);
-            path.pop();
-        }
-    }
-    fn node_terminal_window_size<F>(node: &Node, leaf_size: &mut F) -> Option<(u16, u16)>
-    where
-        F: FnMut(&str) -> Option<(u16, u16)>,
-    {
-        match node {
-            Node::Leaf(id) => leaf_size(id),
-            Node::Split {
-                direction,
-                first,
-                second,
+}
+fn same_structure(a: &MuxPaneLayout, b: &MuxPaneLayout) -> bool {
+    match (a, b) {
+        (MuxPaneLayout::Pane(a), MuxPaneLayout::Pane(b)) => a == b,
+        (
+            MuxPaneLayout::Split {
+                direction: a,
+                children: ac,
                 ..
-            } => {
-                let (first_cols, first_rows) = Self::node_terminal_window_size(first, leaf_size)?;
-                let (second_cols, second_rows) =
-                    Self::node_terminal_window_size(second, leaf_size)?;
-                Some(match direction {
-                    SplitDirection::Right => (
-                        first_cols.saturating_add(second_cols).saturating_add(1),
-                        first_rows.max(second_rows),
-                    ),
-                    SplitDirection::Down => (
-                        first_cols.max(second_cols),
-                        first_rows.saturating_add(second_rows).saturating_add(1),
-                    ),
-                })
-            }
-        }
-    }
-}
-
-/// Split `area` into (first, second) sub-rects, reserving `gap` between them for the divider.
-fn split_area(
-    area: SurfaceRect,
-    direction: SplitDirection,
-    ratio: f32,
-    gap: f32,
-) -> (SurfaceRect, SurfaceRect) {
-    match direction {
-        SplitDirection::Right => {
-            let usable = (area.width() - gap).max(0.0);
-            let first_w = usable * ratio;
-            let first = SurfaceRect::from_min_size(area.min_x, area.min_y, first_w, area.height());
-            let second = SurfaceRect {
-                min_x: area.min_x + first_w + gap,
-                min_y: area.min_y,
-                max_x: area.max_x,
-                max_y: area.max_y,
-            };
-            (first, second)
-        }
-        SplitDirection::Down => {
-            let usable = (area.height() - gap).max(0.0);
-            let first_h = usable * ratio;
-            let first = SurfaceRect::from_min_size(area.min_x, area.min_y, area.width(), first_h);
-            let second = SurfaceRect {
-                min_x: area.min_x,
-                min_y: area.min_y + first_h + gap,
-                max_x: area.max_x,
-                max_y: area.max_y,
-            };
-            (first, second)
-        }
-    }
-}
-
-fn divider_rect(area: SurfaceRect, direction: SplitDirection, ratio: f32, gap: f32) -> SurfaceRect {
-    let (first, second) = split_area(area, direction, ratio, gap);
-    match direction {
-        SplitDirection::Right => SurfaceRect {
-            min_x: first.max_x,
-            min_y: area.min_y,
-            max_x: second.min_x,
-            max_y: area.max_y,
-        },
-        SplitDirection::Down => SurfaceRect {
-            min_x: area.min_x,
-            min_y: first.max_y,
-            max_x: area.max_x,
-            max_y: second.min_y,
-        },
+            },
+            MuxPaneLayout::Split {
+                direction: b,
+                children: bc,
+                ..
+            },
+        ) => a == b && ac.len() == bc.len() && ac.iter().zip(bc).all(|(a, b)| same_structure(a, b)),
+        _ => false,
     }
 }
 
@@ -598,4 +470,48 @@ fn vertical_overlap(a: SurfaceRect, b: SurfaceRect) -> f32 {
 
 fn horizontal_overlap(a: SurfaceRect, b: SurfaceRect) -> f32 {
     (a.max_x.min(b.max_x) - a.min_x.max(b.min_x)).max(0.0)
+}
+
+fn insert_leaf(node: &mut MuxPaneLayout, pane: &str, target: &str, direction: Direction) {
+    match node {
+        MuxPaneLayout::Pane(id) if id == target => {
+            let mut children = vec![node.clone(), MuxPaneLayout::Pane(pane.to_owned())];
+            if matches!(direction, Direction::Left | Direction::Up) {
+                children.reverse();
+            }
+            *node = MuxPaneLayout::Split {
+                direction: match direction {
+                    Direction::Left | Direction::Right => MuxPaneSplitDirection::Right,
+                    Direction::Up | Direction::Down => MuxPaneSplitDirection::Down,
+                },
+                weights: vec![0.5, 0.5],
+                children,
+            };
+        }
+        MuxPaneLayout::Pane(_) => {}
+        MuxPaneLayout::Split { children, .. } => {
+            for child in children {
+                insert_leaf(child, pane, target, direction);
+            }
+        }
+    }
+}
+
+fn prune_leaf(node: &mut MuxPaneLayout, pane: &str) {
+    if let MuxPaneLayout::Split {
+        children, weights, ..
+    } = node
+    {
+        if let Some(ix) = children
+            .iter()
+            .position(|child| matches!(child, MuxPaneLayout::Pane(id) if id == pane))
+        {
+            children.remove(ix);
+            weights.remove(ix);
+        } else {
+            for child in children {
+                prune_leaf(child, pane);
+            }
+        }
+    }
 }

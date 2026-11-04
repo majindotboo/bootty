@@ -6,37 +6,15 @@ use crate::settings_session::{AcceptedSettings, RemoteProfile};
 #[derive(Clone, Debug)]
 pub enum SettingsEffect {
     SubmitDocument(ConfigDocument),
-    InstallIntegration {
-        identity: String,
-        module: String,
-        id: String,
-    },
-    UninstallIntegration {
-        identity: String,
-        module: String,
-        id: String,
-    },
     UpsertRemote(RemoteProfile),
-    SetDefaultRemote(RemoteProfile),
     ClearDefaultRemote,
+    SetDefaultRemote(RemoteProfile),
     RemoveRemote {
         id: String,
     },
     TestRemote {
         request_id: u64,
         profile: RemoteProfile,
-    },
-}
-
-/// Result of native integration work performed by the application owner.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ModuleOutcome {
-    IntegrationUpdated {
-        identity: String,
-    },
-    Failed {
-        identity: Option<String>,
-        message: String,
     },
 }
 
@@ -67,6 +45,5 @@ pub enum SettingsOutcome {
         source: SettingsWriteSource,
         error: String,
     },
-    Module(ModuleOutcome),
     Remote(RemoteOutcome),
 }

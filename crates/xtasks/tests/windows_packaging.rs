@@ -11,8 +11,7 @@ fn local_install_builds_host_daemon_before_replacing_existing_files() {
     fs::create_dir(workspace.join("src")).unwrap();
     fs::write(
         workspace.join("Cargo.toml"),
-        "[package]\nname = \"bootty-daemon\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
-         [profile.daemon-release]\ninherits = \"release\"\n",
+        "[package]\nname = \"bootty-daemon\"\nversion = \"0.0.0\"\nedition = \"2024\"\n",
     )
     .unwrap();
     fs::write(

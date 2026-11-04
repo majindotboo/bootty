@@ -69,10 +69,6 @@ impl AppState {
             return self.dispatch_history_search(arguments, remote, execution);
         }
         // Client attachments and shared mux panes cannot promise exclusive input ownership.
-        if binding.multiplexer().backend != bootty_config::config::MultiplexerBackendConfig::Native
-        {
-            return CommandDispatch::Complete(CommandOutcome::Unsupported { message: "Prompt editing requires a native pane with Bootty shell hooks; shared mux input cannot be leased exclusively".to_owned() });
-        }
         let remote = binding
             .multiplexer()
             .remote

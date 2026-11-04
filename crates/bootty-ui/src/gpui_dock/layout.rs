@@ -8,13 +8,6 @@ use std::{collections::BTreeMap, path::PathBuf, sync::mpsc};
 pub(super) struct SavedLayout {
     #[serde(flatten)]
     pub layout: DockAreaState,
-    #[serde(default)]
-    pub centers: BTreeMap<String, gpui_kit::component::dock::PanelState>,
-    #[serde(default)]
-    pub active_center: Option<String>,
-    /// Each session's right dock, by session key, other than the active session's in `layout`.
-    #[serde(default)]
-    pub rights: BTreeMap<String, gpui_kit::component::dock::DockState>,
 }
 
 struct LayoutSave {

@@ -1,6 +1,7 @@
 #![cfg(test)]
 #![cfg(target_os = "macos")]
 
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     env,
     path::Path,
@@ -112,12 +113,16 @@ fn shell_environment_child() {
 
 fn run_child(mode: &str, shell: &Path) -> Output {
     Command::new(env::current_exe().expect("test executable path"))
-        .args(["--exact", "shell_environment_child", "--nocapture"])
+        .args([
+            "--exact",
+            "shell_environment::shell_environment_child",
+            "--nocapture",
+        ])
         .env(CHILD_MODE, mode)
         .env("BOOTTY_SHELL", shell)
         .env("BOOTTY_SHELL_TEST_TOOLS", shell.with_file_name("tools"))
         .env("SHELL", "/bin/sh")
         .env("PATH", "/usr/bin:/bin")
-        .output()
+        .bootty_output()
         .expect("run isolated shell environment child")
 }

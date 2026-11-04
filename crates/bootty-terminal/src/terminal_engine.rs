@@ -4,7 +4,7 @@ use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
     rc::Rc,
-    sync::Once,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -81,21 +81,35 @@ const TERMINAL_XTVERSION: &str = concat!("ghostty (Bootty ", env!("CARGO_PKG_VER
 pub const TERMINAL_BACKGROUND: (u8, u8, u8) = (0x1a, 0x1b, 0x25);
 pub const TERMINAL_FOREGROUND: (u8, u8, u8) = (0xc0, 0xca, 0xf5);
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalColorConfig {
+    #[serde(with = "crate::frame_wire::rgb")]
     pub background: RgbColor,
+    #[serde(with = "crate::frame_wire::rgb")]
     pub foreground: RgbColor,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub cursor: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub cursor_text: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub pointer_foreground: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub pointer_background: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub tektronix_foreground: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub tektronix_background: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub highlight_background: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub tektronix_cursor: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub highlight_foreground: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub selection_background: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub selection_foreground: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::palette")]
     pub palette: Vec<RgbColor>,
     pub palette_generate: bool,
     pub palette_harmonious: bool,
@@ -124,13 +138,13 @@ impl Default for TerminalColorConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalCursorConfig {
     pub style: Option<TerminalCursorStyle>,
     pub blink: Option<bool>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TerminalCursorStyle {
     Bar,
     Block,
@@ -149,7 +163,7 @@ impl TerminalCursorStyle {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalFeatureConfig {
     pub glyph_protocol: bool,
 }
@@ -166,14 +180,14 @@ impl Default for TerminalFeatureConfig {
 ///
 /// Callers apply this value as one unit. The terminal engine applies colors first, then the
 /// cursor, then terminal features.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalLiveConfig {
     pub colors: TerminalColorConfig,
     pub cursor: TerminalCursorConfig,
     pub features: TerminalFeatureConfig,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TerminalSelectionEvent {
     pub surface: TerminalSurface,
     pub position: SurfacePoint,
@@ -193,7 +207,7 @@ impl TerminalSelectionEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum TerminalSelectionFormat {
     PlainText,
     Vt,
@@ -330,7 +344,7 @@ fn extract_render_row(
         // background still has to be read: a blank painted with a background colour carries that
         // colour and nothing else.
         let style = cell.has_styling()?.then(|| cell.style()).transpose()?;
-        let grapheme_len = cell.graphemes_len()?;
+        let grapheme_len = usize::try_from(cell.graphemes_len()?)?;
         grapheme_scratch.resize(grapheme_len, '\0');
         if grapheme_len > 0 {
             cell.graphemes_buf(grapheme_scratch)?;
@@ -463,6 +477,8 @@ pub struct TerminalEngine {
     pty_write_suppressed: Rc<Cell<bool>>,
     current_working_directory: String,
     colors: TerminalColorConfig,
+    cursor: TerminalCursorConfig,
+    features: TerminalFeatureConfig,
     xterm_color_overrides: XtermColorOverrides,
     color_scheme: Rc<Cell<ColorScheme>>,
     search_query: String,
@@ -542,11 +558,27 @@ impl libghostty_vt::log::Logger for BoottyGhosttyLogger {
     }
 }
 
-fn install_libghostty_logger() {
-    static INSTALL: Once = Once::new();
-    INSTALL.call_once(|| {
-        let _ = libghostty_vt::set_logger(Some(Box::new(BoottyGhosttyLogger)));
-    });
+fn install_libghostty_callbacks() -> Result<()> {
+    static INSTALL: OnceLock<Result<(), libghostty_vt::Error>> = OnceLock::new();
+    (*INSTALL.get_or_init(|| {
+        #[expect(
+            unsafe_code,
+            reason = "register the process-global Ghostty logger once"
+        )]
+        // SAFETY: All engines wait for this initializer before entering libghostty.
+        unsafe {
+            libghostty_vt::set_logger(Some(Box::new(BoottyGhosttyLogger)))?;
+        }
+        #[expect(
+            unsafe_code,
+            reason = "register the process-global Ghostty PNG decoder once"
+        )]
+        // SAFETY: The same initializer excludes concurrent engines and never replaces callbacks.
+        unsafe {
+            set_png_decoder(Some(Box::new(BoottyPngDecoder)))
+        }
+    }))?;
+    Ok(())
 }
 
 fn libghostty_log_enabled(level: libghostty_vt::log::Level) -> bool {
@@ -842,7 +874,8 @@ impl TerminalEngine {
         max_scrollback: usize,
         macos_option_as_alt: MacosOptionAsAlt,
     ) -> Result<Self> {
-        install_libghostty_logger();
+        // Register callbacks before any engine can enter Ghostty.
+        install_libghostty_callbacks()?;
         let mut terminal = Terminal::new(geometry.cols, geometry.rows)?;
         terminal.set_scrollback_max_bytes(Some(max_scrollback))?;
         let base_color_palette = terminal.default_color_palette()?.0;
@@ -873,13 +906,7 @@ impl TerminalEngine {
             geometry.cell_width,
             geometry.cell_height,
         )?;
-        terminal.set_kitty_image_from_file_allowed(true)?;
-        let temp_dir = std::env::temp_dir();
-        #[cfg(unix)]
-        let temp_dir = temp_dir.canonicalize().unwrap_or(temp_dir);
-        terminal.set_kitty_image_temp_file_dir(Some(&temp_dir))?;
-        terminal.set_kitty_image_from_shared_mem_allowed(true)?;
-        set_png_decoder(Some(Box::new(BoottyPngDecoder)))?;
+        configure_kitty_storage(&mut terminal)?;
 
         let selection_gesture = gesture::Gesture::new()?;
         let selection_press_event = gesture::PressEvent::new()?;
@@ -922,6 +949,8 @@ impl TerminalEngine {
             current_working_directory_state: pwd_state,
             color_scheme,
             colors,
+            cursor,
+            features,
             xterm_color_overrides: XtermColorOverrides::default(),
             search_query: String::new(),
             search_options: TerminalSearchOptions::default(),
@@ -962,14 +991,16 @@ impl TerminalEngine {
             if let Ok(title) = terminal.title() {
                 title_side_effects
                     .borrow_mut()
-                    .push(TerminalSideEffect::WindowTitle(title.to_owned()));
+                    .push(TerminalSideEffect::WindowTitle(
+                        String::from_utf8_lossy(title).into_owned(),
+                    ));
             }
         })?;
         let callback_pwd_state = self.current_working_directory_state.clone();
         self.terminal.on_pwd_changed(move |terminal| {
             if let Ok(pwd) = terminal.pwd() {
                 let mut current = callback_pwd_state.borrow_mut();
-                current.replace_range(.., pwd);
+                current.replace_range(.., &String::from_utf8_lossy(pwd));
             }
         })?;
         let bell_side_effects = callback_side_effects;
@@ -1158,12 +1189,14 @@ impl TerminalEngine {
 
     fn set_cursor_config(&mut self, cursor: TerminalCursorConfig) -> Result<()> {
         configure_default_cursor(&mut self.terminal, cursor)?;
+        self.cursor = cursor;
         self.mark_content_changed();
         Ok(())
     }
 
     fn set_feature_config(&mut self, features: TerminalFeatureConfig) -> Result<()> {
         configure_terminal_features(&mut self.terminal, features)?;
+        self.features = features;
         self.mark_content_changed();
         Ok(())
     }
@@ -1612,9 +1645,7 @@ impl TerminalEngine {
     /// Recovery keyframes can carry old terminal queries, a bell, or a
     /// notification the user has already seen. State the keyframe restores,
     /// such as the window title, is kept.
-    pub fn write_vt_without_pty_responses(&mut self, bytes: &[u8]) {
-        // Discard the old epoch's pending input, but keep the keyframe's tail:
-        // rmux appends its incomplete parser sequence for the next live bytes to finish.
+    pub fn import_history(&mut self, bytes: &[u8]) {
         self.clear_streaming_writes();
         let previously_suppressed = self.pty_write_suppressed.replace(true);
         let side_effects = self.side_effects.mark();
@@ -1990,6 +2021,7 @@ impl TerminalEngine {
         self.frame.active_search_segments.clear();
         self.frame.active_search_match_index = None;
         self.frame.search_match_count = 0;
+        self.frame.search_query.clone_from(&self.search_query);
         self.frame.search_pulse = self.search_pulse;
         self.frame.mouse_tracking = self.terminal.is_mouse_tracking()?;
         self.frame.stats = FrameStats {
@@ -2100,6 +2132,8 @@ impl TerminalEngine {
     /// # Errors
     /// Returns an error if terminal state cannot be read or its row and grapheme bounds are inconsistent.
     pub fn extract_frame(&mut self) -> Result<&RenderFrame> {
+        self.frame.current_working_directory = (!self.current_working_directory().is_empty())
+            .then(|| self.current_working_directory().to_owned());
         let extract_start = Instant::now();
         let update_start = Instant::now();
         let snapshot = self.render_state.update(&self.terminal)?;
@@ -2224,4 +2258,14 @@ fn resolve_frame_colors(
             .or(configured.highlight_foreground)
             .or(configured.selection_foreground),
     }
+}
+
+fn configure_kitty_storage(terminal: &mut Terminal) -> Result<()> {
+    terminal.set_kitty_image_from_file_allowed(true)?;
+    let temp_dir = std::env::temp_dir();
+    #[cfg(unix)]
+    let temp_dir = temp_dir.canonicalize().unwrap_or(temp_dir);
+    terminal.set_kitty_image_temp_file_dir(Some(&temp_dir))?;
+    terminal.set_kitty_image_from_shared_mem_allowed(true)?;
+    Ok(())
 }

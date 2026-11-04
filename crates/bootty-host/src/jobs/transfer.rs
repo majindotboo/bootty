@@ -3,7 +3,7 @@ use super::{Job, JobStatus};
 use crate::{CancellableCommandRunner, CommandCancellation, remote::RemoteHost};
 use anyhow::{Context as _, Result, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
+use bootty_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::fmt::Write as _;
@@ -370,7 +370,7 @@ pub fn serve_transfer(payload: &str) -> Result<()> {
         "Transfer request exceeds its bound"
     );
     let request: WireRequest = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
-    let mut input = BufReader::new(std::io::stdin().lock());
+    let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
     match request {
         WireRequest::Upload { path, bytes } => {

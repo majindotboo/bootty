@@ -7,8 +7,8 @@
 use num_traits::ToPrimitive as _;
 
 use crate::config::{
-    BrowserSearchEngine, MacosTitlebarStyle, OnLastWindowClosed, OpenBehavior, RestoreOnStartup,
-    WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
+    MacosTitlebarStyle, OnLastWindowClosed, OpenBehavior, RestoreOnStartup, WhenClosingWithNoTabs,
+    WindowDecoration, WindowFullscreen,
 };
 
 use super::{
@@ -107,25 +107,6 @@ fn custom(
 /// Every accepted compatibility spelling that is not itself a settings-surface control.
 pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] {
     &[
-        // Retired panel preferences remain loadable but have no UI or runtime effect.
-        &["panels", "jobs", "dock"],
-        &["panels", "jobs", "button"],
-        &["panels", "transfers", "dock"],
-        &["panels", "transfers", "button"],
-        &["panels", "recovery", "dock"],
-        &["panels", "recovery", "button"],
-        &["panels", "shell", "dock"],
-        &["panels", "shell", "button"],
-        &["panels", "sessions", "button"],
-        &["panels", "files", "button"],
-        &["panels", "changes", "button"],
-        &["panels", "diff", "button"],
-        &["panels", "sessions", "dock"],
-        &["panels", "files", "dock"],
-        &["panels", "changes", "dock"],
-        &["panels", "diff", "dock"],
-        &["panels", "agents", "dock"],
-        &["panels", "agents", "button"],
         &["chrome", "panel-tab-style"],
         &["chrome", "panel-tabs"],
         &["chrome", "dock-tabs", "appearance"],
@@ -149,39 +130,7 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
         &["sidebar", "position"],
         &["sidebar", "fullscreen-background"],
         &["sidebar", "fullscreen-hover"],
-        &["multiplexer", "herdr-session"],
         &["auto_update"],
-    ]
-}
-
-fn restart_spec() -> SettingSpec {
-    spec(
-        &["agents", "continue-after-restart"],
-        "Continue conversations after restarts",
-        "Resume interrupted work after an update, crash or app restart, using its captured provider conversation and account.",
-        "general",
-        "BEHAVIOR",
-        SettingKind::Bool,
-        SettingDefault::Field(|config| SettingValue::Bool(config.agents.continue_after_restart)),
-    )
-}
-
-fn conversation_specs() -> Vec<SettingSpec> {
-    vec![
-        response_streaming_spec(),
-        spec(
-            &["agents", "collapse-composer-on-scroll"],
-            "Collapse composer on scroll",
-            "Fold an empty conversation composer to one line while reading earlier messages. Click it to write a message.",
-            "general",
-            "BEHAVIOR",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| {
-                SettingValue::Bool(config.agents.collapse_composer_on_scroll)
-            }),
-        ),
-        transcript_width_spec(),
-        restart_spec(),
     ]
 }
 
@@ -201,9 +150,7 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(font_metrics_specs());
     specs.extend(terminal_integration_specs());
     specs.extend(notifications_specs());
-    specs.extend(tray_specs());
     specs.extend(terminal_environment_specs());
-    specs.extend(status_bar_specs());
     specs.extend(diagnostics_specs());
     specs.extend(themes_specs());
     specs.extend(cursor_specs());
@@ -213,126 +160,10 @@ pub(super) fn specs() -> Vec<SettingSpec> {
     specs.extend(sidebar_specs());
     specs.extend(backend_specs());
     specs.extend(ssh_profiles_specs());
-    specs.extend(agent_provider_specs());
-    specs.extend(agent_defaults_specs());
-    specs.extend(conversation_specs());
-    specs.push(spec(
-        &["agents", "send-shortcut"],
-        "Send shortcut",
-        "Enter sends by default; Shift+Enter inserts a newline. Choose Command/Control+Enter always, or only for multiline prompts. Use Command/Control+Enter (Shift with that shortcut enabled) for the opposite follow-up behavior.",
-        "general", "BEHAVIOR",
-        SettingKind::Choice { options: [
-            ("enter", "Enter"),
-            ("mod-enter-multiline", "Command/Control+Enter for multiline prompts"),
-            ("mod-enter", "Command/Control+Enter always"),
-        ].into_iter().map(|(token, label)| SettingOption {token: token.into(), label: label.into(), description: None}).collect() },
-        SettingDefault::Field(|config| SettingValue::Token(config.agents.send_shortcut.token().into())),
-    ));
-    specs.push(spec(
-        &["agents", "follow-up-behavior"],
-        "Follow-up behavior",
-        "",
-        "general",
-        "BEHAVIOR",
-        SettingKind::Choice {
-            options: [
-                ("queue", "Queue"),
-                ("steer", "Steer"),
-                ("interrupt", "Interrupt"),
-            ]
-            .into_iter()
-            .map(|(token, label)| SettingOption {
-                token: token.into(),
-                label: label.into(),
-                description: None,
-            })
-            .collect(),
-        },
-        SettingDefault::Field(|config| {
-            SettingValue::Token(config.agents.follow_up_behavior.token().into())
-        }),
-    ));
-    specs.push(spec(
-        &["agents", "quick-model"],
-        "Quick model",
-        "Codex model that names sessions and worktrees, and writes commit messages and pull request text.",
-        "providers",
-        "PROVIDERS",
-        SettingKind::Text {
-            placeholder: "gpt-6-luna".into(),
-            optional: false,
-        },
-        SettingDefault::Field(|config| SettingValue::Text(config.agents.quick_model.clone())),
-    ));
-    specs.push(spec(
-        &["agents", "allow-spawn"],
-        "Allow agents to create and supervise children",
-        "Allow attached agents to create child sessions in their captured workspace and account, control only shells they created under that grant, and native parents to interrupt or stop their own native children. Child tools receive no spawning, supervision or capture access.",
-        "permissions",
-        "AGENT TOOLS",
-        SettingKind::Bool,
-        SettingDefault::Field(|config| SettingValue::Bool(config.agents.allow_spawn)),
-    ));
     specs.extend(input_specs());
-    specs.extend(browser_specs());
-    specs.extend(computer_specs());
     specs.extend(custom_runtime_specs());
     specs.extend(font_weight_specs());
     specs
-}
-
-fn transcript_width_spec() -> SettingSpec {
-    spec(
-        &["agents", "transcript-width"],
-        "Message width",
-        "",
-        "general",
-        "BEHAVIOR",
-        SettingKind::Choice {
-            options: [
-                ("normal", "Normal"),
-                ("wide", "Wide"),
-                ("full", "Full width"),
-            ]
-            .into_iter()
-            .map(|(token, label)| SettingOption {
-                token: token.into(),
-                label: label.into(),
-                description: None,
-            })
-            .collect(),
-        },
-        SettingDefault::Field(|config| {
-            SettingValue::Token(config.agents.transcript_width.token().into())
-        }),
-    )
-}
-
-fn response_streaming_spec() -> SettingSpec {
-    spec(
-        &["agents", "response-streaming"],
-        "Response streaming",
-        "",
-        "general",
-        "BEHAVIOR",
-        SettingKind::Choice {
-            options: [
-                ("live", "Show text as it arrives"),
-                ("paragraph", "Show finished paragraphs"),
-                ("complete", "Show finished responses"),
-            ]
-            .into_iter()
-            .map(|(token, label)| SettingOption {
-                token: token.into(),
-                label: label.into(),
-                description: None,
-            })
-            .collect(),
-        },
-        SettingDefault::Field(|config| {
-            SettingValue::Token(config.agents.response_streaming.token().into())
-        }),
-    )
 }
 
 fn token<T: Copy + Into<&'static str>>(value: &T) -> String {
@@ -353,100 +184,16 @@ fn font_weight_specs() -> impl Iterator<Item = SettingSpec> {
     })
 }
 
-fn computer_specs() -> [SettingSpec; 4] {
-    [
-        spec(
-            &["computer", "enabled"],
-            "Enable computer use",
-            "Allow local desktop commands.",
-            "permissions",
-            "COMPUTER USE",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.computer.enabled)),
-        ),
-        spec(
-            &["computer", "capture-enabled"],
-            "Screenshots",
-            "Requires Screen Recording permission.",
-            "permissions",
-            "COMPUTER USE",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.computer.capture_enabled)),
-        ),
-        spec(
-            &["computer", "input-enabled"],
-            "Keyboard and mouse",
-            "Requires Accessibility permission.",
-            "permissions",
-            "COMPUTER USE",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.computer.input_enabled)),
-        ),
-        custom(
-            &["computer", "always-allowed-apps"],
-            "permissions",
-            "COMPUTER USE",
-            SettingEditor::Permissions,
-        ),
-    ]
-}
-
-fn browser_specs() -> [SettingSpec; 2] {
-    [
-        spec(
-            &["browser", "search-engine"],
-            "Search engine",
-            "",
-            "browser",
-            "SEARCH",
-            SettingKind::Choice {
-                options: [
-                    (&BrowserSearchEngine::DuckDuckGo, "DuckDuckGo"),
-                    (&BrowserSearchEngine::Google, "Google"),
-                    (&BrowserSearchEngine::Bing, "Bing"),
-                    (&BrowserSearchEngine::Brave, "Brave"),
-                ]
-                .into_iter()
-                .map(|(value, label)| SettingOption::of(value, label))
-                .collect(),
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.browser.search_engine))
-            }),
-        ),
-        spec(
-            &["browser", "persist-site-data"],
-            "Persist site data",
-            "",
-            "browser",
-            "SITE DATA",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.browser.persist_site_data)),
-        ),
-    ]
-}
-
-fn dock_header_specs() -> [SettingSpec; 2] {
-    [
-        spec(
-            &["chrome", "left-dock-toggle"],
-            "Show left sidebar button",
-            "Hide the header button while keeping the sidebar command available.",
-            "appearance",
-            "SIDEBARS",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.chrome.left_dock_toggle)),
-        ),
-        spec(
-            &["chrome", "right-dock-toggle"],
-            "Show right sidebar button",
-            "Hide the header button while keeping the sidebar command available.",
-            "appearance",
-            "SIDEBARS",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.chrome.right_dock_toggle)),
-        ),
-    ]
+fn dock_header_specs() -> [SettingSpec; 1] {
+    [spec(
+        &["chrome", "left-dock-toggle"],
+        "Show left sidebar button",
+        "Hide the header button while keeping the sidebar command available.",
+        "appearance",
+        "SIDEBARS",
+        SettingKind::Bool,
+        SettingDefault::Field(|config| SettingValue::Bool(config.chrome.left_dock_toggle)),
+    )]
 }
 
 fn tabs_specs() -> [SettingSpec; 4] {
@@ -1128,52 +875,7 @@ fn terminal_integration_specs() -> [SettingSpec; 4] {
     ]
 }
 
-fn tray_specs() -> [SettingSpec; 3] {
-    use crate::config::{TrayIconStyle, TrayVisibility};
-    [
-        spec(
-            &["tray", "visibility"],
-            "Show icon",
-            "Choose when the mascot appears.",
-            "general",
-            "MENU BAR & TRAY",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&TrayVisibility::Hidden, "Hidden"),
-                    SettingOption::of(&TrayVisibility::Always, "Always"),
-                    SettingOption::of(&TrayVisibility::Working, "While agents work"),
-                    SettingOption::of(&TrayVisibility::Attention, "When agents need attention"),
-                ],
-            },
-            SettingDefault::Field(|config| SettingValue::Token(token(&config.tray.visibility))),
-        ),
-        spec(
-            &["tray", "icon-style"],
-            "Icon appearance",
-            "Monochrome adapts to the macOS menu bar theme.",
-            "general",
-            "MENU BAR & TRAY",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&TrayIconStyle::Color, "Color"),
-                    SettingOption::of(&TrayIconStyle::Monochrome, "Monochrome"),
-                ],
-            },
-            SettingDefault::Field(|config| SettingValue::Token(token(&config.tray.icon_style))),
-        ),
-        spec(
-            &["tray", "macos-unread-count"],
-            "Unread count",
-            "Show unread conversations beside the icon. macOS only.",
-            "general",
-            "MENU BAR & TRAY",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.tray.macos_unread_count)),
-        ),
-    ]
-}
-
-fn notifications_specs() -> [SettingSpec; 4] {
+fn notifications_specs() -> [SettingSpec; 3] {
     [
         spec(
             &["session", "bell"],
@@ -1190,26 +892,6 @@ fn notifications_specs() -> [SettingSpec; 4] {
                 ],
             },
             SettingDefault::Field(|config| SettingValue::Token(token(&config.session.bell))),
-        ),
-        spec(
-            &["session", "agent-notifications"],
-            "Agent attention",
-            "Notify when an agent completes, needs input or reports an error.",
-            "general",
-            "NOTIFICATIONS",
-            SettingKind::Choice {
-                options: vec![
-                    SettingOption::of(&crate::config::NotificationPolicy::Never, "Never"),
-                    SettingOption::of(
-                        &crate::config::NotificationPolicy::Unfocused,
-                        "When unfocused",
-                    ),
-                    SettingOption::of(&crate::config::NotificationPolicy::Always, "Always"),
-                ],
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(token(&config.session.agent_notifications))
-            }),
         ),
         spec(
             &["session", "command-notifications"],
@@ -1259,7 +941,7 @@ fn notifications_specs() -> [SettingSpec; 4] {
     ]
 }
 
-fn terminal_environment_specs() -> [SettingSpec; 7] {
+fn terminal_environment_specs() -> [SettingSpec; 6] {
     [
         spec(
             &["session", "working-directory"],
@@ -1307,25 +989,6 @@ fn terminal_environment_specs() -> [SettingSpec; 7] {
             }),
         ),
         spec(
-            &["session", "worktree-limit"],
-            "Worktree limit",
-            "Keep at most this many of Bootty's worktrees on each host. Past it, the oldest archived and settled sessions' worktrees go first; one with uncommitted or unpushed work always stays. 0 removes only worktrees no session uses.",
-            "shell",
-            "SHELL",
-            SettingKind::Number {
-                range: 0.0..=1000.0,
-                control: NumberControl::Edit,
-                precision: 0,
-                step: 1.0,
-                slider_step: 1.0,
-                suffix: "".into(),
-                display_scale: 1.0,
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Number(f32::from(config.session.worktree_limit))
-            }),
-        ),
-        spec(
             &["session", "term"],
             "TERM",
             "Advertised terminal type for new shells.",
@@ -1353,18 +1016,6 @@ fn terminal_environment_specs() -> [SettingSpec; 7] {
             SettingDefault::Field(|config| SettingValue::Bool(config.session.glyph_protocol)),
         ),
     ]
-}
-
-fn status_bar_specs() -> [SettingSpec; 1] {
-    [spec(
-        &["multiplexer", "hide-tmux-status"],
-        "Hide tmux's own bar",
-        "Avoid duplicate status bars when the tmux backend is active.",
-        "general",
-        "MULTIPLEXER",
-        SettingKind::Bool,
-        SettingDefault::Field(|config| SettingValue::Bool(config.multiplexer.hide_tmux_status)),
-    )]
 }
 
 fn diagnostics_specs() -> [SettingSpec; 1] {
@@ -1557,27 +1208,8 @@ fn custom_chrome_specs() -> [SettingSpec; 3] {
 }
 
 /// How the sidebar lists sessions.
-fn sidebar_session_specs() -> [SettingSpec; 4] {
+fn sidebar_session_specs() -> [SettingSpec; 2] {
     [
-        spec(
-            &["sidebar", "auto-settle-after-days"],
-            "Auto-settle after",
-            "Settle inactive sessions after this many days. Zero disables auto-settle. Pinned, snoozed and busy sessions stay active.",
-            "sidebar",
-            "SESSIONS",
-            SettingKind::Number {
-                range: 0.0..=90.0,
-                control: NumberControl::Edit,
-                precision: 0,
-                step: 1.0,
-                slider_step: 1.0,
-                suffix: "days".into(),
-                display_scale: 1.0,
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Number(f32::from(config.sidebar.auto_settle_after_days))
-            }),
-        ),
         spec(
             &["sidebar", "group-by-project"],
             "Group sessions by project",
@@ -1586,15 +1218,6 @@ fn sidebar_session_specs() -> [SettingSpec; 4] {
             "SESSIONS",
             SettingKind::Bool,
             SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.group_by_project)),
-        ),
-        spec(
-            &["sidebar", "settled-collapsed"],
-            "Collapse settled sessions",
-            "The Settled shelf shows its heading and count until you open it.",
-            "sidebar",
-            "SESSIONS",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.settled_collapsed)),
         ),
         spec(
             &["sidebar", "sort-order"],
@@ -1619,17 +1242,8 @@ fn sidebar_session_specs() -> [SettingSpec; 4] {
     ]
 }
 
-fn sidebar_specs() -> [SettingSpec; 8] {
+fn sidebar_specs() -> [SettingSpec; 7] {
     [
-        spec(
-            &["sidebar", "animate-working"],
-            "Animate Working ring",
-            "Reduced motion keeps it still.",
-            "sidebar",
-            "SESSIONS",
-            SettingKind::Bool,
-            SettingDefault::Field(|config| SettingValue::Bool(config.sidebar.animate_working)),
-        ),
         custom(
             &["sidebar", "background"],
             "colors",
@@ -1675,33 +1289,8 @@ fn sidebar_specs() -> [SettingSpec; 8] {
     ]
 }
 
-fn backend_specs() -> [SettingSpec; 7] {
+fn backend_specs() -> [SettingSpec; 6] {
     [
-        spec(
-            &["multiplexer", "backend"],
-            "Terminal backend",
-            "",
-            "general",
-            "MULTIPLEXER",
-            SettingKind::Choice {
-                options: [
-                    (crate::config::MultiplexerBackendConfig::Native, "Native"),
-                    (crate::config::MultiplexerBackendConfig::Herdr, "Herdr"),
-                    (crate::config::MultiplexerBackendConfig::Rmux, "rmux"),
-                    (crate::config::MultiplexerBackendConfig::Tmux, "tmux"),
-                ]
-                .into_iter()
-                .map(|(backend, label)| SettingOption {
-                    token: backend.to_string().to_ascii_lowercase().into(),
-                    label: label.into(),
-                    description: None,
-                })
-                .collect(),
-            },
-            SettingDefault::Field(|config| {
-                SettingValue::Token(config.multiplexer.backend.to_string().to_ascii_lowercase())
-            }),
-        ),
         custom(
             &["multiplexer", "remote", "distribution"],
             "remotes",
@@ -1807,13 +1396,10 @@ fn ssh_profiles_specs() -> [SettingSpec; 10] {
 }
 
 fn input_specs() -> impl Iterator<Item = SettingSpec> {
-    let binding_paths: [&[&str]; 6] = [
+    let binding_paths: [&[&str]; 3] = [
         &["input", "keybind"],
         &["input", "sidebar-keybind"],
-        &["input", "backend-keybind", "herdr"],
         &["input", "backend-keybind", "native"],
-        &["input", "backend-keybind", "rmux"],
-        &["input", "backend-keybind", "tmux"],
     ];
     [
         custom(
@@ -1930,96 +1516,4 @@ fn custom_runtime_specs() -> [SettingSpec; 4] {
             SettingEditor::Extensions,
         ),
     ]
-}
-
-fn agent_provider_specs() -> impl Iterator<Item = SettingSpec> {
-    [
-        &["agents", "*", "enabled"][..],
-        &["agents", "*", "program"][..],
-        &["agents", "*", "available-efforts"][..],
-        &["agents", "*", "selected"][..],
-        &["agents", "*", "profiles", "*", "name"][..],
-        &["agents", "*", "profiles", "*", "directory"][..],
-        &["agents", "*", "profiles", "*", "arguments"][..],
-    ]
-    .into_iter()
-    .map(|path| custom(path, "providers", "PROVIDERS", SettingEditor::Providers))
-}
-
-fn agent_defaults_specs() -> Vec<SettingSpec> {
-    let mut specs = vec![spec(
-        &["agents", "default-provider"],
-        "Default provider",
-        "",
-        "general",
-        "NEW SESSIONS",
-        SettingKind::Choice {
-            options: [("codex", "Codex"), ("claude", "Claude"), ("pi", "Pi")]
-                .into_iter()
-                .map(|(token, label)| SettingOption {
-                    token: token.into(),
-                    label: label.into(),
-                    description: None,
-                })
-                .collect(),
-        },
-        SettingDefault::Field(|config| SettingValue::Token(config.agents.default_provider.clone())),
-    )];
-    specs.push(spec(
-        &["agents", "auto-update"],
-        "Automatically update providers",
-        "Update recognized local installations when no provider process is using them.",
-        "providers",
-        "UPDATES",
-        SettingKind::Bool,
-        SettingDefault::Field(|config| SettingValue::Bool(config.agents.auto_update)),
-    ));
-    macro_rules! defaults {
-        ($provider:ident, $id:literal) => {
-            specs.push(spec(
-                &["agents", $id, "default-model"],
-                "Model",
-                "Preferred advertised model; empty resolves the account's recommended model.",
-                "providers",
-                "DEFAULTS",
-                text("Recommended model", false),
-                SettingDefault::Field(|config| {
-                    SettingValue::Text(config.agents.$provider.default_model.clone())
-                }),
-            ));
-            specs.push(spec(
-                &["agents", $id, "default-effort"],
-                "Effort",
-                "Preferred supported effort; empty resolves the model's advertised default.",
-                "providers",
-                "DEFAULTS",
-                text("Recommended effort", false),
-                SettingDefault::Field(|config| {
-                    SettingValue::Text(config.agents.$provider.default_effort.clone())
-                }),
-            ));
-        };
-    }
-    defaults!(codex, "codex");
-    defaults!(claude, "claude");
-    defaults!(pi, "pi");
-    specs.push(spec(
-        &["agents", "codex", "fast-mode"],
-        "Fast mode",
-        "Request the fast service tier for new conversations.",
-        "providers",
-        "DEFAULTS",
-        SettingKind::Bool,
-        SettingDefault::Field(|config| SettingValue::Bool(config.agents.codex.fast_mode)),
-    ));
-    specs.push(spec(
-        &["agents", "claude", "fast-mode"],
-        "Fast mode",
-        "",
-        "providers",
-        "DEFAULTS",
-        SettingKind::Bool,
-        SettingDefault::Field(|config| SettingValue::Bool(config.agents.claude.fast_mode)),
-    ));
-    specs
 }
