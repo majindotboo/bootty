@@ -3,7 +3,6 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     },
-    thread,
     time::Instant,
 };
 
@@ -16,6 +15,8 @@ use bootty_git::{
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use serde_json::{Value, json};
+
+use crate::support::wait::eventually;
 
 /// A host whose Git is on branch `feature` and whose gh answers `pr view` with `answer`.
 #[derive(Clone)]
@@ -130,14 +131,13 @@ fn facts_carry_the_branch_pull_request() {
     let cache = GitFactsCache::with_remote_runner(host.clone());
     let start = Instant::now();
     let refresh_until = |now: Instant, done: &dyn Fn() -> bool| {
-        for _ in 0..100_000 {
-            let facts = cache.refresh("session", "/remote/repo", true, now);
-            if done() {
-                return facts;
-            }
-            thread::yield_now();
-        }
-        panic!("the background ask never finished");
+        let mut facts = None;
+        let finished = eventually(|| {
+            facts = Some(cache.refresh("session", "/remote/repo", true, now));
+            done()
+        });
+        assert!(finished, "the background ask never finished");
+        facts.expect("refreshed at least once")
     };
     let facts = refresh_until(start, &|| {
         cache

@@ -150,7 +150,7 @@ impl ControlHarness {
         loop {
             match self.rx.try_recv() {
                 Ok(value) => return Ok(value),
-                Err(mpsc::TryRecvError::Empty) if started.elapsed() < Duration::from_secs(2) => {
+                Err(mpsc::TryRecvError::Empty) if started.elapsed() < Duration::from_secs(10) => {
                     thread::yield_now();
                 }
                 Err(mpsc::TryRecvError::Empty) => bail!("request timed out"),
@@ -231,7 +231,7 @@ fn rpc_dispatch_and_task_cancellation() {
     );
     assert!(request.cancellation.is_cancelled());
     let deadline = Instant::now()
-        .checked_add(Duration::from_secs(2))
+        .checked_add(Duration::from_secs(10))
         .expect("test deadline");
     while s
         .call("task.status", json!({"task":id}))

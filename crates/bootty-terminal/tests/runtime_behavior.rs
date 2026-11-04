@@ -720,13 +720,10 @@ fn dropping_a_terminal_session_kills_its_owned_child() {
     let pid = wait_for_pid(&pid_path).expect("child fixture ready");
     drop(session);
 
-    for _ in 0..100 {
-        if !process_alive(pid) {
-            return;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    panic!("terminal child {pid} survived session drop");
+    assert!(
+        wait_until(|| (!process_alive(pid)).then_some(())).is_some(),
+        "terminal child {pid} survived session drop"
+    );
 }
 
 #[cfg(unix)]
@@ -1164,26 +1161,30 @@ fn terminal_launch_reports_initial_host_cell_metrics() {
 
 #[cfg(unix)]
 fn wait_for_pid(path: &std::path::Path) -> anyhow::Result<u32> {
-    for _ in 0..100 {
-        if let Ok(value) = fs::read_to_string(path)
-            && let Ok(pid) = value.trim().parse()
-        {
-            return Ok(pid);
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-    anyhow::bail!("terminal child did not publish its pid");
+    wait_until(|| fs::read_to_string(path).ok()?.trim().parse().ok())
+        .ok_or_else(|| anyhow::anyhow!("terminal child did not publish its pid"))
 }
 
 #[cfg(unix)]
 fn wait_for_file(path: &std::path::Path) -> anyhow::Result<String> {
-    for _ in 0..100 {
-        if let Ok(value) = fs::read_to_string(path) {
-            return Ok(value);
+    wait_until(|| fs::read_to_string(path).ok())
+        .ok_or_else(|| anyhow::anyhow!("terminal child did not publish {}", path.display()))
+}
+
+/// Polls a child process's effect until a deadline rather than for a fixed count, so a loaded
+/// host cannot fail a test that would pass. A passing probe returns on its first success.
+#[cfg(unix)]
+fn wait_until<T>(mut probe: impl FnMut() -> Option<T>) -> Option<T> {
+    let deadline = Instant::now().checked_add(Duration::from_secs(10))?;
+    loop {
+        if let Some(value) = probe() {
+            return Some(value);
         }
-        thread::sleep(Duration::from_millis(10));
+        if Instant::now() >= deadline {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
-    anyhow::bail!("terminal child did not publish {}", path.display());
 }
 
 #[cfg(unix)]

@@ -8,8 +8,3 @@ nextest-version = "0.9.145"
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 4 }
 leak-timeout = { period = "100ms", result = "fail" }
-
-# Concurrent fixture startup can consume the real query's five-second deadline on macOS.
-[[profile.default.overrides]]
-filter = "test(stopping_the_real_claude_query_cancels_and_reaps_its_process)"
-threads-required = "num-test-threads"

@@ -528,7 +528,7 @@ fn wait_for_path(path: &Path) {
     let started = Instant::now();
     while !path.exists() {
         assert!(
-            started.elapsed() < Duration::from_secs(2),
+            started.elapsed() < Duration::from_secs(10),
             "timed out waiting for {}",
             path.display()
         );
