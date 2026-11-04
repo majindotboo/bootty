@@ -2,8 +2,9 @@
 rust = { version = "nightly", profile = "minimal", components = ["rustfmt", "clippy", "rust-analyzer"] }
 # The pinned official Ghostty source needs Zig 0.17 for native Windows builds.
 zig = "0.17.0"
-"cargo:cargo-xwin" = "0.23.1"
-"cargo:cargo-zigbuild" = "0.24.0"
+# Prebuilt releases: compiling these would run before the Kache wrapper exists.
+"github:rust-cross/cargo-xwin" = "0.23.1"
+"github:rust-cross/cargo-zigbuild" = "0.24.0"
 # Adopt stable Kache releases without Mise's default one-day delay.
 "github:kunobi-ninja/kache" = { version = "latest", minimum_release_age = "0s" }
 
