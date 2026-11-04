@@ -1,5 +1,5 @@
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Condvar, Mutex},
     thread,
     time::{Duration, Instant},
 };
@@ -15,6 +15,8 @@ type RecordedCalls = Arc<Mutex<Vec<(String, Vec<String>)>>>;
 #[derive(Clone, Default)]
 struct RecordingRunner {
     calls: RecordedCalls,
+    /// Signalled after each recorded call so tests wait on background workers without spinning.
+    recorded: Arc<Condvar>,
 }
 
 impl RecordingRunner {
@@ -37,12 +39,21 @@ impl RecordingRunner {
     }
 
     fn wait_for_diff_calls(&self, expected: usize) {
-        for _ in 0..10_000 {
-            if self.diff_calls() >= expected {
-                return;
-            }
-            thread::yield_now();
-        }
+        let calls = self
+            .calls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let calls = self
+            .recorded
+            .wait_while(calls, |calls| {
+                calls
+                    .iter()
+                    .filter(|(_, args)| args.iter().any(|arg| arg == "diff"))
+                    .count()
+                    < expected
+            })
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drop(calls);
         assert_eq!(self.diff_calls(), expected);
     }
 }
@@ -101,6 +112,7 @@ impl CommandRunner for RecordingRunner {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push((program.to_owned(), args.to_vec()));
+        self.recorded.notify_all();
         Ok(CommandOutput {
             success: true,
             stdout: "/remote/repo\n".to_owned(),

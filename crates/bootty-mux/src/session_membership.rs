@@ -7,136 +7,58 @@ fn label_group(label: &str) -> &str {
     label.split_once('/').map_or("", |(group, _)| group)
 }
 
-/// Saved work state, independent of the backend's process and attachment state.
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionLifecycle {
-    #[default]
-    Active,
-    Settled,
-}
-
-/// Durable presentation state. Archive and deletion retain every other value for restore.
+/// Durable presentation state for a running session.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields, from = "SavedSessionState")]
-// These independent flags survive archive/delete so restoring preserves prior presentation.
 pub struct SessionState {
-    pub lifecycle: SessionLifecycle,
     pub pinned: bool,
-    pub archived: bool,
-    pub deleted: bool,
-    pub snoozed_until: Option<i64>,
     /// Absolute UTC seconds of accepted input; absent for work with no recorded activity.
     pub last_activity_at: Option<i64>,
-    /// Keep this session active even when the sidebar's inactivity interval has elapsed.
-    pub auto_settle_disabled: bool,
     /// Launch directory and project assignment are separate facts.
     pub projectless: bool,
 }
 
-/// Saved state as any version wrote it. Sessions could once be hidden; a hidden one is archived.
+/// Saved presentation state, accepting retired fields from older versions.
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct SavedSessionState {
-    lifecycle: SessionLifecycle,
+    #[serde(rename = "lifecycle")]
+    _lifecycle: Option<serde::de::IgnoredAny>,
     pinned: bool,
-    archived: bool,
-    deleted: bool,
-    hidden: bool,
-    snoozed_until: Option<i64>,
+    #[serde(rename = "archived")]
+    _archived: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "deleted")]
+    _deleted: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "hidden")]
+    _hidden: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "snoozed_until")]
+    _snoozed_until: Option<serde::de::IgnoredAny>,
     last_activity_at: Option<i64>,
-    auto_settle_disabled: bool,
+    #[serde(rename = "auto_settle_disabled")]
+    _auto_settle_disabled: Option<serde::de::IgnoredAny>,
     projectless: bool,
 }
 
 impl From<SavedSessionState> for SessionState {
     fn from(saved: SavedSessionState) -> Self {
         Self {
-            lifecycle: saved.lifecycle,
             pinned: saved.pinned,
-            archived: saved.archived || saved.hidden,
-            deleted: saved.deleted,
-            snoozed_until: saved.snoozed_until,
             last_activity_at: saved.last_activity_at,
-            auto_settle_disabled: saved.auto_settle_disabled,
             projectless: saved.projectless,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SessionView {
-    Active,
-    Settled,
-    Archived,
-    Snoozed,
-    Deleted,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionStateChange {
-    SetLifecycle(SessionLifecycle),
     SetPinned(bool),
-    Archive,
-    RestoreArchive,
-    SnoozeUntil(i64),
-    ClearSnooze,
-    SetAutoSettle(bool),
-    Delete,
-    RestoreDeleted,
     RecordActivity { at: i64, now: i64 },
-    AcceptInput { at: i64, now: i64 },
-}
-
-impl SessionState {
-    #[must_use]
-    pub fn should_auto_settle(self, now: i64, idle_seconds: i64) -> bool {
-        idle_seconds > 0
-            && !self.auto_settle_disabled
-            && !self.pinned
-            && self.view(now) == SessionView::Active
-            && self.snoozed_until.is_none()
-            && self
-                .last_activity_at
-                .is_some_and(|at| at >= 0 && now.saturating_sub(at) >= idle_seconds)
-    }
-    /// `now` is supplied by the caller as absolute UTC seconds; this owner never starts a timer.
-    #[must_use]
-    pub fn view(self, now: i64) -> SessionView {
-        if self.deleted {
-            SessionView::Deleted
-        } else if self.archived {
-            SessionView::Archived
-        } else if self.is_snoozed(now) {
-            SessionView::Snoozed
-        } else {
-            match self.lifecycle {
-                SessionLifecycle::Active => SessionView::Active,
-                SessionLifecycle::Settled => SessionView::Settled,
-            }
-        }
-    }
-
-    #[must_use]
-    pub fn is_snoozed(self, now: i64) -> bool {
-        self.snoozed_until.is_some_and(|until| until > now)
-    }
-
-    #[must_use]
-    pub fn is_overdue(self, now: i64) -> bool {
-        !self.deleted && !self.archived && self.snoozed_until.is_some_and(|until| until <= now)
-    }
-
-    #[must_use]
-    pub fn is_visible(self, now: i64) -> bool {
-        matches!(self.view(now), SessionView::Active | SessionView::Settled)
-    }
 }
 
 /// One session a Space claims, keyed by the identity the multiplexer carries for it.
 ///
 /// Nothing here keys on a name: a name is only ever a hint or a label.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceSession {
     pub identity: String,
     /// The backend's last reported name, used to address its attachment.
@@ -165,7 +87,7 @@ impl WorkspaceSession {
 }
 
 /// The sessions one Space claims, in sidebar order. Membership and order are one list.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionMembership {
     sessions: Vec<WorkspaceSession>,
 }
@@ -273,7 +195,6 @@ impl SessionMembership {
         true
     }
 
-    #[cfg(feature = "terminal-runtime")]
     pub(crate) fn set_terminal_snapshot(
         &mut self,
         identity: &str,
@@ -289,51 +210,20 @@ impl SessionMembership {
         true
     }
 
-    /// Change saved work state without changing membership or backend topology.
+    /// Change presentation without changing membership or topology.
     pub fn set_state(&mut self, identity: &str, change: SessionStateChange) -> bool {
         let Some(session) = self.session_mut(identity) else {
             return false;
         };
         let previous = session.state;
         match change {
-            SessionStateChange::SetLifecycle(lifecycle) => {
-                session.state.lifecycle = lifecycle;
-                if lifecycle == SessionLifecycle::Settled {
-                    session.state.pinned = false;
-                    session.state.snoozed_until = None;
-                }
-            }
-            SessionStateChange::SetPinned(pinned) => {
-                session.state.pinned = pinned;
-                if pinned {
-                    session.state.lifecycle = SessionLifecycle::Active;
-                    session.state.snoozed_until = None;
-                }
-            }
-            SessionStateChange::Archive => session.state.archived = true,
-            SessionStateChange::RestoreArchive => session.state.archived = false,
-            SessionStateChange::SnoozeUntil(until) => session.state.snoozed_until = Some(until),
-            SessionStateChange::ClearSnooze => session.state.snoozed_until = None,
-            SessionStateChange::SetAutoSettle(enabled) => {
-                session.state.auto_settle_disabled = !enabled;
-            }
-            SessionStateChange::Delete => session.state.deleted = true,
-            SessionStateChange::RestoreDeleted => session.state.deleted = false,
+            SessionStateChange::SetPinned(pinned) => session.state.pinned = pinned,
             SessionStateChange::RecordActivity { at, now } => {
                 if at >= 0
                     && at <= now
                     && session.state.last_activity_at.is_none_or(|last| at > last)
                 {
                     session.state.last_activity_at = Some(at);
-                }
-            }
-            SessionStateChange::AcceptInput { at, now } => {
-                if at >= 0
-                    && at <= now
-                    && session.state.last_activity_at.is_none_or(|last| at >= last)
-                {
-                    session.state.last_activity_at = Some(at);
-                    session.state.lifecycle = SessionLifecycle::Active;
                 }
             }
         }

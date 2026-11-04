@@ -6,11 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use gpui_kit::{
-    App, EntityId, Global, Hsla, IntoElement, Styled as _, Task, Transformation,
-    component::{Icon, IconName, Sizable as _},
-    radians,
-};
+use gpui_kit::{App, EntityId, Global, Task};
 use num_traits::ToPrimitive as _;
 
 /// Deliberate limit: 30 Hz keeps rotation readable at a quarter of a 120 Hz display's frames.
@@ -57,21 +53,4 @@ pub fn phase(period: Duration) -> f32 {
         .fract()
         .to_f32()
         .unwrap_or_default()
-}
-
-/// A loading circle turned to the shared clock's phase. Its view asks for frames.
-#[must_use]
-pub fn spinner(color: Hsla) -> impl IntoElement {
-    let turn = phase(Duration::from_millis(800)) * std::f32::consts::TAU;
-    Icon::new(IconName::LoaderCircle)
-        .small()
-        .text_color(color)
-        .transform(Transformation::rotate(radians(turn)))
-}
-
-/// Text opacity that rises and falls once per two seconds, for labels of running work.
-#[must_use]
-pub fn pulse() -> f32 {
-    let wave = (phase(Duration::from_secs(2)) * std::f32::consts::TAU).cos();
-    wave.mul_add(0.2, 0.8)
 }

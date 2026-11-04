@@ -11,12 +11,8 @@ pub enum ErrorNotice {
     LastSpaceCannotClose,
     #[error("command requires confirmation")]
     CommandRequiresConfirmation,
-    #[error("mux operation is unsupported")]
-    MuxOperationUnsupported,
     #[error("mux operation is unavailable")]
     MuxOperationUnavailable,
-    #[error("mux operation capability is stale")]
-    MuxOperationCapabilityStale,
     #[error("mux command worker stopped")]
     MuxCommandWorkerStopped,
     #[error("command worker stopped")]
@@ -47,36 +43,12 @@ pub enum ErrorNotice {
     NoSpaceToMoveSession,
     #[error("session name cannot be empty")]
     SessionNameEmpty,
-    #[error("remote Space name cannot be empty")]
-    RemoteSpaceNameEmpty,
-    #[error("remote Space is unavailable")]
-    RemoteSpaceUnavailable(String),
-    #[error("session does not belong to the remote Space")]
-    SessionDoesNotBelongToRemoteSpace(String),
     #[error("this Space does not hold the session")]
     SessionNotHeldBySpace(String),
-    #[error("remote Spaces need tmux or rmux")]
-    RemoteSpaceBackendUnsupported,
-    #[error("remote Space points to another SSH host")]
-    RemoteSpacePointsToAnotherHost(String),
-    #[error(
-        "Remote Space now uses {actual} instead of {expected}. Edit this Space and select it again."
-    )]
-    RemoteSpaceBackendChanged { actual: String, expected: String },
-    #[error("remote Space catalog version is not supported")]
-    RemoteSpaceCatalogVersionUnsupported(String),
     #[error("remote project task stopped")]
     RemoteProjectTaskStopped,
-    #[error("the previous remote Space operation is still stopping")]
-    RemoteSpaceOperationStopping,
-    #[error("remote Space task stopped")]
-    RemoteSpaceTaskStopped,
-    #[error("binding unavailable; reconnect to restore it")]
-    BindingUnavailable,
     #[error("SSH profile is unavailable")]
     SshProfileUnavailable(String),
-    #[error("persisted Space has no backend binding")]
-    PersistedSpaceHasNoBackendBinding,
     #[error("the terminal configuration could not be applied")]
     TerminalConfigPublicationFailed(String),
     #[error("the worktree operation failed")]
@@ -117,11 +89,7 @@ impl ErrorNotice {
             | Self::StaleCommandTarget(message)
             | Self::NoCurrentTarget(message)
             | Self::FileHandoffRejected(message)
-            | Self::RemoteSpaceUnavailable(message)
-            | Self::SessionDoesNotBelongToRemoteSpace(message)
             | Self::SessionNotHeldBySpace(message)
-            | Self::RemoteSpacePointsToAnotherHost(message)
-            | Self::RemoteSpaceCatalogVersionUnsupported(message)
             | Self::SshProfileUnavailable(message)
             | Self::TerminalConfigPublicationFailed(message)
             | Self::Worktree(message) => Some(message),
@@ -140,82 +108,11 @@ pub const fn command_send_message(error: bootty_control::AppCommandSendError) ->
     }
 }
 
-/// Whether a failure means the provider account needs signing in, which a Sign in action fixes.
-#[must_use]
-pub fn needs_sign_in(message: &str) -> bool {
-    let lower = bootty_agents::native_error_message(message).to_ascii_lowercase();
-    [
-        "not logged in",
-        "sign in",
-        "unauthorized",
-        "not authenticated",
-        "authentication failed",
-        "auth login",
-        "unable to verify organization for the current authentication token",
-    ]
-    .iter()
-    .any(|cause| lower.contains(cause))
-}
-
-/// A provider rejected this model request; another explicit attempt can use the same process.
-#[must_use]
-pub fn retryable_model_error(message: &str) -> bool {
-    let message = bootty_agents::native_error_message(message).to_ascii_lowercase();
-    !message.starts_with("agent process ended")
-        && ["at capacity", "overloaded", "rate limit", "usage limit"]
-            .iter()
-            .any(|cause| message.contains(cause))
-}
-
 /// A cause people can act on, recognized in a failure's text.
 fn known_cause(message: &str) -> Option<&'static str> {
-    let message = bootty_agents::native_error_message(message);
     let lower = message.to_ascii_lowercase();
-    if lower.contains("active writer") || lower.contains("open in another app") {
-        return Some("This conversation is open in another app. Close it there, then retry.");
-    }
-    // Only an archived conversation has an unarchive action; other "archived" text doesn't.
-    if lower.contains("is archived")
-        && ["session", "conversation", "thread"]
-            .iter()
-            .any(|subject| lower.contains(subject))
-    {
-        return Some("This conversation is archived. Unarchive it to continue.");
-    }
-    if lower.contains("unable to verify organization") {
-        return Some(
-            "Sign in with an account allowed by this machine's organization policy, then retry.",
-        );
-    }
-    if needs_sign_in(&message) {
-        return Some("Sign in to the selected provider account, then retry.");
-    }
-    if lower.contains("api key") {
-        return Some("Add the missing API key in Settings, then retry.");
-    }
-    if lower.contains("rate limit") || lower.contains("usage limit") {
-        return Some("The provider's usage limit was reached. Retry when it resets.");
-    }
-    if lower.contains("at capacity") || lower.contains("overloaded") {
-        return Some("This model is at capacity. Retry or choose another model.");
-    }
-    if lower.contains("current voice call") {
-        return Some("Wait for the current voice call to end before starting another.");
-    }
-    if lower.contains("voice connection failed") {
-        return Some("Voice connection failed. Check your network and try again.");
-    }
-    if lower.contains("voice connection was lost") {
-        return Some("Voice connection was lost. Check your network and try again.");
-    }
-    if lower.contains("microphone") || lower.contains("speech was detected") {
-        return Some("Check microphone access and the input device, then try recording again.");
-    }
     if lower.contains("command deadline expired") {
         return Some("The command took too long. Try again.");
-    }
-    if lower.contains("rmux pane output ended: transportlost") {
-        return Some("The terminal connection was lost. Try reopening this pane.");
     }
     if lower.contains("ssh") {
         return Some("Could not reach the remote workspace.");
@@ -225,12 +122,6 @@ fn known_cause(message: &str) -> Option<&'static str> {
     }
     if lower.contains("target is stale") {
         return Some("That pane or session no longer exists.");
-    }
-    if lower.contains("attachments can be at most 512 mib") {
-        return Some("Attachments can be at most 512 MiB.");
-    }
-    if lower.contains("images can be at most 50 mib") {
-        return Some("Images can be at most 50 MiB.");
     }
     if lower.contains("no such file or directory") {
         return Some("It no longer exists.");

@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty-write"
 edition.workspace = true
 
@@ -20,3 +21,7 @@ pretty_assertions.workspace = true
 proptest.workspace = true
 proptest-derive.workspace = true
 rstest.workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

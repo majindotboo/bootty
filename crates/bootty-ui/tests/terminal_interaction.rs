@@ -15,20 +15,9 @@ use std::{
 };
 
 use assert_fs::prelude::*;
-use bootty_config::config::{BoottyConfig, MultiplexerBackendConfig, load_config_from_path};
+use bootty_config::config::load_config_from_path;
 use bootty_control::{
     AppCommandRequest, Caller, CommandCancellation, CommandInvocation, CommandOutcome,
-};
-use bootty_mux::{
-    MuxBackendKind, MuxBindingConfig,
-    backend::MuxBackend,
-    controller::SpaceId,
-    provider::{
-        MuxAppBackendPolicy, MuxAppBackendProvider, MuxBackendProvider, MuxBackendRegistry,
-        MuxCommandDispatch, PaneBehavior, PaneTopology, SelectionPublicationPolicy,
-        TerminalProgressPolicy, TerminalResidency,
-    },
-    terminal::BackendPanePolicy,
 };
 use bootty_terminal::geometry::{CellMetrics, SurfaceRect, TerminalSurface, ViewTransform};
 use bootty_terminal::terminal_input::{DirectKeyInput, ModifierSideState};
@@ -39,9 +28,9 @@ use bootty_ui::product_dialogs::terminal_find::{
 };
 use bootty_ui::{AppEffect, AppState, CursorIcon, ModalDialog};
 
-#[path = "support/frames.rs"]
-mod frames;
-pub mod support;
+use crate::support::config as test_config;
+
+use crate::support::frames;
 
 /// Bounds a real pane-process hang without treating scheduler jitter as failure.
 const PANE_BUDGET: Duration = Duration::from_secs(30);
@@ -97,93 +86,13 @@ fn native_state_with_script(
     direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
     source: &str,
 ) -> (assert_fs::TempDir, AppState) {
-    state_with_script_on_backend(direct_input_rx, source, MultiplexerBackendConfig::Native)
-}
-
-/// Mirrors rmux's app-facing pane policy while using native PTYs for a test-local terminal.
-/// The production rmux provider starts an identity-scoped daemon before it is usable; an app
-/// integration test must not bootstrap or attach to that user-owned daemon.
-struct RmuxHostPolicyProvider;
-
-impl MuxBackendProvider for RmuxHostPolicyProvider {
-    fn kind(&self) -> MuxBackendKind {
-        MuxBackendKind::Rmux
-    }
-
-    fn command_dispatch(&self) -> MuxCommandDispatch {
-        MuxCommandDispatch::WorkerThread
-    }
-
-    fn build_backend(
-        &self,
-        _config: &MuxBindingConfig,
-        workspace: Option<&std::path::Path>,
-    ) -> Box<dyn MuxBackend> {
-        Box::new(workspace.map_or_else(
-            bootty_mux::native::NativeBackend::new,
-            bootty_mux::native::NativeBackend::for_workspace,
-        ))
-    }
-}
-
-impl MuxAppBackendProvider for RmuxHostPolicyProvider {
-    fn build_pane_policy(&self, _config: &MuxBindingConfig) -> Box<dyn BackendPanePolicy> {
-        Box::new(bootty_mux::native::NativePanePolicy)
-    }
-
-    fn app_policy(&self) -> MuxAppBackendPolicy {
-        MuxAppBackendPolicy {
-            panes: PaneBehavior {
-                topology: PaneTopology::BackendReconciled,
-                cache_terminals: true,
-                resize_cached_terminals: false,
-            },
-            progress: TerminalProgressPolicy::TerminalOsc,
-
-            terminal_residency: TerminalResidency::BindingScoped,
-            selection_publication: SelectionPublicationPolicy::PersistBeforePublish,
-        }
-    }
-
-    fn capabilities(&self, scope: SpaceId) -> bootty_mux::capability::BindingCapabilityDescriptor {
-        bootty_mux::native::native_capabilities(scope)
-    }
-}
-
-fn rmux_host_policy_backends() -> Arc<MuxBackendRegistry> {
-    Arc::new(
-        MuxBackendRegistry::from_app_providers(
-            [Arc::new(RmuxHostPolicyProvider)],
-            [MuxBackendKind::Rmux],
-        )
-        .expect("rmux-shaped test backend registry"),
-    )
-}
-
-fn state_with_script_on_backend(
-    direct_input_rx: Option<mpsc::Receiver<DirectKeyInput>>,
-    source: &str,
-    backend: MultiplexerBackendConfig,
-) -> (assert_fs::TempDir, AppState) {
     let directory = assert_fs::TempDir::new().expect("temporary app directory");
     let script = shell_program(source);
-    let mut config = BoottyConfig {
-        config_path: directory.path().join("config.toml"),
-        multiplexer: bootty_config::config::MultiplexerConfig {
-            backend,
-            ..bootty_config::config::MultiplexerConfig::default()
-        },
-        ..BoottyConfig::default()
-    };
+    let mut config = test_config::config(directory.path().join("config.toml"));
     config.session.shell = Some(script.to_string_lossy().into_owned());
     config.session.working_directory = Some(std::env::temp_dir());
-    let backends = if backend == MultiplexerBackendConfig::Rmux {
-        rmux_host_policy_backends()
-    } else {
-        support::backends()
-    };
-    let state = AppState::new(config, backends, repaint_on_event(), direct_input_rx, None)
-        .expect("native app state");
+    let state =
+        AppState::new(config, repaint_on_event(), direct_input_rx, None).expect("native app state");
     (directory, state)
 }
 
@@ -225,43 +134,13 @@ fn submit_invocation(
     None
 }
 
+/// A new tab or split starts its terminal directly and focuses it.
 fn create_terminal_surface(state: &mut AppState, action: &str) {
-    let opened = submit(state, action);
+    let created = submit(state, action);
     assert!(
-        matches!(opened, Some(CommandOutcome::Success { .. })),
-        "{action}: {opened:?}"
-    );
-    let request = state
-        .pending_new_surface()
-        .expect("surface chooser is open")
-        .id;
-    let created = submit_invocation(
-        state,
-        CommandInvocation::new(
-            "surface.choose",
-            vec![request.to_string(), "terminal".to_owned()],
-            Caller::Socket,
-        ),
-    )
-    .expect("terminal creation completes");
-    let CommandOutcome::Success { value, .. } = created else {
-        panic!(
-            "{action} terminal creation failed: {created:?}; last error: {:?}",
-            state.last_error()
-        );
-    };
-    let target = value
-        .get("terminal")
-        .or_else(|| value.get("created"))
-        .expect("canonical created terminal target")
-        .clone();
-    // The headless fixture performs the focus that the host's accepted surface attachment owns.
-    let mut focus = CommandInvocation::new("agents.focus", Vec::new(), Caller::Socket);
-    focus.target = Some(serde_json::from_value(target).expect("issued terminal target"));
-    let focused = submit_invocation(state, focus);
-    assert!(
-        matches!(focused, Some(CommandOutcome::Success { .. })),
-        "{focused:?}"
+        matches!(created, Some(CommandOutcome::Success { .. })),
+        "{action} terminal creation failed: {created:?}; last error: {:?}",
+        state.last_error()
     );
 }
 
@@ -270,17 +149,9 @@ fn start_terminal_pane(state: &mut AppState) -> String {
         submit(state, "new_mux_session"),
         Some(CommandOutcome::Success { .. })
     ));
-    let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
-        panic!("new session form is open");
-    };
-    let id = dialog.spec().id;
-    state.apply_dialog_intent(
-        &bootty_gpui::DialogIntent::FieldChanged {
-            dialog: id,
-            field: "mode".to_owned(),
-            value: "Terminal".to_owned(),
-        },
-        &mut Vec::new(),
+    assert!(
+        matches!(state.modal_dialog(), Some(ModalDialog::NewSession(_))),
+        "new session form is open"
     );
     let deadline = Instant::now()
         .checked_add(PANE_BUDGET)
@@ -558,11 +429,10 @@ fn click_surface() -> TerminalSurface {
 }
 
 #[test]
-fn rmux_shaped_terminal_double_and_triple_clicks_select_without_shift() {
-    let (_directory, mut state) = state_with_script_on_backend(
+fn terminal_double_and_triple_clicks_select_without_shift() {
+    let (_directory, mut state) = native_state_with_script(
         None,
         "#!/bin/sh\nprintf 'abc def\n'\nwhile IFS= read -r line; do\n  printf '%s' \"$line\" | od -An -tx1\ndone\n",
-        MultiplexerBackendConfig::Rmux,
     );
     let pane = start_terminal_pane(&mut state);
     wait_for_pane_text(&mut state, &pane, "abc def");
@@ -582,10 +452,9 @@ fn rmux_shaped_terminal_double_and_triple_clicks_select_without_shift() {
 
 #[test]
 fn multi_clicks_reach_applications_that_report_the_mouse() {
-    let (_directory, mut state) = state_with_script_on_backend(
+    let (_directory, mut state) = native_state_with_script(
         None,
         "#!/bin/sh\nprintf '\\033[?1003h\\033[?1006habc def\n'\nwhile IFS= read -r line; do\n  printf '%s' \"$line\" | od -An -tx1\ndone\n",
-        MultiplexerBackendConfig::Rmux,
     );
     let pane = start_terminal_pane(&mut state);
     wait_for_pane_text(&mut state, &pane, "abc def");
@@ -629,32 +498,27 @@ fn unfocused_pane_mouse_uses_the_hit_surface_after_focus_handoff() {
         },
     ];
 
-    for backend in [
-        MultiplexerBackendConfig::Native,
-        MultiplexerBackendConfig::Rmux,
-    ] {
-        for case in cases {
-            let source = mouse_tracking_script(case.mode);
-            let (_directory, mut state) = state_with_script_on_backend(None, &source, backend);
-            let (unfocused_pane, _focused_pane) = start_two_panes(&mut state);
-            wait_for_pane_text(&mut state, &unfocused_pane, "ready");
+    for case in cases {
+        let source = mouse_tracking_script(case.mode);
+        let (_directory, mut state) = native_state_with_script(None, &source);
+        let (unfocused_pane, _focused_pane) = start_two_panes(&mut state);
+        wait_for_pane_text(&mut state, &unfocused_pane, "ready");
 
-            let area = SurfaceRect::from_min_size(0.0, 0.0, 200.0, 100.0);
-            let rect = state
-                .pane_rects(area, 4.0)
-                .into_iter()
-                .find(|(pane_id, _)| pane_id == &unfocused_pane)
-                .map(|(_, rect)| rect)
-                .expect("unfocused pane rect");
-            let surface = TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 20.0));
+        let area = SurfaceRect::from_min_size(0.0, 0.0, 200.0, 100.0);
+        let rect = state
+            .pane_rects(area, 4.0)
+            .into_iter()
+            .find(|(pane_id, _)| pane_id == &unfocused_pane)
+            .map(|(_, rect)| rect)
+            .expect("unfocused pane rect");
+        let surface = TerminalSurface::for_rect(rect, CellMetrics::new(9.0, 20.0));
 
-            send_unfocused_pane_mouse_press(&mut state, &unfocused_pane, surface);
-            state
-                .terminal_mut()
-                .write_input(b"\n")
-                .expect("terminate mouse report line");
-            wait_for_pane_hex(&mut state, &unfocused_pane, case.expected);
-        }
+        send_unfocused_pane_mouse_press(&mut state, &unfocused_pane, surface);
+        state
+            .terminal_mut()
+            .write_input(b"\n")
+            .expect("terminate mouse report line");
+        wait_for_pane_hex(&mut state, &unfocused_pane, case.expected);
     }
 }
 
@@ -1024,6 +888,23 @@ fn search_state(state: &mut AppState, pane_id: &str) -> (usize, bool) {
     )
 }
 
+fn wait_for_search(state: &mut AppState, pane_id: &str, query: &str) {
+    let deadline = Instant::now().checked_add(PANE_BUDGET).expect("deadline");
+    loop {
+        let frame = state
+            .terminal_mut()
+            .focused_terminal_runtime(pane_id)
+            .expect("pane runtime")
+            .extract_frame()
+            .expect("pane frame");
+        if frame.search_query == query {
+            return;
+        }
+        assert!(Instant::now() < deadline, "search frame not published");
+        thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
+}
+
 #[test]
 fn normal_search_targets_focused_pane_and_close_clears_search() {
     let (_directory, mut state) = native_state();
@@ -1053,11 +934,13 @@ fn normal_search_targets_focused_pane_and_close_clears_search() {
             direction: FindDirection::Current,
         },
     );
+    wait_for_search(&mut state, &focused_pane, "focused-only");
     assert!(search_state(&mut state, &focused_pane).0 > 0);
     assert_eq!(search_state(&mut state, &unfocused_pane).0, 0);
 
     let dialog = state.take_terminal_find_dialog().expect("find dialog");
     state.apply_terminal_find_event(dialog, TerminalFindOutput::Close);
+    wait_for_search(&mut state, &focused_pane, "");
     assert_eq!(search_state(&mut state, &focused_pane), (0, false));
 }
 
@@ -1110,12 +993,17 @@ fn copy_mode_search_returns_focus_and_terminal_text_reaches_shell() {
             InputEvent::ImeCommit("after-search\n".to_owned()),
         ],
     ));
-    assert!(
-        !state
-            .terminal_mut()
-            .copy_mode_active()
-            .expect("copy mode state")
-    );
+    while state
+        .terminal_mut()
+        .copy_mode_active()
+        .expect("copy mode state")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "copy mode cancellation not published"
+        );
+        thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
 
     wait_for_pane_text(&mut state, &focused_pane, "seen:after-search");
 }
@@ -1139,6 +1027,7 @@ fn opening_another_overlay_clears_terminal_search() {
             direction: FindDirection::Current,
         },
     );
+    wait_for_search(&mut state, &focused_pane, "ready");
     assert!(search_state(&mut state, &focused_pane).0 > 0);
 
     assert!(matches!(
@@ -1146,6 +1035,7 @@ fn opening_another_overlay_clears_terminal_search() {
         Some(CommandOutcome::Success { .. })
     ));
 
+    wait_for_search(&mut state, &focused_pane, "");
     assert_eq!(search_state(&mut state, &focused_pane), (0, false));
 }
 
@@ -1178,49 +1068,163 @@ fn configured_platform_shortcut_opens_the_command_palette() {
 #[test]
 fn native_terminal_progress_updates_active_binding_presentation() {
     let directory = assert_fs::TempDir::new().expect("temporary app directory");
-    let script = shell_program("#!/bin/sh\nprintf '\\033]9;4;42\\033\\\\'\nread line\n");
+    let script = shell_program(
+        "#!/bin/sh\nprintf 'ready\\n'\nread line\nprintf '\\033]9;4;42\\033\\\\'\nread line\n",
+    );
 
     let config_file = directory.child("config.toml");
     config_file
         .write_str("[multiplexer]\nbackend = \"native\"\n")
         .expect("write config");
+    bootty_test_support::native_mux::local(config_file.path()).unwrap();
     let mut config = load_config_from_path(config_file.path()).expect("load config");
     config.session.shell = Some(script.to_string_lossy().into_owned());
-    let mut state = AppState::new(config, support::backends(), repaint_on_event(), None, None)
-        .expect("start app state");
-    let pane = bootty_mux::snapshot::MuxPaneAnchor {
-        native_agent: None,
-        session_id: "facts".to_owned(),
-        pane_id: Some("%1".to_owned()),
-        cwd: None,
-        pane_pid: None,
-        process: None,
-    };
+    let (wake, wakes) = mpsc::channel();
+    let host = thread::current();
+    let mut state = AppState::new(
+        config,
+        Arc::new(move || {
+            let _ = wake.send(());
+            host.unpark();
+        }),
+        None,
+        None,
+    )
+    .expect("start app state");
+    let pane = start_terminal_pane(&mut state);
+    wait_for_pane_text(&mut state, &pane, "ready");
     state
         .terminal_mut()
-        .sync_native_window(
-            std::slice::from_ref(&pane),
-            Some(&pane),
-            Some("window"),
-            MultiplexerBackendConfig::Native,
-            false,
-        )
-        .expect("start terminal program");
+        .write_input(b"\n")
+        .expect("request progress");
 
-    let deadline = Instant::now()
-        .checked_add(PANE_BUDGET)
-        .expect("pane deadline fits");
     let mut observed_progress_repaint = false;
-    while Instant::now() < deadline && !observed_progress_repaint {
+    while !observed_progress_repaint {
         for effect in state.update_frame(frames::frame(Instant::now(), Vec::new())) {
             observed_progress_repaint |= effect == AppEffect::RequestRepaint;
         }
         if !observed_progress_repaint {
+            wakes
+                .recv_timeout(PANE_BUDGET)
+                .expect("terminal progress wakeup");
+        }
+    }
+}
+
+#[test]
+fn default_prefix_splits_without_shell_input() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "[input]\npreset = \"bootty\"\n").unwrap();
+    bootty_test_support::native_mux::local(&path).unwrap();
+    let mut config = load_config_from_path(&path).unwrap();
+    config.session.shell = Some(shell_program("#!/bin/sh\nprintf 'ready\\n'\nwhile IFS= read -r line; do printf 'seen:%s\\n' \"$line\"; done\n").to_string_lossy().into_owned());
+    let mut state = AppState::new(config, repaint_on_event(), None, None).unwrap();
+
+    let pane = start_terminal_pane(&mut state);
+    wait_for_pane_text(&mut state, &pane, "ready");
+    for (key, modifiers) in [
+        (
+            Key::Space,
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        ),
+        (Key::Letter('v'), Modifiers::default()),
+    ] {
+        state.update_frame(frames::frame(
+            Instant::now(),
+            vec![InputEvent::Key {
+                key,
+                pressed: true,
+                repeat: false,
+                modifiers,
+            }],
+        ));
+    }
+    let deadline = Instant::now() + PANE_BUDGET;
+    while state.focused_pane().as_deref() == Some(pane.as_str()) && Instant::now() < deadline {
+        state.update_frame(frames::frame(Instant::now(), Vec::new()));
+        if state.focused_pane().as_deref() == Some(pane.as_str()) {
             thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
         }
     }
-    assert!(
-        observed_progress_repaint,
-        "terminal progress must update binding presentation state"
-    );
+    assert_ne!(state.focused_pane().as_deref(), Some(pane.as_str()));
+    state
+        .terminal_mut()
+        .focused_terminal_runtime(&pane)
+        .unwrap()
+        .write_input(b"safe\n")
+        .unwrap();
+    wait_for_pane_text(&mut state, &pane, "seen:safe");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn command_up_scrolls_server_frame_without_shell_input() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(&path, "[input]\npreset = \"bootty\"\n").unwrap();
+    bootty_test_support::native_mux::local(&path).unwrap();
+    let mut config = load_config_from_path(&path).unwrap();
+    config.session.shell = Some(shell_program("#!/bin/sh\ni=0; while [ $i -lt 100 ]; do printf 'line%s\\n' \"$i\"; i=$((i+1)); done; printf 'ready\\n'\nwhile IFS= read -r line; do printf 'seen:%s\\n' \"$line\"; done\n").to_string_lossy().into_owned());
+    let (tx, rx) = mpsc::channel();
+    let mut state = AppState::new(config, repaint_on_event(), Some(rx), None).unwrap();
+
+    let pane = start_terminal_pane(&mut state);
+    wait_for_pane_text(&mut state, &pane, "ready");
+    let before = state
+        .terminal_mut()
+        .focused_terminal_runtime(&pane)
+        .unwrap()
+        .extract_frame()
+        .unwrap()
+        .scrollbar
+        .unwrap()
+        .offset;
+    tx.send(DirectKeyInput {
+        input: KeyInput {
+            key: TerminalKey::ArrowUp,
+            mods: KeyMods {
+                command: true,
+                ..KeyMods::default()
+            },
+            repeat: false,
+            utf8: None,
+            unshifted: None,
+        },
+    })
+    .unwrap();
+    let deadline = Instant::now() + PANE_BUDGET;
+    loop {
+        state.update_frame(frames::frame(Instant::now(), Vec::new()));
+        let frame = state
+            .terminal_mut()
+            .focused_terminal_runtime(&pane)
+            .unwrap()
+            .extract_frame()
+            .unwrap();
+        if frame.scrollbar.unwrap().offset != before {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scroll action did not publish a scrolled frame"
+        );
+        thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+    }
+    state
+        .terminal_mut()
+        .focused_terminal_runtime(&pane)
+        .unwrap()
+        .scroll_viewport_to(usize::MAX)
+        .unwrap();
+    state
+        .terminal_mut()
+        .focused_terminal_runtime(&pane)
+        .unwrap()
+        .write_input(b"safe\n")
+        .unwrap();
+    wait_for_pane_text(&mut state, &pane, "seen:safe");
 }

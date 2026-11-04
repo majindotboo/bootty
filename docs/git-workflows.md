@@ -1,21 +1,26 @@
-# Git panels
+# Git workflows
 
-The Changes panel runs on the selected Space's host and now includes repository
-history, local branches and stashes beside its stage, diff and commit workflow.
-It lists changed files flat under Staged, Unstaged and Untracked, each with its
-status letter, its folder and the lines it adds and removes (`git diff --numstat`
-for both sides). Clicking a file shows its diff in the panel, with the next and
-previous file; a narrow panel shows the diff in place of the list, a wide one
-beside it. `git.overview` returns at most 200 date-ordered commits plus local
-branch/upstream and stash facts. Selecting a commit, All changes, or a turn's
-changes shows its full patch the same way. Pull request files open in the Diff
-panel. Branch creation resolves an explicit start ref to a commit first. Checkout
-accepts only a currently listed local branch and requires a clean tree, so the
-panel never guesses how to carry edits across branches.
+Bootty reads Git on the selected Space's host through the existing host runner.
+Local and remote work use the same typed commands.
 
-Stash creation can include untracked files. Apply uses `--index` and deliberately
-keeps the stash; deletion is the separate destructive `git.stash-drop` command.
-A conflict is reported as Git left it, and the stash remains available. Every
-branch/stash identifier is revalidated against a fresh repository snapshot just
-before mutation. Local and remote workflows use the same typed commands and the
-existing host runner; output appears only after Git reports completion.
+The sidebar shows each session's branch, its pull request number and status, and
+the lines its checkout adds and removes. These facts refresh in the background;
+the UI never waits on Git.
+
+The New Session form starts a session in the project's current checkout or in a
+new worktree. A new worktree takes a branch, an optional base branch, and an
+optional folder name. See `session.worktree-directory` and
+`session.branch-prefix` in [Configuration](configuration.md) for where worktrees
+go and how their branches are named.
+
+The shared commands are:
+
+- `git.overview` returns at most `limit` date-ordered commits plus local
+  branch/upstream and stash facts for a repository.
+- `git.branch-checkout` checks out a currently listed local branch. It requires
+  a clean tree, so Bootty never guesses how to carry edits across branches.
+- `worktree.create` creates a worktree from a branch, an optional folder and an
+  optional start ref. An explicit start ref resolves to a commit first.
+
+Every branch identifier is revalidated against a fresh repository snapshot just
+before mutation. Output appears only after Git reports completion.

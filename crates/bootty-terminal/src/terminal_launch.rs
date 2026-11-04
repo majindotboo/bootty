@@ -1,6 +1,8 @@
+#[cfg(unix)]
+use bootty_os::spawn::CommandSpawn as _;
 use std::{env, ffi::OsString, path::Path, thread};
 
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use std::process::Command as ProcessCommand;
 
 use anyhow::{Context, Result};
@@ -41,6 +43,17 @@ pub(crate) struct OwnedChild {
 }
 
 impl OwnedChild {
+    pub(crate) fn process_id(&self) -> Option<u32> {
+        self.child.as_ref().and_then(|child| child.process_id())
+    }
+
+    pub(crate) fn close(&mut self) {
+        let child = Self {
+            child: self.child.take(),
+            integration: self.integration.take(),
+        };
+        drop(child);
+    }
     fn new(
         child: Box<dyn Child + Send + Sync>,
         integration: Option<crate::shell_integration::ShellIntegration>,
@@ -80,19 +93,16 @@ impl Drop for OwnedChild {
 }
 
 pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<SpawnedTerminal> {
-    let pty_system = native_pty_system();
-    let pair = pty_system.openpty(size)?;
-
-    let shell = shell_command_path(config.shell.clone());
+    let shell = if config.base_environment.is_some() {
+        config
+            .shell
+            .clone()
+            .unwrap_or_else(|| DEFAULT_SHELL.to_owned())
+    } else {
+        shell_command_path(config.shell.clone())
+    };
     let launch_env = resolve_launch_environment(config, crate::terminfo::vendored_terminfo_dir());
-    let original_zdotdir = launch_env
-        .env
-        .iter()
-        .rev()
-        .find(|(name, _)| name == "ZDOTDIR")
-        .map(|(_, value)| value.clone())
-        .or_else(|| std::env::var("ZDOTDIR").ok())
-        .filter(|_| !config.env_remove.iter().any(|name| name == "ZDOTDIR"));
+    let original_zdotdir = original_zdotdir(config, &launch_env);
     let integration = if config.shell_integration && config.command.is_empty() {
         crate::shell_integration::ShellIntegration::prepare(
             &shell,
@@ -121,11 +131,7 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
         }
         argv => CommandBuilder::from_argv(argv.iter().map(OsString::from).collect()),
     };
-    // Parent automation color preferences do not describe this interactive PTY.
-    command.env_remove("NO_COLOR");
-    for (name, value) in locale_env_entries() {
-        command.env(name, value);
-    }
+    apply_base_environment(&mut command, config);
     for (name, value) in &launch_env.env {
         command.env(name, value);
     }
@@ -158,6 +164,13 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
         }
     }
 
+    let _spawn = bootty_os::spawn::lock();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "The spawn lock is held through PTY creation and spawning"
+    )]
+    let pair = native_pty_system().openpty(size)?;
+
     #[cfg(unix)]
     let tty_name = pair
         .master
@@ -166,6 +179,10 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
     #[cfg(not(unix))]
     let tty_name: Option<String> = None;
 
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "The spawn lock is held through PTY creation and spawning"
+    )]
     let child = pair
         .slave
         .spawn_command(command)
@@ -176,6 +193,46 @@ pub(crate) fn spawn(size: PtySize, config: &SessionLaunchConfig) -> Result<Spawn
         child: OwnedChild::new(child, integration),
         tty_name,
     })
+}
+
+fn original_zdotdir(
+    config: &SessionLaunchConfig,
+    launch_env: &ResolvedLaunchEnvironment,
+) -> Option<String> {
+    launch_env
+        .env
+        .iter()
+        .rev()
+        .find(|(name, _)| name == "ZDOTDIR")
+        .map(|(_, value)| value.clone())
+        .or_else(|| {
+            config.base_environment.as_ref().map_or_else(
+                || std::env::var("ZDOTDIR").ok(),
+                |environment| {
+                    environment
+                        .iter()
+                        .find(|(key, _)| key == "ZDOTDIR")
+                        .map(|(_, value)| value.to_string_lossy().into_owned())
+                },
+            )
+        })
+        .filter(|_| !config.env_remove.iter().any(|name| name == "ZDOTDIR"))
+}
+
+fn apply_base_environment(command: &mut CommandBuilder, config: &SessionLaunchConfig) {
+    if let Some(environment) = &config.base_environment {
+        command.env_clear();
+        for (name, value) in environment {
+            command.env(name, value);
+        }
+    }
+    // Parent automation color preferences do not describe this interactive PTY.
+    command.env_remove("NO_COLOR");
+    if config.base_environment.is_none() {
+        for (name, value) in locale_env_entries() {
+            command.env(name, value);
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -269,8 +326,8 @@ const fn normalize_locale_entries(_entries: &mut Vec<(String, String)>) {}
 fn shell_command_path(configured: Option<String>) -> String {
     // Candidates are tried in order; the user's record costs processes, so it is read last.
     let valid = |shell: Option<String>| shell.as_deref().and_then(normalize_shell_path);
-    valid(env::var(BOOTTY_SHELL_ENV).ok())
-        .or_else(|| valid(configured))
+    valid(configured)
+        .or_else(|| valid(env::var(BOOTTY_SHELL_ENV).ok()))
         .or_else(|| valid(configured_user_shell()))
         .or_else(|| valid(env::var("SHELL").ok()))
         .unwrap_or_else(|| DEFAULT_SHELL.to_string())
@@ -307,7 +364,7 @@ fn normalize_username(user: &str) -> Option<String> {
 fn current_username() -> Option<String> {
     let output = ProcessCommand::new("/usr/bin/id")
         .arg("-un")
-        .output()
+        .bootty_output()
         .ok()
         .filter(|output| output.status.success())?;
     normalize_username(&String::from_utf8_lossy(&output.stdout))
@@ -318,13 +375,35 @@ fn read_login_shell_for_user(user: &str) -> Option<String> {
     let user_record = format!("/Users/{user}");
     let output = ProcessCommand::new("/usr/bin/dscl")
         .args([".", "-read", user_record.as_str(), "UserShell"])
-        .output()
+        .bootty_output()
         .ok()
         .filter(|output| output.status.success())?;
     parse_user_shell_output(&String::from_utf8_lossy(&output.stdout))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
+#[must_use]
+pub fn configured_user_shell() -> Option<String> {
+    let user = ProcessCommand::new("id").arg("-u").bootty_output().ok()?;
+    if !user.status.success() {
+        return None;
+    }
+    let record = ProcessCommand::new("getent")
+        .args(["passwd", String::from_utf8_lossy(&user.stdout).trim()])
+        .bootty_output()
+        .ok()?;
+    if !record.status.success() {
+        return None;
+    }
+    normalize_shell_path(
+        String::from_utf8_lossy(&record.stdout)
+            .trim()
+            .rsplit(':')
+            .next()?,
+    )
+}
+
+#[cfg(not(unix))]
 #[must_use]
 pub const fn configured_user_shell() -> Option<String> {
     None
@@ -336,4 +415,19 @@ fn parse_user_shell_output(output: &str) -> Option<String> {
         let (_, shell) = line.split_once(':')?;
         normalize_shell_path(shell)
     })
+}
+
+impl SessionLaunchConfig {
+    /// Freeze the host's hydrated environment and locale policy before crossing a process boundary.
+    /// Explicit pane overrides still apply after this inherited environment.
+    pub fn capture_environment(&mut self) {
+        if self.base_environment.is_some() {
+            return;
+        }
+        self.base_environment = Some(env::vars_os().collect());
+        self.shell = Some(shell_command_path(self.shell.clone()));
+        let mut environment = locale_env_entries();
+        environment.append(&mut self.env);
+        self.env = environment;
+    }
 }

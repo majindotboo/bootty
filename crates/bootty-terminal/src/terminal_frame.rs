@@ -29,7 +29,7 @@ impl FrameLineage {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FrameCopyMode {
     pub selecting: bool,
     pub rectangle: bool,
@@ -50,6 +50,9 @@ pub struct RenderFrame {
     pub active_search_segments: Vec<FrameSelection>,
     pub active_search_match_index: Option<usize>,
     pub search_match_count: usize,
+    pub search_query: String,
+    pub current_working_directory: Option<String>,
+    pub progress: Option<(String, Option<u8>)>,
     pub search_pulse: u64,
     pub copy_mode: Option<FrameCopyMode>,
     pub mouse_tracking: bool,
@@ -59,6 +62,34 @@ pub struct RenderFrame {
     pub images: KittyImageFrame,
     pub scrollbar: Option<FrameScrollbar>,
     pub stats: FrameStats,
+}
+
+impl RenderFrame {
+    /// Compare presentation, excluding extraction diagnostics and damage lineage.
+    #[must_use]
+    pub fn same_presentation(&self, other: &Self) -> bool {
+        self.cols == other.cols
+            && self.rows == other.rows
+            && self.colors == other.colors
+            && self.cursor == other.cursor
+            && self.row_wraps == other.row_wraps
+            && self.search_matches == other.search_matches
+            && self.active_search_match == other.active_search_match
+            && self.active_search_segments == other.active_search_segments
+            && self.active_search_match_index == other.active_search_match_index
+            && self.search_match_count == other.search_match_count
+            && self.search_query == other.search_query
+            && self.current_working_directory == other.current_working_directory
+            && self.progress == other.progress
+            && self.search_pulse == other.search_pulse
+            && self.copy_mode == other.copy_mode
+            && self.mouse_tracking == other.mouse_tracking
+            && self.selections == other.selections
+            && self.cells == other.cells
+            && self.text == other.text
+            && self.images == other.images
+            && self.scrollbar == other.scrollbar
+    }
 }
 
 impl Default for RenderFrame {
@@ -77,6 +108,9 @@ impl Default for RenderFrame {
             active_search_segments: Vec::new(),
             active_search_match_index: None,
             search_match_count: 0,
+            search_query: String::new(),
+            current_working_directory: None,
+            progress: None,
             search_pulse: 0,
             copy_mode: None,
             mouse_tracking: false,
@@ -120,21 +154,21 @@ impl RenderFrame {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FrameScrollbar {
     pub total: u64,
     pub offset: u64,
     pub len: u64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FrameSelection {
     pub row: u16,
     pub start_col: u16,
     pub end_col: u16,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FrameStats {
     pub render_state_update_us: u64,
     pub extraction_us: u64,
@@ -143,39 +177,49 @@ pub struct FrameStats {
     pub dirty_rows: usize,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FrameColors {
+    #[serde(with = "crate::frame_wire::rgb")]
     pub background: RgbColor,
+    #[serde(with = "crate::frame_wire::rgb")]
     pub foreground: RgbColor,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub cursor: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub cursor_text: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub selection_background: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub selection_foreground: Option<RgbColor>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CursorSnapshot {
     pub x: u16,
     pub y: u16,
     pub at_wide_tail: bool,
+    #[serde(with = "crate::frame_wire::cursor_style")]
     pub style: CursorVisualStyle,
     pub blinking: bool,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub color: Option<RgbColor>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RenderCell {
     pub x: u16,
     pub y: u16,
     pub text_start: usize,
     pub text_len: usize,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub fg: Option<RgbColor>,
+    #[serde(with = "crate::frame_wire::optional_rgb")]
     pub bg: Option<RgbColor>,
     pub style: CellStyle,
     pub hyperlink: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CellStyle {
     pub bold: bool,
     pub italic: bool,
@@ -185,6 +229,7 @@ pub struct CellStyle {
     pub invisible: bool,
     pub strikethrough: bool,
     pub overline: bool,
+    #[serde(with = "crate::frame_wire::underline")]
     pub underline: Underline,
 }
 

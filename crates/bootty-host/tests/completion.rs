@@ -1,5 +1,6 @@
 use assert_fs::{TempDir, prelude::*};
 use bootty_host::files::{FileCompletionPage, FileRequest, FileResponse};
+use bootty_os::spawn::CommandSpawn as _;
 fn search(cwd: &str, query: &str) -> anyhow::Result<FileCompletionPage> {
     let FileResponse::Completions(page) = FileRequest::Complete {
         base: cwd.into(),
@@ -43,7 +44,7 @@ fn project_search_includes_tracked_and_untracked_but_honors_gitignore() {
         Command::new("git")
             .args(["init", "--quiet"])
             .current_dir(root.path())
-            .status()
+            .bootty_status()
             .unwrap()
             .success()
     );
@@ -55,7 +56,7 @@ fn project_search_includes_tracked_and_untracked_but_honors_gitignore() {
         Command::new("git")
             .args(["add", "src/main.rs"])
             .current_dir(root.path())
-            .status()
+            .bootty_status()
             .unwrap()
             .success()
     );

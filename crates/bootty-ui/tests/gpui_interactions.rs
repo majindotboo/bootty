@@ -10,18 +10,15 @@ use std::{
 use bootty_ui::gpui::{
     ChromeIntent, ChromeLayout, ChromePalette, ChromeSnapshot, DialogAction, DialogId,
     DialogIntent, DialogRole, DialogRow, DialogSpec, DialogView, FindDirection, GpuiChrome,
-    GpuiPaneColors, GpuiPaneDividerSnapshot, GpuiPaneIntent, GpuiPaneSnapshot, GpuiPaneWorkspace,
-    GpuiPaneWorkspaceSnapshot, NativeChromeAction, PaneRect, PaneSplitDirection, Rgba,
-    SessionContextSnapshot, SessionTarget, SidebarAgent, SidebarFooterItem, SidebarPosition,
+    NativeChromeAction, Rgba, SessionContextSnapshot, SessionTarget, SidebarPosition,
     SidebarProject, SidebarPullRequest, SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask,
     SpaceKey, SpaceSnapshot, StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot,
-    StatusSegmentSnapshot, TabContextSnapshot, UiPalette, UsageMeterSnapshot, init_theme,
+    StatusSegmentSnapshot, TabContextSnapshot, UiPalette, init_theme,
 };
-use bootty_ui::usage::{UsageProvider, UsageWindow};
 use gpui_kit::component::{Root, WindowExt as _};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, Focusable, IntoElement, Modifiers, MouseButton,
-    MouseUpEvent, Render, ScrollDelta, ScrollWheelEvent, Styled, Subscription, TestAppContext,
+    MouseUpEvent, Render, ScrollDelta, ScrollEvent, Styled, Subscription, TestAppContext,
     TouchPhase, VisualTestContext, Window, div, point, prelude::*, px,
 };
 use pretty_assertions::{assert_eq, assert_ne};
@@ -98,7 +95,6 @@ fn chrome_snapshot() -> ChromeSnapshot {
 fn chrome_layout() -> ChromeLayout {
     ChromeLayout {
         left_dock_toggle: true,
-        right_dock_toggle: true,
         panel_tab_style: bootty_config::config::PanelTabStyle::default(),
         panel_tabs: bootty_config::config::PanelTabs::default(),
         tabs: bootty_config::config::ChromeConfig::default().tabs,
@@ -120,7 +116,6 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
     SidebarSnapshot {
         projects: Vec::new(),
         project_target: None,
-        animate_working: true,
         now_utc: 1_000,
         rows: vec![
             SidebarRow {
@@ -132,12 +127,9 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 cwd: None,
                 host: None,
                 branch: None,
-                agents: Vec::new(),
                 trailing: None,
                 trailing_icon: None,
                 trailing_color: None,
-                working: false,
-                needs_attention: false,
                 number: Some(1),
                 indent: 0,
                 tree: None,
@@ -174,12 +166,9 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 cwd: None,
                 host: None,
                 branch: None,
-                agents: Vec::new(),
                 trailing: None,
                 trailing_icon: None,
                 trailing_color: None,
-                working: false,
-                needs_attention: false,
                 number: None,
                 indent: 2,
                 tree: None,
@@ -201,10 +190,8 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 task: None,
             },
         ],
-        footer: Vec::new(),
         title_visible: true,
         group_by_project: true,
-        settled_collapsed: false,
         sort_order: bootty_config::config::SidebarSortOrder::Manual,
         focused: true,
         hovered_session: None,
@@ -677,7 +664,8 @@ fn switching_sessions_reveals_the_row_without_capturing_manual_scroll(cx: &mut T
     let selected_before = cx
         .debug_bounds("sidebar-row-session-25")
         .expect("selected row");
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
+        source: gpui_kit::ScrollSource::default(),
         position: selected_before.center(),
         delta: ScrollDelta::Pixels(point(px(0.0), px(200.0))),
         modifiers: Modifiers::none(),
@@ -822,16 +810,6 @@ fn task_row_snapshot(grouped: bool) -> ChromeSnapshot {
             .to_owned();
         row.trailing = Some(status.to_owned());
         row.trailing_icon = Some(icon.to_owned());
-        row.agents = ["openai", "claude", "pi"]
-            .into_iter()
-            .enumerate()
-            .map(|(agent, icon)| SidebarAgent {
-                key: format!("{}-{agent}", row.key),
-                icon: icon.to_owned(),
-                description: format!("{icon} · {status}"),
-                model: None,
-            })
-            .collect();
         row.current = index == 0;
         row.target = Some(SessionTarget {
             scope: SpaceKey(1),
@@ -843,7 +821,6 @@ fn task_row_snapshot(grouped: bool) -> ChromeSnapshot {
     let mut shell = template;
     shell.key = "plain-shell".to_owned();
     shell.current = false;
-    shell.agents.clear();
     shell.trailing = None;
     shell.trailing_icon = None;
     sidebar.rows.push(shell);
@@ -909,12 +886,10 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
             assert!(icon.right() <= status.right());
         }
         assert_task_padding(cx, font_size, grouped);
-        assert_task_agent_stack(cx);
         let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
         for row in &mut sidebar.rows {
             row.current = row.key == "task-1";
             if row.key == "task-0" {
-                row.agents.clear();
                 row.trailing = None;
                 row.trailing_icon = None;
             }
@@ -942,7 +917,6 @@ fn task_rows_keep_unselected_status_and_equal_heights_at_ui_scale(cx: &mut TestA
             cx.debug_bounds("sidebar-row-task-1").unwrap().size.height,
             selected.size.height
         );
-        assert_eq!(cx.debug_bounds("sidebar-agent-task-0-0"), None);
         assert_eq!(cx.debug_bounds("sidebar-status-task-0"), None);
         assert_eq!(
             cx.debug_bounds("sidebar-title-task-0").unwrap().left(),
@@ -968,30 +942,6 @@ fn assert_task_padding(cx: &mut VisualTestContext, font_size: f32, grouped: bool
     assert_eq!(content.top() - row.top(), px(font_size * 0.5));
     assert_eq!(row.bottom() - content.bottom(), px(font_size * 0.5));
     assert_eq!(content.left() - row.left(), px(font_size * 0.5));
-}
-
-fn assert_task_agent_stack(cx: &mut VisualTestContext) {
-    let branch = cx
-        .debug_bounds("sidebar-branch-task-0")
-        .expect("session branch");
-    let stack = cx
-        .debug_bounds("sidebar-agents-task-0")
-        .expect("agent stack");
-    assert!(branch.right() < stack.left());
-    let first = cx
-        .debug_bounds("sidebar-agent-task-0-0")
-        .expect("first agent");
-    let second = cx
-        .debug_bounds("sidebar-agent-task-0-1")
-        .expect("second agent");
-    let third = cx
-        .debug_bounds("sidebar-agent-task-0-2")
-        .expect("third agent");
-    assert!(first.left() < second.left() && second.left() < third.left());
-    assert!(
-        second.left() < first.right() && third.left() < second.right(),
-        "agent marks overlap"
-    );
 }
 
 #[gpui_kit::test]
@@ -1036,15 +986,11 @@ fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping
         "grouped sessions start from their project header"
     );
     probe.update(cx, |probe, _| {
-        assert!(
-            probe
-                .intents
-                .borrow()
-                .iter()
-                .all(|intent| matches!(intent, ChromeIntent::SearchConversations(_))),
+        assert_eq!(
+            probe.intents.borrow().as_slice(),
+            [],
             "search never activates a session"
         );
-        probe.intents.borrow_mut().clear();
     });
     cx.simulate_keystrokes(if cfg!(target_os = "macos") {
         "cmd-a backspace"
@@ -1054,12 +1000,7 @@ fn sidebar_search_filters_tasks_without_changing_selection_and_survives_grouping
     cx.run_until_parked();
     assert!(cx.debug_bounds("sidebar-row-task-0").is_some());
     probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().as_slice(),
-            [ChromeIntent::SearchConversations(String::new())],
-            "a cleared search clears what conversations matched"
-        );
-        probe.intents.borrow_mut().clear();
+        assert_eq!(probe.intents.borrow().as_slice(), []);
     });
 }
 
@@ -1118,7 +1059,7 @@ fn fullscreen_top_status_keeps_controls_clear_of_notch(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
-fn new_tab_button_follows_the_last_tab_and_opens_the_shared_chooser(cx: &mut TestAppContext) {
+fn new_tab_button_follows_the_last_tab_and_opens_a_new_tab(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(chrome_snapshot(), window, cx));
@@ -1142,200 +1083,6 @@ fn new_tab_button_follows_the_last_tab_and_opens_the_shared_chooser(cx: &mut Tes
         };
         assert_eq!(invocation.command, "new_tab");
         assert_eq!(invocation.arguments, Vec::<String>::new());
-    });
-}
-
-/// A quota reads as words above its meter at every width and scale, and nothing overlaps.
-#[gpui_kit::test]
-fn quota_rows_name_the_quota_above_its_meter_and_pace(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
-    snapshot.sidebar.as_mut().expect("sidebar").footer = ["5h", "7d"]
-        .into_iter()
-        .map(|label| SidebarFooterItem {
-            key: format!("codex:{label}"),
-            text: format!("codex {label}"),
-            icon: Some("openai".to_owned()),
-            color: palette().text,
-            meter: Some(UsageMeterSnapshot {
-                provider: UsageProvider::Codex,
-                label: format!("Codex {label} · 23% left"),
-                reset_at: Some("Oct 6 14:00".to_owned()),
-                description: "Codex remaining quota and estimated pace".to_owned(),
-                fill: palette().accent,
-                marker: palette().accent,
-                pace: palette().text,
-                track: palette().border,
-                meter: UsageWindow {
-                    label: label.to_owned(),
-                    used_percent: 77.0,
-                    duration_secs: 604_800.0,
-                    resets_at: Some(352_000),
-                }
-                .meter(0),
-            }),
-        })
-        .collect();
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    for font_size in [12.0, 16.0, 20.0] {
-        cx.update(|window, cx| {
-            gpui_kit::component::Theme::global_mut(cx).font_size = px(font_size);
-            window.set_rem_size(px(font_size));
-            window.refresh();
-        });
-        for width in [160.0, 240.0, 320.0, 480.0] {
-            snapshot.layout.sidebar_width = width;
-            cx.update(|window, cx| {
-                probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
-                    chrome.update(&snapshot, window, cx);
-                });
-            });
-            cx.run_until_parked();
-            let mut previous_bottom = px(0.0);
-            for (row, labels, track, pace, reset) in [
-                (
-                    "sidebar-footer-codex:5h",
-                    "sidebar-footer-codex:5h-labels",
-                    "sidebar-footer-codex:5h-track",
-                    "sidebar-footer-codex:5h-pace",
-                    "sidebar-footer-codex:5h-reset",
-                ),
-                (
-                    "sidebar-footer-codex:7d",
-                    "sidebar-footer-codex:7d-labels",
-                    "sidebar-footer-codex:7d-track",
-                    "sidebar-footer-codex:7d-pace",
-                    "sidebar-footer-codex:7d-reset",
-                ),
-            ] {
-                let row = cx.debug_bounds(row).expect("quota row");
-                let labels = cx.debug_bounds(labels).expect("quota labels");
-                let track = cx.debug_bounds(track).expect("quota track");
-                let pace = cx.debug_bounds(pace).expect("pacing delta");
-                let reset = cx.debug_bounds(reset).expect("reset countdown");
-                let inside = |part: gpui_kit::Bounds<gpui_kit::Pixels>| {
-                    part.left() >= row.left()
-                        && part.right() <= row.right()
-                        && part.top() >= row.top()
-                        && part.bottom() <= row.bottom()
-                };
-                for part in [labels, track, pace, reset] {
-                    assert!(inside(part), "quota parts stay in their row at {width}px");
-                }
-                assert!(
-                    labels.right() <= reset.left() || labels.bottom() <= reset.top(),
-                    "the reset sits beside the name or under it"
-                );
-                assert!(track.top() >= labels.bottom().max(reset.bottom()));
-                assert!(track.right() <= pace.left());
-                assert!(
-                    (f32::from(track.center().y) - f32::from(pace.center().y)).abs() <= 0.5,
-                    "the pace reads beside its meter"
-                );
-                assert!(
-                    track.size.width > px(0.0),
-                    "meter stays visible at every scale"
-                );
-                assert_eq!(track.size.height, px(font_size * 0.375));
-                assert!(row.top() >= previous_bottom);
-                previous_bottom = row.bottom();
-            }
-        }
-    }
-}
-
-#[gpui_kit::test]
-fn crowded_sidebar_keeps_all_footer_items_and_spaces_reachable(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
-    snapshot.layout.sidebar_width = 120.0;
-    snapshot.sidebar.as_mut().expect("sidebar").footer = (0..6)
-        .map(|index| SidebarFooterItem {
-            key: format!("footer-{index}"),
-            text: format!("Footer {index}"),
-            icon: None,
-            meter: None,
-            color: color(220, 220, 230),
-        })
-        .collect();
-    snapshot.spaces = (1..=8)
-        .map(|key| SpaceSnapshot {
-            key: SpaceKey(key),
-            name: format!("Space {key}"),
-            icon: "terminal".to_owned(),
-            color: color(100, 200, 140),
-            active: key == 1,
-            error: None,
-            accepts_moves: true,
-            can_close: true,
-        })
-        .collect();
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-
-    for selector in [
-        "sidebar-footer-footer-0",
-        "sidebar-footer-footer-1",
-        "sidebar-footer-footer-2",
-        "sidebar-footer-footer-3",
-        "sidebar-footer-footer-4",
-        "sidebar-footer-footer-5",
-    ] {
-        assert!(
-            cx.debug_bounds(selector).is_some(),
-            "{selector} remains reachable"
-        );
-    }
-    for selector in [
-        "space-1", "space-2", "space-3", "space-4", "space-5", "space-6", "space-7", "space-8",
-    ] {
-        assert!(
-            cx.debug_bounds(selector).is_some(),
-            "{selector} remains reachable"
-        );
-    }
-    assert!(cx.debug_bounds("space-create").is_some());
-
-    let footer = cx
-        .debug_bounds("bootty-gpui-sidebar-footer")
-        .expect("footer surface");
-    let last_footer = cx
-        .debug_bounds("sidebar-footer-footer-5")
-        .expect("last footer remains visible");
-    assert!(last_footer.left() >= footer.left());
-    assert!(last_footer.right() <= footer.right());
-    assert!(last_footer.bottom() <= footer.bottom());
-
-    let switcher = cx
-        .debug_bounds("bootty-gpui-space-switcher")
-        .expect("space switcher");
-    cx.simulate_event(ScrollWheelEvent {
-        position: switcher.center(),
-        delta: ScrollDelta::Pixels(point(px(-1000.0), px(0.0))),
-        modifiers: Modifiers::none(),
-        touch_phase: TouchPhase::Moved,
-    });
-    cx.run_until_parked();
-    let last_space = cx
-        .debug_bounds("space-8")
-        .expect("last space remains scrollable");
-    let create_space = cx
-        .debug_bounds("space-create")
-        .expect("create space remains scrollable");
-    assert!(last_space.left() >= switcher.left());
-    assert!(create_space.right() <= switcher.right());
-    cx.simulate_click(center(last_space), Modifiers::none());
-    cx.simulate_click(center(create_space), Modifiers::none());
-
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().as_slice(),
-            [
-                ChromeIntent::ActivateSpace(SpaceKey(8)),
-                ChromeIntent::CreateSpace,
-            ]
-        );
     });
 }
 
@@ -1481,18 +1228,18 @@ fn session_menus_offer_the_sessions_place(cx: &mut TestAppContext) {
             },
         ),
         (
-            "down down down down down down down down down down right down enter",
+            "down down down down down down down right down enter",
             ChromeIntent::RevealPath {
                 scope: target().scope,
                 path: "/tmp/worktrees/feature".to_owned(),
             },
         ),
         (
-            "down down down down down down down down right enter",
+            "down down down down down right enter",
             ChromeIntent::CopyText("/tmp/worktrees/feature".to_owned()),
         ),
         (
-            "down down down down down down down down right down enter",
+            "down down down down down right down enter",
             ChromeIntent::CopyText("feature/rail".to_owned()),
         ),
     ] {
@@ -1678,152 +1425,6 @@ fn dragging_sidebar_session_to_space_emits_move_intent(cx: &mut TestAppContext) 
             }]
         );
     });
-}
-
-struct PaneProbe {
-    arrangement_target: Option<bootty_control::CommandTarget>,
-    intents: Rc<RefCell<Vec<GpuiPaneIntent>>>,
-}
-
-impl Render for PaneProbe {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let intents = Rc::clone(&self.intents);
-        div()
-            .w(px(400.0))
-            .h(px(200.0))
-            .child(GpuiPaneWorkspace::new(
-                GpuiPaneWorkspaceSnapshot {
-                    arrangement_target: self.arrangement_target.clone(),
-                    area: PaneRect::new(0.0, 0.0, 400.0, 200.0),
-                    panes: vec![
-                        GpuiPaneSnapshot {
-                            id: "left".to_owned(),
-                            rect: PaneRect::new(0.0, 0.0, 200.0, 200.0),
-                            terminal: gpui_kit::div().size_full().into_any_element(),
-                            focused: true,
-                            progress: None,
-                        },
-                        GpuiPaneSnapshot {
-                            id: "right".to_owned(),
-                            rect: PaneRect::new(200.0, 0.0, 200.0, 200.0),
-                            terminal: gpui_kit::div().size_full().into_any_element(),
-                            focused: false,
-                            progress: None,
-                        },
-                    ],
-                    dividers: vec![GpuiPaneDividerSnapshot {
-                        path: vec![],
-                        direction: PaneSplitDirection::Right,
-                        rect: PaneRect::new(198.0, 0.0, 4.0, 200.0),
-                        area: PaneRect::new(0.0, 0.0, 400.0, 200.0),
-                    }],
-                    gap: 4.0,
-                    corner_radius: 0.0,
-                    focus_border_width: 2.0,
-                    inactive_dim: 0.0,
-                    window_dim: 0.0,
-                    animation_seconds: 0.0,
-                    colors: GpuiPaneColors {
-                        background: gpui_kit::black(),
-                        divider: gpui_kit::white(),
-                        divider_hover: gpui_kit::white(),
-                        focus_border: gpui_kit::white(),
-                        progress_track: gpui_kit::black(),
-                        progress_normal: gpui_kit::white(),
-                        progress_error: gpui_kit::white(),
-                        progress_warning: gpui_kit::white(),
-                        empty_text: gpui_kit::white(),
-                    },
-                    empty_message: None,
-                },
-                move |intent, _, _| intents.borrow_mut().push(intent),
-            ))
-    }
-}
-
-#[gpui_kit::test]
-fn pane_click_focuses_and_double_click_divider_resets_ratio(cx: &mut TestAppContext) {
-    let intents = Rc::new(RefCell::new(Vec::new()));
-    let (_, cx) = cx.add_window_view({
-        let intents = Rc::clone(&intents);
-        move |_, _| PaneProbe {
-            intents,
-            arrangement_target: None,
-        }
-    });
-    let right = cx
-        .debug_bounds("terminal-pane-surface-right")
-        .expect("right pane");
-    let right_center = center(right);
-    cx.simulate_mouse_down(right_center, MouseButton::Left, Modifiers::none());
-    assert_eq!(
-        intents.borrow().as_slice(),
-        [GpuiPaneIntent::Focus("right".to_owned())]
-    );
-    cx.simulate_event(MouseUpEvent {
-        position: right_center,
-        modifiers: Modifiers::none(),
-        button: MouseButton::Left,
-        click_count: 1,
-    });
-    let divider = cx
-        .debug_bounds("terminal-divider-visual-root")
-        .expect("root divider");
-    let position = center(divider);
-    cx.simulate_mouse_down(position, MouseButton::Left, Modifiers::none());
-    cx.simulate_event(MouseUpEvent {
-        position,
-        modifiers: Modifiers::none(),
-        button: MouseButton::Left,
-        click_count: 2,
-    });
-    assert_eq!(
-        intents.borrow().as_slice(),
-        [
-            GpuiPaneIntent::Focus("right".to_owned()),
-            GpuiPaneIntent::Resize {
-                path: vec![],
-                ratio: 0.5,
-                min_fraction: 0.05,
-            },
-        ]
-    );
-}
-
-#[gpui_kit::test]
-fn pane_divider_drag_emits_a_clamped_ratio(cx: &mut TestAppContext) {
-    let intents = Rc::new(RefCell::new(Vec::new()));
-    let (_, cx) = cx.add_window_view({
-        let intents = Rc::clone(&intents);
-        move |_, _| PaneProbe {
-            intents,
-            arrangement_target: None,
-        }
-    });
-    let divider = cx
-        .debug_bounds("terminal-divider-visual-root")
-        .expect("root divider");
-    let start = center(divider);
-    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-    cx.simulate_mouse_move(
-        point(px(12.0), start.y),
-        Some(MouseButton::Left),
-        Modifiers::none(),
-    );
-    cx.simulate_mouse_move(
-        point(px(80.0), start.y),
-        Some(MouseButton::Left),
-        Modifiers::none(),
-    );
-
-    assert!(intents.borrow().iter().any(|intent| matches!(
-        intent,
-        GpuiPaneIntent::Resize {
-            path,
-            ratio,
-            min_fraction,
-        } if path.is_empty() && *ratio >= *min_fraction && *ratio < 0.5
-    )));
 }
 
 struct DialogProbe {
@@ -2049,12 +1650,6 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
     spec.multiline = true;
     spec.fields = [
         (
-            "provider",
-            "Provider",
-            "Codex",
-            DialogFieldKind::Choice(vec!["Codex".into()]),
-        ),
-        (
             "isolation",
             "Checkout",
             "New worktree",
@@ -2096,14 +1691,13 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
         .debug_bounds("dialog-checkout-picker")
         .expect("checkout mode");
     assert!(
-        base.center().x > composer.center().x,
-        "branch control belongs on the right"
+        mode.top() >= composer.bottom(),
+        "the checkout choice sits below the composer"
     );
     assert!(
-        mode.center().x < composer.center().x,
-        "checkout mode belongs on the left"
+        base.top() >= mode.bottom(),
+        "worktree details follow the checkout choice"
     );
-    assert_eq!(base.center().y, mode.center().y);
     for chosen in ["baseline", "refs/tags/v1.2.3"] {
         let base = cx.debug_bounds("dialog-worktree-base-branch").unwrap();
         cx.simulate_click(base.center(), Modifiers::none());
@@ -2267,7 +1861,7 @@ fn new_session_composer_routes_start_keys_and_preserves_shift_enter(cx: &mut Tes
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(actions, ["enter-session", "start-session-background"]);
+        assert_eq!(actions, ["start-session", "start-session"]);
     });
 }
 
@@ -2300,7 +1894,6 @@ fn prompt_confirm_and_close_buttons_emit_dialog_intents(cx: &TestAppContext) {
 #[gpui_kit::test]
 fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
     let spec = DialogSpec {
-        composer_width: bootty_config::config::TranscriptWidth::default(),
         id: DialogId::new("confirm"),
         role: DialogRole::Confirm,
         title: "Delete session?".to_owned(),
@@ -2312,18 +1905,9 @@ fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
         fields: Vec::new(),
         branches: Vec::new(),
         spaces: Vec::new(),
-        attachments: Vec::new(),
-        applications: Vec::new(),
-        provider_mentions: Vec::new(),
-        completion: None,
-        models: Vec::new(),
-        available_efforts: Vec::new(),
         projects: Vec::new(),
         project_labels: std::collections::BTreeMap::new(),
         selected_project: None,
-        models_loading: false,
-        model_error: None,
-        selected_model: None,
         busy: false,
         progress: Vec::new(),
         multiline: false,
@@ -2358,7 +1942,6 @@ fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
 #[gpui_kit::test]
 fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppContext) {
     let spec = DialogSpec {
-        composer_width: bootty_config::config::TranscriptWidth::default(),
         id: DialogId::new("find"),
         role: DialogRole::TerminalFind,
         title: "Find".to_owned(),
@@ -2370,18 +1953,9 @@ fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppCo
         fields: Vec::new(),
         branches: Vec::new(),
         spaces: Vec::new(),
-        attachments: Vec::new(),
-        applications: Vec::new(),
-        provider_mentions: Vec::new(),
-        completion: None,
-        models: Vec::new(),
-        available_efforts: Vec::new(),
         projects: Vec::new(),
         project_labels: std::collections::BTreeMap::new(),
         selected_project: None,
-        models_loading: false,
-        model_error: None,
-        selected_model: None,
         busy: false,
         progress: Vec::new(),
         multiline: false,
@@ -2408,7 +1982,6 @@ fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppCo
 #[gpui_kit::test]
 fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
     let spec = DialogSpec {
-        composer_width: bootty_config::config::TranscriptWidth::default(),
         id: DialogId::new("themes"),
         role: DialogRole::ThemePicker,
         title: "Themes".to_owned(),
@@ -2420,18 +1993,9 @@ fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
         fields: Vec::new(),
         branches: Vec::new(),
         spaces: Vec::new(),
-        attachments: Vec::new(),
-        applications: Vec::new(),
-        provider_mentions: Vec::new(),
-        completion: None,
-        models: Vec::new(),
-        available_efforts: Vec::new(),
         projects: Vec::new(),
         project_labels: std::collections::BTreeMap::new(),
         selected_project: None,
-        models_loading: false,
-        model_error: None,
-        selected_model: None,
         busy: false,
         progress: Vec::new(),
         multiline: false,
@@ -2451,72 +2015,6 @@ fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
             }]
         );
     });
-}
-
-#[gpui_kit::test]
-fn pane_grip_drag_emits_scoped_swap_or_edge_move(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let target = bootty_control::CommandTarget {
-        kind: bootty_control::ResourceKind::Session,
-        handle: "captured-session".to_owned(),
-        generation: 7,
-    };
-    let intents = Rc::new(RefCell::new(Vec::new()));
-    let (_, cx) = cx.add_window_view({
-        let intents = Rc::clone(&intents);
-        let target = target.clone();
-        move |_, _| PaneProbe {
-            intents,
-            arrangement_target: Some(target),
-        }
-    });
-    let grip = center(cx.debug_bounds("pane-grip-left").expect("drag grip"));
-    for (x, y, direction) in [
-        (300., 100., None),
-        (210., 100., Some("left")),
-        (390., 100., Some("right")),
-        (300., 10., Some("up")),
-        (300., 190., Some("down")),
-    ] {
-        intents.borrow_mut().clear();
-        let end = point(px(x), px(y));
-        cx.simulate_mouse_down(grip, MouseButton::Left, Modifiers::none());
-        cx.simulate_mouse_move(
-            point(grip.x.sub(px(15.)), grip.y.add(px(15.))),
-            Some(MouseButton::Left),
-            Modifiers::none(),
-        );
-        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
-        cx.simulate_event(MouseUpEvent {
-            position: end,
-            modifiers: Modifiers::none(),
-            button: MouseButton::Left,
-            click_count: 1,
-        });
-        let mut args = vec!["left".to_owned(), "right".to_owned()];
-        if let Some(direction) = direction {
-            args.push(direction.to_owned());
-        }
-        let mut expected = bootty_control::CommandInvocation::new(
-            if direction.is_some() {
-                "pane.move"
-            } else {
-                "pane.swap"
-            },
-            args,
-            bootty_control::Caller::Keybinding,
-        );
-        expected.target = Some(target.clone());
-        assert_eq!(
-            intents
-                .borrow()
-                .iter()
-                .filter(|intent| matches!(intent, GpuiPaneIntent::Command(_)))
-                .cloned()
-                .collect::<Vec<_>>(),
-            vec![GpuiPaneIntent::Command(expected)]
-        );
-    }
 }
 
 #[gpui_kit::test]
@@ -2566,38 +2064,6 @@ fn status_only_bar_does_not_cancel_a_tab_reorder(cx: &mut TestAppContext) {
                 }))
         );
     });
-}
-
-#[gpui_kit::test]
-fn pane_divider_commits_the_drop_position_after_one_motion(cx: &mut TestAppContext) {
-    let intents = Rc::new(RefCell::new(Vec::new()));
-    let (_, cx) = cx.add_window_view({
-        let intents = Rc::clone(&intents);
-        move |_, _| PaneProbe {
-            intents,
-            arrangement_target: None,
-        }
-    });
-    let start = center(
-        cx.debug_bounds("terminal-divider-visual-root")
-            .expect("divider"),
-    );
-    let end = point(px(80.0), start.y);
-    cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::none());
-    // The first motion starts GPUI's drag; there need not be another move before release.
-    cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::none());
-    cx.simulate_event(MouseUpEvent {
-        position: end,
-        button: MouseButton::Left,
-        modifiers: Modifiers::none(),
-        click_count: 1,
-    });
-    assert!(
-        intents
-            .borrow()
-            .iter()
-            .any(|intent| matches!(intent, GpuiPaneIntent::Resize { ratio, .. } if *ratio < 0.5))
-    );
 }
 
 #[gpui_kit::test]
@@ -2837,7 +2303,8 @@ fn tab_strip_reveals_selection_and_preserves_manual_scrolling(cx: &mut TestAppCo
         );
     }
     let before = cx.debug_bounds("status-tab-top-1-tab-9").unwrap();
-    cx.simulate_event(ScrollWheelEvent {
+    cx.simulate_event(ScrollEvent {
+        source: gpui_kit::ScrollSource::default(),
         position: region.center(),
         delta: ScrollDelta::Pixels(point(px(0.0), px(150.0))),
         modifiers: Modifiers::none(),
@@ -2988,207 +2455,6 @@ fn empty_session_sidebar_opens_the_shared_creation_command(cx: &mut TestAppConte
 }
 
 #[gpui_kit::test]
-fn detached_session_row_reopens_and_edits_metadata_with_stable_height(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
-    let row = &mut snapshot.sidebar.as_mut().expect("sidebar").rows[0];
-    row.kind = SidebarRowKind::DetachedSession;
-    row.text = "Review keyboard input".to_owned();
-    row.trailing = None;
-    row.trailing_icon = None;
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    let detached = cx.debug_bounds("sidebar-row-session").expect("saved row");
-    cx.simulate_click(center(detached), Modifiers::none());
-    cx.run_until_parked();
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().as_slice(),
-            [ChromeIntent::ReopenSession(target())]
-        );
-        probe.intents.borrow_mut().clear();
-    });
-    cx.simulate_mouse_down(center(detached), MouseButton::Right, Modifiers::none());
-    cx.run_until_parked();
-    cx.update(|window, cx| {
-        _ = window.draw(cx);
-    });
-    cx.simulate_keystrokes("down enter");
-    cx.run_until_parked();
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().as_slice(),
-            [ChromeIntent::RenameSavedSession(target())]
-        );
-    });
-    let row = &mut snapshot.sidebar.as_mut().expect("sidebar").rows[0];
-    row.kind = SidebarRowKind::Session;
-    row.trailing = None;
-    row.trailing_icon = None;
-    cx.update(|window, cx| {
-        probe
-            .read(cx)
-            .chrome
-            .clone()
-            .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
-    });
-    cx.run_until_parked();
-    assert_eq!(
-        cx.debug_bounds("sidebar-row-session").unwrap().size.height,
-        detached.size.height
-    );
-}
-
-#[gpui_kit::test]
-fn sidebar_search_finds_sessions_by_their_conversations(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let sidebar = snapshot.sidebar.as_mut().unwrap();
-    sidebar.rows[0].kind = SidebarRowKind::Session;
-    let mut other = sidebar.rows[0].clone();
-    other.key = "other".to_owned();
-    other.text = "Other work".to_owned();
-    other.target = Some(SessionTarget {
-        scope: SpaceKey(1),
-        session_id: "session-2".to_owned(),
-    });
-    other.task.as_mut().unwrap().identity = "other-identity".to_owned();
-    sidebar.rows.push(other);
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    let input = cx.debug_bounds("sidebar-search").expect("session search");
-    cx.simulate_click(center(input), Modifiers::none());
-    cx.simulate_input("flaky test");
-    draw_chrome(cx);
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().last(),
-            Some(&ChromeIntent::SearchConversations("flaky test".to_owned()))
-        );
-    });
-    assert_eq!(cx.debug_bounds("sidebar-row-other"), None);
-    // The host answers with the conversations that mention it.
-    cx.update(|_, cx| {
-        probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
-            chrome.set_conversation_matches(
-                vec![bootty_agents::NativeSearchMatch {
-                    target: bootty_control::CommandTarget {
-                        kind: bootty_control::ResourceKind::Session,
-                        handle: "native:codex:other".to_owned(),
-                        generation: 1,
-                    },
-                    task_identity: Some("other-identity".to_owned()),
-                    snippet: "the flaky test fails on CI".to_owned(),
-                }],
-                cx,
-            );
-        });
-    });
-    draw_chrome(cx);
-    assert!(cx.debug_bounds("sidebar-match-other").is_some());
-    assert_eq!(cx.debug_bounds("sidebar-row-session"), None);
-}
-
-#[gpui_kit::test]
-fn sessions_chosen_together_take_one_action(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let sidebar = snapshot.sidebar.as_mut().unwrap();
-    sidebar.rows[0].kind = SidebarRowKind::Session;
-    sidebar.rows[0].current = false;
-    let mut other = sidebar.rows[0].clone();
-    other.key = "other".to_owned();
-    other.target = Some(SessionTarget {
-        scope: SpaceKey(1),
-        session_id: "session-2".to_owned(),
-    });
-    other.task.as_mut().unwrap().identity = "other-identity".to_owned();
-    sidebar.rows.push(other);
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    let first = center(cx.debug_bounds("sidebar-row-session").unwrap());
-    let second = center(cx.debug_bounds("sidebar-row-other").unwrap());
-    // Command-clicking chooses without opening; Escape lets go.
-    cx.simulate_click(first, Modifiers::secondary_key());
-    draw_chrome(cx);
-    cx.simulate_keystrokes("escape");
-    cx.simulate_click(first, Modifiers::secondary_key());
-    cx.simulate_click(second, Modifiers::secondary_key());
-    draw_chrome(cx);
-    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
-    let saved = |command: &str, identity: &str, extra: &[&str]| {
-        let mut invocation = bootty_control::CommandInvocation::new(
-            command,
-            std::iter::once(identity)
-                .chain(extra.iter().copied())
-                .map(str::to_owned)
-                .collect(),
-            bootty_control::Caller::Internal,
-        );
-        invocation.target = saved_task(SessionState::default()).binding;
-        invocation
-    };
-    // Pin, Settle, Snooze, then Archive both; Snooze's first choice is an hour away.
-    for (keys, command, extra) in [
-        ("down down down right enter", "session.snooze", vec!["4600"]),
-        ("down down down down enter", "session.archive", Vec::new()),
-    ] {
-        probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
-        cx.simulate_mouse_down(second, MouseButton::Right, Modifiers::none());
-        draw_chrome(cx);
-        cx.simulate_keystrokes(keys);
-        draw_chrome(cx);
-        probe.update(cx, |probe, _| {
-            assert_eq!(
-                probe.intents.borrow().as_slice(),
-                [ChromeIntent::Commands(vec![
-                    saved(command, "saved-identity", &extra),
-                    saved(command, "other-identity", &extra),
-                ])]
-            );
-        });
-        // An action ends the choice; choose both again for the next one.
-        if command == "session.snooze" {
-            cx.simulate_click(first, Modifiers::secondary_key());
-            cx.simulate_click(second, Modifiers::secondary_key());
-            draw_chrome(cx);
-        }
-    }
-    // The choice ends with its action, so a plain click opens a session again.
-    cx.simulate_click(first, Modifiers::none());
-    probe.update(cx, |probe, _| {
-        assert!(matches!(
-            probe.intents.borrow().last(),
-            Some(ChromeIntent::ActivateSession(_))
-        ));
-    });
-}
-
-#[gpui_kit::test]
-fn closed_sessions_say_so_in_their_sidebar_row(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    for (kind, closed) in [
-        (SidebarRowKind::DetachedSession, true),
-        (SidebarRowKind::Session, false),
-    ] {
-        let mut snapshot = saved_task_snapshot(SessionState::default());
-        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-        row.kind = kind;
-        row.trailing = None;
-        row.trailing_icon = None;
-        let (_, cx) =
-            cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-        assert_eq!(
-            cx.debug_bounds("sidebar-status-icon-session").is_some(),
-            closed
-        );
-    }
-}
-
-#[gpui_kit::test]
 fn saved_sessions_rename_in_their_sidebar_row(cx: &mut TestAppContext) {
     use bootty_mux::session_membership::SessionState;
     cx.update(|cx| init_theme(UiPalette::default(), cx));
@@ -3237,7 +2503,7 @@ fn saved_sessions_rename_in_their_sidebar_row(cx: &mut TestAppContext) {
     // The menu's Rename edits in place too, and Escape keeps the old title.
     cx.simulate_mouse_down(row, MouseButton::Right, Modifiers::none());
     draw_chrome(cx);
-    cx.simulate_keystrokes("down down down down enter");
+    cx.simulate_keystrokes("down down enter");
     draw_chrome(cx);
     assert!(cx.debug_bounds("sidebar-rename-session").is_some());
     cx.simulate_input("Discarded");
@@ -3288,13 +2554,16 @@ fn saved_task(state: bootty_mux::session_membership::SessionState) -> SidebarTas
     SidebarTask {
         name: "bootty-7c".to_owned(),
         title: String::new(),
-        native_conversation: None,
-        title_regenerating: false,
         identity: "saved-identity".to_owned(),
         state,
         binding: Some(bootty_control::CommandTarget {
             kind: bootty_control::ResourceKind::Binding,
             handle: "captured-binding".to_owned(),
+            generation: 42,
+        }),
+        session: Some(bootty_control::CommandTarget {
+            kind: bootty_control::ResourceKind::Session,
+            handle: "captured-session".into(),
             generation: 42,
         }),
         pending: false,
@@ -3306,182 +2575,14 @@ fn saved_task_snapshot(state: bootty_mux::session_membership::SessionState) -> C
     let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
     sidebar.rows.truncate(1);
     let row = &mut sidebar.rows[0];
-    row.kind = SidebarRowKind::DetachedSession;
+    row.kind = SidebarRowKind::Session;
     row.task = Some(saved_task(state));
     snapshot
 }
 
-fn choose_task_view(index: usize, cx: &mut VisualTestContext) {
-    let options = cx.debug_bounds("sidebar-view").expect("view controls");
-    cx.simulate_click(options.center(), Modifiers::none());
-    draw_chrome(cx);
-    cx.simulate_keystrokes("down down down down right");
-    draw_chrome(cx);
-    for _ in 0..index.saturating_sub(1) {
-        cx.simulate_keystrokes("down");
-    }
-    cx.simulate_keystrokes("enter");
-    draw_chrome(cx);
-}
-
-#[gpui_kit::test]
-fn selected_task_settle_button_uses_its_saved_binding(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-    row.current = true;
-    row.trailing = None;
-    row.trailing_icon = None;
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    let bounds = cx.debug_bounds("sidebar-row-session").unwrap();
-    assert_eq!(cx.debug_bounds("sidebar-settle-session"), None);
-    let background_at_row = |window: &Window| {
-        let scale = window.scale_factor();
-        let center = bounds.center();
-        window
-            .painted_quads()
-            .into_iter()
-            .filter(|quad| {
-                quad.bounds.contains(&point(
-                    gpui_kit::ScaledPixels(f32::from(center.x) * scale),
-                    gpui_kit::ScaledPixels(f32::from(center.y) * scale),
-                )) && quad.bounds.size.width.0 >= f32::from(bounds.size.width) * scale
-            })
-            .map(|quad| quad.background)
-            .next_back()
-            .expect("painted session background")
-    };
-    let before = cx.update(|window, _| background_at_row(window));
-    cx.simulate_mouse_move(bounds.center(), None, Modifiers::none());
-    draw_chrome(cx);
-    let after = cx.update(|window, _| background_at_row(window));
-    assert_ne!(before, after, "selected session still responds to hover");
-    let settle = cx
-        .debug_bounds("sidebar-settle-session")
-        .expect("hovered Settle");
-    cx.simulate_click(settle.center(), Modifiers::none());
-    draw_chrome(cx);
-    let mut expected = bootty_control::CommandInvocation::new(
-        "session.settle",
-        vec!["saved-identity".to_owned()],
-        bootty_control::Caller::Internal,
-    );
-    expected.target = saved_task(SessionState::default()).binding;
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().as_slice(),
-            [ChromeIntent::Command(expected.clone())]
-        );
-    });
-
-    let now = snapshot.sidebar.as_ref().unwrap().now_utc;
-    snapshot.sidebar.as_mut().unwrap().rows[0]
-        .task
-        .as_mut()
-        .unwrap()
-        .state
-        .snoozed_until = Some(now);
-    snapshot.sidebar.as_mut().unwrap().rows[0].trailing = Some("Woke".into());
-    cx.update(|window, cx| {
-        probe
-            .read(cx)
-            .chrome
-            .clone()
-            .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
-    });
-    draw_chrome(cx);
-    let settle = cx
-        .debug_bounds("sidebar-settle-session")
-        .expect("woken session can settle");
-    cx.simulate_click(settle.center(), Modifiers::none());
-    draw_chrome(cx);
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().last().unwrap().clone(),
-            ChromeIntent::Command(expected)
-        );
-    });
-
-    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-    row.trailing = Some("Working".to_owned());
-    row.trailing_icon = Some("circle-dashed".to_owned());
-    cx.update(|window, cx| {
-        probe
-            .read(cx)
-            .chrome
-            .clone()
-            .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
-    });
-    draw_chrome(cx);
-    assert_eq!(cx.debug_bounds("sidebar-settle-session"), None);
-    assert!(cx.debug_bounds("sidebar-status-session").is_some());
-    assert_eq!(
-        cx.debug_bounds("sidebar-row-session").unwrap().size.height,
-        bounds.size.height
-    );
-}
-
-/// A settled session that asks for approval or input surfaces instead of hiding in the shelf.
-#[gpui_kit::test]
-fn settled_session_that_needs_attention_leaves_the_shelf(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState {
-        lifecycle: SessionLifecycle::Settled,
-        ..SessionState::default()
-    });
-    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-    row.needs_attention = true;
-    row.trailing = Some("Approval".to_owned());
-    let (_, cx) = cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    draw_chrome(cx);
-    assert!(cx.debug_bounds("sidebar-sessions-section").is_some());
-    assert_eq!(cx.debug_bounds("sidebar-settled-section"), None);
-}
-
-/// Rows keep their order, and so their numbered shortcuts, while their agents work or wait.
-#[gpui_kit::test]
-fn rows_keep_their_place_while_agents_work_or_wait(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let rows = &mut snapshot.sidebar.as_mut().unwrap().rows;
-    let mut second = rows[0].clone();
-    second.key = "second".to_owned();
-    rows.push(second);
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    draw_chrome(cx);
-    let second_stays_second = |cx: &mut VisualTestContext| {
-        let first = cx.debug_bounds("sidebar-row-session").expect("first row");
-        let second = cx.debug_bounds("sidebar-row-second").expect("second row");
-        first.top() < second.top()
-    };
-    assert!(second_stays_second(cx));
-    for (working, needs_attention) in [(true, false), (false, true)] {
-        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[1];
-        row.working = working;
-        row.needs_attention = needs_attention;
-        cx.update(|window, cx| {
-            probe
-                .read(cx)
-                .chrome
-                .clone()
-                .update(cx, |chrome, cx| chrome.update(&snapshot, window, cx));
-        });
-        draw_chrome(cx);
-        assert!(
-            second_stays_second(cx),
-            "working {working}, waiting {needs_attention}"
-        );
-    }
-}
-
 /// An idle session says how long it has been idle.
 #[gpui_kit::test]
-fn idle_sessions_show_their_age(cx: &mut TestAppContext) {
+fn idle_sessions_have_no_timestamp(cx: &mut TestAppContext) {
     use bootty_mux::session_membership::SessionState;
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = saved_task_snapshot(SessionState {
@@ -3493,7 +2594,7 @@ fn idle_sessions_show_their_age(cx: &mut TestAppContext) {
     row.trailing_icon = None;
     let (_, cx) = cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
     draw_chrome(cx);
-    assert!(cx.debug_bounds("sidebar-status-session").is_some());
+    assert!(cx.debug_bounds("sidebar-status-session").is_none());
 }
 
 /// A session titled with its branch doesn't repeat the branch under the title.
@@ -3533,308 +2634,12 @@ fn a_branch_shows_its_pull_request(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("sidebar-pull-request-session").is_some());
 }
 
-/// The settled shelf lists the most recently active session first, whatever the manual order.
-#[gpui_kit::test]
-fn settled_shelf_lists_recent_activity_first(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
-    let template = sidebar.rows[0].clone();
-    sidebar.rows = [100, 300, 200]
-        .into_iter()
-        .map(|at| {
-            let mut row = template.clone();
-            row.key = format!("settled-{at}");
-            row.text = format!("Settled at {at}");
-            row.task = Some(saved_task(SessionState {
-                lifecycle: SessionLifecycle::Settled,
-                last_activity_at: Some(at),
-                ..SessionState::default()
-            }));
-            row
-        })
-        .collect();
-    let (_probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    let tops = [
-        "sidebar-row-settled-300",
-        "sidebar-row-settled-200",
-        "sidebar-row-settled-100",
-    ]
-    .map(|selector| cx.debug_bounds(selector).expect(selector).top());
-    assert!(tops.is_sorted(), "{tops:?}");
-}
-
-#[gpui_kit::test]
-fn saved_task_without_a_terminal_has_no_connection_status(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-    row.trailing = None;
-    row.trailing_icon = None;
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    // Its row says Closed (see `closed_sessions_say_so_in_their_sidebar_row`), not a connection.
-    let active = cx.debug_bounds("sidebar-row-session").unwrap();
-    assert_eq!(cx.debug_bounds("sidebar-lifecycle-session"), None);
-
-    snapshot.sidebar.as_mut().unwrap().rows[0].task = Some(saved_task(SessionState {
-        lifecycle: SessionLifecycle::Settled,
-        ..SessionState::default()
-    }));
-    // The settled shelf has no project headers, so the row names its branch.
-    snapshot.sidebar.as_mut().unwrap().rows[0].branch = Some("feature/login".to_owned());
-    cx.update(|window, cx| {
-        probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
-            chrome.update(&snapshot, window, cx);
-        });
-    });
-    draw_chrome(cx);
-    assert!(cx.debug_bounds("sidebar-settled-section").is_some());
-    let settled = cx.debug_bounds("sidebar-row-session").unwrap();
-    assert!(settled.size.height < active.size.height);
-    assert!(cx.debug_bounds("sidebar-settled-context-session").is_some());
-    assert_eq!(cx.debug_bounds("sidebar-status-session"), None);
-    assert_eq!(cx.debug_bounds("sidebar-status-icon-session"), None);
-    // The heading asks to close the shelf; the saved setting closes it.
-    let section = cx.debug_bounds("sidebar-settled-section").unwrap();
-    cx.simulate_click(section.center(), Modifiers::none());
-    probe.update(cx, |probe, _| {
-        assert!(matches!(
-            probe.intents.borrow().as_slice(),
-            [ChromeIntent::Command(invocation)] if invocation.command == "ui.sidebar.toggle_settled"
-        ));
-    });
-    snapshot.sidebar.as_mut().unwrap().settled_collapsed = true;
-    cx.update(|window, cx| {
-        probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
-            chrome.update(&snapshot, window, cx);
-        });
-    });
-    draw_chrome(cx);
-    assert_eq!(cx.debug_bounds("sidebar-row-session"), None);
-    assert!(cx.debug_bounds("sidebar-settled-section").is_some());
-}
-
-/// The settled shelf shows ten sessions at a time.
-#[gpui_kit::test]
-fn settled_shelf_pages_ten_at_a_time(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
-    let template = sidebar.rows[0].clone();
-    sidebar.rows = (0..13)
-        .map(|index| {
-            let mut row = template.clone();
-            row.key = format!("settled-{index}");
-            row.task = Some(saved_task(SessionState {
-                lifecycle: SessionLifecycle::Settled,
-                last_activity_at: Some(1_000_i64.saturating_sub(index)),
-                ..SessionState::default()
-            }));
-            row
-        })
-        .collect();
-    let (_probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    assert!(cx.debug_bounds("sidebar-row-settled-9").is_some());
-    assert!(cx.debug_bounds("sidebar-row-settled-10").is_none());
-    let more = cx
-        .debug_bounds("sidebar-settled-more:3")
-        .expect("Show 3 more");
-    cx.simulate_click(more.center(), Modifiers::none());
-    draw_chrome(cx);
-    assert!(cx.debug_bounds("sidebar-row-settled-12").is_some());
-    assert!(cx.debug_bounds("sidebar-settled-more:3").is_none());
-}
-
-#[gpui_kit::test]
-fn saved_task_views_filter_without_backend_actions_and_keep_row_heights(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
-    let template = sidebar.rows[0].clone();
-    let states = [
-        SessionState::default(),
-        SessionState {
-            lifecycle: SessionLifecycle::Settled,
-            ..SessionState::default()
-        },
-        SessionState {
-            archived: true,
-            ..SessionState::default()
-        },
-        SessionState {
-            snoozed_until: Some(1_001),
-            ..SessionState::default()
-        },
-        SessionState {
-            deleted: true,
-            ..SessionState::default()
-        },
-    ];
-    sidebar.rows = states
-        .into_iter()
-        .enumerate()
-        .map(|(index, state)| {
-            let mut row = template.clone();
-            row.key = format!("saved-{index}");
-            row.text = format!("Saved task {index}");
-            row.task = Some(saved_task(state));
-            row
-        })
-        .collect();
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    let active_height = cx
-        .debug_bounds("sidebar-row-saved-0")
-        .expect("default Active view")
-        .size
-        .height;
-    let row_selectors = [
-        "sidebar-row-saved-0",
-        "sidebar-row-saved-1",
-        "sidebar-row-saved-2",
-        "sidebar-row-saved-3",
-        "sidebar-row-saved-4",
-    ];
-    for selected in [0, 2, 3] {
-        choose_task_view(selected, cx);
-        for (index, selector) in row_selectors.into_iter().enumerate() {
-            let bounds = cx.debug_bounds(selector);
-            assert_eq!(
-                bounds.is_some(),
-                index == selected || (selected == 0 && index == 1),
-                "view {selected}, row {index}"
-            );
-            if let Some(bounds) = bounds {
-                assert_eq!(
-                    bounds.size.height,
-                    if index == 1 { px(28.) } else { active_height }
-                );
-            }
-        }
-    }
-    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
-}
-
-#[gpui_kit::test]
-fn saved_task_keyboard_menu_captures_binding_identity_and_absolute_snooze(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState::default());
-    snapshot.sidebar.as_mut().unwrap().rows[0].kind = SidebarRowKind::Session;
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    let row = cx.debug_bounds("sidebar-row-session").expect("saved row");
-    for (position, preset, command, deadline) in [
-        (1, None, "session.pin", None),
-        (2, None, "session.settle", None),
-        (8, None, "session.archive", None),
-        (3, Some(0), "session.snooze", Some("4600")),
-        (3, Some(1), "session.snooze", Some("11800")),
-    ] {
-        cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
-        draw_chrome(cx);
-        for _ in 0..position {
-            cx.simulate_keystrokes("down");
-        }
-        if let Some(preset) = preset {
-            cx.simulate_keystrokes("right");
-            draw_chrome(cx);
-            for _ in 0..preset {
-                cx.simulate_keystrokes("down");
-            }
-        }
-        cx.simulate_keystrokes("enter");
-        draw_chrome(cx);
-        let mut expected = bootty_control::CommandInvocation::new(
-            command,
-            std::iter::once("saved-identity".to_owned())
-                .chain(deadline.map(str::to_owned))
-                .collect(),
-            bootty_control::Caller::Internal,
-        );
-        expected.target = saved_task(SessionState::default()).binding;
-        probe.update(cx, |probe, _| {
-            assert_eq!(
-                probe.intents.borrow().as_slice(),
-                [ChromeIntent::Command(expected)]
-            );
-            probe.intents.borrow_mut().clear();
-        });
-    }
-}
-
-#[gpui_kit::test]
-fn native_task_menu_captures_the_conversation_generation(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let target = bootty_control::CommandTarget {
-        kind: bootty_control::ResourceKind::Session,
-        handle: "native:codex:captured".into(),
-        generation: 17,
-    };
-    let mut regenerate = bootty_control::CommandInvocation::new(
-        "agents.native.regenerate-title",
-        vec![target.handle.clone(), target.generation.to_string()],
-        bootty_control::Caller::Internal,
-    );
-    regenerate.target = Some(target.clone());
-    let mut unread = regenerate.clone();
-    "agents.native.mark-unread".clone_into(&mut unread.command);
-    for kind in [SidebarRowKind::Session, SidebarRowKind::DetachedSession] {
-        for (keys, regenerating, expected) in [
-            (
-                "down down down down down enter",
-                false,
-                Some(ChromeIntent::Command(regenerate.clone())),
-            ),
-            (
-                "down down down down down down down down down right down enter",
-                false,
-                Some(ChromeIntent::ForkConversation(target.clone())),
-            ),
-            (
-                "down down down down down down enter",
-                false,
-                Some(ChromeIntent::Command(unread.clone())),
-            ),
-            (
-                "down down down down down enter",
-                true,
-                Some(ChromeIntent::Command(unread.clone())),
-            ),
-        ] {
-            let mut snapshot = saved_task_snapshot(SessionState::default());
-            let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-            row.kind = kind.clone();
-            row.task.as_mut().unwrap().native_conversation = Some(target.clone());
-            row.task.as_mut().unwrap().title_regenerating = regenerating;
-            let (probe, cx) =
-                cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-            let bounds = cx.debug_bounds("sidebar-row-session").unwrap();
-            cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
-            draw_chrome(cx);
-            cx.simulate_keystrokes(keys);
-            draw_chrome(cx);
-            probe.update(cx, |probe, _| {
-                assert_eq!(probe.intents.borrow().as_slice(), expected.as_slice());
-            });
-        }
-    }
-}
-
 #[gpui_kit::test]
 fn pending_saved_task_menu_is_a_keyboard_noop(cx: &mut TestAppContext) {
     use bootty_mux::session_membership::SessionState;
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = saved_task_snapshot(SessionState {
-        archived: true,
+        pinned: true,
         ..SessionState::default()
     });
     snapshot.sidebar.as_mut().unwrap().rows[0]
@@ -3844,232 +2649,12 @@ fn pending_saved_task_menu_is_a_keyboard_noop(cx: &mut TestAppContext) {
         .pending = true;
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    choose_task_view(2, cx);
     let row = cx.debug_bounds("sidebar-row-session").unwrap();
     cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
     draw_chrome(cx);
     cx.simulate_keystrokes("down enter");
     draw_chrome(cx);
     probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
-}
-
-#[gpui_kit::test]
-fn saved_task_menu_offers_the_exact_lifecycle_recovery_for_its_current_state(
-    cx: &mut TestAppContext,
-) {
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    for (state, view, position, command) in [
-        (
-            SessionState {
-                lifecycle: SessionLifecycle::Settled,
-                ..SessionState::default()
-            },
-            0,
-            2,
-            "session.activate",
-        ),
-        (
-            SessionState {
-                archived: true,
-                ..SessionState::default()
-            },
-            2,
-            5,
-            "session.unarchive",
-        ),
-        (
-            SessionState {
-                snoozed_until: Some(1_100),
-                ..SessionState::default()
-            },
-            3,
-            3,
-            "session.unsnooze",
-        ),
-    ] {
-        let snapshot = saved_task_snapshot(state);
-        let (probe, cx) =
-            cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-        choose_task_view(view, cx);
-        let row = cx.debug_bounds("sidebar-row-session").unwrap();
-        cx.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
-        draw_chrome(cx);
-        for _ in 0..position {
-            cx.simulate_keystrokes("down");
-        }
-        cx.simulate_keystrokes("enter");
-        draw_chrome(cx);
-        let mut invocation = bootty_control::CommandInvocation::new(
-            command,
-            vec!["saved-identity".to_owned()],
-            bootty_control::Caller::Internal,
-        );
-        invocation.target = saved_task(state).binding;
-        probe.update(cx, |probe, _| {
-            assert_eq!(
-                probe.intents.borrow().as_slice(),
-                [ChromeIntent::Command(invocation)]
-            );
-        });
-    }
-}
-
-#[gpui_kit::test]
-fn working_ring_ignores_focus_and_parks_when_disabled_or_reduced(cx: &mut TestAppContext) {
-    use std::{cell::Cell, time::Duration};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
-    let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-    row.trailing = Some("Working 7s".to_owned());
-    row.trailing_icon = Some("circle-dashed".to_owned());
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    let notifications = Rc::new(Cell::new(0_usize));
-    let observed = notifications.clone();
-    let _subscription = probe.update(cx, |probe, cx| {
-        cx.observe(&probe.chrome, move |_, _, _| {
-            observed.set(observed.get().saturating_add(1));
-        })
-    });
-    cx.update(|window, _| window.activate_window());
-    draw_chrome(cx);
-    notifications.set(0);
-    cx.executor().advance_clock(Duration::from_millis(34));
-    draw_chrome(cx);
-    assert!(notifications.get() > 0, "visible Working ring rotates");
-    cx.deactivate_window();
-    notifications.set(0);
-    cx.executor().advance_clock(Duration::from_millis(34));
-    draw_chrome(cx);
-    assert!(
-        notifications.get() > 0,
-        "visible unfocused Working ring rotates"
-    );
-
-    for (animate, reduced) in [(false, false), (true, true)] {
-        snapshot.sidebar.as_mut().unwrap().animate_working = animate;
-        cx.update(|_, cx| cx.set_reduce_motion(reduced));
-        update_chrome(&probe, &snapshot, cx);
-        // Let the already scheduled frame retire, then check the quiet steady state.
-        cx.executor().advance_clock(Duration::from_millis(34));
-        draw_chrome(cx);
-        notifications.set(0);
-        cx.executor().advance_clock(Duration::from_secs(1));
-        draw_chrome(cx);
-        assert_eq!(notifications.get(), 0);
-        assert!(cx.debug_bounds("sidebar-status-session").is_some());
-        assert!(cx.debug_bounds("sidebar-status-icon-session").is_some());
-    }
-}
-
-#[gpui_kit::test]
-fn expired_snooze_returns_to_lifecycle_view_with_injected_clock(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = saved_task_snapshot(SessionState {
-        snoozed_until: Some(1_001),
-        ..SessionState::default()
-    });
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    assert!(cx.debug_bounds("sidebar-row-session").is_none());
-    snapshot.sidebar.as_mut().unwrap().now_utc = 1_001;
-    update_chrome(&probe, &snapshot, cx);
-    assert!(cx.debug_bounds("sidebar-row-session").is_some());
-    assert!(cx.debug_bounds("sidebar-status-session").is_some());
-    assert!(cx.debug_bounds("sidebar-status-icon-session").is_some());
-    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
-}
-
-#[gpui_kit::test]
-fn native_tab_keeps_its_exact_target_across_selection_updates(cx: &mut TestAppContext) {
-    use bootty_agents::{AgentKind, NativeSessionConfig, NativeSessionRecord};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let record = NativeSessionRecord {
-        restart: bootty_agents::NativeRestart::default(),
-        id: "native:codex:owned-thread".into(),
-        binding_id: "binding-one".into(),
-        task_identity: Some("task-one".into()),
-        title: "Review the project".into(),
-        pending_initial_message: None,
-        permissions_pending: false,
-        generation: 7,
-        config: NativeSessionConfig::new(AgentKind::Codex, "/project"),
-        snapshot: serde_json::from_value(serde_json::json!({
-            "provider":"codex", "session_id":"owned-thread", "turn_id":null,
-            "status":"idle", "transcript":[], "requests":[], "usage":null,
-            "error":null, "revision":1
-        }))
-        .expect("provider snapshot"),
-        side_chat: None,
-        spawn_parent: None,
-        queued_messages: Vec::new(),
-        attachments: Vec::new(),
-        draft: None,
-        seen_turns: 0,
-    };
-    let mut snapshot = chrome_snapshot();
-    let selector = "status-tab-top-1-native:codex:owned-thread:conversation";
-    let segment = &mut snapshot.top_status.as_mut().expect("top strip").segments[1];
-    let mut native_item = segment.items.first().expect("terminal tab style").clone();
-    native_item.key = format!("{}:conversation", record.id);
-    native_item.text.clone_from(&record.title);
-    native_item.icon = Some("openai".to_owned());
-    native_item.action = Some(NativeChromeAction::FocusConversation(record.target()));
-    native_item.reorder_anchor = None;
-    native_item.tab_context = None;
-    native_item.active = false;
-    segment.items.push(native_item);
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot.clone(), window, cx));
-    for selected in [true, false, true] {
-        let items = &mut snapshot.top_status.as_mut().expect("strip").segments[1].items;
-        items.first_mut().expect("terminal tab").active = !selected;
-        items
-            .first_mut()
-            .expect("terminal tab")
-            .tab_context
-            .as_mut()
-            .expect("terminal context")
-            .can_activate = selected;
-        items.last_mut().expect("native tab").active = selected;
-        cx.update(|window, cx| {
-            probe.read(cx).chrome.clone().update(cx, |chrome, cx| {
-                chrome.update(&snapshot, window, cx);
-            });
-        });
-        draw_chrome(cx);
-        let bounds = cx
-            .debug_bounds(selector)
-            .expect("native tab survives selection changes");
-        cx.simulate_click(bounds.center(), Modifiers::none());
-        cx.run_until_parked();
-    }
-    probe.update(cx, |probe, _| {
-        assert!(probe.intents.borrow().iter().all(|intent| {
-            *intent
-                == ChromeIntent::Status(StatusIntent::Action(
-                    NativeChromeAction::FocusConversation(record.target()),
-                ))
-        }));
-        assert_eq!(probe.intents.borrow().len(), 3);
-    });
-    let terminal = cx
-        .debug_bounds("status-tab-top-1-tab-one")
-        .expect("terminal tab retained beside conversation");
-    cx.simulate_click(terminal.center(), Modifiers::none());
-    cx.run_until_parked();
-    probe.update(cx, |probe, _| {
-        assert_eq!(
-            probe.intents.borrow().last(),
-            Some(&ChromeIntent::Status(StatusIntent::Context {
-                session_id: "session-1".to_owned(),
-                window_id: "window-1".to_owned(),
-                action: bootty_gpui::TabContextAction::Activate,
-            }))
-        );
-    });
 }
 
 #[gpui_kit::test]
@@ -4117,54 +2702,6 @@ fn pinned_partition_and_recent_receipts_preserve_manual_ties_and_row_heights(
         assert!(cx.debug_bounds("sidebar-sessions-section").is_some());
         probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
     }
-}
-
-#[gpui_kit::test]
-fn attention_filter_uses_observed_attention_and_keeps_other_states_out(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
-    let sidebar = snapshot.sidebar.as_mut().unwrap();
-    fill_sidebar_sessions(sidebar);
-    sidebar.rows.truncate(21);
-    for (row, (status, attention)) in sidebar
-        .rows
-        .iter_mut()
-        .filter(|row| row.kind.is_session())
-        .zip([
-            ("Working 0:10", false),
-            ("Approval", true),
-            ("Input", true),
-            ("Failed", true),
-            ("Finished", false),
-            ("Woke", false),
-            ("Waiting", false),
-        ])
-    {
-        row.trailing = Some(status.to_owned());
-        row.needs_attention = attention;
-    }
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    choose_task_view(4, cx);
-    for (index, selector) in [
-        "sidebar-row-session-0",
-        "sidebar-row-session-1",
-        "sidebar-row-session-2",
-        "sidebar-row-session-3",
-        "sidebar-row-session-4",
-        "sidebar-row-session-5",
-        "sidebar-row-session-6",
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        assert_eq!(
-            cx.debug_bounds(selector).is_some(),
-            matches!(index, 1..=3),
-            "row {index}"
-        );
-    }
-    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
 }
 
 #[gpui_kit::test]
@@ -4249,64 +2786,7 @@ fn dragging_moves_peer_pills_before_drop_and_escape_restores_without_writes(
 }
 
 #[gpui_kit::test]
-fn archived_and_snoozed_rows_keep_latent_pin_without_a_pinned_partition(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    for (state, view) in [
-        (
-            SessionState {
-                archived: true,
-                pinned: true,
-                ..SessionState::default()
-            },
-            2,
-        ),
-        (
-            SessionState {
-                snoozed_until: Some(1_100),
-                pinned: true,
-                ..SessionState::default()
-            },
-            3,
-        ),
-    ] {
-        let snapshot = saved_task_snapshot(state);
-        assert!(
-            snapshot.sidebar.as_ref().unwrap().rows[0]
-                .task
-                .as_ref()
-                .unwrap()
-                .state
-                .pinned
-        );
-        let (probe, cx) =
-            cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-        choose_task_view(view, cx);
-        assert!(cx.debug_bounds("sidebar-row-session").is_some());
-        assert!(cx.debug_bounds("sidebar-pinned-section").is_none());
-        probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
-    }
-}
-
-#[gpui_kit::test]
-fn attention_filter_without_observed_attention_renders_the_empty_state(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
-    let sidebar = snapshot.sidebar.as_mut().unwrap();
-    sidebar.rows.truncate(1);
-    sidebar.rows[0].trailing = Some("Finished".to_owned());
-    sidebar.rows[0].needs_attention = false;
-    let (probe, cx) =
-        cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    assert!(cx.debug_bounds("sidebar-row-session").is_some());
-    choose_task_view(4, cx);
-    assert!(cx.debug_bounds("sidebar-row-session").is_none());
-    assert!(cx.debug_bounds("sidebar-empty-state").is_some());
-    probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
-}
-
-#[gpui_kit::test]
-fn first_session_in_a_project_drags_its_status_branch_and_agents(cx: &mut TestAppContext) {
+fn first_session_in_a_project_drags_its_status_and_branch(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
     let sidebar = snapshot.sidebar.as_mut().unwrap();
@@ -4317,23 +2797,12 @@ fn first_session_in_a_project_drags_its_status_branch_and_agents(cx: &mut TestAp
     session.branch = Some("feature".to_owned());
     session.trailing = Some("Input".to_owned());
     session.trailing_icon = Some("message-circle-question-mark".to_owned());
-    session.agents = ["claude", "openai"]
-        .into_iter()
-        .enumerate()
-        .map(|(index, icon)| SidebarAgent {
-            key: format!("grouped-agent-{index}"),
-            icon: icon.to_owned(),
-            description: icon.to_owned(),
-            model: None,
-        })
-        .collect();
     let mut group = session.clone();
     group.key = "project-header".to_owned();
     group.text = "Project".to_owned();
     group.kind = SidebarRowKind::Group;
     group.branch = None;
     group.trailing = None;
-    group.agents.clear();
     group.target = None;
     group.current = false;
     group.task = None;
@@ -4358,8 +2827,6 @@ fn first_session_in_a_project_drags_its_status_branch_and_agents(cx: &mut TestAp
         "sidebar-title-grouped-source",
         "sidebar-branch-grouped-source",
         "sidebar-status-grouped-source",
-        "sidebar-agent-grouped-agent-0",
-        "sidebar-agent-grouped-agent-1",
     ] {
         assert!(
             preview.contains(
@@ -4377,7 +2844,7 @@ fn first_session_in_a_project_drags_its_status_branch_and_agents(cx: &mut TestAp
 }
 
 #[gpui_kit::test]
-fn detached_pills_keep_distinct_colors_and_unselected_working_geometry(cx: &mut TestAppContext) {
+fn detached_pills_keep_distinct_colors_and_unselected_status_geometry(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = task_row_snapshot(false);
     let sidebar = snapshot.sidebar.as_mut().unwrap();
@@ -4396,7 +2863,6 @@ fn detached_pills_keep_distinct_colors_and_unselected_working_geometry(cx: &mut 
     draw_chrome(cx);
     let working = cx.debug_bounds("sidebar-row-task-0").unwrap();
     let status = cx.debug_bounds("sidebar-status-task-0").unwrap();
-    let agent = cx.debug_bounds("sidebar-agent-task-0-0").unwrap();
     let pill_bounds = [
         cx.debug_bounds("sidebar-session-task-0").unwrap(),
         cx.debug_bounds("sidebar-session-task-1").unwrap(),
@@ -4419,12 +2885,11 @@ fn detached_pills_keep_distinct_colors_and_unselected_working_geometry(cx: &mut 
         "unselected pills retain their task colors"
     );
     for row in &mut snapshot.sidebar.as_mut().unwrap().rows {
-        row.kind = SidebarRowKind::DetachedSession;
+        row.kind = SidebarRowKind::Session;
     }
     update_chrome(&probe, &snapshot, cx);
     assert_eq!(cx.debug_bounds("sidebar-row-task-0"), Some(working));
     assert_eq!(cx.debug_bounds("sidebar-status-task-0"), Some(status));
-    assert_eq!(cx.debug_bounds("sidebar-agent-task-0-0"), Some(agent));
     let detached_colors = cx.update(|window, _| {
         let quads = window.painted_quads();
         pill_bounds.map(|bounds| {
@@ -4482,10 +2947,6 @@ fn unassigned_backend_rows_stay_visible_and_adopt_exact_target(cx: &mut TestAppC
             );
             probe.intents.borrow_mut().clear();
         });
-        choose_task_view(2, cx);
-        assert!(cx.debug_bounds("sidebar-row-unassigned-terminal").is_none());
-        assert!(cx.debug_bounds("sidebar-row-unassigned-group").is_none());
-        assert!(cx.debug_bounds("sidebar-empty-state").is_some());
         probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
     }
 }
@@ -4573,61 +3034,6 @@ fn sidebar_popup_escape_keeps_palette_shortcuts_and_outside_input_focus(cx: &mut
 }
 
 #[gpui_kit::test]
-fn settled_sessions_remain_visible_below_active_and_pinned_sessions(cx: &mut TestAppContext) {
-    use bootty_config::config::SidebarSortOrder;
-    use bootty_mux::session_membership::{SessionLifecycle, SessionState};
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    for grouped in [false, true] {
-        for order in [SidebarSortOrder::Manual, SidebarSortOrder::RecentActivity] {
-            let mut snapshot = chrome_snapshot();
-            let sidebar = snapshot.sidebar.as_mut().unwrap();
-            fill_sidebar_sessions(sidebar);
-            sidebar.rows.truncate(12);
-            sidebar.group_by_project = grouped;
-            sidebar.sort_order = order;
-            for (index, row) in sidebar
-                .rows
-                .iter_mut()
-                .filter(|row| row.kind.is_session())
-                .enumerate()
-            {
-                row.task = Some(saved_task(SessionState {
-                    lifecycle: if index == 0 {
-                        SessionLifecycle::Settled
-                    } else {
-                        SessionLifecycle::Active
-                    },
-                    pinned: index == 2,
-                    last_activity_at: Some(100),
-                    ..SessionState::default()
-                }));
-            }
-            let (probe, cx) =
-                cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-            let settled = cx
-                .debug_bounds("sidebar-row-session-0")
-                .expect("settled visible by default");
-            let heading = cx.debug_bounds("sidebar-settled-section").unwrap();
-            let pinned = cx.debug_bounds("sidebar-row-session-2").unwrap();
-            let active = cx.debug_bounds("sidebar-row-session-1").unwrap();
-            assert!(pinned.bottom() <= active.top());
-            assert!(active.bottom() < heading.top());
-            assert!(heading.bottom() <= settled.top());
-            assert!(
-                (heading.left().sub(settled.left())).abs() <= px(12.0),
-                "the settled heading starts with the rows: {heading:?}, {settled:?}"
-            );
-            let footer = cx.debug_bounds("bootty-gpui-space-switcher").unwrap();
-            assert!(
-                (footer.top().sub(settled.bottom())).abs() <= px(20.0),
-                "settled tail should sit above the footer: {settled:?}, {footer:?}"
-            );
-            probe.update(cx, |probe, _| assert!(probe.intents.borrow().is_empty()));
-        }
-    }
-}
-
-#[gpui_kit::test]
 fn project_disclosure_hides_sessions_and_empty_projects_remain_operable(cx: &mut TestAppContext) {
     cx.update(|cx| init_theme(UiPalette::default(), cx));
     let mut snapshot = chrome_snapshot();
@@ -4710,131 +3116,5 @@ fn project_disclosure_hides_sessions_and_empty_projects_remain_operable(cx: &mut
                 path: "/work/project".to_owned(),
             })
         );
-    });
-}
-
-#[gpui_kit::test]
-fn permanent_session_deletion_requires_the_visible_confirmation(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let capture = holder.clone();
-    let (_, visual) = cx.add_window_view(move |window, cx| {
-        let probe = cx.new(|cx| {
-            let mut snapshot = saved_task_snapshot(SessionState::default());
-            snapshot.sidebar.as_mut().unwrap().rows[0].kind = SidebarRowKind::Session;
-            ChromeProbe::with_snapshot(snapshot, window, cx)
-        });
-        *capture.borrow_mut() = Some(probe.clone());
-        gpui_kit::component::Root::new(probe, window, cx)
-    });
-    let probe = holder.borrow().clone().unwrap();
-    let row = visual.debug_bounds("sidebar-row-session").unwrap();
-    visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
-    draw_chrome(visual);
-    visual.simulate_keystrokes("down down down down down down down down down enter");
-    draw_chrome(visual);
-    probe.update(visual, |probe, _| {
-        assert!(probe.intents.borrow().is_empty());
-    });
-    let cancel = visual
-        .debug_bounds("prompt-answer-Cancel")
-        .expect("Cancel confirmation");
-    visual.simulate_click(cancel.center(), Modifiers::none());
-    draw_chrome(visual);
-    probe.update(visual, |probe, _| {
-        assert!(probe.intents.borrow().is_empty());
-    });
-}
-
-#[gpui_kit::test]
-fn archiving_a_working_session_asks_first(cx: &mut TestAppContext) {
-    use bootty_mux::session_membership::SessionState;
-    cx.update(|cx| {
-        gpui_kit::component::init(cx);
-        init_theme(UiPalette::default(), cx);
-    });
-    for working in [false, true] {
-        let mut snapshot = saved_task_snapshot(SessionState::default());
-        let row = &mut snapshot.sidebar.as_mut().unwrap().rows[0];
-        row.kind = SidebarRowKind::Session;
-        row.working = working;
-        let holder = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let capture = holder.clone();
-        let (_, visual) = cx.add_window_view(move |window, cx| {
-            let probe = cx.new(|cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-            *capture.borrow_mut() = Some(probe.clone());
-            gpui_kit::component::Root::new(probe, window, cx)
-        });
-        let probe = holder.borrow().clone().unwrap();
-        let row = visual.debug_bounds("sidebar-row-session").unwrap();
-        visual.simulate_mouse_down(row.center(), MouseButton::Right, Modifiers::none());
-        draw_chrome(visual);
-        visual.simulate_keystrokes("down down down down down down down down enter");
-        draw_chrome(visual);
-        if working {
-            probe.update(visual, |probe, _| {
-                assert!(probe.intents.borrow().is_empty());
-            });
-            let archive = visual
-                .debug_bounds("prompt-answer-Archive")
-                .expect("Archive confirmation");
-            visual.simulate_click(archive.center(), Modifiers::none());
-            draw_chrome(visual);
-        }
-        probe.update(visual, |probe, _| {
-            assert!(
-                matches!(probe.intents.borrow().as_slice(), [ChromeIntent::Command(invocation)]
-                    if invocation.command == "session.archive"),
-                "{:?}",
-                probe.intents.borrow()
-            );
-        });
-    }
-}
-
-#[gpui_kit::test]
-fn new_session_composer_accepts_a_pasted_folder(cx: &mut TestAppContext) {
-    use bootty_gpui::{DialogField, DialogFieldKind};
-    let directory = assert_fs::TempDir::new().unwrap();
-    let mut spec = DialogSpec::prompt(
-        bootty_ui::presentation::dialogs::NEW_SESSION_ID,
-        "New session",
-        "",
-        "Prompt",
-        DialogAction::new("start-session"),
-    );
-    spec.multiline = true;
-    spec.fields.push(DialogField {
-        id: "provider".into(),
-        label: "Provider".into(),
-        value: "Codex".into(),
-        placeholder: String::new(),
-        kind: DialogFieldKind::Choice(vec!["Codex".into()]),
-    });
-    let (probe, visual) = dialog_window(cx, DialogRole::Prompt, spec);
-    draw_chrome(visual);
-    let input = visual.debug_bounds("dialog-prompt-input").unwrap();
-    visual.simulate_click(input.center(), Modifiers::none());
-    visual.update(|_, cx| {
-        cx.write_to_clipboard(gpui_kit::ClipboardItem {
-            entries: vec![gpui_kit::ClipboardEntry::ExternalPaths(
-                gpui_kit::ExternalPaths(std::iter::once(directory.path().to_owned()).collect()),
-            )],
-        });
-    });
-    visual.simulate_keystrokes(if cfg!(target_os = "macos") {
-        "cmd-v"
-    } else {
-        "ctrl-v"
-    });
-    draw_chrome(visual);
-    probe.update(visual, |probe, _| {
-        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-            DialogIntent::TextChanged { value, .. } if value.contains(&serde_json::to_string(&format!("{}/", directory.path().display())).unwrap())
-        )));
     });
 }

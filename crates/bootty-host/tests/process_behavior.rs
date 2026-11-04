@@ -1,4 +1,5 @@
 #[cfg(target_os = "macos")]
+use bootty_os::spawn::CommandSpawn as _;
 use std::process::Command;
 #[cfg(unix)]
 use std::{thread, time::Duration};
@@ -189,14 +190,18 @@ fn disowned_commands_resolve_programs_and_preserve_the_bootty_environment() {
     .expect("join PATH");
 
     let output = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "process_behavior_helper", "--nocapture"])
+        .args([
+            "--exact",
+            "process_behavior::process_behavior_helper",
+            "--nocapture",
+        ])
         .env(HELPER_ENV, "1")
         .env("PATH", path)
         .env("BOOTTY_ENV_PROBE", "login-env-value")
         .env("BOOTTY_ENV_PROBE_PROGRAM", program.path())
         .env("BOOTTY_ENV_PROBE_PATH", captured_path.path())
         .env("BOOTTY_ENV_PROBE_CUSTOM", captured_custom.path())
-        .output()
+        .bootty_output()
         .expect("run isolated process behavior test");
 
     assert!(
@@ -261,10 +266,14 @@ fn disowned_commands_run_once_when_launchd_restarts_them() {
     .expect("join PATH");
 
     let output = Command::new(std::env::current_exe().expect("current test executable"))
-        .args(["--exact", "restarted_job_helper", "--nocapture"])
+        .args([
+            "--exact",
+            "process_behavior::restarted_job_helper",
+            "--nocapture",
+        ])
         .env(RESTART_HELPER_ENV, runs.path())
         .env("PATH", path)
-        .output()
+        .bootty_output()
         .expect("run isolated restarted job test");
 
     assert!(
@@ -381,7 +390,7 @@ fn cancellation_closes_pipes_inherited_by_descendants(#[case] leader: &str) {
         if let Ok(pid) = std::fs::read_to_string(marker.path()) {
             let _ = std::process::Command::new("kill")
                 .args(["-KILL", pid.trim()])
-                .status();
+                .bootty_status();
         }
     }
     worker.join().unwrap();

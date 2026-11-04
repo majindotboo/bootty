@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
-use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
+use bootty_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     io::{self, Read, Write},
     process::{Command, Output, Stdio},
@@ -593,14 +594,16 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
             .arg(directory.path())
             .arg(&resolved_program)
             .args(args)
-            .output(),
+            .bootty_output(),
     )?;
     if !output.success {
         return Ok(output);
     }
 
     let status = wait_for_disowned_exit(directory.path(), &label, DISOWNED_COMMAND_TIMEOUT);
-    let _ = Command::new(&launchctl).args(["remove", &label]).output();
+    let _ = Command::new(&launchctl)
+        .args(["remove", &label])
+        .bootty_output();
     let stdout = read_disowned_output(&directory.path().join("stdout"))?;
     let stderr = read_disowned_output(&directory.path().join("stderr"))?;
     let status = status.with_context(|| {
@@ -741,7 +744,7 @@ fn disowned_command_output(program: &str, args: &[String]) -> Result<CommandOutp
     #[cfg(unix)]
     command.process_group(0);
 
-    command_output(program, command.output())
+    command_output(program, command.bootty_output())
 }
 
 fn command_output(program: &str, output: std::io::Result<Output>) -> Result<CommandOutput> {

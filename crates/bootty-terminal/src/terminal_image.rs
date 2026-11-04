@@ -45,7 +45,7 @@ pub struct KittyImagePlacement {
     pub data: Arc<Vec<u8>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KittyVirtualPlacement {
     pub image_id: u32,
     pub placement_id: u32,

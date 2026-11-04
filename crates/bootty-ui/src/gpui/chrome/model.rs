@@ -1,5 +1,3 @@
-pub use bootty_mux::session_membership::SessionView as TaskView;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Rgba {
     pub red: u8,
@@ -60,15 +58,11 @@ pub struct SessionTarget {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeChromeAction {
-    TogglePanel(bootty_config::config::PanelKind),
+    ToggleSessions,
     ActivateWindow {
         session_id: String,
         window_id: String,
     },
-    FocusConversation(bootty_control::CommandTarget),
-    CloseConversation(bootty_control::CommandTarget),
-    SurfaceChooser(u64),
-    CancelSurfaceChooser(u64),
     ToggleKeepAwake,
 }
 
@@ -97,19 +91,6 @@ pub struct SidebarPullRequest {
     pub color: Rgba,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct UsageMeterSnapshot {
-    pub meter: crate::usage::QuotaMeter,
-    pub provider: crate::usage::UsageProvider,
-    pub label: String,
-    pub reset_at: Option<String>,
-    pub description: String,
-    pub fill: Rgba,
-    pub marker: Rgba,
-    pub pace: Rgba,
-    pub track: Rgba,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarPosition {
     Left,
@@ -119,7 +100,6 @@ pub enum SidebarPosition {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeLayout {
     pub left_dock_toggle: bool,
-    pub right_dock_toggle: bool,
     pub panel_tab_style: bootty_config::config::PanelTabStyle,
     pub panel_tabs: bootty_config::config::PanelTabs,
     pub tabs: bootty_config::config::TabConfig,
@@ -310,14 +290,11 @@ pub struct SidebarSnapshot {
     pub projects: Vec<bootty_mux::repository::RegisteredProject>,
     pub project_target: Option<bootty_control::CommandTarget>,
     pub rows: Vec<SidebarRow>,
-    /// Supplied by the chrome clock; expiry does not require an idle timer.
+    /// Supplied by the chrome clock for activity ages.
     pub now_utc: i64,
-    pub footer: Vec<SidebarFooterItem>,
     pub title_visible: bool,
     pub group_by_project: bool,
-    pub settled_collapsed: bool,
     pub sort_order: bootty_config::config::SidebarSortOrder,
-    pub animate_working: bool,
     pub focused: bool,
     pub hovered_session: Option<SessionTarget>,
     pub dim_when_unfocused: f32,
@@ -338,13 +315,9 @@ pub struct SidebarRow {
     pub cwd: Option<String>,
     pub host: Option<String>,
     pub branch: Option<String>,
-    pub agents: Vec<SidebarAgent>,
     pub trailing: Option<String>,
     pub trailing_icon: Option<String>,
     pub trailing_color: Option<Rgba>,
-    /// Observed work state; grouping is independent of presentation icons.
-    pub working: bool,
-    pub needs_attention: bool,
     pub number: Option<usize>,
     pub indent: u16,
     pub tree: Option<String>,
@@ -376,10 +349,9 @@ pub struct SidebarTask {
     pub name: String,
     /// The row's title, for confirmations that name the session.
     pub title: String,
-    pub native_conversation: Option<bootty_control::CommandTarget>,
-    pub title_regenerating: bool,
     pub state: bootty_mux::session_membership::SessionState,
     pub binding: Option<bootty_control::CommandTarget>,
+    pub session: Option<bootty_control::CommandTarget>,
     pub pending: bool,
 }
 
@@ -390,14 +362,6 @@ pub struct SidebarProject {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SidebarAgent {
-    pub key: String,
-    pub icon: String,
-    pub description: String,
-    pub model: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRowKind {
     Group,
     Draft {
@@ -405,7 +369,6 @@ pub enum SidebarRowKind {
         binding: bootty_control::CommandTarget,
     },
     Session,
-    DetachedSession,
     Detail,
     Progress {
         value: Option<u8>,
@@ -418,20 +381,8 @@ pub enum SidebarRowKind {
 impl SidebarRowKind {
     #[must_use]
     pub const fn is_session(&self) -> bool {
-        matches!(
-            self,
-            Self::Session | Self::DetachedSession | Self::Draft { .. }
-        )
+        matches!(self, Self::Session | Self::Draft { .. })
     }
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct SidebarFooterItem {
-    pub key: String,
-    pub text: String,
-    pub icon: Option<String>,
-    pub meter: Option<UsageMeterSnapshot>,
-    pub color: Rgba,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -547,13 +498,10 @@ pub enum ChromeIntent {
     Command(bootty_control::CommandInvocation),
     /// One action on several sessions, in order.
     Commands(Vec<bootty_control::CommandInvocation>),
-    /// Snooze these sessions until a time chosen next; each command takes it as its last argument.
-    CustomSnooze(Vec<bootty_control::CommandInvocation>),
     StartWindowDrag,
     ActivateSpace(SpaceKey),
     CreateSpace,
     EditSpace(SpaceKey),
-    ReconnectSpace(SpaceKey),
     CloseSpace(SpaceKey),
     MoveSessionsToSpace {
         sessions: Vec<SessionTarget>,
@@ -562,16 +510,11 @@ pub enum ChromeIntent {
     ActivateSession(SessionTarget),
     ReopenSession(SessionTarget),
     RenameSavedSession(SessionTarget),
-    OpenGitChanges(SessionTarget),
     AdoptSession(SessionTarget),
     SessionContext {
         target: SessionTarget,
         action: SessionContextAction,
     },
-    /// Start a side chat from a conversation, with its history so far.
-    ForkConversation(bootty_control::CommandTarget),
-    /// Look for the sidebar's search words inside conversations.
-    SearchConversations(String),
     /// Put text on the clipboard, such as a session's path or branch.
     CopyText(String),
     /// Run the project script with this name in a new tab of the session.

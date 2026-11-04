@@ -12,7 +12,7 @@ use crate::command::run as run_command;
 use crate::filesystem::{copy_file, recreate_dir};
 
 const PACKAGE: &str = "bootty-daemon";
-const PROFILE: &str = "daemon-release";
+const PROFILE: &str = "release";
 // Includes the embedded TLS/QUIC transport; larger growth needs a dependency/size review.
 pub const MAX_DAEMON_BYTES: u64 = 14 * 1024 * 1024;
 
@@ -252,12 +252,11 @@ fn build_local(target: DaemonTarget) -> Result<()> {
 
 fn cargo(subcommand: &str, target: DaemonTarget) -> Result<()> {
     let mut command = Command::new("cargo");
-    command.env("RUSTFLAGS", "");
     command.arg(subcommand);
     if subcommand == "xwin" {
         command.arg("build");
     }
-    command.args(["--profile", PROFILE, "-p", PACKAGE, "--target"]);
+    command.args(["--release", "-p", PACKAGE, "--target"]);
     command.arg(target.as_str());
     run_command(&mut command)
 }

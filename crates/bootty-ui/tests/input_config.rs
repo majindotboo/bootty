@@ -10,11 +10,8 @@ use std::{sync::Arc, time::Instant};
 use bootty_config::config::load_config_from_path;
 use bootty_ui::{AppEffect, AppState, input::resolve_modifier_remaps};
 
-#[path = "support/events.rs"]
-mod events;
-#[path = "support/frames.rs"]
-mod frames;
-pub mod support;
+use crate::support::events;
+use crate::support::frames;
 
 fn entries(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_owned()).collect()
@@ -90,7 +87,7 @@ fn a_failed_modifier_remap_sequence_publishes_no_partial_set() {
     "invalid keybind \"broken\""
 )]
 #[case(
-    "[multiplexer]\nbackend = \"native\"\n\n[input.backend-keybind]\ntmux = [\"clear\", \"broken\"]\n",
+    "[multiplexer]\nbackend = \"native\"\n\n[input.backend-keybind]\nnative = [\"clear\", \"broken\"]\n",
     "invalid keybind \"broken\""
 )]
 fn invalid_input_config_stops_startup_before_the_workspace_opens(
@@ -102,7 +99,7 @@ fn invalid_input_config_stops_startup_before_the_workspace_opens(
     config_file.write_str(source).expect("write config");
     let config = load_config_from_path(config_file.path()).expect("load structurally valid config");
 
-    let Err(error) = AppState::new(config, support::backends(), Arc::new(|| {}), None, None) else {
+    let Err(error) = AppState::new(config, Arc::new(|| {}), None, None) else {
         panic!("invalid input must stop startup");
     };
     assert!(error.to_string().contains(expected_error));
@@ -121,8 +118,7 @@ fn invalid_modifier_remap_reload_keeps_the_last_good_config(config_directory: Te
         .write_str("[input]\nmodifier-remap = [\"alt=ctrl\"]\n")
         .expect("write valid config");
     let config = load_config_from_path(config_file.path()).expect("load valid config");
-    let mut state = AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state");
+    let mut state = AppState::new(config, Arc::new(|| {}), None, None).expect("start app state");
 
     config_file
         .write_str("[input]\nmodifier-remap = [\"alt\"]\n")
@@ -142,8 +138,7 @@ fn invalid_keybind_reload_keeps_the_last_good_derived_binding(config_directory: 
         .write_str("[input]\nkeybind = [\"clear\", \"ctrl+k=open_settings\"]\n")
         .expect("write valid config");
     let config = load_config_from_path(config_file.path()).expect("load valid config");
-    let mut state = AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state");
+    let mut state = AppState::new(config, Arc::new(|| {}), None, None).expect("start app state");
 
     config_file
         .write_str("[input]\nkeybind = [\"clear\", \"broken\"]\n")
@@ -172,8 +167,7 @@ fn new_window_and_new_mux_session_have_distinct_products(config_directory: TempD
         )
         .expect("write input config");
     let config = load_config_from_path(config_file.path()).expect("load input config");
-    let mut state = AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state");
+    let mut state = AppState::new(config, Arc::new(|| {}), None, None).expect("start app state");
 
     let window_effects = state.update_frame(frames::frame(
         Instant::now(),

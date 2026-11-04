@@ -1,31 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
-pub enum MuxSnapshotDisposition {
-    #[default]
-    Authoritative,
-    Transient,
-}
-
-impl MuxSnapshotDisposition {
-    #[must_use]
-    pub const fn is_authoritative(&self) -> bool {
-        matches!(self, Self::Authoritative)
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct MuxSnapshot {
     pub sessions: Vec<MuxSession>,
     pub active_session_id: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "MuxSnapshotDisposition::is_authoritative"
-    )]
-    pub disposition: MuxSnapshotDisposition,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MuxSession {
     pub id: String,
     pub name: String,
@@ -58,29 +39,6 @@ impl MuxSessionTag {
     }
 }
 
-/// The multiplexer option holding [`MuxSessionTag::identity`].
-///
-/// tmux hangs it off the session itself. rmux keys its option store by session name and does not
-/// migrate it on rename, so the rmux backend keys the same option on the session's stable id at
-/// server scope instead. Either way the tag lives in the multiplexer and every bootty window
-/// looking at that server reads the same answer.
-pub const SESSION_IDENTITY_OPTION: &str = "@bootty_id";
-
-/// The multiplexer option holding [`MuxSessionTag::space`]. See [`SESSION_IDENTITY_OPTION`].
-pub const SESSION_SPACE_OPTION: &str = "@bootty_space";
-
-/// Stable native conversation identity on a real backend pane. Credentials stay in its provider.
-pub const PANE_NATIVE_AGENT_OPTION: &str = "@bootty_native_agent";
-
-#[must_use]
-pub fn native_agent_identity_is_valid(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 256
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b":_-./".contains(&byte))
-}
-
 /// Mints a session identity. Random, because two bootty installs can share one server.
 #[must_use]
 pub fn new_session_identity() -> String {
@@ -99,17 +57,18 @@ pub enum MuxPaneSplitDirection {
     Down,
 }
 
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+/// Canonical native split tree. Splits have at least two children, positive unit-sum
+/// weights, and no child split with the same direction. Legacy binary saves normalize on load.
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum MuxPaneLayout {
     Pane(String),
     Split {
         direction: MuxPaneSplitDirection,
-        ratio_millis: u16,
-        first: Box<Self>,
-        second: Box<Self>,
+        weights: Vec<f32>,
+        children: Vec<Self>,
     },
 }
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct MuxWindow {
     pub id: String,
     pub index: u32,
@@ -121,17 +80,6 @@ pub struct MuxWindow {
     pub panes: Vec<MuxPaneAnchor>,
     /// Native-layout shape for backends that expose a durable split tree.
     pub layout: Option<MuxPaneLayout>,
-    /// Progress the backend already tracks for this window, for backends that multiplex every
-    /// pane over one attach PTY. They only forward the active pane's OSC 9;4, so asking the
-    /// backend is the only way to see a background window's progress.
-    pub progress: Option<MuxWindowProgress>,
-}
-
-/// Backend-reported progress, in the `ConEmu` vocabulary the OSC 9;4 parser already speaks.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub struct MuxWindowProgress {
-    pub state: String,
-    pub percent: Option<u8>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
@@ -143,8 +91,6 @@ pub struct MuxPaneAnchor {
     pub pane_pid: Option<u32>,
     pub cwd: Option<String>,
     pub process: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_agent: Option<String>,
 }
 
 #[must_use]

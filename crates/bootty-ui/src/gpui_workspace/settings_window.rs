@@ -16,9 +16,9 @@ use gpui_kit::component::{
     tab::{Tab, TabBar},
 };
 use gpui_kit::{
-    Context, Entity, Focusable as _, IntoElement, ParentElement, Render, Styled, Subscription,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind,
-    WindowOptions, div, point, prelude::*, px, size,
+    Context, Entity, IntoElement, ParentElement, Render, Styled, Subscription, TitlebarOptions,
+    WeakEntity, Window, WindowBounds, WindowDecorations, WindowKind, WindowOptions, div, point,
+    prelude::*, px, size,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -204,10 +204,7 @@ impl GpuiSettingsWindow {
                 workspace.settings_window = None;
                 workspace.settings_window_opening = false;
                 window.activate_window();
-                let focus = workspace
-                    .native_conversation_view(cx)
-                    .map_or_else(|| workspace.focus.clone(), |view| view.focus_handle(cx));
-                schedule_focus(focus, window, cx);
+                schedule_focus(workspace.focus.clone(), window, cx);
                 cx.notify();
             });
         })
@@ -1027,45 +1024,7 @@ fn settings_window_options(
 
 impl GpuiWorkspace {
     pub(super) fn open_settings_window(&mut self, window: &Window, cx: &mut Context<Self>) {
-        self.refresh_terminal_provider_statuses();
         self.open_settings_window_target(SettingsWindowTarget::Settings, window, cx);
-    }
-
-    pub(super) fn refresh_terminal_provider_statuses(&mut self) {
-        if self
-            .state
-            .workspace
-            .active
-            .binding
-            .multiplexer()
-            .remote
-            .is_none()
-        {
-            let caller = bootty_control::Caller::Internal;
-            let sender = self.state.app_command_sender(caller);
-            let now = std::time::Instant::now();
-            let deadline = now
-                .checked_add(std::time::Duration::from_secs(20))
-                .unwrap_or(now);
-            for provider in bootty_agents::AgentKind::ALL {
-                let command = format!("agents.{provider}.provider.status");
-                let mut invocation =
-                    bootty_control::CommandInvocation::new(command, Vec::new(), caller);
-                invocation.target = self.state.current_command_target_for(
-                    &invocation.command,
-                    bootty_control::ResourceKind::Binding,
-                );
-                if let Err(error) = sender.submit(
-                    invocation,
-                    deadline,
-                    bootty_control::CommandCancellation::new(),
-                ) {
-                    self.state
-                        .record_error("Could not refresh provider status", &format!("{error:?}"));
-                }
-            }
-            (self.repaint)();
-        }
     }
 
     pub(super) fn open_settings_window_target(

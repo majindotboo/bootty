@@ -72,12 +72,10 @@ impl AppState {
         self.activate_space_from_ui(space_id)
     }
     pub fn close_space_from_ui(&mut self, space_id: SpaceId) -> bool {
-        let config = self.config().clone();
+        let _config = self.config().clone();
         let result = self.workspace.close_space(
             space_id,
             &self.window_state_key,
-            &config,
-            self.active_appearance_variant,
             &self.repaint,
             Instant::now(),
         );
@@ -157,16 +155,14 @@ impl AppState {
         if space_id == self.workspace.active.id {
             return false;
         }
-        let Some(_backend) = self.workspace.space_backend(space_id) else {
+        let Some(_) = self.workspace.spaces().find(|space| space.id == space_id) else {
             return false;
         };
         let switch_started = crate::diagnostics::latency_start();
-        let config = self.config().clone();
+        let _config = self.config().clone();
         if let Err(error) = self.workspace.activate_space(
             space_id,
             &self.window_state_key,
-            &config,
-            self.active_appearance_variant,
             &self.repaint,
             Instant::now(),
         ) {
@@ -190,8 +186,5 @@ impl AppState {
         self.dialogs.clear_space_context();
         self.cancel_surface_chooser_outside_active_space();
         self.sidebar_hovered_session = None;
-    }
-    pub fn reconnect_space_from_ui(&mut self, space_id: SpaceId) -> bool {
-        self.workspace.reconnect_space(space_id, Instant::now())
     }
 }

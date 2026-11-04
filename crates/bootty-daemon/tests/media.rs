@@ -32,7 +32,6 @@ fn remote(directory: &assert_fs::TempDir, body: &str) -> anyhow::Result<RemoteHo
 export HOME={home}
 export XDG_CONFIG_HOME={home}
 export XDG_STATE_HOME={home}
-export BOOTTY_APPLICATION_IDENTITY=bootty-dev
 export BOOTTY_DEVELOPMENT_NAMESPACE=bootty-dev-7f11e00000000009
 unset BOOTTY_DAEMON_STATE
 for arg do last=$arg; done

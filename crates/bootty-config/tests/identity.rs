@@ -89,3 +89,17 @@ fn keymap_path_uses_the_identity_config_tree() {
             .join("keymap.json")
     );
 }
+
+#[rstest::rstest]
+#[case("bootty", Some(ApplicationIdentity::Production))]
+#[case("bootty-dev-0123456789abcdef", Some(ApplicationIdentity::Development))]
+#[case("bootty-dev", None)]
+#[case("bootty-dev-0123456789abcdeg", None)]
+#[case("bootty-dev-0123456789ABCDEF", None)]
+#[case("bootty-other", None)]
+fn mux_namespaces_select_only_an_exact_application_identity(
+    #[case] namespace: &str,
+    #[case] expected: Option<ApplicationIdentity>,
+) {
+    assert_eq!(ApplicationIdentity::parse_namespace(namespace), expected);
+}

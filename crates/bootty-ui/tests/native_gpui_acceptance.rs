@@ -10,9 +10,8 @@ use std::{
 };
 
 use anyhow::{Context as _, Result, bail};
-use bootty_mux::terminal::{
-    BackendPanePolicy, MuxPaneTarget, PaneStartRequest, ScopedMuxPaneTarget, TerminalRuntime,
-};
+use bootty_mux::terminal::{ActiveTerminal, TerminalRuntime};
+use bootty_terminal::frame_source::TerminalFrameSource as _;
 use bootty_terminal::geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface};
 use bootty_terminal::terminal_frame::RenderFrame;
 use bootty_terminal::terminal_session::TerminalSessionConfig;
@@ -29,20 +28,15 @@ use rstest::rstest;
 // Passing frames arrive in milliseconds; the bound only catches a wedged host on a loaded machine.
 const FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 const INPUT_MARKER: &str = "BOOTTY_NATIVE_INPUT=accepted";
-const PANE_MARKER: &str = "BOOTTY_NATIVE_PANE=native-pane";
+const PANE_MARKER: &str = "BOOTTY_NATIVE_PANE=pane-";
 const SIZE_MARKER: &str = "BOOTTY_NATIVE_SIZE=30 100";
 
 #[rstest]
-fn native_policy_publishes_real_frames_through_gpui() -> Result<()> {
+fn native_pane_publishes_real_frames_through_gpui() -> Result<()> {
     let directory = assert_fs::TempDir::new().context("create native acceptance directory")?;
     let script = directory.path().join("pane.sh");
     write_pane_script(&script)?;
 
-    let target = ScopedMuxPaneTarget::from(MuxPaneTarget::Pane {
-        session_id: "native-session".to_owned(),
-        pane_id: "native-pane".to_owned(),
-        cwd: Some(directory.path().to_string_lossy().into_owned()),
-    });
     let (repaint_tx, repaint_rx) = mpsc::channel();
     let repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(move || {
         let _ = repaint_tx.send(());
@@ -52,19 +46,29 @@ fn native_policy_publishes_real_frames_through_gpui() -> Result<()> {
     let mut config = TerminalSessionConfig::default();
     config.launch.shell = Some(script.to_string_lossy().into_owned());
 
-    let mut policy = bootty_mux::native::NativePanePolicy;
-    let mut terminal = policy
-        .start_terminal(PaneStartRequest {
-            target: &target,
-            geometry: initial_geometry,
-            spawn_geometry: initial_geometry,
-            display_scale: 1.0,
-            render_cell: CellMetrics::new(10.0, 20.0),
-            terminal_config: &config,
-            repaint_wakeup: &repaint_wakeup,
-        })?
-        .context("native policy did not start a pane terminal")?;
-
+    bootty_test_support::native_mux::local(directory.path())?;
+    let backend = bootty_mux::native::NativeBackend::for_workspace(directory.path());
+    backend.configure_launch(config.launch.clone());
+    backend.execute(bootty_mux::command::MuxCommand::CreateProjectSession {
+        session_id: "native-session".into(),
+        cwd: directory.path().to_string_lossy().into_owned(),
+        tag: bootty_mux::snapshot::MuxSessionTag::default(),
+        argv: None,
+    })?;
+    let anchor = backend
+        .snapshot()?
+        .sessions
+        .first()
+        .context("created session")?
+        .anchor
+        .clone();
+    let mut terminal = Box::new(ActiveTerminal::new(
+        initial_geometry,
+        config,
+        repaint_wakeup,
+    )?);
+    terminal.set_native_backend(backend);
+    terminal.sync_mux_anchor(&bootty_mux::MuxBindingConfig::default(), Some(&anchor))?;
     let initial = wait_for_frame(&mut *terminal, &repaint_rx, PANE_MARKER)?;
     let initial_rows = initial.text_rows();
     anyhow::ensure!(
@@ -108,7 +112,6 @@ fn native_policy_publishes_real_frames_through_gpui() -> Result<()> {
     assert_eq!((final_frame.cols, final_frame.rows), (100, 30));
 
     drop(terminal);
-    policy.deactivate();
     draw_with_gpui(initial, final_frame);
     Ok(())
 }
@@ -165,7 +168,6 @@ fn wait_for_frame(
         .context("frame deadline overflow")?;
     let mut last_rows = Vec::new();
     while Instant::now() < deadline {
-        terminal.drain_pty();
         let frame = terminal.extract_frame()?;
         last_rows = frame.text_rows();
         if last_rows.iter().any(|row| row.contains(marker)) {

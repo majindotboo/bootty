@@ -150,7 +150,7 @@ fn add_and_replace_preserve_unedited_jsonc(#[case] comment: &str) {
     let added = update_keymap_jsonc(
         &replaced,
         &KeymapEdit::add(KeymapBindingTarget::binding(
-            KeymapContext::Tmux,
+            KeymapContext::Terminal,
             "ctrl-c",
             KeymapAction::command_with_input("move_tab", json!(-1)),
         )),

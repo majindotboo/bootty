@@ -7,13 +7,6 @@ use bootty_mux::repository::SpaceMuxOverride;
 use super::dialog_runtime::ModalDialog;
 use super::{AppEffect, AppState};
 
-impl AppState {
-    pub(crate) fn refresh_updated_provider_catalogs(&mut self) {
-        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
-            dialog.refresh_provider_catalogs();
-        }
-    }
-}
 use crate::commands::command_invocation_from_catalog;
 use crate::input::focus::InputFocus;
 use crate::presentation::dialogs::{
@@ -39,28 +32,16 @@ impl AppState {
     /// Projects the accepted modal state without giving the renderer product ownership.
     pub fn dialog_projection(&mut self) -> Option<DialogProjection> {
         self.poll_accepted_creations();
-        self.clear_delivered_initial_draft();
-        self.poll_session_names();
         let groups = self.session_finder_groups();
-        self.observe_native_creation();
         let mut dialog = self.dialogs.take()?;
         let theme_event = if let ModalDialog::ThemeEditor(editor) = dialog.as_mut() {
             editor.poll()
         } else {
             None
         };
-        let history_event = if let ModalDialog::TerminalHistory(history) = dialog.as_mut() {
-            history.poll()
-        } else {
-            None
-        };
         let pending = match dialog.as_mut() {
             ModalDialog::NewSession(dialog) => dialog.poll(),
             ModalDialog::Capture(dialog) => {
-                dialog.poll();
-                None
-            }
-            ModalDialog::SpaceEditor(dialog) => {
                 dialog.poll();
                 None
             }
@@ -72,9 +53,6 @@ impl AppState {
         }
         if let Some(event) = pending {
             self.apply_picker_event(event);
-        }
-        if let Some(event) = history_event {
-            self.apply_terminal_history_event(event);
         }
         if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut()
             && let Some(draft) = dialog.draft()
@@ -94,14 +72,7 @@ impl AppState {
             .unwrap_or_default();
         let dialog = self.dialogs.current_mut()?;
         Some(match dialog {
-            ModalDialog::NewSession(dialog) => {
-                let mut spec = dialog.spec();
-                spec.composer_width = self.config().agents.transcript_width;
-                DialogProjection::Dialog(Box::new(spec))
-            }
-            ModalDialog::TerminalHistory(dialog) => {
-                DialogProjection::Dialog(Box::new(dialog.spec()))
-            }
+            ModalDialog::NewSession(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
             ModalDialog::Capture(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
             ModalDialog::ThemeEditor(dialog) => DialogProjection::Dialog(Box::new(dialog.spec())),
             ModalDialog::SpaceEditor(dialog) => {
@@ -156,55 +127,8 @@ impl AppState {
         }
     }
 
-    fn clear_delivered_initial_draft(&mut self) {
-        let delivered = self
-            .dialogs
-            .creation_drafts
-            .values()
-            .filter(|record| {
-                self.native_agent_service().is_some_and(|service| {
-                    service.initial_message_pending(
-                        &record.draft.scope.persistence_value().to_string(),
-                        &record.draft.identity,
-                    ) == Some(false)
-                })
-            })
-            .map(|record| record.draft.identity.clone())
-            .collect::<Vec<_>>();
-        for identity in delivered {
-            self.dialogs.remove_creation_draft(&identity);
-        }
-    }
-
-    fn observe_native_creation(&mut self) {
-        let placement = self.dialogs.current().and_then(|dialog| match dialog {
-            ModalDialog::NewSession(dialog) if dialog.is_in_flight() => self
-                .native_agent_service()?
-                .sessions()
-                .into_iter()
-                .find_map(|record| {
-                    if !dialog.matches_native_creation(&record) {
-                        return None;
-                    }
-                    let (_, terminal) = self.native_panel_target(&record)?;
-                    Some((record, terminal))
-                }),
-            _ => None,
-        });
-        if let Some((record, terminal)) = placement
-            && let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut()
-            && let Some((event, reply)) = dialog.native_placed(&record, &terminal)
-        {
-            self.dialogs.creation_replies.push(reply);
-            self.apply_picker_event(event);
-        }
-    }
-
     pub(crate) fn creation_underlay(&self) -> Option<crate::gpui::DialogSpec> {
-        self.dialogs.creation_spec().map(|mut spec| {
-            spec.composer_width = self.config().agents.transcript_width;
-            spec
-        })
+        self.dialogs.creation_spec()
     }
 
     /// Applies an intent emitted by the generic GPUI dialog view.
@@ -215,7 +139,6 @@ impl AppState {
             ThemeEditor(crate::presentation::theme_editor::ThemeEditorEvent),
             KeybindDismiss,
             NewSession(NewSessionPickerEvent),
-            History(crate::presentation::terminal_history::TerminalHistoryEvent),
             RenameSession(RenameSessionEvent),
             RenameTab(RenameTabEvent),
             Session(SessionPickerEvent),
@@ -235,7 +158,6 @@ impl AppState {
             ModalDialog::NewSession(dialog) => {
                 dialog.apply(intent, &open_cwds).map(Event::NewSession)
             }
-            ModalDialog::TerminalHistory(dialog) => dialog.apply(intent).map(Event::History),
             ModalDialog::SpaceEditor(_) => None,
             ModalDialog::Capture(dialog) => dialog.apply(intent).map(Event::Capture),
             ModalDialog::ThemeEditor(dialog) => dialog.apply(intent).map(Event::ThemeEditor),
@@ -286,7 +208,6 @@ impl AppState {
             },
             Some(Event::KeybindDismiss) => self.dismiss_keybind_help(),
             Some(Event::NewSession(event)) => self.apply_picker_event(event),
-            Some(Event::History(event)) => self.apply_terminal_history_event(event),
             Some(Event::RenameSession(event)) => self.apply_rename_session_event(event),
             Some(Event::RenameTab(event)) => self.apply_rename_tab_event(event),
             Some(Event::Session(event)) => self.apply_session_picker_event(event),
@@ -342,39 +263,14 @@ impl AppState {
     }
 
     pub(super) fn dismiss_modal_dialog(&mut self) {
-        if self.dialogs.is_dismissible()
-            && let Some(id) = self.surface_agent_form_request_id()
-            && self
-                .pending_new_surface()
-                .is_some_and(|request| request.id == id)
-        {
-            self.commands.queue(bootty_control::CommandInvocation::new(
-                "surface.cancel",
-                vec![id.to_string()],
-                Caller::Internal,
-            ));
-        }
         self.dialogs.clear();
     }
 
-    pub(crate) fn surface_agent_form_request_id(&self) -> Option<u64> {
-        match self.dialogs.current() {
-            Some(ModalDialog::NewSession(dialog)) => dialog.surface_request_id(),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn close_surface_agent_form(&mut self, id: u64) {
-        if self.surface_agent_form_request_id() == Some(id) {
-            self.dialogs.clear();
-        }
-    }
     pub fn apply_space_editor_event(&mut self, intent: SpaceEditorEvent) {
         match intent {
             SpaceEditorEvent::Close => self.dismiss_modal_dialog(),
             SpaceEditorEvent::Save(draft) => {
                 let mux = SpaceMuxOverride {
-                    backend: draft.backend,
                     remote: draft.remote_source,
                 };
                 let saved = match draft.space_id {
@@ -484,16 +380,6 @@ impl AppState {
     pub fn apply_rename_tab_event(&mut self, event: RenameTabEvent) {
         match event {
             RenameTabEvent::Close => self.dismiss_modal_dialog(),
-            RenameTabEvent::RenameNative { target, name } => {
-                let mut invocation = bootty_control::CommandInvocation::new(
-                    "agents.native.rename",
-                    vec![target.handle.clone(), target.generation.to_string(), name],
-                    Caller::Internal,
-                );
-                invocation.target = Some(target);
-                self.commands.queue(invocation);
-                self.dismiss_modal_dialog();
-            }
             RenameTabEvent::Rename {
                 session_id,
                 window_id,
@@ -513,13 +399,6 @@ impl AppState {
     pub fn dismiss_keybind_help(&mut self) {
         self.dismiss_modal_dialog();
     }
-    /// Capture the host-issued native parent before the command palette takes focus.
-    pub fn capture_command_palette_native_parent(
-        &mut self,
-        target: Option<bootty_control::CommandTarget>,
-    ) {
-        self.dialogs.command_palette_native_parent = target;
-    }
     pub fn apply_command_palette_event(&mut self, event: CommandPaletteEvent) {
         let invocation = match event {
             CommandPaletteEvent::Close => {
@@ -535,22 +414,10 @@ impl AppState {
                 Caller::CommandPalette,
             )),
         };
-        // Resolve the user's current context before another queued caller can change it.
-        let parent = self.dialogs.command_palette_native_parent.clone();
         self.dismiss_modal_dialog();
-        let Some(invocation) = invocation else {
+        let Some(mut invocation) = invocation else {
             return;
         };
-        let mut invocation = parent
-            .as_ref()
-            .and_then(|target| {
-                crate::gpui_actions::native_surface_creation_invocation(
-                    &invocation,
-                    &self.command_catalog(),
-                    target,
-                )
-            })
-            .unwrap_or(invocation);
         if invocation.target.is_none()
             && let Some(kind) = self.commands.target_kind(&invocation.command)
         {
@@ -643,7 +510,8 @@ impl AppState {
         ));
     }
 
-    fn complete_creation(&mut self, value: &serde_json::Value) {
+    /// Accepted creation owns removal of its chooser and draft; this is not cancellation.
+    fn complete_creation(&mut self) {
         let identity = match self.dialogs.current() {
             Some(ModalDialog::NewSession(dialog)) => {
                 dialog.draft().map(|draft| draft.identity.clone())
@@ -651,39 +519,32 @@ impl AppState {
             _ => None,
         };
         self.dialogs.clear();
-        let pending = value
-            .get("native")
-            .and_then(|native| native.get("pending_initial_message"))
-            .is_some_and(serde_json::Value::is_string);
-        if !pending && let Some(identity) = identity {
+        if let Some(identity) = identity {
             self.dialogs.remove_creation_draft(&identity);
         }
-    }
-
-    fn native_creation_baseline(&self) -> std::collections::HashSet<String> {
-        self.native_agent_service()
-            .map_or_else(std::collections::HashSet::new, |service| {
-                service
-                    .activities()
-                    .into_iter()
-                    .map(|record| record.id)
-                    .collect()
-            })
     }
 
     fn session_started(
         &mut self,
         value: &serde_json::Value,
         warnings: Vec<bootty_control::CommandWarning>,
-        foreground: bool,
         setup: Option<String>,
     ) {
-        self.name_created_session(value);
         if let Some(repository) = setup {
             self.run_setup_scripts(value, repository);
         }
-        if foreground {
-            self.focus_created_session(value);
+        // The new session becomes the selected one, as a new tab does.
+        if let Some(Err(outcome)) = value
+            .get("terminal")
+            .and_then(|terminal| {
+                serde_json::from_value::<bootty_control::CommandTarget>(terminal.clone()).ok()
+            })
+            .map(|target| self.activate_created_terminal(&target))
+        {
+            self.record_error(
+                "Could not select the new session",
+                &crate::commands::command_outcome_message(&outcome).unwrap_or_default(),
+            );
         }
         if !warnings.is_empty() {
             self.record_error(
@@ -695,27 +556,12 @@ impl AppState {
                     .join("; "),
             );
         }
-        // A prompt sent to several models starts the next one in its own worktree.
-        let next = match self.dialogs.current_mut() {
-            Some(ModalDialog::NewSession(dialog)) => dialog.next_fan_out(),
-            _ => None,
-        };
-        if let Some(next) = next {
-            self.apply_picker_event(next);
-            return;
-        }
-        // Accepted creation owns removal of its chooser; this is not cancellation.
-        self.complete_creation(value);
+        self.complete_creation();
     }
 
     pub fn apply_picker_event(&mut self, event: NewSessionPickerEvent) {
         match event {
-            NewSessionPickerEvent::Names { invocation, action } => {
-                self.request_session_names(invocation, action);
-            }
-            NewSessionPickerEvent::Catalog(invocation) => {
-                self.request_new_session_catalog(invocation);
-            }
+            NewSessionPickerEvent::Branches(invocation) => self.request_branches(invocation),
             NewSessionPickerEvent::CheckoutBranch(invocation) => {
                 let now = std::time::Instant::now();
                 let result = self.app_command_sender(Caller::Internal).submit(
@@ -731,13 +577,7 @@ impl AppState {
                     }
                 }
             }
-            NewSessionPickerEvent::Authenticate(invocation) => {
-                self.dismiss_modal_dialog();
-                self.commands.queue(invocation);
-                (self.repaint)();
-            }
             NewSessionPickerEvent::Submit(invocation) => {
-                let existing_native_ids = self.native_creation_baseline();
                 let cancellation = bootty_control::CommandCancellation::new();
                 let now = std::time::Instant::now();
                 let result = self.app_command_sender(Caller::Internal).submit(
@@ -748,10 +588,7 @@ impl AppState {
                 );
                 if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
                     match result {
-                        Ok(receiver) => {
-                            dialog.set_native_creation_baseline(existing_native_ids);
-                            dialog.started(receiver);
-                        }
+                        Ok(receiver) => dialog.started(receiver),
                         Err(error) => dialog.failed(format!("Session could not start: {error:?}")),
                     }
                 }
@@ -759,9 +596,8 @@ impl AppState {
             NewSessionPickerEvent::Started {
                 value,
                 warnings,
-                foreground,
                 setup,
-            } => self.session_started(&value, warnings, foreground, setup),
+            } => self.session_started(&value, warnings, setup),
             NewSessionPickerEvent::Close => {
                 self.dismiss_modal_dialog();
             }
@@ -862,100 +698,7 @@ impl AppState {
         }
     }
 
-    fn name_created_session(&mut self, value: &serde_json::Value) {
-        let Some((invocation, scope, identity, initial_title)) =
-            self.dialogs.current().and_then(|dialog| match dialog {
-                ModalDialog::NewSession(dialog) => dialog.background_naming(),
-                _ => None,
-            })
-        else {
-            return;
-        };
-        let now = std::time::Instant::now();
-        if let Ok(reply) = self.app_command_sender(Caller::Internal).submit(
-            invocation,
-            now.checked_add(std::time::Duration::from_secs(120))
-                .unwrap_or(now),
-            bootty_control::CommandCancellation::new(),
-        ) {
-            self.dialogs
-                .session_names
-                .push(super::dialog_runtime::PendingSessionName {
-                    scope,
-                    identity,
-                    initial_title,
-                    native: value.get("native").and_then(|value| {
-                        serde_json::from_value::<bootty_agents::NativeSessionRecord>(value.clone())
-                            .ok()
-                            .map(|record| (record.target(), record.title))
-                    }),
-                    reply,
-                });
-        }
-    }
-
-    fn poll_session_names(&mut self) {
-        let mut ready = Vec::new();
-        self.dialogs
-            .session_names
-            .retain(|pending| match pending.reply.try_recv() {
-                Ok(bootty_control::CommandOutcome::Success { value, .. }) => {
-                    if let Ok(names) =
-                        serde_json::from_value::<bootty_agents::GeneratedSessionNames>(value)
-                        && names.validate().is_ok()
-                    {
-                        ready.push((
-                            pending.scope,
-                            pending.identity.clone(),
-                            pending.initial_title.clone(),
-                            pending.native.clone(),
-                            names.title,
-                        ));
-                    }
-                    false
-                }
-                Ok(_) | Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
-                Err(std::sync::mpsc::TryRecvError::Empty) => true,
-            });
-        for (scope, identity, initial_title, native, title) in ready {
-            if self
-                .workspace
-                .binding(scope)
-                .and_then(|binding| binding.sessions().get(&identity))
-                .is_some_and(|saved| saved.label() == initial_title)
-                && let Some(invocation) = self.saved_session_invocation(
-                    scope,
-                    "session.set_title",
-                    vec![identity, title.clone()],
-                )
-            {
-                let outcome = self.dispatch_command(
-                    invocation,
-                    super::ViewportSnapshot::default(),
-                    &mut Vec::new(),
-                );
-                if !matches!(outcome, bootty_control::CommandOutcome::Success { .. }) {
-                    continue;
-                }
-            }
-            if let Some((target, expected_title)) = native {
-                let mut invocation = bootty_control::CommandInvocation::new(
-                    "agents.native.rename",
-                    vec![
-                        target.handle.clone(),
-                        target.generation.to_string(),
-                        title,
-                        expected_title,
-                    ],
-                    Caller::Internal,
-                );
-                invocation.target = Some(target);
-                self.commands.queue(invocation);
-            }
-        }
-    }
-
-    fn request_new_session_catalog(&mut self, invocation: bootty_control::CommandInvocation) {
+    fn request_branches(&mut self, invocation: bootty_control::CommandInvocation) {
         let now = std::time::Instant::now();
         let result = self.app_command_sender(Caller::Internal).submit(
             invocation.clone(),
@@ -965,36 +708,11 @@ impl AppState {
         );
         if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
             match result {
-                Ok(receiver) => dialog.catalog_started(invocation, receiver),
-                Err(error) => {
-                    dialog.catalog_failed(
-                        &invocation,
-                        format!("Provider catalog unavailable: {error:?}"),
-                    );
-                }
-            }
-        }
-    }
-
-    fn request_session_names(
-        &mut self,
-        invocation: bootty_control::CommandInvocation,
-        action: String,
-    ) {
-        let cancellation = bootty_control::CommandCancellation::new();
-        let now = std::time::Instant::now();
-        let result = self.app_command_sender(Caller::Internal).submit(
-            invocation,
-            now.checked_add(std::time::Duration::from_secs(120))
-                .unwrap_or(now),
-            cancellation.clone(),
-        );
-        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
-            match result {
-                Ok(reply) => dialog.naming_started(action, reply, cancellation),
-                Err(error) => {
-                    dialog.failed(format!("Session naming could not start: {error:?}"));
-                }
+                Ok(receiver) => dialog.branches_started(invocation, receiver),
+                Err(error) => dialog.branches_failed(
+                    &invocation,
+                    format!("The branch catalog is unavailable: {error:?}"),
+                ),
             }
         }
     }
@@ -1015,28 +733,6 @@ impl AppState {
         );
         setup.target = Some(terminal);
         self.commands.queue(setup);
-    }
-
-    pub(super) fn focus_created_session(&mut self, value: &serde_json::Value) {
-        if let Some(native) = value.get("native")
-            && let Ok(record) =
-                serde_json::from_value::<bootty_agents::NativeSessionRecord>(native.clone())
-        {
-            let mut focus = bootty_control::CommandInvocation::from_action(
-                "agents.native.focus",
-                Caller::Internal,
-            );
-            focus.target = Some(record.target());
-            self.commands.queue(focus);
-        } else if let Some(terminal) = value.get("terminal")
-            && let Ok(target) =
-                serde_json::from_value::<bootty_control::CommandTarget>(terminal.clone())
-        {
-            let mut focus =
-                bootty_control::CommandInvocation::from_action("agents.focus", Caller::Internal);
-            focus.target = Some(target);
-            self.commands.queue(focus);
-        }
     }
 
     pub(crate) fn modal_dialog_dismissible(&self) -> bool {
@@ -1066,7 +762,7 @@ impl AppState {
         restored_preview
     }
     pub(super) fn open_new_mux_session_dialog(&mut self) {
-        self.open_session_creation_dialog(false);
+        self.open_session_creation_dialog(None, None);
     }
     pub(crate) fn show_creation_for_empty_workspace(&mut self) {
         if let Some(identity) = self.dialogs.restore_creation.take()
@@ -1094,38 +790,13 @@ impl AppState {
             && binding.mux().unavailable_reason().is_none()
         {
             self.dialogs.empty_creation_scope = Some(scope);
-            self.open_session_creation_dialog(false);
+            self.open_session_creation_dialog(None, None);
             self.dialogs.automatic_creation = true;
         }
     }
-    pub(super) fn open_native_agent_tab_dialog(&mut self) {
-        self.open_session_creation_dialog(true);
-    }
-    pub fn open_surface_agent_form(
-        &mut self,
-        request: &crate::surface_creation::PendingNewSurface,
-    ) {
-        if self
-            .pending_new_surface()
-            .is_none_or(|pending| pending != request)
-        {
-            self.record_message("The new surface chooser was closed or replaced");
-            return;
-        }
-        if let Err(outcome) = self.validate_surface_request(request) {
-            if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                self.record_error("Could not open the agent form", &message);
-            }
-            return;
-        }
-        self.open_session_creation_dialog_for(true, Some(request), None, None);
-    }
-    fn open_session_creation_dialog(&mut self, native_agent: bool) {
-        self.open_session_creation_dialog_for(native_agent, None, None, None);
-    }
     /// Opens the new-session form in a Space's directory, such as a session's project.
     pub fn open_new_session_dialog_in(&mut self, scope: SpaceId, cwd: String) -> bool {
-        self.open_session_creation_dialog_for(false, None, Some((scope, cwd)), None);
+        self.open_session_creation_dialog(Some((scope, cwd)), None);
         true
     }
     pub(crate) fn open_new_session_on_branch(&mut self, scope: SpaceId, cwd: String) -> bool {
@@ -1151,24 +822,6 @@ impl AppState {
             .filter(|record| record.draft.scope == scope)
             .cloned()
             .ok_or("This draft is no longer available in this Space")?;
-        if let Some(activity) = self.native_agent_service().and_then(|service| {
-            service.activities().into_iter().find(|activity| {
-                activity.binding_id == scope.persistence_value().to_string()
-                    && activity.task_identity.as_deref() == Some(identity)
-            })
-        }) {
-            let mut invocation = bootty_control::CommandInvocation::from_action(
-                "agents.native.focus",
-                Caller::Internal,
-            );
-            invocation.target = Some(bootty_control::CommandTarget {
-                kind: bootty_control::ResourceKind::Session,
-                handle: activity.id,
-                generation: activity.generation,
-            });
-            self.commands.queue(invocation);
-            return Ok(());
-        }
         if self
             .workspace
             .binding(scope)
@@ -1184,14 +837,12 @@ impl AppState {
             return Err("The draft's Space could not be opened; the draft is still saved".into());
         }
         let place = Some((scope, record.draft.cwd.clone()));
-        self.open_session_creation_dialog_for(false, None, place, Some(record));
+        self.open_session_creation_dialog(place, Some(record));
         Ok(())
     }
 
-    fn open_session_creation_dialog_for(
+    fn open_session_creation_dialog(
         &mut self,
-        native_agent: bool,
-        request: Option<&crate::surface_creation::PendingNewSurface>,
         place: Option<(SpaceId, String)>,
         retained: Option<super::creation_draft::CreationDraft>,
     ) {
@@ -1199,17 +850,7 @@ impl AppState {
         self.close_overlay_dialogs();
         self.dialogs.automatic_creation = false;
         let mut destinations = self.new_session_destinations();
-        let current = if let Some(request) = request {
-            let Some(destination) = destinations
-                .iter_mut()
-                .find(|destination| destination.target == request.binding)
-            else {
-                self.record_message("The captured host cannot create an agent surface");
-                return;
-            };
-            destination.cwd.clone_from(&request.cwd);
-            destination.scope
-        } else if let Some((scope, cwd)) = place {
+        let current = if let Some((scope, cwd)) = place {
             let Some(destination) = destinations
                 .iter_mut()
                 .find(|destination| destination.scope == scope)
@@ -1222,9 +863,6 @@ impl AppState {
         } else {
             self.mux_scope()
         };
-        if request.is_some() {
-            destinations.retain(|destination| destination.scope == current);
-        }
         let Some(destination) = destinations
             .iter()
             .find(|destination| destination.scope == current)
@@ -1232,70 +870,14 @@ impl AppState {
             self.record_message("The current host cannot create a session");
             return;
         };
-        let mut draft = retained.as_ref().map_or_else(
+        let draft = retained.as_ref().map_or_else(
             || self.session_creation_draft(destination),
             |record| record.draft.clone(),
         );
-        if self.native_agent_service().is_some_and(|service| {
-            service
-                .activities()
-                .iter()
-                .any(|record| record.task_identity.as_deref() == Some(&draft.identity))
-        }) {
-            draft.identity = bootty_mux::snapshot::new_session_identity();
-            draft.suffix.clone_from(&draft.identity);
-        }
-        if native_agent {
-            if request.is_some_and(|request| request.task_identity.is_empty()) {
-                draft.identity = bootty_mux::snapshot::new_session_identity();
-            } else {
-                let selected = request.map_or_else(
-                    || self.mux().selected_session(),
-                    |request| Some(request.task_identity.as_str()),
-                );
-                let Some(selected) = selected else {
-                    self.record_message("Open a session before adding an agent tab");
-                    return;
-                };
-                let identity = request.map_or_else(
-                    || self.workspace.session_identity(current, selected),
-                    |request| Some(request.task_identity.clone()),
-                );
-                let Some(identity) = identity.filter(|identity| !identity.is_empty()) else {
-                    self.record_message("Save this session in a Space before adding an agent tab");
-                    return;
-                };
-                draft.identity = identity;
-            }
-            draft.scope = current;
-            draft.cwd.clone_from(&destination.cwd);
-            draft.isolated = false;
-        }
-        let mut form = NewSessionForm::new(draft, destinations, self.config().agents.clone());
+        let mut form = NewSessionForm::new(draft, destinations);
         if let Some(record) = retained {
             form.set_project_path(record.project);
         }
-        self.prepare_session_form(&mut form);
-        let dialog = if native_agent {
-            let dialog = NewSessionDialog::open_native_form(form, &self.repaint);
-            if let Some(request) = request {
-                dialog.with_surface_request(request.id)
-            } else {
-                dialog
-            }
-        } else {
-            NewSessionDialog::open_registered_form(
-                form,
-                &self.repaint,
-                self.workspace.project_repository(),
-            )
-        };
-        self.show_overlay(ModalDialog::NewSession(Box::new(dialog)));
-    }
-    fn prepare_session_form(
-        &self,
-        form: &mut crate::presentation::new_session_form::NewSessionForm,
-    ) {
         form.set_worktree_directory(self.config().session.worktree_directory.clone());
         form.set_branch_prefix(self.config().session.branch_prefix.clone());
         form.set_project_defaults(
@@ -1304,71 +886,26 @@ impl AppState {
                 .flat_map(|space| self.workspace.registered_projects(space.id).cloned())
                 .collect(),
         );
-        let Some(service) = self.native_agent_service() else {
-            return;
-        };
-        let remote = form
-            .destination()
-            .and_then(|destination| destination.remote.clone());
-        for invocation in form.model_catalog_invocations() {
-            let Some(provider_id) = invocation.arguments.first() else {
-                continue;
-            };
-            let Some(preferences) = form.catalog_provider_preferences(provider_id).cloned() else {
-                continue;
-            };
-            if let Some(catalog) = service.cached_provider_catalog_for_invocation(
-                &invocation,
-                &preferences,
-                remote.as_ref(),
-            ) {
-                form.set_provider_catalog_for(&invocation, Ok(catalog));
-            }
-        }
+        let dialog = NewSessionDialog::open_registered_form(
+            form,
+            &self.repaint,
+            self.workspace.project_repository(),
+        );
+        self.show_overlay(ModalDialog::NewSession(Box::new(dialog)));
     }
     fn session_creation_draft(
         &self,
         destination: &crate::presentation::new_session_form::SessionDestination,
     ) -> crate::presentation::new_session_form::NewSessionDraft {
-        use crate::presentation::new_session_form::{NewSessionDraft, NewSessionMode};
+        use crate::presentation::new_session_form::NewSessionDraft;
         let suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos());
-        let provider = [
-            self.config().agents.default_provider.as_str(),
-            "codex",
-            "claude",
-            "pi",
-        ]
-        .into_iter()
-        .find(|id| {
-            self.config()
-                .agents
-                .provider(id)
-                .is_some_and(|provider| provider.enabled)
-        })
-        .unwrap_or("codex");
-        let mut profiles = std::collections::BTreeMap::new();
-        if destination.remote.is_some() {
-            for id in ["codex", "claude", "pi"] {
-                profiles.insert(id.to_owned(), String::new());
-            }
-        }
         NewSessionDraft {
             scope: destination.scope,
             cwd: destination.cwd.clone(),
-            mode: NewSessionMode::Agent,
             projectless: false,
-            prompt: String::new(),
-            applications: Vec::new(),
-            provider_mentions: Vec::new(),
-            goal: String::new(),
-            attachments: Vec::new(),
             command: String::new(),
-            provider: provider.to_owned(),
-            profiles,
-            model_selection: None,
-            permissions: bootty_agents::NativePermissionMode::ProviderDefault,
             isolated: self.dialogs.new_session_isolated,
             isolation_preference: self.dialogs.new_session_isolated,
             branch: String::new(),
@@ -1377,7 +914,6 @@ impl AppState {
             suffix: format!("{suffix:x}"),
             identity: bootty_mux::snapshot::new_session_identity(),
             directories: std::collections::HashMap::new(),
-            fan_out: Vec::new(),
         }
     }
     fn new_session_destinations(
@@ -1388,12 +924,6 @@ impl AppState {
         self.workspace
             .all_bindings()
             .filter_map(|binding| {
-                if !binding
-                    .capabilities()
-                    .supports(bootty_mux::capability::BindingOperation::CreateProjectSession)
-                {
-                    return None;
-                }
                 let scope = binding.scope();
                 let mux = binding.mux();
                 let handle = self.binding_target_handle(scope, mux.binding_generation());
@@ -1436,8 +966,6 @@ impl AppState {
                     cwd,
                     remote,
                     target,
-                    worktrees: binding.multiplexer().backend
-                        != bootty_config::config::MultiplexerBackendConfig::Herdr,
                 })
             })
             .collect()
@@ -1478,8 +1006,7 @@ impl AppState {
                 default_space_icon(&existing_icons),
                 SpaceMuxOverride::default(),
             )
-            .with_profiles(profiles.into_iter())
-            .discover_wsl(self.repaint.clone()),
+            .with_profiles(profiles.into_iter()),
         ));
         true
     }
@@ -1504,8 +1031,7 @@ impl AppState {
                 space.tint_sidebar,
                 placement,
             )
-            .with_profiles(profiles.into_iter())
-            .discover_wsl(self.repaint.clone()),
+            .with_profiles(profiles.into_iter()),
         ));
         true
     }
@@ -1578,18 +1104,9 @@ impl AppState {
         else {
             return false;
         };
-        let native = self.native_agent_service().and_then(|service| {
-            service.sessions().into_iter().find(|record| {
-                matches!(self.native_panel_target(record),
-                    Some((crate::commands::ExactMuxTarget::Pane(scope, ref session, ref window, _), _))
-                    if scope == self.mux_scope() && session == &session_id && window == &window_id)
-            })
-        });
-        let dialog = native.map_or_else(
-            || RenameTabDialog::open(session_id, window_id, name),
-            |record| RenameTabDialog::open_native(record.target(), record.title),
-        );
-        self.open_overlay(ModalDialog::RenameTab(dialog));
+        self.open_overlay(ModalDialog::RenameTab(RenameTabDialog::open(
+            session_id, window_id, name,
+        )));
         true
     }
     fn selected_window_for_rename(&self) -> Option<(String, String, String)> {
@@ -1613,36 +1130,12 @@ impl AppState {
         Some((session.id.clone(), window.id.clone(), window.name.clone()))
     }
     pub(super) fn open_keybind_help_dialog(&mut self) {
-        let bindings = self
-            .config()
-            .input
-            .keybinds_for_backend(self.workspace.active.binding.multiplexer().backend);
+        let bindings = self.config().input.keybinds();
         self.open_overlay(ModalDialog::KeybindHelp(KeybindHelpDialog::open(&bindings)));
     }
     pub(super) fn open_command_palette_dialog(&mut self) {
-        let native_parent = self.dialogs.command_palette_native_parent.take();
-        let bindings = self
-            .config()
-            .input
-            .keybinds_for_backend(self.workspace.active.binding.multiplexer().backend);
-        let creation = matches!(self.modal_dialog(), Some(ModalDialog::NewSession(dialog)) if dialog.is_creation_form());
-        let mut descriptors = self.commands.catalog().list();
-        descriptors.retain(|descriptor| {
-            let Some(control) = crate::gpui::ComposerControl::ALL
-                .into_iter()
-                .find(|control| descriptor.id == format!("ui.composer.{}", control.command()))
-            else {
-                return true;
-            };
-            creation
-                || (native_parent.is_some()
-                    && matches!(
-                        control,
-                        crate::gpui::ComposerControl::Model
-                            | crate::gpui::ComposerControl::Effort
-                            | crate::gpui::ComposerControl::Permissions
-                    ))
-        });
+        let bindings = self.config().input.keybinds();
+        let descriptors = self.commands.catalog().list();
         self.open_overlay(ModalDialog::CommandPalette(
             CommandPaletteDialog::open_with_catalog(
                 &bindings,
@@ -1654,9 +1147,6 @@ impl AppState {
                 &descriptors,
             ),
         ));
-        if self.dialogs.is_command_palette() {
-            self.dialogs.command_palette_native_parent = native_parent;
-        }
     }
     pub(super) fn open_theme_picker_dialog(&mut self) {
         let config = self.config();

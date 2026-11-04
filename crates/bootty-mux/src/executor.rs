@@ -7,10 +7,9 @@ use bootty_control::CommandCancellation;
 
 use crate::{
     RepaintHandle,
-    capability::BindingOperationOutcome,
     command::MuxCommand,
     controller::{CommandSelection, MuxCommandError, MuxCommandResult, SpaceId},
-    repository::{BindingMembershipMutation, WorkspacePersistenceError},
+    repository::{BindingMembershipMutation, WorkspacePersistenceError, WorkspaceRepository},
     workspace::{BindingRuntime, WorkspaceRuntime},
 };
 
@@ -47,7 +46,7 @@ pub fn begin_synchronous_command(
 }
 
 /// # Errors
-/// Returns the active backend failure or its unsupported, unavailable, or stale operation status.
+/// Returns the active backend failure or its unavailable status.
 pub fn preflight_command(
     workspace: &WorkspaceRuntime,
     command: &MuxCommand,
@@ -56,23 +55,15 @@ pub fn preflight_command(
 }
 
 /// # Errors
-/// Returns the binding's backend failure or its unsupported, unavailable, or stale operation status.
+/// Returns the binding's backend failure or its unavailable status.
 pub fn preflight_binding_command(
     binding: &BindingRuntime,
-    command: &MuxCommand,
+    _command: &MuxCommand,
 ) -> Result<(), MuxCommandError> {
     if let Some(message) = binding.mux().unavailable_reason() {
         return Err(MuxCommandError::Failed(message.to_owned()));
     }
-    match binding
-        .mux()
-        .operation_outcome(binding.multiplexer(), command.operation())
-    {
-        BindingOperationOutcome::Supported(()) => Ok(()),
-        BindingOperationOutcome::Unsupported => Err(MuxCommandError::Unsupported),
-        BindingOperationOutcome::Unavailable => Err(MuxCommandError::Unavailable),
-        BindingOperationOutcome::Stale => Err(MuxCommandError::Stale),
-    }
+    Ok(())
 }
 
 /// # Errors
@@ -90,7 +81,6 @@ pub struct PendingMuxCommand {
     pub scope: SpaceId,
     pub command: MuxCommand,
     pub membership: Option<Box<BindingMembershipMutation>>,
-    pub layout: Option<crate::workspace::PreparedPaneArrangement>,
     pub deadline: Instant,
     pub cancellation: CommandCancellation,
     pub result: mpsc::Receiver<MuxCommandResult>,
@@ -103,11 +93,11 @@ pub fn submit_authoritative_command(
     membership: Option<Box<BindingMembershipMutation>>,
     execution: Option<(Instant, CommandCancellation)>,
 ) -> PendingMuxCommand {
-    let scope = workspace.active.binding.scope();
+    let repository = workspace.project_repository();
     submit_binding_command(
+        repository,
         &mut workspace.active.binding,
         repaint,
-        scope,
         command,
         membership,
         execution,
@@ -118,7 +108,7 @@ pub fn submit_authoritative_command(
 /// Submit an authoritative command to a binding that may no longer be active.
 ///
 /// Cleanup can finish after the user switches Spaces. Keep the original scope attached to the
-/// command so the backend result and membership journal are completed against that binding.
+/// command so the native result and saved membership are completed against that binding.
 pub fn submit_authoritative_command_for_scope(
     workspace: &mut WorkspaceRuntime,
     repaint: &RepaintHandle,
@@ -128,37 +118,44 @@ pub fn submit_authoritative_command_for_scope(
     execution: Option<(Instant, CommandCancellation)>,
     selection: CommandSelection,
 ) -> Option<PendingMuxCommand> {
+    let repository = workspace.project_repository();
     let binding = workspace.binding_mut(scope)?;
     Some(submit_binding_command(
-        binding, repaint, scope, command, membership, execution, selection,
+        repository, binding, repaint, command, membership, execution, selection,
     ))
 }
 
 fn submit_binding_command(
+    mut repository: WorkspaceRepository,
     binding: &mut BindingRuntime,
     repaint: &RepaintHandle,
-    scope: SpaceId,
     command: MuxCommand,
     membership: Option<Box<BindingMembershipMutation>>,
     execution: Option<(Instant, CommandCancellation)>,
     selection: CommandSelection,
 ) -> PendingMuxCommand {
+    let scope = binding.scope();
     let config = binding.multiplexer().clone();
     let (deadline, cancellation) = command_execution(execution);
-    let layout = binding.prepare_pane_arrangement(&command);
+    let mut sessions = binding.sessions().clone();
+    let persisted_membership = membership.clone();
     let result = binding.mux_mut().execute_command_authoritatively(
         repaint,
         &config,
         command.clone(),
         selection,
-        deadline,
-        cancellation.clone(),
+        (deadline, &cancellation),
+        move || {
+            if let Some(membership) = &persisted_membership {
+                repository.commit_binding_membership_mutation(scope, membership, &mut sessions)?;
+            }
+            Ok(())
+        },
     );
     PendingMuxCommand {
         scope,
         command,
         membership,
-        layout,
         deadline,
         cancellation,
         result,
@@ -167,7 +164,7 @@ fn submit_binding_command(
 
 /// Execute a UI initiated mux operation using the active binding's domain state.
 ///
-/// Project session creation has a persistence journal and generated-name bookkeeping, so it
+/// Project session creation has saved membership and generated-name bookkeeping, so it
 /// remains a workspace operation. Other commands use the controller's ordinary optimistic path.
 /// # Errors
 /// Returns a persistence error if project session membership cannot be prepared.
@@ -197,8 +194,8 @@ pub fn complete_authoritative_command(
     command: &MuxCommand,
     membership: Option<&BindingMembershipMutation>,
     result: MuxCommandResult,
-    layout: Option<&crate::workspace::PreparedPaneArrangement>,
 ) -> Result<(MuxCommandResult, Option<String>), WorkspacePersistenceError> {
     workspace.complete_binding_membership_command(scope, membership, &result)?;
-    Ok(workspace.complete_authoritative_command(scope, command, result, layout))
+    workspace.release_closed_session(scope, command, &result)?;
+    Ok(workspace.complete_authoritative_command(scope, command, result))
 }

@@ -60,7 +60,6 @@ impl DialogView {
                 .map(|step| step.id.as_str())
             {
                 Some("worktree") => "Worktree setup failed",
-                Some("names") => "Could not name the worktree",
                 _ => "Session could not start",
             }
         } else if spec

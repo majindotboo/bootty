@@ -26,11 +26,7 @@ fn session_group(
 impl WorkspaceRuntime {
     pub fn active_binding_session_groups(&self) -> Vec<BindingSessionGroup> {
         let binding = &self.active.binding;
-        let sessions = if binding.tracks_session_membership() {
-            binding.mux.sessions()
-        } else {
-            binding.mux.all_sessions()
-        };
+        let sessions = { binding.mux.sessions() };
         vec![session_group(
             binding,
             binding.label.clone(),
@@ -58,7 +54,7 @@ impl WorkspaceRuntime {
         let mut groups = Vec::new();
         for (_, space_name, bindings) in &spaces {
             for binding in bindings {
-                if binding.tracks_session_membership() {
+                {
                     claimed.extend(
                         binding
                             .sessions
@@ -87,7 +83,7 @@ impl WorkspaceRuntime {
 
         // Everything the active binding's backend has that no Space holds: sessions made outside
         // bootty, and sessions a deleted Space left behind.
-        let unclaimed = if self.active.binding.tracks_session_membership() {
+        let unclaimed = {
             let mut seen = HashSet::new();
             self.active
                 .binding
@@ -104,8 +100,6 @@ impl WorkspaceRuntime {
                 .filter(|session| seen.insert(session.id.clone()))
                 .cloned()
                 .collect::<Vec<_>>()
-        } else {
-            Vec::new()
         };
         if !unclaimed.is_empty() {
             let mut group = session_group(

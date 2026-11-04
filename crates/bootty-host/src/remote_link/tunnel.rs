@@ -1,7 +1,7 @@
 use super::{client::RemoteLink, tls::Identity};
 use crate::ssh::SshRemote;
 use anyhow::{Context as _, Result, bail};
-use rmux_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
+use bootty_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use rustls::pki_types::CertificateDer;
 use std::{
     process::{Command, Stdio},

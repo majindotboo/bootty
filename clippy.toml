@@ -4,3 +4,12 @@ allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
 # GPUI geometry wraps f32, so its arithmetic cannot overflow.
 arithmetic-side-effects-allowed = ["gpui_kit::Pixels", "gpui_kit::Point"]
+
+# Child creation must share the descriptor-creation lock.
+disallowed-methods = [
+    { path = "std::process::Command::spawn", reason = "Use bootty_os::spawn::CommandSpawn to serialize descriptor creation and spawning" },
+    { path = "std::process::Command::output", reason = "Use bootty_os::spawn::CommandSpawn to serialize descriptor creation and spawning" },
+    { path = "std::process::Command::status", reason = "Use bootty_os::spawn::CommandSpawn to serialize descriptor creation and spawning" },
+    { path = "portable_pty::PtySystem::openpty", reason = "Hold bootty_os::spawn::lock through PTY creation and spawning" },
+    { path = "portable_pty::SlavePty::spawn_command", reason = "Hold bootty_os::spawn::lock through PTY creation and spawning" },
+]

@@ -1,9 +1,7 @@
-use std::ffi::OsStr;
 use std::path::PathBuf;
 
-use crate::catalog::{Backend, Catalog, LegacyCatalogPaths};
 use anyhow::{Context, Result, bail};
-use bootty_config::{APPLICATION_IDENTITY_ENV, ApplicationIdentity};
+use bootty_config::ApplicationIdentity;
 
 pub fn run_remote_ping() {
     println!(
@@ -19,98 +17,6 @@ pub fn run_remote_exec(args: &[String]) -> Result<i32> {
     let payload = args.first().context("remote-exec requires a payload")?;
     reject_extra(args.iter().skip(1))?;
     bootty_host::run_remote_command(payload)
-}
-
-/// # Errors
-/// Returns argument, host, or command execution errors.
-pub fn run_remote_rmux(args: &[String]) -> Result<i32> {
-    let payload = args.first().context("remote-rmux requires a payload")?;
-    reject_extra(args.iter().skip(1))?;
-    bootty_mux::rmux::run_remote_rmux_command(payload)
-}
-
-pub struct RemoteSpacePaths {
-    state: PathBuf,
-    legacy: Option<LegacyCatalogPaths>,
-}
-
-/// # Errors
-/// Returns argument, host, or command execution errors.
-pub fn run_remote_space(args: &[String], paths: &RemoteSpacePaths) -> Result<()> {
-    run_remote_space_with_io(
-        args,
-        paths,
-        &mut std::io::stdin().lock(),
-        &mut std::io::stdout().lock(),
-    )
-}
-
-/// Dispatches the remote Space protocol using explicit streams and persisted catalog paths.
-/// # Errors
-/// Returns argument, protocol, catalog, backend, or stream errors.
-pub fn run_remote_space_with_io(
-    args: &[String],
-    paths: &RemoteSpacePaths,
-    input: &mut impl std::io::BufRead,
-    output: &mut impl std::io::Write,
-) -> Result<()> {
-    let Some((command, arguments)) = args.split_first() else {
-        bail!("remote-space requires a command")
-    };
-    let backends = std::sync::Arc::new(bootty_mux::provider::MuxBackendRegistry::collect([
-        bootty_mux::MuxBackendKind::Rmux,
-        bootty_mux::MuxBackendKind::Tmux,
-    ])?);
-    let mut catalog = Catalog::open(&paths.state, paths.legacy.as_ref(), backends)?;
-    match command.as_str() {
-        "list" => {
-            if !arguments.is_empty() {
-                bail!("remote-space list takes no arguments")
-            }
-            writeln!(output, "{}", serde_json::to_string(&catalog.list()?)?)?;
-        }
-        "create" => {
-            let name = required_option(arguments, "--name")?;
-            let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
-            writeln!(
-                output,
-                "{}",
-                serde_json::to_string(&catalog.create(&name, backend)?)?
-            )?;
-        }
-        "snapshot" => {
-            let id = required_option(arguments, "--id")?;
-            let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
-            writeln!(
-                output,
-                "{}",
-                serde_json::to_string(&catalog.snapshot(&id, backend)?)?
-            )?;
-        }
-        "execute" => {
-            let id = required_option(arguments, "--id")?;
-            let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
-            let payload = required_option(arguments, "--payload")?;
-            let command = if payload == "-" {
-                bootty_mux::remote_space::read_stream_command(&mut *input)?
-            } else {
-                bootty_mux::remote_space::decode_command(&payload)?
-            };
-            catalog.execute(&id, backend, command)?;
-        }
-        "pane" => {
-            let id = required_option(arguments, "--id")?;
-            let backend = Backend::parse(&required_option(arguments, "--backend")?)?;
-            let request = bootty_mux::remote_space::PaneRequest::read(&mut *input)?;
-            writeln!(
-                output,
-                "{}",
-                serde_json::to_string(&catalog.pane(&id, backend, &request)?)?
-            )?;
-        }
-        _ => bail!("unknown remote-space command {command:?}"),
-    }
-    Ok(())
 }
 
 /// # Errors
@@ -215,14 +121,8 @@ pub fn run_remote_worktree(args: &[String]) -> Result<()> {
 
 /// # Errors
 /// Returns argument, host, or command execution errors.
-pub fn parse_application_identity(args: Vec<String>) -> Result<(ApplicationIdentity, Vec<String>)> {
-    let inherited = std::env::var_os(APPLICATION_IDENTITY_ENV);
-    parse_application_identity_with_inherited(args, inherited.as_deref())
-}
-
-fn parse_application_identity_with_inherited(
+pub fn parse_application_identity(
     mut args: Vec<String>,
-    inherited: Option<&OsStr>,
 ) -> Result<(ApplicationIdentity, Vec<String>)> {
     if args
         .first()
@@ -236,75 +136,9 @@ fn parse_application_identity_with_inherited(
             .with_context(|| format!("unknown application identity {value:?}"))?;
         args.remove(0);
         Ok((identity, args))
-    } else if args
-        .first()
-        .is_some_and(|argument| argument == bootty_mux::rmux::INTERNAL_DAEMON_FLAG)
-    {
-        Ok((inherited_application_identity(inherited)?, args))
     } else {
         Ok((ApplicationIdentity::Production, args))
     }
-}
-
-fn inherited_application_identity(value: Option<&OsStr>) -> Result<ApplicationIdentity> {
-    let Some(value) = value else {
-        return Ok(ApplicationIdentity::Production);
-    };
-    let value = value
-        .to_str()
-        .context("application identity environment value is not UTF-8")?;
-    ApplicationIdentity::parse(value)
-        .with_context(|| format!("unknown application identity {value:?}"))
-}
-
-/// # Errors
-/// Returns argument, host, or command execution errors.
-pub fn remote_space_paths_from_environment(
-    identity: ApplicationIdentity,
-) -> Result<RemoteSpacePaths> {
-    remote_space_paths_from(identity, |name| std::env::var_os(name))
-}
-
-/// Resolves catalog paths from a captured host environment.
-/// # Errors
-/// Returns an error when the daemon state directory cannot be resolved.
-pub fn remote_space_paths_from(
-    identity: ApplicationIdentity,
-    mut var: impl FnMut(&str) -> Option<std::ffi::OsString>,
-) -> Result<RemoteSpacePaths> {
-    let explicit = var("BOOTTY_DAEMON_STATE").map(PathBuf::from);
-    #[cfg(windows)]
-    let local_app_data = var("LOCALAPPDATA").map(PathBuf::from);
-    #[cfg(windows)]
-    let app_data = var("APPDATA").map(PathBuf::from);
-    #[cfg(windows)]
-    let path = bootty_config::windows_daemon_state_path(
-        identity,
-        explicit.as_deref(),
-        local_app_data.as_deref(),
-        app_data.as_deref(),
-    );
-    #[cfg(not(windows))]
-    let xdg_state_home = var("XDG_STATE_HOME").map(PathBuf::from);
-    #[cfg(not(windows))]
-    let home = var("HOME").map(PathBuf::from);
-    #[cfg(not(windows))]
-    let path = bootty_config::unix_daemon_state_path(
-        identity,
-        explicit.as_deref(),
-        xdg_state_home.as_deref(),
-        home.as_deref(),
-    );
-    let state = path.context("daemon state root is unavailable")?;
-    let xdg_config_home = var("XDG_CONFIG_HOME").map(PathBuf::from);
-    let home = var("HOME").map(PathBuf::from);
-    let legacy = bootty_config::legacy_config_path_from_env(
-        identity,
-        xdg_config_home.as_deref(),
-        home.as_deref(),
-    )
-    .map(LegacyCatalogPaths::from_config_path);
-    Ok(RemoteSpacePaths { state, legacy })
 }
 
 fn home_dir() -> Option<PathBuf> {

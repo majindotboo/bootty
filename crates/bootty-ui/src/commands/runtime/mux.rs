@@ -55,22 +55,21 @@ impl AppState {
             scope: submitted.scope,
             command: Box::new(submitted.command),
             membership: submitted.membership,
-            layout: submitted.layout,
             result: submitted.result,
         })
     }
 
     pub(super) fn preflight_mux_command(&self, command: &MuxCommand) -> Option<CommandOutcome> {
         match executor::preflight_command(&self.workspace, command) {
-            Err(MuxCommandError::Failed(message)) => Some(CommandOutcome::Unavailable { message }),
-            Err(MuxCommandError::Unsupported) => Some(CommandOutcome::Unsupported {
-                message: ErrorNotice::MuxOperationUnsupported.to_string(),
-            }),
+            Err(MuxCommandError::Failed(message) | MuxCommandError::LaunchFailed(message)) => {
+                Some(CommandOutcome::Unavailable { message })
+            }
             Err(MuxCommandError::Unavailable) => Some(CommandOutcome::Unavailable {
                 message: ErrorNotice::MuxOperationUnavailable.to_string(),
             }),
             Err(MuxCommandError::Stale) => Some(CommandOutcome::StaleTarget {
-                message: ErrorNotice::MuxOperationCapabilityStale.to_string(),
+                message: ErrorNotice::StaleCommandTarget("mux target is stale".to_owned())
+                    .to_string(),
             }),
             Ok(()) | Err(MuxCommandError::Cancelled | MuxCommandError::DeadlineExceeded) => None,
         }
@@ -93,7 +92,6 @@ impl AppState {
             scope: submitted.scope,
             command: Box::new(submitted.command),
             membership: submitted.membership,
-            layout: submitted.layout,
             result: submitted.result,
         }
     }
@@ -142,35 +140,17 @@ impl AppState {
                     .as_ref()
                     == Some(target)
             }
-            PendingCommandResult::NativePanelFocus {
-                command: pending, ..
-            }
-            | PendingCommandResult::SessionDelete {
-                command: pending, ..
-            }
-            | PendingCommandResult::NativePanelClose {
-                command: pending, ..
-            }
-            | PendingCommandResult::SurfaceCreation {
-                command: pending, ..
-            }
-            | PendingCommandResult::SurfaceRestore {
+            PendingCommandResult::SurfaceCreation {
                 command: pending, ..
             } => self.pending_mux_command_matches(&pending.result, scope, command),
             // These states have no direct mux command to match.
             PendingCommandResult::SessionStart { .. }
-            | PendingCommandResult::SessionReopen { .. }
-            | PendingCommandResult::SessionAgentAssociation { .. }
             | PendingCommandResult::SessionCheckpointCompletion { .. }
-            | PendingCommandResult::TerminalAgentRestore { .. }
-            | PendingCommandResult::TerminalAgent { .. }
             | PendingCommandResult::Outcome(_)
             | PendingCommandResult::WorktreeCleanup { .. }
-            | PendingCommandResult::NativeResume { .. }
             | PendingCommandResult::Forward { .. }
             | PendingCommandResult::Clipboard { .. }
-            | PendingCommandResult::Link { .. }
-            | PendingCommandResult::NativeTitle { .. } => false,
+            | PendingCommandResult::Link { .. } => false,
         }
     }
 
@@ -180,7 +160,6 @@ impl AppState {
         command: &MuxCommand,
         membership: Option<&BindingMembershipMutation>,
         result: MuxCommandResult,
-        layout: Option<&bootty_mux::workspace::PreparedPaneArrangement>,
     ) -> CommandOutcome {
         let completion = match executor::complete_authoritative_command(
             &mut self.workspace,
@@ -188,7 +167,6 @@ impl AppState {
             command,
             membership,
             result,
-            layout,
         ) {
             Ok(completion) => completion,
             Err(error) => {
@@ -206,10 +184,14 @@ impl AppState {
         }
         match completion {
             Ok(completion) => {
+                if matches!(command, MuxCommand::DitchSession { .. }) {
+                    self.request_worktree_cleanup();
+                }
                 let Some(value) = self.mux_command_completion_value(scope, command, &completion)
                 else {
                     let outcome = CommandOutcome::StaleTarget {
-                        message: ErrorNotice::MuxOperationCapabilityStale.to_string(),
+                        message: ErrorNotice::StaleCommandTarget("mux target is stale".to_owned())
+                            .to_string(),
                     };
                     if let Some(message) = command_outcome_message(&outcome) {
                         self.record_command_failure(&message);

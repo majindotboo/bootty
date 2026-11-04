@@ -35,7 +35,7 @@ fn recovery_preserves_live_continuation_at_every_byte_boundary(#[case] update: &
     for split in 0..=update.len() {
         let mut replay = TerminalEngine::new(geometry).unwrap();
         let keyframe = [screen.as_slice(), &update[..split]].concat();
-        replay.write_vt_without_pty_responses(&keyframe);
+        replay.import_history(&keyframe);
         replay.write_vt(&update[split..]);
         assert_eq!(
             rows(replay.extract_frame().unwrap()),

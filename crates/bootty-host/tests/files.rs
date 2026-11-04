@@ -1,3 +1,4 @@
+use bootty_os::spawn::CommandSpawn as _;
 use std::{fs, path::PathBuf};
 
 use anyhow::{Context as _, ensure};
@@ -417,7 +418,7 @@ fn a_document_replaced_by_a_fifo_is_rejected_before_opening_it() {
     assert!(
         std::process::Command::new("mkfifo")
             .arg(file.path())
-            .status()
+            .bootty_status()
             .unwrap()
             .success()
     );

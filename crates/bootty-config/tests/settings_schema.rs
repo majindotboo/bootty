@@ -45,31 +45,6 @@ fn load_with(path: &[&str], toml_value: &str) -> Result<BoottyConfig, Box<dyn st
         .map_err(|error| format!("{source}\nfailed to load: {error}").into())
 }
 
-#[rstest::rstest]
-#[case(true)]
-#[case(false)]
-fn working_ring_animation_is_a_sidebar_switch(#[case] enabled: bool) {
-    let defaults = BoottyConfig::default();
-    assert!(defaults.sidebar.animate_working);
-    let schema = SettingsSchema::builtin();
-    let spec = schema
-        .get("sidebar.animate-working")
-        .expect("animation setting");
-    assert_eq!(spec.page, "sidebar");
-    assert!(matches!(spec.kind, SettingKind::Bool));
-    assert_eq!(
-        spec.default_value(&defaults),
-        Some(SettingValue::Bool(true))
-    );
-    let config = load_with(&["sidebar", "animate-working"], &enabled.to_string())
-        .expect("boolean animation preference");
-    assert_eq!(config.sidebar.animate_working, enabled);
-    assert_eq!(
-        spec.default_value(&config),
-        Some(SettingValue::Bool(enabled))
-    );
-}
-
 #[test]
 fn every_spec_default_matches_the_config_default() {
     let defaults = BoottyConfig::default();
@@ -289,44 +264,85 @@ fn builtin_schema_keeps_the_hand_written_declarations() {
     );
 }
 
+/// Files written for removed features keep loading: each retired key is dropped with a warning,
+/// and naming the native backend is not a retired choice.
 #[rstest::rstest]
-fn panel_preferences_round_trip_through_the_schema(
-    #[values("left", "right", "bottom")] dock: &str,
-    #[values("none", "top", "bottom")] button: &str,
-) {
-    use bootty_config::config::{PanelButton, PanelDock, PanelKind};
-    for kind in PanelKind::ALL {
-        let directory = assert_fs::TempDir::new().unwrap();
-        let file = directory.child("config.toml");
-        file.write_str(&format!(
-            "[panels.{}]\ndock = {dock:?}\nbutton = {button:?}\n",
-            kind.name()
-        ))
-        .unwrap();
-        let config = load_config_from_path(file.path()).unwrap();
-        let expected_dock = match dock {
-            "left" => PanelDock::Left,
-            "bottom" => PanelDock::Bottom,
-            _ => PanelDock::Right,
-        };
-        let expected_button = match button {
-            "top" => PanelButton::Top,
-            "bottom" => PanelButton::Bottom,
-            _ => PanelButton::None,
-        };
-        assert_eq!(config.panel(kind).dock(kind), expected_dock);
-        assert_eq!(config.panel(kind).button, expected_button);
-        let defaults = BoottyConfig::default();
-        assert_eq!(defaults.panel(kind).button, PanelButton::None);
-        assert_eq!(
-            defaults.panel(kind).dock(kind),
-            if kind == PanelKind::Sessions {
-                PanelDock::Left
-            } else {
-                PanelDock::Right
-            }
-        );
-    }
+#[case::agents("[agents.codex]\nenabled = true\n", Some("agents"))]
+#[case::browser("[browser]\nsearch-engine = \"google\"\n", Some("browser"))]
+#[case::computer("[computer]\nenabled = true\n", Some("computer"))]
+#[case::tray("[tray]\nvisibility = \"always\"\n", Some("tray"))]
+#[case::panels("[panels.files]\ndock = \"right\"\n", Some("panels"))]
+#[case::right_dock(
+    "[chrome]\nright-dock-toggle = false\n",
+    Some("chrome.right-dock-toggle")
+)]
+#[case::agent_notifications(
+    "[session]\nagent-notifications = \"always\"\n",
+    Some("session.agent-notifications")
+)]
+#[case::external_backend("[multiplexer]\nbackend = \"rmux\"\n", Some("multiplexer.backend"))]
+#[case::tmux_status(
+    "[multiplexer]\nhide-tmux-status = true\n",
+    Some("multiplexer.hide-tmux-status")
+)]
+#[case::backend_keybind(
+    "[input.backend-keybind]\ntmux = [\"ctrl+a=new_tab\"]\n",
+    Some("input.backend-keybind.tmux")
+)]
+#[case::working_animation(
+    "[sidebar]\nanimate-working = false\n",
+    Some("sidebar.animate-working")
+)]
+#[case::native_backend("[multiplexer]\nbackend = \"native\"\n", None)]
+fn retired_settings_load_with_a_warning(#[case] source: &str, #[case] retired: Option<&str>) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let file = directory.child("config.toml");
+    file.write_str(source).unwrap();
+    let config = load_config_from_path(file.path()).unwrap();
+    assert_eq!(
+        config.compatibility_warnings,
+        retired
+            .map(|path| format!("retired setting ignored: {path}"))
+            .into_iter()
+            .collect::<Vec<_>>()
+    );
+}
+
+/// A TOML binding to a removed action would reject the whole config; it is dropped with a
+/// warning and the other bindings keep working.
+#[rstest::rstest]
+#[case::keybind("keybind")]
+#[case::sidebar("sidebar-keybind")]
+fn retired_keybind_actions_load_with_a_warning(#[case] key: &str) {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let file = directory.child("config.toml");
+    file.write_str(&format!(
+        "[input]\n{key} = [\"cmd+1=toggle_right_dock\", \"cmd+2=show_files:1\", \"cmd+3=new_tab\"]\n"
+    ))
+    .unwrap();
+    let config = load_config_from_path(file.path()).unwrap();
+    assert_eq!(
+        config.compatibility_warnings,
+        [
+            format!("retired keybind action ignored in input.{key}: toggle_right_dock"),
+            format!("retired keybind action ignored in input.{key}: show_files"),
+        ]
+    );
+    let entries = if key == "keybind" {
+        &config.input.keybind
+    } else {
+        &config.input.sidebar_keybind
+    };
+    assert!(
+        entries.iter().any(|entry| entry == "cmd+3=new_tab"),
+        "{entries:?}"
+    );
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry.contains("toggle_right_dock") || entry.contains("show_files")),
+        "{entries:?}"
+    );
 }
 
 #[rstest::rstest]
@@ -386,16 +402,6 @@ fn partial_tab_settings_preserve_defaults(#[case] section: &str) {
 #[rstest::rstest]
 #[case("chrome.panel-tab-style")]
 #[case("chrome.panel-tabs")]
-#[case("panels.sessions.dock")]
-#[case("panels.files.dock")]
-#[case("panels.changes.dock")]
-#[case("panels.diff.dock")]
-#[case("panels.agents.dock")]
-#[case("panels.sessions.button")]
-#[case("panels.files.button")]
-#[case("panels.changes.button")]
-#[case("panels.diff.button")]
-#[case("panels.agents.button")]
 fn retired_placement_and_tab_preferences_do_not_offer_settings_controls(#[case] path: &str) {
     let schema = SettingsSchema::builtin();
     assert!(schema.allows_path(&path.split('.').collect::<Vec<_>>()));
@@ -449,33 +455,4 @@ fn help_text_keeps_placeholders_in_code_spans() {
             spec.id()
         );
     }
-}
-
-#[rstest::rstest]
-#[case::hidden_even_with_attention("hidden", true, true, false)]
-#[case::always_without_agents("always", false, false, true)]
-#[case::working_turn("working", true, false, true)]
-#[case::working_stops_at_wait("working", false, true, false)]
-#[case::waiting_for_attention("attention", false, true, true)]
-#[case::working_without_attention("attention", true, false, false)]
-fn tray_is_opt_in_and_visibility_follows_the_selected_activity(
-    #[case] value: &str,
-    #[case] working: bool,
-    #[case] attention: bool,
-    #[case] shown: bool,
-) {
-    use bootty_config::config::{TrayIconStyle, TrayVisibility};
-    let default = BoottyConfig::default().tray;
-    assert_eq!(default.visibility, TrayVisibility::Hidden);
-    assert_eq!(
-        default.icon_style,
-        if cfg!(target_os = "macos") {
-            TrayIconStyle::Monochrome
-        } else {
-            TrayIconStyle::Color
-        }
-    );
-    assert!(!default.macos_unread_count);
-    let configured = load_with(&["tray", "visibility"], &format!("\"{value}\"")).unwrap();
-    assert_eq!(configured.tray.visibility.allows(working, attention), shown);
 }

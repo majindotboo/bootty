@@ -7,14 +7,14 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rmux_ipc::{LocalEndpoint, LocalListener};
+use bootty_os::ipc::{LocalEndpoint, LocalListener};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 
 use crate::{
     AppCommandSendError, BoundAppCommandSender, Caller, CommandCancellation, CommandInvocation,
     CommandOutcome, ControlCatalog,
-    lease::{ControlInstanceLease, InstanceDescriptor, same_user},
+    lease::{ControlInstanceLease, InstanceDescriptor},
     plane::ControlPlane,
     protocol::{
         COMMAND_COMPLETED_TOPIC, COMMAND_TIMEOUT, EVENT_QUEUE_LIMIT, EVENT_TOPIC_LIMIT, IO_TIMEOUT,
@@ -191,7 +191,7 @@ async fn serve_listener(
             },
             accepted = listener.accept() => {
                 let Ok((stream, peer)) = accepted else { continue };
-                if !same_user(&peer) { continue; }
+                if !peer.is_current_user() { continue; }
                 let Ok(permit) = Arc::clone(&connections).try_acquire_owned() else {
                     continue;
                 };
@@ -218,7 +218,7 @@ async fn serve_listener(
 }
 
 async fn serve_connection(
-    mut stream: rmux_ipc::LocalStream,
+    mut stream: bootty_os::ipc::LocalStream,
     descriptor: InstanceDescriptor,
     commands: BoundAppCommandSender,
     catalog: Arc<ControlCatalog>,

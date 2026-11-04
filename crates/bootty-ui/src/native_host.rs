@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc, sync::Arc, time::Duration};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::assets::BoottyAssets;
 use anyhow::{Context as _, Result, anyhow};
@@ -22,7 +22,7 @@ fn workspace_view(root: &Root) -> Result<Entity<GpuiWorkspace>> {
 struct ReopenContext {
     config: BoottyConfig,
     window_state_key: String,
-    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
+
     control_plane: ControlPlane,
 }
 
@@ -43,15 +43,13 @@ fn reopen_window(
     let control_plane = reopen.control_plane.clone();
     let server_control_plane = control_plane.clone();
     let config = reopen.config;
-    let backends = reopen.backends;
-    let (window, workspace) =
-        match GpuiWorkspace::open(config, state_key, backends, control_plane, cx) {
-            Ok(opened) => opened,
-            Err(error) => {
-                eprintln!("reopen Bootty window: {error:#}");
-                return;
-            }
-        };
+    let (window, workspace) = match GpuiWorkspace::open(config, state_key, control_plane, cx) {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("reopen Bootty window: {error:#}");
+            return;
+        }
+    };
     let _ = window.update(cx, |_, window, _| window.activate_window());
     let (commands, catalog, _) = workspace.read(cx).control_binding();
     reopen_control_server.replace(None);
@@ -66,11 +64,7 @@ fn reopen_window(
 ///
 /// # Errors
 /// Returns errors from application, workspace, font, or control-server initialization.
-pub fn run(
-    config: BoottyConfig,
-    window_state_key: String,
-    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
-) -> Result<()> {
+pub fn run(config: BoottyConfig, window_state_key: String) -> Result<()> {
     // The class flag is read at window creation. If automatic tabbing remains enabled, macOS
     // consumes Cmd+T as newWindowForTab: before GPUI can dispatch Bootty's key binding.
     crate::window::disable_automatic_window_tabbing();
@@ -106,7 +100,6 @@ pub fn run(
         let result = launch(
             config,
             window_state_key,
-            backends,
             &app_control_server,
             &launch_menu,
             &app_reopen_context,
@@ -117,19 +110,6 @@ pub fn run(
             cx.quit();
         }
         app_launch_result.replace(Some(result));
-        // Agent state writes happen off the UI thread; quitting waits briefly for the newest to
-        // land. The app owns this, since the last window may close before the app quits. GPUI
-        // stops waiting for quit work after SHUTDOWN_TIMEOUT, so the flush ends sooner and leaves
-        // room to report a failure.
-        cx.on_app_quit(|cx| {
-            let limit = gpui_kit::SHUTDOWN_TIMEOUT.saturating_sub(Duration::from_millis(50));
-            cx.background_executor().spawn(async move {
-                if let Err(error) = bootty_agents::flush_agent_state(limit) {
-                    eprintln!("Agent state was not saved before quitting: {error}");
-                }
-            })
-        })
-        .detach();
         cx.spawn(async move |cx| {
             while let Ok(urls) = url_receiver.recv().await {
                 cx.update(|cx| {
@@ -229,7 +209,7 @@ fn register_menu_actions(localizer: &crate::i18n::Localizer, cx: &mut App) {
 fn launch(
     config: BoottyConfig,
     window_state_key: String,
-    backends: Arc<bootty_mux::provider::MuxBackendRegistry>,
+
     control_server: &Rc<RefCell<Option<ControlServer>>>,
     app_menu: &Rc<RefCell<Option<crate::menu::AppMenu>>>,
     reopen_context: &Rc<RefCell<Option<ReopenContext>>>,
@@ -250,7 +230,6 @@ fn launch(
     crate::gpui::update_ui_font_weights(&config.font.ui_weights, cx);
     let localizer = crate::i18n::Localizer::new(&config.locale)?;
     crate::i18n::publish(&localizer, cx);
-    crate::gpui_document_panel::init(cx);
     #[cfg(target_os = "macos")]
     register_menu_actions(&localizer, cx);
     #[cfg(target_os = "macos")]
@@ -264,20 +243,15 @@ fn launch(
     let reopen = ReopenContext {
         config: config.clone(),
         window_state_key: window_state_key.clone(),
-        backends: Arc::clone(&backends),
+
         control_plane: ControlPlane::default(),
     };
     let control_state_key = window_state_key.clone();
     let control_plane = reopen.control_plane.clone();
     let workspace_control_plane = control_plane.clone();
-    let (window, workspace) = GpuiWorkspace::open(
-        config,
-        window_state_key,
-        backends,
-        workspace_control_plane,
-        cx,
-    )
-    .context("open Bootty window")?;
+    let (window, workspace) =
+        GpuiWorkspace::open(config, window_state_key, workspace_control_plane, cx)
+            .context("open Bootty window")?;
     app_menu.replace(Some(crate::menu::install(&localizer, cx)));
     cx.activate(true);
     window

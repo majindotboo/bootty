@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty-ui"
 version.workspace = true
 edition.workspace = true
@@ -7,26 +8,19 @@ autobenches = false
 [lib]
 test = false
 
-[features]
-bootty-dev = ["bootty-config/bootty-dev", "bootty-control/bootty-dev"]
-
 [dependencies]
-ureq.workspace = true
+bootty-os = { path = "../bootty-os" }
 futures = "0.3"
 gpui-kit.workspace = true
 sha2.workspace = true
 getrandom.workspace = true
 serde.workspace = true
-base64.workspace = true
 toml_edit.workspace = true
 fluent-bundle.workspace = true
 unic-langid.workspace = true
 ab_glyph.workspace = true
 arboard.workspace = true
 async-channel.workspace = true
-bootty-agents = { path = "../bootty-agents" }
-bootty-browser = { path = "../bootty-browser" }
-bootty-computer = { path = "../bootty-computer" }
 bootty-control = { path = "../bootty-control" }
 bootty-config = { path = "../bootty-config" }
 bootty-git = { path = "../bootty-git" }
@@ -39,16 +33,13 @@ url.workspace = true
 bootty-terminal = { path = "../bootty-terminal" }
 iconflow.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
-mermaid-rs-renderer.workspace = true
 libghostty-vt.workspace = true
-markdown.workspace = true
 keepawake.workspace = true
 fontdb.workspace = true
 png.workspace = true
 tempfile.workspace = true
 rustybuzz.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["rt"] }
 smallvec.workspace = true
 starship-battery.workspace = true
 sysinfo.workspace = true
@@ -61,7 +52,6 @@ thiserror.workspace = true
 notify-rust.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-tray-icon.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_DirectWrite", "Win32_Graphics_Direct2D", "Win32_Graphics_Direct2D_Common", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_Foundation"] }
@@ -71,25 +61,19 @@ windows-numerics = "0.3"
 sys-locale = "0.3"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-ksni.workspace = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = "0.19"
-swash = "0.2.6"
+swash = "0.2.10"
 sys-locale = "0.3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 font-kit.workspace = true
-avplayer = "=0.8.0"
-# These Core Video types cross GPUI's video surface API.
-objc2-core-foundation = "0.3.2"
-objc2-core-video = "0.3.2"
 # These types cross zed-font-kit APIs; update when that crate adopts newer versions.
 core-text = "21"
 core-foundation = "0.10"
 core-graphics = "0.24"
 pathfinder_geometry = "0.5"
-muda.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
@@ -99,18 +83,16 @@ font-kit.workspace = true
 bootty-test-support = { path = "../bootty-test-support" }
 gpui-kit = { workspace = true, features = ["test-support"] }
 # The facade exposes renderer benchmarks; enable their underlying implementation.
-gpui-pre = { version = "=0.3.9", features = ["bench-support"] }
-gpui-pre-platform = { version = "=0.3.9", features = ["bench-support"] }
+gpui-pre = { version = "=0.3.11", features = ["bench-support"] }
+gpui-pre-platform = { version = "=0.3.11", features = ["bench-support"] }
 assert_fs.workspace = true
 criterion.workspace = true
 pretty_assertions.workspace = true
 proptest.workspace = true
 proptest-derive.workspace = true
-rmux-server.workspace = true
 rusqlite.workspace = true
 rstest.workspace = true
 static_assertions.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 [[bench]]
 name = "pipeline_resources"
@@ -178,3 +160,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

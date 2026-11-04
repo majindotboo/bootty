@@ -73,9 +73,6 @@ impl AppState {
             }
             KeybindAction::Scroll(action) => self.apply_terminal_scroll_action(action),
             KeybindAction::Write(bytes) => {
-                if !bytes.is_empty() {
-                    self.revoke_current_terminal_agent_recovery();
-                }
                 if let Err(error) = self
                     .workspace
                     .active
@@ -94,15 +91,9 @@ impl AppState {
                 self.apply_font_size_action(action, effects);
                 self.apply_ui_font_size_action(action, effects);
             }
-            KeybindAction::Find(action) if self.selected_pane_is_native() => {
-                effects.push(AppEffect::ConversationFind(action));
-            }
             KeybindAction::Find(action) => self.apply_terminal_find_action(action, effects),
             KeybindAction::CopyToClipboard(format) => {
                 self.copy_terminal_selection_or_request_copy(format, effects);
-            }
-            KeybindAction::CopyMode if self.selected_pane_is_native() => {
-                effects.push(AppEffect::ConversationCopyMode);
             }
             KeybindAction::CopyMode => {
                 self.enter_terminal_copy_mode(effects);
@@ -135,25 +126,6 @@ impl AppState {
             AppAction::NewMuxSession => {
                 self.open_new_mux_session_dialog();
             }
-            AppAction::NewNativeAgentTab => {
-                self.open_native_agent_tab_dialog();
-            }
-            AppAction::AgentHistory => {
-                let outcome = self.open_agent_history();
-                if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                    self.record_error("Could not open agent history", &message);
-                }
-            }
-            AppAction::AddSelectionToConversation => {
-                effects.push(AppEffect::AddSelectionToConversation);
-            }
-            AppAction::ResumeAgentSession(provider) => {
-                let outcome = self.open_saved_agent_session(provider);
-                if let Some(message) = crate::commands::command_outcome_message(&outcome) {
-                    self.record_error("Could not resume the agent session", &message);
-                }
-            }
-
             AppAction::SessionPicker => {
                 self.then_repaint(effects, Self::toggle_session_picker_dialog);
             }
@@ -209,9 +181,7 @@ impl AppState {
             AppAction::ToggleSidebarFocus => self.toggle_sidebar_focus(effects),
             AppAction::ToggleSidebarVisibility => {
                 effects.push(AppEffect::Dock(crate::commands::DockRequest::local(
-                    crate::commands::DockAction::TogglePanel(
-                        bootty_config::config::PanelKind::Sessions,
-                    ),
+                    crate::commands::DockAction::ToggleSessions,
                 )));
             }
         }
@@ -262,23 +232,6 @@ impl AppState {
         effects.push(AppEffect::RequestRepaint);
     }
 
-    /// Whether the focused pane shows a native conversation rather than a terminal.
-    pub(crate) fn selected_pane_is_native(&self) -> bool {
-        let binding = &self.workspace.active.binding;
-        let (Some(session), Some(window)) = (
-            binding.mux().selected_session(),
-            binding.mux().selected_window(),
-        ) else {
-            return false;
-        };
-        let pane = binding.window_focused_pane(session, window);
-        binding
-            .mux()
-            .selected_window_panes()
-            .iter()
-            .any(|anchor| anchor.pane_id.as_deref() == pane && anchor.native_agent.is_some())
-    }
-
     fn enter_terminal_copy_mode(&mut self, effects: &mut Vec<AppEffect>) {
         let outcome = self
             .terminal_interaction
@@ -287,34 +240,6 @@ impl AppState {
             self.last_error = Some(error);
         }
         effects.extend(outcome.effects);
-    }
-    /// The focused terminal's selected text, with a file name start that says which session it
-    /// came from.
-    pub(crate) fn terminal_selection(&mut self) -> Option<(String, String)> {
-        let binding = &mut self.workspace.active.binding;
-        let session = binding
-            .mux()
-            .selected_session()
-            .and_then(|id| binding.mux().session_by_id_or_name(id))
-            .map_or_else(String::new, |session| {
-                session
-                    .name
-                    .chars()
-                    .map(|character| {
-                        if character.is_alphanumeric() {
-                            character
-                        } else {
-                            '-'
-                        }
-                    })
-                    .collect()
-            });
-        let bytes = binding
-            .terminal_mut()
-            .format_selection(bootty_terminal::terminal_engine::TerminalSelectionFormat::PlainText)
-            .ok()??;
-        let text = String::from_utf8_lossy(&bytes).trim_end().to_owned();
-        (!text.is_empty()).then(|| (format!("terminal-{session}-"), text))
     }
 
     fn copy_terminal_selection_or_request_copy(

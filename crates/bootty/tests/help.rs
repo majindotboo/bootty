@@ -22,8 +22,8 @@ fn app_override_is_documented_only_under_the_app_command(#[case] option: &str) {
 
 #[rstest]
 fn explicit_command_accepts_stdin_json_without_treating_it_as_an_argument() {
-    let cli = Cli::try_parse_from(["bootty", "command", "agents.pi.ingest", "--stdin-json"])
-        .expect("parse the installed Pi adapter command");
+    let cli = Cli::try_parse_from(["bootty", "command", "terminal.paste", "--stdin-json"])
+        .expect("parse a command that reads JSON arguments");
     assert!(matches!(
         cli.subcommand(),
         Some(bootty::cli::Command::Invoke { stdin_json: true, arguments, .. })
@@ -33,15 +33,8 @@ fn explicit_command_accepts_stdin_json_without_treating_it_as_an_argument() {
 
 #[rstest]
 fn raw_stdin_is_separate_from_explicit_arguments_and_json_stdin() {
-    let cli = Cli::try_parse_from([
-        "bootty",
-        "command",
-        "agents.codex.ingest",
-        "--stdin",
-        "%1",
-        "{}",
-    ])
-    .unwrap();
+    let cli = Cli::try_parse_from(["bootty", "command", "terminal.paste", "--stdin", "%1", "{}"])
+        .unwrap();
     assert!(matches!(
         cli.subcommand(),
         Some(bootty::cli::Command::Invoke { stdin: true, arguments, .. })
@@ -51,7 +44,7 @@ fn raw_stdin_is_separate_from_explicit_arguments_and_json_stdin() {
         Cli::try_parse_from([
             "bootty",
             "command",
-            "agents.codex.ingest",
+            "terminal.paste",
             "--stdin",
             "--stdin-json",
         ])
@@ -65,17 +58,17 @@ fn explicit_command_documents_its_target_option() {
     let cli = Cli::try_parse_from([
         "bootty",
         "command",
-        "agents.native.status",
+        "terminal.create_tab",
         "--target",
-        "native:claude:26@43",
-        "native:claude:26",
+        "session-26@43",
+        "session-26",
         "43",
     ])
     .unwrap();
     assert!(matches!(
         cli.subcommand(),
         Some(bootty::cli::Command::Invoke { target: Some(target), arguments, .. })
-            if target == "native:claude:26@43" && arguments == &["native:claude:26", "43"]
+            if target == "session-26@43" && arguments == &["session-26", "43"]
     ));
     let help = Cli::try_parse_from(["bootty", "command", "--help"])
         .expect_err("command help exits through clap")

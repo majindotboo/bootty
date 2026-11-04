@@ -1,10 +1,8 @@
-//! Bootty's worktrees on each host. An hourly pass, a pass soon after a session is deleted,
-//! archived or settled, and the `worktrees.clean` command all run the same cleanup.
+//! Bootty's worktrees on each host. An hourly pass, a pass soon after a session closes, and the `worktrees.clean` command all run the same cleanup.
 use super::AppState;
 use bootty_config::config::RemoteConfig;
 use bootty_control::{CommandOutcome, CommandWarning};
 use bootty_git::{CleanupReport, CleanupRequest, Retention, SessionCheckout};
-use bootty_mux::session_membership::SessionLifecycle;
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, PoisonError, mpsc},
@@ -60,7 +58,7 @@ impl AppState {
             }
         }
         let session = &self.config().session;
-        let settings = (session.worktree_limit, session.worktree_directory.clone());
+        let settings = (0, session.worktree_directory.clone());
         if self.worktree_cleanup.settings.as_ref() != Some(&settings) {
             if self.worktree_cleanup.settings.is_some() {
                 self.request_worktree_cleanup();
@@ -200,8 +198,7 @@ impl AppState {
         let mut hosts = Vec::<(HostCleanup, bool)>::new();
         for binding in self.workspace.all_bindings() {
             let remote = binding.multiplexer().remote.clone();
-            let ready =
-                !binding.tracks_session_membership() || binding.mux().has_session_snapshot();
+            let ready = binding.mux().has_session_snapshot();
             let checkouts = binding_checkouts(binding, now);
             // Projects say what to run in their checkouts before they go.
             let teardown = self
@@ -226,7 +223,7 @@ impl AppState {
                     remote,
                     request: CleanupRequest {
                         directory: directory.clone(),
-                        limit: config.worktree_limit,
+                        limit: 0,
                         sessions: checkouts.collect(),
                         now,
                         teardown: teardown.into_iter().collect(),
@@ -286,16 +283,9 @@ fn binding_checkouts(
         .sessions()
         .sessions()
         .iter()
-        .filter(|saved| !saved.state.deleted)
         .map(|saved| SessionCheckout {
             cwd: saved.cwd.clone(),
-            retention: if saved.state.archived {
-                Retention::Archived
-            } else if saved.state.lifecycle == SessionLifecycle::Settled {
-                Retention::Settled
-            } else {
-                Retention::Active
-            },
+            retention: Retention::Active,
             last_activity: saved.state.last_activity_at.unwrap_or_default(),
             open: binding.session_attachment(&saved.identity).is_some(),
         })
@@ -326,12 +316,11 @@ fn clean_hosts(hosts: Vec<HostCleanup>, exclusive: &Mutex<()>) -> HostResults {
         .map(|host| {
             let result = match &host.remote {
                 None => bootty_git::Git::new().clean_worktrees(&host.request),
-                Some(remote) => bootty_mux::remote_space::clean_remote_worktrees_with_runner(
+                Some(remote) => bootty_git::remote::clean_worktrees(
                     remote,
                     &host.request,
                     &bootty_host::SystemCommandRunner,
-                )
-                .map_err(|error| error.to_string()),
+                ),
             };
             (host.host, result)
         })

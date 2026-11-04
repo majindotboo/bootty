@@ -122,15 +122,6 @@ impl WorkspaceRuntime {
                 "checkpoint binding is stale",
             ));
         }
-        if binding
-            .restored_sessions
-            .get(identity)
-            .is_some_and(|mapping| mapping.association_pending)
-        {
-            return Err(WorkspacePersistenceError::operation(
-                "terminal agent topology association is pending",
-            ));
-        }
         let saved = binding.sessions().get(identity).ok_or_else(|| {
             WorkspacePersistenceError::operation("checkpoint identity is not held")
         })?;
@@ -204,124 +195,15 @@ impl WorkspaceRuntime {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum AgentRestoreAdmission {
-    Available,
-    Queued,
-    Preparing,
-}
-
 #[derive(Default)]
 pub(super) struct RestoredSessionMapping {
     generation: u64,
-    association_pending: bool,
-    agent_locations: HashMap<(String, String, String), (String, String, String)>,
     windows: HashMap<String, String>,
     pub(super) panes: HashMap<String, String>,
     pub(super) history: HashMap<String, String>,
-    // Only cold RestoreSession creates these destinations; reattachment grants none.
-    agent_panes: HashMap<(String, String, String), RestoredAgentPane>,
-}
-
-struct RestoredAgentPane {
-    target: crate::target::ExactMuxTarget,
-    admission: AgentRestoreAdmission,
-    history: std::sync::Arc<str>,
 }
 
 impl super::BindingRuntime {
-    pub fn terminal_agent_association_fence(
-        &self,
-    ) -> impl FnOnce() -> Result<(), crate::controller::MuxCommandError> + Send + use<> {
-        let fence = self.mux.command_fence(&self.multiplexer);
-        move || fence.claim()
-    }
-
-    /// Fence checkpoint replacement until old agent targets have durable saved topology.
-    pub fn set_cold_agent_association_pending(&mut self, identity: &str, pending: bool) {
-        if let Some(mapping) = self.restored_sessions.get_mut(identity) {
-            mapping.association_pending = pending;
-        }
-    }
-
-    /// Stable saved keys for one host-observed exact pane, never another session's selection.
-    #[must_use]
-    pub fn terminal_agent_location(
-        &self,
-        target: &crate::target::ExactMuxTarget,
-    ) -> Option<(String, String, String)> {
-        let crate::target::ExactMuxTarget::Pane(scope, session, window, pane) = target else {
-            return None;
-        };
-        if *scope != self.scope {
-            return None;
-        }
-        self.sessions.sessions().iter().find_map(|saved| {
-            let identity = &saved.identity;
-            let attached = self.session_attachment(identity)?;
-            if attached.id != *session
-                || !attached.windows.iter().any(|item| {
-                    item.id == *window
-                        && item
-                            .panes
-                            .iter()
-                            .any(|item| item.pane_id.as_ref() == Some(pane))
-                })
-            {
-                return None;
-            }
-            Some((
-                identity.clone(),
-                self.saved_window_key(identity, window),
-                self.saved_pane_key(identity, pane),
-            ))
-        })
-    }
-
-    /// Recover a catalog's stable location only through the current cold-generation mapping.
-    #[must_use]
-    pub fn cold_agent_source_path(
-        &self,
-        identity: &str,
-        window: &str,
-        pane: &str,
-    ) -> Option<Vec<String>> {
-        let mapping = self.restored_sessions.get(identity)?;
-        if mapping.generation != self.mux.binding_generation() {
-            return None;
-        }
-        let original = mapping.agent_locations.get(&(
-            identity.to_owned(),
-            window.to_owned(),
-            pane.to_owned(),
-        ))?;
-        Some(vec![
-            self.scope.persistence_value().to_string(),
-            original.0.clone(),
-            original.1.clone(),
-            original.2.clone(),
-        ])
-    }
-
-    /// Derive a legacy catalog's saved location from its exact original checkpoint path.
-    #[must_use]
-    pub fn cold_agent_location(&self, original: &[String]) -> Option<(String, String, String)> {
-        let [_, session, window, pane] = original else {
-            return None;
-        };
-        let key = (session.clone(), window.clone(), pane.clone());
-        self.restored_sessions
-            .values()
-            .filter(|mapping| mapping.generation == self.mux.binding_generation())
-            .find_map(|mapping| {
-                mapping
-                    .agent_locations
-                    .iter()
-                    .find(|(_, original)| **original == key)
-                    .map(|(location, _)| location.clone())
-            })
-    }
-
     pub(super) fn retain_restored_generation(&mut self) {
         let generation = self.mux.binding_generation();
         self.restored_sessions
@@ -467,7 +349,6 @@ impl super::BindingRuntime {
                     WorkspacePersistenceError::operation("checkpoint pane is unavailable")
                 })?;
                 Ok(SavedTerminalPane {
-                    native_agent: pane.native_agent.clone(),
                     id: self.saved_pane_key(identity, id),
                     backend_id: id.clone(),
                     cwd: pane.cwd.clone().unwrap_or_else(|| saved.cwd.clone()),
@@ -535,41 +416,10 @@ impl super::BindingRuntime {
                 ));
             }
             mapping.windows.insert(old.id.clone(), window.id.clone());
-            let original_window = old.backend_id.clone();
-            let old_window_key = old.id.clone();
             for (old, pane) in old.panes.iter().zip(&window.panes) {
                 let id = pane.pane_id.as_ref().ok_or_else(|| {
                     MuxCommandError::Failed("restored pane has no backend identity".into())
                 })?;
-                mapping.agent_locations.insert(
-                    (
-                        saved.session_id.clone(),
-                        old_window_key.clone(),
-                        old.id.clone(),
-                    ),
-                    (
-                        saved.backend_id.clone(),
-                        original_window.clone(),
-                        old.backend_id.clone(),
-                    ),
-                );
-                mapping.agent_panes.insert(
-                    (
-                        saved.backend_id.clone(),
-                        original_window.clone(),
-                        old.backend_id.clone(),
-                    ),
-                    RestoredAgentPane {
-                        target: crate::target::ExactMuxTarget::Pane(
-                            scope,
-                            session.id.clone(),
-                            window.id.clone(),
-                            id.clone(),
-                        ),
-                        admission: AgentRestoreAdmission::Available,
-                        history: std::sync::Arc::from(old.text.as_str()),
-                    },
-                );
                 mapping.panes.insert(old.id.clone(), id.clone());
                 mapping.history.insert(id.clone(), old.text.clone());
             }
@@ -590,113 +440,6 @@ impl super::BindingRuntime {
             }
         }
         Ok(mapping)
-    }
-
-    /// Resolve a cold-restored shell from its frozen original backend path, without live fallbacks.
-    #[must_use]
-    pub fn cold_restored_agent_terminal(
-        &self,
-        original: &[String],
-        queued: bool,
-    ) -> Option<crate::target::ExactMuxTarget> {
-        let [_, session, window, pane] = original else {
-            return None;
-        };
-        let key = (session.clone(), window.clone(), pane.clone());
-        self.restored_sessions
-            .values()
-            .filter(|mapping| mapping.generation == self.mux.binding_generation())
-            .find_map(|mapping| mapping.agent_panes.get(&key))
-            .filter(|pane| (pane.admission != AgentRestoreAdmission::Available) == queued)
-            .map(|pane| pane.target.clone())
-    }
-
-    /// The original checkpoint seed survives later shell checkpoints and backend transcript resets.
-    #[must_use]
-    pub fn cold_restored_agent_history(&self, original: &[String]) -> Option<std::sync::Arc<str>> {
-        let [_, session, window, pane] = original else {
-            return None;
-        };
-        let key = (session.clone(), window.clone(), pane.clone());
-        self.restored_sessions
-            .values()
-            .filter(|mapping| mapping.generation == self.mux.binding_generation())
-            .find_map(|mapping| mapping.agent_panes.get(&key))
-            .map(|pane| std::sync::Arc::clone(&pane.history))
-    }
-
-    /// Queue once, then consume immediately before process replacement. A failed attempt is never replayed.
-    pub fn admit_restored_agent_terminal(
-        &mut self,
-        original: &[String],
-        target: &crate::target::ExactMuxTarget,
-        consume: bool,
-    ) -> bool {
-        let [_, session, window, pane] = original else {
-            return false;
-        };
-        let key = (session.clone(), window.clone(), pane.clone());
-        let generation = self.mux.binding_generation();
-        for mapping in self
-            .restored_sessions
-            .values_mut()
-            .filter(|mapping| mapping.generation == generation)
-        {
-            let Some(pane) = mapping.agent_panes.get_mut(&key) else {
-                continue;
-            };
-            let expected = if consume {
-                AgentRestoreAdmission::Preparing
-            } else {
-                AgentRestoreAdmission::Available
-            };
-            if &pane.target != target || pane.admission != expected {
-                return false;
-            }
-            if consume {
-                mapping.agent_panes.remove(&key);
-            } else {
-                pane.admission = AgentRestoreAdmission::Queued;
-            }
-            return true;
-        }
-        false
-    }
-
-    /// Reserve queued cold recovery before worker preparation, rejecting concurrent repeats.
-    pub fn begin_restored_agent_terminal(
-        &mut self,
-        original: &[String],
-        target: &crate::target::ExactMuxTarget,
-    ) -> bool {
-        let [_, session, window, pane] = original else {
-            return false;
-        };
-        let key = (session.clone(), window.clone(), pane.clone());
-        let generation = self.mux.binding_generation();
-        for mapping in self
-            .restored_sessions
-            .values_mut()
-            .filter(|mapping| mapping.generation == generation)
-        {
-            if let Some(pane) = mapping.agent_panes.get_mut(&key) {
-                if &pane.target != target || pane.admission != AgentRestoreAdmission::Queued {
-                    return false;
-                }
-                pane.admission = AgentRestoreAdmission::Preparing;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Any ordinary input ends the proof that a cold-restored pane is an untouched shell.
-    pub fn revoke_restored_agent_terminal(&mut self, pane: &str) {
-        for mapping in self.restored_sessions.values_mut() {
-            mapping
-                .agent_panes
-                .retain(|_, restored| restored.target.ids().2 != Some(pane));
-        }
     }
 
     /// Resolve a saved window key only within the same exact tagged task attachment.
@@ -808,44 +551,6 @@ impl WorkspaceRuntime {
         Ok(())
     }
 
-    pub(super) fn cleanup_failed_restore(
-        &mut self,
-        scope: SpaceId,
-        created: crate::snapshot::MuxSession,
-        error: &crate::controller::MuxCommandError,
-    ) -> crate::controller::MuxCommandError {
-        use crate::controller::MuxCommandError;
-        let identity = created.tag.identity.clone();
-        let repaint = std::sync::Arc::clone(&self.repaint);
-        let cleanup = self
-            .binding_mut(scope)
-            .ok_or(MuxCommandError::Stale)
-            .and_then(|binding| {
-                let config = binding.multiplexer.clone();
-                binding
-                    .mux
-                    .discard_failed_restore(&repaint, &config, created)
-            });
-        let detail = match cleanup {
-            Ok(true) => {
-                if let Some(binding) = self.binding_mut(scope) {
-                    if let Some(identity) = identity {
-                        binding.restored_sessions.remove(&identity);
-                    }
-                    if let Err(sync) = binding.sync_terminal_panes() {
-                        return MuxCommandError::Failed(format!(
-                            "{error}; restored topology removed, renderer cleanup failed: {sync}"
-                        ));
-                    }
-                }
-                "fresh restored topology removed".to_owned()
-            }
-            Ok(false) => "fresh restored topology retained; exact cleanup queued".to_owned(),
-            Err(cleanup) => format!("fresh restored topology retained; cleanup failed: {cleanup}"),
-        };
-        MuxCommandError::Failed(format!("{error}; {detail}"))
-    }
-
     pub(super) fn restore_session_command(
         &mut self,
         scope: SpaceId,
@@ -871,22 +576,11 @@ impl WorkspaceRuntime {
             .ok_or_else(|| {
                 MuxCommandError::Failed("restored exact attachment is unavailable".into())
             })?;
-        let mut mapping = binding.prepare_restored_session_mapping(&saved, &session)?;
-        if binding.backend_policy.panes.topology == crate::provider::PaneTopology::BackendReconciled
-        {
-            // Seed rmux controllers before worker admission; a late write races the first rebase.
-            for (pane, history) in mapping.history.drain() {
-                binding.terminal_mut().queue_scoped_restored_history(
-                    scope,
-                    &pane,
-                    std::sync::Arc::from(history),
-                );
-            }
-        }
+        let mapping = binding.prepare_restored_session_mapping(&saved, &session)?;
         binding
             .restored_sessions
             .insert(identity.to_owned(), mapping);
-        if binding.backend_policy.panes.topology == crate::provider::PaneTopology::ProcessLocal {
+        {
             for pane in session.windows.iter().flat_map(|window| &window.panes) {
                 let id = pane.pane_id.as_deref().ok_or_else(|| {
                     MuxCommandError::Failed("restored pane has no identity".into())
@@ -922,14 +616,15 @@ fn remap_layout(
         MuxPaneLayout::Pane(id) => MuxPaneLayout::Pane(ids.get(id)?.clone()),
         MuxPaneLayout::Split {
             direction,
-            ratio_millis,
-            first,
-            second,
+            weights,
+            children,
         } => MuxPaneLayout::Split {
             direction: direction.clone(),
-            ratio_millis: *ratio_millis,
-            first: Box::new(remap_layout(first, ids)?),
-            second: Box::new(remap_layout(second, ids)?),
+            weights: weights.clone(),
+            children: children
+                .iter()
+                .map(|child| remap_layout(child, ids))
+                .collect::<Option<_>>()?,
         },
     })
 }

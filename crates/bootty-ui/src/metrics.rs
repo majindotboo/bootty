@@ -1,5 +1,6 @@
 //! Background sampling for the native system status cells.
 
+use bootty_os::spawn::CommandSpawn as _;
 use num_traits::ToPrimitive as _;
 
 use starship_battery::{Manager as BatteryManager, State as BatteryState, units::time::second};
@@ -49,7 +50,9 @@ impl Default for MetricsService {
         let (requests, receiver) = mpsc::sync_channel(1);
         let (sender, samples) = mpsc::sync_channel(1);
         std::thread::spawn(move || {
-            let mut system = System::new();
+            let Ok(mut system) = System::new() else {
+                return;
+            };
             let battery = BatteryManager::new().ok();
             while receiver.recv().is_ok() {
                 let sample = sample_metrics(&mut system, battery.as_ref());
@@ -101,7 +104,7 @@ fn sample_metrics(system: &mut System, battery: Option<&BatteryManager>) -> Metr
         battery_status(battery);
     Metrics {
         cpu: system.global_cpu_usage(),
-        load1: load.one,
+        load1: load.map_or(0.0, |load| load.one),
         mem_used_pct: memory_used_percent(system),
         mem_total_bytes: system.total_memory(),
         battery_percent,
@@ -152,7 +155,7 @@ fn macos_memory_pressure_used() -> Option<f64> {
 #[cfg(target_os = "macos")]
 fn macos_memory_pressure_sample() -> Option<f64> {
     let output = std::process::Command::new("/usr/bin/memory_pressure")
-        .output()
+        .bootty_output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
     let free: f64 = text

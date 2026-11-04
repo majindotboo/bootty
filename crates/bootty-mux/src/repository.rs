@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -9,6 +9,7 @@ use std::{
 use thiserror::Error;
 
 mod projects;
+mod remote_servers;
 mod schema;
 mod snapshot;
 
@@ -16,16 +17,12 @@ use schema::{
     WorkspaceSchemaKind, classify_schema, create_workspace_schema, new_remote_space_id,
     table_columns, user_tables,
 };
-use snapshot::{
-    LoadedSpaces, backend_to_storage, bool_from_storage, color_to_hex, load_spaces,
-    nonempty_trimmed, remote_to_storage,
-};
+use snapshot::{color_to_hex, load_spaces, nonempty_trimmed, remote_to_storage};
 
 use crate::session_membership::{SessionMembership, SessionState, WorkspaceSession};
 
-pub use crate::membership::BackendMembership;
-use crate::{controller::SpaceId, membership::MembershipOperation};
-use bootty_config::config::{MultiplexerBackendConfig, RemoteConfig};
+use crate::controller::SpaceId;
+use bootty_config::config::RemoteConfig;
 pub use projects::{MAX_PROJECT_SCRIPTS, ProjectScript, ProjectSettings, RegisteredProject};
 
 const WORKSPACE_SNAPSHOT_REVISION: i64 = 7;
@@ -58,10 +55,7 @@ impl WorkspacePersistenceError {
 
 pub type WorkspaceResult<T> = Result<T, WorkspacePersistenceError>;
 
-/// The membership change that Bootty asked a remote multiplexer to perform.
-///
-/// The row is durable until the backend result and the workspace state commit agree. The optional
-/// current working directory lets recovery restore session-name metadata when it is available.
+/// A saved membership change committed before native topology is published.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BindingMembershipMutation {
     Create {
@@ -74,14 +68,9 @@ pub enum BindingMembershipMutation {
     },
     Rename {
         identity: String,
-        old_name: String,
         new_name: String,
         display_name: String,
         explicit: bool,
-    },
-    Ditch {
-        identity: String,
-        old_name: String,
     },
 }
 
@@ -89,55 +78,13 @@ impl BindingMembershipMutation {
     #[must_use]
     pub fn identity(&self) -> &str {
         match self {
-            Self::Create { identity, .. }
-            | Self::Rename { identity, .. }
-            | Self::Ditch { identity, .. } => identity,
+            Self::Create { identity, .. } | Self::Rename { identity, .. } => identity,
         }
-    }
-
-    fn backend_operation(&self) -> MembershipOperation {
-        match self {
-            Self::Create {
-                identity,
-                session_name,
-                ..
-            } => MembershipOperation::Create {
-                identity: identity.clone(),
-                session_name: session_name.clone(),
-            },
-            Self::Rename {
-                identity,
-                old_name,
-                new_name,
-                ..
-            } => MembershipOperation::Rename {
-                identity: identity.clone(),
-                old_name: old_name.clone(),
-                new_name: new_name.clone(),
-            },
-            Self::Ditch { identity, old_name } => MembershipOperation::Ditch {
-                identity: identity.clone(),
-                old_name: old_name.clone(),
-            },
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PendingBindingMembershipMutation {
-    mutation: BindingMembershipMutation,
-}
-
-impl PendingBindingMembershipMutation {
-    #[must_use]
-    pub const fn mutation(&self) -> &BindingMembershipMutation {
-        &self.mutation
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SpaceMuxOverride {
-    pub backend: Option<MultiplexerBackendConfig>,
     pub remote: SpaceRemoteOverride,
 }
 
@@ -146,7 +93,6 @@ pub struct RemoteSpaceRef {
     pub profile_id: String,
     pub remote_space_id: String,
     pub remote_space_name: String,
-    pub backend: MultiplexerBackendConfig,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -159,12 +105,10 @@ pub enum SpaceRemoteOverride {
     Inline(RemoteConfig),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceBinding {
     scope: SpaceId,
-    backend_override: Option<MultiplexerBackendConfig>,
     remote_override: SpaceRemoteOverride,
-    hide_tmux_status: bool,
     unavailable: bool,
     selection: Option<WorkspaceBindingSelection>,
     selected_session_identity: Option<String>,
@@ -173,18 +117,8 @@ pub struct WorkspaceBinding {
 
 impl WorkspaceBinding {
     #[must_use]
-    pub const fn backend_override(&self) -> Option<MultiplexerBackendConfig> {
-        self.backend_override
-    }
-
-    #[must_use]
     pub const fn remote_override(&self) -> &SpaceRemoteOverride {
         &self.remote_override
-    }
-
-    #[must_use]
-    pub const fn hide_tmux_status(&self) -> bool {
-        self.hide_tmux_status
     }
 
     #[must_use]
@@ -230,7 +164,7 @@ impl WorkspaceBindingSelection {
         self.window_id.as_deref()
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceSpace {
     id: SpaceId,
     remote_id: String,
@@ -242,11 +176,10 @@ pub struct WorkspaceSpace {
     binding: WorkspaceBinding,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorkspaceSnapshot {
     spaces: Vec<WorkspaceSpace>,
     selected_spaces: HashMap<String, SpaceId>,
-    pending_binding_scopes: HashSet<SpaceId>,
 }
 
 impl WorkspaceSnapshot {
@@ -258,11 +191,6 @@ impl WorkspaceSnapshot {
     #[must_use]
     pub fn selected_space(&self, window_key: &str) -> Option<SpaceId> {
         self.selected_spaces.get(window_key).copied()
-    }
-
-    #[must_use]
-    pub fn has_pending_binding_operation(&self, scope: SpaceId) -> bool {
-        self.pending_binding_scopes.contains(&scope)
     }
 }
 
@@ -349,18 +277,40 @@ impl WorkspaceRepository {
             })
         };
         let encoded = encode(snapshot)?;
-        let previous = previous.map(encode).transpose()?;
         let mut conn = open_db(&self.path)
             .map_err(|error| self.database_error("open terminal checkpoint", &error))?;
+        // Immediate: the read below and the write after it are one compare-and-swap.
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| self.database_error("begin terminal checkpoint", &error))?;
-        let changed = tx.execute("UPDATE workspace_sessions SET terminal_snapshot = ?1 WHERE identity = ?2 AND space_id = ?3 AND terminal_snapshot IS ?4", params![encoded, identity, scope.persistence_value(), previous]).map_err(|error| self.database_error("save terminal checkpoint", &error))?;
-        if changed != 1 {
+        // Compare decoded values, not text: a checkpoint written with since-retired fields (such
+        // as a pane's `native_agent`) re-encodes differently but is the same prior state.
+        let stored = tx
+            .query_row(
+                "SELECT terminal_snapshot FROM workspace_sessions WHERE identity = ?1 AND space_id = ?2",
+                params![identity, scope.persistence_value()],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map_err(|error| self.database_error("read terminal checkpoint", &error))?;
+        let unchanged = stored.is_some_and(|stored| {
+            stored
+                .map(|text| {
+                    serde_json::from_str::<crate::session_snapshot::SavedTerminalSession>(&text)
+                })
+                .transpose()
+                .is_ok_and(|stored| stored.as_ref() == previous)
+        });
+        if !unchanged {
             return Err(WorkspacePersistenceError::operation(
                 "terminal checkpoint owner or prior state changed",
             ));
         }
+        tx.execute(
+            "UPDATE workspace_sessions SET terminal_snapshot = ?1 WHERE identity = ?2 AND space_id = ?3",
+            params![encoded, identity, scope.persistence_value()],
+        )
+        .map_err(|error| self.database_error("save terminal checkpoint", &error))?;
         tx.execute("UPDATE workspace_spaces SET selected_session_identity = ?1 WHERE id = ?2 AND selected_session_id = ?3", params![identity, scope.persistence_value(), snapshot.backend_id]).map_err(|error| self.database_error("save checkpoint selection", &error))?;
         tx.commit()
             .map_err(|error| self.database_error("commit terminal checkpoint", &error))
@@ -383,9 +333,8 @@ impl WorkspaceRepository {
         color: [u8; 3],
         tint_sidebar: bool,
         mux: SpaceMuxOverride,
-        hide_tmux_status: bool,
     ) -> WorkspaceResult<Option<WorkspaceSpace>> {
-        self.create_space_db(name, icon, color, tint_sidebar, mux, hide_tmux_status)
+        self.create_space_db(name, icon, color, tint_sidebar, mux)
             .map_err(|error| self.database_error("create space", &error))
     }
 
@@ -396,7 +345,6 @@ impl WorkspaceRepository {
         color: [u8; 3],
         tint_sidebar: bool,
         mux: SpaceMuxOverride,
-        hide_tmux_status: bool,
     ) -> rusqlite::Result<Option<WorkspaceSpace>> {
         let name = name.trim();
         let Some(icon) = nonempty_trimmed(icon) else {
@@ -423,8 +371,8 @@ impl WorkspaceRepository {
         tx.execute(
             "INSERT INTO workspace_spaces
                 (remote_id, name, icon, color, tint_sidebar, position,
-                 backend, hide_tmux_status, remote)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 backend, remote)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 remote_id,
                 name,
@@ -432,8 +380,7 @@ impl WorkspaceRepository {
                 color_to_hex(color),
                 i64::from(tint_sidebar),
                 position,
-                backend_to_storage(mux.backend),
-                i64::from(hide_tmux_status),
+                "native",
                 remote,
             ],
         )?;
@@ -450,9 +397,8 @@ impl WorkspaceRepository {
             position,
             binding: WorkspaceBinding {
                 scope: SpaceId::from_persistence(space_id),
-                backend_override: mux.backend,
+
                 remote_override: mux.remote,
-                hide_tmux_status,
                 unavailable: false,
                 selection: None,
                 selected_session_identity: None,
@@ -493,7 +439,7 @@ impl WorkspaceRepository {
             return Ok(false);
         };
         let color = color_to_hex(color);
-        let backend = backend_to_storage(mux.backend);
+        let backend = "native";
         let remote = remote_to_storage(&mux.remote)?;
         let conn = open_db(&self.path)?;
         let updated = conn.execute(
@@ -653,76 +599,7 @@ impl WorkspaceRepository {
         self.commit_binding_states(&[(scope, sessions.clone())])
     }
 
-    /// Record a membership mutation before calling the backend.
-    ///
-    /// One row per session, so operations on different sessions never collide and nothing a user
-    /// does can be refused because of a row they cannot see. A second mutation on the *same*
-    /// session supersedes the first, which is what reconciliation would do with one whose effect
-    /// it cannot observe anyway.
-    /// # Errors
-    /// Returns invalid mutation, missing Space, or journal write errors.
-    pub fn begin_binding_membership_mutation(
-        &mut self,
-        scope: SpaceId,
-        mutation: &BindingMembershipMutation,
-    ) -> WorkspaceResult<()> {
-        validate_binding_membership_mutation(mutation)?;
-        let mut conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to journal binding membership", &error)
-        })?;
-        let tx = conn
-            .transaction()
-            .map_err(|error| self.database_error("begin binding membership journal", &error))?;
-        self.validate_binding_scope(&tx, scope)?;
-        let stored = binding_membership_mutation_to_storage(mutation);
-        tx.execute(
-            "INSERT INTO workspace_pending_binding_operations
-                (space_id, operation, identity, old_name, new_name,
-                 display_name, explicit, cwd, initial_state)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, COALESCE(?9, '{}'))
-             ON CONFLICT(identity) DO UPDATE SET
-                space_id = excluded.space_id,
-                operation = excluded.operation,
-                old_name = excluded.old_name,
-                new_name = excluded.new_name,
-                display_name = excluded.display_name,
-                explicit = excluded.explicit,
-                cwd = excluded.cwd,
-                initial_state = excluded.initial_state",
-            params![
-                scope.persistence_value(),
-                stored.operation,
-                stored.identity,
-                stored.old_name,
-                stored.new_name,
-                stored.display_name,
-                stored.explicit,
-                stored.cwd,
-                stored.initial_state,
-            ],
-        )
-        .map_err(|error| self.database_error("journal binding membership", &error))?;
-        tx.commit()
-            .map_err(|error| self.database_error("commit binding membership journal", &error))?;
-        Ok(())
-    }
-
-    /// # Errors
-    /// Returns database read errors or invalid stored journal entries.
-    pub fn pending_binding_membership_mutations(
-        &mut self,
-        scope: SpaceId,
-    ) -> WorkspaceResult<Vec<PendingBindingMembershipMutation>> {
-        let conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to read binding membership", &error)
-        })?;
-        self.load_pending_binding_membership_mutations(&conn, scope)
-    }
-
-    /// Apply a completed remote mutation and clear its journal row in one transaction.
-    ///
-    /// The in-memory stores publish only after `SQLite` commits. A failure therefore leaves both the
-    /// old stores and the pending intent available for the next remote catalog operation.
+    /// Commit saved membership before publishing native topology.
     /// # Errors
     /// Returns invalid membership or transaction errors; live membership is published only after commit.
     pub fn commit_binding_membership_mutation(
@@ -741,114 +618,10 @@ impl WorkspaceRepository {
         let tx = conn
             .transaction()
             .map_err(|error| self.database_error("begin binding membership commit", &error))?;
-        self.require_pending_binding_membership_mutation(&tx, scope, mutation)?;
         self.write_binding_state(&tx, scope, &next)?;
-        self.delete_pending_binding_membership_mutation(&tx, mutation.identity())?;
         tx.commit()
             .map_err(|error| self.database_error("commit binding membership", &error))?;
         *sessions = next;
-        Ok(())
-    }
-
-    /// Settle every leftover mutation for a binding against a fresh backend snapshot.
-    ///
-    /// Each one is applied when the snapshot shows a session carrying its identity, and discarded
-    /// when it does not. Either way the row goes.
-    /// # Errors
-    /// Returns invalid membership or transaction errors; live membership is published only after commit.
-    pub fn reconcile_binding_membership_mutations(
-        &mut self,
-        scope: SpaceId,
-        memberships: &[BackendMembership],
-        sessions: &mut SessionMembership,
-    ) -> WorkspaceResult<bool> {
-        let mut conn = open_db(&self.path).map_err(|error| {
-            self.database_error("open database to reconcile binding membership", &error)
-        })?;
-        let tx = conn.transaction().map_err(|error| {
-            self.database_error("begin binding membership reconciliation", &error)
-        })?;
-        let pending = self.load_pending_binding_membership_mutations(&tx, scope)?;
-        if pending.is_empty() {
-            return Ok(false);
-        }
-        let mut next = sessions.clone();
-        for pending in &pending {
-            if pending
-                .mutation
-                .backend_operation()
-                .effect_occurred(memberships)
-            {
-                apply_binding_membership_mutation(&pending.mutation, &mut next)?;
-            }
-            self.delete_pending_binding_membership_mutation(&tx, pending.mutation.identity())?;
-        }
-        self.write_binding_state(&tx, scope, &next)?;
-        tx.commit().map_err(|error| {
-            self.database_error("commit binding membership reconciliation", &error)
-        })?;
-        *sessions = next;
-        Ok(true)
-    }
-
-    fn validate_binding_scope(&self, tx: &Transaction<'_>, scope: SpaceId) -> WorkspaceResult<()> {
-        space_exists(tx, scope)
-            .map_err(|error| self.database_error("validate binding membership scope", &error))?
-            .then_some(())
-            .ok_or_else(|| {
-                WorkspacePersistenceError::new(format!(
-                    "binding membership scope: Space {} is gone",
-                    scope.persistence_value()
-                ))
-            })
-    }
-
-    fn load_pending_binding_membership_mutations(
-        &self,
-        conn: &Connection,
-        scope: SpaceId,
-    ) -> WorkspaceResult<Vec<PendingBindingMembershipMutation>> {
-        let load = || -> rusqlite::Result<Vec<PendingBindingMembershipMutation>> {
-            let mut statement = conn.prepare(
-                "SELECT operation, identity, old_name, new_name, display_name, explicit, cwd, initial_state
-                 FROM workspace_pending_binding_operations
-                 WHERE space_id = ?1
-                 ORDER BY identity",
-            )?;
-            let rows = statement.query_map(params![scope.persistence_value()], |row| {
-                binding_membership_mutation_from_row(row, 0)
-                    .map(|mutation| PendingBindingMembershipMutation { mutation })
-            })?;
-            rows.collect()
-        };
-        load().map_err(|error| self.database_error("load binding membership journal", &error))
-    }
-
-    fn require_pending_binding_membership_mutation(
-        &self,
-        tx: &Transaction<'_>,
-        scope: SpaceId,
-        mutation: &BindingMembershipMutation,
-    ) -> WorkspaceResult<()> {
-        let pending = self.load_pending_binding_membership_mutations(tx, scope)?;
-        if !pending.iter().any(|pending| pending.mutation == *mutation) {
-            return Err(WorkspacePersistenceError::new(
-                "commit binding membership: pending mutation is missing or superseded",
-            ));
-        }
-        Ok(())
-    }
-
-    fn delete_pending_binding_membership_mutation(
-        &self,
-        tx: &Transaction<'_>,
-        identity: &str,
-    ) -> WorkspaceResult<()> {
-        tx.execute(
-            "DELETE FROM workspace_pending_binding_operations WHERE identity = ?1",
-            [identity],
-        )
-        .map_err(|error| self.database_error("delete binding membership journal", &error))?;
         Ok(())
     }
 
@@ -902,7 +675,6 @@ impl WorkspaceRepository {
                     || session.backend_name.contains('\0')
                     || session.display_name.contains('\0')
                     || session.cwd.contains('\0')
-                    || session.state.snoozed_until.is_some_and(|until| until < 0)
                     || session.state.last_activity_at.is_some_and(|at| at < 0)
                     || !identities.insert(session.identity.as_str())
                 {
@@ -1059,12 +831,15 @@ impl WorkspaceRepository {
                 }
                 create_default_binding(&tx)?;
             }
-            let LoadedSpaces {
-                spaces,
-                unsupported_ids,
-            } = load_spaces(&tx)?;
-            let pending_binding_scopes =
-                validate_pending_binding_operations(&tx, &spaces, &unsupported_ids)?;
+            // Retired saved work must never become a live session again. Compact order in
+            // the same transaction before validating membership.
+            tx.execute_batch("DELETE FROM workspace_sessions WHERE json_extract(session_state, '$.archived') = 1 OR json_extract(session_state, '$.deleted') = 1 OR json_extract(session_state, '$.hidden') = 1;
+                UPDATE workspace_sessions SET position = -position - 1;
+                WITH ordered AS (SELECT identity, ROW_NUMBER() OVER (PARTITION BY space_id ORDER BY position DESC) - 1 AS ordinal FROM workspace_sessions)
+                UPDATE workspace_sessions SET position = (SELECT ordinal FROM ordered WHERE ordered.identity = workspace_sessions.identity);")?;
+            let spaces = load_spaces(&tx)?;
+            // Limit: legacy backend journals remain in schema until its next revision; native
+            // sessions do not survive this process and cannot have partial external mutations.
             let space_ids = spaces
                 .iter()
                 .map(|space| space.id.persistence_value())
@@ -1077,9 +852,6 @@ impl WorkspaceRepository {
                 Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
             })? {
                 let (window_key, selected_space_id) = row?;
-                if unsupported_ids.contains(&selected_space_id) {
-                    continue;
-                }
                 if window_key.trim().is_empty()
                     || !space_ids.contains(&selected_space_id)
                     || selected_spaces
@@ -1095,7 +867,6 @@ impl WorkspaceRepository {
             Ok(WorkspaceSnapshot {
                 spaces,
                 selected_spaces,
-                pending_binding_scopes,
             })
         })();
         result.map_err(|error| {
@@ -1104,239 +875,32 @@ impl WorkspaceRepository {
     }
 }
 
-fn validate_pending_binding_operations(
-    tx: &Transaction<'_>,
-    spaces: &[WorkspaceSpace],
-    unsupported_ids: &HashSet<i64>,
-) -> rusqlite::Result<HashSet<SpaceId>> {
-    let scopes = spaces
-        .iter()
-        .map(|space| space.binding.scope)
-        .collect::<HashSet<_>>();
-    let mut statement = tx.prepare(
-        "SELECT space_id, operation, identity, old_name, new_name,
-                display_name, explicit, cwd, initial_state
-         FROM workspace_pending_binding_operations ORDER BY space_id, identity",
-    )?;
-    let mut pending_scopes = HashSet::new();
-    for row in statement.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            binding_membership_mutation_from_row(row, 1)?,
-        ))
-    })? {
-        let (space_id, _mutation) = row?;
-        if space_id <= 0 {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        if unsupported_ids.contains(&space_id) {
-            continue;
-        }
-        let scope = SpaceId::from_persistence(space_id);
-        // One Space can hold several intents now, so a repeat is expected rather than corrupt.
-        if !scopes.contains(&scope) {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        pending_scopes.insert(scope);
-    }
-    Ok(pending_scopes)
-}
-
 fn validate_binding_membership_mutation(
     mutation: &BindingMembershipMutation,
 ) -> WorkspaceResult<()> {
-    mutation
-        .backend_operation()
-        .validate()
-        .map_err(|_| WorkspacePersistenceError::new("binding membership mutation is invalid"))?;
     let valid_text = |value: &str| !value.is_empty() && !value.contains('\0');
-    let valid = match mutation {
-        BindingMembershipMutation::Create {
-            display_name,
-            cwd,
-            initial_state,
-            ..
-        } => {
-            !display_name.contains('\0')
-                && !cwd.contains('\0')
-                && initial_state.snoozed_until.is_none_or(|until| until >= 0)
-                && initial_state.last_activity_at.is_none_or(|at| at >= 0)
-        }
-        BindingMembershipMutation::Rename { display_name, .. } => valid_text(display_name),
-        BindingMembershipMutation::Ditch { .. } => true,
+    let names_valid = match mutation {
+        BindingMembershipMutation::Create { session_name, .. } => valid_text(session_name),
+        BindingMembershipMutation::Rename { new_name, .. } => valid_text(new_name),
     };
+    let valid = valid_text(mutation.identity())
+        && names_valid
+        && match mutation {
+            BindingMembershipMutation::Create {
+                display_name,
+                cwd,
+                initial_state,
+                ..
+            } => {
+                !display_name.contains('\0')
+                    && !cwd.contains('\0')
+                    && initial_state.last_activity_at.is_none_or(|at| at >= 0)
+            }
+            BindingMembershipMutation::Rename { display_name, .. } => valid_text(display_name),
+        };
     valid
         .then_some(())
         .ok_or_else(|| WorkspacePersistenceError::new("binding membership mutation is invalid"))
-}
-
-struct StoredBindingMembershipMutation<'a> {
-    operation: &'static str,
-    identity: &'a str,
-    old_name: Option<&'a str>,
-    new_name: Option<&'a str>,
-    display_name: Option<&'a str>,
-    explicit: Option<bool>,
-    cwd: Option<&'a str>,
-    initial_state: Option<String>,
-}
-
-fn binding_membership_mutation_to_storage(
-    mutation: &BindingMembershipMutation,
-) -> StoredBindingMembershipMutation<'_> {
-    match mutation {
-        BindingMembershipMutation::Create {
-            identity,
-            session_name,
-            display_name,
-            explicit,
-            cwd,
-            initial_state,
-        } => StoredBindingMembershipMutation {
-            operation: "create",
-            identity,
-            old_name: None,
-            new_name: Some(session_name),
-            display_name: Some(display_name),
-            explicit: Some(*explicit),
-            cwd: Some(cwd),
-            initial_state: Some(serde_json::json!(initial_state).to_string()),
-        },
-        BindingMembershipMutation::Rename {
-            identity,
-            old_name,
-            new_name,
-            display_name,
-            explicit,
-        } => StoredBindingMembershipMutation {
-            operation: "rename",
-            identity,
-            old_name: Some(old_name),
-            new_name: Some(new_name),
-            display_name: Some(display_name),
-            explicit: Some(*explicit),
-            cwd: None,
-            initial_state: None,
-        },
-        BindingMembershipMutation::Ditch { identity, old_name } => {
-            StoredBindingMembershipMutation {
-                operation: "ditch",
-                identity,
-                old_name: Some(old_name),
-                new_name: None,
-                display_name: None,
-                explicit: None,
-                cwd: None,
-                initial_state: None,
-            }
-        }
-    }
-}
-
-/// One binding membership journal row, as stored.
-struct StoredMembershipMutation {
-    operation: String,
-    identity: String,
-    old_name: Option<String>,
-    new_name: Option<String>,
-    display_name: Option<String>,
-    explicit: Option<i64>,
-    cwd: Option<String>,
-    initial_state: Option<String>,
-}
-
-impl StoredMembershipMutation {
-    /// The journal columns starting at `offset`.
-    fn read(row: &Row<'_>, offset: usize) -> rusqlite::Result<Self> {
-        let column = |index: usize| {
-            offset
-                .checked_add(index)
-                .ok_or(rusqlite::Error::InvalidColumnIndex(offset))
-        };
-        Ok(Self {
-            operation: row.get(column(0)?)?,
-            identity: row.get(column(1)?)?,
-            old_name: row.get(column(2)?)?,
-            new_name: row.get(column(3)?)?,
-            display_name: row.get(column(4)?)?,
-            explicit: row.get(column(5)?)?,
-            cwd: row.get(column(6)?)?,
-            initial_state: row.get(column(7)?)?,
-        })
-    }
-
-    fn mutation(self) -> WorkspaceResult<BindingMembershipMutation> {
-        let Self {
-            operation,
-            identity,
-            old_name,
-            new_name,
-            display_name,
-            explicit,
-            cwd,
-            initial_state,
-        } = self;
-        let explicit = explicit
-            .map(|value| {
-                bool_from_storage(value).map_err(|_| {
-                    WorkspacePersistenceError::new(
-                        "binding membership explicit-name state is invalid",
-                    )
-                })
-            })
-            .transpose()?;
-        let missing =
-            |what: &str| WorkspacePersistenceError::new(format!("binding membership {what}"));
-        let mutation = match operation.as_str() {
-            "create" if old_name.is_none() => BindingMembershipMutation::Create {
-                identity,
-                session_name: new_name.ok_or_else(|| missing("create is missing its name"))?,
-                display_name: display_name
-                    .ok_or_else(|| missing("create is missing its display name"))?,
-                explicit: explicit
-                    .ok_or_else(|| missing("create is missing its explicit-name state"))?,
-                cwd: cwd.unwrap_or_default(),
-                initial_state: serde_json::from_str(initial_state.as_deref().unwrap_or("{}"))
-                    .map_err(|_| missing("create has invalid initial state"))?,
-            },
-            "rename" if cwd.is_none() => BindingMembershipMutation::Rename {
-                identity,
-                old_name: old_name.ok_or_else(|| missing("rename is missing its old name"))?,
-                new_name: new_name.ok_or_else(|| missing("rename is missing its new name"))?,
-                display_name: display_name
-                    .ok_or_else(|| missing("rename is missing its display name"))?,
-                explicit: explicit
-                    .ok_or_else(|| missing("rename is missing its explicit-name state"))?,
-            },
-            "ditch"
-                if new_name.is_none()
-                    && display_name.is_none()
-                    && explicit.is_none()
-                    && cwd.is_none() =>
-            {
-                BindingMembershipMutation::Ditch {
-                    identity,
-                    old_name: old_name.ok_or_else(|| missing("ditch is missing its old name"))?,
-                }
-            }
-            _ => {
-                return Err(WorkspacePersistenceError::new(
-                    "binding membership operation is unknown",
-                ));
-            }
-        };
-        validate_binding_membership_mutation(&mutation)?;
-        Ok(mutation)
-    }
-}
-
-fn binding_membership_mutation_from_row(
-    row: &Row<'_>,
-    offset: usize,
-) -> rusqlite::Result<BindingMembershipMutation> {
-    StoredMembershipMutation::read(row, offset)?
-        .mutation()
-        .map_err(|_| rusqlite::Error::InvalidQuery)
 }
 
 fn space_exists(tx: &Transaction<'_>, space: SpaceId) -> rusqlite::Result<bool> {
@@ -1351,7 +915,7 @@ fn space_exists(tx: &Transaction<'_>, space: SpaceId) -> rusqlite::Result<bool> 
 
 /// Apply a mutation whose backend effect is known to have happened. Keyed on the identity, so it
 /// lands on the session it was issued for even if the name moved on in between.
-fn apply_binding_membership_mutation(
+pub(crate) fn apply_binding_membership_mutation(
     mutation: &BindingMembershipMutation,
     sessions: &mut SessionMembership,
 ) -> WorkspaceResult<()> {
@@ -1364,8 +928,7 @@ fn apply_binding_membership_mutation(
             cwd,
             initial_state,
         } => {
-            // A create that already landed is not an error: reconciliation replays the same
-            // mutation the commit path did, and both have to agree on the outcome.
+            // Reopening the same saved identity preserves its state and checkpoint.
             sessions.claim(WorkspaceSession {
                 identity: identity.clone(),
                 backend_name: session_name.clone(),
@@ -1380,7 +943,6 @@ fn apply_binding_membership_mutation(
         }
         BindingMembershipMutation::Rename {
             identity,
-            old_name: _,
             new_name,
             display_name,
             explicit,
@@ -1392,9 +954,6 @@ fn apply_binding_membership_mutation(
             }
             sessions.observe_backend_name(identity, new_name);
             sessions.set_display_name(identity, display_name, *explicit);
-        }
-        BindingMembershipMutation::Ditch { .. } => {
-            // Closing a terminal attachment does not delete its saved session.
         }
     }
     Ok(())
@@ -1423,23 +982,22 @@ fn create_default_binding(tx: &Transaction<'_>) -> rusqlite::Result<WorkspaceBin
     let remote_id = new_remote_space_id(tx)?;
     tx.execute(
         "INSERT INTO workspace_spaces
-            (remote_id, name, icon, color, tint_sidebar, position, backend, hide_tmux_status)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 0)",
+            (remote_id, name, icon, color, tint_sidebar, position, backend)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
         params![
             remote_id,
             DEFAULT_SPACE_NAME,
             DEFAULT_SPACE_ICON,
             color_to_hex(DEFAULT_SPACE_COLOR),
             i64::from(DEFAULT_TINT_SIDEBAR),
-            backend_to_storage(None),
+            "native",
         ],
     )?;
     let space_id = tx.last_insert_rowid();
     Ok(WorkspaceBinding {
         scope: SpaceId::from_persistence(space_id),
-        backend_override: None,
+
         remote_override: SpaceRemoteOverride::Inherit,
-        hide_tmux_status: false,
         unavailable: false,
         selection: None,
         selected_session_identity: None,

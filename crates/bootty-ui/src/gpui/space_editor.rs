@@ -1,6 +1,6 @@
 //! Host-neutral GPUI presentation contract for creating and editing Spaces.
 //!
-//! The host owns the draft, validation, profile lookup, and remote catalog lifecycle. This view
+//! The host owns the draft, validation, and profile lookup. This view
 //! receives an immutable projection and emits typed edits containing only primitive values and
 //! opaque IDs.
 
@@ -16,7 +16,6 @@ use gpui_kit::component::{
     h_flex,
     input::{Input, InputEvent, InputState},
     radio::{Radio, RadioGroup},
-    spinner::Spinner,
     switch::Switch,
     v_flex,
 };
@@ -45,23 +44,6 @@ pub struct SpaceEditorIcon {
     pub selected: bool,
 }
 
-/// The remote catalog projection for the selected location.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RemoteSpaceSnapshot {
-    Hidden,
-    Loading,
-    Failed {
-        message: String,
-    },
-    Ready {
-        spaces: Vec<SpaceEditorChoice>,
-        warning: Option<String>,
-        new_name: String,
-        create_backends: Vec<SpaceEditorChoice>,
-        can_create: bool,
-    },
-}
-
 /// A complete, disposable Space editor projection for one frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpaceEditorSnapshot {
@@ -72,26 +54,15 @@ pub struct SpaceEditorSnapshot {
     pub icons: Vec<SpaceEditorIcon>,
     pub color: [u8; 3],
     pub tint_sidebar: bool,
-    /// `None` IDs represent the host's inherited/default backend choice.
-    pub backends: Vec<OptionalSpaceEditorChoice>,
-    pub backend_enabled: bool,
     pub locations: Vec<SpaceEditorChoice>,
     pub location_notice: Option<String>,
-    pub remote: RemoteSpaceSnapshot,
+    /// Why the selected remote location cannot hold a Space.
+    pub remote_error: Option<String>,
     pub can_save: bool,
     pub colors: SpaceEditorColors,
 }
 
 /// A choice whose value may explicitly inherit the host default.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OptionalSpaceEditorChoice {
-    pub id: Option<String>,
-    pub label: String,
-    pub selected: bool,
-    pub enabled: bool,
-}
-
-/// Typed edits and actions emitted for the authoritative host owner to apply.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SpaceEditorIntent {
     SetName(String),
@@ -99,13 +70,7 @@ pub enum SpaceEditorIntent {
     SelectIcon(String),
     SetColor([u8; 3]),
     SetTintSidebar(bool),
-    SelectBackend(Option<String>),
     SelectLocation(String),
-    SelectRemoteSpace(String),
-    RetryRemoteSpaces,
-    SetNewRemoteSpaceName(String),
-    SelectNewRemoteSpaceBackend(String),
-    CreateRemoteSpace { name: String, backend: String },
     Save,
     Close,
 }
@@ -126,7 +91,6 @@ pub struct SpaceEditorColors {
 enum EditorField {
     Name,
     IconSearch,
-    NewRemoteName,
 }
 
 #[derive(Clone, Copy)]
@@ -140,10 +104,9 @@ struct TextFieldSpec<'a> {
 }
 
 // Keep the dialog comfortable at normal sizes while allowing the content pane to take over
-// scrolling when a window is short or a remote catalog is large.
+// scrolling when a window is short.
 const CONTROL_MAX_WIDTH_REMS: f32 = 35.0;
 const ICON_GRID_MAX_HEIGHT_REMS: f32 = 9.25;
-const REMOTE_LIST_MAX_HEIGHT_REMS: f32 = 10.25;
 
 pub struct GpuiSpaceEditor {
     snapshot: SpaceEditorSnapshot,
@@ -152,8 +115,6 @@ pub struct GpuiSpaceEditor {
     name_input_state: Option<Entity<SpaceEditorInputState>>,
     icon_search_input: Option<Entity<InputState>>,
     icon_search_input_state: Option<Entity<SpaceEditorInputState>>,
-    new_remote_name_input: Option<Entity<InputState>>,
-    new_remote_name_input_state: Option<Entity<SpaceEditorInputState>>,
     color_picker: Option<Entity<ColorPickerState>>,
     _color_picker_subscription: Option<Subscription>,
 }
@@ -185,7 +146,6 @@ impl SpaceEditorInputState {
                 let intent = match self.field {
                     EditorField::Name => SpaceEditorIntent::SetName(value),
                     EditorField::IconSearch => SpaceEditorIntent::SetIconSearch(value),
-                    EditorField::NewRemoteName => SpaceEditorIntent::SetNewRemoteSpaceName(value),
                 };
                 let _ = self.owner.update(cx, |editor, cx| {
                     // Search and draft fields are local interaction state. Keep the projection
@@ -198,16 +158,6 @@ impl SpaceEditorInputState {
                         (EditorField::IconSearch, SpaceEditorIntent::SetIconSearch(value)) => {
                             editor.snapshot.icon_search.clone_from(value);
                         }
-                        (
-                            EditorField::NewRemoteName,
-                            SpaceEditorIntent::SetNewRemoteSpaceName(value),
-                        ) => {
-                            if let RemoteSpaceSnapshot::Ready { new_name, .. } =
-                                &mut editor.snapshot.remote
-                            {
-                                new_name.clone_from(value);
-                            }
-                        }
                         _ => {}
                     }
                     cx.emit(intent);
@@ -215,7 +165,7 @@ impl SpaceEditorInputState {
             }
             InputEvent::PressEnter { .. } => {
                 let _ = self.owner.update(cx, |editor, cx| {
-                    if let Some(intent) = editor.field_enter_intent(self.field) {
+                    if let Some(intent) = editor.field_enter_intent() {
                         cx.emit(intent);
                     }
                 });
@@ -252,8 +202,6 @@ impl GpuiSpaceEditor {
             name_input_state: None,
             icon_search_input: None,
             icon_search_input_state: None,
-            new_remote_name_input: None,
-            new_remote_name_input_state: None,
             color_picker: None,
             _color_picker_subscription: None,
         }
@@ -282,17 +230,6 @@ impl GpuiSpaceEditor {
             window,
             cx,
         );
-        let new_remote_name = match &snapshot.remote {
-            RemoteSpaceSnapshot::Ready { new_name, .. } => new_name.clone(),
-            _ => String::new(),
-        };
-        let (new_remote_name_input, new_remote_name_input_state) = Self::create_input(
-            new_remote_name,
-            "new remote Space",
-            EditorField::NewRemoteName,
-            window,
-            cx,
-        );
         let color = snapshot.color;
         let color_picker =
             cx.new(|cx| ColorPickerState::new(window, cx).default_value(hsla_from_rgb(color)));
@@ -313,8 +250,6 @@ impl GpuiSpaceEditor {
             name_input_state: Some(name_input_state),
             icon_search_input: Some(icon_search_input),
             icon_search_input_state: Some(icon_search_input_state),
-            new_remote_name_input: Some(new_remote_name_input),
-            new_remote_name_input_state: Some(new_remote_name_input_state),
             color_picker: Some(color_picker),
             _color_picker_subscription: Some(color_picker_subscription),
         }
@@ -423,29 +358,8 @@ impl GpuiSpaceEditor {
         cx.emit(SpaceEditorIntent::Close);
     }
 
-    fn field_enter_intent(&self, field: EditorField) -> Option<SpaceEditorIntent> {
-        if field == EditorField::NewRemoteName {
-            self.remote_create_request()
-                .map(|(name, backend)| SpaceEditorIntent::CreateRemoteSpace { name, backend })
-        } else {
-            self.snapshot.can_save.then_some(SpaceEditorIntent::Save)
-        }
-    }
-
-    fn remote_create_request(&self) -> Option<(String, String)> {
-        let RemoteSpaceSnapshot::Ready {
-            new_name,
-            create_backends,
-            can_create,
-            ..
-        } = &self.snapshot.remote
-        else {
-            return None;
-        };
-        let backend = create_backends
-            .iter()
-            .find(|choice| choice.selected && choice.enabled)?;
-        can_create.then(|| (new_name.trim().to_owned(), backend.id.clone()))
+    fn field_enter_intent(&self) -> Option<SpaceEditorIntent> {
+        self.snapshot.can_save.then_some(SpaceEditorIntent::Save)
     }
 
     fn text_field(
@@ -468,10 +382,6 @@ impl GpuiSpaceEditor {
                 .icon_search_input
                 .as_ref()
                 .zip(self.icon_search_input_state.as_ref()),
-            EditorField::NewRemoteName => self
-                .new_remote_name_input
-                .as_ref()
-                .zip(self.new_remote_name_input_state.as_ref()),
         };
         let input = if let Some((input, state)) = retained {
             state.update(cx, |state, cx| state.sync_external_value(value, window, cx));
@@ -590,50 +500,6 @@ impl GpuiSpaceEditor {
                         values[0], values[1], values[2]
                     ))
                     .accessibility_label("Space color"),
-            )
-            .into_any_element()
-    }
-
-    fn backend_choices(&self, cx: &Context<Self>) -> AnyElement {
-        let selected_index = self
-            .snapshot
-            .backends
-            .iter()
-            .position(|choice| choice.selected);
-        let choices = self.snapshot.backends.iter().map(|choice| {
-            let id = choice.id.clone();
-            let enabled = self.snapshot.backend_enabled && choice.enabled;
-            choice_radio(
-                format!(
-                    "space-backend-{}",
-                    choice.id.as_deref().unwrap_or("default")
-                ),
-                &choice.label,
-                choice.selected,
-                enabled,
-            )
-            .on_click(cx.listener(move |_, checked: &bool, _, cx| {
-                if enabled && *checked {
-                    cx.emit(SpaceEditorIntent::SelectBackend(id.clone()));
-                }
-            }))
-        });
-        div()
-            .id("space-backend-group")
-            .w_full()
-            .max_w(rems(CONTROL_MAX_WIDTH_REMS))
-            .min_w_0()
-            .flex()
-            .flex_wrap()
-            .gap_1()
-            .overflow_x_hidden()
-            .role(gpui_kit::Role::RadioGroup)
-            .aria_label("Backend choices")
-            .child(
-                RadioGroup::horizontal("space-backend-radios")
-                    .w_full()
-                    .selected_index(selected_index)
-                    .children(choices),
             )
             .into_any_element()
     }
@@ -833,191 +699,6 @@ impl GpuiSpaceEditor {
             )
             .into_any_element()
     }
-
-    fn remote_space_choices(&self, spaces: &[SpaceEditorChoice], cx: &Context<Self>) -> AnyElement {
-        let colors = self.snapshot.colors;
-        let selected_space_index = spaces.iter().position(|choice| choice.selected);
-        let space_rows = spaces
-            .iter()
-            .map(|choice| {
-                let id = choice.id.clone();
-                let enabled = choice.enabled;
-                choice_radio(
-                    format!("remote-space-{}", choice.id),
-                    &choice.label,
-                    choice.selected,
-                    enabled,
-                )
-                .when_some(choice.detail.clone(), |button, detail| {
-                    button.child(div().text_xs().child(detail))
-                })
-                .on_click(cx.listener(move |_, checked: &bool, _, cx| {
-                    if enabled && *checked {
-                        cx.emit(SpaceEditorIntent::SelectRemoteSpace(id.clone()));
-                    }
-                }))
-            })
-            .collect::<Vec<_>>();
-        div()
-            .id("space-remote-list")
-            .w_full()
-            .max_h(rems(REMOTE_LIST_MAX_HEIGHT_REMS))
-            .min_h(rems(2.125))
-            .min_w_0()
-            .p_1()
-            .rounded(gpui_kit::component::Theme::global(cx).radius)
-            .border_1()
-            .border_color(colors.border)
-            .bg(colors.pane)
-            .overflow_x_hidden()
-            .overflow_y_scroll()
-            .role(gpui_kit::Role::RadioGroup)
-            .aria_label("Remote Space choices")
-            .child(
-                RadioGroup::vertical("space-remote-radios")
-                    .w_full()
-                    .selected_index(selected_space_index)
-                    .children(space_rows),
-            )
-            .into_any_element()
-    }
-
-    fn remote_create_controls(
-        &self,
-        new_name: &str,
-        create_backends: &[SpaceEditorChoice],
-        can_create: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let selected_backend_index = create_backends.iter().position(|choice| choice.selected);
-        let new_name_field = self.text_field(
-            TextFieldSpec {
-                id: "space-new-remote-name",
-                value: new_name,
-                placeholder: "new remote Space",
-                aria_label: "New remote Space name",
-                field: EditorField::NewRemoteName,
-                validation_error: None,
-            },
-            window,
-            cx,
-        );
-        let backend_rows = create_backends
-            .iter()
-            .map(|choice| {
-                let id = choice.id.clone();
-                let enabled = choice.enabled;
-                choice_radio(
-                    format!("remote-create-backend-{}", choice.id),
-                    &choice.label,
-                    choice.selected,
-                    enabled,
-                )
-                .on_click(cx.listener(move |_, checked: &bool, _, cx| {
-                    if enabled && *checked {
-                        cx.emit(SpaceEditorIntent::SelectNewRemoteSpaceBackend(id.clone()));
-                    }
-                }))
-            })
-            .collect::<Vec<_>>();
-        let request = self.remote_create_request();
-        div()
-            .mt_3()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .flex_wrap()
-            .items_center()
-            .gap_2()
-            .child(div().min_w_0().flex_1().child(new_name_field))
-            .child(
-                div()
-                    .id("space-remote-create-backend-group")
-                    .min_w_0()
-                    .flex()
-                    .flex_wrap()
-                    .gap_1()
-                    .role(gpui_kit::Role::RadioGroup)
-                    .aria_label("New remote Space backend choices")
-                    .child(
-                        RadioGroup::horizontal("space-remote-create-backend-radios")
-                            .selected_index(selected_backend_index)
-                            .children(backend_rows),
-                    ),
-            )
-            .child(
-                editor_button("space-create-remote", "Create", can_create).on_click(cx.listener(
-                    move |_, _, _, cx| {
-                        if let Some((name, backend)) = request.clone() {
-                            cx.emit(SpaceEditorIntent::CreateRemoteSpace { name, backend });
-                        }
-                    },
-                )),
-            )
-            .into_any_element()
-    }
-
-    fn remote_editor(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let colors = self.snapshot.colors;
-        match &self.snapshot.remote {
-            RemoteSpaceSnapshot::Hidden => None,
-            RemoteSpaceSnapshot::Loading => Some(
-                div()
-                    .id("space-remote-loading")
-                    .mb_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .text_color(colors.muted)
-                    .child(Spinner::new())
-                    .child("Loading remote Spaces…")
-                    .into_any_element(),
-            ),
-            RemoteSpaceSnapshot::Failed { message } => Some(
-                div()
-                    .id("space-remote-error")
-                    .flex()
-                    .flex_col()
-                    .mb_3()
-                    .gap_2()
-                    .child(Alert::error("space-remote-error-message", message.clone()))
-                    .child(
-                        editor_button("space-remote-retry", "Retry", true)
-                            .mt_2()
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(SpaceEditorIntent::RetryRemoteSpaces);
-                            })),
-                    )
-                    .into_any_element(),
-            ),
-            RemoteSpaceSnapshot::Ready {
-                spaces,
-                warning,
-                new_name,
-                create_backends,
-                can_create,
-            } => Some(
-                div()
-                    .w_full()
-                    .max_w(rems(CONTROL_MAX_WIDTH_REMS))
-                    .min_w_0()
-                    .mb_3()
-                    .when_some(warning.clone(), |editor, warning| {
-                        editor.child(Alert::warning("space-remote-warning", warning).banner())
-                    })
-                    .child(self.remote_space_choices(spaces, cx))
-                    .child(self.remote_create_controls(
-                        new_name,
-                        create_backends,
-                        *can_create,
-                        window,
-                        cx,
-                    ))
-                    .into_any_element(),
-            ),
-        }
-    }
 }
 
 impl EventEmitter<SpaceEditorIntent> for GpuiSpaceEditor {}
@@ -1047,10 +728,7 @@ impl Render for GpuiSpaceEditor {
             cx,
         );
         let appearance_group = self.appearance_group(window, cx);
-        let mut connection_children = vec![
-            Self::labeled("Backend", self.backend_choices(cx)),
-            Self::labeled("Location", self.location_choices(cx)),
-        ];
+        let mut connection_children = vec![Self::labeled("Location", self.location_choices(cx))];
         if let Some(notice) = self.snapshot.location_notice.clone() {
             connection_children.push(
                 Alert::info("space-location-notice", notice)
@@ -1058,8 +736,12 @@ impl Render for GpuiSpaceEditor {
                     .into_any_element(),
             );
         }
-        if let Some(remote) = self.remote_editor(window, cx) {
-            connection_children.push(Self::labeled("Remote Space", remote));
+        if let Some(message) = self.snapshot.remote_error.clone() {
+            connection_children.push(
+                Alert::error("space-remote-error-message", message)
+                    .banner()
+                    .into_any_element(),
+            );
         }
         let connection_group =
             self.section_group("space-editor-connection", "Connection", connection_children);
@@ -1114,17 +796,6 @@ fn choice_radio(id: impl Into<SharedString>, label: &str, selected: bool, enable
         .debug_selector(move || debug_id.to_string())
         .label(label.to_owned())
         .checked(selected)
-        .disabled(!enabled)
-}
-
-fn editor_button(id: impl Into<SharedString>, label: &'static str, enabled: bool) -> Button {
-    let id = id.into();
-    let debug_id = id.clone();
-    Button::new(id)
-        .debug_selector(move || debug_id.to_string())
-        .label(label)
-        .small()
-        .outline()
         .disabled(!enabled)
 }
 

@@ -8,37 +8,30 @@ so replacing a pane cannot redirect a pending action to another process.
 
 `bootty command NAME` and discovered commands (`bootty NAME`) both take
 `--target HANDLE@GENERATION`, before or after the command's arguments. The
-target's kind comes from the command's description. To find a conversation,
-read the current Space, then list its conversations:
+target's kind comes from the command's description. To find the current
+Space's target:
 
 ```sh
 bootty --json command resource.current binding
-bootty --json command agents.native.list --target 'SPACE_HANDLE@GENERATION'
-bootty command agents.native.status --target native:claude:26@43 native:claude:26 43
 ```
 
-Each listed conversation's `id` and `generation` form its target.
-
-A session or conversation also has a short name, like `bootty-7c`: its project's
-name and the start of a hash of its identity. The sidebar shows a session's name
-in its tooltip, and `list_agents` and `agents.native.activities` list each
-conversation's `name`. A name works as `--target`, and resolves to the exact target
-and its current generation when the command runs; any unambiguous start of the hash
-works, as a short Git commit id does. For conversation commands, the name may also
-stand in for the `id` argument, with any `generation`:
+A session also has a short name, like `bootty-7c`: its project's name and the
+start of a hash of its identity. The sidebar shows a session's name in its
+tooltip. A name works as `--target`, and resolves to the exact target and its
+current generation when the command runs; any unambiguous start of the hash
+works, as a short Git commit id does:
 
 ```sh
-bootty command agents.native.status --target bootty-7c bootty-7c 0
 bootty command session.close --target bootty-a3
 ```
 
 ## Wait for a condition
 
 ```sh
-bootty wait agents.pi.state --topic agents.pi.event --pointer /status --equals idle
+bootty wait jobs.list --topic jobs.changed --pointer /0/status/state --equals exited
 ```
 
-Use the topic returned by `system.describe` for the installed provider. `--equals`
+Use a topic returned by `system.describe`. `--equals`
 accepts JSON (numbers, booleans, arrays or objects); other input is a string.
 `--pointer` selects a value using JSON Pointer. Arguments for the snapshot command
 follow `--`. `--target` accepts a target object as JSON; otherwise the current
@@ -68,13 +61,13 @@ completion of a catalog invocation; it is not a general process exit handle.
 
 `bootty doctor` reports the exact selected instance, control protocol and limits,
 configuration identity, live binding generations, backend capabilities, session
-counts, reported agents and the last application error. Availability reflects
+counts and the last application error. Availability reflects
 backend observations already held by the owner; it does not probe or launch a
 remote session. An unavailable binding produces exit status 7. Without a running
 owner the command fails unless `--start` is explicitly supplied.
 
 `bootty command doctor` exposes the workspace portion through the shared command
-catalog, including socket and integration callers. The CLI adds control endpoint
+catalog, including socket callers. The CLI adds control endpoint
 and protocol information around that same result.
 
 ## Run a host job

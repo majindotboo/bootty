@@ -1,5 +1,5 @@
 use super::{BindingRuntime, PendingGeneratedName, WorkspaceRuntime};
-use crate::{RepaintHandle, command::MuxCommand, controller::NewMuxSessionRequest};
+use crate::{RepaintHandle, command::MuxCommand, executor};
 use crate::{repository::WorkspacePersistenceError, session_names};
 
 fn resolve_session_cwd(cwd: &str, remote: bool) -> String {
@@ -46,18 +46,6 @@ impl BindingRuntime {
                 .iter()
                 .any(|session| session.name == pending.name)
         });
-        let Some(result) = self.mux.poll_command() else {
-            return;
-        };
-        if result.is_err() {
-            self.pending_generated_names.clear();
-            if self.tracks_session_membership() {
-                self.membership_reconciliation_waiting_for_refresh = true;
-                self.mux.refresh_on_next_frame();
-            }
-        } else if self.tracks_session_membership() {
-            self.membership_reconciliation_ready = true;
-        }
     }
 
     pub fn clear_pending_generated_names(&mut self) {
@@ -74,6 +62,35 @@ fn session_root(cwd: &str) -> String {
 }
 
 impl WorkspaceRuntime {
+    /// Release a session only after an authoritative successful close, before topology publication.
+    pub(crate) fn release_closed_session(
+        &mut self,
+        scope: crate::controller::SpaceId,
+        command: &crate::command::MuxCommand,
+        result: &crate::controller::MuxCommandResult,
+    ) -> Result<(), WorkspacePersistenceError> {
+        let crate::command::MuxCommand::DitchSession { session_id } = command else {
+            return Ok(());
+        };
+        let Some(binding) = self.binding(scope) else {
+            return Ok(());
+        };
+        if !result
+            .as_ref()
+            .is_ok_and(|completion| completion.matches_config(binding.multiplexer()))
+        {
+            return Ok(());
+        }
+        let identity = self.session_identity(scope, session_id);
+        if let Some(identity) = identity
+            && let Some(mut candidate) = self.binding_state_candidate(scope)
+        {
+            candidate.sessions.release(&identity);
+            self.commit_binding_state_candidate(candidate)?;
+        }
+        Ok(())
+    }
+
     fn taken_session_names(&self, keep: Option<&str>) -> Vec<String> {
         self.all_bindings()
             .flat_map(|binding| {
@@ -120,7 +137,7 @@ impl WorkspaceRuntime {
         let MuxCommand::CreateProjectSession {
             session_id,
             cwd,
-            tag,
+            tag: _,
             argv: None,
         } = command
         else {
@@ -135,30 +152,33 @@ impl WorkspaceRuntime {
             explicit: false,
             initial_state: crate::session_membership::SessionState::default(),
         };
-        let membership = self
-            .begin_active_binding_membership_mutation(command, Some(&pending_name))?
-            .is_some();
-        if !membership && self.active.binding.tracks_session_membership() {
-            return Ok(false);
-        }
+        let membership =
+            self.begin_active_binding_membership_mutation(command, Some(&pending_name))?;
         self.active
             .binding
             .pending_generated_names
             .insert(session_id.clone(), pending_name);
-        let config = self.active.binding.multiplexer.clone();
-        self.active.binding.mux.create_project_session(
-            NewMuxSessionRequest {
-                session_id: session_id.clone(),
-                cwd: cwd.clone(),
-                tag: tag.clone(),
-            },
+        let pending = executor::submit_authoritative_command(
+            self,
             repaint,
-            &config,
+            command.clone(),
+            membership.map(Box::new),
+            None,
         );
-        if self.active.binding.tracks_session_membership()
-            && self.active.binding.membership_completion_is_immediate()
-        {
-            self.active.binding.membership_reconciliation_ready = true;
+        let result = pending
+            .result
+            .try_recv()
+            .map_err(|error| WorkspacePersistenceError::operation(error.to_string()))?;
+        let (result, sync_error) = executor::complete_authoritative_command(
+            self,
+            pending.scope,
+            command,
+            pending.membership.as_deref(),
+            result,
+        )?;
+        result.map_err(|error| WorkspacePersistenceError::operation(error.to_string()))?;
+        if let Some(error) = sync_error {
+            return Err(WorkspacePersistenceError::operation(error));
         }
         Ok(true)
     }
@@ -173,16 +193,6 @@ impl WorkspaceRuntime {
         title: &str,
     ) -> Result<bool, WorkspacePersistenceError> {
         validate_session_title(title)?;
-        if self
-            .repository
-            .pending_binding_membership_mutations(scope)?
-            .iter()
-            .any(|operation| operation.mutation().identity() == identity)
-        {
-            return Err(WorkspacePersistenceError::operation(
-                "this session has a pending terminal operation",
-            ));
-        }
         let Some(mut candidate) = self.binding_state_candidate(scope) else {
             return Err(WorkspacePersistenceError::operation(
                 "the Space no longer exists",
@@ -202,9 +212,9 @@ impl WorkspaceRuntime {
         self.commit_binding_state_candidate(candidate).map(|_| true)
     }
 
-    /// Commit saved lifecycle and visibility independently of a backend attachment.
+    /// Commit saved presentation and visibility independently of a backend attachment.
     /// # Errors
-    /// Rejects foreign identities, invalid deadlines, pending operations and failed writes.
+    /// Rejects foreign identities, invalid activity, pending operations and failed writes.
     pub fn set_session_state(
         &mut self,
         scope: crate::controller::SpaceId,
@@ -213,25 +223,9 @@ impl WorkspaceRuntime {
     ) -> Result<bool, WorkspacePersistenceError> {
         use crate::session_membership::SessionStateChange;
 
-        if matches!(change, SessionStateChange::SnoozeUntil(until) if until < 0) {
-            return Err(WorkspacePersistenceError::operation(
-                "snooze deadline must be non-negative absolute UTC seconds",
-            ));
-        }
-        if matches!(change, SessionStateChange::RecordActivity { at, now } | SessionStateChange::AcceptInput { at, now } if at < 0 || at > now)
-        {
+        if matches!(change, SessionStateChange::RecordActivity { at, now } if at < 0 || at > now) {
             return Err(WorkspacePersistenceError::operation(
                 "activity must be non-negative UTC seconds no later than the accepted clock",
-            ));
-        }
-        if self
-            .repository
-            .pending_binding_membership_mutations(scope)?
-            .iter()
-            .any(|operation| operation.mutation().identity() == identity)
-        {
-            return Err(WorkspacePersistenceError::operation(
-                "this session has a pending terminal operation",
             ));
         }
         let Some(mut candidate) = self.binding_state_candidate(scope) else {
@@ -239,34 +233,11 @@ impl WorkspaceRuntime {
                 "the Space no longer exists",
             ));
         };
-        let Some(saved) = candidate.sessions.get(identity) else {
+        let Some(_) = candidate.sessions.get(identity) else {
             return Err(WorkspacePersistenceError::operation(
                 "this Space does not hold the saved session",
             ));
         };
-        if saved.state.deleted
-            && !matches!(
-                change,
-                SessionStateChange::Delete | SessionStateChange::RestoreDeleted
-            )
-        {
-            return Err(WorkspacePersistenceError::operation(
-                "restore the deleted session before changing its state",
-            ));
-        }
-        if change == SessionStateChange::Delete {
-            if self
-                .binding(scope)
-                .and_then(|binding| binding.session_attachment(identity))
-                .is_some()
-            {
-                return Err(WorkspacePersistenceError::operation(
-                    "Close the session before deleting its saved history. Archive keeps it recoverable.",
-                ));
-            }
-            candidate.sessions.release(identity);
-            return self.commit_binding_state_candidate(candidate).map(|_| true);
-        }
         if !candidate.sessions.set_state(identity, change) {
             return Ok(false);
         }

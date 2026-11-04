@@ -1,3 +1,4 @@
+use bootty_os::spawn::CommandSpawn as _;
 use std::{
     env, fs,
     path::{Path, PathBuf},
@@ -42,7 +43,7 @@ pub fn ensure_xterm_bootty_terminfo_in(state_dir: &Path) -> Result<PathBuf> {
         .arg("-o")
         .arg(&db_dir)
         .arg(&source_path)
-        .output()
+        .bootty_output()
         .context("run tic to compile xterm-bootty terminfo")?;
     anyhow::ensure!(
         output.status.success(),

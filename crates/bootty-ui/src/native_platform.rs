@@ -44,6 +44,9 @@ impl BoottyPlatform {
     }
 }
 impl Platform for BoottyPlatform {
+    fn platform_info(&self) -> gpui_kit::PlatformInfo {
+        self.inner.platform_info()
+    }
     fn text_system(&self) -> Arc<dyn PlatformTextSystem> {
         self.text_system.clone()
     }

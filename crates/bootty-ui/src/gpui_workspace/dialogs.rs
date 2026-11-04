@@ -48,18 +48,8 @@ impl WorkspaceDialogs {
         self.creation_visible.then(|| self.creation_view.clone())
     }
 
-    pub fn new(
-        state: &crate::AppState,
-        window: &mut Window,
-        cx: &mut Context<GpuiWorkspace>,
-    ) -> Self {
-        let sender = state.app_command_sender(bootty_control::Caller::Internal);
-        let codex = &state.config().agents.codex;
-        let view = cx.new(|cx| {
-            let mut view = DialogView::new(window, cx);
-            view.set_completion_sender(sender.clone());
-            view
-        });
+    pub fn new(window: &mut Window, cx: &mut Context<GpuiWorkspace>) -> Self {
+        let view = cx.new(|cx| DialogView::new(window, cx));
         let dialog_subscription = cx.subscribe(&view, |this, _, intent: &DialogIntent, cx| {
             let mut effects = Vec::new();
             if intent.dialog_id().0 == crate::presentation::dialogs::TERMINAL_FIND_ID {
@@ -70,12 +60,7 @@ impl WorkspaceDialogs {
             this.pending_effects.extend(effects);
             cx.notify();
         });
-        let creation_view = cx.new(|cx| {
-            let mut view = DialogView::new(window, cx);
-            view.set_completion_sender(sender);
-            view.configure_speech_account(codex, cx);
-            view
-        });
+        let creation_view = cx.new(|cx| DialogView::new(window, cx));
         let creation_subscription =
             cx.subscribe(&creation_view, |this, _, intent: &DialogIntent, cx| {
                 let mut effects = Vec::new();
@@ -119,7 +104,7 @@ impl WorkspaceDialogs {
         let opening_creation = !self.creation_visible;
         self.creation_visible = underlay.is_some()
             || matches!(&projection,
-            Some(DialogProjection::Dialog(spec)) if spec.placement == crate::gpui::DialogPlacement::FullView || spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline);
+            Some(DialogProjection::Dialog(spec)) if is_creation_form(spec));
         if !self.creation_visible {
             self.creation_view
                 .update(cx, |view, cx| view.present(None, window, cx));
@@ -177,9 +162,7 @@ impl WorkspaceDialogs {
         cx: &mut Context<GpuiWorkspace>,
     ) {
         let id = spec.id.clone();
-        let new_session = spec.placement == crate::gpui::DialogPlacement::FullView
-            || id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline;
-        if new_session {
+        if is_creation_form(&spec) {
             let changed = self.creation_view.read(cx).root_id().as_ref() != Some(&id);
             self.creation_view
                 .update(cx, |view, cx| view.present(Some(spec), window, cx));
@@ -307,6 +290,11 @@ impl WorkspaceDialogs {
         });
         self.presentation = Some(Presentation::SpaceEditor);
     }
+}
+
+/// The new-session form renders in the workspace; its pickers and every other dialog are modal.
+fn is_creation_form(spec: &DialogSpec) -> bool {
+    spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline
 }
 
 const fn space_editor_colors(colors: Colors) -> SpaceEditorColors {

@@ -1,5 +1,6 @@
 //! Code editors installed on this computer, for opening a local file or project in one.
 
+use bootty_os::spawn::CommandSpawn as _;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -95,7 +96,7 @@ impl Editor {
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
+            .bootty_status()
             .map_err(|error| format!("{}: {error}", self.program.display()))?;
         if status.success() {
             Ok(())

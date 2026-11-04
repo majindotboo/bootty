@@ -371,7 +371,6 @@ impl AppState {
                 return 0;
             }
         };
-        self.revoke_current_terminal_agent_recovery();
         let activity = self.current_terminal_activity_identity();
         if let Err(error) = self
             .workspace
@@ -429,10 +428,7 @@ impl AppState {
             if interaction.consumed {
                 continue;
             }
-            if let Some(resolved) = self
-                .keymap_runtime
-                .invocation_for_input(input, self.workspace.multiplexer_backend())
-            {
+            if let Some(resolved) = self.keymap_runtime.invocation_for_input(input) {
                 let invocation = resolved.invocation;
                 let _ = self.dispatch_command(invocation, viewport, effects);
                 if resolved.consumed {
@@ -473,7 +469,6 @@ impl AppState {
     ) -> bool {
         match action {
             SidebarAction::ToggleGrouping => return self.toggle_session_grouping(effects),
-            SidebarAction::ToggleSettled => return self.toggle_settled_shelf(effects),
             SidebarAction::SortManual => {
                 return self.set_session_sort_order(
                     bootty_config::config::SidebarSortOrder::Manual,
@@ -577,12 +572,7 @@ impl AppState {
                 binding.sessions().contains(&target.session_id)
                     && binding.session_attachment(&target.session_id).is_none()
             });
-            if detached && let Some(invocation) = self.saved_native_conversation_invocation(&target)
-            {
-                self.commands.queue(invocation);
-                (self.repaint)();
-                true
-            } else if detached {
+            if detached {
                 let Some(invocation) = self.saved_session_invocation(
                     target.scope,
                     "session.reopen",
@@ -663,9 +653,6 @@ impl AppState {
     ) {
         let records_activity = matches!(&command, TerminalInputCommand::Text(text) | TerminalInputCommand::Paste(text) if !text.is_empty())
             || matches!(&command, TerminalInputCommand::Key(_));
-        if records_activity {
-            self.revoke_current_terminal_agent_recovery();
-        }
         let activity = records_activity
             .then(|| self.current_terminal_activity_identity())
             .flatten();

@@ -90,14 +90,14 @@ jobs:
             libxrandr-dev \
             pkg-config
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # Kache caches rustc outputs by content; only main pushes publish the store.
+      - name: Set up Kache
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
         with:
-          shared-key: release-${{ matrix.name }}
-          cache-on-failure: true
-
-      - name: Evict CPU-specific zig artifacts
-        run: cargo clean -p libghostty-vt-sys
+          cache-key-prefix: bootty-release-${{ matrix.name }}
+          manifest-key: release-${{ matrix.name }}
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          pr-comment: false
 
       - name: Download daemon matrix
         uses: actions/download-artifact@v8
@@ -110,7 +110,7 @@ jobs:
         env:
           BOOTTY_STRICT_MACOS_ICON: "1"
           BOOTTY_DAEMON_OUTPUT_DIR: target/bootty-daemons
-        run: mise run package -- --static
+        run: mise run package
 
       - name: Prepare release assets
         run: mise run release:rename-asset -- "dist/${{ matrix.package-asset }}" "dist/${{ matrix.release-asset }}"

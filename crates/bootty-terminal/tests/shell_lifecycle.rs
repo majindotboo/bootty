@@ -46,7 +46,7 @@ fn replay_restores_title_without_repeating_bells_or_completions() {
     })
     .unwrap();
     let bytes = b"\x07\x1b]133;C\x07\x1b]133;D;7\x07\x1b]2;title\x07";
-    engine.write_vt_without_pty_responses(bytes);
+    engine.import_history(bytes);
     assert_eq!(
         engine.drain_side_effects(),
         vec![TerminalSideEffect::WindowTitle("title".into())]

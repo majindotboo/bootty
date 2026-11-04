@@ -1,4 +1,5 @@
 #[cfg(unix)]
+use bootty_os::spawn::CommandSpawn as _;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -992,7 +993,10 @@ fn terminal_worker_response_operations_preserve_public_results() {
     assert_eq!(
         session
             .format_selection(TerminalSelectionFormat::PlainText)
-            .expect("selection formatting completes"),
+            .expect("selection formatting queued")
+            .receive("selection")
+            .expect("selection formatting completes")
+            .expect("selection succeeds"),
         None
     );
     assert!(
@@ -1074,6 +1078,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
             command_is_argv: false,
             working_directory: Some(working_directory.clone()),
             pane_id: Some("%7".to_owned()),
+            base_environment: None,
             env: vec![
                 (
                     "BOOTTY_TEST_OUTPUT".to_owned(),
@@ -1185,7 +1190,7 @@ fn wait_for_file(path: &std::path::Path) -> anyhow::Result<String> {
 fn process_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
-        .status()
+        .bootty_status()
         .is_ok_and(|status| status.success())
 }
 

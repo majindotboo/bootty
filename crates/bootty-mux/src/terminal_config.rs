@@ -40,6 +40,7 @@ pub fn terminal_session_config_with_side_effects(
                 .or_else(default_working_directory),
             // Filled in by the backend that starts the pane, which is the one that knows it.
             pane_id: None,
+            base_environment: None,
             env: config.session.env.clone(),
             env_remove: Vec::new(),
             term: config.session.term.clone(),
@@ -113,6 +114,19 @@ pub fn terminal_cursor_config(config: &CursorConfig) -> TerminalCursorConfig {
 pub const fn terminal_feature_config(config: &SessionConfig) -> TerminalFeatureConfig {
     TerminalFeatureConfig {
         glyph_protocol: config.glyph_protocol,
+    }
+}
+
+#[must_use]
+pub fn terminal_vt_policy(
+    config: &BoottyConfig,
+    variant: AppearanceVariant,
+) -> crate::native::protocol::VtPolicy {
+    crate::native::protocol::VtPolicy {
+        colors: config.colors_for_appearance(variant).clone(),
+        cursor: terminal_cursor_config(&config.cursor),
+        features: terminal_feature_config(&config.session),
+        max_scrollback: config.session.max_scrollback,
     }
 }
 

@@ -37,10 +37,9 @@ use super::{
     ToggleFocusNav,
     inline_inputs::{InlineInputOptions, InlineInputTarget},
     model::{
-        AnsiPalettePreset, ModifierRemap, ModifierRemapField, ModuleIntegrationStatus,
-        ModuleIntegrationsSnapshot, ModuleSourceIntent, RemoteEditorSnapshot, RemoteTestState,
-        ScalarValue, SettingsCategory, SettingsChoice, SettingsControl, SettingsIntent,
-        SettingsPageItem, SettingsRow, provider_kind_for_settings_row, provider_navigation_id,
+        AnsiPalettePreset, ModifierRemap, ModifierRemapField, RemoteEditorSnapshot,
+        RemoteTestState, ScalarValue, SettingsCategory, SettingsChoice, SettingsControl,
+        SettingsIntent, SettingsPageItem, SettingsRow,
     },
     picker::{SelectControl, SelectStyle, render_select, uses_searchable_picker},
     text_input::TextControlTarget,
@@ -60,7 +59,6 @@ pub(super) struct NavBarEntry {
     pub(super) page_index: usize,
     pub(super) item_index: Option<usize>,
     pub(super) section_id: Option<String>,
-    pub(super) provider: Option<bootty_agents::AgentKind>,
     pub(super) focus_handle: FocusHandle,
 }
 
@@ -102,7 +100,6 @@ impl GpuiSettings {
                 page_index,
                 item_index: None,
                 section_id: None,
-                provider: None,
                 focus_handle: prior_root.map_or_else(
                     || cx.focus_handle().tab_index(0).tab_stop(true),
                     |(_, focus_handle)| focus_handle.clone(),
@@ -121,29 +118,6 @@ impl GpuiSettings {
                             page_index,
                             item_index: Some(item_index),
                             section_id,
-                            provider: None,
-                            focus_handle: prior_section.map_or_else(
-                                || cx.focus_handle().tab_index(0).tab_stop(true),
-                                |(_, focus_handle)| focus_handle.clone(),
-                            ),
-                        });
-                    }
-                    SettingsPageItem::Dependent { parent, .. }
-                        if page.category == SettingsCategory::Ai
-                            && let Some(provider) = provider_kind_for_settings_row(parent)
-                            && let SettingsRow::Value { label, .. } = parent =>
-                    {
-                        let section_id = Some(provider_navigation_id(provider));
-                        let prior_section = prior.get(&(page.category, section_id.clone()));
-                        entries.push(NavBarEntry {
-                            title: label.clone(),
-                            category: page.category,
-                            is_root: false,
-                            expanded: false,
-                            page_index,
-                            item_index: Some(item_index),
-                            section_id,
-                            provider: Some(provider),
                             focus_handle: prior_section.map_or_else(
                                 || cx.focus_handle().tab_index(0).tab_stop(true),
                                 |(_, focus_handle)| focus_handle.clone(),
@@ -221,7 +195,7 @@ impl GpuiSettings {
     ) -> AnyElement {
         let visible_count = self.visible_navbar_indices().len();
         let navigation_focused = self.navbar_focus.contains_focused(window, cx);
-        let mut key_context = KeyContext::new_with_defaults();
+        let mut key_context = KeyContext::new_with_defaults(cx.platform_info().os);
         key_context.add("NavigationMenu");
         key_context.add("menu");
         if input.focus_handle(cx).is_focused(window) {
@@ -382,19 +356,8 @@ impl GpuiSettings {
             .flex()
             .items_center()
             .gap_1p5()
-            .when(entry.is_root && entry.provider.is_none(), |button| {
+            .when(entry.is_root, |button| {
                 button.child(category_tile(entry.category, cx))
-            })
-            .when_some(entry.provider, |button, provider| {
-                button.child(crate::gpui::sized_icon(
-                    provider.icon(),
-                    crate::gpui::IconSize::Small,
-                    if selected {
-                        cx.theme().foreground
-                    } else {
-                        cx.theme().muted_foreground
-                    },
-                ))
             })
             .child(Label::new(entry.title.clone()))
             .accessibility_label(entry.title.clone())
@@ -463,9 +426,6 @@ impl GpuiSettings {
             // (`settings_ui.rs:1270-1323`): the discriminating setting remains a normal row;
             // the active children form one indented, dashed group rather than independent rows.
             SettingsPageItem::Dependent { parent, children } => {
-                if provider_settings_kind(parent).is_some() {
-                    return self.render_provider_settings(parent, children, window, cx);
-                }
                 let parent_id = settings_row_identity(parent)
                     .map_or_else(|| format!("index-{item_index}"), str::to_owned);
                 let dependent_selector = format!("settings-dependent-{parent_id}");
@@ -516,12 +476,6 @@ impl GpuiSettings {
         let selector = format!("settings-content-section-{id}");
         let debug_selector = selector.clone();
         let label: SharedString = title.to_owned().into();
-
-        let provider = id.strip_prefix("providers:").and_then(|id| {
-            bootty_agents::AgentKind::ALL
-                .into_iter()
-                .find(|provider| provider.to_string() == id)
-        });
         gpui_kit::div()
             .flex()
             .flex_col()
@@ -535,239 +489,13 @@ impl GpuiSettings {
             .pb_2()
             .gap_1p5()
             .child(
-                gpui_kit::div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .when_some(provider, |this, provider| {
-                        this.child(crate::gpui::sized_icon(
-                            provider.icon(),
-                            crate::gpui::IconSize::Medium,
-                            cx.theme().foreground,
-                        ))
-                    })
-                    .child(
-                        Label::new(label)
-                            .text_sm()
-                            .text_color(if provider.is_some() {
-                                cx.theme().foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD),
-                    ),
-            )
-            .into_any_element()
-    }
-
-    fn render_provider_settings(
-        &self,
-        parent: &SettingsRow,
-        children: &[SettingsRow],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let Some(provider) = provider_settings_kind(parent) else {
-            return gpui_kit::Empty.into_any_element();
-        };
-        let Some(id) = settings_row_identity(parent) else {
-            return gpui_kit::Empty.into_any_element();
-        };
-        let expanded = self.has_query || self.expanded_providers.contains(id);
-        let selector = format!("settings-provider-{provider}");
-        let debug_selector = selector.clone();
-        div()
-            .id(SharedString::from(selector))
-            .debug_selector(move || debug_selector)
-            .mb_2()
-            .rounded_lg()
-            .overflow_hidden()
-            .child(self.render_provider_summary(parent, provider, expanded, window, cx))
-            .when(expanded, |content| {
-                content.child(self.render_provider_details(children, window, cx))
-            })
-            .into_any_element()
-    }
-
-    fn render_provider_summary(
-        &self,
-        parent: &SettingsRow,
-        provider: bootty_agents::AgentKind,
-        expanded: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let SettingsRow::Value {
-            id,
-            label,
-            help,
-            value: ScalarValue::Bool(enabled),
-            ..
-        } = parent
-        else {
-            return gpui_kit::Empty.into_any_element();
-        };
-        let selected = id.clone();
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .p_1()
-            .pr_3()
-            .child(
-                Button::new(SharedString::from(format!(
-                    "settings-provider-expand-{provider}"
-                )))
-                .debug_selector(move || format!("settings-provider-expand-{provider}"))
-                .ghost()
-                .flex_1()
-                .min_w_0()
-                .h(gpui_kit::rems(3.0))
-                .px_3()
-                .accessibility_label(format!("Configure {label}"))
-                .toggled(expanded)
-                .child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .child(crate::gpui::sized_icon(
-                            if expanded {
-                                "chevron-down"
-                            } else {
-                                "chevron-right"
-                            },
-                            crate::gpui::IconSize::Small,
-                            cx.theme().muted_foreground,
-                        ))
-                        .child(crate::gpui::sized_icon(
-                            provider.icon(),
-                            crate::gpui::IconSize::Medium,
-                            cx.theme().foreground,
-                        ))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .flex()
-                                .flex_col()
-                                .items_start()
-                                .child(
-                                    div()
-                                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                        .child(label.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .truncate()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(match (*enabled, help.is_empty()) {
-                                            (true, _) => help.clone(),
-                                            (false, true) => "Disabled".to_owned(),
-                                            (false, false) => format!("Disabled · {help}"),
-                                        }),
-                                ),
-                        ),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let expanded = if this.expanded_providers.remove(&selected) {
-                        false
-                    } else {
-                        this.expanded_providers.insert(selected.clone());
-                        true
-                    };
-                    this.active_section = expanded.then(|| provider_navigation_id(provider));
-                    this.reset_list_state();
-                    cx.notify();
-                })),
-            )
-            .child(self.render_setting_control(parent, window, cx))
-            .into_any_element()
-    }
-
-    fn render_provider_details(
-        &self,
-        children: &[SettingsRow],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut details = div()
-            .p_3()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().muted.opacity(0.12));
-        let mut actions = div().flex().flex_wrap().items_center().gap_2();
-        for row in children {
-            if matches!(row, SettingsRow::Action { id, .. } if id.starts_with("agents.")) {
-                actions = actions.child(self.render_setting_control(row, window, cx));
-            } else if let SettingsRow::Notice {
-                text,
-                destructive: false,
-            } = row
-            {
-                details = details.child(
-                    div()
-                        .text_xs()
+                gpui_kit::div().flex().items_center().gap_2().child(
+                    Label::new(label)
+                        .text_sm()
                         .text_color(cx.theme().muted_foreground)
-                        .child(text.clone()),
-                );
-            } else {
-                details = details.child(self.render_provider_setting(row, window, cx));
-            }
-        }
-        details.child(actions).into_any_element()
-    }
-
-    fn render_provider_setting(
-        &self,
-        row: &SettingsRow,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let control = self.render_setting_control(row, window, cx);
-        let (SettingsRow::Value {
-            id, label, help, ..
-        }
-        | SettingsRow::Action {
-            id, label, help, ..
-        }) = row
-        else {
-            return self.render_setting(row, window, cx);
-        };
-        let selector = format!("settings-item-{id}");
-        div()
-            .id(SharedString::from(selector.clone()))
-            .debug_selector(move || selector)
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_3()
-            .min_w_0()
-            .child(
-                div()
-                    .id(SharedString::from(format!("settings-provider-help-{id}")))
-                    .min_w_0()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .when(!help.is_empty(), |column| {
-                        column.tooltip({
-                            let help = help.clone();
-                            move |window, cx| {
-                                gpui_kit::component::tooltip::Tooltip::new(help.clone())
-                                    .build(window, cx)
-                            }
-                        })
-                    })
-                    .child(render_setting_label(id, label, Some(&self.draft), cx)),
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD),
+                ),
             )
-            .child(control)
             .into_any_element()
     }
 
@@ -779,10 +507,9 @@ impl GpuiSettings {
     ) -> AnyElement {
         let control = self.render_setting_control(row, window, cx);
         let (id, label, help, structured) = match row {
-            SettingsRow::Section(_)
-            | SettingsRow::Notice { .. }
-            | SettingsRow::ModuleIntegrations(_)
-            | SettingsRow::Remote(_) => return control,
+            SettingsRow::Section(_) | SettingsRow::Notice { .. } | SettingsRow::Remote(_) => {
+                return control;
+            }
             SettingsRow::Value {
                 id, label, help, ..
             }
@@ -913,12 +640,7 @@ impl GpuiSettings {
                 add_label,
                 enabled,
                 ..
-            } => {
-                let choices = self
-                    .provider_effort_options(id)
-                    .unwrap_or_else(|| options.clone());
-                Self::render_string_list(id, items, &choices, add_label, *enabled, window, cx)
-            }
+            } => Self::render_string_list(id, items, options, add_label, *enabled, window, cx),
             SettingsRow::ModifierRemaps {
                 mappings,
                 choices,
@@ -932,7 +654,6 @@ impl GpuiSettings {
                 || gpui_kit::Empty.into_any_element(),
                 |host| host.editor.clone().into_any_element(),
             ),
-            SettingsRow::ModuleIntegrations(editor) => Self::render_module_integrations(editor, cx),
             SettingsRow::Remote(remote) => Self::render_remote_editor(remote, window, cx),
         }
     }
@@ -998,9 +719,6 @@ impl GpuiSettings {
             value,
             enabled,
         } = row;
-        if let Some(control) = self.render_provider_default(row, window, cx) {
-            return control;
-        }
         match control {
             SettingsControl::Toggle => Self::render_toggle(
                 id,
@@ -1468,30 +1186,6 @@ impl GpuiSettings {
             .into_any_element()
     }
 
-    fn render_module_integrations(
-        editor: &ModuleIntegrationsSnapshot,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let integrations = editor
-            .integrations
-            .iter()
-            .map(|integration| Self::module_integration_row(&editor.identity, integration, cx))
-            .collect::<Vec<_>>();
-        gpui_kit::div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap_2()
-            .when_some(editor.error.clone(), |this, error| {
-                this.child(
-                    gpui_kit::component::alert::Alert::error("module-integration-error", error)
-                        .banner(),
-                )
-            })
-            .children(integrations)
-            .into_any_element()
-    }
-
     fn render_remote_editor(
         remote: &RemoteEditorSnapshot,
         window: &mut Window,
@@ -1715,17 +1409,11 @@ impl GpuiSettings {
                 cx,
             )
         } else {
-            // Thinking levels read as the model picker names them, not as config tokens.
-            let efforts = id.ends_with(".available-efforts");
             let choices = options
                 .iter()
                 .map(|option| SettingsChoice {
                     token: option.clone(),
-                    label: if efforts {
-                        crate::gpui_agent_session::reasoning_label(option)
-                    } else {
-                        option.clone()
-                    },
+                    label: option.clone(),
                     description: None,
                 })
                 .collect::<Vec<_>>();
@@ -1778,93 +1466,6 @@ impl GpuiSettings {
         let row_label =
             font_selection.map_or_else(|| value.to_owned(), |selection| selection.family);
         (control, row_label)
-    }
-
-    fn module_integration_row(
-        identity: &str,
-        integration: &super::model::ModuleIntegrationSnapshot,
-        cx: &Context<Self>,
-    ) -> AnyElement {
-        let (status, status_color, installed) = match integration.status {
-            ModuleIntegrationStatus::Installed => ("Installed", cx.theme().success, true),
-            ModuleIntegrationStatus::Partial => ("Partly installed", cx.theme().warning, false),
-            ModuleIntegrationStatus::Missing => {
-                ("Not installed", cx.theme().muted_foreground, false)
-            }
-        };
-        let request = if installed {
-            ModuleSourceIntent::UninstallIntegration {
-                identity: identity.to_owned(),
-                module: integration.module.clone(),
-                id: integration.id.clone(),
-            }
-        } else {
-            ModuleSourceIntent::InstallIntegration {
-                identity: identity.to_owned(),
-                module: integration.module.clone(),
-                id: integration.id.clone(),
-            }
-        };
-        let entity = cx.entity();
-        let button_id = format!(
-            "module-integration-{}-{}",
-            integration.module, integration.id
-        );
-        gpui_kit::div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .gap_0p5()
-            .child(
-                gpui_kit::div()
-                    .flex()
-                    .items_center()
-                    .w_full()
-                    .gap_2()
-                    .justify_between()
-                    .child(
-                        gpui_kit::div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Label::new(integration.title.clone()))
-                            .child(Label::new(status).text_sm().text_color(status_color)),
-                    )
-                    .child({
-                        let debug_selector = button_id.clone();
-                        div()
-                            .id(SharedString::from(button_id.clone()))
-                            .debug_selector(move || debug_selector)
-                            .child(
-                                Button::new(SharedString::from(format!("kit-{button_id}")))
-                                    .label(if installed {
-                                        format!("Remove {}", integration.title)
-                                    } else {
-                                        format!("Install {}", integration.title)
-                                    })
-                                    .outline()
-                                    .small()
-                                    .accessibility_label(if installed {
-                                        format!("Remove integration {}", integration.title)
-                                    } else {
-                                        format!("Install integration {}", integration.title)
-                                    })
-                                    .on_click(move |_, _, app| {
-                                        entity.update(app, |this, cx| {
-                                            this.emit(SettingsIntent::Module(request.clone()), cx);
-                                        });
-                                    }),
-                            )
-                    }),
-            )
-            .when(!integration.summary.is_empty(), |this| {
-                this.child(
-                    Label::new(integration.summary.clone())
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground),
-                )
-            })
-            .into_any_element()
     }
 
     fn remote_profile_field(
@@ -2518,7 +2119,6 @@ pub(super) fn settings_row_identity(row: &SettingsRow) -> Option<&str> {
         | SettingsRow::ModifierRemaps { id, .. }
         | SettingsRow::Environment { id, .. }
         | SettingsRow::FontFeatures { id, .. }
-        | SettingsRow::ModuleIntegrations(ModuleIntegrationsSnapshot { identity: id, .. })
         | SettingsRow::Remote(RemoteEditorSnapshot { id, .. }) => Some(id),
         SettingsRow::Section(_) | SettingsRow::Notice { .. } => None,
     }
@@ -2689,21 +2289,6 @@ fn remote_test_color(state: &RemoteTestState, cx: &gpui_kit::App) -> gpui_kit::H
         RemoteTestState::Passed => cx.theme().success,
         RemoteTestState::Idle | RemoteTestState::Testing => cx.theme().muted_foreground,
     }
-}
-
-fn provider_settings_kind(row: &SettingsRow) -> Option<bootty_agents::AgentKind> {
-    let SettingsRow::Value {
-        id,
-        control: SettingsControl::Toggle,
-        ..
-    } = row
-    else {
-        return None;
-    };
-    let key = id.strip_prefix("agents.")?.strip_suffix(".enabled")?;
-    bootty_agents::AgentKind::ALL
-        .into_iter()
-        .find(|kind| kind.to_string() == key)
 }
 
 /// A category's icon on a tile of its hue, as the navigation lists it.

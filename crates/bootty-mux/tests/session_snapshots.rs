@@ -2,14 +2,12 @@ use std::sync::Arc;
 
 use assert_fs::TempDir;
 use bootty_mux::{
-    backend::MuxBackend,
     command::MuxCommand,
     native::NativeBackend,
     repository::WorkspaceRepository,
     session_membership::{SessionMembership, SessionState, WorkspaceSession},
     session_snapshot::{SavedTerminalPane, SavedTerminalSession, SavedTerminalWindow},
     snapshot::MuxSessionTag,
-    terminal::BackendPanePolicy,
 };
 use pretty_assertions::{assert_eq, assert_ne};
 use proptest::prelude::*;
@@ -29,7 +27,6 @@ fn checkpoint() -> SavedTerminalSession {
             focused_pane_id: "pane".into(),
             layout: None,
             panes: vec![SavedTerminalPane {
-                native_agent: None,
                 id: "pane".into(),
                 backend_id: "old-pane".into(),
                 cwd: "/tmp".into(),
@@ -65,149 +62,6 @@ fn checkpoint_geometry_remains_truthful(
     assert_eq!(checkpoint.validate().is_ok(), accepted);
 }
 
-// Admission uses the real tmux policy with an empty backend; it must not start a client.
-struct MissingTmux;
-
-impl MuxBackend for MissingTmux {
-    fn snapshot(&self) -> anyhow::Result<bootty_mux::snapshot::MuxSnapshot> {
-        Ok(bootty_mux::snapshot::MuxSnapshot::default())
-    }
-    fn execute(&mut self, _: MuxCommand) -> anyhow::Result<()> {
-        anyhow::bail!("restore admission must not execute a backend command")
-    }
-}
-
-impl bootty_mux::provider::MuxBackendProvider for MissingTmux {
-    fn command_dispatch(&self) -> bootty_mux::provider::MuxCommandDispatch {
-        bootty_mux::provider::MuxCommandDispatch::WorkerThread
-    }
-    fn kind(&self) -> bootty_mux::MuxBackendKind {
-        bootty_mux::MuxBackendKind::Tmux
-    }
-    fn build_backend(
-        &self,
-        _: &bootty_mux::MuxBindingConfig,
-        _: Option<&std::path::Path>,
-    ) -> Box<dyn MuxBackend> {
-        Box::new(Self)
-    }
-}
-
-impl bootty_mux::provider::MuxAppBackendProvider for MissingTmux {
-    fn app_policy(&self) -> bootty_mux::provider::MuxAppBackendPolicy {
-        bootty_mux::provider::MuxAppBackendProvider::app_policy(&bootty_mux::tmux::TmuxProvider)
-    }
-    fn capabilities(
-        &self,
-        scope: bootty_mux::controller::SpaceId,
-    ) -> bootty_mux::capability::BindingCapabilityDescriptor {
-        bootty_mux::tmux::tmux_capabilities(scope)
-    }
-    fn build_pane_policy(
-        &self,
-        config: &bootty_mux::MuxBindingConfig,
-    ) -> Box<dyn BackendPanePolicy> {
-        bootty_mux::provider::MuxAppBackendProvider::build_pane_policy(
-            &bootty_mux::tmux::TmuxProvider,
-            config,
-        )
-    }
-}
-
-#[rstest]
-fn tmux_reopen_retains_history_for_the_backend_owner(
-    checkpoint: SavedTerminalSession,
-) -> anyhow::Result<()> {
-    use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
-    let directory = TempDir::new()?;
-    let mut config = BoottyConfig {
-        config_path: directory.path().join("config.toml"),
-        ..BoottyConfig::default()
-    };
-    config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
-    config.multiplexer.remote =
-        Some(bootty_config::config::SshRemoteConfig::for_host("fixture").into());
-    let (mut repository, saved) = WorkspaceRepository::open(&config.config_path)?;
-    let scope = saved.spaces().first().unwrap().id();
-    repository.commit_binding_state(
-        scope,
-        &SessionMembership::from_sessions(vec![WorkspaceSession {
-            identity: checkpoint.session_id.clone(),
-            backend_name: checkpoint.backend_id.clone(),
-            display_name: "Purpose".into(),
-            explicit: true,
-            cwd: "/tmp".into(),
-            state: SessionState::default(),
-            terminal_snapshot: Some(Arc::new(checkpoint.clone())),
-        }]),
-    )?;
-    let registry = bootty_mux::provider::MuxBackendRegistry::from_app_providers(
-        [Arc::new(MissingTmux)],
-        [bootty_mux::MuxBackendKind::Tmux],
-    )?;
-    let mut workspace = bootty_mux::workspace::WorkspaceRuntime::open(
-        &config,
-        "main",
-        Arc::new(registry),
-        AppearanceVariant::Light,
-        Arc::new(|| {}),
-    )?;
-    let (command, _) = workspace.begin_session_reopen(scope, "logical").unwrap();
-    let MuxCommand::RestoreSession { snapshot, .. } = command else {
-        anyhow::bail!("missing backend should restore the saved session")
-    };
-    assert_eq!(snapshot, checkpoint);
-    Ok(())
-}
-
-/// An attached tmux client shows tmux's own active window, so a saved tab never outranks it.
-#[rstest]
-fn tmux_restore_leaves_the_tab_to_the_attached_client(
-    checkpoint: SavedTerminalSession,
-) -> anyhow::Result<()> {
-    use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
-    let directory = TempDir::new()?;
-    let mut config = BoottyConfig {
-        config_path: directory.path().join("config.toml"),
-        ..BoottyConfig::default()
-    };
-    config.multiplexer.backend = MultiplexerBackendConfig::Tmux;
-    config.multiplexer.remote =
-        Some(bootty_config::config::SshRemoteConfig::for_host("fixture").into());
-    let (mut repository, saved) = WorkspaceRepository::open(&config.config_path)?;
-    let scope = saved.spaces().first().unwrap().id();
-    repository.commit_binding_state(
-        scope,
-        &SessionMembership::from_sessions(vec![WorkspaceSession {
-            identity: checkpoint.session_id.clone(),
-            backend_name: checkpoint.backend_id.clone(),
-            display_name: "Purpose".into(),
-            explicit: true,
-            cwd: "/tmp".into(),
-            state: SessionState::default(),
-            terminal_snapshot: Some(Arc::new(checkpoint)),
-        }]),
-    )?;
-    repository.set_binding_saved_selection(scope, Some("logical"), "original", Some("@2"))?;
-    let registry = bootty_mux::provider::MuxBackendRegistry::from_app_providers(
-        [Arc::new(MissingTmux)],
-        [bootty_mux::MuxBackendKind::Tmux],
-    )?;
-    let workspace = bootty_mux::workspace::WorkspaceRuntime::open(
-        &config,
-        "main",
-        Arc::new(registry),
-        AppearanceVariant::Light,
-        Arc::new(|| {}),
-    )?;
-    let mux = workspace.active.binding.mux();
-    assert_eq!(
-        (mux.selected_session(), mux.selected_window()),
-        (Some("original"), None)
-    );
-    Ok(())
-}
-
 #[rstest]
 #[case::unix_absolute("/work", true)]
 #[case::local_platform_absolute(if cfg!(windows) { r"C:\work" } else { "/work" }, true)]
@@ -231,18 +85,22 @@ fn checkpoint_cwd_accepts_absolute_paths_without_shell_expansion(
     assert_eq!(checkpoint.validate().is_ok(), accepted);
 }
 
+/// Checkpoints saved while panes could hold native conversations keep loading.
 #[rstest]
-#[case(None)]
-#[case(Some("native:codex:captured".to_owned()))]
+fn checkpoints_with_retired_native_agent_metadata_still_load(checkpoint: SavedTerminalSession) {
+    let mut value = serde_json::to_value(&checkpoint).unwrap();
+    value["windows"][0]["panes"][0]["native_agent"] = "native:codex:captured".into();
+    let loaded: SavedTerminalSession = serde_json::from_value(value).unwrap();
+    assert_eq!(loaded, checkpoint);
+}
+
+#[rstest]
 fn native_restoration_preserves_saved_topology_and_rejects_adoption(
-    mut checkpoint: SavedTerminalSession,
-    #[case] native_agent: Option<String>,
+    checkpoint: SavedTerminalSession,
 ) {
-    checkpoint.windows[0].panes[0]
-        .native_agent
-        .clone_from(&native_agent);
     let directory = TempDir::new().expect("create isolated workspace");
-    let mut backend = NativeBackend::for_workspace(directory.path());
+    bootty_test_support::native_mux::local(directory.path()).unwrap();
+    let backend = NativeBackend::for_workspace(directory.path());
     let command = MuxCommand::RestoreSession {
         session_id: "restored".into(),
         tag: MuxSessionTag {
@@ -251,14 +109,12 @@ fn native_restoration_preserves_saved_topology_and_rejects_adoption(
         },
         snapshot: checkpoint,
     };
-    assert!(!command.is_repeatable());
     backend
         .execute(command.clone())
         .expect("restore saved topology");
     let before = backend.snapshot().expect("read native topology");
     let session = before.sessions.first().unwrap();
     assert_eq!(session.tag.identity.as_deref(), Some("logical"));
-    assert_eq!(session.windows[0].panes[0].native_agent, native_agent);
     assert_eq!(session.windows.first().unwrap().name, "Work");
     assert_eq!(
         session
@@ -325,7 +181,7 @@ fn checkpoint_reload_and_lifecycle_write_preserve_committed_history(
     );
     let mut earlier_ui = saved.clone();
     earlier_ui.terminal_snapshot = None;
-    earlier_ui.state.archived = true;
+    earlier_ui.state.pinned = true;
     repository
         .commit_binding_state(scope, &SessionMembership::from_sessions(vec![earlier_ui]))
         .expect("commit lifecycle change without replacing history");
@@ -338,7 +194,7 @@ fn checkpoint_reload_and_lifecycle_write_preserve_committed_history(
         .sessions()
         .get("logical")
         .unwrap();
-    assert!(current.state.archived);
+    assert!(current.state.pinned);
     assert_eq!(current.terminal_snapshot.as_deref(), Some(&checkpoint));
     assert_eq!(current.display_name, saved.display_name);
 }
@@ -437,7 +293,7 @@ fn supported_lifecycle_schema_evolves_without_losing_saved_work() {
         explicit: true,
         cwd: "/tmp".into(),
         state: SessionState {
-            archived: true,
+            pinned: true,
             ..SessionState::default()
         },
         terminal_snapshot: None,
@@ -480,13 +336,13 @@ fn live_workspace() -> anyhow::Result<(
     bootty_mux::controller::SpaceId,
     String,
 )> {
-    use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
+    use bootty_config::config::{AppearanceVariant, BoottyConfig};
     let directory = TempDir::new()?;
-    let mut config = BoottyConfig {
+    let config = BoottyConfig {
         config_path: directory.path().join("config.toml"),
         ..BoottyConfig::default()
     };
-    config.multiplexer.backend = MultiplexerBackendConfig::Native;
+
     let (mut repository, snapshot) = WorkspaceRepository::open(&config.config_path)?;
     let space = snapshot
         .spaces()
@@ -506,7 +362,8 @@ fn live_workspace() -> anyhow::Result<(
         scope,
         &SessionMembership::from_sessions(vec![saved.clone()]),
     )?;
-    let mut backend = NativeBackend::for_workspace(&config.config_path);
+    bootty_test_support::native_mux::local(&config.config_path)?;
+    let backend = NativeBackend::for_workspace(&config.config_path);
     backend.execute(MuxCommand::CreateProjectSession {
         session_id: saved.backend_name.clone(),
         cwd: saved.cwd,
@@ -517,11 +374,11 @@ fn live_workspace() -> anyhow::Result<(
         argv: None,
     })?;
     let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
-    let registry = Arc::new(bootty_mux::provider::MuxBackendRegistry::desktop()?);
+
+    bootty_test_support::native_mux::local(&config.config_path)?;
     let mut workspace = bootty_mux::workspace::WorkspaceRuntime::open(
         &config,
         "main",
-        registry,
         AppearanceVariant::Light,
         Arc::clone(&repaint),
     )?;
@@ -567,7 +424,7 @@ fn reopening_a_window_before_its_first_frame_reattaches_the_existing_native_sess
     )>,
     #[case] save_checkpoint: bool,
 ) {
-    use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
+    use bootty_config::config::{AppearanceVariant, BoottyConfig};
     let (directory, mut original, scope, pane) = live_workspace.unwrap();
     if save_checkpoint {
         let generation = original.binding(scope).unwrap().mux().binding_generation();
@@ -578,17 +435,17 @@ fn reopening_a_window_before_its_first_frame_reattaches_the_existing_native_sess
             .unwrap();
         assert!(original.publish_session_checkpoint(receipt).unwrap());
     }
-    let mut config = BoottyConfig {
+    let config = BoottyConfig {
         config_path: directory.path().join("config.toml"),
         ..BoottyConfig::default()
     };
-    config.multiplexer.backend = MultiplexerBackendConfig::Native;
+
+    bootty_test_support::native_mux::local(&config.config_path).unwrap();
     let backend = NativeBackend::for_workspace(&config.config_path);
     let before = backend.snapshot().unwrap();
     let mut reopened = bootty_mux::workspace::WorkspaceRuntime::open(
         &config,
         "second-window",
-        Arc::new(bootty_mux::provider::MuxBackendRegistry::desktop().unwrap()),
         AppearanceVariant::Light,
         Arc::new(|| {}),
     )
@@ -609,6 +466,52 @@ fn reopening_a_window_before_its_first_frame_reattaches_the_existing_native_sess
             .unwrap()
             .session_attachment("logical"),
         before.sessions.first()
+    );
+}
+
+/// A checkpoint stored with since-retired pane metadata is still the prior state the next save
+/// replaces, so saving keeps working after an upgrade.
+#[rstest]
+fn checkpoints_replace_stored_state_with_retired_native_agent_metadata(
+    live_workspace: anyhow::Result<(
+        TempDir,
+        bootty_mux::workspace::WorkspaceRuntime,
+        bootty_mux::controller::SpaceId,
+        String,
+    )>,
+) {
+    let (directory, mut workspace, scope, pane) =
+        live_workspace.expect("create live exact-tagged workspace");
+    let generation = workspace.binding(scope).unwrap().mux().binding_generation();
+    let receipt = workspace
+        .prepare_session_checkpoint(scope, "logical", generation, 10)
+        .expect("prepare first checkpoint")
+        .save(vec![pane_capture(&pane, None, "first history")])
+        .expect("persist first checkpoint");
+    assert!(workspace.publish_session_checkpoint(receipt).unwrap());
+    let database = rusqlite::Connection::open(directory.path().join("session-order.sqlite3"))
+        .expect("open checkpoint database");
+    database
+        .execute(
+            "UPDATE workspace_sessions SET terminal_snapshot = json_set(terminal_snapshot, '$.windows[0].panes[0].native_agent', 'native:codex:old') WHERE identity = 'logical'",
+            [],
+        )
+        .expect("store retired pane metadata");
+    workspace
+        .prepare_session_checkpoint(scope, "logical", generation, 11)
+        .expect("prepare next checkpoint")
+        .save(vec![pane_capture(&pane, None, "next history")])
+        .expect("replace the stored checkpoint");
+    let stored: String = database
+        .query_row(
+            "SELECT terminal_snapshot FROM workspace_sessions WHERE identity = 'logical'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        stored.contains("next history") && !stored.contains("native_agent"),
+        "{stored}"
     );
 }
 
@@ -741,7 +644,8 @@ fn native_restore_with_missing_saved_cwd_keeps_checkpoint_and_creates_nothing(
         .get("logical")
         .unwrap()
         .clone();
-    let mut backend = NativeBackend::for_workspace(&config_path);
+    bootty_test_support::native_mux::local(&config_path).unwrap();
+    let backend = NativeBackend::for_workspace(&config_path);
     let original = workspace
         .binding(scope)
         .unwrap()
@@ -774,13 +678,7 @@ fn native_restore_with_missing_saved_cwd_keeps_checkpoint_and_creates_nothing(
         workspace.binding(scope).unwrap().sessions().get("logical"),
         Some(&saved)
     );
-    let (mut repository, restored) = WorkspaceRepository::open(&config_path).unwrap();
-    assert_eq!(
-        repository
-            .pending_binding_membership_mutations(scope)
-            .unwrap(),
-        Vec::new()
-    );
+    let (_repository, restored) = WorkspaceRepository::open(&config_path).unwrap();
     assert_eq!(
         restored
             .spaces()
@@ -828,7 +726,8 @@ fn legacy_native_topology_creation_tracks_only_its_new_pane(
             argv: None,
         }
     };
-    let mut backend = NativeBackend::for_workspace(&directory.path().join("config.toml"));
+    bootty_test_support::native_mux::local(&directory.path().join("config.toml")).unwrap();
+    let backend = NativeBackend::for_workspace(&directory.path().join("config.toml"));
     backend.execute(command.clone()).unwrap();
     let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
     workspace
@@ -875,7 +774,7 @@ fn legacy_native_topology_creation_tracks_only_its_new_pane(
 }
 
 fn sparse_native_topology(
-    backend: &mut NativeBackend,
+    backend: &NativeBackend,
     session: &str,
     pane: &str,
 ) -> anyhow::Result<()> {
@@ -984,7 +883,6 @@ fn restore_saved_topology(
         &submitted.command,
         submitted.membership.as_deref(),
         result,
-        submitted.layout.as_ref(),
     )?;
     result.map_err(|error| anyhow::anyhow!("{error}"))?;
     anyhow::ensure!(sync_error.is_none(), "restore sync failed: {sync_error:?}");
@@ -999,23 +897,22 @@ fn cold_workspace(
     bootty_config::config::BoottyConfig,
     bootty_mux::workspace::WorkspaceRuntime,
 )> {
-    use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
+    use bootty_config::config::{AppearanceVariant, BoottyConfig};
     // A separate native owner namespace starts empty while loading the same durable Space.
     let cold = TempDir::new()?;
     std::fs::copy(
         original.join("session-order.sqlite3"),
         cold.path().join("session-order.sqlite3"),
     )?;
-    let mut config = BoottyConfig {
+    let config = BoottyConfig {
         config_path: cold.path().join("config.toml"),
         ..BoottyConfig::default()
     };
-    config.multiplexer.backend = MultiplexerBackendConfig::Native;
-    let registry = Arc::new(bootty_mux::provider::MuxBackendRegistry::desktop()?);
+
+    bootty_test_support::native_mux::local(&config.config_path)?;
     let workspace = bootty_mux::workspace::WorkspaceRuntime::open(
         &config,
         "main",
-        registry,
         AppearanceVariant::Light,
         Arc::clone(repaint),
     )?;
@@ -1038,7 +935,6 @@ fn reopening_without_a_checkpoint_starts_fresh_and_keeps_saved_work(
     #[case] explicit: bool,
     #[case] occupied: bool,
 ) {
-    use bootty_mux::session_membership::SessionLifecycle;
     let (original, workspace, scope, _) = live_workspace.unwrap();
     let mut saved = workspace
         .binding(scope)
@@ -1051,7 +947,6 @@ fn reopening_without_a_checkpoint_starts_fresh_and_keeps_saved_work(
     saved.display_name = display_name.to_owned();
     saved.explicit = explicit;
     saved.state.pinned = true;
-    saved.state.lifecycle = SessionLifecycle::Settled;
     drop(workspace);
     let (mut repository, _) =
         WorkspaceRepository::open(&original.path().join("config.toml")).unwrap();
@@ -1063,7 +958,8 @@ fn reopening_without_a_checkpoint_starts_fresh_and_keeps_saved_work(
         .unwrap();
     let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
     let (_cold, config, mut workspace) = cold_workspace(original.path(), &repaint).unwrap();
-    let mut backend = NativeBackend::for_workspace(&config.config_path);
+    bootty_test_support::native_mux::local(&config.config_path).unwrap();
+    let backend = NativeBackend::for_workspace(&config.config_path);
     if occupied {
         backend
             .execute(MuxCommand::CreateProjectSession {
@@ -1106,13 +1002,7 @@ fn reopening_without_a_checkpoint_starts_fresh_and_keeps_saved_work(
         backend.snapshot().unwrap().sessions.len(),
         if occupied { 2 } else { 1 }
     );
-    let (mut repository, reloaded) = WorkspaceRepository::open(&config.config_path).unwrap();
-    assert_eq!(
-        repository
-            .pending_binding_membership_mutations(scope)
-            .unwrap(),
-        Vec::new()
-    );
+    let (_repository, reloaded) = WorkspaceRepository::open(&config.config_path).unwrap();
     assert_eq!(
         reloaded
             .spaces()
@@ -1127,7 +1017,7 @@ fn reopening_without_a_checkpoint_starts_fresh_and_keeps_saved_work(
 
 fn prepare_sparse_checkpoint(
     workspace: &mut bootty_mux::workspace::WorkspaceRuntime,
-    backend: &mut NativeBackend,
+    backend: &NativeBackend,
     scope: bootty_mux::controller::SpaceId,
     original_pane: &str,
     repaint: &bootty_mux::RepaintHandle,
@@ -1167,21 +1057,18 @@ fn sparse_saved_keys_survive_cold_restore_then_new_tab_and_split(
     use bootty_mux::command::MuxSplitDirection;
     let (original_directory, mut workspace, scope, original_pane) = live_workspace.unwrap();
     let original_config = original_directory.path().join("config.toml");
-    let mut backend = NativeBackend::for_workspace(&original_config);
+    bootty_test_support::native_mux::local(&original_config).unwrap();
+    let backend = NativeBackend::for_workspace(&original_config);
     let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
-    let original_saved = prepare_sparse_checkpoint(
-        &mut workspace,
-        &mut backend,
-        scope,
-        &original_pane,
-        &repaint,
-    )
-    .unwrap();
+    let original_saved =
+        prepare_sparse_checkpoint(&mut workspace, &backend, scope, &original_pane, &repaint)
+            .unwrap();
     drop(workspace);
     let (_cold, config, mut workspace) =
         cold_workspace(original_directory.path(), &repaint).unwrap();
     restore_saved_topology(&mut workspace, scope).unwrap();
-    let mut backend = NativeBackend::for_workspace(&config.config_path);
+    bootty_test_support::native_mux::local(&config.config_path).unwrap();
+    let backend = NativeBackend::for_workspace(&config.config_path);
     let restored_id = workspace
         .binding(scope)
         .unwrap()
@@ -1257,388 +1144,6 @@ fn sparse_saved_keys_survive_cold_restore_then_new_tab_and_split(
     );
 }
 
-#[derive(Clone, Copy)]
-enum RestoreAdmissionFailure {
-    Refuse,
-    CleanupFails,
-    TopologyChanged,
-}
-
-struct AdmissionProvider {
-    path: std::path::PathBuf,
-    failure: RestoreAdmissionFailure,
-}
-
-struct AdmissionBackend {
-    native: NativeBackend,
-    failure: RestoreAdmissionFailure,
-}
-
-impl MuxBackend for AdmissionBackend {
-    fn snapshot(&self) -> anyhow::Result<bootty_mux::snapshot::MuxSnapshot> {
-        self.native.snapshot()
-    }
-    fn execute(&mut self, command: MuxCommand) -> anyhow::Result<()> {
-        if matches!(self.failure, RestoreAdmissionFailure::CleanupFails)
-            && matches!(command, MuxCommand::DitchSession { .. })
-        {
-            anyhow::bail!("injected exact cleanup refusal");
-        }
-        self.native.execute(command)
-    }
-}
-
-impl bootty_mux::provider::MuxBackendProvider for AdmissionProvider {
-    fn kind(&self) -> bootty_mux::MuxBackendKind {
-        bootty_mux::MuxBackendKind::Native
-    }
-    fn command_dispatch(&self) -> bootty_mux::provider::MuxCommandDispatch {
-        bootty_mux::provider::MuxCommandDispatch::CallerThread
-    }
-    fn build_backend(
-        &self,
-        _: &bootty_mux::MuxBindingConfig,
-        workspace: Option<&std::path::Path>,
-    ) -> Box<dyn MuxBackend> {
-        Box::new(AdmissionBackend {
-            native: workspace.map_or_else(NativeBackend::new, NativeBackend::for_workspace),
-            failure: self.failure,
-        })
-    }
-}
-
-impl bootty_mux::provider::MuxAppBackendProvider for AdmissionProvider {
-    fn app_policy(&self) -> bootty_mux::provider::MuxAppBackendPolicy {
-        bootty_mux::provider::MuxAppBackendProvider::app_policy(&bootty_mux::native::NativeProvider)
-    }
-    fn capabilities(
-        &self,
-        scope: bootty_mux::controller::SpaceId,
-    ) -> bootty_mux::capability::BindingCapabilityDescriptor {
-        bootty_mux::native::native_capabilities(scope)
-    }
-    fn build_pane_policy(
-        &self,
-        _: &bootty_mux::MuxBindingConfig,
-    ) -> Box<dyn bootty_mux::terminal::BackendPanePolicy> {
-        Box::new(AdmissionPolicy {
-            native: bootty_mux::native::NativePanePolicy,
-            path: self.path.clone(),
-            failure: self.failure,
-        })
-    }
-}
-
-struct AdmissionPolicy {
-    native: bootty_mux::native::NativePanePolicy,
-    path: std::path::PathBuf,
-    failure: RestoreAdmissionFailure,
-}
-
-impl BackendPanePolicy for AdmissionPolicy {
-    fn remote_target(&self) -> Option<bootty_mux::RemoteTarget> {
-        None
-    }
-    fn start_terminal(
-        &mut self,
-        request: bootty_mux::terminal::PaneStartRequest<'_>,
-    ) -> anyhow::Result<Option<Box<dyn bootty_mux::terminal::TerminalRuntime>>> {
-        if request.terminal_config.restored_history.is_some() {
-            if matches!(self.failure, RestoreAdmissionFailure::TopologyChanged) {
-                NativeBackend::for_workspace(&self.path).execute(MuxCommand::SplitPane {
-                    session_id: request.target.session_id().to_owned(),
-                    pane_id: request.target.pane_id().map(str::to_owned),
-                    direction: bootty_mux::command::MuxSplitDirection::Right,
-                })?;
-            }
-            anyhow::bail!("injected synchronous renderer refusal");
-        }
-        self.native.start_terminal(request)
-    }
-    fn sync_target(
-        &mut self,
-        target: Option<&bootty_mux::terminal::ScopedMuxPaneTarget>,
-        hide_status: bool,
-    ) {
-        self.native.sync_target(target, hide_status);
-    }
-    fn set_layout_window(&mut self, window: Option<&str>) {
-        self.native.set_layout_window(window);
-    }
-    fn resize_layout_window(
-        &mut self,
-        request: bootty_mux::terminal::PaneLayoutResizeRequest<'_>,
-    ) -> anyhow::Result<bool> {
-        self.native.resize_layout_window(request)
-    }
-    fn deactivate(&mut self) {
-        self.native.deactivate();
-    }
-}
-
-fn admission_workspace(
-    original: &std::path::Path,
-    config: &bootty_config::config::BoottyConfig,
-    failure: RestoreAdmissionFailure,
-    repaint: bootty_mux::RepaintHandle,
-) -> anyhow::Result<(
-    NativeBackend,
-    bootty_mux::snapshot::MuxSession,
-    bootty_mux::workspace::WorkspaceRuntime,
-)> {
-    let mut backend = NativeBackend::for_workspace(&config.config_path);
-    backend.execute(MuxCommand::CreateProjectSession {
-        session_id: "sibling".into(),
-        cwd: original.to_string_lossy().into_owned(),
-        tag: MuxSessionTag {
-            identity: Some("sibling".into()),
-            space: Some("other-space".into()),
-        },
-        argv: Some(Vec::new()),
-    })?;
-    let sibling = backend
-        .snapshot()?
-        .sessions
-        .into_iter()
-        .find(|session| session.id == "sibling")
-        .ok_or_else(|| anyhow::anyhow!("missing unrelated sibling"))?;
-    let provider = Arc::new(AdmissionProvider {
-        path: config.config_path.clone(),
-        failure,
-    });
-    let registry = Arc::new(
-        bootty_mux::provider::MuxBackendRegistry::from_app_providers(
-            [provider],
-            [bootty_mux::MuxBackendKind::Native],
-        )?,
-    );
-    let workspace = bootty_mux::workspace::WorkspaceRuntime::open(
-        config,
-        "main",
-        registry,
-        bootty_config::config::AppearanceVariant::Light,
-        repaint,
-    )?;
-    Ok((backend, sibling, workspace))
-}
-
-#[rstest]
-#[case::exact_fresh_removed(
-    RestoreAdmissionFailure::Refuse,
-    true,
-    "fresh restored topology removed"
-)]
-#[case::cleanup_failure_retained(
-    RestoreAdmissionFailure::CleanupFails,
-    false,
-    "injected exact cleanup refusal"
-)]
-#[case::changed_topology_retained(
-    RestoreAdmissionFailure::TopologyChanged,
-    false,
-    "cleanup failed: mux operation capability is stale"
-)]
-fn synchronous_restore_admission_failure_preserves_saved_work_and_other_sessions(
-    live_workspace: anyhow::Result<(
-        TempDir,
-        bootty_mux::workspace::WorkspaceRuntime,
-        bootty_mux::controller::SpaceId,
-        String,
-    )>,
-    #[case] failure: RestoreAdmissionFailure,
-    #[case] removed: bool,
-    #[case] diagnostic: &str,
-) {
-    let (original, mut workspace, scope, _) = live_workspace.unwrap();
-    save_current_topology(&mut workspace, scope, 10).unwrap();
-    let saved = workspace
-        .binding(scope)
-        .unwrap()
-        .sessions()
-        .get("logical")
-        .unwrap()
-        .clone();
-    drop(workspace);
-    let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
-    let (_cold, config, workspace) = cold_workspace(original.path(), &repaint).unwrap();
-    drop(workspace);
-    let (backend, sibling, mut workspace) =
-        admission_workspace(original.path(), &config, failure, repaint).unwrap();
-    let failed = restore_saved_topology(&mut workspace, scope).unwrap_err();
-    assert!(
-        failed
-            .to_string()
-            .contains("injected synchronous renderer refusal"),
-        "{failed}"
-    );
-    assert!(failed.to_string().contains(diagnostic), "{failed}");
-    let after = backend.snapshot().unwrap();
-    let sibling_after = after
-        .sessions
-        .iter()
-        .find(|session| session.id == sibling.id)
-        .unwrap();
-    // The backend activates the admitted restore; a refused cleanup leaves it selected.
-    let mut expected_sibling = sibling;
-    expected_sibling.active = removed;
-    for window in &mut expected_sibling.windows {
-        window.active = removed && expected_sibling.active_window_id.as_deref() == Some(&window.id);
-    }
-    assert_eq!(sibling_after, &expected_sibling);
-    let selected = after
-        .sessions
-        .iter()
-        .find(|session| session.active)
-        .unwrap();
-    assert_eq!(
-        after.active_session_id.as_deref(),
-        Some(selected.id.as_str())
-    );
-    assert_eq!(
-        selected.tag.identity.as_deref(),
-        Some(if removed { "sibling" } else { "logical" })
-    );
-    assert_eq!(
-        after
-            .sessions
-            .iter()
-            .any(|session| session.tag.identity.as_deref() == Some("logical")),
-        !removed
-    );
-    assert_eq!(
-        workspace
-            .binding(scope)
-            .unwrap()
-            .sessions()
-            .get("logical")
-            .unwrap()
-            .terminal_snapshot,
-        saved.terminal_snapshot
-    );
-    let (_, loaded) = WorkspaceRepository::open(&config.config_path).unwrap();
-    let current = loaded
-        .spaces()
-        .first()
-        .unwrap()
-        .binding()
-        .sessions()
-        .get("logical")
-        .unwrap();
-    assert_eq!(current.identity, saved.identity);
-    assert_eq!(current.display_name, saved.display_name);
-    assert_eq!(current.cwd, saved.cwd);
-    assert_eq!(current.state, saved.state);
-    assert_eq!(current.terminal_snapshot, saved.terminal_snapshot);
-}
-
-#[rstest]
-fn accepted_creation_journal_survives_unrelated_membership_reconciliation(
-    live_workspace: anyhow::Result<(
-        TempDir,
-        bootty_mux::workspace::WorkspaceRuntime,
-        bootty_mux::controller::SpaceId,
-        String,
-    )>,
-) {
-    use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
-    use bootty_mux::{controller::CommandSelection, executor};
-    let (directory, mut workspace, scope, _) = live_workspace.unwrap();
-    let mut config = BoottyConfig {
-        config_path: directory.path().join("config.toml"),
-        ..BoottyConfig::default()
-    };
-    config.multiplexer.backend = MultiplexerBackendConfig::Native;
-    let repaint: bootty_mux::RepaintHandle = Arc::new(|| {});
-    let (command, membership) = workspace
-        .begin_session_create(
-            scope,
-            "accepted",
-            directory.path().to_str().unwrap(),
-            Vec::new(),
-        )
-        .unwrap();
-    let accepted_identity = match &command {
-        MuxCommand::CreateProjectSession { tag, .. } => tag.identity.clone().unwrap(),
-        _ => panic!("expected project creation"),
-    };
-    workspace.set_pending_session_completion_scopes(std::collections::HashSet::from([scope]));
-    let submitted = executor::submit_authoritative_command_for_scope(
-        &mut workspace,
-        &repaint,
-        scope,
-        command,
-        membership.map(Box::new),
-        None,
-        CommandSelection::Preserve,
-    )
-    .unwrap();
-    // Legacy optimistic creation marks reconciliation ready before the accepted reply is consumed.
-    let legacy = workspace.project_session_command(directory.path().to_str().unwrap());
-    assert!(workspace.create_project_session(&legacy, &repaint).unwrap());
-    let legacy_identity = match &legacy {
-        MuxCommand::CreateProjectSession { tag, .. } => tag.identity.clone().unwrap(),
-        _ => panic!("expected legacy project creation"),
-    };
-    let (mut repository, _) = WorkspaceRepository::open(&config.config_path).unwrap();
-    let held = repository
-        .pending_binding_membership_mutations(scope)
-        .unwrap();
-    assert_eq!(held.len(), 2);
-    let now = std::time::Instant::now();
-    workspace.advance_frame(&config, AppearanceVariant::Light, &repaint, now, true);
-    assert_eq!(
-        repository
-            .pending_binding_membership_mutations(scope)
-            .unwrap(),
-        held
-    );
-    let result = submitted.result.recv().unwrap();
-    let (result, sync_error) = executor::complete_authoritative_command(
-        &mut workspace,
-        scope,
-        &submitted.command,
-        submitted.membership.as_deref(),
-        result,
-        submitted.layout.as_ref(),
-    )
-    .unwrap();
-    assert!(result.is_ok(), "{result:?}");
-    assert_eq!(sync_error, None);
-    assert!(
-        workspace
-            .binding(scope)
-            .unwrap()
-            .sessions()
-            .get(&accepted_identity)
-            .is_some()
-    );
-    assert_eq!(
-        repository
-            .pending_binding_membership_mutations(scope)
-            .unwrap()
-            .len(),
-        1
-    );
-    workspace.set_pending_session_completion_scopes(std::collections::HashSet::new());
-    workspace.advance_frame(
-        &config,
-        AppearanceVariant::Light,
-        &repaint,
-        now.checked_add(std::time::Duration::from_secs(1)).unwrap(),
-        true,
-    );
-    assert_eq!(
-        repository
-            .pending_binding_membership_mutations(scope)
-            .unwrap(),
-        Vec::new()
-    );
-    let (_, loaded) = WorkspaceRepository::open(&config.config_path).unwrap();
-    let sessions = loaded.spaces().first().unwrap().binding().sessions();
-    assert!(sessions.get(&accepted_identity).is_some());
-    assert!(sessions.get(&legacy_identity).is_some());
-}
-
 fn complete_pane_command(
     workspace: &mut bootty_mux::workspace::WorkspaceRuntime,
     scope: bootty_mux::controller::SpaceId,
@@ -1661,14 +1166,8 @@ fn complete_pane_command(
     )
     .ok_or_else(|| anyhow::anyhow!("pane binding is unavailable"))?;
     let result = pending.result.recv()?;
-    let (result, sync_error) = executor::complete_authoritative_command(
-        workspace,
-        scope,
-        &pending.command,
-        None,
-        result,
-        pending.layout.as_ref(),
-    )?;
+    let (result, sync_error) =
+        executor::complete_authoritative_command(workspace, scope, &pending.command, None, result)?;
     anyhow::ensure!(sync_error.is_none(), "pane sync failed: {sync_error:?}");
     Ok(result)
 }

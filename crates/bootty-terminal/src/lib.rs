@@ -20,10 +20,12 @@ pub mod terminal_input;
 pub mod terminal_input_model;
 pub mod terminal_launch;
 pub mod terminal_links;
+pub mod terminal_output;
 pub mod terminal_palette;
 pub mod terminal_search;
 pub mod terminal_session;
 pub mod terminal_side_effect;
+pub mod terminal_transport;
 pub mod terminfo;
 
 pub use benchmark_trace::{BenchmarkTrace, TraceValue};
@@ -41,3 +43,11 @@ pub use terminal_input::TerminalInputCommand;
 pub mod shell_prompt;
 
 pub mod clipboard_write;
+
+pub mod frame_wire;
+pub use frame_wire::{
+    FrameDecoder, FrameEncoder, FrameRows, FrameUpdate, ImageContent, ImageKey, WireError, WireRow,
+    WireState, decode_image_content, decode_update, encode_image_content, encode_update,
+};
+
+pub mod wire_bytes;

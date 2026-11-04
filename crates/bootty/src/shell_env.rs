@@ -2,12 +2,13 @@
 //!
 //! A macOS `.app` launched from Finder/Dock/Spotlight inherits launchd's minimal
 //! environment: PATH is `/usr/bin:/bin:/usr/sbin:/sbin` and the user's shell
-//! exports (Homebrew, rustup, custom PATH entries) are absent. That breaks the
-//! tmux backend and any tool the user spawns, since both rely on PATH. Launching
+//! exports (Homebrew, rustup, custom PATH entries) are absent. That breaks any
+//! tool the user spawns, since it relies on PATH. Launching
 //! the same binary from a terminal works only because the terminal hands us its
 //! environment. We reproduce that here by running the login shell once and
 //! importing what it exports.
 
+use bootty_os::spawn::CommandSpawn as _;
 use std::{collections::BTreeMap, ffi::OsString, process::Command};
 
 use anyhow::{Context, Result};
@@ -60,7 +61,7 @@ pub fn initialize_shell_environment() -> Result<Option<i32>> {
     #[cfg(not(unix))]
     {
         let status = command
-            .status()
+            .bootty_status()
             .context("restart Bootty with the login environment")?;
         Ok(Some(status.code().unwrap_or(1)))
     }
@@ -108,7 +109,7 @@ fn capture_login_env(shell: &str) -> Option<Vec<(String, String)>> {
             "-c",
             r"printf '\036BOOTTY_ENV\037'; /usr/bin/env -0",
         ])
-        .output()
+        .bootty_output()
         .ok()?;
     if !output.status.success() {
         return None;

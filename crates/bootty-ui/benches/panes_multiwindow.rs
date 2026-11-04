@@ -1,7 +1,7 @@
 use std::hint::black_box;
 
 use anyhow::{Result, anyhow};
-use bootty_config::config::{BoottyConfig, MultiplexerBackendConfig};
+use bootty_config::config::BoottyConfig;
 use bootty_terminal::geometry::{CellMetrics, TerminalGeometry, TerminalPadding, TerminalSurface};
 use bootty_terminal::{
     terminal_engine::TerminalEngine,
@@ -9,7 +9,7 @@ use bootty_terminal::{
 };
 use bootty_ui::{
     app_actions::{AppKeyBindings, KeybindAction, MuxKeyAction},
-    commands::{CommandExecutor, CommandRegistry, CoreCommandExecutor},
+    commands::{CommandRegistry, CoreCommandExecutor},
 };
 use bootty_ui::{
     paint_plan::PaintPlanner,
@@ -498,9 +498,7 @@ fn bench_pane_active_and_inactive_paths(c: &mut Criterion) -> Result<()> {
 }
 
 fn bench_tab_keybind_lookup(c: &mut Criterion) -> Result<()> {
-    let keybinds = BoottyConfig::default()
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    let keybinds = BoottyConfig::default().input.keybinds();
     let inputs = tab_key_inputs();
 
     let mut bindings = AppKeyBindings::from_keybinds(&keybinds)?;
@@ -519,8 +517,8 @@ fn bench_tab_keybind_lookup(c: &mut Criterion) -> Result<()> {
                         });
                 if matches!(
                     executor,
-                    Some(CommandExecutor::Core(CoreCommandExecutor::Keybind(
-                        KeybindAction::Mux(MuxKeyAction::NextTab | MuxKeyAction::SelectTab(_))
+                    Some(CoreCommandExecutor::Keybind(KeybindAction::Mux(
+                        MuxKeyAction::NextTab | MuxKeyAction::SelectTab(_)
                     )))
                 ) {
                     hits = hits.saturating_add(1);

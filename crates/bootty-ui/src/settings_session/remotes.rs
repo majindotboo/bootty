@@ -38,33 +38,6 @@ impl DefaultRemote {
             dirty: false,
         }
     }
-
-    fn validate(&self) -> Result<RemoteProfile, String> {
-        let host = self.host.trim();
-        if host.is_empty() {
-            return Err("Default remote needs a host name.".to_owned());
-        }
-        let port = nonempty(&self.port)
-            .map(|port| {
-                port.parse::<std::num::NonZeroU16>()
-                    .map(std::num::NonZeroU16::get)
-                    .map_err(|_| "Port must be between 1 and 65535.".to_owned())
-            })
-            .transpose()?;
-        Ok(RemoteProfile {
-            id: "default".to_owned(),
-            name: "Default remote".to_owned(),
-            host: host.to_owned(),
-            user: nonempty(&self.user),
-            port,
-            authentication: "auto".to_owned(),
-            host_key_policy: "strict".to_owned(),
-            identity_file: None,
-            proxy_jump: None,
-            program: nonempty(&self.program).unwrap_or_else(|| "ssh".to_owned()),
-            args: self.args.iter().filter_map(|arg| nonempty(arg)).collect(),
-        })
-    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -324,11 +297,22 @@ impl RemoteState {
         true
     }
 
-    pub(crate) fn save_default(&mut self) -> Option<SettingsEffect> {
-        match self.default.validate() {
+    pub(crate) fn validated_default(&mut self) -> Option<RemoteProfile> {
+        let draft = RemoteDraft {
+            name: "Default remote".to_owned(),
+            host: self.default.host.clone(),
+            user: self.default.user.clone(),
+            port: self.default.port.clone(),
+            program: self.default.program.clone(),
+            args: self.default.args.clone(),
+            authentication: "auto".to_owned(),
+            host_key_policy: "strict".to_owned(),
+            ..RemoteDraft::default()
+        };
+        match draft.validate() {
             Ok(profile) => {
                 self.default.error = None;
-                Some(SettingsEffect::SetDefaultRemote(profile))
+                Some(profile)
             }
             Err(error) => {
                 self.default.error = Some(error);

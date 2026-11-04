@@ -1,44 +1,31 @@
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::Path,
     sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
-    thread,
     time::{Duration, Instant},
 };
 
-use crate::{MuxBackendKind, MuxBindingConfig};
+use crate::MuxBindingConfig;
+use anyhow::Context as _;
 use bootty_control::CommandCancellation;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    backend::MuxBackend,
-    capability::{BindingOperation, BindingOperationOutcome},
     command::MuxCommand,
-    provider::{MuxBackendRegistry, MuxCommandDispatch},
-    snapshot::{MuxSession, MuxSessionTag, MuxSnapshot, selection_after_refresh, session_matches},
+    native::{NativeBackend, protocol::TopologySnapshot},
+    snapshot::{MuxSession, MuxSnapshot, selection_after_refresh, session_matches},
 };
-
-mod session_refresh;
-
-use session_refresh::SessionRefresh;
 
 pub type RepaintHandle = Arc<dyn Fn() + Send + Sync + 'static>;
 
-/// How often a focused window polls the backend for session structure.
-///
-/// Nothing pushes these changes to us: a session created from a shell, or a pane whose foreground command changed, only
-/// shows up on the next poll, so the cadence is what makes the sidebar feel live. It also sets the
-/// floor on how often an otherwise idle window repaints, and the session facts a row shows are
-/// themselves refreshed every 500ms, so polling faster than that only bought frames.
+/// How often a focused window reads the shared native topology.
+/// Other Bootty windows can change the shared native state between commands.
 pub const MUX_SESSION_REFRESH_INTERVAL: Duration = Duration::from_millis(500);
-/// The same poll behind an unfocused window.
-///
-/// Every poll spawns a backend client process and forces a frame, and nobody is reading the sidebar, so it drops to a cadence that still notices sessions
-/// coming and going without paying 4 processes a second to watch them.
+/// A lower refresh cadence for unfocused windows.
 pub const MUX_SESSION_REFRESH_INTERVAL_UNFOCUSED: Duration = Duration::from_secs(2);
 static NEXT_BINDING_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -56,14 +43,6 @@ pub const fn mux_session_refresh_interval(focused: bool) -> Duration {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NewMuxSessionRequest {
-    pub session_id: String,
-    pub cwd: String,
-    /// What the new session is stamped with. See [`MuxCommand::CreateProjectSession`].
-    pub tag: MuxSessionTag,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MuxSessionRefreshOutcome {
     pub applied: bool,
@@ -74,10 +53,10 @@ pub struct MuxSessionRefreshOutcome {
 pub enum MuxCommandError {
     Cancelled,
     DeadlineExceeded,
-    Unsupported,
     Unavailable,
     Stale,
     Failed(String),
+    LaunchFailed(String),
 }
 
 impl std::fmt::Display for MuxCommandError {
@@ -85,13 +64,34 @@ impl std::fmt::Display for MuxCommandError {
         match self {
             Self::Cancelled => formatter.write_str("command was cancelled"),
             Self::DeadlineExceeded => formatter.write_str("command deadline expired"),
-            Self::Unsupported => formatter.write_str("mux operation is unsupported"),
             Self::Unavailable => formatter.write_str("mux operation is unavailable"),
-            Self::Stale => formatter.write_str("mux operation capability is stale"),
-            Self::Failed(message) => formatter.write_str(message),
+            Self::Stale => formatter.write_str("mux target is stale"),
+            Self::Failed(message) | Self::LaunchFailed(message) => formatter.write_str(message),
         }
     }
 }
+
+fn mux_failure(error: &anyhow::Error) -> MuxCommandError {
+    if let Some(error) = error.downcast_ref::<MuxCommandError>() {
+        return error.clone();
+    }
+    if error.is::<crate::native::ServerChanged>() {
+        return MuxCommandError::Stale;
+    }
+    if error.is::<crate::native::RequestExpired>() {
+        return MuxCommandError::DeadlineExceeded;
+    }
+    if error.is::<crate::native::RequestCanceled>() {
+        return MuxCommandError::Cancelled;
+    }
+    if error.is::<crate::native::protocol::LaunchFailure>() {
+        MuxCommandError::LaunchFailed(format!("{error:#}"))
+    } else {
+        MuxCommandError::Failed(format!("{error:#}"))
+    }
+}
+
+impl std::error::Error for MuxCommandError {}
 
 pub type MuxCommandResult = std::result::Result<MuxCommandCompletion, MuxCommandError>;
 
@@ -106,13 +106,13 @@ pub enum CommandSelection {
     Preserve,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MuxCommandCompletion {
     /// The selection the command asked for. Both are `None` for a command that preserves it.
     pub selected_session: Option<String>,
     pub selected_window: Option<String>,
     preserve_selection: bool,
-    snapshot: Option<(MuxBindingConfig, MuxSnapshot)>,
+    snapshot: Option<(MuxBindingConfig, TopologySnapshot)>,
 }
 
 impl MuxCommandCompletion {
@@ -126,19 +126,6 @@ impl MuxCommandCompletion {
         self.snapshot
             .as_ref()
             .is_none_or(|(completed_config, _)| completed_config == config)
-    }
-
-    pub(crate) fn restored_session(&self, tag: &MuxSessionTag) -> Option<&MuxSession> {
-        let (_, snapshot) = self.snapshot.as_ref()?;
-        if !snapshot.disposition.is_authoritative() {
-            return None;
-        }
-        let mut matches = snapshot
-            .sessions
-            .iter()
-            .filter(|session| session.tag == *tag);
-        let session = matches.next()?;
-        matches.next().is_none().then_some(session)
     }
 
     const fn requested(selected_session: Option<String>, selected_window: Option<String>) -> Self {
@@ -159,7 +146,7 @@ impl MuxCommandCompletion {
         }
     }
 
-    fn with_snapshot(self, config: MuxBindingConfig, snapshot: MuxSnapshot) -> Self {
+    fn with_snapshot(self, config: MuxBindingConfig, snapshot: TopologySnapshot) -> Self {
         if self.preserve_selection {
             return Self {
                 snapshot: Some((config, snapshot)),
@@ -169,19 +156,19 @@ impl MuxCommandCompletion {
         // Detached creation need not change the backend's active session.
         let requested = self.selected_session.filter(|selected| {
             snapshot
+                .snapshot
                 .sessions
                 .iter()
                 .any(|session| session_matches(session, selected))
         });
         let selected_session = selection_after_refresh(
-            requested.or_else(|| snapshot.active_session_id.clone()),
-            &snapshot.sessions,
+            requested.or_else(|| snapshot.snapshot.active_session_id.clone()),
+            &snapshot.snapshot.sessions,
         );
         let selected_window = selected_window_after_refresh(
             selected_session.as_deref(),
             self.selected_window,
-            None,
-            &snapshot,
+            &snapshot.snapshot,
         );
         Self {
             selected_session,
@@ -192,120 +179,9 @@ impl MuxCommandCompletion {
     }
 }
 
-/// The backend configuration a controller's queued work was checked against. The generation
-/// moves whenever that configuration changes and when the controller is dropped, so work claimed
-/// later fails as stale instead of acting on a closed or reconfigured binding's backend.
-#[derive(Default)]
-struct CommandConfigState {
-    config: Option<MuxBindingConfig>,
-    generation: u64,
-}
-
-/// A ticket for work a binding hands to another thread, taken when the work is dispatched.
-pub(crate) struct CommandFence {
-    state: Arc<Mutex<CommandConfigState>>,
-    generation: u64,
-}
-
-impl CommandFence {
-    /// Check, right before acting, that the binding still lives with the backend configuration
-    /// it had at dispatch.
-    /// # Errors
-    /// Returns `Stale` once the binding was closed or replaced, or its configuration changed.
-    pub(crate) fn claim(&self) -> Result<(), MuxCommandError> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.generation == self.generation {
-            Ok(())
-        } else {
-            Err(MuxCommandError::Stale)
-        }
-    }
-}
-
-struct MuxCommandJob {
-    scope: SpaceId,
-    config: MuxBindingConfig,
-    command: MuxCommand,
-    completion: MuxCommandCompletion,
-    response: Option<mpsc::Sender<MuxCommandResult>>,
-    deadline: Option<Instant>,
-    cancellation: Option<CommandCancellation>,
-    config_generation: u64,
-    expected_restore: Option<MuxSession>,
-}
-
-fn execute_backend_command(
-    registry: &MuxBackendRegistry,
-    backend: &mut dyn MuxBackend,
-    config: &MuxBindingConfig,
-    scope: SpaceId,
-    command: MuxCommand,
-    expected_restore: Option<&MuxSession>,
-) -> Result<(), MuxCommandError> {
-    if let Some(expected) = expected_restore {
-        validate_restore_cleanup(backend, expected)?;
-    }
-    match registry.execute_checked(config, scope, backend, command) {
-        BindingOperationOutcome::Supported(result) => {
-            result.map_err(|error| MuxCommandError::Failed(format!("{error:#}")))
-        }
-        BindingOperationOutcome::Unsupported => Err(MuxCommandError::Unsupported),
-        BindingOperationOutcome::Unavailable => Err(MuxCommandError::Unavailable),
-        BindingOperationOutcome::Stale => Err(MuxCommandError::Stale),
-    }
-}
-
-fn validate_restore_cleanup(
-    backend: &dyn MuxBackend,
-    expected: &MuxSession,
-) -> Result<(), MuxCommandError> {
-    let snapshot = backend
-        .snapshot()
-        .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
-    if !snapshot.disposition.is_authoritative() {
-        return Err(MuxCommandError::Unavailable);
-    }
-    let current = snapshot
-        .sessions
-        .iter()
-        .find(|session| session.id == expected.id)
-        .filter(|session| session.tag == expected.tag)
-        .ok_or(MuxCommandError::Stale)?;
-    let topology = |session: &MuxSession| {
-        session
-            .windows
-            .iter()
-            .map(|window| {
-                (
-                    window.id.clone(),
-                    window
-                        .panes
-                        .iter()
-                        .filter_map(|pane| pane.pane_id.clone())
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    if topology(current) != topology(expected) {
-        return Err(MuxCommandError::Stale);
-    }
-    Ok(())
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct ActiveWindow {
-    session_id: String,
-    window_id: String,
-}
-
 fn selected_window_after_refresh(
     selected_session: Option<&str>,
     current: Option<String>,
-    previous_active: Option<&ActiveWindow>,
     snapshot: &MuxSnapshot,
 ) -> Option<String> {
     let selected_session = selected_session?;
@@ -313,34 +189,9 @@ fn selected_window_after_refresh(
         .sessions
         .iter()
         .find(|session| session.id == selected_session || session.name == selected_session)?;
-    let active = session.active_window_id.as_deref();
-    let previous_active = previous_active
-        .filter(|previous| previous.session_id == session.id)
-        .map(|previous| previous.window_id.as_str());
-    // Follow an external switch: when tmux's active window moved since the last
-    // snapshot, the highlight tracks it (e.g. windows changed from inside tmux).
-    // Otherwise keep the current selection, stable across refreshes and during an
-    // optimistic local switch that the snapshot hasn't caught up to yet.
-    if previous_active.is_some() && active.is_some() && active != previous_active {
-        return active.map(str::to_owned);
-    }
     current
         .filter(|window_id| session.windows.iter().any(|window| &window.id == window_id))
         .or_else(|| session.active_window_id.clone())
-}
-
-fn active_window_of(
-    sessions: &[MuxSession],
-    selected_session: Option<&str>,
-) -> Option<ActiveWindow> {
-    let selected_session = selected_session?;
-    let session = sessions
-        .iter()
-        .find(|session| session.id == selected_session || session.name == selected_session)?;
-    Some(ActiveWindow {
-        session_id: session.id.clone(),
-        window_id: session.active_window_id.clone()?,
-    })
 }
 
 fn optimistic_window_after_command(
@@ -349,6 +200,8 @@ fn optimistic_window_after_command(
     command: &MuxCommand,
 ) -> Option<String> {
     let (session_id, step) = match command {
+        MuxCommand::ActivateWindow { window_id, .. }
+        | MuxCommand::ActivatePane { window_id, .. } => return Some(window_id.clone()),
         MuxCommand::ActivateNextWindow { session_id } => (session_id.as_str(), 1_i32),
         MuxCommand::ActivatePreviousWindow { session_id } => (session_id.as_str(), -1_i32),
         MuxCommand::ActivateWindowIndex { session_id, index } => {
@@ -486,84 +339,78 @@ impl MuxResourceKey {
     }
 }
 
+pub(crate) struct CommandFence(Arc<AtomicBool>);
+impl CommandFence {
+    pub(crate) fn claim(&self) -> Result<(), MuxCommandError> {
+        self.0
+            .load(Ordering::Acquire)
+            .then_some(())
+            .ok_or(MuxCommandError::Stale)
+    }
+}
+
 pub struct MuxController {
     last_error: Option<String>,
     availability_error: Option<BindingAvailabilityError>,
-    refresh_failed: bool,
     binding_generation: u64,
+    server_generation: Option<u64>,
+    server_revision: Option<u64>,
     resource_generations: BTreeMap<MuxResourceKey, u64>,
     observed_resources: BTreeMap<MuxResourceKey, String>,
-    observed_backend: Option<MuxBackendKind>,
-    scope: SpaceId,
     sessions: Vec<MuxSession>,
     all_sessions: Vec<MuxSession>,
     backend_session_names: Vec<String>,
     selected_session: Option<String>,
-    /// A session this binding just asked the backend to create and still expects to see. Selection
-    /// falls back to whatever the backend calls active whenever the current one is missing, so
-    /// without this the session being created loses focus in the frames before it shows up.
-    expected_session: Option<String>,
     previous_selected_session: Option<String>,
     selected_window: Option<String>,
-    /// The selected session's active window from the previous snapshot, used to detect window
-    /// switches made outside bootty so the highlight follows them.
-    last_active_window: Option<ActiveWindow>,
-    current_backend: Option<MuxBackendKind>,
-    session_refresh: SessionRefresh,
-    mux_command_tx: Option<mpsc::Sender<MuxCommandJob>>,
-    mux_command_rx: Option<mpsc::Receiver<MuxCommandResult>>,
-    pending_gui_commands: usize,
-    registry: Arc<MuxBackendRegistry>,
-    workspace: Option<PathBuf>,
-    command_config: Arc<Mutex<CommandConfigState>>,
+    alive: Arc<AtomicBool>,
+    backend: NativeBackend,
+    pending_inline: Vec<mpsc::Receiver<MuxCommandResult>>,
+    last_refresh: Option<Instant>,
+    has_snapshot: bool,
 }
 
 impl Drop for MuxController {
-    // A dropped controller's binding was closed or replaced. Retiring its configuration makes
-    // queued commands and pending pane work fail as stale rather than reach the old backend.
     fn drop(&mut self) {
-        let mut state = self
-            .command_config
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        state.config = None;
-        state.generation = state.generation.wrapping_add(1);
+        self.alive.store(false, Ordering::Release);
     }
 }
-
 impl MuxController {
+    pub(crate) fn command_fence(&self, _config: &MuxBindingConfig) -> CommandFence {
+        CommandFence(Arc::clone(&self.alive))
+    }
+
     #[must_use]
-    pub fn new(
-        scope: SpaceId,
-        registry: Arc<MuxBackendRegistry>,
-        workspace: Option<PathBuf>,
-    ) -> Self {
+    pub fn new(workspace: Option<&Path>) -> Self {
+        Self::with_backend(workspace.map_or_else(NativeBackend::new, NativeBackend::for_workspace))
+    }
+
+    pub(crate) fn with_backend(backend: NativeBackend) -> Self {
         Self {
+            alive: Arc::new(AtomicBool::new(true)),
+            backend,
+            pending_inline: Vec::new(),
+            last_refresh: None,
+            has_snapshot: false,
             last_error: None,
             availability_error: None,
-            refresh_failed: false,
             binding_generation: next_binding_generation(),
+            server_generation: None,
+            server_revision: None,
             resource_generations: BTreeMap::new(),
             observed_resources: BTreeMap::new(),
-            observed_backend: None,
-            scope,
             sessions: Vec::new(),
             all_sessions: Vec::new(),
             backend_session_names: Vec::new(),
             selected_session: None,
-            expected_session: None,
             previous_selected_session: None,
             selected_window: None,
-            last_active_window: None,
-            current_backend: None,
-            session_refresh: SessionRefresh::default(),
-            mux_command_tx: None,
-            mux_command_rx: None,
-            pending_gui_commands: 0,
-            registry,
-            workspace,
-            command_config: Arc::new(Mutex::new(CommandConfigState::default())),
         }
+    }
+
+    #[must_use]
+    pub fn native_backend(&self) -> NativeBackend {
+        self.backend.clone()
     }
 
     #[must_use]
@@ -597,25 +444,6 @@ impl MuxController {
     #[must_use]
     pub const fn binding_generation(&self) -> u64 {
         self.binding_generation
-    }
-
-    #[must_use]
-    pub fn operation_outcome(
-        &self,
-        config: &MuxBindingConfig,
-        operation: BindingOperation,
-    ) -> BindingOperationOutcome<()> {
-        if self.availability_error.is_some() {
-            return BindingOperationOutcome::Unavailable;
-        }
-        let Some(capabilities) = self.registry.capabilities(config, self.scope) else {
-            return BindingOperationOutcome::Unavailable;
-        };
-        if capabilities.supports(operation) {
-            BindingOperationOutcome::Supported(())
-        } else {
-            BindingOperationOutcome::Unsupported
-        }
     }
 
     #[must_use]
@@ -696,46 +524,13 @@ impl MuxController {
         self.observed_resources = current;
     }
 
-    pub(crate) fn workspace_path(&self) -> Option<&std::path::Path> {
-        self.workspace.as_deref()
-    }
-
-    fn build_backend(&self, config: &MuxBindingConfig) -> anyhow::Result<Box<dyn MuxBackend>> {
-        self.registry
-            .build_backend(config, self.workspace.as_deref())
-    }
-
-    /// A fence for work dispatched now against `config`; see [`CommandFence::claim`].
-    pub(crate) fn command_fence(&self, config: &MuxBindingConfig) -> CommandFence {
-        CommandFence {
-            state: Arc::clone(&self.command_config),
-            generation: self.observe_command_config(config),
-        }
-    }
-
-    fn observe_command_config(&self, config: &MuxBindingConfig) -> u64 {
-        let mut state = self
-            .command_config
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.config.as_ref() != Some(config) {
-            state.config = Some(config.clone());
-            state.generation = state.generation.wrapping_add(1);
-        }
-        state.generation
-    }
-
     pub const fn refresh_on_next_frame(&mut self) {
-        self.current_backend = None;
-        self.session_refresh.request_soon();
+        self.last_refresh = None;
     }
 
-    /// Whether the current provider has published an authoritative session listing.
     #[must_use]
-    pub fn has_session_snapshot(&self) -> bool {
-        self.observed_backend.is_some()
-            && self.observed_backend == self.current_backend
-            && self.availability_error.is_none()
+    pub const fn has_session_snapshot(&self) -> bool {
+        self.has_snapshot && self.availability_error.is_none()
     }
 
     #[must_use]
@@ -849,9 +644,6 @@ impl MuxController {
         }
         // A session this binding is still waiting on keeps the selection: it belongs to the order
         // already, it is just missing from the backend list the order was applied to.
-        if self.selected_session == self.expected_session {
-            return;
-        }
         if self.selected_session.as_deref().is_none_or(|selected| {
             !self
                 .sessions
@@ -875,140 +667,54 @@ impl MuxController {
         &mut self,
         repaint: &RepaintHandle,
         config: &MuxBindingConfig,
-        interval: Duration,
+        _interval: Duration,
     ) -> MuxSessionRefreshOutcome {
         if let Some(BindingAvailabilityError::Configured(error)) = &self.availability_error {
-            self.last_error = Some(error.clone());
             return MuxSessionRefreshOutcome {
                 applied: false,
                 error: Some(error.clone()),
             };
         }
-        let recovering = self.refresh_failed;
-        let outcome = self.refresh_sessions_inner(repaint, config, interval);
-        if let Some(error) = &outcome.error {
-            self.set_availability_error(Some(error.clone()));
-            self.refresh_failed = true;
-        }
-        if outcome.applied {
-            let backend_changed = self
-                .observed_backend
-                .is_some_and(|observed| Some(observed) != self.current_backend);
-            if recovering || backend_changed {
-                self.binding_generation = self.binding_generation.saturating_add(1);
-                self.observed_resources.clear();
+        let mut ready = Vec::new();
+        self.pending_inline.retain(|rx| match rx.try_recv() {
+            Ok(result) => {
+                ready.push(result);
+                false
             }
-            self.observed_backend = self.current_backend;
-            if outcome.error.is_none() {
+            Err(mpsc::TryRecvError::Empty) => true,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                ready.push(Err(MuxCommandError::Failed(
+                    "native mux command worker stopped".into(),
+                )));
+                false
+            }
+        });
+        for result in ready {
+            if let Err(error) = self.complete_authoritative_command(result, config) {
+                self.last_error = Some(error.to_string());
+            }
+        }
+        match self.backend.latest_snapshot(repaint) {
+            Ok(None) => MuxSessionRefreshOutcome::default(),
+            Ok(Some(snapshot)) => {
+                let applied = self.apply_refreshed_snapshot(snapshot);
+                self.last_refresh = Some(Instant::now());
                 self.set_availability_error(None);
-                self.refresh_failed = false;
-            }
-            self.record_resource_snapshot();
-        }
-        outcome
-    }
-
-    fn refresh_sessions_inner(
-        &mut self,
-        repaint: &RepaintHandle,
-        config: &MuxBindingConfig,
-        interval: Duration,
-    ) -> MuxSessionRefreshOutcome {
-        self.observe_command_config(config);
-        let mut outcome = MuxSessionRefreshOutcome::default();
-        if let Some(result) = self.session_refresh.poll(config) {
-            match result {
-                Ok((backend, snapshot)) => {
-                    outcome.applied |= self.apply_refreshed_snapshot(backend, snapshot);
-                }
-                Err(error) => {
-                    outcome.error = Some(error);
-                    return outcome;
-                }
-            }
-        }
-
-        // A snapshot taken between queued commands can mistake our own switch for an external one.
-        if self.pending_gui_commands != 0 || !self.session_refresh.is_due(interval) {
-            return outcome;
-        }
-
-        if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
-            let inline = self.refresh_inline_sessions(config);
-            outcome.applied |= inline.applied;
-            outcome.error = inline.error;
-            return outcome;
-        }
-
-        outcome.error = self
-            .session_refresh
-            .request(&self.registry, self.workspace.as_deref(), repaint, config)
-            .err();
-        outcome
-    }
-
-    fn refresh_inline_sessions(&mut self, config: &MuxBindingConfig) -> MuxSessionRefreshOutcome {
-        match self
-            .build_backend(config)
-            .and_then(|backend| backend.snapshot())
-        {
-            Ok(snapshot) => {
-                let backend = self.registry.selected_kind(config);
-                let applied = self.apply_refreshed_snapshot(backend, snapshot);
-                self.session_refresh.record_started();
+                self.record_resource_snapshot();
                 MuxSessionRefreshOutcome {
                     applied,
                     error: None,
                 }
             }
-            Err(error) => MuxSessionRefreshOutcome {
-                applied: false,
-                error: Some(error.to_string()),
-            },
-        }
-    }
-
-    pub fn poll_command(&mut self) -> Option<Result<(), String>> {
-        let mut completed = false;
-        let mut first_error = None;
-        loop {
-            let result = match self
-                .mux_command_rx
-                .as_ref()
-                .map(std::sync::mpsc::Receiver::try_recv)
-            {
-                Some(Ok(result)) => result,
-                Some(Err(mpsc::TryRecvError::Empty)) => break,
-                None => return None,
-                Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                    self.mux_command_tx = None;
-                    self.mux_command_rx = None;
-                    self.pending_gui_commands = 0;
-                    self.session_refresh.invalidate();
-                    let result = Some(Err("mux command worker stopped".to_owned()));
-                    self.last_error = result
-                        .as_ref()
-                        .and_then(|result| result.as_ref().err().cloned());
-                    return result;
+            Err(error) => {
+                let error = error.to_string();
+                self.set_availability_error(Some(error.clone()));
+                MuxSessionRefreshOutcome {
+                    applied: false,
+                    error: Some(error),
                 }
-            };
-            completed = true;
-            self.pending_gui_commands = self.pending_gui_commands.saturating_sub(1);
-            if let Err(error) = self.complete_authoritative_command_inner(result, None)
-                && first_error.is_none()
-            {
-                first_error = Some(error.to_string());
             }
         }
-
-        let result = completed.then(|| first_error.map_or(Ok(()), Err));
-        if let Some(result) = &result {
-            self.last_error = result.as_ref().err().cloned();
-            if result.is_ok() {
-                self.record_resource_snapshot();
-            }
-        }
-        result
     }
 
     /// # Errors
@@ -1050,12 +756,7 @@ impl MuxController {
                             completion.selected_window.clone(),
                         )
                     };
-                    self.apply_snapshot(
-                        self.registry.selected_kind(config),
-                        snapshot.clone(),
-                        session,
-                        window,
-                    );
+                    self.apply_server_snapshot(snapshot.clone(), session, window);
                 } else if !completion.preserve_selection {
                     match (&completion.selected_session, &completion.selected_window) {
                         (Some(session), Some(window)) => {
@@ -1067,13 +768,10 @@ impl MuxController {
                         (None, None) => {}
                     }
                 }
-                self.session_refresh.invalidate();
+                self.last_refresh = None;
                 Ok(completion)
             }
-            Err(error) => {
-                self.expected_session = None;
-                Err(error)
-            }
+            Err(error) => Err(error),
         }
     }
 
@@ -1085,21 +783,6 @@ impl MuxController {
             self.previous_selected_session = Some(current);
         }
         self.selected_session = session_id;
-    }
-
-    /// The selection to keep once `sessions` is the whole truth: the expected session survives even
-    /// while the backend has yet to report it, and anything else falls back as usual.
-    fn selection_within(
-        &self,
-        preferred: Option<String>,
-        sessions: &[MuxSession],
-    ) -> Option<String> {
-        if let Some(preferred) = preferred.as_deref()
-            && self.expected_session.as_deref() == Some(preferred)
-        {
-            return Some(preferred.to_owned());
-        }
-        selection_after_refresh(preferred, sessions)
     }
 
     /// The backend id behind the current selection. Selection resolves by name or id, and only the
@@ -1117,13 +800,6 @@ impl MuxController {
     }
 
     pub fn activate_session(&mut self, session_id: &str) {
-        if self
-            .expected_session
-            .as_deref()
-            .is_some_and(|expected| expected != session_id)
-        {
-            self.expected_session = None;
-        }
         self.set_selected_session(Some(session_id.to_owned()));
         self.selected_window = None;
     }
@@ -1135,33 +811,17 @@ impl MuxController {
         repaint: &RepaintHandle,
         config: &MuxBindingConfig,
     ) {
-        self.set_selected_session(Some(session_id.to_owned()));
-        self.selected_window = Some(window_id.to_owned());
-        let command = MuxCommand::ActivateWindow {
-            session_id: session_id.to_owned(),
-            window_id: window_id.to_owned(),
-        };
-        if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
-            self.execute_and_apply_inline_command(
-                config,
-                command,
-                Some(session_id.to_owned()),
-                Some(window_id.to_owned()),
-            );
-            repaint();
-            return;
-        }
-        self.enqueue_command(
+        self.execute_and_apply_inline_command(
             repaint,
             config,
-            command,
-            MuxCommandCompletion::requested(
-                Some(session_id.to_owned()),
-                Some(window_id.to_owned()),
-            ),
-            None,
-            None,
+            MuxCommand::ActivateWindow {
+                session_id: session_id.to_owned(),
+                window_id: window_id.to_owned(),
+            },
+            Some(session_id.to_owned()),
+            Some(window_id.to_owned()),
         );
+        repaint();
     }
     pub fn rename_window(
         &mut self,
@@ -1219,65 +879,14 @@ impl MuxController {
         config: &MuxBindingConfig,
         command: MuxCommand,
     ) {
-        if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
-            self.execute_and_apply_inline_command(
-                config,
-                command,
-                self.selected_session.clone(),
-                self.selected_window.clone(),
-            );
-            repaint();
-            return;
-        }
-        self.enqueue_command(
+        self.execute_and_apply_inline_command(
             repaint,
             config,
             command,
-            MuxCommandCompletion::requested(None, None),
-            None,
-            None,
+            self.selected_session.clone(),
+            self.selected_window.clone(),
         );
-    }
-
-    pub fn create_project_session(
-        &mut self,
-        request: NewMuxSessionRequest,
-        repaint: &RepaintHandle,
-        config: &MuxBindingConfig,
-    ) {
-        if self.availability_error.is_some() {
-            return;
-        }
-        let command = MuxCommand::CreateProjectSession {
-            session_id: request.session_id.clone(),
-            cwd: request.cwd,
-            tag: request.tag,
-            argv: None,
-        };
-        self.expected_session = Some(request.session_id.clone());
-        if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
-            let succeeded = self.execute_and_apply_inline_command(
-                config,
-                command,
-                Some(request.session_id),
-                None,
-            );
-            repaint();
-            if succeeded {
-                self.record_resource_snapshot();
-            }
-            return;
-        }
-        self.activate_session(&request.session_id);
-        self.enqueue_command(
-            repaint,
-            config,
-            command,
-            MuxCommandCompletion::requested(Some(request.session_id), None),
-            None,
-            None,
-        );
-        self.record_resource_snapshot();
+        repaint();
     }
 
     pub fn execute_command(
@@ -1286,31 +895,9 @@ impl MuxController {
         config: &MuxBindingConfig,
         command: MuxCommand,
     ) {
-        if self.availability_error.is_some() {
-            return;
-        }
-        let (selected_session, preferred_window) = self.command_completion(&command);
-        if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
-            let succeeded = self.execute_and_apply_inline_command(
-                config,
-                command,
-                selected_session,
-                preferred_window,
-            );
-            repaint();
-            if succeeded {
-                self.record_resource_snapshot();
-            }
-            return;
-        }
-        let selected_window = self.apply_optimistic_command_selection(&command);
-        // The window is already selected. A late completion must keep newer keyboard navigation.
-        let completion = if selected_window.is_some() {
-            MuxCommandCompletion::preserving_selection()
-        } else {
-            MuxCommandCompletion::requested(selected_session, selected_window)
-        };
-        self.enqueue_command(repaint, config, command, completion, None, None);
+        let (session, window) = self.command_completion(&command);
+        self.execute_and_apply_inline_command(repaint, config, command, session, window);
+        repaint();
         self.record_resource_snapshot();
     }
 
@@ -1320,9 +907,10 @@ impl MuxController {
         config: &MuxBindingConfig,
         command: MuxCommand,
         selection: CommandSelection,
-        deadline: Instant,
-        cancellation: CommandCancellation,
+        execution: (Instant, &CommandCancellation),
+        persist: impl FnOnce() -> anyhow::Result<()> + Send + 'static,
     ) -> mpsc::Receiver<MuxCommandResult> {
+        let (deadline, cancellation) = execution;
         let (response_tx, response_rx) = mpsc::channel();
         if self.availability_error.is_some() {
             let _ = response_tx.send(Err(MuxCommandError::Unavailable));
@@ -1344,89 +932,50 @@ impl MuxController {
             let _ = response_tx.send(Err(MuxCommandError::DeadlineExceeded));
             return response_rx;
         }
-        let command_dispatch = self.registry.command_dispatch(config);
-        if command_dispatch == Some(MuxCommandDispatch::CallerThread) && !cancellation.try_start() {
-            let _ = response_tx.send(Err(MuxCommandError::Cancelled));
-            return response_rx;
+        // A window already present in the server snapshot can be presented immediately.
+        // Its focus mutation still completes only after the server acknowledges the command.
+        if selection == CommandSelection::Follow
+            && matches!(
+                command,
+                MuxCommand::ActivateWindow { .. }
+                    | MuxCommand::ActivateWindowIndex { .. }
+                    | MuxCommand::ActivateNextWindow { .. }
+                    | MuxCommand::ActivatePreviousWindow { .. }
+                    | MuxCommand::ActivateLastWindow { .. }
+            )
+        {
+            if let Some(session) = &completion.selected_session {
+                self.set_selected_session(Some(session.clone()));
+            }
+            if let Some(window) = &completion.selected_window {
+                self.selected_window = Some(window.clone());
+            }
         }
-        if command_dispatch == Some(MuxCommandDispatch::CallerThread) {
-            let result = self
-                .execute_inline_command(config, command)
-                .map(|snapshot| completion.with_snapshot(config.clone(), snapshot));
+        let fence = self.command_fence(config);
+        let pending = self.backend.submit_persisted(
+            command,
+            move || {
+                fence.claim()?;
+                persist()
+            },
+            deadline,
+            cancellation.clone(),
+            self.server_generation
+                .or_else(|| self.backend.peer_generation()),
+        );
+        let repaint = Arc::clone(repaint);
+        let config = config.clone();
+        std::thread::spawn(move || {
+            let result = pending
+                .recv()
+                .context("native mux client worker stopped")
+                .and_then(|result| result)
+                .map_err(|error| mux_failure(&error))
+                .map(|snapshot| completion.with_snapshot(config, snapshot));
             let _ = response_tx.send(result);
             repaint();
-            return response_rx;
-        }
-        self.enqueue_command(
-            repaint,
-            config,
-            command,
-            completion,
-            Some(response_tx),
-            Some((deadline, cancellation)),
-        );
+        });
         response_rx
-    }
-
-    pub(crate) fn discard_failed_restore(
-        &mut self,
-        repaint: &RepaintHandle,
-        config: &MuxBindingConfig,
-        expected: MuxSession,
-    ) -> Result<bool, MuxCommandError> {
-        let command = MuxCommand::DitchSession {
-            session_id: expected.id.clone(),
-        };
-        if self.registry.command_dispatch(config) == Some(MuxCommandDispatch::CallerThread) {
-            let mut backend = self
-                .build_backend(config)
-                .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
-            execute_backend_command(
-                &self.registry,
-                backend.as_mut(),
-                config,
-                self.scope,
-                command,
-                Some(&expected),
-            )?;
-            let snapshot = backend
-                .snapshot()
-                .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
-            if snapshot
-                .sessions
-                .iter()
-                .any(|session| session.id == expected.id)
-            {
-                return Err(MuxCommandError::Failed(
-                    "backend retained the exact restored session after cleanup".into(),
-                ));
-            }
-            self.apply_snapshot(
-                self.registry.selected_kind(config),
-                snapshot,
-                self.selected_session.clone(),
-                self.selected_window.clone(),
-            );
-            self.record_resource_snapshot();
-            repaint();
-            return Ok(true);
-        }
-        let config_generation = self.observe_command_config(config);
-        self.queue_command_job(
-            repaint,
-            MuxCommandJob {
-                scope: self.scope,
-                config: config.clone(),
-                command,
-                completion: MuxCommandCompletion::preserving_selection(),
-                response: None,
-                deadline: None,
-                cancellation: None,
-                config_generation,
-                expected_restore: Some(expected),
-            },
-        );
-        Ok(false)
     }
 
     fn command_completion(&self, command: &MuxCommand) -> (Option<String>, Option<String>) {
@@ -1440,245 +989,134 @@ impl MuxController {
         )
     }
 
-    fn execute_inline_command(
-        &self,
-        config: &MuxBindingConfig,
-        command: MuxCommand,
-    ) -> Result<MuxSnapshot, MuxCommandError> {
-        let mut backend = self
-            .build_backend(config)
-            .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
-        execute_backend_command(
-            &self.registry,
-            backend.as_mut(),
-            config,
-            self.scope,
-            command,
-            None,
-        )
-        .and_then(|()| {
-            backend
-                .snapshot()
-                .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))
-        })
-    }
-
     fn execute_and_apply_inline_command(
         &mut self,
+        repaint: &RepaintHandle,
         config: &MuxBindingConfig,
         command: MuxCommand,
         preferred_session: Option<String>,
         preferred_window: Option<String>,
-    ) -> bool {
-        let backend_kind = self.registry.selected_kind(config);
-        let result = self
-            .execute_inline_command(config, command)
-            .map(|snapshot| {
-                self.apply_snapshot(backend_kind, snapshot, preferred_session, preferred_window)
-            });
-        if result.is_err() {
-            self.expected_session = None;
+    ) {
+        if let Some(session) = preferred_session.as_deref()
+            && self.sessions.iter().any(|s| session_matches(s, session))
+        {
+            self.set_selected_session(Some(session.to_owned()));
+            if preferred_window.as_ref().is_some_and(|window| {
+                self.sessions.iter().any(|s| {
+                    session_matches(s, session) && s.windows.iter().any(|w| &w.id == window)
+                })
+            }) {
+                self.selected_window = preferred_window;
+            }
         }
-        self.session_refresh.request_soon();
-        self.last_error = result.as_ref().err().map(ToString::to_string);
-        result.is_ok()
+        drop(preferred_session);
+        let completion = MuxCommandCompletion::preserving_selection();
+        let pending = self.backend.submit_request_for_generation(
+            crate::native::protocol::Request::Execute(command),
+            self.server_generation
+                .or_else(|| self.backend.peer_generation()),
+        );
+        let config = config.clone();
+        let repaint = Arc::clone(repaint);
+        let (tx, rx) = mpsc::channel();
+        self.pending_inline.push(rx);
+        std::thread::spawn(move || {
+            let result = pending
+                .recv()
+                .context("native mux client worker stopped")
+                .and_then(|result| result)
+                .and_then(|response| match response {
+                    crate::native::protocol::Response::Snapshot(snapshot) => Ok(snapshot),
+                    _ => anyhow::bail!("native mux command returned no topology"),
+                })
+                .map(|snapshot| completion.with_snapshot(config, snapshot))
+                .map_err(|error| mux_failure(&error));
+            let _ = tx.send(result);
+            repaint();
+        });
     }
 
-    fn apply_refreshed_snapshot(&mut self, backend: MuxBackendKind, snapshot: MuxSnapshot) -> bool {
-        if !snapshot.disposition.is_authoritative() {
+    pub(crate) const fn server_generation(&self) -> Option<u64> {
+        self.server_generation
+    }
+    fn observe_server_generation(&mut self, generation: u64) {
+        if self
+            .server_generation
+            .is_some_and(|previous| previous != generation)
+        {
+            self.binding_generation = next_binding_generation();
+            self.observed_resources.clear();
+            self.pending_inline.clear();
+        }
+        if self.server_generation != Some(generation) {
+            self.server_revision = None;
+        }
+        self.server_generation = Some(generation);
+    }
+
+    pub(crate) fn accept_server_snapshot(&mut self, snapshot: TopologySnapshot) {
+        if self.apply_refreshed_snapshot(snapshot) {
+            self.record_resource_snapshot();
+        }
+    }
+
+    fn apply_refreshed_snapshot(&mut self, snapshot: TopologySnapshot) -> bool {
+        self.apply_server_snapshot(
+            snapshot,
+            self.selected_session.clone(),
+            self.selected_window.clone(),
+        )
+    }
+
+    fn apply_server_snapshot(
+        &mut self,
+        snapshot: TopologySnapshot,
+        preferred_session: Option<String>,
+        preferred_window: Option<String>,
+    ) -> bool {
+        if self
+            .backend
+            .peer_generation()
+            .or(self.server_generation)
+            .is_some_and(|generation| generation != snapshot.generation)
+            || self.server_generation == Some(snapshot.generation)
+                && self
+                    .server_revision
+                    .is_some_and(|revision| revision > snapshot.revision)
+        {
             return false;
         }
-        let same_backend = self.current_backend == Some(backend);
-        let keep_selection = same_backend || self.current_backend.is_none();
-        let current_session = keep_selection
-            .then(|| self.selected_session.take())
-            .flatten();
-        let current_window = keep_selection
-            .then(|| self.selected_window.take())
-            .flatten();
-        self.apply_snapshot(backend, snapshot, current_session, current_window)
+        // Command completions and pushed events can arrive in a different order.
+        // A delayed completion must never retire resources from a newer snapshot.
+        self.observe_server_generation(snapshot.generation);
+        self.server_revision = Some(snapshot.revision);
+        self.apply_snapshot(snapshot.snapshot, preferred_session, preferred_window)
     }
 
     fn apply_snapshot(
         &mut self,
-        backend: MuxBackendKind,
         mut snapshot: MuxSnapshot,
         preferred_session: Option<String>,
         preferred_window: Option<String>,
     ) -> bool {
-        if !snapshot.disposition.is_authoritative() {
-            return false;
-        }
+        self.has_snapshot = true;
         self.backend_session_names = snapshot
             .sessions
             .iter()
             .map(|session| session.name.clone())
             .collect();
-        let same_backend = self.current_backend == Some(backend);
-        if same_backend {
-            snapshot.sessions = stable_session_order(&self.sessions, snapshot.sessions);
-        }
-        if self.expected_session.as_deref().is_some_and(|expected| {
-            snapshot
-                .sessions
-                .iter()
-                .any(|session| session_matches(session, expected))
-        }) {
-            self.expected_session = None;
-        }
-        self.set_selected_session(self.selection_within(preferred_session, &snapshot.sessions));
+        snapshot.sessions = stable_session_order(&self.sessions, snapshot.sessions);
+        self.set_selected_session(selection_after_refresh(
+            preferred_session,
+            &snapshot.sessions,
+        ));
         self.selected_window = selected_window_after_refresh(
             self.selected_session.as_deref(),
             preferred_window,
-            self.last_active_window.as_ref(),
             &snapshot,
         );
-        self.current_backend = Some(backend);
         self.all_sessions = snapshot.sessions;
         self.sessions = self.all_sessions.clone();
-        self.last_active_window =
-            active_window_of(&self.sessions, self.selected_session.as_deref());
         true
-    }
-
-    fn apply_optimistic_command_selection(&mut self, command: &MuxCommand) -> Option<String> {
-        let session_id = command.session_id().to_owned();
-        let window_id = optimistic_window_after_command(
-            &self.sessions,
-            self.selected_window.as_deref(),
-            command,
-        )?;
-        self.set_selected_session(Some(session_id));
-        self.selected_window = Some(window_id.clone());
-        Some(window_id)
-    }
-
-    fn ensure_command_worker(&mut self, repaint: &RepaintHandle) {
-        if self.mux_command_tx.is_some() && self.mux_command_rx.is_some() {
-            return;
-        }
-
-        let (request_tx, request_rx) = mpsc::channel::<MuxCommandJob>();
-        let (result_tx, result_rx) = mpsc::channel::<MuxCommandResult>();
-        let repaint = repaint.clone();
-        let registry = Arc::clone(&self.registry);
-        let workspace = self.workspace.clone();
-        let command_config = Arc::clone(&self.command_config);
-        thread::spawn(move || {
-            while let Ok(job) = request_rx.recv() {
-                let cancellation = job.cancellation.as_ref();
-                let state = command_config
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let result = if state.generation != job.config_generation {
-                    Err(MuxCommandError::Stale)
-                } else if cancellation.is_some_and(CommandCancellation::is_cancelled) {
-                    Err(MuxCommandError::Cancelled)
-                } else if job
-                    .deadline
-                    .is_some_and(|deadline| Instant::now() >= deadline)
-                {
-                    if let Some(cancellation) = cancellation {
-                        let _ = cancellation.cancel();
-                    }
-                    Err(MuxCommandError::DeadlineExceeded)
-                } else if cancellation.is_some_and(|cancellation| !cancellation.try_start()) {
-                    Err(MuxCommandError::Cancelled)
-                } else {
-                    drop(state);
-                    registry
-                        .build_backend(&job.config, workspace.as_deref())
-                        .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))
-                        .and_then(|mut backend| {
-                            let reconcile_workspace_membership = matches!(
-                                job.command,
-                                MuxCommand::CreateProjectSession { .. }
-                                    | MuxCommand::RestoreSession { .. }
-                                    | MuxCommand::CreateWorktreeSession { .. }
-                                    | MuxCommand::RenameSession { .. }
-                                    | MuxCommand::DitchSession { .. }
-                            );
-                            execute_backend_command(
-                                &registry,
-                                backend.as_mut(),
-                                &job.config,
-                                job.scope,
-                                job.command,
-                                job.expected_restore.as_ref(),
-                            )
-                            .and_then(|()| {
-                                if job.response.is_some() || reconcile_workspace_membership {
-                                    backend
-                                        .snapshot()
-                                        .map(|snapshot| {
-                                            job.completion
-                                                .with_snapshot(job.config.clone(), snapshot)
-                                        })
-                                        .map_err(|error| {
-                                            MuxCommandError::Failed(format!("{error:#}"))
-                                        })
-                                } else {
-                                    Ok(job.completion)
-                                }
-                            })
-                        })
-                };
-                if let Some(response) = job.response {
-                    let _ = response.send(result);
-                } else if result_tx.send(result).is_err() {
-                    break;
-                }
-                repaint();
-            }
-        });
-        self.mux_command_tx = Some(request_tx);
-        self.mux_command_rx = Some(result_rx);
-    }
-
-    fn enqueue_command(
-        &mut self,
-        repaint: &RepaintHandle,
-        config: &MuxBindingConfig,
-        command: MuxCommand,
-        completion: MuxCommandCompletion,
-        response: Option<mpsc::Sender<MuxCommandResult>>,
-        execution: Option<(Instant, CommandCancellation)>,
-    ) {
-        let (deadline, cancellation) = execution
-            .map_or_else(Default::default, |(deadline, cancellation)| {
-                (Some(deadline), Some(cancellation))
-            });
-        let config_generation = self.observe_command_config(config);
-        let job = MuxCommandJob {
-            scope: self.scope,
-            config: config.clone(),
-            command,
-            completion,
-            response,
-            deadline,
-            cancellation,
-            config_generation,
-            expected_restore: None,
-        };
-        self.queue_command_job(repaint, job);
-    }
-
-    fn queue_command_job(&mut self, repaint: &RepaintHandle, job: MuxCommandJob) {
-        if job.response.is_none() {
-            self.pending_gui_commands = self.pending_gui_commands.saturating_add(1);
-            self.session_refresh.invalidate();
-        }
-        self.ensure_command_worker(repaint);
-        let Some(tx) = &self.mux_command_tx else {
-            return;
-        };
-        if let Err(error) = tx.send(job) {
-            self.mux_command_tx = None;
-            self.mux_command_rx = None;
-            self.ensure_command_worker(repaint);
-            if let Some(tx) = &self.mux_command_tx {
-                let _ = tx.send(error.0);
-            }
-        }
     }
 }

@@ -10,7 +10,6 @@ mod inline_inputs;
 mod model;
 mod number_input;
 mod picker;
-mod provider_models;
 mod search;
 mod text_input;
 mod theme_colors;

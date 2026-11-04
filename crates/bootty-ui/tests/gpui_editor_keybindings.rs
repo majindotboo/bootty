@@ -69,12 +69,7 @@ fn terminal_tab_reaches_key_input_but_controls_keep_root_focus_navigation(cx: &m
     cx.update(|cx| {
         init_theme(UiPalette::default(), cx);
         replace_workspace_key_bindings(
-            key_bindings_for_snapshot(
-                &snapshot,
-                KeymapFocus::Terminal,
-                bootty_config::config::MultiplexerBackendConfig::Native,
-                &CommandCatalog::default(),
-            ),
+            key_bindings_for_snapshot(&snapshot, KeymapFocus::Terminal, &CommandCatalog::default()),
             cx,
         )
         .unwrap();
@@ -98,12 +93,7 @@ fn terminal_tab_reaches_key_input_but_controls_keep_root_focus_navigation(cx: &m
         assert_eq!(view.keys, ["tab", "tab"]);
         assert!(view.terminal.is_focused(window));
         replace_workspace_key_bindings(
-            key_bindings_for_snapshot(
-                &snapshot,
-                KeymapFocus::Other,
-                bootty_config::config::MultiplexerBackendConfig::Native,
-                &CommandCatalog::default(),
-            ),
+            key_bindings_for_snapshot(&snapshot, KeymapFocus::Other, &CommandCatalog::default()),
             cx,
         )
         .unwrap();
@@ -126,12 +116,7 @@ fn terminal_tab_reaches_key_input_but_controls_keep_root_focus_navigation(cx: &m
         });
     cx.update(|window, cx| {
         replace_workspace_key_bindings(
-            key_bindings_for_snapshot(
-                &snapshot,
-                KeymapFocus::Terminal,
-                bootty_config::config::MultiplexerBackendConfig::Native,
-                &CommandCatalog::default(),
-            ),
+            key_bindings_for_snapshot(&snapshot, KeymapFocus::Terminal, &CommandCatalog::default()),
             cx,
         )
         .unwrap();
@@ -151,9 +136,8 @@ struct EditorProbe {
 
 #[gpui_kit::test]
 fn command_context_remaps_and_unbinds_without_activating_workspace_shortcuts(cx: &TestAppContext) {
-    use bootty_config::{
-        config::MultiplexerBackendConfig,
-        keymap_file::{KeymapAction, KeymapBindingKind, KeymapBindingSource, KeymapContext},
+    use bootty_config::keymap_file::{
+        KeymapAction, KeymapBindingKind, KeymapBindingSource, KeymapContext,
     };
     use bootty_ui::{
         commands::CommandCatalog,
@@ -201,12 +185,8 @@ fn command_context_remaps_and_unbinds_without_activating_workspace_shortcuts(cx:
     };
     cx.update(|cx| {
         init_theme(UiPalette::default(), cx);
-        let bindings = key_bindings_for_snapshot(
-            &snapshot,
-            KeymapFocus::Command,
-            MultiplexerBackendConfig::Native,
-            &CommandCatalog::default(),
-        );
+        let bindings =
+            key_bindings_for_snapshot(&snapshot, KeymapFocus::Command, &CommandCatalog::default());
         let hints = bindings.command_hints(&CommandCatalog::default());
         assert_eq!(
             hints,
@@ -216,7 +196,7 @@ fn command_context_remaps_and_unbinds_without_activating_workspace_shortcuts(cx:
             ]
         );
         replace_workspace_key_bindings(bindings, cx).unwrap();
-        let mut workspace = KeyContext::new_with_defaults();
+        let mut workspace = KeyContext::new_with_defaults(cx.platform_info().os);
         workspace.add(WORKSPACE_KEY_CONTEXT);
         let mut command = KeyContext::default();
         command.add("Command");
@@ -314,7 +294,7 @@ fn workspace_keymap_reload_removes_old_bindings(cx: &TestAppContext) {
         )
         .expect("install empty replacement");
 
-        let mut context = KeyContext::new_with_defaults();
+        let mut context = KeyContext::new_with_defaults(cx.platform_info().os);
         context.add(WORKSPACE_KEY_CONTEXT);
         let (bindings, pending) = cx.key_bindings().borrow().bindings_for_input(
             &[Keystroke::parse("cmd-x").expect("parse keystroke")],

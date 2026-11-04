@@ -49,11 +49,14 @@ jobs:
       - name: Set up mise toolchain
         uses: jdx/mise-action@v5
 
-      - name: Cache Rust dependencies
-        uses: Swatinem/rust-cache@v2
+      # Kache caches rustc outputs by content; only main pushes publish the store.
+      - name: Set up Kache
+        uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
         with:
-          shared-key: daemon-${{ matrix.target }}
-          cache-on-failure: true
+          cache-key-prefix: bootty-daemon-${{ matrix.target }}
+          manifest-key: daemon-${{ matrix.target }}
+          save-cache: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          pr-comment: false
 
       - name: Build daemon
         run: mise run daemon:build-one -- "${{ matrix.target }}"

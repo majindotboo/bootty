@@ -7,8 +7,7 @@ use bootty_config::settings_schema::SettingsSchema;
 use bootty_config::{
     ConfigChange, ConfigRuntime, ModifierRemapSet,
     config::{
-        AppearanceVariant, BoottyConfig, ConfigDocument, ConfigWriteOutcome,
-        MultiplexerBackendConfig, WindowFullscreen,
+        AppearanceVariant, BoottyConfig, ConfigDocument, ConfigWriteOutcome, WindowFullscreen,
     },
 };
 
@@ -58,14 +57,7 @@ pub struct AppConfigRuntime {
 }
 
 fn validate_keybindings(config: &BoottyConfig) -> Result<()> {
-    for backend in [
-        MultiplexerBackendConfig::Herdr,
-        MultiplexerBackendConfig::Native,
-        MultiplexerBackendConfig::Rmux,
-        MultiplexerBackendConfig::Tmux,
-    ] {
-        AppKeyBindings::from_keybinds(&config.input.keybinds_for_backend(backend))?;
-    }
+    AppKeyBindings::from_keybinds(&config.input.keybinds())?;
     SidebarKeyBindings::from_keybinds(&config.input.sidebar_keybind)?;
     Ok(())
 }
@@ -108,11 +100,7 @@ impl AppConfigRuntime {
         self.runtime.document()
     }
 
-    pub(super) fn reload(
-        &mut self,
-        _backend: MultiplexerBackendConfig,
-        appearance: AppearanceVariant,
-    ) -> Result<AcceptedConfigChange> {
+    pub(super) fn reload(&mut self, appearance: AppearanceVariant) -> Result<AcceptedConfigChange> {
         let (change, modifier_remaps) = self.runtime.reload(|candidate| {
             let modifier_remaps = resolve_modifier_remaps(&candidate.input.modifier_remap)
                 .map_err(|error| error.to_string())?;
@@ -126,7 +114,7 @@ impl AppConfigRuntime {
     pub(super) fn commit_document(
         &mut self,
         document: ConfigDocument,
-        _backend: MultiplexerBackendConfig,
+
         appearance: AppearanceVariant,
     ) -> Result<(AcceptedConfigChange, ConfigDocument, ConfigWriteOutcome)> {
         let (change, document, outcome, modifier_remaps) =

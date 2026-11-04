@@ -275,7 +275,7 @@ fn missing_config_file_loads_with_selected_path() {
 #[test]
 fn sidebar_modules_default_and_override_in_order() {
     let defaults = load_config_source("").expect("valid config");
-    assert_eq!(defaults.sidebar.modules, ["sessions", "usage"]);
+    assert_eq!(defaults.sidebar.modules, ["sessions"]);
     assert_eq!(
         defaults.sidebar.session_modules,
         [
@@ -889,18 +889,6 @@ fn obsolete_chrome_keys_are_ignored(#[case] key: &str) {
     assert_eq!(config.chrome, BoottyConfig::default().chrome);
 }
 
-#[rstest]
-#[case("")]
-#[case("previously-selected")]
-fn obsolete_herdr_session_key_does_not_block_loading(#[case] session: &str) {
-    let config = load_config_source(&format!(
-        "[multiplexer]\nbackend = 'herdr'\nherdr-session = '{session}'\n"
-    ))
-    .expect("valid config");
-
-    assert_eq!(config.multiplexer.backend, MultiplexerBackendConfig::Herdr);
-}
-
 #[test]
 fn keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"
@@ -959,13 +947,6 @@ fn keybind_entries_without_clear_layer_on_defaults() {
 #[rstest]
 fn option_as_meta_does_not_rewrite_shortcuts(
     #[values("none", "left", "right", "both")] option: &str,
-    #[values(
-        MultiplexerBackendConfig::Native,
-        MultiplexerBackendConfig::Rmux,
-        MultiplexerBackendConfig::Tmux,
-        MultiplexerBackendConfig::Herdr
-    )]
-    backend: MultiplexerBackendConfig,
 ) {
     let config = load_config_source(&format!(
         r#"
@@ -975,16 +956,13 @@ fn option_as_meta_does_not_rewrite_shortcuts(
                    "cmd+k>alt+n=next_tab", "cmd+alt+n=new_window"]
         [input.backend-keybind]
         native = ["clear", "alt+>=move_tab:1"]
-        rmux = ["clear", "alt+>=move_tab:1"]
-        tmux = ["clear", "alt+>=move_tab:1"]
-        herdr = ["clear", "alt+>=move_tab:1"]
     "#
     ))
     .expect("valid config");
 
     let mut expected = config.input.keybind.clone();
     expected.push("alt+>=move_tab:1".to_owned());
-    assert_eq!(config.input.keybinds_for_backend(backend), expected);
+    assert_eq!(config.input.keybinds(), expected);
 }
 
 #[test]
@@ -1042,69 +1020,37 @@ fn ssh_remote_defaults_and_all_fields_are_preserved() {
     );
 }
 
-/// Only the backends bootty drives through a client can run on another host. The native backend
-/// owns its terminals in this process, so accepting it would start local shells and present them as
-/// the remote host's sessions.
+/// No backend can open a remote Space yet, but its placement still loads so the Space survives.
 #[test]
-fn multiplexer_remote_is_refused_for_backends_with_no_remote_client() {
-    for (backend, accepted) in [
-        ("herdr", true),
-        ("tmux", true),
-        ("rmux", true),
-        ("native", false),
-    ] {
-        let loaded = ConfigSandbox::with_config(&format!(
-            "[multiplexer]\nbackend = \"{backend}\"\n\n[multiplexer.remote]\nhost = \"devbox\"\n"
-        ))
+fn multiplexer_remote_placement_still_loads() {
+    let config = ConfigSandbox::with_config("[multiplexer.remote]\nhost = \"devbox\"\n")
         .expect("config fixture")
-        .load();
+        .load()
+        .expect("remote placement loads");
 
-        assert_eq!(loaded.is_ok(), accepted, "backend {backend}");
-    }
-}
-
-#[test]
-fn herdr_has_no_backend_keybinds_by_default() {
-    let input = &BoottyConfig::default().input;
-
-    assert_eq!(input.backend_keybinds.herdr, Vec::<String>::new());
-    assert!(
-        input
-            .keybinds_for_backend(MultiplexerBackendConfig::Herdr)
-            .iter()
-            .all(|entry| !entry.contains("split_right") && !entry.contains("split_down"))
+    assert_eq!(
+        config
+            .multiplexer
+            .remote
+            .map(|remote| remote.host().to_owned()),
+        Some("devbox".to_owned())
     );
 }
 
 #[test]
 fn multiplexer_remote_validation_errors_keep_their_exact_text() {
-    let empty_host = ConfigSandbox::with_config(
-        "[multiplexer]\nbackend = \"tmux\"\n\n[multiplexer.remote]\nhost = \"  \"\n",
-    )
-    .expect("config fixture")
-    .load()
-    .unwrap_err();
+    let empty_host = ConfigSandbox::with_config("[multiplexer.remote]\nhost = \"  \"\n")
+        .expect("config fixture")
+        .load()
+        .unwrap_err();
     assert_eq!(
         empty_host.to_string(),
         "multiplexer.remote.host must name a host"
     );
-
-    let unsupported = ConfigSandbox::with_config(
-        "[multiplexer]\nbackend = \"native\"\n\n[multiplexer.remote]\nhost = \"devbox\"\n",
-    )
-    .expect("config fixture")
-    .load()
-    .unwrap_err();
-    assert_eq!(
-        unsupported.to_string(),
-        "multiplexer.remote needs a backend with a client to run there, got Native"
-    );
 }
 
-// Rmux is a native-layout backend: it must ship the same layout bindings as the native backend
-// for every preset, or split/pane shortcuts silently vanish when switching backends.
 #[test]
-fn rmux_backend_defaults_mirror_native_layout_bindings() {
+fn bootty_preset_ships_native_layout_bindings() {
     let config = load_config_source(indoc! {r#"
         version = 1
 
@@ -1112,9 +1058,7 @@ fn rmux_backend_defaults_mirror_native_layout_bindings() {
         preset = "bootty"
     "#})
     .expect("valid config");
-    let keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Rmux);
+    let keybinds = config.input.keybinds();
 
     assert!(
         keybinds
@@ -1127,13 +1071,6 @@ fn rmux_backend_defaults_mirror_native_layout_bindings() {
             .any(|entry| entry == "ctrl+space>-=split_down")
     );
     assert!(keybinds.iter().any(|entry| entry == "ctrl+space>c=new_tab"));
-
-    let default_input = &BoottyConfig::default().input;
-    assert_ne!(default_input.backend_keybinds.rmux, Vec::<String>::new());
-    assert_eq!(
-        default_input.backend_keybinds.rmux,
-        default_input.backend_keybinds.native
-    );
 }
 
 // Switching preset must swap the built-in default tables while user override rows keep layering
@@ -1150,19 +1087,13 @@ fn every_preset_opens_the_palette_with_the_shared_shortcut(#[case] preset: &str)
     } else {
         "ctrl+shift+k"
     };
-    for backend in [
-        MultiplexerBackendConfig::Native,
-        MultiplexerBackendConfig::Rmux,
-        MultiplexerBackendConfig::Tmux,
-    ] {
-        let matching: Vec<_> = config
-            .input
-            .keybinds_for_backend(backend)
-            .into_iter()
-            .filter(|entry| split_keybind_entry(entry).is_some_and(|(key, _)| key == trigger))
-            .collect();
-        assert_eq!(matching, vec![format!("{trigger}=command_palette")]);
-    }
+    let matching: Vec<_> = config
+        .input
+        .keybinds()
+        .into_iter()
+        .filter(|entry| split_keybind_entry(entry).is_some_and(|(key, _)| key == trigger))
+        .collect();
+    assert_eq!(matching, vec![format!("{trigger}=command_palette")]);
 }
 
 #[test]
@@ -1176,9 +1107,7 @@ fn preset_selects_default_tables_and_keeps_user_overrides_layered() {
     "#})
     .expect("valid config");
 
-    let keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    let keybinds = config.input.keybinds();
     assert!(keybinds.iter().any(|entry| entry == "ctrl+b>c=new_tab"));
     assert!(!keybinds.iter().any(|entry| entry == "ctrl+space>c=new_tab"));
     assert!(keybinds.iter().any(|entry| entry == "cmd+g=new_tab"));
@@ -1192,10 +1121,6 @@ fn preset_selects_default_tables_and_keeps_user_overrides_layered() {
         keybinds
             .iter()
             .any(|entry| entry == "ctrl+b>:=command_palette")
-    );
-    assert!(
-        config.input.backend_keybinds.tmux.is_empty(),
-        "tmux preset leaves the prefix unbound on the tmux backend so real tmux receives it"
     );
 }
 
@@ -1283,7 +1208,6 @@ fn prefixed_presets_use_alt_shift_for_direct_pane_bindings(#[case] preset: &str)
         "alt+shift+l=select_pane:right",
         "alt+shift+o=next_pane",
         "alt+shift+x=kill_pane",
-        "alt+shift+z=toggle_pane_zoom",
     ] {
         assert!(
             config.input.keybind.iter().any(|keybind| keybind == entry),
@@ -1300,7 +1224,6 @@ fn prefixed_presets_use_alt_shift_for_direct_pane_bindings(#[case] preset: &str)
                 "alt+l=select_pane:right",
                 "alt+o=next_pane",
                 "alt+x=kill_pane",
-                "alt+z=toggle_pane_zoom",
             ]
             .contains(&entry.as_str())
         }),
@@ -1321,28 +1244,12 @@ fn prefix_override_rebuilds_prefixed_chords() {
     "#})
     .expect("valid config");
 
-    let keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    let keybinds = config.input.keybinds();
     assert!(keybinds.iter().any(|entry| entry == "ctrl+a>v=split_right"));
     assert!(
         !keybinds
             .iter()
             .any(|entry| entry.starts_with("ctrl+space>"))
-    );
-
-    let tmux_keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Tmux);
-    assert!(
-        tmux_keybinds
-            .iter()
-            .any(|entry| entry == "ctrl+a=text:\\x01")
-    );
-    assert!(
-        !tmux_keybinds
-            .iter()
-            .any(|entry| entry == "ctrl+space=text:\\x00")
     );
 }
 
@@ -1359,21 +1266,12 @@ fn ghostty_preset_ignores_prefix_and_ships_direct_combos() {
     .expect("valid config");
 
     assert_eq!(config.input.effective_prefix(), None);
-    let keybinds = config
-        .input
-        .keybinds_for_backend(MultiplexerBackendConfig::Native);
+    let keybinds = config.input.keybinds();
     assert!(keybinds.iter().all(|entry| !entry.contains('>')));
     if cfg!(target_os = "macos") {
         assert!(keybinds.contains(&"cmd+shift+,=move_session:-1".to_owned()));
         assert!(keybinds.contains(&"cmd+shift+.=move_session:1".to_owned()));
     }
-    assert_eq!(
-        config
-            .input
-            .keybinds_for_backend(MultiplexerBackendConfig::Tmux),
-        keybinds,
-        "the Ghostty preset keeps its direct layout shortcuts on tmux"
-    );
 }
 
 // An empty prefix (recorder cleared) must fall back to the preset default instead of producing
@@ -1405,29 +1303,6 @@ fn wsl_remote_loads_through_the_toml_configuration_boundary() {
         panic!("WSL host");
     };
     assert_eq!(remote.distribution.as_str(), "Ubuntu 開発");
-}
-
-#[rstest::rstest]
-#[case("jobs")]
-#[case("transfers")]
-#[case("recovery")]
-#[case("shell")]
-fn retired_panel_preferences_do_not_prevent_loading(#[case] panel: &str) {
-    let dir = assert_fs::TempDir::new().unwrap();
-    let path = dir.path().join("config.toml");
-    std::fs::write(
-        &path,
-        format!("[panels.{panel}]\ndock = \"right\"\n[panels.files]\ndock = \"left\"\n"),
-    )
-    .unwrap();
-    let config = bootty_config::config::load_config_from_path(&path).unwrap();
-    assert_eq!(config.panels.len(), 1);
-    assert_eq!(
-        config
-            .panel(bootty_config::config::PanelKind::Files)
-            .dock(bootty_config::config::PanelKind::Files),
-        bootty_config::config::PanelDock::Left
-    );
 }
 
 #[cfg(unix)]
@@ -1474,12 +1349,8 @@ fn every_preset_zooms_all_fonts_and_leaves_specific_font_actions_unbound(#[case]
     } else {
         "ctrl"
     };
-    for backend in [
-        MultiplexerBackendConfig::Native,
-        MultiplexerBackendConfig::Rmux,
-        MultiplexerBackendConfig::Tmux,
-    ] {
-        let entries = config.input.keybinds_for_backend(backend);
+    {
+        let entries = config.input.keybinds();
         for (key, action) in [
             (format!("{modifier}+="), "increase_all_font_sizes:1"),
             (format!("{modifier}++"), "increase_all_font_sizes:1"),

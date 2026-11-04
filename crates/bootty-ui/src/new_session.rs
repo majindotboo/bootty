@@ -271,21 +271,19 @@ fn run_effect(
             NewSessionOutcome::ProjectAdded(path)
         }
         (NewSessionTarget::Remote(remote), NewSessionEffect::ListProjects) => {
-            NewSessionOutcome::Projects(bootty_mux::remote_space::list_remote_projects_with_runner(
-                remote, runner,
-            )?)
+            NewSessionOutcome::Projects(
+                bootty_git::remote::list_projects(remote, runner).map_err(anyhow::Error::msg)?,
+            )
         }
         (NewSessionTarget::Remote(remote), NewSessionEffect::ListWorktrees(project, open_cwds)) => {
             NewSessionOutcome::Worktrees(
-                bootty_mux::remote_space::list_remote_worktrees_with_runner(
-                    remote, &project, &open_cwds, runner,
-                )?,
+                bootty_git::remote::list_worktrees(remote, &project, &open_cwds, runner)
+                    .map_err(anyhow::Error::msg)?,
             )
         }
         (NewSessionTarget::Remote(remote), NewSessionEffect::ToggleFavorite(path)) => {
-            let favorite = bootty_mux::remote_space::toggle_remote_project_favorite_with_runner(
-                remote, &path, runner,
-            )?;
+            let favorite = bootty_git::remote::toggle_project_favorite(remote, &path, runner)
+                .map_err(anyhow::Error::msg)?;
             NewSessionOutcome::Favorite { path, favorite }
         }
         (NewSessionTarget::Remote(remote), NewSessionEffect::AddFavorite(path)) => {

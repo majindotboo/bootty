@@ -86,10 +86,6 @@ impl AppState {
                 session_id,
                 pane_id,
             },
-            MuxKeyAction::TogglePaneZoom => MuxCommand::TogglePaneZoom {
-                session_id,
-                pane_id,
-            },
             _ => return None,
         })
     }
@@ -252,8 +248,7 @@ impl AppState {
         let target_pane_id = planned_command.as_ref().and_then(|command| match command {
             MuxCommand::SplitPane { pane_id, .. }
             | MuxCommand::KillPane { pane_id, .. }
-            | MuxCommand::ClosePane { pane_id, .. }
-            | MuxCommand::TogglePaneZoom { pane_id, .. } => pane_id.as_deref(),
+            | MuxCommand::ClosePane { pane_id, .. } => pane_id.as_deref(),
             _ => None,
         });
         if matches!(action, MuxKeyAction::ClosePane) {
@@ -262,7 +257,7 @@ impl AppState {
         }
         // On the native engine, killing a pane means removing the focused split leaf and
         // collapsing the layout, same as closing it.
-        if self.uses_native_terminal_layout() && matches!(action, MuxKeyAction::KillPane) {
+        if matches!(action, MuxKeyAction::KillPane) {
             self.close_target_pane(target_pane_id, planned_command.as_ref());
             return;
         }
@@ -274,25 +269,6 @@ impl AppState {
             );
             return;
         }
-        // Native directional pane selection belongs to the local geometry.
-        if let MuxKeyAction::SelectPane(direction) = action
-            && self.uses_native_terminal_layout()
-        {
-            self.focus_pane_neighbor(direction);
-            return;
-        }
-        if self.uses_native_terminal_layout() {
-            let delta = match action {
-                MuxKeyAction::NextPane => Some(1),
-                MuxKeyAction::PreviousPane => Some(-1),
-                _ => None,
-            };
-            if let Some(delta) = delta {
-                self.workspace.active.binding.focus_pane_relative(delta);
-                return;
-            }
-        }
-
         let Some(command) = planned_command else {
             return;
         };
@@ -302,40 +278,17 @@ impl AppState {
     fn close_target_pane(
         &mut self,
         target_pane_id: Option<&str>,
-        planned_command: Option<&MuxCommand>,
+        _planned_command: Option<&MuxCommand>,
     ) {
-        if self.uses_native_terminal_layout() {
-            if let Some(pane_id) = target_pane_id
-                .map(str::to_owned)
-                .or_else(|| self.focused_pane())
-            {
-                self.workspace
-                    .active
-                    .binding
-                    .close_focused_pane(&self.repaint, &pane_id);
-            }
-            return;
+        if let Some(pane_id) = target_pane_id
+            .map(str::to_owned)
+            .or_else(|| self.focused_pane())
+        {
+            self.workspace
+                .active
+                .binding
+                .close_focused_pane(&self.repaint, &pane_id);
         }
-        let Some(command) = planned_command.cloned() else {
-            return;
-        };
-        self.execute_mux_command(command);
-        self.workspace
-            .active
-            .binding
-            .terminal_mut()
-            .discard_active_pane();
-    }
-
-    fn focus_pane_neighbor(&mut self, direction: bootty_mux::command::MuxDirection) {
-        let Some(area) = self.last_pane_area else {
-            return;
-        };
-        let gap = self.config().chrome.pane_divider_width;
-        self.workspace
-            .active
-            .binding
-            .focus_pane_neighbor(direction, area, gap);
     }
 
     pub(super) fn execute_mux_command(&mut self, command: MuxCommand) {

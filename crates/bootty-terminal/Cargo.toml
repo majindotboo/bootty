@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty-terminal"
 edition.workspace = true
 autobenches = false
@@ -7,9 +8,12 @@ autobenches = false
 test = false
 
 [dependencies]
+bootty-os = { path = "../bootty-os" }
+ciborium.workspace = true
 bootty-control = { path = "../bootty-control" }
 num-traits.workspace = true
 serde.workspace = true
+serde_bytes.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 base64.workspace = true
@@ -33,9 +37,6 @@ proptest-derive.workspace = true
 rstest.workspace = true
 unicode-width.workspace = true
 
-[[test]]
-name = "terminal_engine"
-path = "tests/terminal_engine/main.rs"
 
 [[bench]]
 name = "pty_drain"
@@ -47,3 +48,7 @@ harness = false
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

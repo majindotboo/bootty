@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "xtasks"
 version = "0.0.0"
 edition.workspace = true
@@ -32,8 +33,11 @@ winreg.workspace = true
 bootty-test-support = { path = "../bootty-test-support" }
 assert_fs.workspace = true
 pretty_assertions.workspace = true
-proptest.workspace = true
 rstest.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

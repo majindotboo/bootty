@@ -172,27 +172,9 @@ command_catalog! {
     ToggleSessionsPanel:
         "Toggle Sessions panel", "Show or hide the sessions panel",
         "toggle_sessions_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ToggleFilesPanel:
-        "Toggle Files panel", "Show or hide the files panel",
-        "toggle_files_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ToggleChangesPanel:
-        "Toggle Changes panel", "Show or hide the changes panel",
-        "toggle_changes_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ToggleDiffPanel:
-        "Toggle Diff panel", "Show or hide the diff panel",
-        "toggle_diff_panel", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
-    ToggleAgentsPanel:
-        "Toggle Agents panel", "Show or hide the agents panel",
-        "toggle_agents_panel", "panel-left", Layout, hidden, Write, ApplicationWindow, DockGroup;
     ToggleLeftDock:
         "Toggle left dock", "Show or hide the left dock",
         "toggle_left_dock", "panel-left", Layout, shown, Write, ApplicationWindow, None;
-    ToggleRightDock:
-        "Toggle right dock", "Show or hide the right dock",
-        "toggle_right_dock", "panel-right", Layout, shown, Write, ApplicationWindow, None;
-    TogglePanelFullView:
-        "Toggle panel full view", "Expand the right-hand panel or restore its prior layout",
-        "toggle_panel_full_view", "maximize", Layout, shown, Write, ApplicationWindow, DockGroup;
     ShowSidebar:
         "Show Sessions", "Open the Sessions panel",
         "show_sidebar", "panel-left", Layout, shown, Write, ApplicationWindow, DockGroup;
@@ -211,21 +193,6 @@ command_catalog! {
     ExportTerminal:
         "Export Terminal", "Save retained terminal content as plain text, ANSI or HTML",
         "export_terminal", "download", Terminal, shown, Write, ApplicationWindow, None;
-    ShowSubagents:
-        "Show Subagents", "Browse subagents across conversations",
-        "show_subagents", "bot", Application, shown, Write, ApplicationWindow, DockGroup;
-    ShowAgents:
-        "Show Agents", "Open agent attention, session and navigation controls",
-        "show_agents", "bot", Application, hidden, Write, ApplicationWindow, DockGroup;
-    ShowFiles:
-        "Browse Files", "Open the Files panel for the terminal directory",
-        "show_files", "folder", Application, shown, Write, ApplicationWindow, DockGroup;
-    ShowChanges:
-        "Show Git Changes", "Open the Changes and Diff tool panels",
-        "show_changes", "git-branch", Application, shown, Write, ApplicationWindow, DockGroup;
-    ShowDiff:
-        "Show Git Diff", "Open the Git Diff panel",
-        "show_diff", "git-compare", Application, shown, Write, ApplicationWindow, DockGroup;
     AddProject:
         "Add Project", "Bookmark a directory for future sessions",
         "add_project", "folder-plus", Sessions, shown, Write, Binding, None;
@@ -233,36 +200,15 @@ command_catalog! {
         "New Session",
         "Pick a directory or worktree and start a session",
         "new_mux_session", "square-plus", Sessions, shown, Write, ApplicationWindow, None;
-    AgentHistory:
-        "History", "Browse and continue saved conversations across agent providers",
-        "agent_history", "history", Sessions, shown, Write, Binding, None;
-    AddSelectionToConversation:
-        "Add Selection to Conversation", "Add the selected document lines or terminal text to this session's conversation",
-        "add_selection_to_conversation", "message-square-plus", Sessions, shown, Write, ApplicationWindow, None;
-    ResumeCodexSession:
-        "Resume Codex session…", "Continue a saved Codex conversation from any application",
-        "resume_codex_session", "history", Sessions, hidden, Write, Binding, None;
-    ResumeClaudeSession:
-        "Resume Claude session…", "Continue a saved Claude conversation from any application",
-        "resume_claude_session", "history", Sessions, hidden, Write, Binding, None;
-    ResumePiSession:
-        "Resume Pi session…", "Continue a saved Pi conversation from any terminal",
-        "resume_pi_session", "history", Sessions, hidden, Write, Binding, None;
     SwitchSession:
         "Switch Session", "Fuzzy-find and jump to an open session",
         "session_picker", "terminal", Sessions, shown, Write, Binding, None;
-    SettleSession:
-        "Settle Session", "Mark current saved work settled without closing its terminal",
-        "settle_session", "circle-check", Sessions, shown, Write, Session, None;
     TogglePinSession:
         "Pin or Unpin Session", "Pin the current saved work, or unpin it when already pinned",
         "toggle_session_pin", "pin", Sessions, shown, Write, Session, None;
-    ArchiveSession:
-        "Archive Session", "Archive the current saved work without closing its terminal",
-        "archive_session", "archive", Sessions, shown, Write, Session, None;
-    InterruptAgent:
-        "Interrupt Agent", "Stop the running turn of the conversation in the focused pane",
-        "interrupt_agent", "square", Sessions, shown, Write, Pane, None;
+    CloseSession:
+        "Close Session", "Close the current session",
+        "close_session", "x", Sessions, shown, Destructive, Session, None;
     RenameSession:
         "Rename Session", "Rename the current session",
         "rename_session", "pencil", Sessions, shown, Write, Session, None;
@@ -302,9 +248,6 @@ command_catalog! {
     NavigateForward:
         "Forward", "Show the session Back left",
         "navigate_forward", "arrow-right", Sessions, shown, Write, ApplicationWindow, None;
-    NewNativeAgentTab:
-        "New agent tab…", "Choose a provider and account for an agent tab",
-        "agents.native.open", "bot", Layout, shown, Write, ApplicationWindow, None;
     NewTab:
         "New Tab", "Open a new tab in the current session",
         "new_tab", "plus", Layout, shown, Write, Session, None;
@@ -340,9 +283,6 @@ command_catalog! {
     PreviousPane:
         "Previous Pane", "Move focus to the previous pane",
         "previous_pane", "layout-grid", Layout, shown, Write, MuxWindow, None;
-    TogglePaneZoom:
-        "Toggle Pane Zoom", "Zoom the focused pane to fill the window, or restore it",
-        "toggle_pane_zoom", "maximize-2", Layout, shown, Write, Pane, None;
     KillPane:
         "Kill Pane", "Close the focused pane",
         "kill_pane", "x", Layout, shown, Destructive, Pane, None;
@@ -371,7 +311,7 @@ command_catalog! {
         "Scroll to Bottom", "Jump to the latest output",
         "scroll_to_bottom", "arrow-down-to-line", Terminal, shown, Write, Terminal, None;
     CopyMode:
-        "Copy Mode", "Select and copy with the keyboard in a terminal or conversation",
+        "Copy Mode", "Select and copy with the keyboard in the terminal",
         "copy_mode", "copy", Terminal, shown, Write, Terminal, None;
     IncreaseFontSize:
         "Increase Terminal Font Size", "Make the terminal text larger",
@@ -409,7 +349,7 @@ command_catalog! {
         "reset_ui_font_size", "type", Appearance, shown, Write,
         ApplicationWindow, None;
     Find:
-        "Find", "Search the terminal scrollback or the focused conversation",
+        "Find", "Search the terminal scrollback",
         "start_search", "search", Terminal, shown, Write, Terminal, None;
     KeyboardShortcuts:
         "Keyboard Shortcuts", "Browse the active keybindings",

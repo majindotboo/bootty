@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rmux_ipc::{LocalEndpoint, endpoint_for_label};
+use bootty_os::ipc::{LocalEndpoint, endpoint_for_label};
 use serde::{Deserialize, Serialize};
 
 use bootty_config::ApplicationIdentity;
@@ -42,6 +42,7 @@ impl ControlInstanceLease {
 
         let generation = generation_token()?;
         let endpoint = endpoint_for_generation(generation)?;
+        #[cfg(unix)]
         prepare_endpoint_parent(&endpoint)?;
         let started_at_ms = current_process_started_at_ms()?;
         let descriptor = InstanceDescriptor {
@@ -204,13 +205,14 @@ fn endpoint_for_generation(generation: u64) -> Result<LocalEndpoint> {
     } else {
         'd'
     };
-    Ok(endpoint_for_label(format!("{prefix}{generation:016x}"))?)
+    Ok(endpoint_for_label(&format!("{prefix}{generation:016x}"))?)
 }
 
+/// Unix sockets need their owner-only directory; Windows pipes have no parent to create.
+#[cfg(unix)]
 fn prepare_endpoint_parent(endpoint: &LocalEndpoint) -> Result<()> {
     if let Some(parent) = endpoint.as_path().parent() {
         fs::create_dir_all(parent)?;
-        #[cfg(unix)]
         set_owner_only_directory(parent)?;
     }
     Ok(())
@@ -244,20 +246,10 @@ fn instance_process_is_dead(instance: &InstanceDescriptor) -> bool {
 }
 
 fn process_started_at_ms(pid: u32) -> Option<u128> {
-    let system = sysinfo::System::new_all();
+    let system = sysinfo::System::new_all().ok()?;
     system
         .process(sysinfo::Pid::from_u32(pid))
         .map(|process| u128::from(process.start_time()) * 1000)
-}
-
-#[cfg(unix)]
-pub fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
-    peer.uid == rmux_os::identity::real_user_id()
-}
-
-#[cfg(windows)]
-pub fn same_user(peer: &rmux_ipc::PeerIdentity) -> bool {
-    rmux_os::identity::IdentityResolver::current().is_ok_and(|identity| identity == peer.user)
 }
 
 #[cfg(unix)]

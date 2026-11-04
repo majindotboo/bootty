@@ -3,64 +3,23 @@ use std::process::Command;
 use anyhow::Result;
 use clap::Args;
 
-use crate::command::{append_env, run as run_command};
+use crate::command::run as run_command;
 
 #[derive(Args, Clone, Debug, Default, Eq, PartialEq)]
 pub struct BuildArgs {
-    /// Use the faster release profile.
+    /// Build the production app with the release profile.
     #[arg(long)]
-    pub fast: bool,
-
-    /// Statically link the Rust runtime where supported.
-    #[arg(long = "static")]
-    pub static_linkage: bool,
+    pub release: bool,
 }
 
 /// # Errors
 /// Returns an error if Cargo cannot start or the application build fails.
 pub fn run(args: &BuildArgs) -> Result<()> {
-    run_with_features(args, cfg!(not(windows)))
-}
-
-/// # Errors
-/// Returns an error if Cargo cannot start or the selected application build fails.
-pub fn run_with_features(args: &BuildArgs, development: bool) -> Result<()> {
     let mut command = Command::new("cargo");
     command.arg("build");
-    command.args(profile_args(args));
-    if development {
-        command.args(["--features", "bootty-dev"]);
+    if args.release {
+        command.arg("--release");
     }
     command.args(["-p", "bootty", "--bins"]);
-
-    if !args.static_linkage {
-        let rustflags = if cfg!(windows) {
-            "-C prefer-dynamic"
-        } else {
-            "-C prefer-dynamic -C rpath"
-        };
-        command.env("RUSTFLAGS", append_env("RUSTFLAGS", rustflags));
-    }
-
     run_command(&mut command)
-}
-
-#[must_use]
-pub const fn profile(args: &BuildArgs) -> &'static str {
-    if args.fast {
-        "fast-release"
-    } else if args.static_linkage {
-        "release"
-    } else {
-        "dynamic-release"
-    }
-}
-
-#[must_use]
-pub fn profile_args(args: &BuildArgs) -> Vec<&'static str> {
-    if profile(args) == "release" {
-        vec!["--release"]
-    } else {
-        vec!["--profile", profile(args)]
-    }
 }

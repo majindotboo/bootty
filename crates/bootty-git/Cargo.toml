@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty-git"
 edition.workspace = true
 version.workspace = true
@@ -17,6 +18,7 @@ url.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]
+bootty-os = { path = "../bootty-os" }
 anyhow.workspace = true
 assert_fs.workspace = true
 pretty_assertions.workspace = true
@@ -25,3 +27,7 @@ proptest.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

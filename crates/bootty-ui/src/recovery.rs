@@ -1,6 +1,5 @@
 //! Private bounded archives of rendered output, never a source of terminal input.
 use anyhow::{Context as _, Result, ensure};
-use bootty_agents::{AgentKind, AgentLaunch};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::{
@@ -15,15 +14,9 @@ use std::{
 pub const MAX_ARCHIVES: usize = 32;
 pub const MAX_TEXT: usize = 256 * 1024;
 const MAX_FILE: u64 = 512 * 1024;
+/// Unknown keys are ignored so archives saved with the retired `agent` resume metadata still
+/// load.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ArchivedAgent {
-    pub provider: AgentKind,
-    pub session: String,
-    pub launch: AgentLaunch,
-}
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct OutputArchive {
     pub id: String,
     pub run: String,
@@ -39,10 +32,9 @@ pub struct OutputArchive {
     pub rows: u16,
     pub omitted_lines: u64,
     pub text: String,
-    pub agent: Option<ArchivedAgent>,
 }
 impl OutputArchive {
-    /// Validate archive identity, bounded metadata, output, and reusable agent arguments.
+    /// Validate archive identity, bounded metadata and output.
     ///
     /// # Errors
     /// Returns an error when any archive field violates these limits.
@@ -65,17 +57,6 @@ impl OutputArchive {
             ensure!(
                 value.len() <= 4096 && !value.chars().any(char::is_control),
                 "invalid archive metadata"
-            );
-        }
-        if let Some(agent) = &self.agent {
-            agent.launch.validate().map_err(anyhow::Error::msg)?;
-            agent
-                .launch
-                .session_arguments(agent.provider, &agent.session, false)
-                .map_err(anyhow::Error::msg)?;
-            ensure!(
-                agent.launch == agent.launch.retained(agent.provider),
-                "archive contains non-reusable launch arguments"
             );
         }
         Ok(())

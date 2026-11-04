@@ -95,6 +95,20 @@ impl TerminalFindModel {
         self.error = error;
     }
 
+    pub const fn clear_result(&mut self) {
+        self.result = None;
+    }
+
+    pub fn update_from_frame(&mut self, frame: &bootty_terminal::terminal_frame::RenderFrame) {
+        if !frame.search_query.is_empty() && frame.search_query == self.query {
+            self.set_result(TerminalFindResult {
+                found: frame.active_search_match.is_some(),
+                active_index: frame.active_search_match_index,
+                match_count: frame.search_match_count,
+            });
+        }
+    }
+
     pub fn set_result(&mut self, result: TerminalFindResult) {
         self.error = None;
         self.result = Some(result);

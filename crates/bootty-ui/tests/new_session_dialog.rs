@@ -1,19 +1,18 @@
 #![cfg(test)]
 
+use bootty_os::spawn::CommandSpawn as _;
 use bootty_ui::gpui as bootty_gpui;
 use std::collections::HashMap;
 
-use bootty_config::config::MultiplexerBackendConfig;
 use bootty_git::ProjectPickerEntry;
-use bootty_mux::repository::{RemoteSpaceRef, SpaceMuxOverride, SpaceRemoteOverride};
 use bootty_mux::{
     controller::SpaceId,
     snapshot::{MuxPaneAnchor, MuxSession, MuxSessionTag},
     workspace::BindingSessionGroup,
 };
-use bootty_ui::gpui::{DialogIntent, RemoteSpaceSnapshot, RowId};
+use bootty_ui::gpui::{DialogIntent, RowId};
 use bootty_ui::presentation::dialogs::{
-    NewSessionDialog, NewSessionPickerEvent, SessionPickerDialog, SpaceEditorDialog,
+    NewSessionDialog, NewSessionPickerEvent, SessionPickerDialog,
 };
 use pretty_assertions::assert_eq;
 
@@ -311,32 +310,6 @@ proptest::proptest! {
     }
 }
 
-#[test]
-fn remote_space_editor_starts_catalog_after_profiles_are_loaded() {
-    let dialog = SpaceEditorDialog::edit_space(
-        SpaceId::from_persistence(1),
-        "Development".to_owned(),
-        "folder".to_owned(),
-        [0x7a, 0xa2, 0xf7],
-        false,
-        SpaceMuxOverride {
-            backend: Some(MultiplexerBackendConfig::Tmux),
-            remote: SpaceRemoteOverride::Profile(RemoteSpaceRef {
-                profile_id: "missing".to_owned(),
-                remote_space_id: "remote-space".to_owned(),
-                remote_space_name: "Development".to_owned(),
-                backend: MultiplexerBackendConfig::Tmux,
-            }),
-        },
-    )
-    .with_profiles(std::iter::empty());
-
-    assert!(matches!(
-        dialog.snapshot().remote,
-        RemoteSpaceSnapshot::Failed { .. }
-    ));
-}
-
 #[rstest::rstest]
 fn theme_preview_uses_the_rendered_theme_and_restores_the_original() {
     use bootty_ui::presentation::dialogs::{ThemePickerDialog, ThemePickerEvent};
@@ -387,12 +360,6 @@ fn rename_dialogs_preserve_their_distinct_empty_name_policies(
     };
     let mut session = RenameSessionDialog::open("session".to_owned(), name.to_owned());
     let mut tab = RenameTabDialog::open("session".to_owned(), "tab".to_owned(), name.to_owned());
-    let target = bootty_control::CommandTarget {
-        kind: bootty_control::ResourceKind::Session,
-        handle: "native:codex:1".to_owned(),
-        generation: 7,
-    };
-    let mut native = RenameTabDialog::open_native(target.clone(), name.to_owned());
     let submit = |spec: bootty_gpui::DialogSpec| {
         let row = &spec.rows[0];
         let action = row.action.clone().expect("submit action");
@@ -419,15 +386,6 @@ fn rename_dialogs_preserve_their_distinct_empty_name_policies(
             name: name.trim().to_owned()
         })
     );
-    assert_eq!(native.spec().rows[0].enabled, session_name.is_some());
-    assert_eq!(native.spec().footer, None);
-    assert_eq!(
-        native.apply(&submit(native.spec())),
-        session_name.map(|name| RenameTabEvent::RenameNative {
-            target,
-            name: name.to_owned()
-        }),
-    );
 }
 
 #[rstest::fixture]
@@ -436,6 +394,8 @@ fn worktree_project() -> assert_fs::TempDir {
     for args in [
         vec!["init", "--quiet"],
         vec![
+            "-c",
+            "commit.gpgsign=false",
             "-c",
             "user.name=Bootty Test",
             "-c",
@@ -451,7 +411,7 @@ fn worktree_project() -> assert_fs::TempDir {
             .arg("-C")
             .arg(repo.path())
             .args(args)
-            .output()
+            .bootty_output()
             .expect("git");
         assert!(
             output.status.success(),

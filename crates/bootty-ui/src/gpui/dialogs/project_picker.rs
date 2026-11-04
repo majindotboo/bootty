@@ -1,4 +1,5 @@
-//! Registered projects stay in the composer while their anchored picker owns search and focus.
+//! Registered projects stay in the new-session form while their anchored picker owns search
+//! and focus.
 use super::*;
 use gpui_kit::component::{
     searchable_list::{SearchableListItem, SearchableVec},
@@ -148,7 +149,7 @@ impl DialogView {
         };
         let selector_id = "new-session-header-project".to_owned();
         let debug_selector = selector_id.clone();
-        let picker_control = div()
+        div()
             .id(SharedString::from(selector_id))
             .debug_selector(move || debug_selector)
             .flex()
@@ -158,15 +159,6 @@ impl DialogView {
             .hover(|style| style.bg(cx.theme().list_hover))
             .child(
                 Select::new(&picker.state)
-                    .when(Self::is_agent_session_spec(spec), |select| {
-                        select
-                            .text_xl()
-                            .h_auto()
-                            .px_1()
-                            .py_0()
-                            .border_0()
-                            .text_color(cx.theme().foreground)
-                    })
                     .appearance(false)
                     .placeholder(choice.label.trim_end_matches('…').to_owned())
                     .search_placeholder("Find project…")
@@ -181,15 +173,6 @@ impl DialogView {
                     })
                     .disabled(spec.busy || !choice.enabled),
             )
-            .into_any_element();
-        super::with_composer_tooltip(
-            "new-session-project-tooltip",
-            picker_control,
-            "Project",
-            vec![super::composer_focus_action(
-                super::ComposerControl::Project,
-                picker.state.focus_handle(cx),
-            )],
-        )
+            .into_any_element()
     }
 }

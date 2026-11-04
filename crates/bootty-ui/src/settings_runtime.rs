@@ -1,58 +1,29 @@
 //! Application effects for the renderer-neutral settings session.
 
-use std::{
-    path::{Path, PathBuf},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::sync::Arc;
 
-use crate::gpui::ModuleIntegrationsSnapshot;
 use crate::settings_session::{
-    AcceptedSettings, ModuleOutcome, RemoteOutcome, RemoteProfile, SettingsEffect, SettingsOutcome,
+    AcceptedSettings, RemoteOutcome, RemoteProfile, SettingsEffect, SettingsOutcome,
     SettingsWriteSource,
 };
 use bootty_config::config::{
     ConfigDocument, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
-    SshRemoteConfig,
 };
 use bootty_mux::RepaintHandle;
 
 use crate::{AppEffect, state::AppState};
 
-#[derive(Clone, Debug, Default)]
-pub struct NativeSettingsCatalog {
-    pub(crate) integration_rows: Vec<ModuleIntegrationsSnapshot>,
-}
-
-struct CatalogResult {
-    generation: u64,
-    catalog: NativeSettingsCatalog,
-}
-
 pub struct SettingsRuntime {
     remote_results_tx: async_channel::Sender<SettingsOutcome>,
     remote_results_rx: async_channel::Receiver<SettingsOutcome>,
-    catalog_results_tx: async_channel::Sender<CatalogResult>,
-    catalog_results_rx: async_channel::Receiver<CatalogResult>,
-    catalog: Mutex<NativeSettingsCatalog>,
-    catalog_generation: AtomicU64,
-    published_catalog_generation: AtomicU64,
 }
 
 impl Default for SettingsRuntime {
     fn default() -> Self {
         let (remote_results_tx, remote_results_rx) = async_channel::bounded(8);
-        let (catalog_results_tx, catalog_results_rx) = async_channel::bounded(4);
         Self {
             remote_results_tx,
             remote_results_rx,
-            catalog_results_tx,
-            catalog_results_rx,
-            catalog: Mutex::new(NativeSettingsCatalog::default()),
-            catalog_generation: AtomicU64::new(0),
-            published_catalog_generation: AtomicU64::new(0),
         }
     }
 }
@@ -68,36 +39,6 @@ impl SettingsRuntime {
             SettingsEffect::SubmitDocument(document) => {
                 commit_document(state, document, SettingsWriteSource::Document)
             }
-            SettingsEffect::InstallIntegration {
-                identity,
-                module,
-                id,
-            } => {
-                self.request_integration(
-                    state.config().config_path.clone(),
-                    identity,
-                    module,
-                    id,
-                    true,
-                    repaint,
-                );
-                (Vec::new(), Vec::new())
-            }
-            SettingsEffect::UninstallIntegration {
-                identity,
-                module,
-                id,
-            } => {
-                self.request_integration(
-                    state.config().config_path.clone(),
-                    identity,
-                    module,
-                    id,
-                    false,
-                    repaint,
-                );
-                (Vec::new(), Vec::new())
-            }
             SettingsEffect::UpsertRemote(profile) => update_remote_document(
                 state,
                 SettingsWriteSource::RemoteProfile(profile.id.clone()),
@@ -109,16 +50,9 @@ impl SettingsRuntime {
                 },
             ),
             SettingsEffect::SetDefaultRemote(profile) => {
-                let remote = SshRemoteConfig {
-                    host: profile.host,
-                    user: profile.user,
-                    port: profile.port,
-                    program: profile.program,
-                    args: profile.args,
-                };
                 update_remote_document(state, SettingsWriteSource::DefaultRemote, |document| {
                     document
-                        .set_multiplexer_remote(&remote)
+                        .set_multiplexer_remote(&remote_config(&profile)?.to_remote())
                         .map_err(|error| error.to_string())
                 })
             }
@@ -153,8 +87,8 @@ impl SettingsRuntime {
         let repaint = Arc::clone(repaint);
         std::thread::spawn(move || {
             let result = remote_config(&profile).and_then(|profile| {
-                bootty_mux::remote_space::list_remote(&profile)
-                    .map(|_| ())
+                bootty_host::remote::RemoteHost::new(profile.to_remote())
+                    .ensure_daemon_with(&bootty_host::SystemCommandRunner)
                     .map_err(|error| error.to_string())
             });
             let _ = sender.send_blocking(SettingsOutcome::Remote(RemoteOutcome {
@@ -165,78 +99,8 @@ impl SettingsRuntime {
         });
     }
 
-    /// Refresh native settings facts away from the UI thread.
-    pub(crate) fn request_catalog(&self, config_path: &Path, repaint: &RepaintHandle) {
-        let generation = self
-            .catalog_generation
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1);
-        let config_path = config_path.to_owned();
-        let sender = self.catalog_results_tx.clone();
-        let repaint = Arc::clone(repaint);
-        std::thread::spawn(move || {
-            let catalog = load_native_settings_catalog(&config_path);
-            let _ = sender.send_blocking(CatalogResult {
-                generation,
-                catalog,
-            });
-            repaint();
-        });
-    }
-
     pub(crate) fn drain_outcomes(&self) -> Vec<SettingsOutcome> {
         std::iter::from_fn(|| self.remote_results_rx.try_recv().ok()).collect()
-    }
-
-    /// Publish the newest completed catalog, rejecting results from older requests.
-    pub(crate) fn drain_catalog(&self) -> Option<NativeSettingsCatalog> {
-        let mut newest = None;
-        while let Ok(result) = self.catalog_results_rx.try_recv() {
-            if newest
-                .as_ref()
-                .is_none_or(|current: &CatalogResult| result.generation > current.generation)
-            {
-                newest = Some(result);
-            }
-        }
-        let result = newest?;
-        if result.generation <= self.published_catalog_generation.load(Ordering::Acquire) {
-            return None;
-        }
-        if let Ok(mut catalog) = self.catalog.lock() {
-            *catalog = result.catalog.clone();
-        }
-        self.published_catalog_generation
-            .store(result.generation, Ordering::Release);
-        Some(result.catalog)
-    }
-
-    /// Return the last completed native catalog without touching the filesystem.
-    pub(crate) fn current_catalog(&self) -> NativeSettingsCatalog {
-        self.catalog.lock().map_or_else(
-            |_| NativeSettingsCatalog::default(),
-            |catalog| catalog.clone(),
-        )
-    }
-
-    fn request_integration(
-        &self,
-        _config_path: PathBuf,
-        identity: String,
-        _module: String,
-        _id: String,
-        _install: bool,
-        repaint: &RepaintHandle,
-    ) {
-        let outcome_sender = self.remote_results_tx.clone();
-        let repaint = Arc::clone(repaint);
-        std::thread::spawn(move || {
-            let _ = outcome_sender.send_blocking(SettingsOutcome::Module(ModuleOutcome::Failed {
-                identity: Some(identity),
-                message: "Agents use native terminals. Legacy integration files are preserved and are not installed or executed.".to_owned(),
-            }));
-            repaint();
-        });
     }
 }
 
@@ -288,10 +152,6 @@ fn commit_document(
             Vec::new(),
         ),
     }
-}
-
-fn load_native_settings_catalog(_config_path: &Path) -> NativeSettingsCatalog {
-    NativeSettingsCatalog::default()
 }
 
 fn remote_config(profile: &RemoteProfile) -> Result<SshProfileConfig, String> {

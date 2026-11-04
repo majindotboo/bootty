@@ -7,7 +7,7 @@ use std::{collections::HashSet, path::Path};
 pub const MAX_SAVED_PANE_TEXT: usize = bootty_control::terminal_history::MAX_HISTORY_BYTES;
 pub const MAX_SAVED_SESSION_TEXT: usize = 8 * 1024 * 1024;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SavedTerminalSession {
     pub captured_at: i64,
@@ -18,7 +18,7 @@ pub struct SavedTerminalSession {
     pub windows: Vec<SavedTerminalWindow>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct SavedTerminalWindow {
     /// Stable saved key, independent of later backend attachment identities.
@@ -30,8 +30,9 @@ pub struct SavedTerminalWindow {
     pub panes: Vec<SavedTerminalPane>,
 }
 
+/// Unknown keys are ignored so panes saved with retired metadata, such as the `native_agent`
+/// conversation identity, still load.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct SavedTerminalPane {
     pub id: String,
     pub backend_id: String,
@@ -41,12 +42,10 @@ pub struct SavedTerminalPane {
     pub rows: u16,
     pub text: String,
     pub omitted_lines: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native_agent: Option<String>,
 }
 
 /// A renderer's validated styled history capture; topology and directory come from the binding owner.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SessionPaneCapture {
     pub pane_id: String,
     /// Cached observed directory when the runtime has one; topology remains binding-owned.
@@ -73,7 +72,6 @@ impl SavedTerminalSession {
         let mut pane_ids = HashSet::new();
         let mut backend_windows = HashSet::new();
         let mut backend_panes = HashSet::new();
-        let mut native_agents = HashSet::new();
         let mut bytes = 0usize;
         for window in &self.windows {
             if !metadata(&window.id, false)
@@ -93,13 +91,6 @@ impl SavedTerminalSession {
             let mut current = HashSet::new();
             for pane in &window.panes {
                 validate_pane(pane)?;
-                if pane
-                    .native_agent
-                    .as_ref()
-                    .is_some_and(|id| !native_agents.insert(id))
-                {
-                    return Err("saved native conversation occupies more than one pane".into());
-                }
                 if !pane_ids.insert(&pane.id) {
                     return Err("saved terminal pane repeats a logical id".into());
                 }
@@ -128,13 +119,6 @@ impl SavedTerminalSession {
 }
 
 fn validate_pane(pane: &SavedTerminalPane) -> Result<(), String> {
-    if pane
-        .native_agent
-        .as_deref()
-        .is_some_and(|id| !crate::snapshot::native_agent_identity_is_valid(id))
-    {
-        return Err("saved native agent pane has invalid identity metadata".into());
-    }
     if !metadata(&pane.id, false) {
         return Err("saved terminal pane has invalid logical id metadata".into());
     }
@@ -182,17 +166,56 @@ fn validate_layout<'a>(
             }
         }
         MuxPaneLayout::Split {
-            ratio_millis,
-            first,
-            second,
-            ..
+            weights, children, ..
         } => {
-            if !(1..=999).contains(ratio_millis) {
-                return Err("invalid saved terminal split ratio".into());
+            if children.len() < 2
+                || weights.len() != children.len()
+                || weights
+                    .iter()
+                    .any(|weight| !weight.is_finite() || *weight <= 0.)
+            {
+                return Err("invalid saved terminal split weights".into());
             }
-            validate_layout(first, leaves, depth.saturating_add(1))?;
-            validate_layout(second, leaves, depth.saturating_add(1))?;
+            for child in children {
+                validate_layout(child, leaves, depth.saturating_add(1))?;
+            }
         }
     }
     Ok(())
+}
+
+/// Decode a pane's reported directory for a local cold checkpoint.
+/// # Errors
+/// Rejects foreign hosts, non-file URIs and paths that are not UTF-8.
+pub(crate) fn checkpoint_cwd(reported: &str) -> anyhow::Result<Option<String>> {
+    if reported.is_empty() {
+        return Ok(None);
+    }
+    if Path::new(reported).is_absolute() {
+        return Ok(Some(reported.to_owned()));
+    }
+    let mut uri = url::Url::parse(reported)
+        .map_err(|_| anyhow::anyhow!("Terminal directory is not a valid file URI"))?;
+    anyhow::ensure!(
+        uri.scheme() == "file",
+        "Terminal directory is not a file URI"
+    );
+    if let Some(host) = uri.host_str() {
+        let local = sysinfo::System::host_name();
+        anyhow::ensure!(
+            host.eq_ignore_ascii_case("localhost")
+                || local
+                    .as_deref()
+                    .is_ok_and(|local| host.eq_ignore_ascii_case(local)),
+            "Terminal directory URI does not name this host"
+        );
+        uri.set_host(Some("localhost"))
+            .map_err(|_| anyhow::anyhow!("Terminal directory URI host is invalid"))?;
+    }
+    let path = uri
+        .to_file_path()
+        .map_err(|()| anyhow::anyhow!("Terminal directory URI does not name a local host path"))?;
+    Ok(Some(path.into_os_string().into_string().map_err(|_| {
+        anyhow::anyhow!("Terminal directory is not valid UTF-8")
+    })?))
 }

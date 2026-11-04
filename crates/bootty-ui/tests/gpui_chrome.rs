@@ -175,7 +175,6 @@ fn sidebar_width_matches_zed_bounds_without_starving_the_center(
 ) {
     let layout = ChromeLayout {
         left_dock_toggle: true,
-        right_dock_toggle: true,
         panel_tab_style: bootty_config::config::PanelTabStyle::default(),
         panel_tabs: bootty_config::config::PanelTabs::default(),
         tabs: bootty_config::config::ChromeConfig::default().tabs,

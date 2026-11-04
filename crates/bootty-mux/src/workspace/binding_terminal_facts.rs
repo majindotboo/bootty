@@ -1,10 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::pane_layout::PaneLayout;
 use crate::{
     RepaintHandle,
-    provider::{PaneTopology, TerminalProgressPolicy},
-    snapshot::{MuxSession, MuxWindow, MuxWindowProgress},
+    snapshot::{MuxSession, MuxWindow},
 };
 
 use super::{BindingRuntime, ScopedPaneId, ScopedWindowId};
@@ -35,10 +34,6 @@ impl TerminalProgress {
         Some(Self { state, value })
     }
 
-    fn from_mux(progress: &MuxWindowProgress) -> Option<Self> {
-        Self::from_conemu(&progress.state, progress.percent)
-    }
-
     fn percent(self) -> Option<u8> {
         self.value
             .or_else(|| (self.state == TerminalProgressState::Indeterminate).then_some(50))
@@ -47,8 +42,6 @@ impl TerminalProgress {
 
 #[derive(Default)]
 pub(super) struct BindingTerminalFacts {
-    custom_window_names: HashSet<ScopedWindowId>,
-    window_titles: HashMap<ScopedWindowId, String>,
     pane_progress: HashMap<ScopedPaneId, TerminalProgress>,
     unscoped_progress: Option<TerminalProgress>,
     pane_ports: HashMap<ScopedPaneId, Vec<u16>>,
@@ -86,25 +79,6 @@ impl BindingRuntime {
         })
     }
 
-    pub fn apply_window_title(
-        &mut self,
-        source_pane_id: Option<&str>,
-        title: String,
-        repaint: &RepaintHandle,
-    ) {
-        let key = source_pane_id
-            .and_then(|pane_id| self.window_id_for_pane(pane_id))
-            .or_else(|| source_pane_id.is_none().then(|| self.current_window_id()))
-            .filter(|key| !key.window_id.is_empty());
-        let Some(key) = key else {
-            return;
-        };
-        if !self.terminal_facts.custom_window_names.contains(&key) {
-            self.rename_window_if_changed(&key.session_id, &key.window_id, &title, repaint);
-        }
-        self.terminal_facts.window_titles.insert(key, title);
-    }
-
     pub fn set_custom_window_name(
         &mut self,
         session_id: &str,
@@ -112,36 +86,13 @@ impl BindingRuntime {
         name: &str,
         repaint: &RepaintHandle,
     ) {
-        let key = self.window_id(session_id.to_owned(), window_id.to_owned());
-        if name.is_empty() {
-            self.terminal_facts.custom_window_names.remove(&key);
-            if let Some(title) = self.terminal_facts.window_titles.get(&key).cloned() {
-                self.rename_window_if_changed(session_id, window_id, &title, repaint);
-            }
-        } else {
-            self.terminal_facts.custom_window_names.insert(key);
-            self.rename_window_if_changed(session_id, window_id, name, repaint);
-        }
-    }
-
-    fn rename_window_if_changed(
-        &mut self,
-        session_id: &str,
-        window_id: &str,
-        name: &str,
-        repaint: &RepaintHandle,
-    ) {
-        let current = self
-            .mux
-            .session_by_id_or_name(session_id)
-            .and_then(|session| session.windows.iter().find(|window| window.id == window_id))
-            .map(|window| window.name.as_str());
-        if current == Some(name) {
-            return;
-        }
-        let config = self.multiplexer.clone();
-        self.mux
-            .rename_window(session_id, window_id, name.to_owned(), repaint, &config);
+        self.mux.rename_window(
+            session_id,
+            window_id,
+            name.to_owned(),
+            repaint,
+            &self.multiplexer,
+        );
     }
 
     pub fn record_terminal_progress(
@@ -150,12 +101,7 @@ impl BindingRuntime {
         state: &str,
         value: Option<u8>,
     ) {
-        // A tmux client reports progress for every window through its own bookkeeping. It forwards
-        // OSC 9;4 only for the pane it currently shows. Recording that copy would credit it to the
-        // attach pane and leave a stale bar on the wrong window.
-        if state == "unknown"
-            || self.backend_policy.progress == TerminalProgressPolicy::BackendSnapshot
-        {
+        if state == "unknown" {
             return;
         }
         let progress = TerminalProgress::from_conemu(state, value);
@@ -230,13 +176,7 @@ impl BindingRuntime {
         &'a self,
         window: &'a MuxWindow,
     ) -> impl Iterator<Item = TerminalProgress> + 'a {
-        let backend = Self::backend_window_progress(window);
-        let panes = backend
-            .is_none()
-            .then(|| Self::window_pane_ids(window).filter_map(|id| self.pane_progress(id)))
-            .into_iter()
-            .flatten();
-        backend.into_iter().chain(panes)
+        Self::window_pane_ids(window).filter_map(|id| self.pane_progress(id))
     }
 
     fn window_pane_ids(window: &MuxWindow) -> impl Iterator<Item = &str> {
@@ -247,16 +187,7 @@ impl BindingRuntime {
             .filter_map(|pane| pane.pane_id.as_deref())
     }
 
-    fn backend_window_progress(window: &MuxWindow) -> Option<TerminalProgress> {
-        window
-            .progress
-            .as_ref()
-            .and_then(TerminalProgress::from_mux)
-    }
-
     pub fn current_pane_layout(&self) -> Option<&PaneLayout> {
-        (self.backend_policy.panes.topology != PaneTopology::Attach)
-            .then(|| self.pane_layouts.get(&self.current_window_id()))
-            .flatten()
+        self.pane_layouts.get(&self.current_window_id())
     }
 }

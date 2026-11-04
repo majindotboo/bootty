@@ -5,27 +5,24 @@ use std::sync::Arc;
 
 use assert_fs::{TempDir, prelude::*};
 use bootty_config::{
-    config::{BoottyConfig, MultiplexerBackendConfig},
+    config::BoottyConfig,
     keymap_file::{KeymapAction, KeymapContext},
 };
 use bootty_ui::{AppState, load_keymap_text_file, reload_saved_keymap_text};
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 
-pub mod support;
-
 fn state(directory: &TempDir, keymap: &str) -> AppState {
     directory
         .child("keymap.json")
         .write_str(keymap)
         .expect("write keymap");
-    let mut config = BoottyConfig {
+    let config = BoottyConfig {
         config_path: directory.path().join("config.toml"),
         ..BoottyConfig::default()
     };
-    config.multiplexer.backend = MultiplexerBackendConfig::Native;
-    AppState::new(config, support::backends(), Arc::new(|| {}), None, None)
-        .expect("start app state")
+
+    AppState::new(config, Arc::new(|| {}), None, None).expect("start app state")
 }
 
 #[rstest]

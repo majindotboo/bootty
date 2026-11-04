@@ -1,9 +1,7 @@
 //! GPUI-native Bootty presentation primitives.
 
-mod changes;
 pub mod chrome;
 mod color_picker;
-pub(crate) mod composer;
 mod config_editor;
 mod dialogs;
 pub mod direct_input;
@@ -23,8 +21,6 @@ mod text_menu;
 mod theme;
 mod theme_integration;
 
-pub use crate::gpui_model_picker::{ModelPickerEvent, ModelPickerView};
-pub use changes::*;
 pub use chrome::*;
 pub use config_editor::*;
 pub use dialogs::*;

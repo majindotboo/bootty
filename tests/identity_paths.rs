@@ -5,7 +5,6 @@ use bootty_config::{
     ApplicationIdentity, legacy_config_path_from_env, unix_daemon_state_path,
     windows_daemon_state_path,
 };
-use bootty_mux::rmux::{endpoint_path_for, socket_name};
 use pretty_assertions::{assert_eq, assert_ne};
 use proptest::prelude::*;
 use proptest_derive::Arbitrary;
@@ -54,25 +53,18 @@ fn identities_use_separate_default_config_trees() {
     assert_ne!(production, development);
 }
 
-#[test]
-fn identities_use_separate_local_rmux_endpoint_names() {
-    let production =
-        endpoint_path_for(ApplicationIdentity::Production).expect("production rmux endpoint");
+#[rstest]
+fn mux_endpoints_isolate_identities_and_include_the_wire_version() {
+    let production = bootty_mux::native::local::endpoint(ApplicationIdentity::Production).unwrap();
     let development =
-        endpoint_path_for(ApplicationIdentity::Development).expect("development rmux endpoint");
-
-    assert_eq!(
-        (
-            socket_name(ApplicationIdentity::Production, 8),
-            socket_name(ApplicationIdentity::Development, 8),
-        ),
-        (
-            "bootty-wire8".to_owned(),
-            format!("{}-wire8", ApplicationIdentity::Development.namespace()),
-        ),
-    );
-    assert_eq!(production.parent(), development.parent());
+        bootty_mux::native::local::endpoint(ApplicationIdentity::Development).unwrap();
     assert_ne!(production, development);
+    for endpoint in [production, development] {
+        assert!(endpoint.as_path().to_string_lossy().contains(&format!(
+            "-mux-v{}",
+            bootty_mux::native::protocol::WIRE_VERSION
+        )));
+    }
 }
 
 #[test]

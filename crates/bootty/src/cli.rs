@@ -10,7 +10,7 @@ use bootty_config::{
     ApplicationIdentity,
     config::{BoottyConfig, load_config_from_path},
 };
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 
 mod config_overrides;
 
@@ -24,7 +24,7 @@ pub enum Command {
     Update,
     /// List commands exposed by a running Bootty instance.
     Commands,
-    /// Read live owner, protocol and backend capability diagnostics.
+    /// Read live owner, protocol and native workspace diagnostics.
     Doctor,
     /// Run a batch job on the selected binding host with streamed output and an observed exit.
     Run(RunArgs),
@@ -44,9 +44,8 @@ pub enum Command {
         /// Read the command's string or number arguments as a JSON array from stdin.
         #[arg(long, conflicts_with = "arguments")]
         stdin_json: bool,
-        /// Exact target as HANDLE@GENERATION, or a session or conversation's short name like
-        /// `bootty-7c`. `resource.current binding` names the current Space;
-        /// `agents.native.list --target SPACE` names its conversations.
+        /// Exact target as HANDLE@GENERATION, or a session's short name like `bootty-7c`.
+        /// `resource.current binding` names the current Space.
         #[arg(long, value_name = "HANDLE@GENERATION|NAME")]
         target: Option<String>,
         #[arg(long)]
@@ -60,18 +59,12 @@ pub enum Command {
     /// Create, poll, or remove one bounded event subscription.
     #[command(name = "events", subcommand)]
     Events(EventCommand),
-    /// Legacy remote Space protocol retained while daemon installations roll out.
-    #[command(name = "remote-space", hide = true, subcommand)]
-    RemoteSpace(RemoteSpaceCommand),
     /// Legacy remote command transport retained while daemon installations roll out.
     #[command(name = "remote-exec", hide = true)]
     RemoteExec { payload: String },
     /// Legacy remote availability probe retained while daemon installations roll out.
     #[command(name = "remote-ping", hide = true)]
     RemotePing,
-    /// Legacy remote terminal protocol retained while daemon installations roll out.
-    #[command(name = "remote-rmux", hide = true)]
-    RemoteRmux { payload: String },
     /// Invoke a command discovered from a running Bootty instance.
     #[command(external_subcommand)]
     Dynamic(Vec<String>),
@@ -162,45 +155,6 @@ pub enum EventCommand {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Subcommand)]
-pub enum RemoteSpaceCommand {
-    List,
-    Create {
-        #[arg(long)]
-        name: String,
-        #[arg(long, value_enum)]
-        backend: RemoteSpaceBackend,
-    },
-    Snapshot {
-        #[arg(long)]
-        id: String,
-        #[arg(long, value_enum)]
-        backend: RemoteSpaceBackend,
-    },
-    Execute {
-        #[arg(long)]
-        id: String,
-        #[arg(long, value_enum)]
-        backend: RemoteSpaceBackend,
-        #[arg(long)]
-        payload: String,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum RemoteSpaceBackend {
-    Rmux,
-    Tmux,
-}
-
-impl From<RemoteSpaceBackend> for bootty_mux::MuxBackendKind {
-    fn from(value: RemoteSpaceBackend) -> Self {
-        match value {
-            RemoteSpaceBackend::Rmux => Self::Rmux,
-            RemoteSpaceBackend::Tmux => Self::Tmux,
-        }
-    }
-}
 #[derive(Debug, Parser)]
 #[command(name = "bootty", version, about = "Bootty terminal emulator")]
 pub struct Cli {
@@ -250,8 +204,8 @@ impl Cli {
 
     /// Whether this invocation may spawn user processes and so needs the login shell's
     /// environment. Control clients only talk to a running instance, which hydrated itself; an
-    /// instance they start is its own process and hydrates at its own startup. Agent hooks run a
-    /// client per event, so skipping the login shell keeps them inside their timeout.
+    /// instance they start is its own process and hydrates at its own startup. Scripts may run a
+    /// client per event, so skipping the login shell keeps them fast.
     #[must_use]
     pub const fn needs_login_environment(&self) -> bool {
         !matches!(
@@ -329,29 +283,4 @@ fn create_parent_dir_for_defaults(path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
-}
-
-/// Resolves the private stdio connection before any application state is opened.
-/// # Errors
-/// Returns a redacted usage error for missing, extra, or relative connection paths.
-pub fn agent_tool_stdio_connection(
-    arguments: impl IntoIterator<Item = std::ffi::OsString>,
-) -> anyhow::Result<Option<std::path::PathBuf>> {
-    let mut arguments = arguments.into_iter();
-    if arguments.next().as_deref() != Some(std::ffi::OsStr::new("--agent-tool-stdio")) {
-        return Ok(None);
-    }
-    let connection = arguments.next().ok_or_else(|| {
-        anyhow::anyhow!("--agent-tool-stdio requires an absolute connection path")
-    })?;
-    anyhow::ensure!(
-        arguments.next().is_none(),
-        "--agent-tool-stdio accepts exactly one connection path"
-    );
-    let connection = std::path::PathBuf::from(connection);
-    anyhow::ensure!(
-        connection.is_absolute(),
-        "--agent-tool-stdio requires an absolute connection path"
-    );
-    Ok(Some(connection))
 }

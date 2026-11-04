@@ -7,6 +7,7 @@ pub(super) const ALPN: &[u8] = b"bootty-remote-1";
 pub(super) const SERVER_NAME: &str = "bootty.remote";
 pub(super) const MAX_FRAME: usize = 1024 * 1024;
 pub(super) const CHUNK: usize = 32 * 1024;
+pub(super) const MUX: u8 = 9;
 pub(super) const PROBE: u8 = 8;
 pub(super) const INPUT: u8 = 1;
 pub(super) const RESIZE: u8 = 2;

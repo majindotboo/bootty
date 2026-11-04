@@ -17,19 +17,16 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
+    if bootty_mux::native::local::run_embedded()? {
+        return Ok(ExitCode::SUCCESS);
+    }
     let (identity, args) =
         command_runtime::parse_application_identity(std::env::args().skip(1).collect())?;
-    bootty_mux::rmux::prepare_local_rmux_daemon(identity)?;
-    if let Some(code) = bootty_mux::rmux::run_embedded_rmux_daemon()? {
-        return Ok(exit_code(code));
-    }
+    identity.initialize_process()?;
     let Some((command, arguments)) = args.split_first() else {
         bail!("bootty-daemon requires a command");
     };
     match command.as_str() {
-        "private-stdio-cleanup" | "private-stdio-relay" | "--agent-tool-stdio" => {
-            run_private_stdio(command, arguments)
-        }
         "remote-ping" => {
             command_runtime::run_remote_ping();
             Ok(ExitCode::SUCCESS)
@@ -83,7 +80,10 @@ fn run() -> Result<ExitCode> {
         "remote-link-bootstrap" => {
             bootty_host::remote_link::run_bootstrap().map(|()| ExitCode::SUCCESS)
         }
-        "remote-link-server" => bootty_host::remote_link::run_server().map(|()| ExitCode::SUCCESS),
+        "remote-link-server" => {
+            bootty_host::remote_link::run_server(bootty_mux::native::local::remote_connector())
+                .map(|()| ExitCode::SUCCESS)
+        }
         "remote-link-broker" => {
             let [config] = arguments else {
                 bail!("remote-link-broker requires a target");
@@ -95,11 +95,6 @@ fn run() -> Result<ExitCode> {
                 bail!("remote-link-exec requires a target and request");
             };
             bootty_host::remote_link::run_proxy(config, request).map(exit_code)
-        }
-        "remote-rmux" => command_runtime::run_remote_rmux(arguments).map(exit_code),
-        "remote-space" => {
-            let paths = command_runtime::remote_space_paths_from_environment(identity)?;
-            command_runtime::run_remote_space(arguments, &paths).map(|()| ExitCode::SUCCESS)
         }
         "remote-project" => {
             command_runtime::run_remote_project(arguments).map(|()| ExitCode::SUCCESS)
@@ -127,44 +122,4 @@ fn exit_code(code: i32) -> ExitCode {
 #[cfg(not(any(unix, windows)))]
 fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
-}
-
-fn run_private_stdio(command: &str, arguments: &[String]) -> Result<ExitCode> {
-    match command {
-        "private-stdio-cleanup" => {
-            let [name] = arguments else {
-                bail!("private-stdio-cleanup requires its directory name");
-            };
-            bootty_host::private_stdio::relay::cleanup(name)?;
-            Ok(ExitCode::SUCCESS)
-        }
-        "private-stdio-relay" => {
-            anyhow::ensure!(
-                arguments.is_empty(),
-                "private-stdio-relay takes its private files on stdin"
-            );
-            bootty_host::private_stdio::relay::serve(
-                &mut std::io::stdin().lock(),
-                &mut std::io::stdout().lock(),
-            )?;
-            Ok(ExitCode::SUCCESS)
-        }
-        "--agent-tool-stdio" => {
-            let [connection] = arguments else {
-                bail!("--agent-tool-stdio requires one private connection path");
-            };
-            let connection = std::path::Path::new(connection);
-            anyhow::ensure!(
-                connection.is_absolute(),
-                "Private tool connection must be absolute"
-            );
-            bootty_host::private_stdio::tool_stdio(
-                connection,
-                &mut std::io::stdin().lock(),
-                &mut std::io::stdout().lock(),
-            )?;
-            Ok(ExitCode::SUCCESS)
-        }
-        _ => bail!("unknown private stdio command"),
-    }
 }

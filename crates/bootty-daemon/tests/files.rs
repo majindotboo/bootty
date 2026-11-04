@@ -7,6 +7,7 @@ use bootty_host::{
     files::{FileRequest, FileResponse, encode_document},
     ssh::SshRemote,
 };
+use bootty_os::spawn::CommandSpawn as _;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use std::{
@@ -24,7 +25,7 @@ fn execute(request: &FileRequest) -> std::process::Output {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .bootty_spawn()
         .unwrap();
     child
         .stdin

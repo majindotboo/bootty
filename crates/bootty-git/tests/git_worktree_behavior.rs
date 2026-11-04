@@ -1,7 +1,5 @@
-#[path = "support/repository.rs"]
-mod repository_support;
-#[path = "support/seed.rs"]
-mod seed;
+use crate::support::seed;
+use bootty_os::spawn::CommandSpawn as _;
 
 use anyhow::Context as _;
 use std::{fs, path::Path, process::Command};
@@ -15,7 +13,11 @@ use pretty_assertions::assert_eq;
 use rstest::{fixture, rstest};
 
 fn git_ok(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
-    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .bootty_output()?;
     anyhow::ensure!(
         output.status.success(),
         "git {args:?} failed: {}",
@@ -25,7 +27,11 @@ fn git_ok(cwd: &Path, args: &[&str]) -> anyhow::Result<()> {
 }
 
 fn git_read(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
-    let output = Command::new("git").arg("-C").arg(cwd).args(args).output()?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(args)
+        .bootty_output()?;
     anyhow::ensure!(output.status.success());
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
@@ -177,10 +183,14 @@ fn forced_branch_deletion_removes_unmerged_work(repository: anyhow::Result<Repos
     .expect("git setup command");
     remove_worktree(repository.worktree.to_str().unwrap(), false).expect("remove worktree");
     assert!(!repository.worktree.exists());
-    assert!(
-        !git_read(&repository.main, &["worktree", "list"])
+    // Only the main checkout remains; the random temp root can itself contain "wt".
+    assert_eq!(
+        git_read(&repository.main, &["worktree", "list", "--porcelain"])
             .expect("git output")
-            .contains("wt")
+            .lines()
+            .filter(|line| line.starts_with("worktree "))
+            .count(),
+        1
     );
     delete_branch(repository.main.to_str().unwrap(), "feature", true).expect("delete branch");
     assert_eq!(

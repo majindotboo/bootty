@@ -65,14 +65,12 @@ impl crate::AppState {
         let bindings = self.workspace.all_bindings().map(|binding| serde_json::json!({
             "scope":binding.scope().persistence_value().to_string(),
             "active":binding.scope() == self.workspace.active.binding.scope(),
-            "backend":binding.multiplexer().backend,
             "host":binding.multiplexer().remote.as_ref().map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label),
             "generation":binding.mux().binding_generation().to_string(),
             "available":binding.mux().unavailable_reason().is_none(),
-            "availability_source":"last_backend_snapshot",
+            "availability_source":"native_snapshot",
             "unavailable_reason":binding.mux().unavailable_reason(),
             "sessions":binding.mux().all_sessions().len(),
-            "capabilities":binding.capabilities(),
         })).collect::<Vec<_>>();
         serde_json::json!({
             "healthy":bindings.iter().all(|binding| binding["available"] == true),
@@ -81,7 +79,6 @@ impl crate::AppState {
             "config_revision":self.config_revision().to_string(),
             "remote_protocol":bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
             "bindings":bindings,
-            "reported_agents":self.agent_overview().len(),
             "last_error":self.last_error(),
         })
     }

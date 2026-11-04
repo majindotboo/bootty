@@ -34,7 +34,7 @@ fn terminal_engine_orders_osc_color_query_responses_before_later_da1() {
 fn terminal_engine_does_not_answer_queries_replayed_from_a_rebase() {
     let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
-    engine.write_vt_without_pty_responses(b"\x1b[?u");
+    engine.import_history(b"\x1b[?u");
     assert_eq!(take_pty_output(&output), Vec::<u8>::new());
 
     engine.write_vt(b"\x1b[c");
@@ -45,7 +45,7 @@ fn terminal_engine_does_not_answer_queries_replayed_from_a_rebase() {
 fn terminal_engine_does_not_repeat_side_effects_replayed_from_a_rebase() {
     let (mut engine, _output) = captured_pty_engine().expect("test operation succeeds");
 
-    engine.write_vt_without_pty_responses(b"\x1b]1337;ReportCellSize\x1b\\");
+    engine.import_history(b"\x1b]1337;ReportCellSize\x1b\\");
     assert_eq!(
         engine.drain_side_effects(),
         Vec::<bootty_terminal::terminal_engine::TerminalSideEffect>::new()
@@ -60,7 +60,7 @@ fn terminal_engine_completes_a_pending_rebase_query_once() {
     let (mut engine, output) = captured_pty_engine().expect("test operation succeeds");
 
     // This query was incomplete at capture time; only its live completion answers it.
-    engine.write_vt_without_pty_responses(b"\x1b]1337;ReportCellSize");
+    engine.import_history(b"\x1b]1337;ReportCellSize");
     assert_eq!(take_pty_output(&output), Vec::<u8>::new());
 
     engine.write_vt(b"\x1b\\\x1b[c");
@@ -78,7 +78,7 @@ fn terminal_engine_does_not_splice_a_pending_write_onto_a_rebase() {
 
     // The live stream is cut mid-sequence, then recovery replays a keyframe.
     engine.write_vt(b"\x1b]1337;Repor");
-    engine.write_vt_without_pty_responses(b"\x1b[c");
+    engine.import_history(b"\x1b[c");
     // The keyframe stands on its own: the stale prefix neither joins it nor
     // swallows it as OSC payload.
     assert_eq!(take_pty_output(&output), Vec::<u8>::new());
@@ -91,7 +91,7 @@ fn terminal_engine_does_not_splice_a_pending_write_onto_a_rebase() {
 fn terminal_engine_keeps_state_restored_by_a_rebase() {
     let (mut engine, _output) = captured_pty_engine().expect("test operation succeeds");
 
-    engine.write_vt_without_pty_responses(b"\x1b]2;restored\x1b\\");
+    engine.import_history(b"\x1b]2;restored\x1b\\");
 
     assert!(engine.drain_side_effects().iter().any(|effect| matches!(
         effect,

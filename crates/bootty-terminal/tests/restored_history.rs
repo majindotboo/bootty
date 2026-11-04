@@ -204,7 +204,7 @@ fn formatted_history_round_trips_rendered_colors_and_styles() {
     let saved = sanitize_history(&capture.text).expect("safe styled checkpoint");
     validate_history(&saved).expect("persisted style validation");
     let mut restored = TerminalEngine::new(geometry).expect("restored engine");
-    restored.write_vt_without_pty_responses(&styled_history_bytes(&saved).expect("restore bytes"));
+    restored.import_history(&styled_history_bytes(&saved).expect("restore bytes"));
     let visible = |engine: &mut TerminalEngine| {
         let frame = engine.extract_frame().expect("render frame");
         frame
@@ -409,7 +409,7 @@ proptest::proptest! {
         let plain = history_plain_text(&saved).unwrap();
         proptest::prop_assert_eq!(plain.as_str(), text.as_str());
         let mut engine = TerminalEngine::new(TerminalGeometry { cols: 80, rows: 3, cell_width: 8, cell_height: 16 }).unwrap();
-        engine.write_vt_without_pty_responses(&styled_history_bytes(&saved).unwrap());
+        engine.import_history(&styled_history_bytes(&saved).unwrap());
         let frame = engine.extract_frame().unwrap();
         let visible = frame.cells.iter().filter(|cell| !frame.cell_text(cell).is_empty() && frame.cell_text(cell).iter().any(|ch| !ch.is_whitespace())).collect::<Vec<_>>();
         proptest::prop_assert_eq!(visible.len(), text.len());

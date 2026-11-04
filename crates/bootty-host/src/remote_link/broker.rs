@@ -8,6 +8,7 @@ use crate::{CancellableCommandRunner, CommandCancellation, CommandRunner as _, s
 use anyhow::{Context as _, Result, bail};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use bootty_config::{config::SshRemoteConfig, identity::ApplicationIdentity};
+use bootty_os::spawn::CommandSpawn as _;
 use bootty_write::{NewFileMode, WriteTarget};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -195,8 +196,7 @@ fn prepare_descriptor(
         .stdout(Stdio::piped())
         .stdin(Stdio::null())
         .stderr(Stdio::null());
-    rmux_os::daemon::configure_hidden_daemon_command(&mut command, true);
-    let mut child = rmux_os::daemon::spawn_hidden_daemon_command(&mut command)?;
+    let mut child = bootty_os::daemon::spawn_hidden(&mut command)?;
     let mut response = String::new();
     std::io::BufReader::new(child.stdout.take().context("remote relay startup")?)
         .take(4096)
@@ -277,7 +277,32 @@ pub fn run_broker(payload: &str) -> Result<()> {
     })
 }
 
-async fn bootstrap(remote: &SshRemote, identity: &Identity) -> Result<RemoteLink> {
+pub(super) async fn bootstrap(remote: &SshRemote, identity: &Identity) -> Result<RemoteLink> {
+    let response = announce(remote, identity).await?;
+    let direct = RemoteLink::connect(
+        identity,
+        response.certificate.clone().into(),
+        response.address,
+    );
+    let tunneled = async {
+        // Give a reachable direct host a head start, without waiting out a blocked UDP dial.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        super::tunnel::connect(
+            remote,
+            identity,
+            response.certificate.into(),
+            response.tcp_port,
+        )
+        .await
+    };
+    tokio::pin!(direct, tunneled);
+    tokio::select! {
+        link = &mut direct => match link { Ok(link) => Ok(link), Err(_) => tunneled.await },
+        link = &mut tunneled => match link { Ok(link) => Ok(link), Err(_) => direct.await },
+    }
+}
+
+pub(super) async fn announce(remote: &SshRemote, identity: &Identity) -> Result<Bootstrap> {
     let (program, args) = remote.raw_command(&crate::exec::remote_program_line(&[
         "--application-identity".into(),
         identity_argument().into(),
@@ -307,27 +332,7 @@ async fn bootstrap(remote: &SshRemote, identity: &Identity) -> Result<RemoteLink
     if response.certificate.len() > 16 * 1024 {
         bail!("remote certificate is too large");
     }
-    let direct = RemoteLink::connect(
-        identity,
-        response.certificate.clone().into(),
-        response.address,
-    );
-    let tunneled = async {
-        // Give a reachable direct host a head start, without waiting out a blocked UDP dial.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        super::tunnel::connect(
-            remote,
-            identity,
-            response.certificate.into(),
-            response.tcp_port,
-        )
-        .await
-    };
-    tokio::pin!(direct, tunneled);
-    tokio::select! {
-        link = &mut direct => match link { Ok(link) => Ok(link), Err(_) => tunneled.await },
-        link = &mut tunneled => match link { Ok(link) => Ok(link), Err(_) => direct.await },
-    }
+    Ok(response)
 }
 
 async fn relay(
@@ -485,12 +490,29 @@ fn start_input(frames: tokio::sync::mpsc::Sender<(u8, Vec<u8>)>, terminal: bool)
 }
 
 fn current_size() -> RemoteTerminalSize {
-    rmux_os::terminal::current_size().map_or(RemoteTerminalSize { cols: 80, rows: 24 }, |size| {
+    terminal_size().map_or(RemoteTerminalSize { cols: 80, rows: 24 }, |(cols, rows)| {
         RemoteTerminalSize {
-            cols: size.cols.max(1),
-            rows: size.rows.max(1),
+            cols: cols.max(1),
+            rows: rows.max(1),
         }
     })
+}
+
+#[cfg(unix)]
+fn terminal_size() -> Option<(u16, u16)> {
+    [
+        rustix::termios::tcgetwinsize(std::io::stdin()),
+        rustix::termios::tcgetwinsize(std::io::stdout()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|size| (size.ws_col, size.ws_row))
+    .find(|&(cols, rows)| cols > 0 && rows > 0)
+}
+
+#[cfg(windows)]
+fn terminal_size() -> Option<(u16, u16)> {
+    crossterm::terminal::size().ok()
 }
 
 fn fallback(config: SshRemoteConfig, request: &RemoteProcessRequest) -> Result<i32> {
@@ -508,7 +530,7 @@ fn fallback(config: SshRemoteConfig, request: &RemoteProcessRequest) -> Result<i
         vec!["-o", "BatchMode=yes"]
     };
     let (program, args) = remote.build_line(line, &mode);
-    let status = Command::new(program).args(args).status()?;
+    let status = Command::new(program).args(args).bootty_status()?;
     Ok(status.code().unwrap_or(1))
 }
 

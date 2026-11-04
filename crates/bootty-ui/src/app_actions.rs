@@ -27,11 +27,6 @@ pub enum AppAction {
     NewWindow,
     AddProject,
     NewMuxSession,
-    ResumeAgentSession(bootty_agents::AgentKind),
-    AgentHistory,
-    /// Add the focused document's or terminal's selection to the session's conversation.
-    AddSelectionToConversation,
-    NewNativeAgentTab,
     SessionPicker,
     CommandPalette,
     Close,
@@ -104,7 +99,6 @@ pub enum MuxKeyAction {
     PreviousPane,
     KillPane,
     ClosePane,
-    TogglePaneZoom,
     NextSession,
     PreviousSession,
     LastSession,
@@ -145,7 +139,6 @@ impl Default for AppKeyBindings {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SidebarAction {
     ToggleGrouping,
-    ToggleSettled,
     SortManual,
     SortRecentActivity,
     Ignore,
@@ -156,9 +149,8 @@ pub enum SidebarAction {
 }
 
 impl SidebarAction {
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 8] = [
         Self::ToggleGrouping,
-        Self::ToggleSettled,
         Self::SortManual,
         Self::SortRecentActivity,
         Self::Ignore,
@@ -174,7 +166,6 @@ impl SidebarAction {
             Self::SortManual => "ui.sidebar.sort_manual",
             Self::SortRecentActivity => "ui.sidebar.sort_recent_activity",
             Self::ToggleGrouping => "ui.sidebar.toggle_grouping",
-            Self::ToggleSettled => "ui.sidebar.toggle_settled",
             Self::Ignore => "ui.sidebar.ignore",
             Self::PreviousSession => "ui.sidebar.previous_session",
             Self::NextSession => "ui.sidebar.next_session",
@@ -427,18 +418,6 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::NewWindow => Keybind::App(AppAction::NewWindow),
         Binding::AddProject => Keybind::App(AppAction::AddProject),
         Binding::NewMuxSession => Keybind::App(AppAction::NewMuxSession),
-        Binding::AgentHistory => Keybind::App(AppAction::AgentHistory),
-        Binding::AddSelectionToConversation => Keybind::App(AppAction::AddSelectionToConversation),
-        Binding::ResumeCodexSession => Keybind::App(AppAction::ResumeAgentSession(
-            bootty_agents::AgentKind::Codex,
-        )),
-        Binding::ResumeClaudeSession => Keybind::App(AppAction::ResumeAgentSession(
-            bootty_agents::AgentKind::Claude,
-        )),
-        Binding::ResumePiSession => {
-            Keybind::App(AppAction::ResumeAgentSession(bootty_agents::AgentKind::Pi))
-        }
-        Binding::NewNativeAgentTab => Keybind::App(AppAction::NewNativeAgentTab),
         Binding::SessionPicker => Keybind::App(AppAction::SessionPicker),
         Binding::CommandPalette => Keybind::App(AppAction::CommandPalette),
         Binding::CloseWindow => Keybind::App(AppAction::Close),
@@ -447,35 +426,12 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::FocusTerminal => Keybind::App(AppAction::FocusTerminal),
         Binding::ToggleSidebarFocus => Keybind::App(AppAction::ToggleSidebarFocus),
         Binding::ToggleSidebarVisibility => Keybind::App(AppAction::ToggleSidebarVisibility),
-        Binding::ShowSubagents => {
-            Keybind::App(AppAction::Dock(crate::commands::DockAction::Subagents))
-        }
-        Binding::ShowAgents => Keybind::App(AppAction::Dock(crate::commands::DockAction::Agents)),
-        Binding::ShowFiles => Keybind::App(AppAction::Dock(crate::commands::DockAction::Files)),
         Binding::ShowSidebar => Keybind::App(AppAction::Dock(crate::commands::DockAction::Sidebar)),
-        Binding::ToggleSessionsPanel => Keybind::App(AppAction::Dock(
-            crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Sessions),
-        )),
-        Binding::ToggleFilesPanel => Keybind::App(AppAction::Dock(
-            crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Files),
-        )),
-        Binding::ToggleChangesPanel => Keybind::App(AppAction::Dock(
-            crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Changes),
-        )),
-        Binding::ToggleDiffPanel => Keybind::App(AppAction::Dock(
-            crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Diff),
-        )),
-        Binding::ToggleAgentsPanel => Keybind::App(AppAction::Dock(
-            crate::commands::DockAction::TogglePanel(bootty_config::config::PanelKind::Agents),
-        )),
+        Binding::ToggleSessionsPanel => {
+            Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleSessions))
+        }
         Binding::ToggleLeftDock => {
             Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleLeft))
-        }
-        Binding::ToggleRightDock => {
-            Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleRight))
-        }
-        Binding::TogglePanelFullView => {
-            Keybind::App(AppAction::Dock(crate::commands::DockAction::ToggleFullView))
         }
         Binding::ShowSpaces => Keybind::App(AppAction::Dock(crate::commands::DockAction::Spaces)),
         Binding::ToggleHiddenTabs => Keybind::App(AppAction::Dock(
@@ -486,18 +442,14 @@ fn keybind_action(action: BindingAction) -> Result<KeybindAction> {
         }
         Binding::EditTheme => Keybind::App(AppAction::EditTheme),
         Binding::ExportTerminal => Keybind::App(AppAction::ExportTerminal),
-        Binding::ShowChanges => Keybind::App(AppAction::Dock(crate::commands::DockAction::Changes)),
-        Binding::ShowDiff => Keybind::App(AppAction::Dock(crate::commands::DockAction::Diff)),
         Binding::OpenSetting(id) => Keybind::OpenSetting(id),
         Binding::OpenSettings => Keybind::App(AppAction::OpenSettings),
         Binding::ChangeAppearance(choice) => {
             Keybind::App(AppAction::ChangeAppearance(appearance_mode(choice)))
         }
         Binding::SwitchTheme => Keybind::App(AppAction::SwitchTheme),
-        Binding::SettleSession => Keybind::Invoke("settle_session"),
         Binding::TogglePinSession => Keybind::Invoke("toggle_session_pin"),
-        Binding::ArchiveSession => Keybind::Invoke("archive_session"),
-        Binding::InterruptAgent => Keybind::Invoke("interrupt_agent"),
+        Binding::CloseSession => Keybind::Invoke("close_session"),
         Binding::RenameSession => Keybind::App(AppAction::RenameSession),
         Binding::CleanWorktrees => Keybind::App(AppAction::CleanWorktrees),
         Binding::MoveSessionToSpace => Keybind::App(AppAction::MoveSessionToSpace),
@@ -540,7 +492,6 @@ fn terminal_keybind_action(action: BindingAction) -> Result<KeybindAction> {
         Binding::NextPane => Keybind::Mux(Mux::NextPane),
         Binding::PreviousPane => Keybind::Mux(Mux::PreviousPane),
         Binding::KillPane => Keybind::Mux(Mux::KillPane),
-        Binding::TogglePaneZoom => Keybind::Mux(Mux::TogglePaneZoom),
         Binding::NextSession => Keybind::Mux(Mux::NextSession),
         Binding::PreviousSession => Keybind::Mux(Mux::PreviousSession),
         Binding::LastSession => Keybind::Mux(Mux::LastSession),

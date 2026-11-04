@@ -1,13 +1,12 @@
 //! Native application menu, owned by GPUI.
 //!
 //! Edit actions use GPUI's typed input actions so native responder selectors and focused GPUI
-//! inputs share one dispatch path. Muda remains the event source for the agent tray.
+//! inputs share one dispatch path.
 
 #[cfg(target_os = "macos")]
 mod platform_menu {
     use gpui_kit::component::input::{Copy, Cut, Paste, Redo, SelectAll, Undo};
     use gpui_kit::{Menu, MenuItem, OsAction};
-    use muda::MenuEvent;
 
     const SETTINGS_COMMAND: &str = "open_settings";
     const QUIT_COMMAND: &str = "quit";
@@ -21,9 +20,6 @@ mod platform_menu {
 
     #[must_use]
     pub fn install(localizer: &crate::i18n::Localizer, cx: &mut gpui_kit::App) -> AppMenu {
-        MenuEvent::set_event_handler(Some(|event: MenuEvent| {
-            crate::agent_tray::dispatch(&event.id.0);
-        }));
         refresh(localizer, cx);
         AppMenu
     }

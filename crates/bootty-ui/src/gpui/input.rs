@@ -13,7 +13,7 @@ use std::{
 use gpui_kit::{
     App, Bounds, ExternalPaths, InputHandler, KeyDownEvent, KeyUpEvent, ModifiersChangedEvent,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, Pixels, Point as GpuiPoint,
-    ScrollDelta, ScrollWheelEvent, UTF16Selection, Window,
+    ScrollDelta, ScrollEvent, UTF16Selection, Window,
 };
 
 /// A logical key after the active keyboard layout has been applied.
@@ -288,7 +288,7 @@ impl InputAccumulator {
         self.push(InputEvent::PointerGone);
     }
 
-    pub fn scroll(&mut self, event: &ScrollWheelEvent) {
+    pub fn scroll(&mut self, event: &ScrollEvent) {
         self.update_pointer(event.position, event.modifiers);
         let (unit, delta) = match event.delta {
             ScrollDelta::Pixels(delta) => (WheelUnit::Pixels, point(delta)),

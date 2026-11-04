@@ -34,8 +34,8 @@ bootty command history.search '{"shell":"bash","path":"~/.bash_history","query":
 ```
 
 The first form requires a native terminal with shell hooks. The second works on
-any binding, including native, rmux, tmux, and Herdr, locally or remotely. It reads
-the selected host's history without assuming ownership of its prompt.
+any binding, locally or remotely. It reads the selected host's history without
+assuming ownership of its prompt.
 
 Semantic mode retrieves candidates without lexical filtering, deduplicates and
 orders them using the existing history reader, then sends at most 50 commands

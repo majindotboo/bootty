@@ -22,8 +22,7 @@ use rstest::rstest;
 #[cfg(windows)]
 use bootty_ui::strings::home_dir;
 
-#[path = "support/events.rs"]
-mod events;
+use crate::support::events;
 
 fn session(id: &str, name: &str) -> MuxSession {
     MuxSession {

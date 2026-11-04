@@ -69,3 +69,19 @@ fn closing_pending_export_cancels_the_shared_command() {
     drop(dialog);
     assert!(cancellation.is_cancelled());
 }
+
+#[test]
+fn terminal_find_frame_distinguishes_pending_and_no_matches() {
+    use bootty_ui::product_dialogs::terminal_find::TerminalFindModel;
+    let mut dialog = TerminalFindModel::new("needle".into());
+    let mut frame = bootty_terminal::terminal_frame::RenderFrame::default();
+    dialog.update_from_frame(&frame);
+    assert!(dialog.result().is_none());
+    frame.search_query = "needle".into();
+    dialog.update_from_frame(&frame);
+    assert_eq!(dialog.count_text(), "0/0");
+    frame.search_match_count = 3;
+    frame.active_search_match_index = Some(2);
+    dialog.update_from_frame(&frame);
+    assert_eq!(dialog.count_text(), "2/3");
+}

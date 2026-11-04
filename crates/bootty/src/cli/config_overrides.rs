@@ -6,8 +6,7 @@ use bootty_config::{
     color::Color,
     config::{
         BoottyConfig, CursorStyleConfig, MacosOptionAsAltConfig, MacosTitlebarStyle,
-        MultiplexerBackendConfig, SidebarPosition, SshRemoteConfig, WindowDecoration,
-        WindowFullscreen,
+        SidebarPosition, WindowDecoration, WindowFullscreen,
     },
 };
 use bootty_terminal::terminal_engine::NATIVE_SCROLLBACK_BYTES_PER_ROW_ESTIMATE;
@@ -15,22 +14,6 @@ use clap::{Args, ValueEnum};
 
 #[derive(Clone, Debug, Default, Args)]
 pub(super) struct ConfigOverrides {
-    /// Force the multiplexer backend.
-    #[arg(long, value_enum, value_name = "BACKEND")]
-    backend: Option<CliBackend>,
-
-    /// Attach the multiplexer running on this SSH host instead of the local one.
-    #[arg(long, value_name = "HOST")]
-    ssh_remote: Option<String>,
-
-    /// Force tmux status hiding on.
-    #[arg(long, conflicts_with = "show_tmux_status")]
-    hide_tmux_status: bool,
-
-    /// Force tmux status hiding off.
-    #[arg(long)]
-    show_tmux_status: bool,
-
     /// Force fullscreen mode. Omitting a value is the same as --fullscreen native.
     #[arg(
         long,
@@ -286,7 +269,6 @@ pub(super) struct ConfigOverrides {
 
 impl ConfigOverrides {
     pub(super) fn apply(&self, config: &mut BoottyConfig) -> Result<()> {
-        self.apply_multiplexer(config)?;
         self.apply_window(config);
         self.apply_theme_and_colors(config)?;
         self.apply_font(config)?;
@@ -296,31 +278,6 @@ impl ConfigOverrides {
         self.apply_chrome(config);
         self.apply_sidebar(config);
         self.apply_diagnostics(config);
-        Ok(())
-    }
-
-    fn apply_multiplexer(&self, config: &mut BoottyConfig) -> Result<()> {
-        if let Some(backend) = self.backend {
-            config.multiplexer.backend = backend.into();
-        }
-        if let Some(hide_tmux_status) = bool_override(self.hide_tmux_status, self.show_tmux_status)
-        {
-            config.multiplexer.hide_tmux_status = hide_tmux_status;
-        }
-        if let Some(host) = &self.ssh_remote {
-            // The flag names a host and nothing else, so whatever `[multiplexer.remote]` says about
-            // reaching it — port, identity, jump host — stays in place.
-            let mut remote = config
-                .multiplexer
-                .remote
-                .as_ref()
-                .and_then(bootty_config::config::RemoteConfig::as_ssh)
-                .cloned()
-                .unwrap_or_else(|| SshRemoteConfig::for_host(host.clone()));
-            remote.host.clone_from(host);
-            config.multiplexer.remote = Some(remote.into());
-        }
-        config.multiplexer.validate_remote()?;
         Ok(())
     }
 
@@ -533,12 +490,6 @@ macro_rules! cli_value_enum {
 }
 
 cli_value_enum! {
-    CliBackend => MultiplexerBackendConfig {
-        Herdr,
-        Native,
-        Rmux,
-        Tmux,
-    }
     CliFullscreen => WindowFullscreen {
         Disabled,
         Native,

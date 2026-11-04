@@ -1,14 +1,12 @@
 use super::load::{ConfigLoadError, ConfigResult};
 use super::model::{
-    AppearanceBranchConfig, AppearanceConfig, BackendKeybindConfig, BoottyConfig, BrowserConfig,
-    ChromeConfig, ColorConfig, ComputerConfig, CursorConfig, DiagnosticsConfig, FontConfig,
-    InputConfig, MultiplexerConfig, ResolvedTheme, SessionConfig, SidebarConfig,
-    SshAuthenticationConfig, SshProfileConfig, WindowConfig,
+    AppearanceBranchConfig, AppearanceConfig, BoottyConfig, ChromeConfig, ColorConfig,
+    CursorConfig, DiagnosticsConfig, FontConfig, InputConfig, MultiplexerConfig, ResolvedTheme,
+    SessionConfig, SidebarConfig, SshAuthenticationConfig, SshProfileConfig, WindowConfig,
 };
 use super::raw::{
-    AppearanceBranchPatch, AppearancePatch, BackendKeybindPatch, BrowserPatch, ChromePatch,
-    ColorPatch, ComputerPatch, CursorPatch, DiagnosticsPatch, FontPatch, InputPatch,
-    MultiplexerPatch, RawConfig, SessionPatch, SidebarPatch, WindowPatch,
+    AppearanceBranchPatch, AppearancePatch, ChromePatch, ColorPatch, CursorPatch, DiagnosticsPatch,
+    FontPatch, InputPatch, MultiplexerPatch, RawConfig, SessionPatch, SidebarPatch, WindowPatch,
 };
 use super::theme_catalog::{load_builtin_theme, parse_theme_source};
 use crate::FontFeature;
@@ -69,7 +67,6 @@ impl ConfigResolver<'_> {
             when_closing_with_no_tabs,
             on_last_window_closed,
             locale,
-            tray,
         );
         config.appearance = resolve_appearance(
             raw.appearance,
@@ -81,19 +78,14 @@ impl ConfigResolver<'_> {
         apply_partial_font(&mut config.font, raw.font)?;
         apply_font_features(&mut config.font, raw.font_feature)?;
         apply_partial_chrome(&mut config.chrome, raw.chrome);
-        config.panels = raw.panels;
         apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer)?;
         config.ssh_profiles = raw.ssh_profiles;
-        raw.agents.validate()?;
-        config.agents = raw.agents;
         config.extensions = raw.extensions;
         for (id, profile) in &config.ssh_profiles {
             profile.validate(id)?;
         }
         apply_partial_input(&mut config.input, raw.input);
-        apply_partial_browser(&mut config.browser, raw.browser);
-        apply_partial_computer(&mut config.computer, raw.computer);
         apply_partial_session(&mut config.session, raw.session);
         apply_partial_diagnostics(&mut config.diagnostics, raw.diagnostics);
         apply_partial_window(&mut config.window, raw.window);
@@ -194,7 +186,6 @@ fn apply_font_features(font: &mut FontConfig, features: Vec<String>) -> ConfigRe
 fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_fields!(chrome, partial;
         left_dock_toggle,
-        right_dock_toggle,
         panel_tab_style,
         panel_tabs,
         tabs_use_session_color,
@@ -229,10 +220,7 @@ fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
 fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
     apply_fields!(sidebar, partial;
         group_by_project,
-        settled_collapsed,
         sort_order,
-        animate_working,
-        auto_settle_after_days,
         position,
         background,
         foreground,
@@ -263,8 +251,6 @@ fn apply_partial_multiplexer(
     partial: MultiplexerPatch,
 ) -> ConfigResult<()> {
     apply_fields!(multiplexer, partial;
-        backend,
-        hide_tmux_status,
         remote,
     );
     multiplexer
@@ -290,26 +276,8 @@ fn apply_partial_input(input: &mut InputConfig, partial: InputPatch) {
     if let Some(value) = partial.sidebar_keybind {
         input.sidebar_keybind = merge_keybind_entries(&input.sidebar_keybind, value);
     }
-    if let Some(value) = partial.backend_keybind {
-        apply_partial_backend_keybind(&mut input.backend_keybinds, value);
-    }
-}
-
-fn apply_partial_backend_keybind(
-    keybinds: &mut BackendKeybindConfig,
-    partial: BackendKeybindPatch,
-) {
-    if let Some(value) = partial.herdr {
-        keybinds.herdr = merge_keybind_entries(&keybinds.herdr, value);
-    }
-    if let Some(value) = partial.native {
-        keybinds.native = merge_keybind_entries(&keybinds.native, value);
-    }
-    if let Some(value) = partial.rmux {
-        keybinds.rmux = merge_keybind_entries(&keybinds.rmux, value);
-    }
-    if let Some(value) = partial.tmux {
-        keybinds.tmux = merge_keybind_entries(&keybinds.tmux, value);
+    if let Some(value) = partial.backend_keybind.and_then(|keybinds| keybinds.native) {
+        input.layout_keybind = merge_keybind_entries(&input.layout_keybind, value);
     }
 }
 
@@ -334,14 +302,12 @@ fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
         output_archives,
         clipboard_write_hosts,
         bell,
-        agent_notifications,
         command_notifications,
         command_notification_min_seconds,
         shell_integration,
         shell,
         working_directory,
         worktree_directory,
-        worktree_limit,
         branch_prefix,
     );
     if let Some(value) = partial.env {
@@ -356,22 +322,6 @@ fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
         max_scrollback,
         scrollbar,
         glyph_protocol,
-    );
-}
-
-fn apply_partial_computer(computer: &mut ComputerConfig, partial: ComputerPatch) {
-    apply_fields!(computer, partial;
-        enabled,
-        capture_enabled,
-        input_enabled,
-        always_allowed_apps,
-    );
-}
-
-fn apply_partial_browser(browser: &mut BrowserConfig, partial: BrowserPatch) {
-    apply_fields!(browser, partial;
-        search_engine,
-        persist_site_data,
     );
 }
 

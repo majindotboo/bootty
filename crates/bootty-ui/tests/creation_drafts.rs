@@ -1,7 +1,7 @@
 #![cfg(test)]
 //! Unstarted sessions are independent drafts, not backend processes.
 use assert_fs::TempDir;
-use bootty_config::config::{BoottyConfig, MultiplexerBackendConfig};
+use bootty_config::config::BoottyConfig;
 use bootty_control::{
     Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget,
 };
@@ -12,18 +12,16 @@ use bootty_ui::{
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     path::Path,
     sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
-#[path = "support/idle_frames.rs"]
-mod frames;
-pub mod support;
-#[path = "support/config.rs"]
-mod test_config;
+use crate::support::idle_frames as frames;
+
+use crate::support::config as test_config;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -31,7 +29,6 @@ fn host(config: BoottyConfig) -> TestResult<(AppState, mpsc::Receiver<()>)> {
     let (wake, wakes) = mpsc::channel();
     let state = AppState::new(
         config,
-        support::backends(),
         Arc::new(move || {
             let _ = wake.send(());
         }),
@@ -42,14 +39,8 @@ fn host(config: BoottyConfig) -> TestResult<(AppState, mpsc::Receiver<()>)> {
 }
 
 fn config(directory: &Path) -> BoottyConfig {
-    let mut config = test_config::config(
-        directory.join("config.toml"),
-        MultiplexerBackendConfig::Native,
-    );
+    let mut config = test_config::config(directory.join("config.toml"));
     config.session.working_directory = Some(directory.to_owned());
-    config.agents.codex.enabled = false;
-    config.agents.claude.enabled = false;
-    config.agents.pi.enabled = false;
     config
 }
 
@@ -133,6 +124,17 @@ fn wait_for_drafts(
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .map_err(|error| format!("Waiting for {count} drafts after {drafts}: {error}"))?;
     }
+}
+
+fn draft_catalog(directory: &Path) -> TestResult<std::path::PathBuf> {
+    Ok(std::fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().ends_with(".drafts.json"))
+        })
+        .ok_or("draft catalog")?)
 }
 
 fn type_prompt(state: &mut AppState, text: &str) {
@@ -257,6 +259,80 @@ fn clearing_the_restored_draft_removes_its_saved_entry() -> TestResult {
 }
 
 #[rstest]
+fn drafts_saved_by_the_agent_composer_load_as_terminal_drafts() -> TestResult {
+    let directory = TempDir::new()?;
+    let config = config(directory.path());
+    let cwd = directory.path().to_string_lossy().into_owned();
+    let (mut state, wakes) = host(config.clone())?;
+    let target = binding(&mut state, &wakes)?;
+    let scope = state.mux_scope();
+    state.open_new_session_dialog_in(scope, cwd.clone());
+    type_prompt(&mut state, "make test");
+    wait_for_drafts(&mut state, &wakes, &target, 1)?;
+    drop(state);
+
+    // Older versions saved agent mode and its composer next to the terminal fields.
+    let catalog = draft_catalog(directory.path())?;
+    let mut saved: Value = serde_json::from_slice(&std::fs::read(&catalog)?)?;
+    let draft = saved["drafts"]
+        .as_object_mut()
+        .and_then(|drafts| drafts.values_mut().next())
+        .and_then(Value::as_object_mut)
+        .ok_or("saved draft")?;
+    for (field, value) in [
+        ("terminal", json!(false)),
+        ("prompt", json!("Fix the flaky test")),
+        (
+            "attachments",
+            json!([{"path": "/missing.png", "size_bytes": 1, "prompt_ranges": [[0, 1]]}]),
+        ),
+        (
+            "applications",
+            json!([{"id": "app", "prompt_range": [0, 3]}]),
+        ),
+        ("provider_mentions", json!([])),
+        ("goal", json!("Ship it")),
+        ("provider", json!("codex")),
+        ("profiles", json!({"codex": ""})),
+        (
+            "model_selection",
+            json!({"model": "gpt-5", "reasoning_effort": "high"}),
+        ),
+        ("permissions", json!("full-access")),
+        (
+            "fan_out",
+            json!([{"provider": "claude", "model": "opus", "name": "Opus"}]),
+        ),
+        ("start_ref", json!("main")),
+    ] {
+        draft.insert(field.to_owned(), value);
+    }
+    std::fs::write(&catalog, serde_json::to_vec(&saved)?)?;
+
+    let (mut state, wakes) = host(config)?;
+    let target = binding(&mut state, &wakes)?;
+    let drafts = wait_for_drafts(&mut state, &wakes, &target, 1)?;
+    assert_eq!(
+        (drafts[0]["cwd"].as_str(), drafts[0]["branch"].as_str()),
+        (Some(cwd.as_str()), Some("main"))
+    );
+    let mut open = CommandInvocation::new(
+        "session.draft.open",
+        vec![
+            drafts[0]["identity"]
+                .as_str()
+                .ok_or("draft identity")?
+                .to_owned(),
+        ],
+        Caller::Socket,
+    );
+    open.target = Some(target);
+    success(submit(&mut state, &wakes, open)?)?;
+    assert_eq!(shown_prompt(&mut state).as_deref(), Some("make test"));
+    Ok(())
+}
+
+#[rstest]
 fn a_failed_discard_keeps_the_draft_and_its_text() -> TestResult {
     let directory = TempDir::new()?;
     let (mut state, wakes) = host(config(directory.path()))?;
@@ -269,14 +345,7 @@ fn a_failed_discard_keeps_the_draft_and_its_text() -> TestResult {
         .as_str()
         .ok_or("draft identity")?
         .to_owned();
-    let catalog = std::fs::read_dir(directory.path())?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .find(|path| {
-            path.file_name()
-                .is_some_and(|name| name.to_string_lossy().ends_with(".drafts.json"))
-        })
-        .ok_or("draft catalog")?;
+    let catalog = draft_catalog(directory.path())?;
     let backup = catalog.with_extension("json.backup");
     std::fs::rename(&catalog, &backup)?;
     std::fs::create_dir(&catalog)?;
@@ -326,12 +395,7 @@ fn automatic_terminal_restore_keeps_the_open_draft() -> TestResult {
         Caller::Socket,
     );
     create.target = Some(target.clone());
-    let created = success(submit(&mut state, &wakes, create)?)?;
-    let session = serde_json::from_value::<CommandTarget>(created["created"].clone())?;
-    let mut close = CommandInvocation::new("session.close", Vec::new(), Caller::Socket);
-    close.target = Some(session);
-    close.confirmation = Some(close.confirmation());
-    success(submit(&mut state, &wakes, close)?)?;
+    _ = success(submit(&mut state, &wakes, create)?)?;
     let scope = state.mux_scope();
     state.open_new_session_dialog_in(scope, directory.path().to_string_lossy().into_owned());
     type_prompt(&mut state, "Do not replace this unfinished prompt");

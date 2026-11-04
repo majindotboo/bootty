@@ -109,7 +109,7 @@ The capture runs outside the timed iterations.
 | `hostile_input` | invalid bytes, malformed controls, huge OSC/DCS payloads, reset storms, long lines, fuzz streams, image quota abuse, and recovery ladders |
 | `panes_multiwindow` | native/tmux-equivalent tabs and panes, active/inactive panes, all-panes-tailing updates, tab switching, create/close models, and aggregate multi-window rendering |
 | `multiplexer` | terminal-alone, native mux, tmux, screen, tmux-over-SSH, nested SSH/tmux, passthrough/fallback, feature classification, latency delta, and render overhead |
-| `remote_session` | virtual-network replay for SSH, mosh, docker/podman exec, ConPTY-like sessions, resize propagation, and feature-degradation classification |
+| `remote_session` | virtual-network replay for SSH, ConPTY-like sessions, resize propagation, and feature-degradation classification |
 | `real_app_replay` | deterministic replay streams for editors, fuzzy finders, diffs, build logs, log tails, dashboards, mux sessions, and AI/code-generation output |
 
 ## Reproduction and dashboard workflow
@@ -285,8 +285,6 @@ Tracing writes synchronously **after** taking the paint timestamp. Its overhead
 can affect subsequent frames; compare candidates with identical instrumentation.
 Scene paint is earlier than GPU submission, and nonblank content is not a pixel
 equivalence check. Confirm real window content and input routing independently.
-Opaque tmux/Herdr attachment keys may not distinguish inner tab changes: do not
-use identical keys as a tab benchmark or call those no-ops a fast result.
 
 Bootty can emit internal JSONL trace records for optimization-only runs. This is
 not apples-to-apples competitive evidence because competitors cannot expose the

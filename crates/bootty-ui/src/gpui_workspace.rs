@@ -3,17 +3,14 @@
 //! Projects accepted configuration, mux state, and native service facts into the workspace window.
 
 mod dialogs;
-mod native_conversations;
-use native_conversations::NativeConversations;
 mod project_settings;
 mod settings_window;
-mod snooze;
+mod surfaces;
 use dialogs::WorkspaceDialogs;
 
 use crate::gpui_keymap_editor::editor_snapshot as keymap_editor_snapshot;
 use settings_window::{GpuiSettingsWindow, SettingsWindowTarget};
 
-use bootty_mux::pane_layout::SplitDirection;
 use std::{
     cell::RefCell,
     collections::{HashMap, HashSet},
@@ -29,11 +26,10 @@ use crate::terminal_text::{
     NativeSymbolPolicy, TerminalTextConfig, TerminalTextContract, TerminalTextGeometry,
 };
 use anyhow::Result;
-use bootty_config::config::{AppearanceVariant, BoottyConfig, MultiplexerBackendConfig};
+use bootty_config::config::{AppearanceVariant, BoottyConfig};
 use bootty_control::{
     BoundAppCommandSender, Caller, CommandInvocation, ControlCatalog, ControlPlane,
 };
-use bootty_mux::provider::MuxBackendRegistry;
 use bootty_terminal::geometry::{CellMetrics, SurfaceRect, TerminalPadding, TerminalSurface};
 use gpui_kit::component::{
     ActiveTheme as _, ElementExt as _, WindowExt as _, notification::Notification,
@@ -46,10 +42,8 @@ use gpui_kit::{
 use num_traits::ToPrimitive as _;
 
 use crate::gpui::{
-    GpuiKeymapEditor, GpuiPaneColors, GpuiPaneDividerSnapshot, GpuiPaneIntent, GpuiPaneSnapshot,
-    GpuiPaneWorkspace, GpuiPaneWorkspaceSnapshot, GpuiSettings, GpuiTerminalInteraction,
-    KeymapEditorIntent, ModuleIntegrationsSnapshot, PaneProgress, PaneProgressState, PaneRect,
-    PaneSplitDirection, SettingsIntent,
+    GpuiKeymapEditor, GpuiPaneColors, GpuiPaneSnapshot, GpuiSettings, GpuiTerminalInteraction,
+    KeymapEditorIntent, PaneProgress, PaneProgressState, SettingsIntent,
     chrome::{ChromeIntent, ChromeSnapshot, GpuiChrome, SidebarPosition},
     setup_ui_font, terminal_cell_metrics,
 };
@@ -117,15 +111,6 @@ struct BoottyErrorNotification;
 
 struct BoottyUndoNotification;
 
-/// What the sidebar asked for that the workspace finishes later.
-#[derive(Default)]
-struct SidebarRequests {
-    /// A conversation to fork, started once a window is at hand.
-    side_chat: Option<bootty_control::CommandTarget>,
-    /// Counts searches, so a slower earlier one never replaces a newer one's results.
-    search: u64,
-}
-
 fn schedule_focus<T: 'static>(focus: FocusHandle, window: &Window, cx: &mut Context<T>) {
     cx.defer_in(window, move |_, window, cx| window.focus(&focus, cx));
 }
@@ -166,21 +151,17 @@ struct WorkspaceLaunch {
     native_chrome: Rc<RefCell<chrome_frame::NativeChrome>>,
     window_state_root: Arc<str>,
     next_window_id: Arc<AtomicU64>,
-    backends: Arc<MuxBackendRegistry>,
+
     control_plane: ControlPlane,
 }
 
 impl WorkspaceLaunch {
-    fn new(
-        window_state_root: String,
-        backends: Arc<MuxBackendRegistry>,
-        control_plane: ControlPlane,
-    ) -> Self {
+    fn new(window_state_root: String, control_plane: ControlPlane) -> Self {
         Self {
             native_chrome: Rc::new(RefCell::new(chrome_frame::NativeChrome::default())),
             window_state_root: window_state_root.into(),
             next_window_id: Arc::new(AtomicU64::new(1)),
-            backends,
+
             control_plane,
         }
     }
@@ -217,12 +198,9 @@ pub struct GpuiWorkspace {
     workspace_bounds: Bounds<Pixels>,
     window_viewport: gpui_kit::Size<Pixels>,
     tools: Option<Entity<crate::gpui_dock::WorkspaceDock>>,
-    document_close_prompt: bool,
     exit_pending: bool,
-    /// The dock's focus changes and the comments on its changes.
+    /// The dock's focus changes.
     tools_subscriptions: Vec<Subscription>,
-    browser_overlay_task: Option<gpui_kit::Task<()>>,
-    integration_rows: Vec<ModuleIntegrationsSnapshot>,
     launch: WorkspaceLaunch,
     terminal: TerminalPaneView,
     terminal_panes: HashMap<String, TerminalPaneView>,
@@ -250,18 +228,16 @@ pub struct GpuiWorkspace {
     settings_runtime: SettingsRuntime,
     settings_started: Instant,
     last_settings_revision: Option<u64>,
-    last_provider_revision: Option<u64>,
     settings_view: gpui_kit::Entity<GpuiSettings>,
     _settings_subscription: Subscription,
     settings_window: Option<WeakEntity<GpuiSettingsWindow>>,
     settings_window_opening: bool,
     keymap_editor: Entity<GpuiKeymapEditor>,
     _keymap_editor_subscription: Subscription,
-    last_keymap: Option<(u64, KeymapFocus, MultiplexerBackendConfig, bool)>,
+    last_keymap: Option<(u64, KeymapFocus)>,
     last_keymap_editor_revision: Option<u64>,
     last_config_file_editor_revision: Option<u64>,
     dialogs: WorkspaceDialogs,
-    native_conversations: NativeConversations,
     chrome_view: gpui_kit::Entity<GpuiChrome>,
     last_error_notification: Option<String>,
     last_ui_theme: crate::gpui::UiTheme,
@@ -269,7 +245,6 @@ pub struct GpuiWorkspace {
     display_id: Option<u32>,
     _chrome_subscription: Subscription,
     pending_window_move: bool,
-    sidebar_requests: SidebarRequests,
     pending_effects: Vec<AppEffect>,
     scheduled_repaint: Option<Instant>,
     scheduled_maintenance: Option<Instant>,
@@ -283,11 +258,11 @@ impl GpuiWorkspace {
     pub(crate) fn open(
         config: BoottyConfig,
         window_state_key: String,
-        backends: Arc<MuxBackendRegistry>,
+
         control_plane: ControlPlane,
         cx: &mut App,
     ) -> Result<(AnyWindowHandle, Entity<Self>)> {
-        let launch = WorkspaceLaunch::new(window_state_key.clone(), backends, control_plane);
+        let launch = WorkspaceLaunch::new(window_state_key.clone(), control_plane);
         Self::open_with_launch(config, window_state_key, launch, cx)
     }
 
@@ -309,20 +284,15 @@ impl GpuiWorkspace {
         if let Some(saved) = &saved_window {
             saved.restore(&config, &mut options, cx);
         }
-        // Every window shares one stash of prompts put aside.
-        if !cx.has_global::<crate::prompt_stash::PromptStash>() {
-            cx.set_global(crate::prompt_stash::PromptStash::open(&config.config_path));
-        }
         // Prepare fallible state before GPUI's infallible entity constructor publishes a view.
         // The bounded wake channel retains work that arrives before the window subscribes.
         let (repaint_tx, repaint_rx) = async_channel::bounded(1);
         let repaint: bootty_mux::RepaintHandle = Arc::new(move || {
             let _ = repaint_tx.try_send(());
         });
-        let mut state = AppState::new_for_window_with_agents(
+        let mut state = AppState::new_for_window_with_events(
             config,
             window_state_key.clone(),
-            Arc::clone(&launch.backends),
             repaint.clone(),
             None,
             None,
@@ -334,7 +304,6 @@ impl GpuiWorkspace {
         gpui_kit::open_window(options, cx, move |window, cx| {
             crate::window::macos_enable_window_resizing(window, &state.config().window);
             crate::window::macos_expose_text_target(window);
-            state.native_computer_window = crate::window::native_computer_window_id(window);
             cx.new(|cx| {
                 Self::new(
                     state,
@@ -377,14 +346,12 @@ impl GpuiWorkspace {
         let input = Self::window_input(&repaint, window_focused);
         state.set_appearance_variant(startup_variant);
         let settings_runtime = SettingsRuntime::default();
-        settings_runtime.request_catalog(&state.config().config_path, &repaint);
-        let integration_rows = settings_runtime.current_catalog().integration_rows;
 
         let (settings_view, settings_subscription) =
-            Self::create_settings_view(&state, &font_families, &integration_rows, window, cx);
+            Self::create_settings_view(&state, &font_families, window, cx);
         let (keymap_editor, keymap_editor_subscription) =
             Self::create_keymap_editor(&state, window, cx);
-        let dialogs = WorkspaceDialogs::new(&state, window, cx);
+        let dialogs = WorkspaceDialogs::new(window, cx);
         let (chrome_view, chrome_subscription) =
             Self::create_chrome_view(&state, &launch, &keymap_context, window, cx);
         let terminal = Self::create_terminal_view(None, window, cx);
@@ -401,12 +368,9 @@ impl GpuiWorkspace {
             window_viewport: window.viewport_size(),
             display_id,
             tools: None,
-            document_close_prompt: false,
             exit_pending: false,
             tools_subscriptions: Vec::new(),
-            browser_overlay_task: None,
             state,
-            integration_rows,
             launch,
             terminal,
             terminal_panes: HashMap::new(),
@@ -432,7 +396,6 @@ impl GpuiWorkspace {
             settings_runtime,
             settings_started: Instant::now(),
             last_settings_revision: None,
-            last_provider_revision: None,
             settings_view,
             _settings_subscription: settings_subscription,
             settings_window: None,
@@ -443,14 +406,12 @@ impl GpuiWorkspace {
             last_keymap_editor_revision: None,
             last_config_file_editor_revision: None,
             dialogs,
-            native_conversations: NativeConversations::default(),
             chrome_view,
             last_error_notification: None,
             last_ui_theme,
             last_background_material: None,
             _chrome_subscription: chrome_subscription,
             pending_window_move: false,
-            sidebar_requests: SidebarRequests::default(),
             pending_effects: Vec::new(),
             scheduled_repaint: None,
             scheduled_maintenance: None,
@@ -503,7 +464,7 @@ impl GpuiWorkspace {
         let root = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             root.update(cx, |root, cx| {
-                root.request_document_exit(false, window, cx);
+                root.request_exit(false, window, cx);
                 false
             })
             .unwrap_or(true)
@@ -523,9 +484,6 @@ impl GpuiWorkspace {
         window: &Window,
         cx: &Context<Self>,
     ) {
-        let tray_window = cx.entity_id();
-        cx.on_release(move |_, cx| crate::agent_tray::remove(tray_window, cx))
-            .detach();
         cx.spawn_in(window, async move |weak, cx| {
             while repaint_rx.recv().await.is_ok() {
                 if weak.update_in(cx, Self::process_work).is_err() {
@@ -539,19 +497,11 @@ impl GpuiWorkspace {
     fn create_settings_view(
         state: &AppState,
         font_families: &Arc<[String]>,
-        integration_rows: &[ModuleIntegrationsSnapshot],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Entity<GpuiSettings>, Subscription) {
-        let settings_view = cx.new(|cx| {
-            GpuiSettings::for_app(
-                state,
-                Arc::clone(font_families),
-                integration_rows,
-                window,
-                cx,
-            )
-        });
+        let settings_view =
+            cx.new(|cx| GpuiSettings::for_app(state, Arc::clone(font_families), window, cx));
         let settings_subscription =
             cx.subscribe(&settings_view, |this, _, intent: &SettingsIntent, cx| {
                 this.apply_settings_intent(intent.clone(), cx);
@@ -625,7 +575,7 @@ impl GpuiWorkspace {
                     terminal.set_window_focused(active, cx);
                 });
             }
-            if active && window.focused(cx).is_none() && this.can_reclaim_focus(window, cx) {
+            if active && window.focused(cx).is_none() && !window.has_active_dialog(cx) {
                 // Reactivation preserves the current component focus, including modal traps.
                 schedule_focus(this.focus.clone(), window, cx);
             } else if !active {
@@ -642,27 +592,14 @@ impl GpuiWorkspace {
     /// composer, or another Space's panel). GPUI keeps that stale focus, so keys reach no
     /// key context: typing and Bootty's own bindings stop until a click. The workspace root
     /// always tracks `focus`, so reclaiming it restores bindings and, when visible, the terminal.
-    /// A conversation in front takes it instead of the terminal pane hidden behind it.
     fn observe_workspace_focus_loss(window: &mut Window, cx: &mut Context<Self>) {
         cx.on_focus_lost(window, |this, window, cx| {
-            if !this.can_reclaim_focus(window, cx) {
-                return;
-            }
-            match this.native_conversation_view(cx) {
-                Some(view) => view.focus_handle(cx).focus(window, cx),
-                None => this.focus.focus(window, cx),
+            // Modal dialogs own focus outside the workspace tree.
+            if !window.has_active_dialog(cx) {
+                this.focus.focus(window, cx);
             }
         })
         .detach();
-    }
-
-    /// Modal dialogs and an active browser page own focus outside the workspace tree.
-    fn can_reclaim_focus(&self, window: &mut Window, cx: &mut gpui_kit::App) -> bool {
-        !window.has_active_dialog(cx)
-            && !self
-                .tools
-                .as_ref()
-                .is_some_and(|tools| tools.read(cx).browser_page_active(cx))
     }
 
     fn observe_workspace_window(
@@ -743,18 +680,8 @@ impl GpuiWorkspace {
         (window_appearance_subscription, display_id)
     }
 
-    fn schedule_initial_dock(window: &Window, cx: &mut Context<Self>) {
-        cx.defer_in(window, |this, window, cx| {
-            this.ensure_tools(window, cx);
-            if let Some(dock) = &this.tools {
-                dock.update(cx, |dock, cx| dock.set_inspector_visible(false, window, cx));
-            }
-        });
-    }
-
     fn schedule_workspace_ui(window: &Window, cx: &mut Context<Self>) {
-        Self::schedule_initial_dock(window, cx);
-        Self::observe_browser_overlays(window, cx);
+        cx.defer_in(window, Self::ensure_tools);
     }
 
     pub(crate) fn control_binding(
@@ -853,24 +780,8 @@ impl GpuiWorkspace {
 
     fn sync_key_bindings(&mut self, window: &Window, cx: &mut Context<Self>) {
         let snapshot = self.state.keymap_snapshot();
-        let completion = self
-            .dialogs
-            .creation_view
-            .read(cx)
-            .completion_active(window, cx)
-            || self
-                .native_conversation_view(cx)
-                .is_some_and(|view| view.read(cx).completion_active(window, cx));
-        let focus = if completion {
-            KeymapFocus::ComposerCompletion
-        } else if self.state.modal_dialog().is_some() {
+        let focus = if self.state.modal_dialog().is_some() {
             self.state.keymap_focus()
-        } else if self
-            .tools
-            .as_ref()
-            .is_some_and(|tools| tools.read(cx).surface_chooser_focused(window, cx))
-        {
-            KeymapFocus::SurfaceChooser
         } else if self
             .tools
             .as_ref()
@@ -888,42 +799,22 @@ impl GpuiWorkspace {
         } else {
             self.state.keymap_focus()
         };
-        let backend = self.state.multiplexer_backend();
-        let native = !matches!(
-            focus,
-            KeymapFocus::Sidebar | KeymapFocus::SurfaceChooser | KeymapFocus::ComposerCompletion
-        ) && ((self.state.modal_dialog().is_none()
-            && self.selected_mux_pane_is_native())
-            || matches!(
-                self.state.modal_dialog(),
-                Some(crate::state::ModalDialog::NewSession(dialog)) if dialog.is_creation_form()
-            ));
-        let keymap = (snapshot.revision, focus, backend, native);
+        let keymap = (snapshot.revision, focus);
         if self.last_keymap == Some(keymap) {
             return;
         }
 
-        let bindings = if native {
-            crate::gpui_actions::key_bindings_for_native_conversation(
-                &snapshot,
-                backend,
-                &self.state.command_catalog(),
-            )
-        } else {
-            crate::gpui_actions::key_bindings_for_snapshot(
-                &snapshot,
-                focus,
-                backend,
-                &self.state.command_catalog(),
-            )
-        };
+        let bindings = crate::gpui_actions::key_bindings_for_snapshot(
+            &snapshot,
+            focus,
+            &self.state.command_catalog(),
+        );
         let navigation = bindings.navigation_hints();
         self.chrome_view
             .update(cx, |chrome, cx| chrome.set_navigation_hints(navigation, cx));
         let hints = bindings.command_hints(&self.state.command_catalog());
         self.dialogs.view.update(cx, |view, cx| {
             view.set_command_keybindings(Some(hints), cx);
-            view.set_send_shortcut(self.state.config().agents.send_shortcut);
         });
         if let Err(error) = crate::gpui_actions::replace_workspace_key_bindings_for_context(
             &self.keymap_context,
@@ -1024,68 +915,6 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) {
         self.sync_displayed_sessions(cx);
-        if matches!(
-            self.state
-                .command_catalog()
-                .resolve(invocation.clone())
-                .map(|resolved| resolved.executor),
-            Ok(crate::commands::CommandExecutor::Core(
-                crate::commands::CoreCommandExecutor::Keybind(
-                    crate::app_actions::KeybindAction::App(
-                        crate::app_actions::AppAction::CommandPalette
-                    )
-                )
-            ))
-        ) {
-            let parent = self
-                .native_conversation_view(cx)
-                .filter(|view| view.read(cx).contains_focused(window, cx))
-                .and_then(|_| self.selected_native_conversation_target(cx));
-            self.state.capture_command_palette_native_parent(parent);
-        }
-        let native_close = self
-            .selected_native_conversation_target(cx)
-            .filter(|_| self.state.modal_dialog().is_none())
-            .and_then(|target| {
-                crate::gpui_actions::native_conversation_close_invocation(
-                    &invocation,
-                    &self.state.command_catalog(),
-                    &target,
-                )
-            });
-        if native_close.is_some()
-            && matches!(
-                invocation.caller,
-                Caller::Keybinding | Caller::BuiltinKeybinding
-            )
-            && !self
-                .native_conversation_view(cx)
-                .is_some_and(|view| view.read(cx).contains_focused(window, cx))
-        {
-            return;
-        }
-        let invocation = native_close.unwrap_or(invocation);
-        let invocation = self
-            .native_conversation_view(cx)
-            .filter(|view| view.read(cx).contains_focused(window, cx))
-            .and_then(|_| self.selected_native_conversation_target(cx))
-            .and_then(|target| {
-                crate::gpui_actions::native_surface_creation_invocation(
-                    &invocation,
-                    &self.state.command_catalog(),
-                    &target,
-                )
-            })
-            .unwrap_or(invocation);
-        if crate::gpui_actions::conversation_terminal_navigation(
-            &invocation,
-            &self.state.command_catalog(),
-        ) {
-            self.close_native_conversation();
-            if let Some(dock) = &self.tools {
-                dock.update(cx, |dock, _| dock.cancel_restored_agent_destination());
-            }
-        }
         if let Some(tools) = &self.tools {
             tools.update(cx, |tools, cx| tools.remember_focus(window, cx));
         }
@@ -1106,7 +935,7 @@ impl GpuiWorkspace {
 
     fn tools_match_binding(&self, cx: &gpui_kit::App) -> bool {
         self.state
-            .current_command_target_for("git.open", bootty_control::ResourceKind::Binding)
+            .current_command_target_for("session.saved", bootty_control::ResourceKind::Binding)
             .is_some_and(|target| {
                 self.tools.as_ref().is_some_and(|tools| {
                     tools.read(cx).matches_target(
@@ -1124,15 +953,6 @@ impl GpuiWorkspace {
 
     fn ensure_tools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tools_match_binding(cx) {
-            let cwd = self
-                .state
-                .terminal_mut()
-                .current_working_directory()
-                .ok()
-                .flatten()
-                .and_then(|cwd| {
-                    bootty_mux::workspace::terminal_cwd_for_mux_command(Some(cwd), None)
-                });
             let binding = &self.state.workspace.active.binding;
             let scope = binding.scope();
             if !binding.mux().has_session_snapshot() {
@@ -1140,7 +960,7 @@ impl GpuiWorkspace {
             }
             let Some(target) = self
                 .state
-                .current_command_target_for("git.open", bootty_control::ResourceKind::Binding)
+                .current_command_target_for("session.saved", bootty_control::ResourceKind::Binding)
             else {
                 return;
             };
@@ -1149,44 +969,19 @@ impl GpuiWorkspace {
                 Ok(identity) => identity,
                 Err(error) => {
                     self.state
-                        .record_error("Could not open the tools panel", &error);
+                        .record_error("Could not open the workspace dock", &error);
                     return;
                 }
             };
-            let context = crate::gpui_git_panel::GitPanelContext {
+            let context = crate::gpui_dock::DockContext {
                 terminal: self.state.current_command_target_for(
                     "shell.prompt",
                     bootty_control::ResourceKind::Terminal,
                 ),
                 target,
-                directory: cwd
-                    .or_else(|| {
-                        binding
-                            .mux()
-                            .selected_session_anchor()
-                            .and_then(|anchor| anchor.cwd.clone())
-                    })
-                    .unwrap_or_else(|| {
-                        if remote.is_some() {
-                            return "/".to_owned();
-                        }
-                        self.state
-                            .config()
-                            .session
-                            .working_directory
-                            .clone()
-                            .or_else(bootty_config::config::default_working_directory)
-                            .filter(|path| path.is_absolute())
-                            .map_or_else(
-                                || "/".to_owned(),
-                                |path| path.to_string_lossy().into_owned(),
-                            )
-                    }),
-                host: remote.map_or_else(|| "Local".to_owned(), bootty_mux::RemoteTarget::label),
                 host_identity,
-                remote: remote.cloned(),
             };
-            self.set_workspace_context(scope, context, false, window, cx);
+            self.set_workspace_context(scope, context, window, cx);
         }
         cx.notify();
     }
@@ -1194,36 +989,23 @@ impl GpuiWorkspace {
     fn set_workspace_context(
         &mut self,
         scope: bootty_mux::controller::SpaceId,
-        context: crate::gpui_git_panel::GitPanelContext,
-        reveal_changes: bool,
+        context: crate::gpui_dock::DockContext,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(tools) = &self.tools {
+            tools.update(cx, |tools, cx| tools.set_context(context, cx));
+            return;
+        }
         let sender = self.state.app_command_sender(Caller::Internal);
         let path = self.state.config().config_path.clone();
         let key = self.state.window_state_key.clone();
-        let local_git = self
-            .state
-            .workspace
-            .binding(scope)
-            .filter(|binding| binding.multiplexer().remote.is_none())
-            .map(|_| self.launch.native_chrome.borrow().local_git.clone());
-        if let Some(tools) = &self.tools {
-            tools.update(cx, |tools, cx| {
-                tools.set_context(context.clone(), local_git, window, cx);
-                if reveal_changes {
-                    tools.browse_repository(context.directory, window, cx);
-                }
-            });
-            return;
-        }
         let owner = cx.weak_entity();
         let tools = cx.new(|cx| {
             crate::gpui_dock::WorkspaceDock::new(
                 context,
                 crate::gpui_dock::DockHosts {
                     owner,
-                    terminal: self.terminal.view.clone(),
                     chrome: self.chrome_view.clone(),
                     sender,
                 },
@@ -1231,108 +1013,27 @@ impl GpuiWorkspace {
                 crate::gpui_dock::DockStorage {
                     config_path: &path,
                     state_key: key,
-                    browser_profile: browser_profile_directory(),
                 },
-                local_git,
                 window,
                 cx,
             )
         });
-        if reveal_changes {
-            tools.update(cx, |tools, cx| tools.refresh(window, cx));
-        }
-        self.tools_subscriptions = vec![
-            cx.subscribe_in(
-                &tools,
-                window,
-                |this, _, _: &crate::gpui_dock::DockFocusChanged, window, cx| {
-                    this.sync_key_bindings(window, cx);
-                    cx.notify();
-                },
-            ),
-            cx.subscribe_in(
-                &tools,
-                window,
-                |this, _, comment: &crate::gpui_git_panel::DiffComment, window, cx| {
-                    this.add_diff_comment(comment, window, cx);
-                },
-            ),
-        ];
+        self.tools_subscriptions = vec![cx.subscribe_in(
+            &tools,
+            window,
+            |this, _, _: &crate::gpui_dock::DockFocusChanged, window, cx| {
+                this.sync_key_bindings(window, cx);
+                cx.notify();
+            },
+        )];
         self.tools = Some(tools);
         cx.notify();
     }
 
-    fn pending_documents(
-        &self,
-        quit: bool,
-        cx: &gpui_kit::App,
-    ) -> Vec<Entity<crate::gpui_document_panel::DocumentPanel>> {
-        if quit {
-            return crate::gpui_document_panel::Documents::pending(cx);
+    fn request_exit(&mut self, quit: bool, window: &Window, cx: &mut Context<Self>) {
+        if !self.exit_pending {
+            self.finish_exit(quit, window, cx);
         }
-        self.tools
-            .iter()
-            .flat_map(|tools| tools.read(cx).documents())
-            .filter(|document| document.read(cx).needs_close_prompt(cx))
-            .collect()
-    }
-
-    fn request_document_exit(&mut self, quit: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.exit_pending {
-            return;
-        }
-        let documents = self.pending_documents(quit, cx);
-        if documents.is_empty() {
-            self.finish_document_exit(quit, window, cx);
-            return;
-        }
-        if self.document_close_prompt {
-            return;
-        }
-        if documents
-            .iter()
-            .any(|document| document.read(cx).saving(cx))
-        {
-            self.state.record_message(
-                "A document save is still running. Wait for its result before closing.",
-            );
-            return;
-        }
-        self.document_close_prompt = true;
-        let detail = documents
-            .iter()
-            .map(|document| document.read(cx).path())
-            .collect::<Vec<_>>()
-            .join("\n");
-        let answer = crate::gpui::prompt(
-            "Unsaved documents",
-            Some(&detail),
-            &[
-                "Save all and keep open".into(),
-                "Discard and close".into(),
-                "Cancel".into(),
-            ],
-            window,
-            cx,
-        );
-        cx.spawn_in(window, async move |weak, cx| {
-            let answer = answer.await;
-            _ = weak.update_in(cx, |this, window, cx| {
-                this.document_close_prompt = false;
-                match answer {
-                    Ok(0) => {
-                        for document in documents {
-                            document.update(cx, super::gpui_document_panel::DocumentPanel::save);
-                        }
-                    }
-                    Ok(1) => {
-                        this.finish_document_exit(quit, window, cx);
-                    }
-                    _ => {}
-                }
-            });
-        })
-        .detach();
     }
 
     fn close_link_forwards(&mut self, cx: &Context<Self>) -> gpui_kit::Task<()> {
@@ -1349,7 +1050,7 @@ impl GpuiWorkspace {
         })
     }
 
-    fn finish_document_exit(&mut self, quit: bool, window: &Window, cx: &mut Context<Self>) {
+    fn finish_exit(&mut self, quit: bool, window: &Window, cx: &mut Context<Self>) {
         let window_state = crate::window_state::WindowState::capture(
             window,
             self.state.macos_non_native_fullscreen_active(),
@@ -1420,30 +1121,6 @@ impl GpuiWorkspace {
         let owner = cx.entity();
         let timer = cx.background_executor().clone();
         cx.spawn(async move |weak, cx| {
-            let drafts = weak.update(cx, |this, cx| {
-                this.native_conversations.draft_views().into_iter().filter_map(|view| {
-                    match view.update(cx, |view, cx| view.flush_draft(cx)) {
-                        Ok(Some(reply)) => Some(Ok(reply)),
-                        Ok(None) => None,
-                        Err(error) => Some(Err(error)),
-                    }
-                }).collect::<Result<Vec<_>, String>>()
-            });
-            let drafts = match drafts {
-                Ok(Ok(drafts)) => drafts,
-                Ok(Err(error)) => {
-                    _ = weak.update(cx, |this, _| this.state.record_error("Could not save conversation drafts", &error));
-                    return false;
-                }
-                Err(_) => return false,
-            };
-            for reply in drafts {
-                let outcome = cx.background_executor().spawn(async move { reply.recv_timeout(Duration::from_secs(5)) }).await;
-                if !matches!(outcome, Ok(bootty_control::CommandOutcome::Success { .. })) {
-                    _ = weak.update(cx, |this, _| this.state.record_message("Conversation draft saving did not finish. Nothing was closed; try again."));
-                    return false;
-                }
-            }
             let deadline = Instant::now().checked_add(Duration::from_secs(5));
             let mut captured = false;
             loop {
@@ -1451,7 +1128,8 @@ impl GpuiWorkspace {
                     let drafts = this.state.save_creation_drafts(Instant::now(), true)?;
                     this.state.poll_session_checkpoints();
                     if !captured && !this.state.session_checkpoint_pending() {
-                        this.state.checkpoint_sessions(crate::clock::ClockSnapshot::now().epoch);
+                        this.state
+                            .checkpoint_sessions(crate::clock::ClockSnapshot::now().epoch);
                         captured = true;
                     }
                     Ok::<_, String>((this.state.session_checkpoint_pending(), drafts))
@@ -1459,15 +1137,25 @@ impl GpuiWorkspace {
                 let (sessions, drafts) = match pending {
                     Ok(Ok(pending)) => pending,
                     Ok(Err(error)) => {
-                        _ = weak.update(cx, |this, _| this.state.record_error("Could not save session drafts", &error));
+                        _ = weak.update(cx, |this, _| {
+                            this.state
+                                .record_error("Could not save session drafts", &error);
+                        });
                         return false;
                     }
                     Err(_) => return false,
                 };
-                if !sessions && !drafts { break; }
+                if !sessions && !drafts {
+                    break;
+                }
                 if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
-                    _ = weak.update(cx, |this, _| this.state.record_message("Session saving did not finish before closing"));
-                    if drafts { return false; }
+                    _ = weak.update(cx, |this, _| {
+                        this.state
+                            .record_message("Session saving did not finish before closing");
+                    });
+                    if drafts {
+                        return false;
+                    }
                     break;
                 }
                 timer.timer(Duration::from_millis(1)).await;
@@ -1477,7 +1165,7 @@ impl GpuiWorkspace {
         })
     }
 
-    fn apply_chrome_intent(&mut self, mut intent: ChromeIntent, cx: &mut Context<Self>) {
+    fn apply_chrome_intent(&mut self, intent: ChromeIntent, cx: &mut Context<Self>) {
         self.sync_displayed_sessions(cx);
         let focus_terminal = matches!(
             &intent,
@@ -1490,76 +1178,8 @@ impl GpuiWorkspace {
                 }
             )
         );
-        if (focus_terminal
-            || matches!(
-                &intent,
-                ChromeIntent::Status(crate::gpui::chrome::StatusIntent::Action(
-                    crate::gpui::chrome::NativeChromeAction::FocusConversation(_)
-                ))
-            ))
-            && let Some(dock) = &self.tools
-        {
-            dock.update(cx, |dock, _| dock.cancel_restored_agent_destination());
-        }
-        if (focus_terminal
-            || matches!(
-                &intent,
-                ChromeIntent::Status(crate::gpui::chrome::StatusIntent::Action(
-                    crate::gpui::chrome::NativeChromeAction::FocusConversation(_)
-                ))
-            ))
-            && let Some(id) = self
-                .tools
-                .as_ref()
-                .and_then(|dock| dock.read(cx).outer_chooser_id())
-        {
-            self.state.commands.queue(CommandInvocation::new(
-                "surface.cancel",
-                vec![id.to_string()],
-                Caller::Internal,
-            ));
-        }
-        if let crate::gpui::chrome::ChromeIntent::Status(
-            crate::gpui::chrome::StatusIntent::Action(
-                crate::gpui::chrome::NativeChromeAction::CloseConversation(target),
-            ),
-        ) = &intent
-        {
-            let mut invocation =
-                CommandInvocation::new("agents.native.close", Vec::new(), Caller::Internal);
-            invocation.target = Some(target.clone());
-            intent = ChromeIntent::Command(invocation);
-        }
-        if let ChromeIntent::Status(crate::gpui::chrome::StatusIntent::Action(
-            crate::gpui::chrome::NativeChromeAction::CancelSurfaceChooser(id),
-        )) = &intent
-        {
-            intent = ChromeIntent::Command(CommandInvocation::new(
-                "surface.cancel",
-                vec![id.to_string()],
-                Caller::Internal,
-            ));
-        }
-        if matches!(
-            &intent,
-            ChromeIntent::Status(
-                crate::gpui::chrome::StatusIntent::Action(
-                    crate::gpui::chrome::NativeChromeAction::ActivateWindow { .. }
-                ) | crate::gpui::chrome::StatusIntent::Context { .. }
-            )
-        ) {
-            self.close_native_conversation();
-        }
         if intent == ChromeIntent::StartWindowDrag {
             self.pending_window_move = true;
-        } else if let ChromeIntent::SearchConversations(query) = intent {
-            self.search_conversations(query, cx);
-        } else if let ChromeIntent::ForkConversation(target) = intent {
-            // The fork opens over its source, so the source comes forward first.
-            let mut focus = CommandInvocation::from_action("agents.native.focus", Caller::Internal);
-            focus.target = Some(target.clone());
-            self.state.commands.queue(focus);
-            self.sidebar_requests.side_chat = Some(target);
         } else {
             self.pending_effects
                 .extend(chrome_frame::apply(&mut self.state, intent));
@@ -1570,107 +1190,19 @@ impl GpuiWorkspace {
         cx.notify();
     }
 
-    /// A connector action from Settings, `provider:list`, `provider:add` or
-    /// `provider:login:name`, as the provider's own command.
-    fn invoke_connector(&mut self, action: &str, cx: &mut Context<Self>) {
-        let mut parts = action.splitn(3, ':');
-        let (Some(provider), Some(operation)) = (parts.next(), parts.next()) else {
-            return;
-        };
-        let (command, arguments) = match operation {
-            "list" => (format!("agents.{provider}.connectors"), Vec::new()),
-            "login" => (
-                format!("agents.{provider}.connector.login"),
-                parts.next().map(str::to_owned).into_iter().collect(),
-            ),
-            "add" => {
-                let arguments = self.settings_view.update(cx, |view, _| {
-                    let field = |name: &str| {
-                        view.draft
-                            .connector_draft(&format!("{provider}:{name}"))
-                            .trim()
-                            .to_owned()
-                    };
-                    let arguments = vec![field("name"), field("target")];
-                    view.draft.clear_connector_drafts(provider);
-                    arguments
-                });
-                (format!("agents.{provider}.connector.add"), arguments)
-            }
-            _ => return,
-        };
-        let mut invocation =
-            CommandInvocation::new(&command, arguments, bootty_control::Caller::Internal);
-        if operation != "list" {
-            invocation.target = self
-                .state
-                .current_command_target_for(&command, bootty_control::ResourceKind::Session);
-        }
-        self.state.commands.queue(invocation);
-        (self.repaint)();
-    }
-
     fn apply_settings_intent(&mut self, intent: SettingsIntent, cx: &mut Context<Self>) {
-        let prior_providers = self.state.config().agents.clone();
-        let provider_terminal = match &intent {
-            SettingsIntent::Invoke(id) => bootty_agents::AgentKind::ALL.iter().any(|provider| {
-                ["account.login", "tab", "history.open"]
-                    .iter()
-                    .any(|operation| id == &format!("agents.{provider}.{operation}"))
-            }),
-            _ => false,
-        };
-        // Adding a connector or signing in to one runs in a terminal tab, like Sign in.
-        let connector_terminal = matches!(&intent, SettingsIntent::Invoke(id)
-            if id.starts_with("connector:") && !id.ends_with(":list"));
-        let close =
-            matches!(intent, SettingsIntent::Close) || provider_terminal || connector_terminal;
+        let close = matches!(intent, SettingsIntent::Close);
         let open_keymap = matches!(&intent, SettingsIntent::Invoke(id) if id == "keymap:open");
         let open_config = matches!(&intent, SettingsIntent::Invoke(id) if id == "config:edit");
         if matches!(intent, SettingsIntent::DiscardChanges) {
             self.state.reload_config(&mut self.pending_effects);
         }
-        if let SettingsIntent::Invoke(id) = &intent {
-            if provider_terminal || id.ends_with(".provider.status") {
-                let mut invocation =
-                    CommandInvocation::new(id, Vec::new(), bootty_control::Caller::Internal);
-                if let Some(provider) = bootty_agents::AgentKind::ALL
-                    .into_iter()
-                    .find(|provider| id == &format!("agents.{provider}.provider.update"))
-                {
-                    let mut invocation = bootty_control::CommandInvocation::from_action(
-                        "agents.providers.update",
-                        bootty_control::Caller::Internal,
-                    );
-                    invocation.arguments = vec![provider.to_string()];
-                    self.state.commands.queue(invocation);
-                    (self.repaint)();
-                } else if provider_terminal {
-                    invocation.target = self
-                        .state
-                        .current_command_target_for(id, bootty_control::ResourceKind::Session);
-                }
-                self.state.commands.queue(invocation);
-                (self.repaint)();
-            } else if let Some(action) = id.strip_prefix("connector:") {
-                self.invoke_connector(action, cx);
-            } else if id == "config:reload" {
-                self.state.reload_config(&mut self.pending_effects);
-            } else if let Some(action) = id.strip_prefix("panel:show:")
-                && let Some(action) = crate::commands::DockAction::PANELS
-                    .into_iter()
-                    .find(|candidate| candidate.command().action() == action)
-            {
-                self.pending_effects
-                    .push(AppEffect::Dock(crate::commands::DockRequest::local(action)));
-            }
+        if matches!(&intent, SettingsIntent::Invoke(id) if id == "config:reload") {
+            self.state.reload_config(&mut self.pending_effects);
         }
         self.settings_view
             .update(cx, |view, _| view.apply_edit(intent, &self.state));
         self.flush_settings_effects(cx);
-        if prior_providers != self.state.config().agents {
-            self.refresh_terminal_provider_statuses();
-        }
         // Settings has its own window. Publish global font changes even when the workspace
         // is occluded and cannot render its queued effects yet. Consume them in order so an
         // older queued selection cannot overwrite the latest accepted font later.
@@ -1717,13 +1249,9 @@ impl GpuiWorkspace {
 
     fn refresh_settings(&mut self, cx: &mut Context<Self>) {
         self.last_settings_revision = Some(self.state.config_revision());
-        self.last_provider_revision = self
-            .state
-            .terminal_agent_service()
-            .map(|service| service.revision());
-        let changed = self.settings_view.update(cx, |view, cx| {
-            view.reconcile(&self.state, &self.integration_rows, cx)
-        });
+        let changed = self
+            .settings_view
+            .update(cx, |view, cx| view.reconcile(&self.state, cx));
         if changed && let Some(window) = self.settings_window.clone() {
             cx.defer(move |cx| {
                 let _ = window.update_in(cx, |_, _, cx| cx.notify());
@@ -1766,12 +1294,12 @@ impl GpuiWorkspace {
     ) {
         for effect in effects {
             match effect {
-                AppEffect::CloseWindow => self.request_document_exit(false, window, cx),
+                AppEffect::CloseWindow => self.request_exit(false, window, cx),
                 AppEffect::OpenWindow => self.open_workspace_window(cx),
                 AppEffect::OpenSpaceWindow(space_id) => {
                     self.open_workspace_window_for_space(Some(space_id), cx);
                 }
-                AppEffect::QuitApplication => self.request_document_exit(true, window, cx),
+                AppEffect::QuitApplication => self.request_exit(true, window, cx),
                 AppEffect::Window(effect) => self.apply_window_effect(effect, window),
                 // GPUI performs the native copy key equivalent itself but exposes no
                 // request-copy event equivalent for an application view.
@@ -1797,61 +1325,23 @@ impl GpuiWorkspace {
                 AppEffect::UiFont(effect) => apply_ui_font_effect(effect, cx),
                 AppEffect::FocusTerminal => self.focus_terminal_surface(window, cx),
                 AppEffect::OpenUrl(url) => cx.open_url(&url),
-                AppEffect::NativeConversation(target) => {
-                    self.open_native_conversation(target, window, cx);
-                }
-                AppEffect::OpenSurfaceChooser(request) => {
-                    self.open_surface_chooser(request, window, cx);
-                }
-                AppEffect::OpenSurfaceAgentForm(request) => {
-                    self.open_surface_agent_form(&request, cx);
-                }
-                AppEffect::NavigateSurfaceChooser { id, action } => {
-                    self.navigate_surface_chooser(id, action, window, cx);
-                }
-                AppEffect::CloseSurfaceChooser(id) => self.close_surface_chooser(id, window, cx),
-                AppEffect::AttachNewSurface { request_id, target } => {
-                    self.attach_new_surface(request_id, target, window, cx);
-                }
-                AppEffect::CloseNativeConversation(target) => {
-                    self.apply_native_close(&target, window, cx);
+                AppEffect::AttachNewSurface { request, target } => {
+                    self.attach_new_surface(&request, &target, window, cx);
                 }
                 AppEffect::Dock(request) => self.apply_dock_request(request, window, cx),
-                AppEffect::Browser(request) => self.apply_browser_request(request, window, cx),
-                AppEffect::OpenGitChanges {
-                    scope,
-                    target,
-                    directory,
-                    host,
-                } => self.open_git_changes(scope, target, directory, host, window, cx),
-                AppEffect::OpenFiles(request) => self.open_files(request, window, cx),
                 AppEffect::RevealPath(path) => cx.reveal_path(&path),
                 AppEffect::OpenWithSystem(path) => cx.open_with_system(&path),
-                AppEffect::ConversationFind(action) => {
-                    self.update_conversation(cx, |view, cx| view.find_action(&action, window, cx));
-                }
-                AppEffect::ConversationCopyMode => {
-                    self.update_conversation(cx, |view, cx| view.enter_copy_mode(window, cx));
-                }
                 AppEffect::OpenInEditor { editor, path } => Self::open_in_editor(editor, path, cx),
-                AppEffect::AddSelectionToConversation => {
-                    self.add_selection_to_conversation(window, cx);
-                }
                 AppEffect::ChooseProjectDirectory(target) => {
                     Self::choose_project_directory(target, window, cx);
                 }
-                AppEffect::CustomSnooze(invocation) => {
-                    Self::open_custom_snooze(invocation, window, cx);
-                }
+
                 AppEffect::OpenSettings => self.open_settings_window(window, cx),
                 AppEffect::OpenThemeSettings => {
                     self.open_settings_window_target(SettingsWindowTarget::Theme, window, cx);
                 }
                 AppEffect::OpenSetting(id) => {
                     self.open_settings_window_target(SettingsWindowTarget::Setting(id), window, cx);
-                }
-                AppEffect::ComposerAction(request) => {
-                    self.apply_composer_action(request, window, cx);
                 }
                 AppEffect::CommandAction(action) => {
                     self.dialogs
@@ -1869,20 +1359,6 @@ impl GpuiWorkspace {
     const fn set_terminal_cursor(&mut self, icon: crate::state::CursorIcon) {
         self.terminal_cursor = gpui_cursor(icon);
         self.cursor = self.terminal_cursor;
-    }
-
-    /// Act on the native conversation that shows, when one does.
-    fn update_conversation(
-        &self,
-        cx: &mut Context<Self>,
-        act: impl FnOnce(
-            &mut crate::NativeAgentSessionView,
-            &mut Context<crate::NativeAgentSessionView>,
-        ),
-    ) {
-        if let Some(view) = self.native_conversation_view(cx) {
-            view.update(cx, act);
-        }
     }
 
     fn apply_window_effect(&self, effect: WindowEffect, window: &mut Window) {
@@ -1907,60 +1383,6 @@ impl GpuiWorkspace {
         }
     }
 
-    /// Run a composer action in the composer that shows, after readying speech for dictation
-    /// and voice.
-    fn apply_composer_action(
-        &self,
-        request: crate::commands::ComposerRequest,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Err(error) = request.begin() {
-            request.complete(crate::commands::runtime::command_outcome_for_mux_error(
-                error,
-            ));
-            return;
-        }
-        let action = request.action;
-        if matches!(
-            action,
-            crate::gpui::CommandAction::Dictate | crate::gpui::CommandAction::Voice
-        ) {
-            let codex = self.state.config().agents.codex.clone();
-            self.dialogs
-                .creation_view
-                .update(cx, |view, cx| view.configure_speech_account(&codex, cx));
-            if let Some(view) = self.native_conversation_view(cx) {
-                view.update(cx, |view, cx| view.configure_speech_account(&codex, cx));
-            }
-        }
-        if window.has_active_dialog(cx)
-            && matches!(
-                self.state.modal_dialog(),
-                None | Some(crate::state::ModalDialog::NewSession(_))
-            )
-        {
-            window.close_dialog(cx);
-        }
-        let performed = self
-            .dialogs
-            .creation_view
-            .update(cx, |view, cx| view.perform_completion(action, window, cx))
-            || self.native_conversation_view(cx).is_some_and(|view| {
-                view.update(cx, |view, cx| view.perform_completion(action, window, cx))
-            });
-        request.complete(if performed {
-            bootty_control::CommandOutcome::Success {
-                warnings: Vec::new(),
-                value: serde_json::Value::Null,
-            }
-        } else {
-            bootty_control::CommandOutcome::Unavailable {
-                message: "This composer action is not available".into(),
-            }
-        });
-    }
-
     fn set_window_decorations(&self, decorated: bool, window: &Window) {
         window.request_decorations(if decorated {
             crate::platform::window_decorations(&self.state.config().window)
@@ -1969,17 +1391,10 @@ impl GpuiWorkspace {
         });
     }
 
-    fn focus_terminal_surface(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn focus_terminal_surface(&self, window: &mut Window, cx: &mut Context<Self>) {
         // Leaving the sidebar lets go of sessions chosen together there.
         self.chrome_view
             .update(cx, GpuiChrome::clear_sidebar_selection);
-        if self.sync_selected_native_pane(window, cx) {
-            if let Some(view) = self.native_conversation_view(cx) {
-                view.focus_handle(cx).focus(window, cx);
-            }
-            return;
-        }
-        self.close_native_conversation();
         let selected = self.state.workspace.active.binding.current_window_id();
         if let Some(dock) = self.tools.clone() {
             dock.update(cx, |dock, cx| {
@@ -1991,18 +1406,6 @@ impl GpuiWorkspace {
         self.focus.focus(window, cx);
     }
 
-    fn apply_native_close(
-        &mut self,
-        target: &bootty_control::CommandTarget,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.selected_native_conversation_target(cx).as_ref() == Some(target) {
-            self.close_native_conversation();
-            self.focus_terminal_surface(window, cx);
-        }
-    }
-
     fn apply_terminal_text_config(&mut self, config: TerminalTextConfig, window: &mut Window) {
         self.terminal_base_cell = terminal_cell_metrics(&config, window);
         self.terminal_cell = self.terminal_base_cell;
@@ -2012,235 +1415,15 @@ impl GpuiWorkspace {
         ));
     }
 
-    fn open_files(
-        &mut self,
-        request: crate::state::OpenFilesRequest,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let crate::state::OpenFilesRequest {
-            scope,
-            target,
-            host,
-            path,
-            document,
-            line,
-            column,
-        } = request;
-        let reuse = self.tools.as_ref().is_some_and(|tools| {
-            tools.read(cx).matches_target(
-                &target,
-                self.state
-                    .current_command_target_for(
-                        "shell.prompt",
-                        bootty_control::ResourceKind::Terminal,
-                    )
-                    .as_ref(),
-            )
-        });
-        let remote = self
-            .state
-            .workspace
-            .binding(scope)
-            .and_then(|binding| binding.multiplexer().remote.as_ref());
-        let host_identity = match bootty_host::files::host_identity(remote) {
-            Ok(identity) => identity,
-            Err(error) => {
-                self.state.record_error("Could not open files", &error);
-                return;
-            }
-        };
-        let directory = if !document {
-            path.clone()
-        } else if remote.is_some() {
-            path.rsplit_once('/').map_or_else(
-                || "/".to_owned(),
-                |(parent, _)| {
-                    if parent.is_empty() {
-                        "/".to_owned()
-                    } else {
-                        parent.to_owned()
-                    }
-                },
-            )
-        } else {
-            std::path::Path::new(&path).parent().map_or_else(
-                || path.clone(),
-                |parent| parent.to_string_lossy().into_owned(),
-            )
-        };
-        let context = crate::gpui_git_panel::GitPanelContext {
-            terminal: self
-                .state
-                .current_command_target_for("shell.prompt", bootty_control::ResourceKind::Terminal),
-            target,
-            directory,
-            host,
-            host_identity,
-            remote: remote.cloned(),
-        };
-        if !reuse {
-            self.set_workspace_context(scope, context, false, window, cx);
-        }
-        if let Some(tools) = &self.tools {
-            tools.update(cx, |tools, cx| {
-                tools.resume(cx);
-                if document {
-                    tools.open_document(path, line, column, window, cx);
-                } else {
-                    tools.browse_files(path, window, cx);
-                }
-            });
-        }
-    }
-
-    fn open_git_changes(
-        &mut self,
-        scope: bootty_mux::controller::SpaceId,
-        target: bootty_control::CommandTarget,
-        directory: String,
-        host: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let remote = self
-            .state
-            .workspace
-            .binding(scope)
-            .and_then(|binding| binding.multiplexer().remote.as_ref());
-        let host_identity = match bootty_host::files::host_identity(remote) {
-            Ok(identity) => identity,
-            Err(error) => {
-                self.state.record_error("Could not open changes", &error);
-                return;
-            }
-        };
-        self.set_workspace_context(
-            scope,
-            crate::gpui_git_panel::GitPanelContext {
-                terminal: self.state.current_command_target_for(
-                    "shell.prompt",
-                    bootty_control::ResourceKind::Terminal,
-                ),
-                target,
-                directory,
-                host,
-                host_identity,
-                remote: remote.cloned(),
-            },
-            true,
-            window,
-            cx,
-        );
-    }
-
-    fn observe_browser_overlays(window: &Window, cx: &mut Context<Self>) {
-        cx.observe_global_in::<gpui_kit::base::GlobalState>(window, |this, window, cx| {
-            this.observe_browser_overlay(window, cx);
-        })
-        .detach();
-    }
-
-    fn observe_browser_overlay(&mut self, window: &Window, cx: &mut Context<Self>) {
-        if !gpui_kit::base::GlobalState::is_in_deferred_context(cx) {
-            return;
-        }
-        let Some(tools) = &self.tools else {
-            return;
-        };
-        if !tools.read(cx).browser_has_native_views(cx) {
-            return;
-        }
-        tools.update(cx, |tools, cx| tools.set_browser_visible(false, cx));
-        if self.browser_overlay_task.is_some() {
-            return;
-        }
-        // The pinned Kit notifies when a popup opens, but token drop does not notify dismissal.
-        // Poll only that open popup's lifetime; remove this task when Kit exposes dismissal events.
-        self.browser_overlay_task = Some(cx.spawn_in(window, async move |owner, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(50))
-                    .await;
-                let keep_waiting = owner
-                    .update_in(cx, |this, _, cx| {
-                        let has_views = this
-                            .tools
-                            .as_ref()
-                            .is_some_and(|tools| tools.read(cx).browser_has_native_views(cx));
-                        if has_views && gpui_kit::base::GlobalState::is_in_deferred_context(cx) {
-                            return true;
-                        }
-                        this.browser_overlay_task = None;
-                        cx.notify();
-                        false
-                    })
-                    .unwrap_or(false);
-                if !keep_waiting {
-                    break;
-                }
-            }
-        }));
-    }
-
-    fn apply_browser_request(
-        &mut self,
-        request: crate::commands::BrowserRequest,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.ensure_tools(window, cx);
-        if let Some(tools) = &self.tools {
-            tools.update(cx, |tools, cx| tools.execute_browser(request, window, cx));
-        } else {
-            request.complete(bootty_control::CommandOutcome::Unavailable {
-                message: "This window has no workspace sidebar.".into(),
-            });
-        }
-    }
-
     fn apply_dock_request(
         &mut self,
-        mut request: crate::commands::DockRequest,
+        request: crate::commands::DockRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(
-            request.action.panel(),
-            Some(
-                bootty_config::config::PanelKind::Files | bootty_config::config::PanelKind::Changes
-            )
-        ) {
-            request.directory = self
-                .state
-                .terminal_mut()
-                .current_working_directory()
-                .ok()
-                .flatten()
-                .and_then(|cwd| {
-                    bootty_mux::workspace::terminal_cwd_for_mux_command(Some(cwd), None)
-                })
-                .or_else(|| {
-                    self.state
-                        .workspace
-                        .active
-                        .binding
-                        .mux()
-                        .selected_session_anchor()
-                        .and_then(|anchor| anchor.cwd.clone())
-                });
-        }
         self.ensure_tools(window, cx);
         if let Some(tools) = &self.tools {
-            tools.update(cx, |tools, cx| {
-                tools.update_agents(
-                    self.state.agent_overview(),
-                    self.state
-                        .current_command_target(bootty_control::ResourceKind::Terminal),
-                    cx,
-                );
-                tools.apply_request(request, window, cx);
-            });
+            tools.update(cx, |tools, cx| tools.apply_request(request, window, cx));
         } else {
             request.complete(bootty_control::CommandOutcome::Unavailable {
                 message: "No workspace is available for this dock command".into(),
@@ -2305,9 +1488,6 @@ impl GpuiWorkspace {
             .iter()
             .any(|effect| !matches!(effect, AppEffect::RepaintAfter(_)));
         self.apply_effects(effects, window, cx);
-        // A frame can select another tab or pane. A conversation it brings forward takes focus
-        // now; waiting for the next wake leaves keys on the pane that just left.
-        self.sync_selected_native_pane(window, cx);
         changed
     }
 
@@ -2365,57 +1545,8 @@ impl GpuiWorkspace {
         false
     }
 
-    fn sync_agents(&self, cx: &mut Context<Self>) {
-        let selected = self.selected_native_conversation_target(cx);
-        if let Some(tools) = &self.tools {
-            tools.update(cx, |tools, cx| {
-                tools.update_subagents(
-                    self.native_conversations.subagent_parents(),
-                    selected.as_ref(),
-                    cx,
-                );
-                tools.update_agents(
-                    self.state.agent_overview(),
-                    self.state
-                        .current_command_target(bootty_control::ResourceKind::Terminal),
-                    cx,
-                );
-            });
-        }
-        crate::agent_tray::update(
-            cx.entity_id(),
-            self.state.agent_overview(),
-            self.state.app_command_sender(Caller::Internal),
-            self.state.config().tray,
-            cx,
-        );
-    }
-
-    fn sync_browser_configuration(&self, window: &Window, cx: &mut Context<Self>) {
-        let Some(tools) = &self.tools else {
-            return;
-        };
-        let conversation_target = self.shown_native_conversation_target(cx);
-        let attachment = self.browser_attachment_context(conversation_target.as_ref());
-        tools.update(cx, |tools, cx| {
-            tools.configure_browser(
-                self.state.config().browser,
-                conversation_target,
-                self.state
-                    .current_command_target(bootty_control::ResourceKind::ApplicationWindow),
-                attachment,
-                window,
-                cx,
-            );
-        });
-    }
-
-    fn poll_settings_runtime(&mut self, cx: &mut Context<Self>) -> bool {
+    fn poll_settings_runtime(&self, cx: &mut Context<Self>) -> bool {
         let mut settings_changed = false;
-        if let Some(catalog) = self.settings_runtime.drain_catalog() {
-            settings_changed = true;
-            self.integration_rows = catalog.integration_rows;
-        }
         for outcome in self.settings_runtime.drain_outcomes() {
             settings_changed = true;
             self.settings_view
@@ -2426,20 +1557,13 @@ impl GpuiWorkspace {
 
     fn process_work(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let revision = self.state.config_revision();
-        self.refresh_native_conversations(window, cx);
         let error = self.state.last_error();
         let frame_changed = self.advance_frame(window, cx);
         let mut changed = frame_changed;
-        self.sync_agents(cx);
         let settings_changed = self.poll_settings_runtime(cx);
-        let provider_revision = self
-            .state
-            .terminal_agent_service()
-            .map(|service| service.revision());
         if (self.settings_window.is_some() || self.settings_window_opening)
             && (settings_changed
-                || self.last_settings_revision != Some(self.state.config_revision())
-                || self.last_provider_revision != provider_revision)
+                || self.last_settings_revision != Some(self.state.config_revision()))
         {
             self.refresh_settings(cx);
             changed = true;
@@ -2457,18 +1581,10 @@ impl GpuiWorkspace {
             .collect::<Vec<_>>();
         changed |= self.last_pane_layouts != layouts;
         self.last_pane_layouts = layouts;
-        let usage_visible = self.state.config().chrome.sidebar
-            && self
-                .state
-                .config()
-                .sidebar
-                .modules
-                .iter()
-                .any(|module| module == "usage");
         self.launch
             .native_chrome
             .borrow_mut()
-            .refresh(Instant::now(), usage_visible);
+            .refresh(Instant::now());
         let terminal_changed = self.terminal_frames_changed(cx);
         let chrome = self.maintenance_chrome(window);
         let chrome_changed = self.last_maintenance_chrome.as_ref() != Some(&chrome);
@@ -2637,46 +1753,6 @@ impl GpuiWorkspace {
         }
     }
 
-    /// Finds the conversations that mention the sidebar's search, once typing pauses, off the UI
-    /// thread.
-    fn search_conversations(&mut self, query: String, cx: &mut Context<Self>) {
-        self.sidebar_requests.search = self.sidebar_requests.search.wrapping_add(1);
-        let search = self.sidebar_requests.search;
-        let Some(service) = self
-            .state
-            .native_agent_service()
-            .filter(|_| !query.is_empty())
-        else {
-            self.chrome_view.update(cx, |chrome, cx| {
-                chrome.set_conversation_matches(Vec::new(), cx);
-            });
-            return;
-        };
-        cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(150))
-                .await;
-            if this
-                .read_with(cx, |this, _| this.sidebar_requests.search != search)
-                .unwrap_or(true)
-            {
-                return;
-            }
-            let matches = cx
-                .background_executor()
-                .spawn(async move { service.search(&query) })
-                .await;
-            _ = this.update(cx, |this, cx| {
-                if this.sidebar_requests.search == search {
-                    this.chrome_view.update(cx, |chrome, cx| {
-                        chrome.set_conversation_matches(matches, cx);
-                    });
-                }
-            });
-        })
-        .detach();
-    }
-
     /// Hands a local path to an installed editor off the UI thread, and says when it refuses.
     fn open_in_editor(editor: &'static str, path: std::path::PathBuf, cx: &Context<Self>) {
         let Some(editor) = crate::editors::find(editor) else {
@@ -2743,7 +1819,6 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.close_stale_surface_chooser(window, cx);
         if let Some(project) = self.state.take_project_settings() {
             self.open_settings_window_target(
                 SettingsWindowTarget::Project(Box::new(project)),
@@ -2753,10 +1828,7 @@ impl GpuiWorkspace {
         }
         let terminal_focus = (self.state.terminal_focused()
             && self.state.pending_new_surface().is_none())
-        .then(|| {
-            self.native_conversation_view(cx)
-                .map_or_else(|| self.focus.clone(), |view| view.focus_handle(cx))
-        });
+        .then(|| self.focus.clone());
         self.dialogs.present(
             projection,
             self.state.creation_underlay(),
@@ -2765,23 +1837,6 @@ impl GpuiWorkspace {
             window,
             cx,
         );
-    }
-
-    pub(crate) fn prepare_terminal_window(
-        &mut self,
-        target: &bootty_control::CommandTarget,
-        id: &bootty_mux::workspace::ScopedWindowId,
-        geometry: bootty_terminal::geometry::TerminalGeometry,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.terminal_window_matches_binding(target, id) {
-            return;
-        }
-        let binding = &mut self.state.workspace.active.binding;
-        if let Err(error) = binding.prepare_window(id.session_id(), id.window_id(), geometry) {
-            self.state.record_render_error(&error);
-        }
-        cx.notify();
     }
 
     fn docked_terminal_surface(
@@ -2793,19 +1848,15 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.visible_terminals.clear();
-        self.sync_dock_task_center(&dock, window, cx);
         if let Some(empty_terminal) = self.empty_terminal_state() {
             dock.update(cx, |dock, cx| {
-                dock.reconcile_terminal_surfaces(&self.state.workspace.active.binding, window, cx);
                 dock.clear_terminals(window, cx);
                 dock.set_empty_terminal(Some(empty_terminal), cx);
             });
         } else {
             dock.update(cx, |dock, cx| dock.set_empty_terminal(None, cx));
-            if self.state.uses_native_terminal_layout() {
+            {
                 self.prepare_dock_terminals(&dock, window, colors, cx);
-            } else {
-                self.prepare_dock_attachment(&dock, window, colors, cx);
             }
         }
 
@@ -2837,149 +1888,46 @@ impl GpuiWorkspace {
         let binding = &self.state.workspace.active.binding;
         let mux = binding.mux();
         let selected = binding.current_window_id();
-        let session = mux.session_by_id_or_name(selected.session_id());
-        let no_terminals = !crate::workspace_composition::has_selected_terminal(
-            mux.sessions(),
-            &selected,
-            binding.uses_native_terminal_layout(),
-        );
+        let no_terminals =
+            !crate::workspace_composition::has_selected_terminal(mux.sessions(), &selected);
         no_terminals.then(|| {
-            let operation = if session.is_none() {
-                bootty_mux::capability::BindingOperation::CreateProjectSession
-            } else {
-                bootty_mux::capability::BindingOperation::CreateWindow
-            };
             crate::workspace_composition::EmptyTerminalState::from_snapshot(
                 mux.has_session_snapshot(),
                 mux.unavailable_reason(),
-                self.state
-                    .workspace
-                    .active
-                    .binding
-                    .capabilities()
-                    .supports(operation),
             )
         })
-    }
-
-    fn prepare_dock_attachment(
-        &mut self,
-        dock: &Entity<crate::gpui_dock::WorkspaceDock>,
-        window: &mut Window,
-        colors: Colors,
-        cx: &mut Context<Self>,
-    ) {
-        let panel = dock.update(cx, |dock, cx| dock.attachment_panel(window, cx));
-        let (active, bounds) = {
-            let data = panel.read(cx);
-            (data.active, data.bounds)
-        };
-        let native_layout = bounds.map_or_else(Vec::new, |bounds| {
-            let panel_area = SurfaceRect {
-                min_x: bounds.left().into(),
-                min_y: bounds.top().into(),
-                max_x: bounds.right().into(),
-                max_y: bounds.bottom().into(),
-            };
-            if active {
-                self.terminal_element(window, panel_area, colors, cx);
-            }
-            self.state
-                .workspace
-                .active
-                .binding
-                .native_agent_pane_rects(panel_area, self.state.config().chrome.pane_divider_width)
-        });
-        panel.update(cx, |panel, cx| {
-            panel.publish_native_layout(self.native_conversations.revision, native_layout, cx);
-        });
-        let mux = self.state.mux();
-        let title = mux
-            .sessions()
-            .iter()
-            .find(|session| {
-                Some(session.id.as_str()) == mux.selected_session()
-                    || Some(session.name.as_str()) == mux.selected_session()
-            })
-            .map_or_else(|| "Terminal".to_owned(), |session| session.name.clone());
-        panel.update(cx, |panel, cx| panel.set_title(title, cx));
     }
 
     fn prepare_dock_panel(
         &mut self,
         panel: &Entity<crate::gpui_terminal_panel::TerminalPanel>,
-        windows: &[crate::gpui_dock::TerminalWindowPresentation],
         window: &mut Window,
         colors: Colors,
         cx: &mut Context<Self>,
     ) {
         let data = panel.read(cx);
-        if data.active
-            && data.visible
-            && let Some(bounds) = data.bounds
-        {
-            let id = data.window_id.clone();
-            let panel_area = SurfaceRect {
-                min_x: bounds.left().into(),
-                min_y: bounds.top().into(),
-                max_x: bounds.right().into(),
-                max_y: bounds.bottom().into(),
-            };
-            let surface = self.fit_terminal_surface(panel_area, window);
-            let pane_ids = self
-                .state
-                .mux()
-                .sessions()
-                .iter()
-                .find(|session| session.id == id.session_id())
-                .and_then(|session| {
-                    session
-                        .windows
-                        .iter()
-                        .find(|window| window.id == id.window_id())
-                })
-                .map_or_else(Default::default, |window| {
-                    window
-                        .panes
-                        .iter()
-                        .filter_map(|pane| pane.pane_id.clone())
-                        .collect()
-                });
-            panel.update(cx, |panel, cx| {
-                panel.prepare(surface.geometry(), pane_ids, window, cx);
-            });
-            let snapshot = self.native_terminal_snapshot(window, &id, surface, colors, cx);
-            let title = windows
-                .iter()
-                .find(|candidate| candidate.id == id)
-                .map_or_else(Default::default, |candidate| candidate.title.clone());
-            panel.update(cx, |panel, cx| panel.publish(title, snapshot, cx));
+        let Some(bounds) = data.bounds else {
+            return;
+        };
+        let pane_id = data.pane_id.clone();
+        // A close disconnects its attachment before publishing the replacement snapshot.
+        // Keep the published frame until the command retires this panel.
+        if self.state.pane_close_pending(&pane_id) {
+            return;
         }
-    }
-
-    fn sync_dock_task_center(
-        &self,
-        dock: &Entity<crate::gpui_dock::WorkspaceDock>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let scope = self.state.mux_scope();
-        let binding = &self.state.workspace.active.binding;
-        let binding_id = scope.persistence_value().to_string();
-        let task = binding
-            .mux()
-            .selected_session()
-            .and_then(|session| self.state.workspace.session_identity(scope, session))
-            .or_else(|| binding.saved_selected_session_identity().map(str::to_owned))
-            .unwrap_or_default();
-        let selected = binding.current_window_id();
-        let key = crate::workspace_composition::surface_center_key(
-            &binding_id,
-            &task,
-            "window",
-            &binding.saved_window_key(&task, selected.window_id()),
-        );
-        dock.update(cx, |dock, cx| dock.sync_task_center(key, window, cx));
+        let key = data.key.clone();
+        let area = SurfaceRect {
+            min_x: bounds.left().into(),
+            min_y: bounds.top().into(),
+            max_x: bounds.right().into(),
+            max_y: bounds.bottom().into(),
+        };
+        let surface = self.fit_terminal_surface(area, window);
+        let view = self.ensure_terminal_pane(&pane_id, &key, window, cx);
+        if let Some(terminal) = self.present_terminal(&view, Some(&pane_id), surface, window, cx) {
+            let snapshot = self.pane_snapshot(pane_id, terminal, area.width(), colors, window, cx);
+            panel.update(cx, |panel, cx| panel.publish(snapshot, cx));
+        }
     }
 
     fn prepare_dock_terminals(
@@ -2990,53 +1938,31 @@ impl GpuiWorkspace {
         cx: &mut Context<Self>,
     ) {
         let binding = &self.state.workspace.active.binding;
-        let windows = binding
-            .mux()
-            .sessions()
-            .iter()
-            .flat_map(|session| {
-                session
-                    .windows
-                    .iter()
-                    .map(|window| crate::gpui_dock::TerminalWindowPresentation {
-                        id: binding.window_id(session.id.clone(), window.id.clone()),
-                        title: window.name.clone(),
-                    })
-            })
-            .collect::<Vec<_>>();
-        let selected = dock
-            .read(cx)
-            .terminal_center_location()
-            .and_then(|(task, key)| {
-                windows
-                    .iter()
-                    .find(|candidate| {
-                        self.state
-                            .workspace
-                            .session_identity(binding.scope(), candidate.id.session_id())
-                            .as_ref()
-                            == Some(&task)
-                            && binding.saved_window_key(&task, candidate.id.window_id()) == key
-                    })
-                    .map(|candidate| candidate.id.clone())
-            })
-            .unwrap_or_else(|| binding.current_window_id());
-        let origins = dock.read(cx).terminal_surface_origins(cx);
-        for origin in origins {
-            self.restore_terminal_surface(&origin, window, cx);
-        }
+        let target = self
+            .state
+            .current_command_target_for("pane.move", bootty_control::ResourceKind::Session);
         if self.state.mux().has_session_snapshot() {
             dock.update(cx, |dock, cx| {
-                dock.reconcile_terminal_surfaces(binding, window, cx);
-                dock.sync_terminals(&windows, &selected, window, cx);
+                let config = self.state.config();
+                let divider = (
+                    config.chrome.pane_divider_width,
+                    config
+                        .chrome
+                        .pane_divider_color
+                        .map(crate::theme::config_rgba)
+                        .map(gpui_color),
+                );
+                if dock.pane_divider != divider {
+                    dock.pane_divider = divider;
+                    cx.notify();
+                }
+                dock.sync_terminals(binding, target, window, cx);
             });
         }
         self.visible_terminals.clear();
         self.retain_live_terminal_panes();
-        // Dock geometry belongs to the terminal surface; mux owns the split ratios.
-        let panels = dock.read(cx).visible_terminal_surface_panels(cx);
-        for panel in panels {
-            self.prepare_dock_panel(&panel, &windows, window, colors, cx);
+        for panel in dock.read(cx).visible_terminal_surface_panels(cx) {
+            self.prepare_dock_panel(&panel, window, colors, cx);
         }
     }
 
@@ -3063,7 +1989,7 @@ impl GpuiWorkspace {
 
     fn scroll_terminal_pointer(
         &mut self,
-        event: &gpui_kit::ScrollWheelEvent,
+        event: &gpui_kit::ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3175,15 +2101,8 @@ impl GpuiWorkspace {
         cx.notify();
     }
 
-    fn terminal_surface(
-        &mut self,
-        window: &mut Window,
-        terminal_area: SurfaceRect,
-        colors: Colors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let terminal = self.terminal_element(window, terminal_area, colors, cx);
-        let content = self.terminal_panel_content(terminal, cx);
+    fn terminal_surface(&self, terminal_area: SurfaceRect, cx: &Context<Self>) -> AnyElement {
+        let content = self.terminal_panel_content(None, cx);
         div()
             .absolute()
             .left(px(terminal_area.min_x))
@@ -3231,7 +2150,7 @@ impl GpuiWorkspace {
         }
         surface
             .on_mouse_move(cx.listener(Self::move_terminal_pointer))
-            .on_scroll_wheel(cx.listener(Self::scroll_terminal_pointer))
+            .on_scroll(cx.listener(Self::scroll_terminal_pointer))
             .on_pinch(cx.listener(Self::pinch_terminal_pointer))
             .on_drop(cx.listener(Self::drop_terminal_files))
             .when_some(terminal, ParentElement::child)
@@ -3239,11 +2158,7 @@ impl GpuiWorkspace {
     }
 
     pub(crate) fn new_session_surface(&self, cx: &App) -> Option<AnyElement> {
-        if self.surface_agent_form_presented() {
-            return None;
-        }
         self.dialogs.new_session_surface().map(|view| {
-            let full_view = view.read(cx).is_full_view();
             div()
                 .id("new-session-surface")
                 .size_full()
@@ -3253,13 +2168,7 @@ impl GpuiWorkspace {
                 .overflow_y_scroll()
                 .p_6()
                 .bg(cx.theme().background)
-                .child(
-                    div()
-                        .w_full()
-                        .max_w(gpui_kit::rems(44.0))
-                        .when(full_view, |body| body.size_full().max_w_full().min_h_0())
-                        .child(view),
-                )
+                .child(div().w_full().max_w(gpui_kit::rems(44.0)).child(view))
                 .into_any_element()
         })
     }
@@ -3275,38 +2184,6 @@ impl GpuiWorkspace {
         );
         self.terminal_cell = geometry.grid_cell;
         TerminalSurface::new(area, geometry.grid_cell, padding)
-    }
-
-    fn terminal_element(
-        &mut self,
-        window: &mut Window,
-        area: SurfaceRect,
-        colors: Colors,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        let surface = self.fit_terminal_surface(area, window);
-        if self.state.uses_native_terminal_layout() {
-            return Some(self.native_terminal_element(window, surface, colors, cx));
-        }
-
-        // Native panes own their focus handles and painted facts. Drop them before
-        // returning to the attached presentation so a backend switch cannot route the
-        // next pointer event through a removed pane or leave keyboard focus on its child view.
-        let terminal_focus = self.terminal.view.focus_handle(cx);
-        let native_pointer_state_was_active =
-            self.focus != terminal_focus || !self.terminal_panes.is_empty();
-        if native_pointer_state_was_active {
-            self.terminal_mouse_buttons.clear();
-            self.pending_link_click = None;
-        }
-        if self.focus != terminal_focus {
-            self.focus = terminal_focus.clone();
-            schedule_focus(terminal_focus, window, cx);
-        }
-        self.terminal_panes.clear();
-        self.visible_terminals.clear();
-        self.present_terminal(&self.terminal.view.clone(), None, surface, window, cx)
-            .map(IntoElement::into_any_element)
     }
 
     fn present_terminal(
@@ -3385,140 +2262,11 @@ impl GpuiWorkspace {
             if self.focus != focus || self.focused_surface != transition_key {
                 self.focus = focus.clone();
                 self.focused_surface = transition_key;
-                // An attached backend draws one terminal for every pane; a conversation over its
-                // selected pane keeps the keys.
-                if self.native_conversation_view(cx).is_none() {
-                    schedule_focus(focus, window, cx);
-                }
+                schedule_focus(focus, window, cx);
             }
             self.state.record_surface(surface);
         }
         Some(CachedTerminalView(view.clone()))
-    }
-
-    fn native_terminal_element(
-        &mut self,
-        window: &mut Window,
-        surface: TerminalSurface,
-        colors: Colors,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        self.visible_terminals.clear();
-        let window_id = self.state.workspace.active.binding.current_window_id();
-        self.retain_live_terminal_panes();
-        let snapshot = self.native_terminal_snapshot(window, &window_id, surface, colors, cx);
-        let weak = cx.entity().downgrade();
-        GpuiPaneWorkspace::new(snapshot, move |intent, window, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                this.apply_pane_intent(intent, window, cx);
-                cx.notify();
-            });
-        })
-        .into_any_element()
-    }
-
-    fn native_terminal_snapshot(
-        &mut self,
-        window: &mut Window,
-        window_id: &bootty_mux::workspace::ScopedWindowId,
-        surface: TerminalSurface,
-        colors: Colors,
-        cx: &mut Context<Self>,
-    ) -> GpuiPaneWorkspaceSnapshot<crate::gpui_terminal_panel::WorkspacePaneView> {
-        let area = surface.rect;
-        let config = self.state.config();
-        let gap = config.chrome.pane_divider_width;
-        let focused = self.state.focused_pane();
-        let layout = self
-            .state
-            .workspace
-            .active
-            .binding
-            .window_pane_layout(window_id.session_id(), window_id.window_id())
-            .cloned();
-        let rects = layout
-            .as_ref()
-            .map_or_else(Default::default, |layout| layout.rects(area, gap));
-        if *window_id == self.state.workspace.active.binding.current_window_id() {
-            self.state.record_pane_area(area);
-        }
-
-        let pane_surfaces = rects
-            .iter()
-            .map(|(pane_id, rect)| {
-                (
-                    pane_id.clone(),
-                    *rect,
-                    TerminalSurface::new(*rect, surface.cell, surface.padding),
-                )
-            })
-            .collect::<Vec<_>>();
-        self.resize_native_pane_window(window_id, layout.as_ref(), &pane_surfaces);
-
-        let mut panes = Vec::with_capacity(pane_surfaces.len());
-        for (pane_id, rect, surface) in pane_surfaces {
-            let is_focused = focused.as_deref() == Some(pane_id.as_str());
-            if let Some(view) = self.native_mux_pane_content(&pane_id, window, cx) {
-                // Native content still occupies a real backend pane. Keep its geometry in
-                // the same resize path as terminal content so the backend retains the split.
-                if let Some(runtime) = self
-                    .state
-                    .workspace
-                    .active
-                    .binding
-                    .visible_terminal_frame_source(Some(&pane_id))
-                    && let Err(error) = runtime.resize(surface.geometry())
-                {
-                    self.state.record_render_error(&error);
-                }
-                panes.push(GpuiPaneSnapshot {
-                    id: pane_id,
-                    rect: pane_rect(rect),
-                    terminal: view,
-                    focused: is_focused,
-                    progress: None,
-                });
-                continue;
-            }
-            let key = self.state.pane_widget_key(&pane_id);
-            let terminal_view = self.ensure_terminal_pane(&pane_id, &key, window, cx);
-            if let Some(terminal) =
-                self.present_terminal(&terminal_view, Some(&pane_id), surface, window, cx)
-            {
-                panes.push(GpuiPaneSnapshot {
-                    id: pane_id.clone(),
-                    rect: pane_rect(rect),
-                    terminal: crate::gpui_terminal_panel::WorkspacePaneView::Terminal(terminal),
-                    focused: is_focused,
-                    progress: self.state.pane_progress(&pane_id).map(pane_progress),
-                });
-            }
-        }
-
-        let dividers = self.pane_dividers(layout.as_ref(), area, gap);
-        self.finish_pane_snapshot(area, panes, dividers, colors, window, cx)
-    }
-
-    fn pane_dividers(
-        &mut self,
-        layout: Option<&bootty_mux::pane_layout::PaneLayout>,
-        area: SurfaceRect,
-        gap: f32,
-    ) -> Vec<GpuiPaneDividerSnapshot> {
-        let dividers = layout.map_or_else(Default::default, |layout| layout.dividers(area, gap));
-        dividers
-            .into_iter()
-            .map(|divider| {
-                let handle = expanded_divider_hit_rect(divider.rect, divider.direction);
-                self.state.register_chrome_handle(handle);
-                GpuiPaneDividerSnapshot {
-                    path: divider.path,
-                    direction: pane_split_direction(divider.direction),
-                    rect: pane_rect(divider.rect),
-                    area: pane_rect(divider.area),
-                }
-            })
-            .collect()
     }
 
     fn ensure_terminal_pane(
@@ -3537,111 +2285,60 @@ impl GpuiWorkspace {
         view
     }
 
-    fn resize_native_pane_window(
+    fn pane_snapshot(
         &mut self,
-        window_id: &bootty_mux::workspace::ScopedWindowId,
-        layout: Option<&bootty_mux::pane_layout::PaneLayout>,
-        pane_surfaces: &[(String, SurfaceRect, TerminalSurface)],
-    ) {
-        if let Some((cols, rows)) = layout.and_then(|layout| {
-            layout.terminal_window_size(|pane_id| {
-                pane_surfaces
-                    .iter()
-                    .find(|(candidate, _, _)| candidate == pane_id)
-                    .map(|(_, _, surface)| {
-                        let geometry = surface.geometry();
-                        (geometry.cols, geometry.rows)
-                    })
-            })
-        }) {
-            let result = if *window_id == self.state.workspace.active.binding.current_window_id() {
-                self.state.resize_native_layout_window(cols, rows)
-            } else {
-                self.state
-                    .workspace
-                    .active
-                    .binding
-                    .terminal_mut()
-                    .resize_visible_window(Some(window_id.window_id()), cols, rows)
-            };
-            if let Err(error) = result {
-                self.state.record_render_error(&error);
-            }
-        }
-    }
-
-    fn finish_pane_snapshot(
-        &mut self,
-        area: SurfaceRect,
-        panes: Vec<GpuiPaneSnapshot<crate::gpui_terminal_panel::WorkspacePaneView>>,
-        dividers: Vec<GpuiPaneDividerSnapshot>,
+        pane: String,
+        terminal: CachedTerminalView,
+        width: f32,
         colors: Colors,
         window: &Window,
         cx: &Context<Self>,
-    ) -> GpuiPaneWorkspaceSnapshot<crate::gpui_terminal_panel::WorkspacePaneView> {
+    ) -> GpuiPaneSnapshot<CachedTerminalView> {
         let config = self.state.config();
-        let gap = config.chrome.pane_divider_width;
-        let corner_radius = config.chrome.pane_corner_radius;
-        let focus_border_width = config.chrome.pane_focus_border_width;
-        let focus_border_color = config.chrome.pane_focus_border_color;
-        let divider_color = config.chrome.pane_divider_color;
-        let inactive_dim = config.chrome.unfocused_terminal_dim.clamp(0.0, 1.0);
-        let window_dim = if self.state.terminal_focused() {
-            0.0
-        } else {
-            inactive_dim
-        };
-        let palette = self.state.ui_theme().palette;
-        let background_opacity = config.window.background_opacity;
-        let empty_message = panes.is_empty().then(|| "No terminal pane".to_owned());
-        let has_visible_indeterminate_progress = panes.iter().any(|pane| {
-            pane.progress
-                .is_some_and(|progress| progress.state == PaneProgressState::Indeterminate)
-        });
-        let arrangement_target = self
-            .state
-            .supports_pane_operation(bootty_mux::capability::BindingOperation::MovePane)
-            .then(|| {
-                self.state
-                    .current_command_target_for("pane.move", bootty_control::ResourceKind::Session)
-            })
-            .flatten();
-        let snapshot = GpuiPaneWorkspaceSnapshot {
-            arrangement_target,
-            area: pane_rect(area),
-            panes,
-            dividers,
-            gap,
-            corner_radius,
-            focus_border_width,
+        let progress = self.state.pane_progress(&pane).map(pane_progress);
+        let inactive_dim = config.chrome.unfocused_terminal_dim.clamp(0., 1.);
+        let snapshot = GpuiPaneSnapshot {
+            focused: self.state.focused_pane().as_deref() == Some(&pane),
+            target: self
+                .state
+                .current_command_target_for("pane.move", bootty_control::ResourceKind::Session),
+            id: pane,
+            terminal,
+            width,
+            progress,
+            corner_radius: config.chrome.pane_corner_radius,
+            focus_border_width: if self.state.workspace.active.binding.native_multi_pane() {
+                config.chrome.pane_focus_border_width
+            } else {
+                0.
+            },
             inactive_dim,
-            window_dim,
+            window_dim: if self.state.terminal_focused() {
+                0.
+            } else {
+                inactive_dim
+            },
             animation_seconds: self.settings_started.elapsed().as_secs_f64(),
             colors: GpuiPaneColors {
-                // Terminal frames and the pane host are one visual surface. Using a chrome panel
-                // color here exposed gutters and split margins whenever the terminal theme was
-                // not identical to the UI theme.
-                background: if background_opacity < 1.0 {
+                background: if config.window.background_opacity < 1. {
                     gpui_kit::Hsla::transparent_black()
                 } else {
                     colors.base
                 },
-                divider: divider_color
-                    .map(crate::theme::config_rgba)
-                    .map_or(colors.border_variant, gpui_color),
-                divider_hover: colors.accent,
-                focus_border: focus_border_color
+                focus_border: config
+                    .chrome
+                    .pane_focus_border_color
                     .map(crate::theme::config_rgba)
                     .map_or(colors.accent, gpui_color),
                 progress_track: colors.border,
                 progress_normal: colors.accent,
                 progress_error: colors.destructive,
-                progress_warning: gpui_color(palette.warning),
-                empty_text: colors.muted,
+                progress_warning: gpui_color(self.state.ui_theme().palette.warning),
             },
-            empty_message,
         };
-        if has_visible_indeterminate_progress && window.is_visible() {
+        if progress.is_some_and(|progress| progress.state == PaneProgressState::Indeterminate)
+            && window.is_visible()
+        {
             self.schedule_repaint_after(
                 bootty_terminal::scheduler::CURSOR_BLINK_REFRESH_INTERVAL,
                 cx,
@@ -3650,161 +2347,41 @@ impl GpuiWorkspace {
         snapshot
     }
 
-    pub(crate) fn close_terminal_window(
+    pub(crate) fn focus_terminal_pane(
         &mut self,
-        target: &bootty_control::CommandTarget,
-        id: &bootty_mux::workspace::ScopedWindowId,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.terminal_window_matches_binding(target, id) {
-            return;
-        }
-        self.state.apply_exact_mux_action(
-            crate::state::ExactMuxAction::CloseWindowPane,
-            crate::commands::ExactMuxTarget::window(
-                self.state.mux_scope(),
-                id.session_id(),
-                id.window_id(),
-            ),
-        );
-        cx.notify();
-    }
-
-    pub(crate) fn focus_terminal_window(
-        &mut self,
-        target: &bootty_control::CommandTarget,
-        id: &bootty_mux::workspace::ScopedWindowId,
+        pane: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.terminal_window_matches_binding(target, id) {
-            return;
+        // User and Dock focus enter here; snapshot reflection focuses the view directly.
+        self.activate_terminal_pane(pane, window, cx);
+        if let Some(pane) = self.terminal_panes.get(&self.state.pane_widget_key(pane)) {
+            self.focus = pane.view.focus_handle(cx);
+            self.focus.focus(window, cx);
         }
-        self.close_native_conversation();
-        if *id != self.state.workspace.active.binding.current_window_id() {
-            self.state.apply_exact_mux_action(
-                crate::state::ExactMuxAction::Activate,
-                crate::commands::ExactMuxTarget::window(
-                    self.state.mux_scope(),
-                    id.session_id(),
-                    id.window_id(),
-                ),
-            );
-        }
-        if self.sync_selected_native_pane(window, cx) {
-            cx.notify();
-            return;
-        }
-        if let Some(pane) = self.state.focused_pane() {
-            let key = self.state.pane_widget_key(&pane);
-            if let Some(pane) = self.terminal_panes.get(&key) {
-                self.focus = pane.view.focus_handle(cx);
-                self.focus.focus(window, cx);
-            }
-        }
-        cx.notify();
     }
 
-    pub(crate) fn apply_terminal_window_intent(
-        &mut self,
-        target: &bootty_control::CommandTarget,
-        id: &bootty_mux::workspace::ScopedWindowId,
-        intent: GpuiPaneIntent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.terminal_window_matches_binding(target, id) {
-            return;
-        }
-        match intent {
-            GpuiPaneIntent::Resize {
-                path,
-                ratio,
-                min_fraction,
-            } => {
-                self.state.workspace.active.binding.set_window_pane_ratio(
-                    id,
-                    &path,
-                    ratio,
-                    min_fraction,
-                );
-            }
-            GpuiPaneIntent::Focus(pane) => {
-                if let Some(record) = self.state.native_agent_service().and_then(|service| {
-                    service.sessions().into_iter().find(|record| {
-                        self.state
-                            .native_panel_target(record)
-                            .is_some_and(|(exact, _)| {
-                                exact.scope() == self.state.mux_scope()
-                                    && exact.ids().2 == Some(pane.as_str())
-                            })
-                    })
-                }) {
-                    if self
-                        .selected_mux_native_record()
-                        .as_ref()
-                        .map(bootty_agents::NativeSessionRecord::target)
-                        != Some(record.target())
-                    {
-                        let mut invocation =
-                            CommandInvocation::from_action("agents.native.focus", Caller::Internal);
-                        invocation.target = Some(record.target());
-                        self.invoke_gpui_command(invocation, window, cx);
-                    }
-                    return;
-                }
-                self.focus_terminal_window(target, id, window, cx);
-                self.state.focus_pane(&pane);
-                self.sync_selected_native_pane(window, cx);
-                let key = self.state.pane_widget_key(&pane);
-                if let Some(pane) = self.terminal_panes.get(&key) {
-                    self.focus = pane.view.focus_handle(cx);
-                    self.focus.focus(window, cx);
-                }
-            }
-            GpuiPaneIntent::Command(invocation) => self.invoke_gpui_command(invocation, window, cx),
-        }
-        cx.notify();
-    }
-
-    fn terminal_window_matches_binding(
-        &self,
-        target: &bootty_control::CommandTarget,
-        id: &bootty_mux::workspace::ScopedWindowId,
-    ) -> bool {
-        self.state
-            .current_command_target_for("git.open", bootty_control::ResourceKind::Binding)
-            .is_some_and(|current| current == *target)
-            && self
+    fn activate_terminal_pane(&mut self, pane: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .state
+            .mux()
+            .selected_session_anchor()
+            .and_then(|anchor| anchor.pane_id.as_deref())
+            != Some(pane)
+            && let Some(id) = self.state.workspace.active.binding.window_id_for_pane(pane)
+            && let Some(target) = self
                 .state
-                .workspace
-                .active
-                .binding
-                .window_id(id.session_id().to_owned(), id.window_id().to_owned())
-                == *id
-            && self.state.mux().sessions().iter().any(|session| {
-                session.id == id.session_id()
-                    && session
-                        .windows
-                        .iter()
-                        .any(|window| window.id == id.window_id())
-            })
-    }
-
-    fn apply_pane_intent(
-        &mut self,
-        intent: GpuiPaneIntent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        match intent {
-            GpuiPaneIntent::Command(invocation) => self.invoke_gpui_command(invocation, window, cx),
-            GpuiPaneIntent::Focus(pane_id) => self.state.focus_pane(&pane_id),
-            GpuiPaneIntent::Resize {
-                path,
-                ratio,
-                min_fraction,
-            } => self.state.set_pane_ratio(&path, ratio, min_fraction),
+                .current_command_target_for("pane.focus", bootty_control::ResourceKind::Session)
+        {
+            self.invoke_gpui_command(
+                crate::gpui::pane_invocation(
+                    "pane.focus",
+                    vec![id.window_id().to_owned(), pane.to_owned()],
+                    target,
+                ),
+                window,
+                cx,
+            );
         }
     }
 
@@ -3876,7 +2453,7 @@ impl GpuiWorkspace {
             return;
         };
         if let Some(pane) = hit.pane_id {
-            self.state.focus_pane(&pane);
+            self.focus_terminal_pane(&pane, window, cx);
         }
         self.focus = hit.view.focus_handle(cx);
         window.focus(&self.focus, cx);
@@ -3931,18 +2508,6 @@ impl GpuiWorkspace {
         let Some(link) = hit.interaction.hyperlink_at(point) else {
             return false;
         };
-        if let bootty_terminal::terminal_links::LinkTarget::File { path, .. } = &link.target {
-            let absolute = path.starts_with(['/', '~']) || path.as_bytes().get(1) == Some(&b':');
-            let binding = &self.state.workspace.active.binding;
-            if !absolute
-                && !binding.uses_native_terminal_layout()
-                && binding.mux().selected_window_panes().len() > 1
-            {
-                self.state.record_message("Use an absolute file link in a multipane tmux attachment; the clicked pane's directory is not available.");
-                self.pending_link_click = Some((event.position, None));
-                return true;
-            }
-        }
         let Some(target) = self
             .state
             .current_command_target_for("link.open", bootty_control::ResourceKind::Terminal)
@@ -3981,10 +2546,6 @@ impl GpuiWorkspace {
     }
 }
 
-fn pane_rect(rect: SurfaceRect) -> PaneRect {
-    PaneRect::new(rect.min_x, rect.min_y, rect.width(), rect.height())
-}
-
 fn terminal_content_padding(window: &Window) -> TerminalPadding {
     // Keep terminal ink clear of pane edges without changing configured cell fitting.
     TerminalPadding::uniform(f32::from(window.rem_size()) * 0.25)
@@ -3995,13 +2556,6 @@ pub fn surface_bounds(rect: SurfaceRect) -> Bounds<Pixels> {
         point(px(rect.min_x), px(rect.min_y)),
         size(px(rect.width()), px(rect.height())),
     )
-}
-
-const fn pane_split_direction(direction: SplitDirection) -> PaneSplitDirection {
-    match direction {
-        SplitDirection::Right => PaneSplitDirection::Right,
-        SplitDirection::Down => PaneSplitDirection::Down,
-    }
 }
 
 const fn pane_progress(progress: bootty_mux::workspace::TerminalProgress) -> PaneProgress {
@@ -4019,32 +2573,8 @@ const fn pane_progress(progress: bootty_mux::workspace::TerminalProgress) -> Pan
     }
 }
 
-fn expanded_divider_hit_rect(rect: SurfaceRect, direction: SplitDirection) -> SurfaceRect {
-    const MIN_GRAB: f32 = 8.0;
-    match direction {
-        SplitDirection::Right => {
-            let width = rect.width().max(MIN_GRAB);
-            let inset = (width - rect.width()) / 2.0;
-            SurfaceRect {
-                min_x: rect.min_x - inset,
-                max_x: rect.max_x + inset,
-                ..rect
-            }
-        }
-        SplitDirection::Down => {
-            let height = rect.height().max(MIN_GRAB);
-            let inset = (height - rect.height()) / 2.0;
-            SurfaceRect {
-                min_y: rect.min_y - inset,
-                max_y: rect.max_y + inset,
-                ..rect
-            }
-        }
-    }
-}
-
 impl GpuiWorkspace {
-    fn prepare_frame_metrics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn prepare_frame_metrics(&mut self, window: &mut Window) {
         if window.is_window_active() {
             crate::window::macos_sync_fullscreen_presentation(window.is_simple_fullscreen().then(
                 || {
@@ -4063,8 +2593,6 @@ impl GpuiWorkspace {
                 terminal_cell_metrics(&self.terminal_text_contract.config, window);
             self.terminal_cell = self.terminal_base_cell;
         }
-
-        self.sync_agents(cx);
     }
 
     fn prepare_frame_state(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4085,7 +2613,6 @@ impl GpuiWorkspace {
         {
             self.advance_frame(window, cx);
         }
-        crate::agent_cursor::sync_pending(cx);
         self.sync_key_bindings(window, cx);
         let active_appearance_variant = self
             .state
@@ -4105,8 +2632,7 @@ impl GpuiWorkspace {
         }
     }
 
-    fn decorate_dock_chrome(&self, chrome_snapshot: &mut ChromeSnapshot, cx: &Context<Self>) {
-        self.decorate_native_tabs(chrome_snapshot, cx);
+    fn decorate_dock_chrome(&self, chrome_snapshot: &mut ChromeSnapshot) {
         if self.tools.is_some() {
             let config = self.state.config();
             chrome_snapshot.layout.top_inset = self.state.window_chrome_facts().top_inset(
@@ -4125,18 +2651,10 @@ impl GpuiWorkspace {
     ) -> ChromeSnapshot {
         let viewport = self.workspace_bounds.size;
         let viewport_height: f32 = viewport.height.into();
-        let usage_visible = self.state.config().chrome.sidebar
-            && self
-                .state
-                .config()
-                .sidebar
-                .modules
-                .iter()
-                .any(|module| module == "usage");
         self.launch
             .native_chrome
             .borrow_mut()
-            .refresh(Instant::now(), usage_visible);
+            .refresh(Instant::now());
         let projection = chrome_frame::prepare(
             &self.state,
             &mut self.launch.native_chrome.borrow_mut(),
@@ -4159,21 +2677,7 @@ impl GpuiWorkspace {
             viewport_height,
         );
         self.last_maintenance_chrome = Some(chrome_snapshot.clone());
-        self.sync_conversation_context(&chrome_snapshot, cx);
-        if let Some(tools) = &self.tools {
-            let conversation = self
-                .native_conversation_view(cx)
-                .filter(|_| self.new_session_surface(cx).is_none());
-            tools.update(cx, |tools, cx| {
-                tools.set_conversation(conversation.clone(), cx);
-            });
-            tools
-                .read(cx)
-                .titlebar
-                .clone()
-                .update(cx, |bar, cx| bar.set_conversation(conversation, cx));
-        }
-        self.decorate_dock_chrome(&mut chrome_snapshot, cx);
+        self.decorate_dock_chrome(&mut chrome_snapshot);
         if self.new_session_surface(cx).is_some() {
             if let Some(sidebar) = &mut chrome_snapshot.sidebar {
                 for row in &mut sidebar.rows {
@@ -4226,10 +2730,7 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.selected_mux_pane_is_native()
-            || window.has_active_dialog(cx)
-            || self.state.modal_dialog().is_some()
-        {
+        if window.has_active_dialog(cx) || self.state.modal_dialog().is_some() {
             return;
         }
         if self
@@ -4287,7 +2788,7 @@ impl GpuiWorkspace {
             .flatten()
             .map(|bar| {
                 bar.on_close_window(cx.listener(|this, _, window, cx| {
-                    this.request_document_exit(false, window, cx);
+                    this.request_exit(false, window, cx);
                 }))
             });
         div()
@@ -4382,14 +2883,13 @@ impl GpuiWorkspace {
 
 impl Render for GpuiWorkspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.prepare_frame_metrics(window, cx);
+        self.prepare_frame_metrics(window);
         self.prepare_frame_state(window, cx);
         let config_revision = self.state.config_revision();
         let settings_changed = self.poll_settings_runtime(cx);
         let chrome_snapshot = self.prepare_chrome_frame(window, cx);
         let docked_terminals = self.tools.is_some();
         let colors = Colors::from_state(&self.state);
-        self.sync_browser_configuration(window, cx);
         self.sync_settings_window(settings_changed, config_revision, cx);
         self.sync_frame_overlays(colors, window, cx);
         let terminal_area = terminal_area(&chrome_snapshot, docked_terminals);
@@ -4401,25 +2901,10 @@ impl Render for GpuiWorkspace {
             self.pending_window_move = false;
             window.start_window_move();
         }
-        if let Some(target) = self.sidebar_requests.side_chat.take() {
-            self.start_side_chat(&target, window, cx);
-        }
-        if let Some(tools) = &self.tools {
-            let browser_visible = (self.state.dialog_projection().is_none()
-                || self.state.surface_agent_form_request_id().is_some())
-                && !window.has_active_dialog(cx)
-                && !window.has_active_sheet(cx)
-                && !window.has_active_prompt()
-                && !gpui_kit::base::GlobalState::is_in_deferred_context(cx)
-                && !cx.has_active_drag();
-            tools.update(cx, |tools, cx| {
-                tools.set_browser_visible(browser_visible, cx);
-            });
-        }
         let terminal_surface = if let Some(dock) = self.tools.clone() {
             self.docked_terminal_surface(dock, window, terminal_area, colors, cx)
         } else {
-            self.terminal_surface(window, terminal_area, colors, cx)
+            self.terminal_surface(terminal_area, cx)
         };
         let workspace = self.workspace_frame(terminal_surface, terminal_area, colors, window, cx);
 
@@ -4463,37 +2948,6 @@ const fn gpui_cursor(icon: crate::state::CursorIcon) -> CursorStyle {
         // faithful neutral fallback rather than guessing a different interaction state.
         _ => CursorStyle::Arrow,
     }
-}
-
-/// Browser data follows the process identity, independently of config overrides.
-pub fn browser_profile_directory() -> std::path::PathBuf {
-    use bootty_config::identity::ApplicationIdentity;
-    let identity = ApplicationIdentity::for_process();
-    #[cfg(target_os = "windows")]
-    let state = {
-        let local = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from);
-        let roaming = std::env::var_os("APPDATA").map(std::path::PathBuf::from);
-        bootty_config::identity::windows_daemon_state_path(
-            identity,
-            None,
-            local.as_deref(),
-            roaming.as_deref(),
-        )
-    };
-    #[cfg(not(target_os = "windows"))]
-    let state = {
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        let xdg = std::env::var_os("XDG_STATE_HOME").map(std::path::PathBuf::from);
-        bootty_config::identity::unix_daemon_state_path(
-            identity,
-            None,
-            xdg.as_deref(),
-            home.as_deref(),
-        )
-    };
-    state
-        .unwrap_or_else(|| identity.default_config_path())
-        .with_file_name("browser")
 }
 
 fn apply_ui_font_effect(effect: UiFontEffect, cx: &mut App) {

@@ -1,7 +1,4 @@
-use bootty_config::config::{
-    MultiplexerBackendConfig, MultiplexerConfig, RemoteConfig, SshRemoteConfig, WslDistribution,
-    WslRemoteConfig,
-};
+use bootty_config::config::{RemoteConfig, SshRemoteConfig, WslDistribution, WslRemoteConfig};
 use pretty_assertions::assert_eq;
 use proptest::prelude::*;
 use rstest::rstest;
@@ -19,27 +16,6 @@ fn host_target_round_trips_without_changing_the_wire_shape(#[case] value: serde_
 #[case(serde_json::json!({"distribution":"Ubuntu\nother"}))]
 fn malformed_or_ambiguous_hosts_are_rejected(#[case] value: serde_json::Value) {
     assert!(serde_json::from_value::<RemoteConfig>(value).is_err());
-}
-#[rstest]
-#[case(MultiplexerBackendConfig::Native, false)]
-#[case(MultiplexerBackendConfig::Herdr, false)]
-#[case(MultiplexerBackendConfig::Rmux, true)]
-#[case(MultiplexerBackendConfig::Tmux, true)]
-fn wsl_requires_a_linux_client_backend(
-    #[case] backend: MultiplexerBackendConfig,
-    #[case] supported: bool,
-) {
-    let config = MultiplexerConfig {
-        backend,
-        remote: Some(
-            WslRemoteConfig {
-                distribution: WslDistribution::new("Ubuntu").unwrap(),
-            }
-            .into(),
-        ),
-        ..Default::default()
-    };
-    assert_eq!(config.validate_remote().is_ok(), supported);
 }
 #[rstest]
 fn ssh_and_wsl_can_use_the_same_name_without_sharing_identity() {

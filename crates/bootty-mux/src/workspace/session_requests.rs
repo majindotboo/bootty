@@ -7,22 +7,14 @@ use crate::{
     command::MuxCommand,
     controller::{MuxCommandError, SpaceId},
     executor::preflight_binding_command,
-    provider::PaneTopology,
     repository::{BindingMembershipMutation, WorkspacePersistenceError},
     snapshot::{MuxPaneAnchor, MuxSession},
 };
 
 /// The longest session name a caller may choose, in bytes.
 pub use crate::session_names::SESSION_NAME_MAX_BYTES;
-/// The most argv elements a caller may pass for a new session's first pane.
+/// Limit: bound command admission to 64 argv elements; raise with a product need for larger launches.
 pub const SESSION_ARGV_MAX_ELEMENTS: usize = 64;
-/// The most argv bytes a caller may pass, counting one terminator per element.
-///
-/// Deliberate limit: tmux carries a whole client command, the create's stamps included, in one
-/// message of about 16 KiB. Raise this only with a launch path that tmux does not bound that way,
-/// such as handing the pane a file to run.
-pub const SESSION_ARGV_MAX_BYTES: usize = 12 * 1024;
-
 #[derive(Clone, Copy)]
 pub struct SavedSessionMetadata<'a> {
     pub identity: &'a str,
@@ -41,7 +33,6 @@ pub struct StartingSession {
     pane_id: String,
     window_id: String,
     created_session: bool,
-    pane_ids: Vec<String>,
 }
 
 impl StartingSession {
@@ -78,13 +69,9 @@ pub enum SessionRequestError {
     Invalid(String),
     /// A session on the binding's server already has the requested name.
     NameTaken(String),
-    /// The binding's backend cannot do what was asked.
-    Unsupported(String),
     /// The Space, the session, or the binding's backend is not available.
     Unavailable(String),
-    /// A prior durable operation must reconcile before this saved task can reopen.
-    Pending,
-    /// The membership journal could not be written.
+    /// Saved membership could not be written.
     Persistence(WorkspacePersistenceError),
 }
 
@@ -94,13 +81,13 @@ impl From<WorkspacePersistenceError> for SessionRequestError {
     }
 }
 
-/// A request ready to submit: the backend command and the membership it journaled.
+/// A request ready to submit: the backend command and its prepared membership.
 pub type PreparedSessionRequest = (MuxCommand, Option<BindingMembershipMutation>);
 
 impl WorkspaceRuntime {
     /// Prepare a literal command in a new tab of an existing held session.
     /// # Errors
-    /// Rejects invalid cwd/argv, foreign sessions and unsupported backends before mutation.
+    /// Rejects invalid cwd/argv, foreign sessions before mutation.
     pub fn begin_tab_create(
         &self,
         scope: SpaceId,
@@ -121,9 +108,7 @@ impl WorkspaceRuntime {
         }
         if let Some(cwd) = cwd {
             validate_cwd(cwd)?;
-            if binding.backend_policy.panes.topology == PaneTopology::ProcessLocal
-                && !Path::new(cwd).is_dir()
-            {
+            if !Path::new(cwd).is_dir() {
                 return Err(SessionRequestError::Invalid(format!(
                     "cwd {cwd:?} is not a directory"
                 )));
@@ -140,7 +125,7 @@ impl WorkspaceRuntime {
 
     /// Prepare a literal command in a new pane of an exact held terminal session.
     /// # Errors
-    /// Rejects foreign panes, invalid cwd/argv and unsupported backends before mutation.
+    /// Rejects foreign panes, invalid cwd/argv before mutation.
     pub fn begin_pane_create(
         &self,
         scope: SpaceId,
@@ -177,7 +162,7 @@ impl WorkspaceRuntime {
         Ok((command, None))
     }
 
-    /// Validate an explicit session create in the Space at `scope` and journal its membership.
+    /// Validate an explicit session create in the Space at `scope` and prepare its membership.
     ///
     /// The name must be free on the binding's server: the create never adopts or renames an
     /// existing session. The Space claims the session under the caller's name, so generated-name
@@ -225,10 +210,8 @@ impl WorkspaceRuntime {
             .transpose()?;
         let binding = self.live_binding(scope)?;
         // Bootty spawns a native pane itself, and its PTY layer starts in the home directory when
-        // the cwd is not one. tmux and rmux resolve the directory on their own host.
-        if binding.backend_policy.panes.topology == PaneTopology::ProcessLocal
-            && !Path::new(cwd).is_dir()
-        {
+        // the cwd is not one. Validate it before publishing topology.
+        if !Path::new(cwd).is_dir() {
             return Err(SessionRequestError::Invalid(format!(
                 "cwd {cwd:?} is not a directory"
             )));
@@ -266,7 +249,7 @@ impl WorkspaceRuntime {
     }
 
     fn saved_create_metadata(
-        &mut self,
+        &self,
         scope: SpaceId,
         name: &str,
         cwd: &str,
@@ -285,11 +268,6 @@ impl WorkspaceRuntime {
         super::binding_session_names::validate_session_title(title)
             .map_err(|error| SessionRequestError::Invalid(error.to_string()))?;
         let binding = self.live_binding(scope)?;
-        if !binding.tracks_session_membership() {
-            return Err(SessionRequestError::Unsupported(
-                "this backend cannot create saved session identities".to_owned(),
-            ));
-        }
         let saved = binding.sessions.get(identity).cloned();
         if self.all_bindings().any(|binding| {
             (binding.scope != scope && binding.sessions.contains(identity))
@@ -305,11 +283,6 @@ impl WorkspaceRuntime {
             ));
         }
         if let Some(saved) = &saved {
-            if saved.state.deleted {
-                return Err(SessionRequestError::Unavailable(
-                    "restore the deleted session before retrying it".to_owned(),
-                ));
-            }
             if saved.cwd != cwd {
                 return Err(SessionRequestError::Invalid(
                     "retry must use the saved project directory".to_owned(),
@@ -318,22 +291,6 @@ impl WorkspaceRuntime {
             if saved.state.projectless != projectless {
                 return Err(SessionRequestError::Invalid(
                     "retry must keep the saved project assignment".into(),
-                ));
-            }
-        }
-        let scopes = self
-            .all_bindings()
-            .map(|binding| binding.scope)
-            .collect::<Vec<_>>();
-        for pending_scope in scopes {
-            if self
-                .repository
-                .pending_binding_membership_mutations(pending_scope)?
-                .iter()
-                .any(|operation| operation.mutation().identity() == identity)
-            {
-                return Err(SessionRequestError::Unavailable(
-                    "this saved identity already has a pending operation".to_owned(),
                 ));
             }
         }
@@ -363,7 +320,7 @@ impl WorkspaceRuntime {
         let binding = self.binding_mut(scope).ok_or_else(|| {
             SessionRequestError::Unavailable("the target Space was closed".into())
         })?;
-        if binding.membership_completion_is_immediate() {
+        {
             // Native topology outlives a window; inspect it even before that window's first frame.
             let config = binding.multiplexer.clone();
             if let Some(error) = binding
@@ -374,31 +331,12 @@ impl WorkspaceRuntime {
                 return Err(SessionRequestError::Unavailable(error));
             }
         }
-        let pending = self
-            .repository
-            .pending_binding_membership_mutations(scope)?;
         let binding = self.live_binding(scope)?;
-        if !binding.tracks_session_membership() {
-            return Err(SessionRequestError::Unsupported(
-                "this backend cannot resolve saved session identities".to_owned(),
-            ));
-        }
         let saved = binding.sessions.get(identity).ok_or_else(|| {
             SessionRequestError::Unavailable(
                 "this Space does not hold the saved session".to_owned(),
             )
         })?;
-        if saved.state.deleted {
-            return Err(SessionRequestError::Unavailable(
-                "restore the deleted session before opening it".to_owned(),
-            ));
-        }
-        if pending
-            .iter()
-            .any(|operation| operation.mutation().identity() == identity)
-        {
-            return Err(SessionRequestError::Pending);
-        }
         if let Some(session) = binding.session_attachment(identity) {
             let window = session
                 .windows
@@ -434,17 +372,8 @@ impl WorkspaceRuntime {
                 },
             );
         };
-        validate_restore_snapshot(&saved_snapshot, binding.backend_policy.panes.topology)?;
-        let mut snapshot = (*saved_snapshot).clone();
-        // Native/rmux readers seed local history. tmux's copy mode needs rows on its owner.
-        if binding.backend_policy.panes.topology != crate::provider::PaneTopology::Attach {
-            for window in &mut snapshot.windows {
-                for pane in &mut window.panes {
-                    pane.text.clear();
-                    pane.omitted_lines = 0;
-                }
-            }
-        }
+        validate_restore_snapshot(&saved_snapshot)?;
+        let snapshot = (*saved_snapshot).clone();
         let command = MuxCommand::RestoreSession {
             session_id: name,
             tag: crate::snapshot::MuxSessionTag {
@@ -488,8 +417,7 @@ impl WorkspaceRuntime {
     }
 
     /// Start the first pane of a session `command` explicitly created (argv or the default shell),
-    /// when Bootty rather than the backend runs that pane. tmux and rmux started it with the
-    /// session. A native pane would start the first time it is shown, so this starts it now,
+    /// before it is first shown. This starts it now,
     /// hidden, in the owner that will later show it. The argv lives only in the command: nothing
     /// replays it.
     pub(super) fn start_session_command(
@@ -537,20 +465,7 @@ impl WorkspaceRuntime {
             })
             .map(|window| window.id.clone())
             .ok_or_else(|| MuxCommandError::Failed("created pane has no window".to_owned()))?;
-        let pane_ids = if matches!(command, MuxCommand::RestoreSession { .. }) {
-            binding
-                .mux
-                .backend_session_by_id_or_name(&pane.session_id)
-                .into_iter()
-                .flat_map(|session| &session.windows)
-                .flat_map(|window| &window.panes)
-                .filter_map(|pane| pane.pane_id.clone())
-                .collect()
-        } else {
-            pane.pane_id.clone().into_iter().collect()
-        };
         Ok(Some(StartingSession {
-            pane_ids,
             window_id,
             created_session: matches!(
                 command,
@@ -578,20 +493,8 @@ impl WorkspaceRuntime {
                 starting.session_id
             ))));
         }
-        for id in &starting.pane_ids {
-            let Some(runtime) = self.space_terminal_runtime(starting.scope, id) else {
-                return Poll::Ready(Err(MuxCommandError::Failed(format!(
-                    "pane {id} closed before it started"
-                ))));
-            };
-            match runtime.started() {
-                Ok(true) => {}
-                Ok(false) => return Poll::Pending,
-                Err(error) => {
-                    return Poll::Ready(Err(MuxCommandError::Failed(format!("{error:#}"))));
-                }
-            }
-        }
+        // The server prepares real processes before publishing their topology. Rendering
+        // attachment readiness cannot change the outcome of that observed launch.
         Poll::Ready(Ok(()))
     }
 
@@ -616,8 +519,7 @@ impl WorkspaceRuntime {
         })
     }
 
-    /// The first pane of the session an explicit create made, with its argv, when Bootty rather
-    /// than the backend runs the pane. `None` for any other command or backend.
+    /// The first pane an explicit create made, with its argv. `None` for other commands.
     fn session_command_pane<'command>(
         &self,
         scope: SpaceId,
@@ -643,9 +545,6 @@ impl WorkspaceRuntime {
         let Some(binding) = self.binding(scope) else {
             return Err(MuxCommandError::Stale);
         };
-        if binding.backend_policy.panes.topology != PaneTopology::ProcessLocal {
-            return Ok(None);
-        }
         let pane = binding
             .mux
             .backend_session_by_id_or_name(session_id)
@@ -717,10 +616,6 @@ impl BindingRuntime {
     /// membership, otherwise everything its backend reports.
     #[must_use]
     pub fn member_sessions(&self) -> Vec<&MuxSession> {
-        let reported = self.mux.all_sessions();
-        if !self.tracks_session_membership() {
-            return reported.iter().collect();
-        }
         self.sessions
             .sessions()
             .iter()
@@ -729,21 +624,19 @@ impl BindingRuntime {
     }
 
     fn holds(&self, session: &MuxSession) -> bool {
-        !self.tracks_session_membership()
-            || session
-                .tag
-                .identity
-                .as_deref()
-                .is_some_and(|identity| self.sessions.get(identity).is_some())
+        session
+            .tag
+            .identity
+            .as_deref()
+            .is_some_and(|identity| self.sessions.get(identity).is_some())
     }
 }
 
 fn validate_restore_snapshot(
     snapshot: &crate::session_snapshot::SavedTerminalSession,
-    topology: PaneTopology,
 ) -> Result<(), SessionRequestError> {
     snapshot.validate().map_err(SessionRequestError::Invalid)?;
-    if topology == PaneTopology::ProcessLocal {
+    {
         for pane in snapshot.windows.iter().flat_map(|window| &window.panes) {
             if !Path::new(&pane.cwd).is_dir() {
                 return Err(SessionRequestError::Invalid(format!(
@@ -758,9 +651,6 @@ fn validate_restore_snapshot(
 
 fn preflight(binding: &BindingRuntime, command: &MuxCommand) -> Result<(), SessionRequestError> {
     preflight_binding_command(binding, command).map_err(|error| match error {
-        MuxCommandError::Unsupported => SessionRequestError::Unsupported(
-            "this Space's backend does not support this session operation".to_owned(),
-        ),
         MuxCommandError::Failed(message) => SessionRequestError::Unavailable(message),
         error => SessionRequestError::Unavailable(error.to_string()),
     })
@@ -780,16 +670,6 @@ fn validate_session_name(name: &str) -> Result<(), SessionRequestError> {
     if name.chars().any(char::is_control) {
         return invalid(format!(
             "session name {name:?} contains a control character"
-        ));
-    }
-    // tmux and rmux rewrite `:` and `.` and escape `\`; tmux expands `#` formats in a name.
-    if let Some(character) = name.chars().find(|c| matches!(c, ':' | '.' | '\\' | '#')) {
-        return invalid(format!("session name {name:?} contains {character:?}"));
-    }
-    // `-` reads as a flag, and tmux targets read `$`, `@` and `%` as ids and `=` as exact-match.
-    if name.starts_with(['-', '$', '@', '%', '=']) {
-        return invalid(format!(
-            "session name {name:?} cannot start with '-', '$', '@', '%' or '='"
         ));
     }
     Ok(())
@@ -818,14 +698,6 @@ fn validate_argv(argv: &[String]) -> Result<(), SessionRequestError> {
     }
     if argv.iter().any(|argument| argument.contains('\0')) {
         return invalid("argv elements cannot contain NUL".to_owned());
-    }
-    let bytes = argv.iter().fold(0_usize, |total, argument| {
-        total.saturating_add(argument.len()).saturating_add(1)
-    });
-    if bytes > SESSION_ARGV_MAX_BYTES {
-        return invalid(format!(
-            "argv is {bytes} bytes; the limit is {SESSION_ARGV_MAX_BYTES}"
-        ));
     }
     Ok(())
 }

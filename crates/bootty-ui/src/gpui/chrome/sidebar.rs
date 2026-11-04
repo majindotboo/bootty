@@ -1,5 +1,3 @@
-use num_traits::ToPrimitive as _;
-
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use std::{
     cell::{Cell, RefCell},
@@ -8,7 +6,7 @@ use std::{
 };
 
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Side, Sizable as _,
+    ActiveTheme as _, Side, Sizable as _,
     input::{Input, InputState},
     menu::{ContextMenuExt, DropdownMenu as _, PopupMenuItem},
     scroll::ScrollableElement as _,
@@ -22,10 +20,10 @@ use gpui_kit::{
 };
 
 use super::{
-    ChromeIntent, ChromeLayout, ChromePalette, Confirmation, ContextMenu, GpuiChrome, MenuRow,
-    Rgba, SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarPosition, SidebarRow,
+    ChromeIntent, ChromeLayout, ChromePalette, ContextMenu, GpuiChrome, MenuRow, Rgba,
+    SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarPosition, SidebarRow,
     SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceKey, SpaceSnapshot, SpaceTransition,
-    TaskView, TitlebarSnapshot, UsageMeterSnapshot, color, space_switcher,
+    TitlebarSnapshot, color, space_switcher,
 };
 use crate::gpui::theme::{mix, readable_color};
 
@@ -117,34 +115,14 @@ impl Render for DraggedSidebarPreview {
 
 pub(super) type SidebarRowBounds = Rc<RefCell<Vec<(SessionTarget, Bounds<Pixels>)>>>;
 
-/// Settled sessions the shelf shows before Show more.
-const SETTLED_PAGE: usize = 10;
-
-/// How much of the settled shelf shows; whether it is open is saved in the configuration.
-#[derive(Clone, Copy)]
-pub(super) struct SettledShelf {
-    pub shown: usize,
-}
-impl Default for SettledShelf {
-    fn default() -> Self {
-        Self {
-            shown: SETTLED_PAGE,
-        }
-    }
-}
-
 /// The sidebar's own state in the chrome: search, filters, selection, renaming and scrolling.
 #[derive(Clone, Copy)]
 pub(super) struct SidebarView<'a> {
     pub search: &'a Entity<InputState>,
     pub project_filter: Option<&'a str>,
-    pub task_view: TaskView,
-    pub attention_only: bool,
-    pub settled_shelf: SettledShelf,
     pub drag_order: Option<&'a (String, Option<String>)>,
     pub rename: Option<&'a super::view::SidebarRename>,
     pub selection: &'a [String],
-    pub conversation_matches: &'a [(String, String)],
     pub row_bounds: &'a SidebarRowBounds,
     pub scroll: &'a gpui_kit::ScrollHandle,
     pub reveal_current: &'a Rc<Cell<bool>>,
@@ -194,15 +172,12 @@ pub(super) fn render(
         .track_scroll(scroll)
         .child(rows.render_content(width, docked).flex_none().min_h_full())
         .vertical_scrollbar(scroll);
-    let status_footer = render_usage(snapshot, colors);
-
     let resize_handle = resize_handle(position, cx);
 
     let header = sidebar_header(snapshot, title, layout, header_height, docked, colors, cx);
     let component_footer = v_flex()
         .w(px(width))
         .when(docked, gpui_kit::Styled::w_full)
-        .when_some(status_footer, ParentElement::child)
         .child(space_switcher::render(chrome, snapshot.tint, cx));
     let sidebar = v_flex()
         .id("bootty-gpui-sidebar")
@@ -233,7 +208,7 @@ pub(super) fn render(
         .into_any_element()
 }
 
-/// The rows the sidebar lists for its search, filters and task view.
+/// The rows the sidebar lists for its search and filters.
 fn sidebar_rows(
     snapshot: &SidebarSnapshot,
     view: SidebarView<'_>,
@@ -243,13 +218,9 @@ fn sidebar_rows(
     let SidebarView {
         search,
         project_filter,
-        task_view,
-        attention_only,
-        settled_shelf,
         drag_order,
         rename,
         selection,
-        conversation_matches,
         row_bounds: sidebar_row_bounds,
         scroll,
         reveal_current,
@@ -266,32 +237,23 @@ fn sidebar_rows(
     } = chrome;
     let width = layout.effective_sidebar_width();
     let query = search.read(cx).value().trim().to_lowercase();
-    let words = Search {
-        query: &query,
-        conversations: conversation_matches,
-    };
-    let views = task_view_counts(snapshot, &words, project_filter);
+    let words = Search { query: &query };
     SidebarRows {
-        snapshot: task_view_snapshot(snapshot, &words, project_filter, task_view),
+        snapshot: filtered_snapshot(snapshot, &words, project_filter),
         search: search.clone(),
         project_filter: project_filter.map(str::to_owned),
         projects: project_paths(&snapshot.rows),
         searching: !query.is_empty(),
-        attention_only,
-        settled_shelf,
         drag_order: drag_order.cloned(),
         rename: rename.map(|rename| (rename.task.identity.clone(), rename.input.clone())),
         selection: selection.to_vec(),
         visible_sessions: Rc::default(),
-        conversation_matches: words.found().to_vec(),
         shown_anchors: Rc::default(),
         scope: spaces
             .iter()
             .find(|space| space.active)
             .map(|space| space.key),
         width,
-        task_view,
-        views,
         pointer_hovered_session: pointer_hovered_session.cloned(),
         colors,
         radius: cx.theme().radius_tokens().md,
@@ -311,65 +273,15 @@ fn sidebar_rows(
 /// conversations mention them, by identity.
 struct Search<'a> {
     query: &'a str,
-    conversations: &'a [(String, String)],
 }
 
-impl Search<'_> {
-    /// The conversation matches that apply: none once the search is cleared.
-    const fn found(&self) -> &[(String, String)] {
-        if self.query.is_empty() {
-            &[]
-        } else {
-            self.conversations
-        }
-    }
-
-    fn in_conversation(&self, row: &SidebarRow) -> bool {
-        row.task.as_ref().is_some_and(|task| {
-            self.conversations
-                .iter()
-                .any(|(identity, _)| *identity == task.identity)
-        })
-    }
-}
-
-fn task_view_counts(
+fn filtered_snapshot(
     snapshot: &SidebarSnapshot,
     search: &Search<'_>,
     project_filter: Option<&str>,
-) -> [(TaskView, usize); 4] {
-    let view_rows = filtered_rows(
-        &snapshot.rows,
-        search,
-        project_filter,
-        None,
-        snapshot.now_utc,
-    );
-    TASK_VIEWS.map(|view| {
-        (
-            view,
-            view_rows
-                .iter()
-                .filter(|row| row.kind.is_session() && row_view(row, snapshot.now_utc) == view)
-                .count(),
-        )
-    })
-}
-
-fn task_view_snapshot(
-    snapshot: &SidebarSnapshot,
-    search: &Search<'_>,
-    project_filter: Option<&str>,
-    task_view: TaskView,
 ) -> SidebarSnapshot {
     SidebarSnapshot {
-        rows: filtered_rows(
-            &snapshot.rows,
-            search,
-            project_filter,
-            Some(task_view),
-            snapshot.now_utc,
-        ),
+        rows: filtered_rows(&snapshot.rows, search, project_filter),
         ..snapshot.clone()
     }
 }
@@ -378,48 +290,23 @@ fn filtered_rows(
     rows: &[SidebarRow],
     search: &Search<'_>,
     project_filter: Option<&str>,
-    task_view: Option<TaskView>,
-    now: i64,
 ) -> Vec<SidebarRow> {
     let query = search.query;
-    if query.is_empty() && project_filter.is_none() && task_view.is_none() {
-        return rows.to_vec();
-    }
     let mut filtered = Vec::new();
     let mut group = None;
     let mut group_added = false;
-    let mut parent_view = TaskView::Active;
     for row in rows {
         if matches!(row.kind, SidebarRowKind::Group) {
             group = Some(row);
             group_added = false;
-            parent_view = TaskView::Active;
-            continue;
-        }
-        if row.kind.is_session() {
-            parent_view = row_view(row, now);
-        }
-        let view = if matches!(
-            row.kind,
-            SidebarRowKind::Detail | SidebarRowKind::Progress { .. } | SidebarRowKind::Ports(_)
-        ) {
-            parent_view
-        } else {
-            row_view(row, now)
-        };
-        if task_view.is_some_and(|selected| {
-            selected != view && !(selected == TaskView::Active && view == TaskView::Settled)
-        }) {
             continue;
         }
         let matches = std::iter::once(row.text.as_str())
             .chain(row.project.iter().map(|project| project.name.as_str()))
             .chain(group.iter().map(|group| group.text.as_str()))
             .chain(row.branch.as_deref())
-            .chain(row.agents.iter().map(|agent| agent.description.as_str()))
             .chain(row.task.iter().map(|task| task.name.as_str()))
-            .any(|text| text.to_lowercase().contains(query))
-            || (!query.is_empty() && search.in_conversation(row));
+            .any(|text| text.to_lowercase().contains(query));
         if matches && project_filter.is_none_or(|path| row.project_path.as_deref() == Some(path)) {
             if !group_added && let Some(group) = group {
                 filtered.push(group.clone());
@@ -428,30 +315,27 @@ fn filtered_rows(
             filtered.push(row.clone());
         }
     }
-    if task_view.is_none_or(|view| view == TaskView::Active) {
-        for row in rows
+    for row in rows
+        .iter()
+        .filter(|row| matches!(row.kind, SidebarRowKind::Group) && row.project_path.is_some())
+    {
+        if !rows
             .iter()
-            .filter(|row| matches!(row.kind, SidebarRowKind::Group) && row.project_path.is_some())
+            .any(|session| session.kind.is_session() && session.project_path == row.project_path)
+            && row.text.to_lowercase().contains(query)
+            && project_filter.is_none_or(|path| row.project_path.as_deref() == Some(path))
         {
-            if !rows.iter().any(|session| {
-                session.kind.is_session() && session.project_path == row.project_path
-            }) && row.text.to_lowercase().contains(query)
-                && project_filter.is_none_or(|path| row.project_path.as_deref() == Some(path))
-            {
-                filtered.push(row.clone());
-            }
+            filtered.push(row.clone());
         }
     }
     filtered
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-/// Sections a person chooses. Status (working, waiting for an answer) shows on the row, so a
-/// row and its numbered shortcut stay put while its agent works.
+/// Sections a person chooses, so a row and its numbered shortcut stay put while it runs.
 enum SessionSection {
     Pinned,
     Active,
-    Settled,
 }
 
 #[derive(Clone)]
@@ -461,8 +345,6 @@ struct SidebarRows {
     project_filter: Option<String>,
     projects: Vec<ProjectChoice>,
     searching: bool,
-    attention_only: bool,
-    settled_shelf: SettledShelf,
     drag_order: Option<(String, Option<String>)>,
     /// The saved identity whose title is being edited in place, and its field.
     rename: Option<(String, Entity<InputState>)>,
@@ -472,13 +354,9 @@ struct SidebarRows {
     selection: Vec<String>,
     /// Saved session rows in the order this render shows them, for choosing a range.
     visible_sessions: Rc<std::cell::RefCell<Vec<String>>>,
-    /// While searching, saved sessions whose conversations mention the search, with the line.
-    conversation_matches: Vec<(String, String)>,
     /// Session reorder anchors in the order this render shows them.
     shown_anchors: Rc<std::cell::RefCell<Vec<String>>>,
     width: f32,
-    task_view: TaskView,
-    views: [(TaskView, usize); 4],
     pointer_hovered_session: Option<SessionTarget>,
     colors: ChromePalette,
     radius: Pixels,
@@ -521,9 +399,7 @@ impl SidebarRows {
                         .gap_2()
                         .text_sm()
                         .text_color(color(colors.muted))
-                        .child(if self.attention_only {
-                            "No sessions need attention"
-                        } else if self.searching {
+                        .child(if self.searching {
                             "No matching sessions"
                         } else {
                             "No sessions in this view"
@@ -660,7 +536,6 @@ impl SidebarRows {
         let project_rows = self.clone();
         let sort_owner = self.owner.clone();
         let order = self.snapshot.sort_order;
-        let view_rows = self.clone();
         let menu = super::view::popup_focus_context(menu, &self.owner, cx);
         menu.submenu_with_icon(
             Some(Icon::new(I::LayoutDashboard)),
@@ -732,24 +607,6 @@ impl SidebarRows {
                 })
             },
         )
-        .submenu_with_icon(
-            Some(Icon::new(I::ListFilter)),
-            format!(
-                "Show · {}",
-                if self.attention_only {
-                    "Needs attention"
-                } else if self.task_view == TaskView::Active {
-                    "Sessions"
-                } else {
-                    task_view_label(self.task_view)
-                }
-            ),
-            window,
-            cx,
-            move |menu, _, cx| {
-                view_rows.views_menu(super::view::popup_focus_context(menu, &view_rows.owner, cx))
-            },
-        )
     }
 
     fn group_menu(
@@ -806,64 +663,6 @@ impl SidebarRows {
         })
     }
 
-    fn views_menu(
-        &self,
-        menu: gpui_kit::component::menu::PopupMenu,
-    ) -> gpui_kit::component::menu::PopupMenu {
-        let selected = self.task_view;
-        let attention = self.attention_only;
-        let menu = self
-            .views
-            .into_iter()
-            .filter(|(view, _)| *view != TaskView::Settled)
-            .fold(menu.check_side(Side::Right), |menu, (view, count)| {
-                let owner = self.owner.clone();
-                menu.item(
-                    PopupMenuItem::new(if view == TaskView::Active {
-                        format!(
-                            "Sessions ({})",
-                            self.views
-                                .iter()
-                                .filter(|(view, _)| matches!(
-                                    view,
-                                    TaskView::Active | TaskView::Settled
-                                ))
-                                .map(|(_, count)| count)
-                                .sum::<usize>()
-                        )
-                    } else {
-                        format!("{} ({count})", task_view_label(view))
-                    })
-                    .icon(gpui_kit::component::Icon::new(task_view_icon(view)))
-                    .checked(selected == view && !attention)
-                    .on_click(move |_, _, cx| {
-                        _ = owner.update(cx, |chrome, cx| {
-                            chrome.sidebar_task_view = view;
-                            chrome.sidebar_attention_only = false;
-                            chrome.sidebar_reveal_current.set(false);
-                            cx.notify();
-                        });
-                    }),
-                )
-            });
-        let owner = self.owner.clone();
-        menu.separator().item(
-            PopupMenuItem::new("Needs attention")
-                .icon(gpui_kit::component::Icon::new(
-                    gpui_kit::assets::IconName::CircleAlert,
-                ))
-                .checked(attention)
-                .on_click(move |_, _, cx| {
-                    _ = owner.update(cx, |chrome, cx| {
-                        chrome.sidebar_task_view = TaskView::Active;
-                        chrome.sidebar_attention_only = true;
-                        chrome.sidebar_reveal_current.set(false);
-                        cx.notify();
-                    });
-                }),
-        )
-    }
-
     fn presentation_rows(&self) -> Vec<(SidebarRow, SessionSection)> {
         let mut group = None;
         let mut sessions = Vec::new();
@@ -871,7 +670,7 @@ impl SidebarRows {
             if matches!(row.kind, SidebarRowKind::Group) {
                 group = Some(row.clone());
             }
-            if row.kind.is_session() && (!self.attention_only || needs_attention(row)) {
+            if row.kind.is_session() {
                 sessions.push((row.clone(), group.clone()));
             }
         }
@@ -901,12 +700,12 @@ impl SidebarRows {
             sessions.insert(target, dragged);
         }
         // Pinning changes presentation only; membership remains the one manual order owner.
-        sessions.sort_by_key(|(row, _)| self.section(row));
+        sessions.sort_by_key(|(row, _)| row_section(row));
         if self.snapshot.group_by_project {
             let mut group_order = std::collections::BTreeMap::new();
             for (row, group) in &sessions {
                 let key = (
-                    self.section(row),
+                    row_section(row),
                     group.as_ref().map(|group| group.key.clone()),
                 );
                 let next = group_order.len();
@@ -914,23 +713,21 @@ impl SidebarRows {
             }
             sessions.sort_by_key(|(row, group)| {
                 let key = (
-                    self.section(row),
+                    row_section(row),
                     group.as_ref().map(|group| group.key.clone()),
                 );
                 group_order.get(&key).copied()
             });
         }
-        self.sort_settled_shelf(&mut sessions);
         let mut result = Vec::new();
         let mut previous_group = None;
         let mut previous_section = None;
         for (row, group) in sessions {
-            let section = self.section(&row);
+            let section = row_section(&row);
             if previous_section != Some(section) {
                 previous_group = None;
             }
             if self.snapshot.group_by_project
-                && section != SessionSection::Settled
                 && let Some(group) = group
                 && previous_group.as_ref() != Some(&group.key)
             {
@@ -938,51 +735,24 @@ impl SidebarRows {
                 let mut group = group;
                 group.key = match section {
                     SessionSection::Pinned => format!("pinned-{}", group.key),
-                    SessionSection::Settled => format!("settled-{}", group.key),
                     SessionSection::Active => group.key,
                 };
                 result.push((group, section));
             }
             previous_section = Some(section);
-            if section == SessionSection::Settled
-                || !self.project_collapsed(row.project_path.as_deref())
+            if !self.project_collapsed(row.project_path.as_deref())
                 || !self.snapshot.group_by_project
             {
                 result.push((row, section));
             }
         }
         self.append_empty_projects(&mut result);
-        let tail = result
-            .iter()
-            .position(|(_, section)| *section == SessionSection::Settled)
-            .unwrap_or(result.len());
-        result.splice(tail..tail, self.unassigned_rows());
+        result.extend(self.unassigned_rows());
         result
     }
 
-    /// The settled shelf has no project headers; most recently active first keeps its ages in
-    /// order. `sessions` are already in section order, so the shelf is their tail.
-    fn sort_settled_shelf(&self, sessions: &mut [(SidebarRow, Option<SidebarRow>)]) {
-        let first_settled = sessions
-            .iter()
-            .position(|(row, _)| self.section(row) == SessionSection::Settled)
-            .unwrap_or(sessions.len());
-        if let Some(settled) = sessions.get_mut(first_settled..) {
-            settled.sort_by_key(|(row, _)| {
-                std::cmp::Reverse(
-                    row.task
-                        .as_ref()
-                        .and_then(|task| task.state.last_activity_at),
-                )
-            });
-        }
-    }
-
     fn append_empty_projects(&self, result: &mut Vec<(SidebarRow, SessionSection)>) {
-        if self.snapshot.group_by_project
-            && self.task_view == TaskView::Active
-            && !self.attention_only
-        {
+        if self.snapshot.group_by_project {
             for group in self.snapshot.rows.iter().filter(|row| {
                 matches!(row.kind, SidebarRowKind::Group) && row.project_path.is_some()
             }) {
@@ -990,11 +760,7 @@ impl SidebarRows {
                     matches!(row.kind, SidebarRowKind::Group)
                         && row.project_path == group.project_path
                 }) {
-                    let tail = result
-                        .iter()
-                        .position(|(_, section)| *section == SessionSection::Settled)
-                        .unwrap_or(result.len());
-                    result.insert(tail, (group.clone(), SessionSection::Active));
+                    result.push((group.clone(), SessionSection::Active));
                 }
             }
         }
@@ -1010,9 +776,6 @@ impl SidebarRows {
     }
 
     fn unassigned_rows(&self) -> Vec<(SidebarRow, SessionSection)> {
-        if self.task_view != TaskView::Active || self.attention_only {
-            return Vec::new();
-        }
         let mut group = None;
         let mut rows = Vec::new();
         for row in &self.snapshot.rows {
@@ -1026,205 +789,37 @@ impl SidebarRows {
         rows
     }
 
-    fn section(&self, row: &SidebarRow) -> SessionSection {
-        if row_is_pinned(row, self.snapshot.now_utc) {
-            SessionSection::Pinned
-        } else if row_view(row, self.snapshot.now_utc) == TaskView::Settled
-            // An approval, question or failure brings a settled session back.
-            && !row.needs_attention
-            && !row
-                .task
-                .as_ref()
-                .is_some_and(|task| task.state.is_overdue(self.snapshot.now_utc))
-        {
-            SessionSection::Settled
-        } else {
-            SessionSection::Active
-        }
-    }
-
     fn render_session_blocks(&self) -> Vec<gpui_kit::AnyElement> {
         let mut blocks = Vec::new();
         let mut previous_section = None;
         let rows = self.presentation_rows();
-        let settled_count = rows
-            .iter()
-            .filter(|(_, section)| *section == SessionSection::Settled)
-            .count();
-        let collapsed = self.snapshot.settled_collapsed;
-        let mut settled_shown = 0_usize;
         for (row, section) in rows {
             if previous_section != Some(section) {
                 let (selector, label) = match section {
                     SessionSection::Pinned => ("sidebar-pinned-section", "Pinned"),
                     SessionSection::Active => ("sidebar-sessions-section", "Sessions"),
-                    SessionSection::Settled => ("sidebar-settled-section", "Settled"),
                 };
-                if section == SessionSection::Settled {
-                    blocks.push(self.settled_header(settled_count));
-                } else {
-                    blocks.push(
-                        div()
-                            .debug_selector(move || selector.to_owned())
-                            .when(section == SessionSection::Settled, Styled::mt_auto)
-                            .px_3()
-                            .py_1()
-                            .text_xs()
-                            .text_color(color(readable_color(
-                                self.snapshot.tint,
-                                self.colors.muted,
-                            )))
-                            .child(label)
-                            .into_any_element(),
-                    );
-                }
+                blocks.push(
+                    div()
+                        .debug_selector(move || selector.to_owned())
+                        .px_3()
+                        .py_1()
+                        .text_xs()
+                        .text_color(color(readable_color(self.snapshot.tint, self.colors.muted)))
+                        .child(label)
+                        .into_any_element(),
+                );
             }
             previous_section = Some(section);
-            if section == SessionSection::Settled {
-                if collapsed || settled_shown >= self.settled_shelf.shown {
-                    continue;
-                }
-                settled_shown = settled_shown.saturating_add(1);
-            }
+
             blocks.push(if row.kind.is_session() {
                 self.session_block(&row)
             } else {
                 self.render_row(&row, false)
             });
         }
-        if !collapsed && settled_count > settled_shown {
-            blocks.push(self.settled_more(settled_count.saturating_sub(settled_shown)));
-        }
+
         blocks
-    }
-
-    /// Shows the next page of the settled shelf.
-    fn settled_more(&self, hidden: usize) -> gpui_kit::AnyElement {
-        let owner = self.owner.clone();
-        let next = hidden.min(SETTLED_PAGE);
-        div()
-            .flex()
-            .px_1()
-            .child(
-                Button::new("sidebar-settled-more")
-                    .debug_selector(move || format!("sidebar-settled-more:{next}"))
-                    .ghost()
-                    .small()
-                    .text_color(color(self.colors.muted))
-                    .label(format!("Show {next} more"))
-                    .on_click(move |_, _, cx| {
-                        _ = owner.update(cx, |this, cx| {
-                            this.sidebar_settled_shelf.shown = this
-                                .sidebar_settled_shelf
-                                .shown
-                                .saturating_add(SETTLED_PAGE);
-                            cx.notify();
-                        });
-                    }),
-            )
-            .into_any_element()
-    }
-
-    fn settled_header(&self, count: usize) -> gpui_kit::AnyElement {
-        let owner = self.owner.clone();
-        // Button content centers in its own width, so a row keeps the heading at the start.
-        div()
-            .flex()
-            .mt_auto()
-            .child(
-                Button::new("sidebar-settled-toggle")
-                    .debug_selector(|| "sidebar-settled-section".into())
-                    .ghost()
-                    .small()
-                    .text_color(color(self.colors.muted))
-                    .child(crate::gpui::icon(
-                        if self.snapshot.settled_collapsed {
-                            "chevron-right"
-                        } else {
-                            "chevron-down"
-                        },
-                        self.icon_size,
-                        color(self.colors.muted),
-                    ))
-                    .label(format!("Settled ({count})"))
-                    .accessibility_label(if self.snapshot.settled_collapsed {
-                        "Expand settled sessions"
-                    } else {
-                        "Collapse settled sessions"
-                    })
-                    .on_click(move |_, _, cx| {
-                        emit_sidebar_command(&owner, "ui.sidebar.toggle_settled", cx);
-                    }),
-            )
-            .into_any_element()
-    }
-
-    /// How long ago a saved session was last active, such as "4d".
-    fn activity_age(&self, row: &SidebarRow) -> Option<String> {
-        row.task
-            .as_ref()
-            .and_then(|task| task.state.last_activity_at)
-            .map(|last| {
-                let seconds = self.snapshot.now_utc.saturating_sub(last).max(0);
-                crate::clock::format_age(std::time::Duration::from_secs(
-                    u64::try_from(seconds).unwrap_or_default(),
-                ))
-            })
-    }
-
-    /// The settled shelf has no project headers, so each row names its branch, or its project
-    /// without one, to tell same-titled sessions apart.
-    fn settled_label(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
-        let age = self.activity_age(row);
-        let context = row
-            .branch
-            .clone()
-            .filter(|branch| !branch.is_empty() && *branch != row.text)
-            .or_else(|| row.project.as_ref().map(|project| project.name.clone()));
-        div()
-            .w_full()
-            .min_w_0()
-            .flex()
-            .items_center()
-            .gap_2()
-            .text_color(color(readable_color(
-                self.background(row),
-                self.colors.muted,
-            )))
-            .child(div().size_4().flex_none().map(|slot| {
-                if let Some(artwork) = row
-                    .project
-                    .as_ref()
-                    .and_then(|project| project.artwork.as_ref())
-                {
-                    slot.child(img(artwork.clone()).size_full())
-                } else {
-                    slot.child(crate::gpui::icon(
-                        "folder",
-                        self.icon_size,
-                        color(self.colors.muted),
-                    ))
-                }
-            }))
-            .child(self.title_or_rename(
-                row,
-                div().flex_1().min_w_0().truncate().child(row.text.clone()),
-            ))
-            .children(context.map(|context| {
-                let key = row.key.clone();
-                div()
-                    .debug_selector(move || format!("sidebar-settled-context-{key}"))
-                    .flex_shrink(1.0)
-                    .min_w_0()
-                    .max_w(gpui_kit::relative(0.4))
-                    .truncate()
-                    .text_xs()
-                    .child(context)
-            }))
-            .children(self.settle_button(row).or_else(|| {
-                age.map(|age| div().flex_none().text_xs().child(age).into_any_element())
-            }))
-            .into_any_element()
     }
 
     fn session_block(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
@@ -1244,7 +839,7 @@ impl SidebarRows {
             .hover(|style| style.bg(color(self.row_background(row, true))))
             .tooltip({
                 let row = row.clone();
-                let age = self.activity_age(&row);
+                let age = None;
                 move |window, cx| session_tooltip(&row, age.clone()).build(window, cx)
             })
             .child(self.render_row(row, true))
@@ -1540,14 +1135,7 @@ impl SidebarRows {
                                 .text_color(color(self.text_color(
                                     row,
                                     if row.kind.is_session() {
-                                        if (self.section(row) == SessionSection::Settled
-                                            || row.kind == SidebarRowKind::DetachedSession)
-                                            && !row.current
-                                        {
-                                            self.colors.muted
-                                        } else {
-                                            snapshot.foreground
-                                        }
+                                        snapshot.foreground
                                     } else if is_group {
                                         if current { row.color } else { row.dim_color }
                                     } else if row.active {
@@ -1586,15 +1174,6 @@ impl SidebarRows {
                 label.children(self.trailing_label(row))
             })
             .into_any_element()
-    }
-
-    /// The line that matched the search in this session's conversation.
-    fn conversation_line(&self, row: &SidebarRow) -> Option<String> {
-        let identity = &row.task.as_ref()?.identity;
-        self.conversation_matches
-            .iter()
-            .find(|(matched, _)| matched == identity)
-            .map(|(_, line)| line.clone())
     }
 
     fn rename_input(&self, row: &SidebarRow) -> Option<&Entity<InputState>> {
@@ -1767,30 +1346,9 @@ impl SidebarRows {
                     .flex()
                     .items_center()
                     .gap_1()
-                    // While searching, a session found by its conversation shows the line.
-                    .when_some(self.conversation_line(row), |line, text| {
-                        line.child(crate::gpui::icon(
-                            "message-square",
-                            self.icon_size * 0.85,
-                            color(self.colors.muted),
-                        ))
-                        .child(
-                            div()
-                                .debug_selector({
-                                    let key = row.key.clone();
-                                    move || format!("sidebar-match-{key}")
-                                })
-                                .min_w_0()
-                                .truncate()
-                                .child(text),
-                        )
-                    })
                     // A session titled with its branch doesn't repeat it here.
                     .when_some(
-                        row.branch
-                            .as_ref()
-                            .filter(|branch| **branch != row.text)
-                            .filter(|_| self.conversation_line(row).is_none()),
+                        row.branch.as_ref().filter(|branch| **branch != row.text),
                         |branch, name| {
                             branch
                                 .child(crate::gpui::icon(
@@ -1831,107 +1389,16 @@ impl SidebarRows {
                         )
                     }),
             )
-            .child(self.agent_stack(row))
-            .into_any_element()
-    }
-
-    fn agent_stack(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
-        // Bound horizontal space; the tooltip retains every observed agent when the stack overflows.
-        let visible = row.agents.len().min(4);
-        let width = visible
-            .saturating_sub(1)
-            .to_f32()
-            .unwrap_or_default()
-            .mul_add(0.75, 1.125);
-        let description = row
-            .agents
-            .iter()
-            .map(|agent| agent.description.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        div()
-            .id(SharedString::from(format!("sidebar-agents-{}", row.key)))
-            .debug_selector({
-                let key = row.key.clone();
-                move || format!("sidebar-agents-{key}")
-            })
-            .flex_none()
-            .relative()
-            .h(gpui_kit::rems(1.125))
-            .w(gpui_kit::rems(if visible == 0 { 0.0 } else { width }))
-            .tooltip(move |window, cx| Tooltip::new(description.clone()).build(window, cx))
-            .children(
-                row.agents
-                    .iter()
-                    .take(visible)
-                    .enumerate()
-                    .map(|(index, agent)| {
-                        div()
-                            .id(SharedString::from(format!("sidebar-agent-{}", agent.key)))
-                            .debug_selector({
-                                let key = agent.key.clone();
-                                move || format!("sidebar-agent-{key}")
-                            })
-                            .absolute()
-                            .left(gpui_kit::rems(index.to_f32().unwrap_or_default() * 0.75))
-                            .size(gpui_kit::rems(1.125))
-                            .rounded_full()
-                            .bg(color(self.background(row)))
-                            .border_1()
-                            .border_color(color(self.background(row)))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(crate::gpui::icon(
-                                &agent.icon,
-                                self.icon_size,
-                                color(self.text_color(
-                                    row,
-                                    if self.section(row) == SessionSection::Settled {
-                                        self.colors.muted
-                                    } else {
-                                        self.snapshot.foreground
-                                    },
-                                )),
-                            ))
-                    }),
-            )
             .into_any_element()
     }
 
     fn trailing_label(&self, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
-        if let Some(button) = self.settle_button(row) {
-            return Some(button);
-        }
-        let lifecycle =
-            row.task.as_ref().and_then(|task| {
-                if task.state.is_overdue(self.snapshot.now_utc) {
-                    Some(("Woke", "alarm-clock", self.colors.accent))
-                } else {
-                    match task.state.view(self.snapshot.now_utc) {
-                        TaskView::Active => (row.kind == SidebarRowKind::DetachedSession)
-                            .then_some(("Closed", "power-off", self.colors.muted)),
-                        TaskView::Settled => Some(("Settled", "check", self.colors.muted)),
-                        TaskView::Archived => Some(("Archived", "archive", self.colors.muted)),
-                        TaskView::Snoozed => Some(("Snoozed", "clock", self.colors.muted)),
-                        TaskView::Deleted => Some(("Deleted", "trash", self.colors.muted)),
-                    }
-                }
-            });
-        let (trailing, icon, tone) = if let Some((text, icon, tone)) = lifecycle
-            && (row.trailing.is_none() || row.trailing.as_deref() == Some("Finished"))
-        {
-            (text.to_owned(), Some(icon), tone)
-        } else if let Some(text) = &row.trailing {
-            (
-                text.clone(),
-                row.trailing_icon.as_deref(),
-                row.trailing_color.unwrap_or(self.colors.muted),
-            )
-        } else {
-            // An idle session says how long it has been idle.
-            (self.activity_age(row)?, None, self.colors.muted)
-        };
+        let text = row.trailing.as_ref()?;
+        let (trailing, icon, tone) = (
+            text.clone(),
+            row.trailing_icon.as_deref(),
+            row.trailing_color.unwrap_or(self.colors.muted),
+        );
         let trailing_color = color(readable_color(self.background(row), tone));
         div()
             .debug_selector({
@@ -1947,12 +1414,6 @@ impl SidebarRows {
             .truncate()
             .text_xs()
             .font_weight(FontWeight::MEDIUM)
-            .when(row.working, |element| {
-                element.font_features(gpui_kit::FontFeatures(std::sync::Arc::new(vec![(
-                    "tnum".to_owned(),
-                    1,
-                )])))
-            })
             .text_color(trailing_color)
             .when_some(icon, |element, icon| {
                 element.child(
@@ -1963,137 +1424,16 @@ impl SidebarRows {
                         })
                         .size_3()
                         .flex_none()
-                        .child(if icon == "circle-dashed" {
-                            self.working_indicator(trailing_color)
-                        } else {
-                            crate::gpui::icon(icon, self.icon_size * 0.85, trailing_color)
-                        }),
+                        .child(crate::gpui::icon(
+                            icon,
+                            self.icon_size * 0.85,
+                            trailing_color,
+                        )),
                 )
             })
             .child(div().min_w_0().truncate().child(trailing))
             .into_any_element()
             .into()
-    }
-
-    fn settle_button(&self, row: &SidebarRow) -> Option<gpui_kit::AnyElement> {
-        let task = row.task.as_ref()?;
-        let settled = self.section(row) == SessionSection::Settled;
-        if self.pointer_hovered_session.as_ref() != row.target.as_ref()
-            || (task.state.view(self.snapshot.now_utc) != TaskView::Active
-                && !task.state.is_overdue(self.snapshot.now_utc)
-                && !settled)
-            || row.trailing.as_deref().is_some_and(|status| {
-                status != "Finished"
-                    && !(status == "Woke" && task.state.is_overdue(self.snapshot.now_utc))
-            })
-        {
-            return None;
-        }
-        let label = if settled { "Unsettle" } else { "Settle" };
-        let invocation = saved_state_invocation(
-            task,
-            if settled {
-                "session.activate"
-            } else {
-                "session.settle"
-            },
-            Vec::new(),
-        )?;
-        let owner = self.owner.clone();
-        let foreground = color(self.colors.text);
-        let button = Button::new(SharedString::from(format!("settle-{}", row.key)))
-            .ghost()
-            .xsmall()
-            .p_0()
-            .child(
-                div()
-                    .id("settle-content")
-                    .size_full()
-                    .px_1()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_color(color(self.colors.muted))
-                    .when(!task.pending, |content| {
-                        content.hover(move |style| style.text_color(foreground))
-                    })
-                    .child(
-                        gpui_kit::component::Icon::new(if settled {
-                            gpui_kit::assets::IconName::Undo2
-                        } else {
-                            gpui_kit::assets::IconName::Check
-                        })
-                        .xsmall(),
-                    )
-                    .child(label),
-            )
-            .accessibility_label(format!("{label} {}", row.text))
-            .tooltip(format!("{label} this session"))
-            .disabled(task.pending);
-        Some(super::button::activated_button(
-            div()
-                .flex_none()
-                .debug_selector({
-                    let key = row.key.clone();
-                    move || format!("sidebar-settle-{key}")
-                })
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()),
-            button,
-            move |_, cx| {
-                _ = owner.update(cx, |_, cx| {
-                    cx.emit(ChromeIntent::Command(invocation.clone()));
-                });
-            },
-        ))
-    }
-
-    fn working_indicator(&self, tint: gpui_kit::Hsla) -> gpui_kit::AnyElement {
-        let owner = self.owner.clone();
-        let animate = self.snapshot.animate_working;
-        canvas(
-            |bounds, _, _| bounds,
-            move |bounds, _, window, cx| {
-                if !bounds.intersects(&window.content_mask().bounds) {
-                    return;
-                }
-                let animated = animate && window.is_visible() && !cx.reduce_motion();
-                let phase = if animated {
-                    crate::motion::phase(std::time::Duration::from_secs(1))
-                } else {
-                    0.0
-                };
-                let radius = f32::from(bounds.size.width.min(bounds.size.height)) * 0.4;
-                let center = bounds.center();
-                for dash in 0..8_u8 {
-                    let angle = f32::from(dash)
-                        .mul_add(std::f32::consts::FRAC_PI_4, phase * std::f32::consts::TAU);
-                    let position = |angle: f32| {
-                        gpui_kit::point(
-                            center.x + px(radius * angle.cos()),
-                            center.y + px(radius * angle.sin()),
-                        )
-                    };
-                    let mut path = gpui_kit::PathBuilder::stroke(px(radius * 0.22));
-                    path.move_to(position(angle));
-                    path.arc_to(
-                        gpui_kit::point(px(radius), px(radius)),
-                        px(0.0),
-                        false,
-                        true,
-                        position(angle + 0.45),
-                    );
-                    if let Ok(path) = path.build() {
-                        window.paint_path(path, tint);
-                    }
-                }
-                // Clipped, inactive and reduced-motion rings park.
-                if animated && let Some(owner) = owner.upgrade() {
-                    crate::motion::request_frame(owner.entity_id(), cx);
-                }
-            },
-        )
-        .size_full()
-        .into_any_element()
     }
 
     fn focus_outline(&self, row: &SidebarRow) -> gpui_kit::AnyElement {
@@ -2240,7 +1580,7 @@ impl SidebarRows {
         row: &SidebarRow,
         row_height: f32,
     ) -> gpui_kit::AnyElement {
-        let accessible_label = row_accessible_label(row, self.snapshot.now_utc);
+        let accessible_label = row_accessible_label(row);
         let context_owner = self.owner.clone();
         let context = self.row_menu(row);
         let element = if let Some(context) = context {
@@ -2390,7 +1730,6 @@ impl SidebarRows {
         if row.task.as_ref().is_some_and(|task| task.pending) {
             return None;
         }
-        let now = self.snapshot.now_utc;
         if self.selection.len() > 1 && self.selection.contains(&row.key) {
             let tasks = self
                 .snapshot
@@ -2403,7 +1742,7 @@ impl SidebarRows {
                     Some((task, chosen.kind == SidebarRowKind::Session))
                 })
                 .collect();
-            return Some(ContextMenu::Sessions { tasks, now });
+            return Some(ContextMenu::Sessions { tasks });
         }
         // Confirmations name the session as its row shows it.
         let task = row.task.clone().map(|mut task| {
@@ -2420,22 +1759,11 @@ impl SidebarRows {
             local: row.host.is_none(),
             scripts: Some((target.clone(), row.scripts.clone())),
         };
-        Some(if matches!(row.kind, SidebarRowKind::DetachedSession) {
-            ContextMenu::DetachedSession {
-                target,
-                task,
-                now,
-                place,
-            }
-        } else {
-            ContextMenu::Session {
-                target,
-                options,
-                task,
-                now,
-                place,
-                working: row.working,
-            }
+        Some(ContextMenu::Session {
+            target,
+            options,
+            task,
+            place,
         })
     }
 
@@ -2460,10 +1788,6 @@ impl SidebarRows {
         let owner = self.owner.clone();
         let activation_target = row.target.clone();
         let activation_kind = row.kind.clone();
-        let native_conversation = row
-            .task
-            .as_ref()
-            .and_then(|task| task.native_conversation.clone());
         let button = Button::new(SharedString::from(format!(
             "sidebar-row-button-{}",
             row.key
@@ -2473,11 +1797,7 @@ impl SidebarRows {
         .w_full()
         .h(gpui_kit::rems(row_height))
         .tab_index(0_isize)
-        .accessibility_label(if native_conversation.is_some() {
-            format!("Open conversation for {accessible_label}")
-        } else {
-            accessible_label
-        })
+        .accessibility_label(accessible_label)
         .child(element);
         let renames = row.task.is_some();
         let (key, visible) = (row.key.clone(), self.visible_sessions.clone());
@@ -2486,7 +1806,7 @@ impl SidebarRows {
                 let modifiers = event.modifiers();
                 // Command-click (Control-click elsewhere) chooses saved work for one action
                 // together; Shift-click chooses a range.
-                if renames && (modifiers.secondary() || modifiers.shift) {
+                if renames && (modifiers.secondary(app) || modifiers.shift) {
                     _ = owner.update(app, |chrome, cx| {
                         chrome.choose_sidebar_row(
                             &key,
@@ -2520,21 +1840,12 @@ impl SidebarRows {
                         );
                         invocation.target = Some(binding.clone());
                         cx.emit(ChromeIntent::Command(invocation));
-                    } else if let Some(target) = native_conversation.clone() {
-                        let mut invocation = bootty_control::CommandInvocation::from_action(
-                            "agents.native.focus",
-                            bootty_control::Caller::Internal,
-                        );
-                        invocation.target = Some(target);
-                        cx.emit(ChromeIntent::Command(invocation));
                     } else if let Some(target) = activation_target.clone() {
                         let intent = if matches!(
                             &activation_kind,
                             SidebarRowKind::Other(kind) if kind == "unassigned"
                         ) {
                             ChromeIntent::AdoptSession(target)
-                        } else if matches!(activation_kind, SidebarRowKind::DetachedSession) {
-                            ChromeIntent::ReopenSession(target)
                         } else {
                             ChromeIntent::ActivateSession(target)
                         };
@@ -2577,12 +1888,8 @@ impl SidebarRows {
         let snapshot = &self.snapshot;
         let row_height = match row.kind {
             SidebarRowKind::Group => GROUP_ROW_HEIGHT,
-            SidebarRowKind::Session
-            | SidebarRowKind::DetachedSession
-            | SidebarRowKind::Draft { .. } => {
-                if self.section(row) == SessionSection::Settled {
-                    ROW_HEIGHT
-                } else if self.snapshot.group_by_project {
+            SidebarRowKind::Session | SidebarRowKind::Draft { .. } => {
+                if self.snapshot.group_by_project {
                     GROUPED_SESSION_ROW_HEIGHT
                 } else {
                     SESSION_ROW_HEIGHT
@@ -2624,15 +1931,11 @@ impl SidebarRows {
                 matches!(row.kind, SidebarRowKind::Group) && row.project_path.is_some(),
                 |element| element.hover(|element| element.bg(color(self.snapshot.hover))),
             )
-            .child(
-                if self.section(row) == SessionSection::Settled && row.kind.is_session() {
-                    self.settled_label(row)
-                } else if row.kind.is_session() {
-                    self.session_label(row)
-                } else {
-                    self.label(row)
-                },
-            )
+            .child(if row.kind.is_session() {
+                self.session_label(row)
+            } else {
+                self.label(row)
+            })
             .children(shortcut)
             .children(self.bounds_probe(row));
         let element = self.drag_row(element, row);
@@ -2714,168 +2017,7 @@ fn session_tooltip(row: &SidebarRow, age: Option<String>) -> Tooltip {
                     .filter(|task| !task.name.is_empty())
                     .map(|task| line("at-sign", task.name.clone())),
             )
-            .children(row.agents.iter().map(|agent| {
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .child(crate::gpui::icon(
-                        &agent.icon,
-                        14.0,
-                        cx.theme().muted_foreground,
-                    ))
-                    .child(
-                        agent
-                            .model
-                            .clone()
-                            .unwrap_or_else(|| agent.description.clone()),
-                    )
-            }))
     })
-}
-
-/// A quota in two rows: what it is, how much is left and when it resets; then the meter with the
-/// pace against an even spend.
-fn usage_meter(
-    snapshot: &UsageMeterSnapshot,
-    item: &super::SidebarFooterItem,
-    colors: ChromePalette,
-) -> gpui_kit::AnyElement {
-    let selector = |part: &str| {
-        let name = format!("sidebar-footer-{}-{part}", item.key);
-        move || name.clone()
-    };
-    // The reset moves under the name when both don't fit.
-    let words = div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_wrap()
-        .items_center()
-        .gap_x_1()
-        .when_some(item.icon.as_deref(), |element, icon| {
-            element.child(crate::gpui::sized_icon(
-                icon,
-                crate::gpui::IconSize::Small,
-                color(snapshot.fill),
-            ))
-        })
-        .child(
-            div()
-                .debug_selector(selector("labels"))
-                .flex_1()
-                .min_w(gpui_kit::rems(5.))
-                .text_ellipsis()
-                .text_color(color(item.color))
-                .child(snapshot.label.clone()),
-        )
-        .when(!snapshot.meter.reset.is_empty(), |element| {
-            element.child(
-                div()
-                    .debug_selector(selector("reset"))
-                    .flex_none()
-                    .text_color(color(colors.muted))
-                    .child(format!("resets in {}", snapshot.meter.reset)),
-            )
-        });
-    div()
-        .id(SharedString::from(format!("usage-meter-{}", item.key)))
-        .tooltip({
-            let description = snapshot.description.clone();
-            move |window, cx| Tooltip::new(description.clone()).build(window, cx)
-        })
-        .w_full()
-        .min_w_0()
-        .py_0p5()
-        .flex()
-        .flex_col()
-        .gap_0p5()
-        .child(words)
-        .child(usage_track(snapshot, &item.key))
-        .into_any_element()
-}
-
-/// The meter: what is left, a mark where an even spend would be, and the pace against it.
-fn usage_track(snapshot: &UsageMeterSnapshot, key: &str) -> gpui_kit::Div {
-    let fill_width = (snapshot.meter.remaining_percent.clamp(0.0, 100.0) / 100.0)
-        .to_f32()
-        .unwrap_or(0.0);
-    let marker = snapshot
-        .meter
-        .expected_remaining_percent
-        .and_then(|value| (value.clamp(0.0, 100.0) / 100.0).to_f32());
-    let selector = |part: &str| {
-        let name = format!("sidebar-footer-{key}-{part}");
-        move || name.clone()
-    };
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap_2()
-        .child(
-            div()
-                .id(SharedString::from(format!("usage-track-{key}")))
-                .debug_selector(selector("track"))
-                .relative()
-                .flex_1()
-                .min_w_0()
-                .h(gpui_kit::rems(0.375))
-                .rounded_full()
-                .bg(color(snapshot.track))
-                .child(
-                    div()
-                        .h_full()
-                        .w(relative(fill_width))
-                        .rounded_full()
-                        .bg(color(snapshot.fill)),
-                )
-                .when_some(marker, |element, marker| {
-                    element.child(
-                        div()
-                            .absolute()
-                            .left(relative(marker))
-                            .top_neg_1()
-                            .bottom_neg_1()
-                            .w_0p5()
-                            .rounded_full()
-                            .bg(color(snapshot.marker)),
-                    )
-                }),
-        )
-        .when(!snapshot.meter.pace.is_empty(), |element| {
-            element.child(
-                div()
-                    .debug_selector(selector("pace"))
-                    .flex_none()
-                    .text_color(color(snapshot.pace))
-                    .child(snapshot.meter.pace.clone()),
-            )
-        })
-}
-
-pub(super) fn detached_session_menu(target: &SessionTarget) -> Vec<MenuRow> {
-    [
-        ("Rename…", ChromeIntent::RenameSavedSession(target.clone())),
-        (
-            "Move to Space…",
-            ChromeIntent::SessionContext {
-                target: target.clone(),
-                action: SessionContextAction::MoveToSpace,
-            },
-        ),
-    ]
-    .into_iter()
-    .map(|(label, intent)| MenuRow {
-        confirm: None,
-        label: label.to_owned(),
-        enabled: true,
-        destructive: false,
-        starts_group: false,
-        intent,
-    })
-    .collect()
 }
 
 /// What can be done with where a session works: start another session there, show its
@@ -3002,45 +2144,6 @@ pub(super) fn session_menu(
     .collect()
 }
 
-pub(super) fn render_usage(
-    snapshot: &SidebarSnapshot,
-    colors: ChromePalette,
-) -> Option<gpui_kit::AnyElement> {
-    (!snapshot.footer.is_empty())
-        .then(|| {
-            v_flex()
-                .id("bootty-gpui-sidebar-footer")
-                .debug_selector(|| "bootty-gpui-sidebar-footer".to_owned())
-                .flex_none()
-                .w_full()
-                .px_2()
-                .py_0p5()
-                .gap_1()
-                .border_t_1()
-                .border_color(color(snapshot.border))
-                .children(snapshot.footer.iter().map(|item| {
-                    let row = v_flex()
-                        .id(SharedString::from(format!("sidebar-footer-{}", item.key)))
-                        .debug_selector({
-                            let key = item.key.clone();
-                            move || format!("sidebar-footer-{key}")
-                        })
-                        .w_full()
-                        .min_w_0()
-                        .text_xs()
-                        .text_color(color(item.color));
-                    if let Some(meter) = &item.meter {
-                        row.child(usage_meter(meter, item, colors))
-                            .into_any_element()
-                    } else {
-                        row.child(div().min_w_0().child(item.text.clone()))
-                            .into_any_element()
-                    }
-                }))
-        })
-        .map(IntoElement::into_any_element)
-}
-
 /// The hover group of one project header, from its stable row key.
 fn project_header_group(key: &str) -> SharedString {
     SharedString::from(format!("sidebar-project-header-{key}"))
@@ -3133,11 +2236,7 @@ fn project_paths(rows: &[SidebarRow]) -> Vec<ProjectChoice> {
     projects.into_values().collect()
 }
 
-const fn needs_attention(row: &SidebarRow) -> bool {
-    row.needs_attention
-}
-
-fn row_accessible_label(row: &SidebarRow, now: i64) -> String {
+fn row_accessible_label(row: &SidebarRow) -> String {
     let mut label = if row.text.trim().is_empty() {
         row.key.clone()
     } else {
@@ -3159,44 +2258,7 @@ fn row_accessible_label(row: &SidebarRow, now: i64) -> String {
             pull_request.number, pull_request.status
         );
     }
-    for agent in &row.agents {
-        _ = write!(label, " · {}", agent.description);
-    }
-    if let Some(task) = &row.task {
-        let view = task.state.view(now);
-        if view != TaskView::Active {
-            _ = write!(label, " · {}", task_view_label(view));
-        } else if row.kind == SidebarRowKind::DetachedSession {
-            label.push_str(" · Closed");
-        }
-        if task.state.is_overdue(now) {
-            label.push_str(" · Woke");
-        }
-    }
     label
-}
-
-const TASK_VIEWS: [TaskView; 4] = [
-    TaskView::Active,
-    TaskView::Settled,
-    TaskView::Archived,
-    TaskView::Snoozed,
-];
-
-const fn task_view_label(view: TaskView) -> &'static str {
-    match view {
-        TaskView::Active => "Active",
-        TaskView::Settled => "Settled",
-        TaskView::Archived => "Archived",
-        TaskView::Snoozed => "Snoozed",
-        TaskView::Deleted => "Deleted",
-    }
-}
-
-fn row_view(row: &SidebarRow, now: i64) -> TaskView {
-    row.task
-        .as_ref()
-        .map_or(TaskView::Active, |task| task.state.view(now))
 }
 
 pub(super) fn saved_state_invocation(
@@ -3211,86 +2273,43 @@ pub(super) fn saved_state_invocation(
         arguments,
         bootty_control::Caller::Internal,
     );
-    invocation.target = Some(task.binding.clone()?);
+    if command == "close_session" {
+        invocation.arguments.clear();
+        invocation.target = Some(task.session.clone()?);
+    } else {
+        invocation.target = Some(task.binding.clone()?);
+    }
     Some(invocation)
 }
 
-/// Archiving working sessions and deleting saved work ask first.
-pub(super) fn saved_session_menu(task: &SidebarTask, now: i64, working: bool) -> Vec<MenuRow> {
-    use bootty_mux::session_membership::SessionLifecycle;
+/// Session state actions and the shared close command.
+pub(super) fn saved_session_menu(task: &SidebarTask) -> Vec<MenuRow> {
     let row = |label: &str, command, starts_group| {
         saved_state_invocation(task, command, Vec::new()).map(|invocation| MenuRow {
             confirm: None,
             label: label.to_owned(),
             enabled: !task.pending,
-            destructive: command == "session.delete",
+            destructive: command == "close_session",
             starts_group,
             intent: ChromeIntent::Command(invocation),
         })
     };
-    let mut rows = task
-        .native_conversation
-        .as_ref()
-        .map_or_else(Vec::new, |target| {
-            conversation_menu(target, task.pending, task.title_regenerating)
-        });
-    if !task.state.archived {
-        rows.extend(row(
-            if task.state.pinned { "Unpin" } else { "Pin" },
-            if task.state.pinned {
-                "session.unpin"
-            } else {
-                "session.pin"
-            },
-            true,
-        ));
-        let settled =
-            task.state.lifecycle == SessionLifecycle::Settled && !task.state.is_overdue(now);
-        rows.extend(row(
-            if settled { "Unsettle" } else { "Settle" },
-            if settled {
-                "session.activate"
-            } else {
-                "session.settle"
-            },
-            false,
-        ));
-        if task.state.snoozed_until.is_some_and(|until| until > now) {
-            rows.extend(row("Wake", "session.unsnooze", false));
-        }
-    }
-    rows.extend(
-        row(
-            if task.state.archived {
-                "Unarchive"
-            } else {
-                "Archive"
-            },
-            if task.state.archived {
-                "session.unarchive"
-            } else {
-                "session.archive"
-            },
-            true,
-        )
-        .map(|mut archive| {
-            if working && !task.state.archived {
-                archive.confirm = Some(archive_confirmation(&task.title));
-            }
-            archive
-        }),
-    );
-    rows.extend(row("Delete…", "session.delete", false).map(|mut delete| {
-        delete.confirm = Some(delete_confirmation(&task.title));
-        delete
-    }));
+    let mut rows = Vec::new();
+    rows.extend(row(
+        if task.state.pinned { "Unpin" } else { "Pin" },
+        if task.state.pinned {
+            "session.unpin"
+        } else {
+            "session.pin"
+        },
+        true,
+    ));
+    rows.extend(row("Close Session", "close_session", true));
     rows
 }
 
-/// One action on several saved sessions: pin or unpin, settle, mark unread, archive, or delete
-/// them after closing their terminals.
-pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)], now: i64) -> Vec<MenuRow> {
-    use bootty_mux::session_membership::SessionLifecycle;
+/// Pin, unpin, or close several sessions through the shared command path.
+pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)]) -> Vec<MenuRow> {
     let count = tasks.len();
     let all = |command: &str, chosen: &dyn Fn(&SidebarTask, bool) -> bool| {
         tasks
@@ -3308,228 +2327,26 @@ pub(super) fn sessions_menu(tasks: &[(SidebarTask, bool)], now: i64) -> Vec<Menu
         intent: ChromeIntent::Commands(invocations),
     };
     let pinned = tasks.iter().all(|(task, _)| task.state.pinned);
-    let mut rows = vec![
-        if pinned {
-            row(
-                format!("Unpin {count} sessions"),
-                all("session.unpin", &|_, _| true),
-                false,
-            )
-        } else {
-            row(
-                format!("Pin {count} sessions"),
-                all("session.pin", &|task, _| {
-                    !task.state.pinned && !task.state.archived
-                }),
-                false,
-            )
-        },
+    let mut rows = vec![if pinned {
         row(
-            format!("Settle {count} sessions"),
-            all("session.settle", &|task, _| {
-                task.state.lifecycle != SessionLifecycle::Settled || task.state.is_overdue(now)
-            }),
+            format!("Unpin {count} sessions"),
+            all("session.unpin", &|_, _| true),
             false,
-        ),
-    ];
-    let unread = conversation_invocations(tasks, "agents.native.mark-unread");
-    if !unread.is_empty() {
-        rows.push(row(format!("Mark {} unread", unread.len()), unread, false));
-    }
-    let regenerate = conversation_invocations(tasks, "agents.native.regenerate-title");
-    if !regenerate.is_empty() {
-        let busy = tasks.iter().any(|(task, _)| task.title_regenerating);
-        let mut regenerate = row(
-            if busy {
-                "Regenerating…".into()
-            } else {
-                format!("Regenerate {} titles", regenerate.len())
-            },
-            regenerate,
+        )
+    } else {
+        row(
+            format!("Pin {count} sessions"),
+            all("session.pin", &|task, _| !task.state.pinned),
             false,
-        );
-        regenerate.enabled &= !busy;
-        rows.push(regenerate);
-    }
-    rows.push(row(
-        format!("Archive {count} sessions"),
-        all("session.archive", &|task, _| !task.state.archived),
+        )
+    }];
+    let mut close = row(
+        format!("Close {count} sessions"),
+        all("close_session", &|_, _| true),
         true,
-    ));
-    let deletable = all("session.delete", &|_, _| true);
-    let mut delete = row(format!("Delete {count} sessions…"), deletable, false);
-    delete.destructive = true;
-    delete.confirm = Some(Confirmation {
-        question: format!("Delete {count} sessions permanently?"),
-        detail: "This stops their work, closes their terminals and removes their saved history from Bootty.",
-        action: "Delete permanently",
-    });
-    rows.push(delete);
-    rows
-}
-
-fn conversation_invocations(
-    tasks: &[(SidebarTask, bool)],
-    command: &str,
-) -> Vec<bootty_control::CommandInvocation> {
-    tasks
-        .iter()
-        .filter_map(|(task, _)| task.native_conversation.as_ref())
-        .map(|target| {
-            let mut invocation = bootty_control::CommandInvocation::new(
-                command,
-                vec![target.handle.clone(), target.generation.to_string()],
-                bootty_control::Caller::Internal,
-            );
-            invocation.target = Some(target.clone());
-            invocation
-        })
-        .collect()
-}
-
-/// What a session's conversation offers: a new title, marking it unread, and a side chat.
-fn conversation_menu(
-    target: &bootty_control::CommandTarget,
-    pending: bool,
-    title_regenerating: bool,
-) -> Vec<MenuRow> {
-    let mut rows = Vec::new();
-    for (label, command) in [
-        ("Regenerate title", "agents.native.regenerate-title"),
-        ("Mark unread", "agents.native.mark-unread"),
-    ] {
-        let mut invocation = bootty_control::CommandInvocation::new(
-            command,
-            vec![target.handle.clone(), target.generation.to_string()],
-            bootty_control::Caller::Internal,
-        );
-        invocation.target = Some(target.clone());
-        rows.push(MenuRow {
-            confirm: None,
-            label: if command == "agents.native.regenerate-title" && title_regenerating {
-                "Regenerating…".into()
-            } else {
-                label.to_owned()
-            },
-            enabled: !(pending
-                || command == "agents.native.regenerate-title" && title_regenerating),
-            destructive: false,
-            starts_group: false,
-            intent: ChromeIntent::Command(invocation),
-        });
-    }
-    rows.push(MenuRow {
-        confirm: None,
-        label: "Start side chat".to_owned(),
-        enabled: !pending,
-        destructive: false,
-        starts_group: false,
-        intent: ChromeIntent::ForkConversation(target.clone()),
-    });
-    rows
-}
-
-fn archive_confirmation(title: &str) -> Confirmation {
-    Confirmation {
-        question: if title.is_empty() {
-            "Archive this session while it works?".to_owned()
-        } else {
-            format!("Archive “{title}” while it works?")
-        },
-        detail: "It keeps working, out of the active list.",
-        action: "Archive",
-    }
-}
-
-/// Deleting can't be undone, so the question names the session.
-fn delete_confirmation(title: &str) -> Confirmation {
-    Confirmation {
-        question: if title.is_empty() {
-            "Delete this session permanently?".to_owned()
-        } else {
-            format!("Delete “{title}” permanently?")
-        },
-        detail: "This stops its work, closes its terminals and removes its saved history from Bootty.",
-        action: "Delete permanently",
-    }
-}
-
-/// When `tasks` can sleep until: presets in the local time zone, then a chosen time. One task's
-/// rows carry one command; several tasks' rows carry one per task that can snooze.
-pub(super) fn snooze_menu(tasks: &[SidebarTask], now: i64) -> Vec<MenuRow> {
-    use chrono::{Datelike as _, TimeZone as _};
-    let snoozable: Vec<&SidebarTask> = tasks
-        .iter()
-        .filter(|task| {
-            !task.state.archived
-                && !task.state.deleted
-                && task.state.snoozed_until.is_none_or(|until| until <= now)
-        })
-        .collect();
-    if snoozable.is_empty() {
-        return Vec::new();
-    }
-    let enabled = snoozable.iter().all(|task| !task.pending);
-    let intent =
-        |invocations: Vec<bootty_control::CommandInvocation>| match <[_; 1]>::try_from(invocations)
-        {
-            Ok([one]) => ChromeIntent::Command(one),
-            Err(several) => ChromeIntent::Commands(several),
-        };
-    let local =
-        chrono::DateTime::from_timestamp(now, 0).map(|date| date.with_timezone(&chrono::Local));
-    let morning = |days: u64| {
-        local
-            .as_ref()
-            .and_then(|date| date.date_naive().checked_add_days(chrono::Days::new(days)))
-            .and_then(|date| date.and_hms_opt(9, 0, 0))
-            .and_then(|date| chrono::Local.from_local_datetime(&date).earliest())
-            .map(|date| date.timestamp())
-    };
-    let monday = local.as_ref().map_or(7, |date| {
-        7u64.saturating_sub(u64::from(date.weekday().num_days_from_monday()))
-    });
-    let mut rows = [
-        ("In 1 hour", now.checked_add(3_600)),
-        ("In 3 hours", now.checked_add(10_800)),
-        ("Tomorrow", morning(1)),
-        ("Next week", morning(monday)),
-    ]
-    .into_iter()
-    .filter_map(|(label, until)| {
-        let until = until?;
-        let date = chrono::DateTime::from_timestamp(until, 0)?.with_timezone(&chrono::Local);
-        let invocations = snoozable
-            .iter()
-            .map(|task| saved_state_invocation(task, "session.snooze", vec![until.to_string()]))
-            .collect::<Option<Vec<_>>>()?;
-        Some(MenuRow {
-            confirm: None,
-            label: format!(
-                "{label} ({})",
-                crate::clock::local_moment(date, crate::clock::Moment::DayAndTime)
-            ),
-            enabled,
-            destructive: false,
-            starts_group: false,
-            intent: intent(invocations),
-        })
-    })
-    .collect::<Vec<_>>();
-    if let Some(invocations) = snoozable
-        .iter()
-        .map(|task| saved_state_invocation(task, "session.snooze", Vec::new()))
-        .collect::<Option<Vec<_>>>()
-    {
-        rows.push(MenuRow {
-            confirm: None,
-            label: "Custom…".into(),
-            enabled,
-            destructive: false,
-            starts_group: true,
-            intent: ChromeIntent::CustomSnooze(invocations),
-        });
-    }
+    );
+    close.destructive = true;
+    rows.push(close);
     rows
 }
 
@@ -3578,19 +2395,14 @@ fn project_menu_item(
     })
 }
 
-const fn task_view_icon(view: TaskView) -> gpui_kit::assets::IconName {
-    use gpui_kit::assets::IconName as I;
-    match view {
-        TaskView::Active => I::List,
-        TaskView::Settled => I::CircleCheck,
-        TaskView::Archived => I::Archive,
-        TaskView::Snoozed => I::Clock,
-        TaskView::Deleted => I::Trash,
+fn row_section(row: &SidebarRow) -> SessionSection {
+    if row_is_pinned(row) {
+        SessionSection::Pinned
+    } else {
+        SessionSection::Active
     }
 }
 
-fn row_is_pinned(row: &SidebarRow, now: i64) -> bool {
-    row.task
-        .as_ref()
-        .is_some_and(|task| task.state.pinned && task.state.view(now) == TaskView::Active)
+fn row_is_pinned(row: &SidebarRow) -> bool {
+    row.task.as_ref().is_some_and(|task| task.state.pinned)
 }

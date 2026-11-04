@@ -17,7 +17,7 @@ impl ScopedSessionTarget {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BindingSessionGroup {
     pub scope: SpaceId,
     pub label: String,

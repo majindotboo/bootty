@@ -10,7 +10,7 @@ use gpui_kit::{
 use std::{collections::HashMap, rc::Rc, sync::Arc};
 
 pub(super) type PanelFactory =
-    Rc<dyn Fn(&PanelInfo, &mut Window, &mut App) -> Arc<dyn BasePanelView>>;
+    Rc<dyn Fn(&PanelInfo, &mut Window, &mut App) -> Option<Arc<dyn BasePanelView>>>;
 
 #[derive(Default)]
 struct NativePanels(HashMap<(EntityId, String), PanelFactory>);
@@ -35,15 +35,15 @@ pub(super) fn register_factory(
             .0
             .get(&(context.dock_area().entity_id(), name.clone()))
             .cloned();
-        if let Some(factory) = factory {
-            factory(context.info(), window, cx)
-        } else {
-            let state = context.state().clone();
-            panel_handle(cx.new(|cx| UnavailablePanel {
-                state,
-                focus: cx.focus_handle(),
-            }))
-        }
+        factory
+            .and_then(|factory| factory(context.info(), window, cx))
+            .unwrap_or_else(|| {
+                let state = context.state().clone();
+                panel_handle(cx.new(|cx| UnavailablePanel {
+                    state,
+                    focus: cx.focus_handle(),
+                }))
+            })
     });
 }
 struct UnavailablePanel {
@@ -77,7 +77,7 @@ impl Render for UnavailablePanel {
 pub(super) fn register<P: Panel>(area: &Entity<DockArea>, panel: Entity<P>, cx: &mut App) {
     let handle = panel_handle(panel);
     let name = handle.panel_name(cx);
-    register_factory(area, name, Rc::new(move |_, _, _| handle.clone()), cx);
+    register_factory(area, name, Rc::new(move |_, _, _| Some(handle.clone())), cx);
 }
 
 pub(super) fn unregister(area: EntityId, cx: &mut App) {

@@ -1,11 +1,6 @@
 use super::{CommandDispatch, PendingCommandResult};
-use crate::{
-    AppState,
-    state::{AppEffect, ViewportSnapshot},
-};
-use bootty_control::{
-    Caller, CommandCancellation, CommandInvocation, CommandOutcome, CommandTarget, ResourceKind,
-};
+use crate::{AppState, state::AppEffect};
+use bootty_control::{CommandCancellation, CommandOutcome, CommandTarget, ResourceKind};
 use bootty_host::{
     CancellableCommandRunner,
     files::{FileRequest, FileResponse},
@@ -26,9 +21,6 @@ pub enum ResolvedLink {
     },
     File {
         path: String,
-        directory: bool,
-        line: u32,
-        column: u32,
     },
 }
 
@@ -37,16 +29,6 @@ pub(super) fn failure(message: String) -> CommandOutcome {
         code: "link_open_failed".to_owned(),
         message,
     }
-}
-
-/// What to do with a link once it resolves.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LinkUse {
-    Open,
-    /// Show the file in this computer's file manager.
-    Reveal,
-    /// Open the file in the installed editor with this id.
-    Edit(&'static str),
 }
 
 impl AppState {
@@ -63,7 +45,6 @@ impl AppState {
         target: CommandTarget,
         exact: &ExactMuxTarget,
         arguments: &[String],
-        link_use: LinkUse,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
         let scope = exact.scope();
@@ -134,56 +115,7 @@ impl AppState {
             scope,
             target,
             result,
-            link_use,
         })
-    }
-
-    /// Shows a resolved file link in this computer's file manager, or opens it in an editor.
-    pub(super) fn finish_link_on_desktop(
-        &self,
-        scope: SpaceId,
-        link: ResolvedLink,
-        link_use: LinkUse,
-        effects: &mut Vec<AppEffect>,
-    ) -> CommandOutcome {
-        let Some(binding) = self.workspace.binding(scope) else {
-            return CommandOutcome::StaleTarget {
-                message: "Link host was closed".to_owned(),
-            };
-        };
-        match (link, link_use) {
-            (ResolvedLink::Url { .. }, LinkUse::Edit(_)) => {
-                failure("Only files open in an editor".to_owned())
-            }
-            (ResolvedLink::Url { .. }, _) => {
-                failure("Only files can be shown in the file manager".to_owned())
-            }
-            (ResolvedLink::File { .. }, LinkUse::Edit(_))
-                if binding.multiplexer().remote.is_some() =>
-            {
-                CommandOutcome::Unsupported {
-                    message: "A remote host's files can't be opened in this computer's editors"
-                        .to_owned(),
-                }
-            }
-            (ResolvedLink::File { .. }, _) if binding.multiplexer().remote.is_some() => {
-                CommandOutcome::Unsupported {
-                    message: "A remote host's files can't be shown in this computer's file manager"
-                        .to_owned(),
-                }
-            }
-            (ResolvedLink::File { path, .. }, LinkUse::Edit(editor)) => {
-                effects.push(AppEffect::OpenInEditor {
-                    editor,
-                    path: path.into(),
-                });
-                CommandOutcome::success()
-            }
-            (ResolvedLink::File { path, .. }, _) => {
-                effects.push(AppEffect::RevealPath(path.into()));
-                CommandOutcome::success()
-            }
-        }
     }
 
     pub(super) fn finish_link_open(
@@ -228,32 +160,17 @@ impl AppState {
                     warnings: Vec::new(),
                 }
             }
-            ResolvedLink::File {
-                path,
-                directory,
-                line,
-                column,
-            } => {
-                let target = CommandTarget {
-                    kind: ResourceKind::Binding,
-                    handle: self.binding_target_handle(scope, generation),
-                    generation,
-                };
-                let mut invocation = CommandInvocation::new(
-                    if directory {
-                        "files.browse"
-                    } else {
-                        "files.open"
-                    },
-                    if directory {
-                        vec![path]
-                    } else {
-                        vec![path, line.to_string(), column.to_string()]
-                    },
-                    Caller::Internal,
-                );
-                invocation.target = Some(target);
-                self.dispatch_command(invocation, ViewportSnapshot::default(), effects)
+            // A local file opens in the app this computer opens it with; a remote host's file
+            // has no local app.
+            ResolvedLink::File { path } => {
+                if binding.multiplexer().remote.is_some() {
+                    return CommandOutcome::Unsupported {
+                        message: "A remote host's files can't be opened on this computer"
+                            .to_owned(),
+                    };
+                }
+                effects.push(AppEffect::OpenWithSystem(path.into()));
+                CommandOutcome::success()
             }
         }
     }
@@ -274,7 +191,7 @@ fn resolve_link(
                 .map(|_| LinkTarget::Url(location.to_owned()))
         })
         .context("not a URL or file location")?;
-    let (path, line, column) = match target {
+    let (path, line) = match target {
         LinkTarget::Url(value) => {
             let mut url = url::Url::parse(&value).context("invalid URL")?;
             if url.scheme() == "file" {
@@ -283,7 +200,7 @@ fn resolve_link(
                 {
                     url.set_host(None)?;
                 }
-                (url.to_string(), None, None)
+                (url.to_string(), None)
             } else {
                 anyhow::ensure!(
                     !matches!(url.scheme(), "javascript" | "data"),
@@ -318,7 +235,7 @@ fn resolve_link(
                 });
             }
         }
-        LinkTarget::File { path, line, column } => (path, line, column),
+        LinkTarget::File { path, line, .. } => (path, line),
     };
     let request = FileRequest::Resolve { path, base };
     let response = if let Some(remote) = remote {
@@ -333,10 +250,5 @@ fn resolve_link(
         !is_directory || line.is_none(),
         "a directory cannot have a line number"
     );
-    Ok(ResolvedLink::File {
-        path,
-        directory: is_directory,
-        line: line.unwrap_or(1),
-        column: column.unwrap_or(1),
-    })
+    Ok(ResolvedLink::File { path })
 }

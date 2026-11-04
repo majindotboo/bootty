@@ -1,8 +1,6 @@
 //! Per-window creation drafts. Edits save off the UI thread; committed entries drive navigation.
 
-use crate::presentation::new_session_form::{
-    NewSessionAttachment, NewSessionDraft, NewSessionMode,
-};
+use crate::presentation::new_session_form::NewSessionDraft;
 use bootty_mux::controller::SpaceId;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,7 +14,7 @@ use std::{
 /// How long a draft must stay the same before it is written.
 const SETTLE: Duration = Duration::from_secs(1);
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct CreationDraft {
     pub draft: NewSessionDraft,
     pub project: Option<String>,
@@ -25,9 +23,7 @@ pub struct CreationDraft {
 
 impl CreationDraft {
     pub(crate) fn has_content(&self) -> bool {
-        !self.draft.prompt.trim().is_empty()
-            || !self.draft.command.trim().is_empty()
-            || !self.draft.attachments.is_empty()
+        !self.draft.command.trim().is_empty()
     }
 }
 
@@ -38,12 +34,12 @@ pub struct DraftSummary {
     pub title: String,
     pub cwd: String,
     pub project: Option<String>,
-    pub provider: String,
     pub branch: Option<String>,
 }
 
-/// What of a draft survives a restart. Pasted files live in temporary files that end with the
-/// app, so only attachments of real files are kept.
+/// What of a draft survives a restart. Unknown fields are ignored, so drafts saved by older
+/// versions, including their removed agent fields (`prompt`, `provider`, `attachments`, …),
+/// still load as terminal drafts.
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
 struct SavedDraft {
     scope: SpaceId,
@@ -52,35 +48,26 @@ struct SavedDraft {
     #[serde(default)]
     title: String,
     #[serde(default)]
-    fan_out: Vec<crate::presentation::new_session_form::FanOutModel>,
     cwd: String,
-    terminal: bool,
+    #[serde(default)]
     projectless: bool,
-    prompt: String,
-    attachments: Vec<SavedAttachment>,
-    applications: Vec<bootty_agents::NativeApplicationMention>,
-    provider_mentions: Vec<bootty_agents::NativeProviderMention>,
-    goal: String,
+    #[serde(default)]
     command: String,
-    provider: String,
-    profiles: BTreeMap<String, String>,
-    model_selection: Option<bootty_agents::NativeModelSelection>,
-    permissions: bootty_agents::NativePermissionMode,
+    #[serde(default)]
     isolated: bool,
+    #[serde(default)]
     isolation_preference: bool,
+    #[serde(default)]
     branch: String,
+    #[serde(default)]
     folder: String,
+    #[serde(default)]
     start_ref: String,
+    #[serde(default)]
     suffix: String,
     identity: String,
+    #[serde(default)]
     directories: Vec<(SpaceId, String)>,
-}
-
-#[derive(Clone, Deserialize, PartialEq, Serialize)]
-struct SavedAttachment {
-    path: PathBuf,
-    size_bytes: u64,
-    prompt_ranges: Vec<std::ops::Range<usize>>,
 }
 
 impl From<&CreationDraft> for SavedDraft {
@@ -90,29 +77,9 @@ impl From<&CreationDraft> for SavedDraft {
             scope: draft.scope,
             project: record.project.clone(),
             title: record.title.clone(),
-            fan_out: draft.fan_out.clone(),
             cwd: draft.cwd.clone(),
-            terminal: draft.mode == NewSessionMode::Terminal,
             projectless: draft.projectless,
-            prompt: draft.prompt.clone(),
-            attachments: draft
-                .attachments
-                .iter()
-                .filter(|attachment| attachment.temporary.is_none())
-                .map(|attachment| SavedAttachment {
-                    path: attachment.path.clone(),
-                    size_bytes: attachment.size_bytes,
-                    prompt_ranges: attachment.prompt_ranges.clone(),
-                })
-                .collect(),
-            applications: draft.applications.clone(),
-            provider_mentions: draft.provider_mentions.clone(),
-            goal: draft.goal.clone(),
             command: draft.command.clone(),
-            provider: draft.provider.clone(),
-            profiles: draft.profiles.clone(),
-            model_selection: draft.model_selection.clone(),
-            permissions: draft.permissions,
             isolated: draft.isolated,
             isolation_preference: draft.isolation_preference,
             branch: draft.branch.clone(),
@@ -134,33 +101,8 @@ impl From<SavedDraft> for NewSessionDraft {
         Self {
             scope: saved.scope,
             cwd: saved.cwd,
-            mode: if saved.terminal {
-                NewSessionMode::Terminal
-            } else {
-                NewSessionMode::Agent
-            },
             projectless: saved.projectless,
-            prompt: saved.prompt,
-            attachments: saved
-                .attachments
-                .into_iter()
-                .filter(|attachment| attachment.path.is_file())
-                .map(|attachment| NewSessionAttachment {
-                    path: attachment.path,
-                    size_bytes: attachment.size_bytes,
-                    prompt_ranges: attachment.prompt_ranges,
-                    preview: None,
-                    temporary: None,
-                })
-                .collect(),
-            applications: saved.applications,
-            provider_mentions: saved.provider_mentions,
-            goal: saved.goal,
             command: saved.command,
-            provider: saved.provider,
-            profiles: saved.profiles,
-            model_selection: saved.model_selection,
-            permissions: saved.permissions,
             isolated: saved.isolated,
             isolation_preference: saved.isolation_preference,
             branch: saved.branch,
@@ -169,7 +111,6 @@ impl From<SavedDraft> for NewSessionDraft {
             suffix: saved.suffix,
             identity: saved.identity,
             directories: saved.directories.into_iter().collect::<HashMap<_, _>>(),
-            fan_out: saved.fan_out,
         }
     }
 }
@@ -251,7 +192,7 @@ impl CreationDraftStore {
                         .or_else(|| (!saved.projectless).then(|| saved.cwd.clone())),
                     title: if saved.title.is_empty() {
                         saved
-                            .prompt
+                            .command
                             .lines()
                             .find(|line| !line.trim().is_empty())
                             .unwrap_or("New session")
@@ -294,11 +235,6 @@ impl CreationDraftStore {
             project: record.project.clone(),
             branch: (!matches!(record.draft.start_ref.as_str(), "" | "HEAD"))
                 .then(|| record.draft.start_ref.clone()),
-            provider: if record.draft.mode == NewSessionMode::Terminal {
-                "terminal".into()
-            } else {
-                record.draft.provider.clone()
-            },
         })
     }
 

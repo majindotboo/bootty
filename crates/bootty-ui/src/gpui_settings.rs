@@ -4,11 +4,10 @@ use crate::{
     ansi_palette::{standard_16_palette, xterm_256_palette},
     gpui::{
         AnsiPalettePreset, EnvironmentVariable, FontFeatureEditorSnapshot, FontFeaturePreset,
-        GpuiSettings, ModifierRemap, ModifierRemapField, ModuleIntegrationsSnapshot,
-        ModuleSourceIntent, NumberSetting, RemoteEditorSnapshot, RemoteProfileFieldSnapshot,
-        RemoteProfileOption, RemoteProfileSnapshot, RemoteTestIntent, RemoteTestState, ScalarValue,
-        SettingsCategory, SettingsChoice, SettingsContent, SettingsControl, SettingsIntent,
-        SettingsListItem, SettingsPage, SettingsPageItem, SettingsRow,
+        GpuiSettings, ModifierRemap, ModifierRemapField, NumberSetting, RemoteEditorSnapshot,
+        RemoteProfileFieldSnapshot, RemoteProfileOption, RemoteProfileSnapshot, RemoteTestIntent,
+        RemoteTestState, ScalarValue, SettingsCategory, SettingsChoice, SettingsContent,
+        SettingsControl, SettingsIntent, SettingsListItem, SettingsRow,
     },
     gpui_settings_catalog::{
         advanced_configuration_rows, group_settings, setting_is_visible_in_native_settings,
@@ -32,14 +31,12 @@ impl GpuiSettings {
     pub(crate) fn for_app(
         state: &AppState,
         font_families: Arc<[String]>,
-        integrations: &[ModuleIntegrationsSnapshot],
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let draft = SettingsSession::new(state.accepted_settings(), Catalogs { font_families });
-        let content = settings_content(&draft, state, integrations);
+        let content = settings_content(&draft, state);
         let mut settings = Self::new_with_window(content, draft, window, cx);
-        settings.sync_provider_catalogs(state, cx);
         settings.set_theme_preview([
             state.config().appearance.light.theme_colors.clone(),
             state.config().appearance.dark.theme_colors.clone(),
@@ -47,14 +44,8 @@ impl GpuiSettings {
         settings
     }
 
-    pub(crate) fn reconcile(
-        &mut self,
-        state: &AppState,
-        integrations: &[ModuleIntegrationsSnapshot],
-        cx: &mut Context<Self>,
-    ) -> bool {
+    pub(crate) fn reconcile(&mut self, state: &AppState, cx: &mut Context<Self>) -> bool {
         self.draft.reconcile_accepted(state.accepted_settings());
-        self.sync_provider_catalogs(state, cx);
         self.draft.set_catalogs(Catalogs {
             font_families: Arc::clone(self.draft.font_families()),
         });
@@ -62,7 +53,7 @@ impl GpuiSettings {
             state.config().appearance.light.theme_colors.clone(),
             state.config().appearance.dark.theme_colors.clone(),
         ]);
-        let content = settings_content(&self.draft, state, integrations);
+        let content = settings_content(&self.draft, state);
         self.set_content(content, cx)
     }
 
@@ -75,7 +66,6 @@ impl GpuiSettings {
             }
             SettingsIntent::SetValue { id, value } => {
                 self.set_scalar_value(&id, &value, state);
-                self.reset_unsupported_provider_effort(&id);
             }
             SettingsIntent::RemoveValue(id) => {
                 if state.settings_schema().get(&id).is_some() {
@@ -149,7 +139,6 @@ impl GpuiSettings {
                 field_id,
                 value,
             } => self.set_remote_field(&profile_id, &field_id, value),
-            SettingsIntent::Module(intent) => self.apply_module_intent(intent),
             SettingsIntent::TestRemote(intent) => {
                 self.draft
                     .test_remote_with_fields(&intent.profile_id, intent.fields);
@@ -188,9 +177,6 @@ impl GpuiSettings {
                         }
                     }
                 }
-            }
-            ("multiplexer.backend", ScalarValue::Token(backend)) => {
-                self.draft.set_multiplexer_backend(backend);
             }
             ("cursor.style", ScalarValue::Token(token)) if token == "default" => {
                 self.draft.remove_value(id);
@@ -297,36 +283,7 @@ impl GpuiSettings {
     }
 
     fn invoke_remote_editor(&mut self, id: &str, state: &AppState) {
-        if let Some(provider) = id.strip_prefix("provider:new:") {
-            if let Some(preferences) = state.config().agents.provider(provider)
-                && let Some(number) = (1..=16).find(|number| {
-                    !preferences
-                        .profiles
-                        .contains_key(&format!("profile-{number}"))
-                })
-            {
-                let profile = format!("profile-{number}");
-                self.draft.set_custom_value(
-                    &format!("agents.{provider}.profiles.{profile}.name"),
-                    &ScalarValue::Text(format!("Profile {number}")),
-                );
-                self.draft.set_custom_value(
-                    &format!("agents.{provider}.selected"),
-                    &ScalarValue::Text(profile),
-                );
-            }
-        } else if let Some(provider) = id.strip_prefix("provider:remove:") {
-            if let Some(preferences) = state.config().agents.provider(provider) {
-                self.draft.set_custom_value(
-                    &format!("agents.{provider}.selected"),
-                    &ScalarValue::Text(String::new()),
-                );
-                self.draft.remove_custom_value(&format!(
-                    "agents.{provider}.profiles.{}",
-                    preferences.selected
-                ));
-            }
-        } else if id == "remote:new" {
+        if id == "remote:new" {
             if let Some(id) = Self::next_remote_profile_id(state) {
                 self.draft.new_remote(id);
             } else {
@@ -380,28 +337,12 @@ impl GpuiSettings {
             "input.modifier-remap" => state.config().input.modifier_remap.clone(),
             "sidebar.session-modules" => state.config().sidebar.session_modules.clone(),
             "sidebar.modules" => state.config().sidebar.modules.clone(),
-            "computer.always-allowed-apps" => state.config().computer.always_allowed_apps.clone(),
             _ => Vec::new(),
         })
     }
 
     fn new_string_list_item(&self, id: &str) -> String {
         match id {
-            id if id.ends_with(".available-efforts") => self
-                .provider_effort_options(id)
-                .and_then(|options| {
-                    options.into_iter().find(|effort| {
-                        !self
-                            .draft
-                            .string_list(id)
-                            .unwrap_or_default()
-                            .contains(effort)
-                    })
-                })
-                .unwrap_or_else(|| "medium".to_owned()),
-            id if id.starts_with("agents.") || id == "computer.always-allowed-apps" => {
-                String::new()
-            }
             "input.modifier-remap" => "right_alt=left_ctrl".to_owned(),
             "sidebar.session-modules" | "sidebar.modules" => "module".to_owned(),
             _ => self
@@ -415,18 +356,6 @@ impl GpuiSettings {
     }
 
     fn set_setting_text(&mut self, id: &str, text: String, state: &AppState) {
-        if let Some(key) = id.strip_prefix("connector:") {
-            self.draft.set_connector_draft(key, text);
-            return;
-        }
-        if id.starts_with("agents.") {
-            if text.is_empty() && id.ends_with(".directory") {
-                self.draft.remove_custom_value(id);
-            } else {
-                self.draft.set_custom_value(id, &ScalarValue::Text(text));
-            }
-            return;
-        }
         if is_scalar_color_setting(id) {
             match Color::from_hex(&text) {
                 Ok(color) => {
@@ -500,542 +429,11 @@ impl GpuiSettings {
             .map(|index| format!("remote-{index}"))
             .find(|id| !configured.contains_key(id))
     }
-
-    fn apply_module_intent(&mut self, intent: ModuleSourceIntent) {
-        match intent {
-            ModuleSourceIntent::InstallIntegration {
-                identity,
-                module,
-                id,
-            } => self.draft.install_integration(identity, module, id),
-            ModuleSourceIntent::UninstallIntegration {
-                identity,
-                module,
-                id,
-            } => self.draft.uninstall_integration(identity, module, id),
-        }
-    }
-}
-
-fn ai_settings_page(
-    source: &crate::gpui_settings_catalog::SettingsCatalogPage,
-    state: &AppState,
-    session: &SettingsSession,
-    rows: Vec<SettingsRow>,
-    integration_rows: &[ModuleIntegrationsSnapshot],
-) -> SettingsPage {
-    let mut page = settings_page(source, rows);
-    page.items
-        .extend(provider_settings_page(source, state, session).items);
-    let mut rows = vec![SettingsRow::Section("AGENT INTEGRATIONS".to_owned())];
-    rows.extend(integration_rows.iter().cloned().map(|mut row| {
-        row.error = session.integration_error(&row.identity).map(str::to_owned);
-        SettingsRow::ModuleIntegrations(row)
-    }));
-    page.items.extend(settings_page(source, rows).items);
-    page
-}
-
-fn provider_settings_page(
-    source: &crate::gpui_settings_catalog::SettingsCatalogPage,
-    state: &AppState,
-    session: &SettingsSession,
-) -> SettingsPage {
-    let mut page = settings_page(source, Vec::new());
-    let mut rows = provider_settings_rows(state, session)
-        .into_iter()
-        .peekable();
-    while let Some(row) = rows.next() {
-        let SettingsRow::Section(title) = row else {
-            page.items.push(SettingsPageItem::Setting(row));
-            continue;
-        };
-        let mut children = Vec::new();
-        while rows
-            .peek()
-            .is_some_and(|row| !matches!(row, SettingsRow::Section(_)))
-        {
-            if let Some(row) = rows.next() {
-                children.push(row);
-            }
-        }
-        let Some(parent_index) = children.iter().position(|row| {
-            matches!(
-                row,
-                SettingsRow::Value {
-                    control: SettingsControl::Toggle,
-                    ..
-                }
-            )
-        }) else {
-            continue;
-        };
-        let mut parent = children.remove(parent_index);
-        let status_index = children.iter().position(|row| {
-            matches!(
-                row,
-                SettingsRow::Value {
-                    control: SettingsControl::ReadOnly,
-                    ..
-                }
-            )
-        });
-        if let SettingsRow::Value { label, help, .. } = &mut parent {
-            *label = title;
-            if let Some(index) = status_index
-                && let SettingsRow::Value {
-                    value: ScalarValue::Text(status),
-                    help: message,
-                    ..
-                } = children.remove(index)
-            {
-                *help = status;
-                if !message.is_empty() {
-                    children.insert(
-                        0,
-                        SettingsRow::Notice {
-                            text: message,
-                            destructive: false,
-                        },
-                    );
-                }
-            }
-        }
-        page.items
-            .push(SettingsPageItem::Dependent { parent, children });
-    }
-    page
-}
-
-fn provider_settings_rows(state: &AppState, session: &SettingsSession) -> Vec<SettingsRow> {
-    let mut rows = Vec::new();
-    let remote = state
-        .workspace
-        .active
-        .binding
-        .multiplexer()
-        .remote
-        .is_some();
-    if remote {
-        rows.push(SettingsRow::Notice { text: "Agent terminals and sign-in use the selected session's host. Installation inspection and updates are local-only; account-directory profiles require a local POSIX terminal.".to_owned(), destructive: false });
-    }
-    for provider in [
-        bootty_agents::AgentKind::Codex,
-        bootty_agents::AgentKind::Claude,
-        bootty_agents::AgentKind::Pi,
-    ] {
-        if let Some(preferences) = state.config().agents.provider(&provider.to_string()) {
-            rows.extend(provider_rows(state, session, provider, preferences, remote));
-        }
-    }
-    rows
-}
-
-/// One provider's section: its preferences, profiles, account status and actions.
-fn provider_rows(
-    state: &AppState,
-    session: &SettingsSession,
-    provider: bootty_agents::AgentKind,
-    preferences: &bootty_config::config::AgentProviderConfig,
-    remote: bool,
-) -> Vec<SettingsRow> {
-    let key = provider.to_string();
-    let base = format!("agents.{key}");
-    let mut rows = vec![SettingsRow::Section(provider.display_name().to_owned())];
-    rows.push(SettingsRow::Value {
-        id: format!("{base}.enabled"),
-        label: "Enabled".to_owned(),
-        help: "Allow new conversations and agent tabs. Existing conversations stay readable but cannot send until this is on again.".to_owned(),
-        value: ScalarValue::Bool(preferences.enabled),
-        control: SettingsControl::Toggle,
-        enabled: true,
-    });
-    rows.extend(provider_scalar_settings(
-        state,
-        session,
-        &format!("{base}."),
-    ));
-    rows.push(SettingsRow::StringList {
-        id: format!("{base}.available-efforts"),
-        label: "Available thinking levels".to_owned(),
-        help: "Choose levels for the picker and effort shortcuts. Empty shows all supported levels; each model still determines which levels it supports.".to_owned(),
-        items: session.string_list(&format!("{base}.available-efforts"))
-            .unwrap_or_else(|| preferences.available_efforts.clone()),
-        options: ["off", "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"]
-            .into_iter().map(str::to_owned).collect(),
-        add_label: "Add thinking level".to_owned(),
-        enabled: true,
-    });
-    rows.push(provider_text_row(
-        format!("{base}.program"),
-        "Executable",
-        "Leave empty to use PATH.",
-        &preferences.program,
-        provider.default_program(),
-        true,
-    ));
-    rows.extend(provider_profile_rows(&base, &key, preferences));
-    rows.extend(provider_account_rows(
-        state,
-        session,
-        provider,
-        preferences,
-        remote,
-    ));
-    rows
-}
-
-/// The profile picker, and the selected profile's own settings.
-fn provider_profile_rows(
-    base: &str,
-    key: &str,
-    preferences: &bootty_config::config::AgentProviderConfig,
-) -> Vec<SettingsRow> {
-    let home = crate::strings::home_dir();
-    let mut rows = Vec::new();
-    let mut choices = vec![SettingsChoice {
-        token: String::new(),
-        label: "Default account".to_owned(),
-        description: None,
-    }];
-    choices.extend(preferences.profiles.iter().map(|(id, profile)| {
-        SettingsChoice {
-            token: id.clone(),
-            label: profile.name.clone(),
-            description: profile
-                .directory
-                .as_deref()
-                .map(|directory| bootty_git::project::display_path(directory, home.as_deref())),
-        }
-    }));
-    rows.push(SettingsRow::Value {
-        id: format!("{base}.selected"),
-        label: "Profile".to_owned(),
-        help: "Used for new agents.".to_owned(),
-        value: ScalarValue::Token(preferences.selected.clone()),
-        control: SettingsControl::Choice(choices),
-        enabled: true,
-    });
-    rows.push(SettingsRow::Action {
-        id: format!("provider:new:{key}"),
-        label: "Profiles".to_owned(),
-        help: String::new(),
-        button: "Add profile".to_owned(),
-        enabled: preferences.profiles.len() < 16,
-    });
-    if let Some(profile) = preferences.selected_profile() {
-        let path = format!("{base}.profiles.{}", preferences.selected);
-        rows.push(provider_text_row(
-            format!("{path}.name"),
-            "Profile name",
-            "",
-            &profile.name,
-            "Work",
-            false,
-        ));
-        rows.push(provider_text_row(
-            format!("{path}.directory"),
-            "Account directory",
-            "Separate sign-in storage. Leave empty to use the default.",
-            profile.directory.as_deref().unwrap_or_default(),
-            "/path/to/provider-account",
-            true,
-        ));
-        rows.push(SettingsRow::StringList {
-            id: format!("{path}.arguments"),
-            label: "Launch arguments".to_owned(),
-            help: "One argument per field.".to_owned(),
-            items: profile.arguments.clone(),
-            options: Vec::new(),
-            add_label: "Add argument".to_owned(),
-            enabled: true,
-        });
-        rows.push(SettingsRow::Action {
-            id: format!("provider:remove:{key}"),
-            label: "Remove profile".to_owned(),
-            help: "Keeps credentials and conversations.".to_owned(),
-            button: "Remove profile".to_owned(),
-            enabled: true,
-        });
-    }
-    rows
-}
-
-/// What the provider reports about its installation and account, read locally only.
-fn provider_status(
-    state: &AppState,
-    provider: bootty_agents::AgentKind,
-    preferences: &bootty_config::config::AgentProviderConfig,
-    remote: bool,
-) -> Option<bootty_agents::TerminalProviderStatus> {
-    if remote {
-        return None;
-    }
-    let program = if preferences.program.is_empty() {
-        provider.default_program()
-    } else {
-        &preferences.program
-    };
-    let directory = preferences
-        .selected_profile()
-        .and_then(|profile| profile.directory.as_deref());
-    let selector = if provider == bootty_agents::AgentKind::Pi {
-        preferences
-            .selected_profile()
-            .map(|profile| bootty_agents::PiAccountSelector::from_arguments(&profile.arguments))
-            .transpose()
-            .map(Option::flatten)
-            .ok()?
-    } else {
-        None
-    };
-    state
-        .terminal_agent_service()?
-        .provider_status_with_pi_selector(provider, program, directory, selector.as_ref())
-}
-
-/// The account's status, connectors, and sign-in, start and update actions.
-fn provider_account_rows(
-    state: &AppState,
-    session: &SettingsSession,
-    provider: bootty_agents::AgentKind,
-    preferences: &bootty_config::config::AgentProviderConfig,
-    remote: bool,
-) -> Vec<SettingsRow> {
-    let base = format!("agents.{provider}");
-    let program = if preferences.program.is_empty() {
-        provider.default_program()
-    } else {
-        &preferences.program
-    };
-    let directory = preferences
-        .selected_profile()
-        .and_then(|profile| profile.directory.as_deref());
-    let status = provider_status(state, provider, preferences, remote);
-    let mut rows = Vec::new();
-    rows.extend(provider_status_rows(
-        provider,
-        preferences
-            .selected_profile()
-            .map_or(&[], |profile| profile.arguments.as_slice()),
-        status.as_ref(),
-        remote,
-    ));
-    let has_session = state
-        .current_command_target_for(
-            &format!("{base}.tab"),
-            bootty_control::ResourceKind::Session,
-        )
-        .is_some();
-    if bootty_agents::manages_connectors(provider) && !remote {
-        let listing = state
-            .terminal_agent_service()
-            .and_then(|service| service.connectors(provider, program, directory));
-        rows.extend(connector_rows(
-            provider,
-            listing.as_ref(),
-            session,
-            has_session,
-        ));
-    }
-    for (operation, title, help, button, enabled) in [
-        (
-            "account.login",
-            "Sign in",
-            if provider == bootty_agents::AgentKind::Pi {
-                "Open Pi in the selected account store, then use /login."
-            } else {
-                "Use the provider's sign-in flow in a terminal tab."
-            },
-            "Sign in…",
-            has_session && (directory.is_none() || (!remote && cfg!(unix))),
-        ),
-        (
-            "tab",
-            "Start agent",
-            "Open the selected account/profile in a new tab in this session.",
-            "Open terminal",
-            has_session && preferences.enabled && (directory.is_none() || (!remote && cfg!(unix))),
-        ),
-        (
-            "provider.update",
-            "Update agent",
-            "Uses the detected installer when this provider has no active processes.",
-            "Update…",
-            !remote
-                && status
-                    .as_ref()
-                    .is_some_and(|status| status.installer.is_some())
-                && state
-                    .terminal_agent_service()
-                    .is_none_or(|service| !service.has_live_provider(provider)),
-        ),
-    ] {
-        rows.push(SettingsRow::Action {
-            id: format!("{base}.{operation}"),
-            label: title.to_owned(),
-            help: help.to_owned(),
-            button: button.to_owned(),
-            enabled,
-        });
-    }
-    rows
-}
-
-/// A provider's MCP connectors: the ones it lists, sign-in for those that need it, and a form
-/// that adds one with the provider's own command, in a terminal tab of this session.
-fn connector_rows(
-    provider: bootty_agents::AgentKind,
-    listing: Option<&bootty_agents::ConnectorListing>,
-    session: &SettingsSession,
-    has_session: bool,
-) -> Vec<SettingsRow> {
-    use bootty_agents::ConnectorListing;
-    let (key, name) = (provider.to_string(), provider.display_name());
-    let help = match listing {
-        None => format!("The MCP servers {name} connects to."),
-        Some(ConnectorListing::Listing) => "Listing…".to_owned(),
-        Some(ConnectorListing::Listed(connectors)) if connectors.is_empty() => {
-            format!("{name} has no connectors.")
-        }
-        Some(ConnectorListing::Listed(connectors)) => format!(
-            "{} connector{}.",
-            connectors.len(),
-            if connectors.len() == 1 { "" } else { "s" }
-        ),
-        Some(ConnectorListing::Failed(error)) => error.clone(),
-    };
-    let mut rows = vec![SettingsRow::Action {
-        id: format!("connector:{key}:list"),
-        label: "Connectors".to_owned(),
-        help,
-        button: if listing.is_some() { "Refresh" } else { "List" }.to_owned(),
-        enabled: listing != Some(&ConnectorListing::Listing),
-    }];
-    if let Some(ConnectorListing::Listed(connectors)) = listing {
-        rows.extend(connectors.iter().map(|connector| {
-            if connector.needs_sign_in {
-                SettingsRow::Action {
-                    id: format!("connector:{key}:login:{}", connector.name),
-                    label: connector.name.clone(),
-                    help: format!("{} · {}", connector.target, connector.status),
-                    button: "Sign in…".to_owned(),
-                    enabled: has_session,
-                }
-            } else {
-                SettingsRow::Value {
-                    id: format!("connector:{key}:item:{}", connector.name),
-                    label: connector.name.clone(),
-                    help: connector.target.clone(),
-                    value: ScalarValue::Text(connector.status.clone()),
-                    control: SettingsControl::ReadOnly,
-                    enabled: true,
-                }
-            }
-        }));
-    }
-    let draft = |field: &str| {
-        session
-            .connector_draft(&format!("{key}:{field}"))
-            .to_owned()
-    };
-    let (new_name, target) = (draft("name"), draft("target"));
-    rows.push(SettingsRow::Value {
-        id: format!("connector:{key}:name"),
-        label: "New connector".to_owned(),
-        help: "What to call it.".to_owned(),
-        value: ScalarValue::Text(new_name.clone()),
-        control: SettingsControl::Text {
-            placeholder: "linear".to_owned(),
-            optional: true,
-        },
-        enabled: true,
-    });
-    rows.push(SettingsRow::Value {
-        id: format!("connector:{key}:target"),
-        label: "URL or command".to_owned(),
-        help: "A server on the web by its https:// address, or the command that starts one, with its arguments after it.".to_owned(),
-        value: ScalarValue::Text(target.clone()),
-        control: SettingsControl::Text {
-            placeholder: "https://mcp.linear.app/mcp".to_owned(),
-            optional: true,
-        },
-        enabled: true,
-    });
-    rows.push(SettingsRow::Action {
-        id: format!("connector:{key}:add"),
-        label: "Add connector".to_owned(),
-        help: format!("Adds it with {name}'s own mcp add in a terminal tab, so {name} keeps it."),
-        button: "Add…".to_owned(),
-        enabled: has_session && !new_name.trim().is_empty() && !target.trim().is_empty(),
-    });
-    rows
 }
 
 // Scalar specs render through the schema even on the custom account/profile page.
-fn provider_scalar_settings(
-    state: &AppState,
-    session: &SettingsSession,
-    prefix: &str,
-) -> Vec<SettingsRow> {
-    state
-        .settings_schema()
-        .specs()
-        .iter()
-        .filter_map(|spec| {
-            let id = spec.id();
-            if settings_category_for(&id, spec.page.as_ref()) != SettingsCategory::Ai {
-                return None;
-            }
-            // The naming model keeps its existing TOML path but belongs to Codex's account.
-            if !(id == "agents.quick-model" && prefix == "agents.codex.") {
-                let leaf = id.strip_prefix(prefix)?;
-                if leaf.contains('.') {
-                    return None;
-                }
-            }
-            if matches!(spec.kind, SettingKind::Custom(_)) {
-                return None;
-            }
-            let (label, help) = setting_copy(spec);
-            Some(SettingsRow::Value {
-                value: session.value(&id)?,
-                id,
-                label,
-                help,
-                control: settings_control(&spec.kind),
-                enabled: true,
-            })
-        })
-        .collect()
-}
 
-fn provider_text_row(
-    id: String,
-    label: &str,
-    help: &str,
-    value: &str,
-    placeholder: &str,
-    optional: bool,
-) -> SettingsRow {
-    SettingsRow::Value {
-        id,
-        label: label.to_owned(),
-        help: help.to_owned(),
-        value: ScalarValue::Text(value.to_owned()),
-        control: SettingsControl::Text {
-            placeholder: placeholder.to_owned(),
-            optional,
-        },
-        enabled: true,
-    }
-}
-
-fn settings_content(
-    session: &SettingsSession,
-    state: &AppState,
-    integration_rows: &[ModuleIntegrationsSnapshot],
-) -> SettingsContent {
+fn settings_content(session: &SettingsSession, state: &AppState) -> SettingsContent {
     let home = crate::strings::home_dir();
     let schema = state.settings_schema();
     let mut pages: Vec<_> = settings_catalog_pages()
@@ -1058,9 +456,6 @@ fn settings_content(
                 .iter()
                 .filter(|spec| {
                     setting_is_visible_in_native_settings(&spec.id())
-                        && (category.category != SettingsCategory::Ai
-                            || !spec.id().starts_with("agents.")
-                            || (spec.path.len() == 2 && spec.id() != "agents.quick-model"))
                         && settings_category_for(&spec.id(), spec.page.as_ref())
                             == category.category
                 })
@@ -1091,8 +486,6 @@ fn settings_content(
                 });
             } else if category.category == SettingsCategory::Remotes {
                 rows = remote_settings_rows(session, state);
-            } else if category.category == SettingsCategory::Ai {
-                return ai_settings_page(category, state, session, rows, integration_rows);
             }
             settings_page(category, rows)
         })
@@ -1364,7 +757,7 @@ fn custom_setting_rows(
     // The Remotes page is one editor: its default target and profile lifecycle
     // must be projected together so every field follows the same typed command
     // path. Do not emit one read-only row per schema leaf.
-    if matches!(editor, SettingEditor::Remotes | SettingEditor::Providers) {
+    if matches!(editor, SettingEditor::Remotes) {
         return Vec::new();
     }
     if let Some(row) = editable_custom_setting(spec, config) {
@@ -1393,19 +786,6 @@ fn custom_setting_rows(
                     "Add UI fallback"
                 },
             )]
-        }
-        (SettingEditor::Permissions, "computer.always-allowed-apps") => {
-            vec![SettingsRow::StringList {
-                id,
-                label: "Always allowed apps".to_owned(),
-                help: "Agents use these apps in any conversation without asking. Enter bundle ids, such as dev.zed.Zed.".to_owned(),
-                items: session
-                    .string_list("computer.always-allowed-apps")
-                    .unwrap_or_else(|| config.computer.always_allowed_apps.clone()),
-                options: Vec::new(),
-                add_label: "Add app".to_owned(),
-                enabled: true,
-            }]
         }
         (_, "font.cell-width") => vec![optional_metric_row(
             spec,
@@ -2196,170 +1576,4 @@ fn remote_option(id: &str, label: &str) -> RemoteProfileOption {
         id: id.to_owned(),
         label: label.to_owned(),
     }
-}
-
-/// Project the selected launch's supported account scope without adopting another account.
-fn provider_status_rows(
-    provider: bootty_agents::AgentKind,
-    arguments: &[String],
-    cached: Option<&bootty_agents::TerminalProviderStatus>,
-    remote: bool,
-) -> Vec<SettingsRow> {
-    let key = provider.to_string();
-    let scope_error = provider_inspection_scope_error(provider, arguments);
-    let status = (!remote && scope_error.is_none())
-        .then_some(cached)
-        .flatten();
-    let detail = if remote {
-        "Account status unavailable on this remote host".to_owned()
-    } else if scope_error.is_some() {
-        cached.map_or_else(
-            || "Account status unavailable".to_owned(),
-            |status| {
-                format!(
-                    "{} · Account status unavailable",
-                    status.version.as_deref().unwrap_or("Version unavailable")
-                )
-            },
-        )
-    } else {
-        provider_status_summary(status)
-    };
-    let mut rows = vec![SettingsRow::Value {
-        id: format!("provider:status:{key}"),
-        label: "Installation and account".to_owned(),
-        help: scope_error
-            .clone()
-            .or_else(|| status.and_then(|status| status.message.clone()))
-            .or_else(|| claude_connectors_note(provider, status))
-            .unwrap_or_default(),
-        value: ScalarValue::Text(detail),
-        control: SettingsControl::ReadOnly,
-        enabled: true,
-    }];
-    if let Some(status) = status
-        && status.authenticated == Some(true)
-        && let Some(account) = &status.account
-    {
-        rows.push(SettingsRow::Value {
-            id: format!("provider:account:{key}"),
-            label: "Account".to_owned(),
-            help: String::new(),
-            value: ScalarValue::Text(account.clone()),
-            control: SettingsControl::ReadOnly,
-            enabled: true,
-        });
-    }
-    rows.push(SettingsRow::Action {
-        id: format!("agents.{key}.provider.status"),
-        label: "Refresh status".to_owned(),
-        help: "Refresh version and sign-in status.".to_owned(),
-        button: "Refresh".to_owned(),
-        enabled: !remote
-            && scope_error.is_none()
-            && status.is_none_or(|status| status.message.as_deref() != Some("Checking…")),
-    });
-    rows
-}
-
-fn provider_inspection_scope_error(
-    provider: bootty_agents::AgentKind,
-    arguments: &[String],
-) -> Option<String> {
-    if provider == bootty_agents::AgentKind::Pi {
-        return bootty_agents::PiAccountSelector::from_arguments(arguments).err();
-    }
-    if provider != bootty_agents::AgentKind::Codex {
-        return None;
-    }
-    // Account inspection does not reproduce launch overrides. Add support only with a
-    // provider-owned account query that accepts the same bounded configuration scope.
-    let changed = arguments
-        .iter()
-        .take_while(|argument| argument.as_str() != "--")
-        .any(|argument| {
-            matches!(
-                argument.as_str(),
-                "--oss"
-                    | "--local-provider"
-                    | "--remote"
-                    | "--remote-auth-token-env"
-                    | "-p"
-                    | "--profile"
-                    | "-c"
-                    | "--config"
-            ) || [
-                "--local-provider=",
-                "--remote=",
-                "--remote-auth-token-env=",
-                "--profile=",
-                "--config=",
-            ]
-            .iter()
-            .any(|prefix| argument.starts_with(prefix))
-                || (argument.starts_with("-p") && argument.len() > 2)
-                || (argument.starts_with("-c") && argument.len() > 2)
-        });
-    changed.then(|| "Account status unavailable for this Codex launch profile: its provider, configuration, or remote overrides are not applied by the local account check.".to_owned())
-}
-
-/// Claude loads the connectors of a Claude account, the ones Claude Desktop has, only when it
-/// signs in with that account; an Anthropic Console key has none.
-fn claude_connectors_note(
-    provider: bootty_agents::AgentKind,
-    status: Option<&bootty_agents::TerminalProviderStatus>,
-) -> Option<String> {
-    (provider == bootty_agents::AgentKind::Claude
-        && status.is_some_and(|status| {
-            status.authenticated == Some(true)
-                && matches!(status.auth_method.as_deref(), Some("api_key" | "apiKey"))
-        }))
-    .then(|| {
-        "Signed in with an Anthropic Console key, so your Claude account's connectors, the ones \
-         Claude Desktop has, aren't available. Sign in with your Claude subscription to use them."
-            .to_owned()
-    })
-}
-
-fn provider_status_summary(status: Option<&bootty_agents::TerminalProviderStatus>) -> String {
-    let Some(status) = status else {
-        return "Not checked".to_owned();
-    };
-    if status.message.as_deref() == Some("Checking…") {
-        return "Checking installation and account…".to_owned();
-    }
-    let version = status.version.as_deref().unwrap_or("Unavailable");
-    let account = match status.authenticated {
-        Some(true) => "Authenticated",
-        Some(false) => "Not signed in",
-        None => "Account not verified",
-    };
-    let mut details = vec![version.to_owned(), account.to_owned()];
-    if status.authenticated == Some(true) {
-        if let Some(method) = status.auth_method.as_deref() {
-            details.push(match method {
-                "chatgpt" => "ChatGPT".to_owned(),
-                "claude.ai" => "Claude.ai".to_owned(),
-                "api_key" | "apiKey" => "API key".to_owned(),
-                "oauth" | "oauth_token" => "OAuth".to_owned(),
-                "amazon_bedrock" => "Amazon Bedrock".to_owned(),
-                method => method.to_owned(),
-            });
-        }
-        if let Some(subscription) = &status.subscription {
-            let label = match subscription.as_str() {
-                "free" => "Free",
-                "plus" => "Plus",
-                "pro" => "Pro",
-                "max" => "Max",
-                "team" => "Team",
-                "business" => "Business",
-                "enterprise" => "Enterprise",
-                "education" | "edu" => "Education",
-                value => value,
-            };
-            details.push(format!("{label} subscription"));
-        }
-    }
-    details.join(" · ")
 }

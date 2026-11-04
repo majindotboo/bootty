@@ -25,14 +25,12 @@ impl AppState {
             .collect()
     }
 
-    /// Replaces a target written as a short name with the exact target it names now. Native
-    /// conversation commands name conversations, whose id argument may be the name too; other
-    /// commands name live sessions.
+    /// Replaces a target written as a short name with the exact live session it names now.
     pub(super) fn named_target(
         &self,
         mut invocation: CommandInvocation,
     ) -> Result<CommandInvocation, CommandOutcome> {
-        // Names stand for sessions and conversations, never Spaces.
+        // Names stand for sessions, never Spaces.
         let Some(written) = invocation
             .target
             .as_ref()
@@ -42,31 +40,11 @@ impl AppState {
         else {
             return Ok(invocation);
         };
-        let target = if invocation.command.starts_with("agents.native.") {
-            let service =
-                self.native_agent_service()
-                    .ok_or_else(|| CommandOutcome::Unavailable {
-                        message: "Native conversations are unavailable".to_owned(),
-                    })?;
-            let target = service
-                .named(&written)
-                .map_err(|message| CommandOutcome::StaleTarget { message })?;
-            if invocation.arguments.first() == Some(&written) {
-                let generation = target.generation.to_string();
-                invocation.arguments.splice(
-                    ..2.min(invocation.arguments.len()),
-                    [target.handle.clone(), generation],
-                );
-            }
-            target
-        } else {
-            let kind = invocation
-                .target
-                .as_ref()
-                .map_or(bootty_control::ResourceKind::Session, |target| target.kind);
-            self.named_session(&written, kind)?
-        };
-        invocation.target = Some(target);
+        let kind = invocation
+            .target
+            .as_ref()
+            .map_or(bootty_control::ResourceKind::Session, |target| target.kind);
+        invocation.target = Some(self.named_session(&written, kind)?);
         Ok(invocation)
     }
 

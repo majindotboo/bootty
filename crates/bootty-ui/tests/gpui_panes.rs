@@ -1,255 +1,208 @@
 #![cfg(test)]
 
-use bootty_ui::gpui as bootty_gpui;
-use std::{cell::RefCell, rc::Rc};
-
-use bootty_ui::gpui::{
-    GpuiPaneColors, GpuiPaneDividerSnapshot, GpuiPaneSnapshot, GpuiPaneWorkspace,
-    GpuiPaneWorkspaceSnapshot, PaneRect, PaneSplitDirection,
+use bootty_control::{CommandInvocation, CommandTarget, ResourceKind};
+use bootty_ui::{
+    gpui::{DraggedPane, GpuiPane, GpuiPaneColors, GpuiPaneSnapshot},
+    workspace_composition::pane_drop_command,
+};
+use gpui_kit::component::{
+    ActiveTheme as _,
+    dock::{
+        BasePanel, DockArea, DockEvent, DockLayout, DockPlacement, PaneRef, Panel, PanelEvent,
+        PanelId, PanelInfo, PanelState,
+    },
 };
 use gpui_kit::{
-    Context, IntoElement, Modifiers, MouseButton, Point, Render, TestAppContext, Window, black,
-    blue, div, point, prelude::*, px,
+    App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Modifiers,
+    MouseButton, ParentElement, Render, Subscription, TestAppContext, Window, div, point,
+    prelude::*, px,
 };
+use pretty_assertions::assert_eq;
+use std::{cell::RefCell, rc::Rc};
 
-struct PaneProbe {
-    count: usize,
+fn target() -> CommandTarget {
+    CommandTarget {
+        kind: ResourceKind::Session,
+        handle: "session".into(),
+        generation: 1,
+    }
 }
-
-impl Render for PaneProbe {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let panes = (0..self.count)
-            .map(|index| GpuiPaneSnapshot {
-                id: format!("pane-{index}"),
-                rect: PaneRect::new(
-                    f32::from(u16::try_from(index).expect("pane index fits u16")) * 100.0,
-                    0.0,
-                    100.0,
-                    80.0,
-                ),
-                terminal: div().size_full().into_any_element(),
-                focused: index == 0,
+struct Pane {
+    id: String,
+    focus: FocusHandle,
+}
+impl EventEmitter<PanelEvent> for Pane {}
+impl Focusable for Pane {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+impl BasePanel for Pane {
+    fn panel_name(&self) -> &'static str {
+        "bootty.terminal-pane"
+    }
+    fn closable(&self, _: &App) -> bool {
+        false
+    }
+    fn dump(&self, _: &App) -> PanelState {
+        PanelState {
+            panel_name: self.panel_name().into(),
+            children: Vec::new(),
+            info: PanelInfo::panel(serde_json::json!({"pane":self.id})),
+        }
+    }
+}
+impl Panel for Pane {}
+impl Render for Pane {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        GpuiPane::new(
+            GpuiPaneSnapshot {
+                id: self.id.clone(),
+                target: Some(target()),
+                terminal: div().size_full(),
+                focused: true,
                 progress: None,
-            })
-            .collect();
-        GpuiPaneWorkspace::new(
-            GpuiPaneWorkspaceSnapshot {
-                arrangement_target: None,
-                area: PaneRect::new(
-                    0.0,
-                    0.0,
-                    f32::from(u16::try_from(self.count).expect("pane count fits u16")) * 100.0,
-                    80.0,
-                ),
-                panes,
-                dividers: Vec::new(),
-                gap: 1.0,
-                corner_radius: 0.0,
-                focus_border_width: 2.0,
-                inactive_dim: 0.0,
-                window_dim: 0.0,
-                animation_seconds: 0.0,
+                width: 300.,
+                corner_radius: 0.,
+                focus_border_width: 0.,
+                inactive_dim: 0.,
+                window_dim: 0.,
+                animation_seconds: 0.,
                 colors: GpuiPaneColors {
-                    background: black(),
-                    divider: black(),
-                    divider_hover: blue(),
-                    focus_border: blue(),
-                    progress_track: black(),
-                    progress_normal: blue(),
-                    progress_error: blue(),
-                    progress_warning: blue(),
-                    empty_text: black(),
+                    background: theme.background,
+                    focus_border: theme.primary,
+                    progress_track: theme.border,
+                    progress_normal: theme.primary,
+                    progress_error: theme.danger,
+                    progress_warning: theme.warning,
                 },
-                empty_message: None,
             },
             |_, _, _| {},
         )
     }
 }
-
-#[gpui_kit::test]
-fn a_single_pane_does_not_draw_a_redundant_focus_border(cx: &mut TestAppContext) {
-    let (_, cx) = cx.add_window_view(|_, _| PaneProbe { count: 1 });
-
-    assert!(cx.debug_bounds("terminal-pane-workspace").is_some());
-    assert!(
-        cx.debug_bounds("terminal-pane-focus-border-pane-0")
-            .is_none()
-    );
+struct DockProbe {
+    area: Entity<DockArea>,
+    panes: [Entity<Pane>; 2],
+    commands: Rc<RefCell<Vec<CommandInvocation>>>,
+    changes: usize,
+    _subscription: Subscription,
 }
-
-#[gpui_kit::test]
-fn split_panes_keep_the_focused_pane_indicator(cx: &mut TestAppContext) {
-    let (_, cx) = cx.add_window_view(|_, _| PaneProbe { count: 2 });
-
-    assert!(
-        cx.debug_bounds("terminal-pane-focus-border-pane-0")
-            .is_some()
-    );
-    assert!(
-        cx.debug_bounds("terminal-pane-focus-border-pane-1")
-            .is_none()
-    );
-}
-
-#[gpui_kit::test]
-fn pane_content_fills_the_current_viewport_before_the_next_measured_frame(cx: &mut TestAppContext) {
-    let (_, cx) = cx.add_window_view(|_, _| PaneProbe { count: 2 });
-    let area = cx
-        .debug_bounds("terminal-pane-workspace")
-        .expect("pane area");
-    let left = cx
-        .debug_bounds("terminal-pane-surface-pane-0")
-        .expect("left pane");
-    let right = cx
-        .debug_bounds("terminal-pane-surface-pane-1")
-        .expect("right pane");
-
-    pretty_assertions::assert_eq!(left.origin, area.origin);
-    pretty_assertions::assert_eq!(left.bottom(), area.bottom());
-    pretty_assertions::assert_eq!(right.bottom_right(), area.bottom_right());
-    pretty_assertions::assert_eq!(left.right(), right.left());
-}
-
-struct PaneLayerProbe;
-
-impl Render for PaneLayerProbe {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        GpuiPaneWorkspace::new(
-            GpuiPaneWorkspaceSnapshot {
-                arrangement_target: None,
-                area: PaneRect::new(10.0, 20.0, 201.0, 80.0),
-                panes: vec![
-                    GpuiPaneSnapshot {
-                        id: "active".to_owned(),
-                        rect: PaneRect::new(10.0, 20.0, 100.0, 80.0),
-                        terminal: div().size_full().into_any_element(),
-                        focused: true,
-                        progress: None,
-                    },
-                    GpuiPaneSnapshot {
-                        id: "inactive".to_owned(),
-                        rect: PaneRect::new(111.0, 20.0, 100.0, 80.0),
-                        terminal: div().size_full().into_any_element(),
-                        focused: false,
-                        progress: None,
-                    },
-                ],
-                dividers: vec![GpuiPaneDividerSnapshot {
-                    path: vec![0],
-                    direction: PaneSplitDirection::Right,
-                    rect: PaneRect::new(110.0, 20.0, 1.0, 80.0),
-                    area: PaneRect::new(10.0, 20.0, 201.0, 80.0),
-                }],
-                gap: 1.0,
-                corner_radius: 0.0,
-                focus_border_width: 2.0,
-                inactive_dim: 0.25,
-                window_dim: 0.0,
-                animation_seconds: 0.0,
-                colors: GpuiPaneColors {
-                    background: black(),
-                    divider: black(),
-                    divider_hover: blue(),
-                    focus_border: blue(),
-                    progress_track: black(),
-                    progress_normal: blue(),
-                    progress_error: blue(),
-                    progress_warning: blue(),
-                    empty_text: black(),
-                },
-                empty_message: None,
-            },
-            |_, _, _| {},
-        )
-    }
-}
-
-#[gpui_kit::test]
-fn pane_layers_keep_backgrounds_and_separator_at_their_owners(cx: &mut TestAppContext) {
-    let (_, cx) = cx.add_window_view(|_, _| PaneLayerProbe);
-
-    assert!(cx.debug_bounds("terminal-pane-surface-active").is_some());
-    assert!(cx.debug_bounds("terminal-pane-surface-inactive").is_some());
-    assert!(
-        cx.debug_bounds("terminal-pane-inactive-dim-inactive")
-            .is_some()
-    );
-    assert!(
-        cx.debug_bounds("terminal-pane-inactive-dim-active")
-            .is_none()
-    );
-    assert!(cx.debug_bounds("terminal-divider-visual-0").is_some());
-}
-
-struct PanePointerProbe {
-    intents: Rc<RefCell<Vec<bootty_gpui::GpuiPaneIntent>>>,
-}
-
-impl Render for PanePointerProbe {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        let panes = (0..2)
-            .map(|index| GpuiPaneSnapshot {
-                id: format!("pane-{index}"),
-                rect: PaneRect::new(
-                    f32::from(u16::try_from(index).expect("pane index fits u16")) * 100.0,
-                    0.0,
-                    100.0,
-                    80.0,
-                ),
-                terminal: div().size_full().into_any_element(),
-                focused: index == 0,
-                progress: None,
+impl DockProbe {
+    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let area = cx.new(|cx| DockArea::new("pane-test", None, window, cx));
+        let panes = ["a", "b"].map(|id| {
+            cx.new(|cx| Pane {
+                id: id.into(),
+                focus: cx.focus_handle(),
             })
-            .collect();
-        let intents = Rc::clone(&self.intents);
-        div().w(px(200.0)).h(px(80.0)).child(GpuiPaneWorkspace::new(
-            GpuiPaneWorkspaceSnapshot {
-                arrangement_target: None,
-                area: PaneRect::new(0.0, 0.0, 200.0, 80.0),
-                panes,
-                dividers: Vec::new(),
-                gap: 0.0,
-                corner_radius: 0.0,
-                focus_border_width: 0.0,
-                inactive_dim: 0.0,
-                window_dim: 0.0,
-                animation_seconds: 0.0,
-                colors: GpuiPaneColors {
-                    background: black(),
-                    divider: black(),
-                    divider_hover: blue(),
-                    focus_border: blue(),
-                    progress_track: black(),
-                    progress_normal: blue(),
-                    progress_error: blue(),
-                    progress_warning: blue(),
-                    empty_text: black(),
-                },
-                empty_message: None,
-            },
-            move |intent, _, _| intents.borrow_mut().push(intent),
-        ))
+        });
+        area.update(cx, |area, cx| {
+            area.set_center(
+                DockLayout::h_split()
+                    .child(DockLayout::tabs().panel(panes[0].clone()), Some(px(300.)))
+                    .child(DockLayout::tabs().panel(panes[1].clone()), Some(px(300.))),
+                window,
+                cx,
+            );
+        });
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let subscription = cx.subscribe(&area, |this, area, event, cx| match event {
+            DockEvent::LayoutChanged => this.changes = this.changes.saturating_add(1),
+            DockEvent::DragDrop { item, target } => {
+                let drag = item.value().downcast_ref::<DraggedPane>().unwrap();
+                let area = area.read(cx);
+                let node = area
+                    .layout(DockPlacement::Center)
+                    .unwrap()
+                    .find_node(target.node())
+                    .unwrap();
+                let PaneRef::Tabs { panels, .. } = node.kind() else {
+                    panic!("drop on split")
+                };
+                let pane = this
+                    .panes
+                    .iter()
+                    .find(|pane| panels.contains(&PanelId::from(pane.entity_id())))
+                    .unwrap()
+                    .read(cx);
+                if let Some(command) = pane_drop_command(drag, &pane.id, target.placement()) {
+                    this.commands.borrow_mut().push(command);
+                }
+            }
+        });
+        Self {
+            area,
+            panes,
+            commands,
+            changes: 0,
+            _subscription: subscription,
+        }
     }
 }
-
+impl Render for DockProbe {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(600.)).h(px(400.)).child(self.area.clone())
+    }
+}
 #[gpui_kit::test]
-fn non_left_pane_presses_focus_the_pointer_pane(cx: &mut TestAppContext) {
-    let intents = Rc::new(RefCell::new(Vec::new()));
-    let (_, cx) = cx.add_window_view({
-        let intents = Rc::clone(&intents);
-        move |_, _| PanePointerProbe { intents }
+fn host_drag_reports_edge_move_and_center_swap_without_mutating_dock(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (probe, cx) = cx.add_window_view(DockProbe::new);
+    for (fraction, command) in [(0.1, "pane.move"), (0.5, "pane.swap")] {
+        let source = cx
+            .debug_bounds("pane-drag-handle-a")
+            .expect("pane handle")
+            .center();
+        let target = cx.debug_bounds("terminal-pane-b").expect("pane content");
+        let destination = point(
+            target.left() + target.size.width * fraction,
+            target.top() + target.size.height * 0.5,
+        );
+        cx.simulate_mouse_down(source, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(
+            source + point(px(-12.), px(12.)),
+            Some(MouseButton::Left),
+            Modifiers::none(),
+        );
+        cx.simulate_mouse_move(destination, Some(MouseButton::Left), Modifiers::none());
+        cx.simulate_mouse_up(destination, MouseButton::Left, Modifiers::none());
+        probe.read_with(cx, |probe, _| {
+            let commands = probe.commands.borrow();
+            assert_eq!(
+                commands.last().expect("Dock reports host drop").command,
+                command
+            );
+            assert_eq!(probe.changes, 0, "host drops leave Dock topology untouched");
+        });
+    }
+}
+#[gpui_kit::test]
+fn dock_resize_reports_one_layout_change(cx: &mut TestAppContext) {
+    cx.update(gpui_kit::init);
+    let (probe, cx) = cx.add_window_view(DockProbe::new);
+    cx.update(|window, cx| {
+        let area = probe.read(cx).area.clone();
+        let node = area
+            .read(cx)
+            .layout(DockPlacement::Center)
+            .unwrap()
+            .root()
+            .id();
+        area.update(cx, |area, cx| {
+            area.set_split_sizes(node, vec![px(200.), px(400.)], window, cx);
+        });
     });
-    let position: Point<gpui_kit::Pixels> = point(px(150.0), px(40.0));
-
-    cx.simulate_mouse_down(position, MouseButton::Middle, Modifiers::none());
-    cx.simulate_mouse_down(position, MouseButton::Right, Modifiers::none());
-
-    assert_eq!(
-        intents.borrow().as_slice(),
-        [
-            bootty_gpui::GpuiPaneIntent::Focus("pane-1".to_owned()),
-            bootty_gpui::GpuiPaneIntent::Focus("pane-1".to_owned()),
-        ]
-    );
+    cx.run_until_parked();
+    probe.read_with(cx, |probe, cx| {
+        assert_eq!(probe.changes, 1);
+        let layout =
+            bootty_ui::workspace_composition::mux_pane_layout(&probe.area.read(cx).dump(cx).center)
+                .unwrap();
+        let bootty_mux::snapshot::MuxPaneLayout::Split { weights, .. } = layout else {
+            panic!("split")
+        };
+        assert!((weights[0] - 1. / 3.).abs() < 0.000_01);
+    });
 }

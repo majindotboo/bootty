@@ -1,4 +1,5 @@
 [package]
+autotests = false
 name = "bootty-daemon"
 version.workspace = true
 edition.workspace = true
@@ -16,19 +17,22 @@ anyhow.workspace = true
 bootty-config = { path = "../bootty-config" }
 bootty-git = { path = "../bootty-git" }
 bootty-host = { path = "../bootty-host" }
-bootty-mux = { path = "../bootty-mux", default-features = false }
-rusqlite.workspace = true
+bootty-mux = { path = "../bootty-mux" }
 serde_json.workspace = true
 
 [dev-dependencies]
+bootty-os = { path = "../bootty-os" }
+tokio = { workspace = true, features = ["rt", "net"] }
 bootty-test-support = { path = "../bootty-test-support" }
 sha2.workspace = true
 base64.workspace = true
 rstest.workspace = true
 assert_fs.workspace = true
 pretty_assertions.workspace = true
-rmux-sdk.workspace = true
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "integration"
+path = "tests/integration/main.rs"

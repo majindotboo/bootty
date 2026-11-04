@@ -7,7 +7,7 @@ use crate::{
 use anyhow::Result;
 use bootty_config::{
     KeymapMatch, KeymapPhysicalKey, KeymapTrigger, KeymapTriggerKey,
-    config::{BoottyConfig, MultiplexerBackendConfig},
+    config::BoottyConfig,
     keymap_file::{KeymapAction, KeymapBindingKind, KeymapContext, KeymapEdit, KeymapWriteOutcome},
 };
 use bootty_control::{Caller, CommandDescriptor, CommandInvocation, CommandOutcome};
@@ -33,10 +33,6 @@ pub enum KeymapFocus {
     Terminal,
     Sidebar,
     Command,
-    SurfaceChooser,
-    /// A shown Agent composer: a native conversation or the new-session form.
-    Composer,
-    ComposerCompletion,
     #[default]
     Other,
 }
@@ -120,7 +116,6 @@ impl KeymapRuntime {
         events: Vec<InputEvent>,
         modifier_sides: ModifierSideState,
         focus: KeymapFocus,
-        backend: MultiplexerBackendConfig,
     ) -> (Vec<InputEvent>, Vec<CommandInvocation>) {
         let mut remaining = Vec::with_capacity(events.len());
         let mut invocations = Vec::new();
@@ -151,7 +146,7 @@ impl KeymapRuntime {
             };
             let candidates = to_keymap_candidates(&candidates);
             let resolved = self.runtime.next_candidates(&candidates, |context| {
-                runtime_context_is_active(context, focus, backend)
+                runtime_context_is_active(context, focus)
             });
             let resolved = resolved_to_binding(resolved, focus);
             if let Some(resolved) = resolved {
@@ -169,14 +164,10 @@ impl KeymapRuntime {
         (remaining, invocations)
     }
 
-    pub(crate) fn invocation_for_input(
-        &mut self,
-        input: KeyInput,
-        backend: MultiplexerBackendConfig,
-    ) -> Option<ResolvedBinding> {
+    pub(crate) fn invocation_for_input(&mut self, input: KeyInput) -> Option<ResolvedBinding> {
         let candidates = to_keymap_candidates(&binding_triggers_for_key_input(input));
         let resolved = self.runtime.next_candidates(&candidates, |context| {
-            runtime_context_is_active(context, KeymapFocus::Terminal, backend)
+            runtime_context_is_active(context, KeymapFocus::Terminal)
         });
         resolved_to_binding(resolved, KeymapFocus::Terminal)
     }
@@ -208,13 +199,8 @@ fn consume_invocation(focus: KeymapFocus) -> CommandInvocation {
     CommandInvocation::from_action(command, Caller::Keybinding)
 }
 
-pub(crate) fn context_is_active(
-    context: &KeymapContext,
-    focus: KeymapFocus,
-    backend: MultiplexerBackendConfig,
-) -> bool {
-    compile_context(context)
-        .is_ok_and(|context| runtime_context_is_active(&context, focus, backend))
+pub(crate) fn context_is_active(context: &KeymapContext, focus: KeymapFocus) -> bool {
+    compile_context(context).is_ok_and(|context| runtime_context_is_active(&context, focus))
 }
 
 fn compile_context(context: &KeymapContext) -> Result<RuntimeContext, String> {
@@ -222,14 +208,7 @@ fn compile_context(context: &KeymapContext) -> Result<RuntimeContext, String> {
         KeymapContext::Global => return Ok(RuntimeContext { predicate: None }),
         KeymapContext::Sidebar => "Sidebar",
         KeymapContext::Command => "Command",
-        KeymapContext::SurfaceChooser => "SurfaceChooser",
-        KeymapContext::Composer => "Composer",
-        KeymapContext::ComposerCompletion => "ComposerCompletion",
         KeymapContext::Terminal => "Terminal",
-        KeymapContext::Herdr => "Terminal && backend == herdr",
-        KeymapContext::Native => "Terminal && backend == native",
-        KeymapContext::Rmux => "Terminal && backend == rmux",
-        KeymapContext::Tmux => "Terminal && backend == tmux",
         KeymapContext::Expression(source) => source,
     };
     KeyBindingContextPredicate::parse(source)
@@ -239,37 +218,30 @@ fn compile_context(context: &KeymapContext) -> Result<RuntimeContext, String> {
         .map_err(|error| format!("invalid keybinding context {source:?}: {error}"))
 }
 
-fn runtime_context_is_active(
-    context: &RuntimeContext,
-    focus: KeymapFocus,
-    backend: MultiplexerBackendConfig,
-) -> bool {
+fn runtime_context_is_active(context: &RuntimeContext, focus: KeymapFocus) -> bool {
     let Some(predicate) = &context.predicate else {
         return focus != KeymapFocus::Command;
     };
-    predicate
-        .depth_of(&active_key_contexts(focus, backend))
-        .is_some()
+    predicate.depth_of(&active_key_contexts(focus)).is_some()
 }
 
-fn active_key_contexts(focus: KeymapFocus, backend: MultiplexerBackendConfig) -> Vec<KeyContext> {
-    let mut workspace = KeyContext::new_with_defaults();
+fn active_key_contexts(focus: KeymapFocus) -> Vec<KeyContext> {
+    let mut workspace = KeyContext::new_with_defaults(if cfg!(target_os = "macos") {
+        gpui_kit::OperatingSystem::Mac
+    } else if cfg!(windows) {
+        gpui_kit::OperatingSystem::Windows
+    } else {
+        gpui_kit::OperatingSystem::Linux
+    });
     workspace.add("Workspace");
     let mut contexts = vec![workspace];
     let mut focused = KeyContext::default();
     match focus {
         KeymapFocus::Terminal => {
             focused.add("Terminal");
-            focused.set("backend", backend.to_string().to_ascii_lowercase());
         }
         KeymapFocus::Sidebar => focused.add("Sidebar"),
         KeymapFocus::Command => focused.add("Command"),
-        KeymapFocus::SurfaceChooser => focused.add("SurfaceChooser"),
-        KeymapFocus::Composer => focused.add("Composer"),
-        KeymapFocus::ComposerCompletion => {
-            focused.add("Composer");
-            focused.add("ComposerCompletion");
-        }
         KeymapFocus::Other => return contexts,
     }
     if focus == KeymapFocus::Command {
@@ -670,100 +642,19 @@ fn command_outcome_message(outcome: CommandOutcome) -> String {
     }
 }
 
-/// Stashing a prompt takes the platform's Save keystroke.
-const STASH_KEYSTROKE: &str = if cfg!(target_os = "macos") {
-    "cmd+s"
-} else {
-    "ctrl+s"
-};
-
-const FOCUS_COMPOSER_KEYSTROKE: &str = if cfg!(target_os = "macos") {
-    "cmd+l"
-} else {
-    "ctrl+l"
-};
-
 /// Built-in bindings by context: each keystroke and the command it runs there.
-const BUILT_IN_BINDINGS: [(KeymapContext, &[(&str, &str)]); 4] = [
-    (
-        KeymapContext::Command,
-        &[
-            ("arrow_up", "ui.command.previous"),
-            ("ctrl+p", "ui.command.previous"),
-            ("arrow_down", "ui.command.next"),
-            ("ctrl+n", "ui.command.next"),
-            ("enter", "ui.command.confirm"),
-            ("escape", "ui.command.cancel"),
-            ("ctrl+shift+f", "ui.command.toggle_favorite"),
-        ],
-    ),
-    (
-        KeymapContext::SurfaceChooser,
-        &[
-            ("arrow_up", "ui.surface.previous"),
-            ("k", "ui.surface.previous"),
-            ("ctrl+p", "ui.surface.previous"),
-            ("shift+tab", "ui.surface.previous"),
-            ("arrow_down", "ui.surface.next"),
-            ("j", "ui.surface.next"),
-            ("ctrl+n", "ui.surface.next"),
-            ("tab", "ui.surface.next"),
-            ("home", "ui.surface.first"),
-            ("g > g", "ui.surface.first"),
-            ("alt+<", "ui.surface.first"),
-            ("end", "ui.surface.last"),
-            ("shift+g", "ui.surface.last"),
-            ("alt+>", "ui.surface.last"),
-            ("enter", "ui.surface.confirm"),
-            ("ctrl+m", "ui.surface.confirm"),
-            ("ctrl+g", "ui.surface.cancel"),
-            ("escape", "ui.surface.cancel"),
-            ("a", "ui.surface.agent"),
-            ("t", "ui.surface.terminal"),
-            ("1", "ui.surface.claude"),
-            ("2", "ui.surface.codex"),
-            ("3", "ui.surface.pi"),
-            ("e", "ui.surface.edit_profiles"),
-        ],
-    ),
-    (
-        KeymapContext::ComposerCompletion,
-        &[
-            ("arrow_up", "ui.composer.previous"),
-            ("ctrl+p", "ui.composer.previous"),
-            ("ctrl+k", "ui.composer.previous"),
-            ("alt+k", "ui.composer.previous"),
-            ("arrow_down", "ui.composer.next"),
-            ("ctrl+n", "ui.composer.next"),
-            ("ctrl+j", "ui.composer.next"),
-            ("alt+j", "ui.composer.next"),
-            ("enter", "ui.composer.confirm"),
-            ("tab", "ui.composer.confirm"),
-            ("escape", "ui.composer.cancel"),
-            ("ctrl+g", "ui.composer.cancel"),
-        ],
-    ),
-    (
-        KeymapContext::Composer,
-        &[
-            ("ctrl+alt+s", "ui.composer.focus-space"),
-            ("ctrl+alt+m", "ui.composer.focus-model"),
-            ("alt+,", "ui.composer.effort-down"),
-            ("alt+.", "ui.composer.effort-up"),
-            ("ctrl+alt+p", "ui.composer.focus-project"),
-            ("ctrl+alt+w", "ui.composer.focus-worktree"),
-            ("ctrl+alt+a", "ui.composer.focus-permissions"),
-            ("shift+tab", "ui.composer.toggle-plan"),
-            ("ctrl+alt+f", "ui.composer.toggle-fast"),
-            ("ctrl+alt+d", "ui.composer.dictate"),
-            ("ctrl+alt+v", "ui.composer.voice"),
-            ("ctrl+alt+i", "ui.composer.focus-composer"),
-            (FOCUS_COMPOSER_KEYSTROKE, "ui.composer.focus-composer"),
-            ("ctrl+alt+e", "ui.composer.expand"),
-            (STASH_KEYSTROKE, "ui.composer.stash"),
-        ],
-    ),
-];
+const BUILT_IN_BINDINGS: [(KeymapContext, &[(&str, &str)]); 1] = [(
+    KeymapContext::Command,
+    &[
+        ("arrow_up", "ui.command.previous"),
+        ("ctrl+p", "ui.command.previous"),
+        ("arrow_down", "ui.command.next"),
+        ("ctrl+n", "ui.command.next"),
+        ("enter", "ui.command.confirm"),
+        ("escape", "ui.command.cancel"),
+        ("ctrl+shift+f", "ui.command.toggle_favorite"),
+    ],
+)];
 
 fn built_in_bindings(config: &BoottyConfig) -> Vec<KeymapBindingSnapshot> {
     BUILT_IN_BINDINGS

@@ -6,17 +6,12 @@ use std::collections::{HashMap, HashSet};
 use crate::chrome_projection::{MuxView, SessionProgressView, SessionView, WindowView};
 use crate::gpui::chrome::{
     ChromeIntent, ChromeLayout, ChromePalette, ChromeSnapshot, NativeChromeAction, Rgba,
-    SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarAgent, SidebarPosition,
-    SidebarProject, SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceKey,
-    SpaceSnapshot, StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot,
-    StatusProgress, StatusSegmentSnapshot, TabContextAction, TabContextSnapshot, TitlebarSnapshot,
-    UsageMeterSnapshot,
+    SessionContextAction, SessionContextSnapshot, SessionTarget, SidebarPosition, SidebarProject,
+    SidebarRow, SidebarRowKind, SidebarSnapshot, SidebarTask, SpaceKey, SpaceSnapshot,
+    StatusAlignment, StatusBarSnapshot, StatusIntent, StatusItemSnapshot, StatusProgress,
+    StatusSegmentSnapshot, TabContextAction, TabContextSnapshot, TitlebarSnapshot,
 };
-use crate::{
-    clock::ClockSnapshot,
-    metrics::MetricsService,
-    usage::{QuotaTone, UsageProvider, UsageService},
-};
+use crate::{clock::ClockSnapshot, metrics::MetricsService};
 use bootty_mux::repository::DEFAULT_SPACE_COLOR;
 
 use crate::{
@@ -39,7 +34,6 @@ pub struct NativeChrome {
     )>,
     artwork: crate::project_artwork::ProjectArtworkCache,
     pub(crate) metrics: MetricsService,
-    pub(crate) usage: UsageService,
     pub(crate) clock: ClockSnapshot,
 }
 
@@ -50,14 +44,13 @@ impl Default for NativeChrome {
             remote_git: Vec::new(),
             artwork: crate::project_artwork::ProjectArtworkCache::default(),
             metrics: MetricsService::default(),
-            usage: UsageService::default(),
             clock: ClockSnapshot::now(),
         }
     }
 }
 
 impl NativeChrome {
-    pub(crate) fn refresh(&mut self, now: std::time::Instant, _usage_visible: bool) {
+    pub(crate) fn refresh(&mut self, now: std::time::Instant) {
         self.local_git.prune(now);
         self.remote_git.retain(|(_, cache, seen)| {
             let current = now.saturating_duration_since(*seen) < std::time::Duration::from_mins(5);
@@ -130,19 +123,6 @@ pub fn prepare(
         session_views.push(session_view(state, session, display_name, selected));
     }
     let binding = &state.workspace.active.binding;
-    for saved in binding.sessions().sessions() {
-        if binding.session_attachment(&saved.identity).is_none() {
-            session_views.push(SessionView {
-                id: saved.identity.clone(),
-                identity: Some(saved.identity.clone()),
-                detached: true,
-                name: saved.backend_name.clone(),
-                display_name: saved.label().to_owned(),
-                cwd: (!saved.state.projectless && !saved.cwd.is_empty()).then(|| saved.cwd.clone()),
-                ..SessionView::default()
-            });
-        }
-    }
     let saved_order = binding
         .sessions()
         .sessions()
@@ -278,7 +258,6 @@ fn session_view(
     SessionView {
         id: session.id.clone(),
         identity: session.tag.identity.clone(),
-        detached: false,
         name: session.name.clone(),
         display_name,
         active: session.active,
@@ -529,7 +508,6 @@ pub fn snapshot(
         palette,
         layout: ChromeLayout {
             left_dock_toggle: chrome.left_dock_toggle,
-            right_dock_toggle: chrome.right_dock_toggle,
             panel_tab_style: chrome.panel_tab_style,
             panel_tabs: chrome.panel_tabs,
             tabs: chrome.tabs,
@@ -664,7 +642,6 @@ fn sidebar_snapshot(
 ) -> SidebarSnapshot {
     let config = state.config();
     let chrome = &config.chrome;
-    let theme = state.ui_theme().palette;
     let black_notch_chrome = state.black_notch_chrome();
     let sidebar_config = &config.sidebar;
     let mut rows = if sidebar_config.modules.iter().any(|name| name == "sessions") {
@@ -715,20 +692,9 @@ fn sidebar_snapshot(
         ),
         rows,
         now_utc: native.clock.epoch,
-        footer: if sidebar_config
-            .modules
-            .iter()
-            .any(|module| module == "usage")
-        {
-            sidebar_footer(native, theme)
-        } else {
-            Vec::new()
-        },
         title_visible: config.window.custom_chrome_title_visible(),
         group_by_project: sidebar_config.group_by_project,
-        settled_collapsed: sidebar_config.settled_collapsed,
         sort_order: sidebar_config.sort_order,
-        animate_working: sidebar_config.animate_working,
         focused: state.sidebar_focused(),
         hovered_session: state.sidebar_hovered_session().map(neutral_target),
         dim_when_unfocused: chrome.unfocused_sidebar_dim,
@@ -775,9 +741,6 @@ fn append_creation_drafts(state: &AppState, rows: &mut Vec<SidebarRow>, palette:
             continue;
         }
         let project = project_name(draft.project.as_deref()).to_owned();
-        let provider = bootty_agents::AgentKind::ALL
-            .into_iter()
-            .find(|provider| provider.to_string() == draft.provider);
         let row = SidebarRow {
             key: format!("draft:{}", draft.identity),
             text: draft.title,
@@ -790,22 +753,9 @@ fn append_creation_drafts(state: &AppState, rows: &mut Vec<SidebarRow>, palette:
             cwd: Some(draft.cwd.clone()),
             host: None,
             branch: draft.branch,
-            agents: vec![SidebarAgent {
-                key: format!("draft-provider:{}", draft.identity),
-                icon: provider
-                    .map_or("terminal", bootty_agents::AgentKind::icon)
-                    .to_owned(),
-                description: format!(
-                    "{} draft",
-                    provider.map_or("Terminal", bootty_agents::AgentKind::display_name)
-                ),
-                model: None,
-            }],
             trailing: Some("Draft".into()),
             trailing_icon: None,
             trailing_color: None,
-            working: false,
-            needs_attention: false,
             number: None,
             indent: 0,
             tree: None,
@@ -920,12 +870,9 @@ fn empty_project_row(
         cwd: Some(project.cwd.clone()),
         host: None,
         branch: None,
-        agents: Vec::new(),
         trailing: None,
         trailing_icon: None,
         trailing_color: None,
-        working: false,
-        needs_attention: false,
         number: None,
         indent: 0,
         tree: None,
@@ -966,12 +913,9 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                 .as_ref()
                 .map(bootty_mux::RemoteTarget::label),
             branch: None,
-            agents: Vec::new(),
             trailing: None,
             trailing_icon: None,
             trailing_color: None,
-            working: false,
-            needs_attention: false,
             number: None,
             indent: 0,
             tree: None,
@@ -1006,12 +950,9 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                     .as_ref()
                     .map(bootty_mux::RemoteTarget::label),
                 branch: None,
-                agents: Vec::new(),
                 trailing: None,
                 trailing_icon: None,
                 trailing_color: None,
-                working: false,
-                needs_attention: false,
                 number: None,
                 indent: 2,
                 tree: None,
@@ -1056,20 +997,9 @@ fn session_title<'a>(name: &'a str, project: &str, explicit: bool) -> &'a str {
 
 /// The sessions the sidebar lists, in order: each session once, by project when grouped, without
 /// the tasks a conversation delegated, which show under their parent instead.
-fn listed_sessions<'a>(
-    projection: &'a ChromeProjection,
-    delegated: &HashSet<&str>,
-    grouped: bool,
-) -> Vec<(usize, &'a SessionView)> {
+fn listed_sessions(projection: &ChromeProjection, grouped: bool) -> Vec<(usize, &SessionView)> {
     let mut groups = Vec::<(Option<&str>, Vec<(usize, &SessionView)>)>::new();
     for (index, session) in projection.mux.sessions.iter().enumerate() {
-        if session
-            .identity
-            .as_deref()
-            .is_some_and(|identity| delegated.contains(identity))
-        {
-            continue;
-        }
         let group = session_project_path(projection, session);
         if grouped && let Some((_, indices)) = groups.iter_mut().find(|(key, _)| *key == group) {
             indices.push((index, session));
@@ -1090,21 +1020,13 @@ fn sidebar_rows(
     palette: ChromePalette,
 ) -> Vec<SidebarRow> {
     let sessions = &projection.mux.sessions;
-    let native_activities = state
-        .native_agent_service()
-        .map_or_else(Vec::new, |agents| agents.activities());
     let scope = state.mux_scope().persistence_value().to_string();
     let now = std::time::Instant::now();
     let mut rows = Vec::new();
     let grouped = state.config().sidebar.group_by_project;
     let names = state.saved_session_names();
-    let delegated: HashSet<_> = native_activities
-        .iter()
-        .filter(|activity| activity.spawn_parent.is_some())
-        .filter_map(|activity| activity.task_identity.as_deref())
-        .collect();
     let mut last_group = None;
-    for (index, session) in listed_sessions(projection, &delegated, grouped) {
+    for (index, session) in listed_sessions(projection, grouped) {
         let facts = projection
             .session_facts
             .get(&session.id)
@@ -1147,9 +1069,8 @@ fn sidebar_rows(
             .and_then(|identity| state.workspace.active.binding.sessions().get(identity))
             .is_some_and(|saved| saved.explicit);
         let title = session_title(name, project, explicit_title);
-        let mut row = session_row(
+        let row = session_row(
             state,
-            session,
             facts,
             SidebarProject {
                 name: project.to_owned(),
@@ -1158,22 +1079,6 @@ fn sidebar_rows(
             title,
             base,
         );
-        let terminal_priority = sidebar_session_activity(state, session, &mut row);
-        let selected_native = active_pane_conversation(state, session);
-        sidebar_native_activity(
-            &mut row,
-            session,
-            (&scope, selected_native.as_deref()),
-            &native_activities,
-            terminal_priority,
-            state.ui_theme().palette,
-        );
-        if let Some(task) = &mut row.task {
-            task.title_regenerating = task
-                .native_conversation
-                .as_ref()
-                .is_some_and(|target| state.native_title_pending(target));
-        }
         rows.push(row);
         last_group = Some(group);
     }
@@ -1183,7 +1088,6 @@ fn sidebar_rows(
 /// A session's own row: its title, project, branch, pull request and diff.
 fn session_row(
     state: &AppState,
-    session: &SessionView,
     facts: bootty_git::GitSessionFacts,
     project: SidebarProject,
     title: &str,
@@ -1201,11 +1105,7 @@ fn session_row(
         ),
         worktree: facts.project.is_some(),
         icon: Some("terminal".to_owned()),
-        kind: if session.detached {
-            SidebarRowKind::DetachedSession
-        } else {
-            SidebarRowKind::Session
-        },
+        kind: SidebarRowKind::Session,
         selectable: true,
         ..base
     }
@@ -1279,292 +1179,6 @@ fn project_name(path: Option<&str>) -> &str {
     .unwrap_or("No project")
 }
 
-fn sidebar_session_activity(state: &AppState, session: &SessionView, row: &mut SidebarRow) -> u8 {
-    if session.detached {
-        row.reorder_anchor.clone_from(&session.identity);
-    }
-    let activities = terminal_activities(state, &session.id, None);
-    if let Some(activity) = activities
-        .iter()
-        .max_by_key(|activity| activity_priority(activity.status))
-    {
-        sidebar_agent_activity(row, activity, state.ui_theme().palette);
-    }
-    let priority = activities
-        .iter()
-        .map(|activity| activity_priority(activity.status))
-        .max()
-        .unwrap_or(0);
-    row.agents = activities.iter().map(sidebar_agent).collect();
-    if row.task.as_ref().is_some_and(|task| task.state.deleted) {
-        row.reorder_anchor = None;
-    }
-    priority
-}
-
-/// A task can hold several conversations; its row acts on the one in the session's active pane.
-fn active_pane_conversation(state: &AppState, session: &SessionView) -> Option<String> {
-    let attached = state
-        .workspace
-        .active
-        .binding
-        .session_attachment(session.identity.as_deref()?)?;
-    attached
-        .windows
-        .iter()
-        .flat_map(|window| &window.panes)
-        .find(|pane| pane.pane_id.is_some() && pane.pane_id == session.pane_id)
-        .and_then(|pane| pane.native_agent.clone())
-}
-
-fn sidebar_native_activity(
-    row: &mut SidebarRow,
-    session: &SessionView,
-    (binding_id, selected): (&str, Option<&str>),
-    activities: &[bootty_agents::NativeSessionActivity],
-    terminal_priority: u8,
-    theme: crate::gpui::UiPalette,
-) {
-    use bootty_agents::NativeSessionStatus as S;
-    let matching = activities
-        .iter()
-        .filter(|activity| {
-            activity.binding_id == binding_id
-                && activity.task_identity.is_some()
-                && activity.task_identity == session.identity
-        })
-        .collect::<Vec<_>>();
-    if let (Some(task), Some(activity)) = (
-        row.task.as_mut().filter(|task| !task.state.deleted),
-        matching
-            .iter()
-            .find(|activity| Some(activity.id.as_str()) == selected)
-            .or_else(|| matching.last()),
-    ) {
-        task.native_conversation = Some(bootty_control::CommandTarget {
-            kind: bootty_control::ResourceKind::Session,
-            handle: activity.id.clone(),
-            generation: activity.generation,
-        });
-    }
-    row.agents
-        .extend(matching.iter().map(|activity| SidebarAgent {
-            key: activity.id.clone(),
-            icon: activity.provider.icon().to_owned(),
-            description: format!(
-                "{} · {}",
-                activity.provider.display_name(),
-                native_status_word(activity.status)
-            ),
-            model: activity.model.clone(),
-        }));
-    let priority = |activity: &&bootty_agents::NativeSessionActivity| {
-        if activity.approval {
-            10
-        } else if activity.input {
-            9
-        } else {
-            match activity.status {
-                S::Error => 8,
-                S::Working => 7,
-                S::Idle | S::Stopped if activity.running_subagents > 0 => 7,
-                S::Waiting => 6,
-                S::Starting => 5,
-                S::Idle | S::Stopped if activity.unread => 3,
-                S::Idle | S::Stopped => 0,
-            }
-        }
-    };
-    if let Some(activity) = matching
-        .into_iter()
-        .max_by_key(priority)
-        .filter(|activity| priority(activity) >= terminal_priority)
-    {
-        row.needs_attention = activity.approval || activity.input || activity.status == S::Error;
-        // Subagents keep a conversation working after its own turn ends.
-        row.working =
-            matches!(activity.status, S::Starting | S::Working) || activity.running_subagents > 0;
-        let badge = if activity.approval {
-            Some(("Approval", "shield-question-mark", theme.warning))
-        } else if activity.input {
-            Some(("Input", "message-circle-question-mark", theme.accent))
-        } else {
-            match activity.status {
-                S::Starting | S::Working => Some(("Working", "circle-dashed", theme.accent)),
-                S::Idle | S::Stopped if activity.running_subagents > 0 => {
-                    Some(("Working", "circle-dashed", theme.accent))
-                }
-                S::Waiting => Some(("Waiting", "clock", theme.muted)),
-                S::Error => Some(("Failed", "circle-alert", theme.destructive)),
-                S::Idle | S::Stopped if activity.unread => {
-                    Some(("Finished", "circle-check", theme.success))
-                }
-                S::Idle | S::Stopped => None,
-            }
-        };
-        if let Some((text, icon, color)) = badge {
-            row.trailing = Some(if text == "Working" {
-                activity.working_elapsed.map_or_else(
-                    || text.to_owned(),
-                    |elapsed| format!("{text} {}", crate::clock::format_working_duration(elapsed)),
-                )
-            } else {
-                text.to_owned()
-            });
-            row.trailing_icon = Some(icon.to_owned());
-            row.trailing_color = Some(color);
-        }
-    }
-}
-
-/// A conversation's status in the words the Agents panel uses.
-const fn native_status_word(status: bootty_agents::NativeSessionStatus) -> &'static str {
-    use bootty_agents::NativeSessionStatus as Status;
-    match status {
-        Status::Starting => "Starting",
-        Status::Idle => "Idle",
-        Status::Working => "Working",
-        Status::Waiting => "Waiting",
-        Status::Stopped => "Stopped",
-        Status::Error => "Failed",
-    }
-}
-
-/// A terminal agent's status in the words the Agents panel uses.
-const fn terminal_status_word(status: bootty_agents::TerminalAgentStatus) -> &'static str {
-    use bootty_agents::TerminalAgentStatus as Status;
-    match status {
-        Status::Starting => "Starting",
-        Status::Idle => "Idle",
-        Status::Working => "Working",
-        Status::Approval => "Needs approval",
-        Status::Input => "Needs input",
-        Status::Waiting => "Waiting",
-        Status::Finished => "Finished",
-        Status::Stopped => "Stopped",
-        Status::Error => "Failed",
-        Status::Unavailable => "Unavailable",
-    }
-}
-
-fn sidebar_agent(activity: &bootty_agents::TerminalAgentActivity) -> SidebarAgent {
-    SidebarAgent {
-        key: activity.target.handle.clone(),
-        icon: activity.provider.icon().to_owned(),
-        model: None,
-        description: format!(
-            "{} · {}{}",
-            activity.provider.display_name(),
-            terminal_status_word(activity.status),
-            activity
-                .detail
-                .as_ref()
-                .map_or_else(String::new, |detail| format!(" · {detail}"))
-        ),
-    }
-}
-
-fn sidebar_agent_activity(
-    row: &mut SidebarRow,
-    activity: &bootty_agents::TerminalAgentActivity,
-    theme: crate::gpui::UiPalette,
-) {
-    use bootty_agents::TerminalAgentStatus as S;
-    row.needs_attention = matches!(activity.status, S::Approval | S::Input | S::Error);
-    row.working = matches!(activity.status, S::Starting | S::Working);
-    let (status, icon, tone) = match activity.status {
-        S::Starting | S::Working => ("Working", "circle-dashed", theme.accent),
-        S::Approval => ("Approval", "shield-question-mark", theme.warning),
-        S::Input => ("Input", "message-circle-question-mark", theme.accent),
-        S::Waiting => ("Waiting", "clock", theme.muted),
-        S::Error => ("Failed", "circle-alert", theme.destructive),
-        S::Finished => ("Finished", "circle-check", theme.success),
-        S::Idle | S::Stopped | S::Unavailable => return,
-    };
-    row.trailing = Some(activity.working_elapsed.map_or_else(
-        || status.to_owned(),
-        |elapsed| {
-            format!(
-                "{status} {}",
-                crate::clock::format_working_duration(elapsed)
-            )
-        },
-    ));
-    row.trailing_icon = Some(icon.to_owned());
-    row.trailing_color = Some(tone);
-}
-
-const fn activity_priority(status: bootty_agents::TerminalAgentStatus) -> u8 {
-    use bootty_agents::TerminalAgentStatus as S;
-    match status {
-        S::Approval => 10,
-        S::Input => 9,
-        S::Error => 8,
-        S::Working => 7,
-        S::Waiting => 6,
-        S::Starting => 5,
-        S::Unavailable => 4,
-        S::Finished => 3,
-        S::Stopped => 2,
-        S::Idle => 1,
-    }
-}
-
-fn terminal_activity(
-    state: &AppState,
-    session_id: &str,
-    window_id: Option<&str>,
-) -> Option<bootty_agents::TerminalAgentActivity> {
-    terminal_activities(state, session_id, window_id)
-        .into_iter()
-        .max_by_key(|activity| activity_priority(activity.status))
-}
-
-fn terminal_activities(
-    state: &AppState,
-    session_id: &str,
-    window_id: Option<&str>,
-) -> Vec<bootty_agents::TerminalAgentActivity> {
-    terminal_activities_in_scope(state, state.mux_scope(), session_id, window_id)
-}
-
-pub fn terminal_activities_in_scope(
-    state: &AppState,
-    scope: bootty_mux::controller::SpaceId,
-    session_id: &str,
-    window_id: Option<&str>,
-) -> Vec<bootty_agents::TerminalAgentActivity> {
-    use bootty_control::ResourceKind;
-    let Some(agents) = state.terminal_agent_service() else {
-        return Vec::new();
-    };
-    let Some(binding_runtime) = state.workspace.binding(scope) else {
-        return Vec::new();
-    };
-    let mux = binding_runtime.mux();
-    let Some(session) = mux.backend_session_by_id_or_name(session_id) else {
-        return Vec::new();
-    };
-    let binding = state.binding_target_handle(scope, mux.binding_generation());
-    session
-        .windows
-        .iter()
-        .filter(|window| window_id.is_none_or(|id| window.id == id))
-        .flat_map(|window| {
-            window.panes.iter().filter_map(|pane| {
-                let target = ExactMuxTarget::Pane(
-                    scope,
-                    session.id.clone(),
-                    window.id.clone(),
-                    pane.pane_id.clone()?,
-                )
-                .command_target(ResourceKind::Terminal, mux, &binding)?;
-                agents.activity(&target)
-            })
-        })
-        .collect()
-}
-
 fn sidebar_session_base(
     state: &AppState,
     session: &SessionView,
@@ -1591,12 +1205,9 @@ fn sidebar_session_base(
             .as_ref()
             .map(bootty_mux::RemoteTarget::label),
         branch: None,
-        agents: Vec::new(),
         trailing: None,
         trailing_icon: None,
         trailing_color: None,
-        working: false,
-        needs_attention: false,
         number: None,
         indent: 0,
         tree: None,
@@ -1624,22 +1235,16 @@ fn sidebar_session_base(
                 identity: identity.to_owned(),
                 name: String::new(),
                 title: String::new(),
-                native_conversation: session
-                    .detached
-                    .then(|| {
-                        state
-                            .saved_native_conversation_invocation(&ScopedSessionTarget::new(
-                                binding.scope(),
-                                identity,
-                            ))
-                            .and_then(|invocation| invocation.target)
-                    })
-                    .flatten(),
                 state: saved.state,
-                title_regenerating: false,
                 binding: state
                     .saved_session_invocation(binding.scope(), "session.saved", Vec::new())
                     .and_then(|invocation| invocation.target),
+                session: state.mux_resource_target(
+                    binding.scope(),
+                    bootty_control::ResourceKind::Session,
+                    &session.id,
+                    None,
+                ),
                 pending: state.saved_session_state_pending(binding.scope(), identity),
             })
         }),
@@ -1654,103 +1259,6 @@ fn sidebar_session_base(
             can_return_to_last: state.mux().previous_selected_session().is_some(),
         }),
     }
-}
-
-fn sidebar_footer(
-    native: &NativeChrome,
-    theme: crate::gpui::UiPalette,
-) -> Vec<crate::gpui::chrome::SidebarFooterItem> {
-    let mut rows = Vec::new();
-    let mut error = None;
-    for (provider, usage) in UsageProvider::ALL.into_iter().zip(native.usage.current()) {
-        error = error.or(usage.error.as_deref());
-        let provider_color = match provider {
-            UsageProvider::Codex => theme.accent,
-            UsageProvider::Claude => theme.warning,
-        };
-        let tone_color = |tone| match tone {
-            QuotaTone::Provider => provider_color,
-            QuotaTone::Muted => theme.muted,
-            QuotaTone::Success => theme.success,
-            QuotaTone::Warning => theme.warning,
-            QuotaTone::Critical => theme.destructive,
-        };
-        for window in &usage.windows {
-            let mut meter = window.meter(native.clock.epoch);
-            let stale = window
-                .resets_at
-                .is_some_and(|reset| reset <= native.clock.epoch);
-            if stale {
-                meter.tone = QuotaTone::Muted;
-                meter.pace.clear();
-            }
-            let reset_at = window
-                .resets_at
-                .and_then(|epoch| chrono::DateTime::from_timestamp(epoch, 0))
-                .map(|date| {
-                    crate::clock::local_moment(
-                        date.with_timezone(&chrono::Local),
-                        crate::clock::Moment::DayAndTime,
-                    )
-                });
-            rows.push(crate::gpui::chrome::SidebarFooterItem {
-                key: format!("{}:{}", provider.id(), window.label),
-                text: format!("{} {}", provider.id(), window.label),
-                icon: Some(
-                    match provider {
-                        UsageProvider::Codex => "openai",
-                        UsageProvider::Claude => "claude",
-                    }
-                    .to_owned(),
-                ),
-                color: theme.text,
-                meter: Some(UsageMeterSnapshot {
-                    provider,
-                    label: if stale {
-                        format!("{} {} · updating", provider.name(), window.label)
-                    } else {
-                        format!(
-                            "{} {} · {:.0}% left",
-                            provider.name(),
-                            window.label,
-                            meter.remaining_percent
-                        )
-                    },
-                    description: format!(
-                        "{} {}: {:.0}% remaining. {} (estimated). Resets {}{}.",
-                        provider.name(),
-                        window.label,
-                        meter.remaining_percent,
-                        meter.pace,
-                        reset_at.as_deref().unwrap_or("at an unknown time"),
-                        if meter.reset.is_empty() {
-                            String::new()
-                        } else {
-                            format!(" (in {})", meter.reset)
-                        }
-                    ),
-                    reset_at,
-                    fill: tone_color(meter.tone),
-                    marker: tone_color(meter.marker_tone),
-                    pace: tone_color(meter.pace_tone),
-                    track: theme.border_variant,
-                    meter,
-                }),
-            });
-        }
-    }
-    if rows.is_empty()
-        && let Some(error) = error
-    {
-        rows.push(crate::gpui::chrome::SidebarFooterItem {
-            key: "usage:error".to_owned(),
-            text: format!("usage {error}"),
-            icon: None,
-            color: theme.muted,
-            meter: None,
-        });
-    }
-    rows
 }
 
 /// The status bar's one layout: the session, when the sidebar doesn't show it, and the session's
@@ -1796,7 +1304,7 @@ fn status_snapshot(
 }
 
 fn status_items(
-    state: &AppState,
+    _state: &AppState,
     module: &str,
     native: &NativeChrome,
     projection: &ChromeProjection,
@@ -1819,7 +1327,7 @@ fn status_items(
             .map(|name| status_cell("session", name.clone(), Some("folder"), theme.accent))
             .into_iter()
             .collect(),
-        "windows" => window_status_items(state, projection, theme),
+        "windows" => window_status_items(projection, theme),
         "sysinfo" => system_status_items(native, projection, theme),
         _ => Vec::new(),
     }
@@ -1849,7 +1357,6 @@ fn status_cell(
 }
 
 fn window_status_items(
-    state: &AppState,
     projection: &ChromeProjection,
     theme: crate::gpui::UiPalette,
 ) -> Vec<StatusItemSnapshot> {
@@ -1882,71 +1389,7 @@ fn window_status_items(
             };
             let index = make_cell("index", window.index.to_string());
             let mut name = make_cell("name", window.name.clone());
-            name.icon = Some(
-                projection
-                    .tab_contexts
-                    .get(&window.id)
-                    .and_then(|context| {
-                        terminal_activity(state, &context.session_id, Some(&window.id))
-                    })
-                    .map_or("terminal", |activity| activity.provider.icon())
-                    .to_owned(),
-            );
-            if let Some(native) = state
-                .mux()
-                .selected_session_windows()
-                .iter()
-                .find(|candidate| candidate.id == window.id)
-                .and_then(|candidate| {
-                    candidate
-                        .panes
-                        .iter()
-                        .find_map(|pane| pane.native_agent.as_deref())
-                })
-                .and_then(|id| {
-                    state
-                        .native_agent_service()?
-                        .activities()
-                        .into_iter()
-                        .find(|record| {
-                            record.id == id
-                                && record.binding_id
-                                    == state.mux_scope().persistence_value().to_string()
-                                && projection
-                                    .tab_contexts
-                                    .get(&window.id)
-                                    .is_some_and(|context| {
-                                        record.task_identity
-                                            == state.workspace.session_identity(
-                                                state.mux_scope(),
-                                                &context.session_id,
-                                            )
-                                    })
-                        })
-                })
-            {
-                name.text = native.title;
-                name.icon = Some(native.provider.icon().to_owned());
-                // A conversation waiting on an approval or answer fills its bar in the warning
-                // color; a working one runs it.
-                name.progress = if native.approval || native.input {
-                    Some(StatusProgress {
-                        value: Some(100),
-                        color: theme.warning,
-                    })
-                } else {
-                    matches!(
-                        native.status,
-                        bootty_agents::NativeSessionStatus::Starting
-                            | bootty_agents::NativeSessionStatus::Working
-                    )
-                    .then_some(StatusProgress {
-                        value: None,
-                        color: theme.accent,
-                    })
-                };
-                return [index, name];
-            }
+            name.icon = Some("terminal".to_owned());
             name.progress = window.progress.map(|value| StatusProgress {
                 value: (!window.progress_indeterminate).then_some(value),
                 color: parse_color(projection.mux.session_color.as_deref()).unwrap_or(theme.accent),
@@ -2084,16 +1527,10 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
     ) || (matches!(intent, ChromeIntent::ActivateSpace(_))
         && state.config().default_open_behavior != OpenBehavior::NewWindow);
     let handled = match intent {
-        ChromeIntent::CustomSnooze(invocation) => {
-            effects.push(AppEffect::CustomSnooze(invocation));
-            true
-        }
         ChromeIntent::Command(invocation) => dispatch_all(state, vec![invocation], &mut effects),
         ChromeIntent::Commands(invocations) => dispatch_all(state, invocations, &mut effects),
-        // The GPUI host owns window moves and conversation views.
-        ChromeIntent::StartWindowDrag
-        | ChromeIntent::ForkConversation(_)
-        | ChromeIntent::SearchConversations(_) => false,
+        // The GPUI host owns window moves.
+        ChromeIntent::StartWindowDrag => false,
         ChromeIntent::ActivateSpace(space) => {
             let space = id(space);
             if state.config().default_open_behavior == OpenBehavior::NewWindow {
@@ -2105,15 +1542,10 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
         }
         ChromeIntent::CreateSpace => state.open_create_space_dialog_from_ui(),
         ChromeIntent::EditSpace(space) => state.open_edit_space_dialog_from_ui(id(space)),
-        ChromeIntent::ReconnectSpace(space) => state.reconnect_space_from_ui(id(space)),
         ChromeIntent::CloseSpace(space) => state.close_space_from_ui(id(space)),
         ChromeIntent::MoveSessionsToSpace { sessions, to } => sessions
             .iter()
             .all(|session| state.move_scoped_session_to_space(&scoped_target(session), id(to))),
-        ChromeIntent::OpenGitChanges(target) => {
-            state.open_session_git_changes(id(target.scope), &target.session_id);
-            true
-        }
         ChromeIntent::ActivateSession(target) => {
             apply_session_activation(state, &scoped_target(&target), &mut effects)
         }
@@ -2163,12 +1595,7 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
         ChromeIntent::Status(intent) => apply_status(state, intent),
     };
     effects.push(AppEffect::RequestRepaint);
-    if handled
-        && focus_terminal
-        && !effects
-            .iter()
-            .any(|effect| matches!(effect, AppEffect::NativeConversation(_)))
-    {
+    if handled && focus_terminal {
         effects.push(AppEffect::FocusTerminal);
     }
     effects
@@ -2186,15 +1613,11 @@ fn apply_session_activation(
             binding.sessions().contains(&target.session_id)
                 && binding.session_attachment(&target.session_id).is_none()
         })
-        && let Some(invocation) = state
-            .saved_native_conversation_invocation(target)
-            .or_else(|| {
-                state.saved_session_invocation(
-                    target.scope,
-                    "session.reopen",
-                    vec![target.session_id.clone()],
-                )
-            })
+        && let Some(invocation) = state.saved_session_invocation(
+            target.scope,
+            "session.reopen",
+            vec![target.session_id.clone()],
+        )
     {
         matches!(
             state.dispatch_command(
@@ -2305,22 +1728,8 @@ fn apply_session_context(
 
 fn apply_status(state: &mut AppState, intent: StatusIntent) -> bool {
     match intent {
-        StatusIntent::Action(NativeChromeAction::FocusConversation(target)) => {
-            let mut invocation = bootty_control::CommandInvocation::from_action(
-                "agents.native.focus",
-                bootty_control::Caller::Internal,
-            );
-            invocation.target = Some(target);
-            state.commands.queue(invocation);
-            true
-        }
-        // Conversation closure is host-owned; panel toggles arrive through shared commands.
-        StatusIntent::Action(
-            NativeChromeAction::CloseConversation(_)
-            | NativeChromeAction::TogglePanel(_)
-            | NativeChromeAction::SurfaceChooser(_)
-            | NativeChromeAction::CancelSurfaceChooser(_),
-        ) => false,
+        // The sessions toggle arrives through the shared dock command.
+        StatusIntent::Action(NativeChromeAction::ToggleSessions) => false,
         StatusIntent::Action(NativeChromeAction::ToggleKeepAwake) => {
             state.toggle_keep_awake();
             true
@@ -2384,7 +1793,6 @@ fn pane_menu_commands(
     selected_window: Option<&str>,
 ) -> Vec<(String, bootty_control::CommandInvocation)> {
     use bootty_control::{Caller, CommandInvocation, ResourceKind};
-    use bootty_mux::capability::BindingOperation;
     let target =
         state.mux_resource_target(state.mux_scope(), ResourceKind::Session, &session.id, None);
     let mut commands = Vec::new();
@@ -2393,8 +1801,7 @@ fn pane_menu_commands(
         invocation.target.clone_from(&target);
         commands.push((label, invocation));
     };
-    if state.supports_pane_operation(BindingOperation::ExtractPane)
-        && window.panes.len() > 1
+    if window.panes.len() > 1
         && let Some(pane) = state
             .workspace
             .active
@@ -2407,21 +1814,18 @@ fn pane_menu_commands(
             vec![pane.to_owned()],
         );
     }
-    if state.supports_pane_operation(BindingOperation::MergeWindows)
-        && let Some(selected) = selected_window.filter(|selected| *selected != window.id)
-    {
+    if let Some(selected) = selected_window.filter(|selected| *selected != window.id) {
         add(
             "Merge into Active Tab".to_owned(),
             "pane.merge",
             vec![window.id.clone(), selected.to_owned()],
         );
     }
-    if state.supports_pane_operation(BindingOperation::MovePane)
-        && let Some(pane) = state
-            .workspace
-            .active
-            .binding
-            .window_focused_pane(&session.id, &window.id)
+    if let Some(pane) = state
+        .workspace
+        .active
+        .binding
+        .window_focused_pane(&session.id, &window.id)
     {
         for destination in &session.windows {
             if destination.id == window.id {

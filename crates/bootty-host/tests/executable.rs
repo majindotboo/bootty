@@ -2,6 +2,7 @@
 
 use assert_fs::{TempDir, prelude::*};
 use bootty_host::{find_executable_in, local_command};
+use bootty_os::spawn::CommandSpawn as _;
 use pretty_assertions::assert_eq;
 use rstest::rstest;
 use std::{ffi::OsStr, path::Path};
@@ -90,7 +91,7 @@ fn batch_launch_keeps_literal_arguments() {
     let output = command
         .args(arguments)
         .current_dir(root.path())
-        .output()
+        .bootty_output()
         .unwrap();
     assert!(
         output.status.success(),
