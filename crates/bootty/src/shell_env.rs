@@ -8,6 +8,7 @@
 //! environment. We reproduce that here by running the login shell once and
 //! importing what it exports.
 
+#[cfg(any(target_os = "macos", not(unix)))]
 use bootty_os::spawn::CommandSpawn as _;
 use std::{collections::BTreeMap, ffi::OsString, process::Command};
 

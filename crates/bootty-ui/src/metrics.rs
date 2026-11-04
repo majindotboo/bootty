@@ -1,5 +1,6 @@
 //! Background sampling for the native system status cells.
 
+#[cfg(target_os = "macos")]
 use bootty_os::spawn::CommandSpawn as _;
 use num_traits::ToPrimitive as _;
 

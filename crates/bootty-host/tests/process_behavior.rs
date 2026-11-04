@@ -1,5 +1,6 @@
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 use bootty_os::spawn::CommandSpawn as _;
+#[cfg(target_os = "macos")]
 use std::process::Command;
 #[cfg(unix)]
 use std::{thread, time::Duration};
