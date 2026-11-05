@@ -22,8 +22,8 @@ pub struct CreationDraft {
 }
 
 impl CreationDraft {
-    pub(crate) fn has_content(&self) -> bool {
-        !self.draft.command.trim().is_empty()
+    pub(crate) const fn has_content(&self) -> bool {
+        self.draft.isolated || !self.draft.branch.is_empty() || !self.draft.folder.is_empty()
     }
 }
 
@@ -37,9 +37,7 @@ pub struct DraftSummary {
     pub branch: Option<String>,
 }
 
-/// What of a draft survives a restart. Unknown fields are ignored, so drafts saved by older
-/// versions, including their removed agent fields (`prompt`, `provider`, `attachments`, …),
-/// still load as terminal drafts.
+/// Persisted session creation choices.
 #[derive(Clone, Deserialize, PartialEq, Serialize)]
 struct SavedDraft {
     scope: SpaceId,
@@ -51,8 +49,6 @@ struct SavedDraft {
     cwd: String,
     #[serde(default)]
     projectless: bool,
-    #[serde(default)]
-    command: String,
     #[serde(default)]
     isolated: bool,
     #[serde(default)]
@@ -79,7 +75,6 @@ impl From<&CreationDraft> for SavedDraft {
             title: record.title.clone(),
             cwd: draft.cwd.clone(),
             projectless: draft.projectless,
-            command: draft.command.clone(),
             isolated: draft.isolated,
             isolation_preference: draft.isolation_preference,
             branch: draft.branch.clone(),
@@ -102,7 +97,6 @@ impl From<SavedDraft> for NewSessionDraft {
             scope: saved.scope,
             cwd: saved.cwd,
             projectless: saved.projectless,
-            command: saved.command,
             isolated: saved.isolated,
             isolation_preference: saved.isolation_preference,
             branch: saved.branch,
@@ -120,13 +114,6 @@ struct SavedCatalog {
     drafts: BTreeMap<String, SavedDraft>,
     #[serde(default)]
     selected: Option<String>,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum SavedState {
-    Catalog(SavedCatalog),
-    Legacy(Box<SavedDraft>),
 }
 
 struct PendingWrite {
@@ -151,14 +138,9 @@ pub(super) struct CreationDraftStore {
 impl CreationDraftStore {
     pub(super) fn open(
         path: PathBuf,
-        legacy: Option<&Path>,
         repaint: bootty_mux::RepaintHandle,
     ) -> anyhow::Result<(Self, Vec<CreationDraft>, Option<String>)> {
-        let source = if path.exists() {
-            Some(path.as_path())
-        } else {
-            legacy.filter(|path| path.exists())
-        };
+        let source = path.exists().then_some(path.as_path());
         let written = if let Some(source) = source {
             let file = std::fs::File::open(source)?;
             anyhow::ensure!(
@@ -171,13 +153,7 @@ impl CreationDraftStore {
                 bytes.len() <= 16 * 1024 * 1024,
                 "Creation drafts exceed 16 MiB"
             );
-            match serde_json::from_slice::<SavedState>(&bytes)? {
-                SavedState::Catalog(catalog) => catalog,
-                SavedState::Legacy(draft) => SavedCatalog {
-                    drafts: [(draft.identity.clone(), *draft)].into(),
-                    selected: None,
-                },
-            }
+            serde_json::from_slice::<SavedCatalog>(&bytes)?
         } else {
             SavedCatalog::default()
         };
@@ -191,14 +167,7 @@ impl CreationDraftStore {
                         .clone()
                         .or_else(|| (!saved.projectless).then(|| saved.cwd.clone())),
                     title: if saved.title.is_empty() {
-                        saved
-                            .command
-                            .lines()
-                            .find(|line| !line.trim().is_empty())
-                            .unwrap_or("New session")
-                            .chars()
-                            .take(72)
-                            .collect()
+                        "New session".to_owned()
                     } else {
                         saved.title.clone()
                     },

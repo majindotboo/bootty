@@ -8,11 +8,11 @@ use bootty_control::{
 use bootty_ui::{
     AppState,
     gpui::{DialogId, DialogIntent},
-    presentation::dialogs::{DialogProjection, NEW_SESSION_ID},
+    presentation::dialogs::NEW_SESSION_ID,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     path::Path,
     sync::{Arc, mpsc},
@@ -137,20 +137,35 @@ fn draft_catalog(directory: &Path) -> TestResult<std::path::PathBuf> {
         .ok_or("draft catalog")?)
 }
 
-fn type_prompt(state: &mut AppState, text: &str) {
+fn set_branch(state: &mut AppState, text: &str) {
     state.apply_dialog_intent(
-        &DialogIntent::TextChanged {
+        &DialogIntent::FieldChanged {
             dialog: DialogId::new(NEW_SESSION_ID),
+            field: "isolation".into(),
+            value: if text.is_empty() {
+                "Current checkout"
+            } else {
+                "New worktree"
+            }
+            .into(),
+        },
+        &mut Vec::new(),
+    );
+    state.apply_dialog_intent(
+        &DialogIntent::FieldChanged {
+            dialog: DialogId::new(NEW_SESSION_ID),
+            field: "branch".into(),
             value: text.to_owned(),
         },
         &mut Vec::new(),
     );
 }
 
-fn shown_prompt(state: &mut AppState) -> Option<String> {
-    match state.dialog_projection()? {
-        DialogProjection::Dialog(spec) => spec.text,
-        DialogProjection::SpaceEditor(_) => None,
+fn shown_branch(state: &AppState) -> Option<String> {
+    if let Some(bootty_ui::ModalDialog::NewSession(dialog)) = state.modal_dialog() {
+        dialog.draft().map(|draft| draft.branch.clone())
+    } else {
+        None
     }
 }
 
@@ -162,7 +177,7 @@ fn drafts_survive_navigation_restart_and_explicit_discard() -> TestResult {
     let target = binding(&mut state, &wakes)?;
     let scope = state.mux_scope();
     state.open_new_session_dialog_in(scope, directory.path().to_string_lossy().into_owned());
-    type_prompt(&mut state, "First unfinished idea");
+    set_branch(&mut state, "First unfinished idea");
     let first = wait_for_drafts(&mut state, &wakes, &target, 1)?[0]["identity"]
         .as_str()
         .ok_or("draft identity")?
@@ -174,8 +189,8 @@ fn drafts_survive_navigation_restart_and_explicit_discard() -> TestResult {
         &mut Vec::new(),
     );
     state.open_new_session_dialog_in(scope, directory.path().to_string_lossy().into_owned());
-    assert_eq!(shown_prompt(&mut state).as_deref(), Some(""));
-    type_prompt(&mut state, "Second unfinished idea");
+    assert_eq!(shown_branch(&state).as_deref(), Some(""));
+    set_branch(&mut state, "Second unfinished idea");
     let drafts = wait_for_drafts(&mut state, &wakes, &target, 2)?;
     let second = drafts
         .as_array()
@@ -204,7 +219,7 @@ fn drafts_survive_navigation_restart_and_explicit_discard() -> TestResult {
     open.target = Some(target.clone());
     success(submit(&mut state, &wakes, open)?)?;
     assert_eq!(
-        shown_prompt(&mut state).as_deref(),
+        shown_branch(&state).as_deref(),
         Some("First unfinished idea")
     );
     let mut discard = CommandInvocation::new("session.draft.discard", vec![second], Caller::Socket);
@@ -229,7 +244,7 @@ fn clearing_the_restored_draft_removes_its_saved_entry() -> TestResult {
     let target = binding(&mut state, &wakes)?;
     let scope = state.mux_scope();
     state.open_new_session_dialog_in(scope, directory.path().to_string_lossy().into_owned());
-    type_prompt(&mut state, "Keep this draft");
+    set_branch(&mut state, "Keep this draft");
     wait_for_drafts(&mut state, &wakes, &target, 1)?;
     drop(state);
 
@@ -244,8 +259,8 @@ fn clearing_the_restored_draft_removes_its_saved_entry() -> TestResult {
     );
     open.target = Some(target.clone());
     success(submit(&mut state, &wakes, open)?)?;
-    assert_eq!(shown_prompt(&mut state).as_deref(), Some("Keep this draft"));
-    type_prompt(&mut state, "");
+    assert_eq!(shown_branch(&state).as_deref(), Some("Keep this draft"));
+    set_branch(&mut state, "");
     wait_for_drafts(&mut state, &wakes, &target, 0)?;
     drop(state);
 
@@ -254,92 +269,18 @@ fn clearing_the_restored_draft_removes_its_saved_entry() -> TestResult {
     wait_for_drafts(&mut state, &wakes, &target, 0)?;
     let scope = state.mux_scope();
     state.open_new_session_dialog_in(scope, directory.path().to_string_lossy().into_owned());
-    assert_eq!(shown_prompt(&mut state).as_deref(), Some(""));
+    assert_eq!(shown_branch(&state).as_deref(), Some(""));
     Ok(())
 }
 
 #[rstest]
-fn drafts_saved_by_the_agent_composer_load_as_terminal_drafts() -> TestResult {
-    let directory = TempDir::new()?;
-    let config = config(directory.path());
-    let cwd = directory.path().to_string_lossy().into_owned();
-    let (mut state, wakes) = host(config.clone())?;
-    let target = binding(&mut state, &wakes)?;
-    let scope = state.mux_scope();
-    state.open_new_session_dialog_in(scope, cwd.clone());
-    type_prompt(&mut state, "make test");
-    wait_for_drafts(&mut state, &wakes, &target, 1)?;
-    drop(state);
-
-    // Older versions saved agent mode and its composer next to the terminal fields.
-    let catalog = draft_catalog(directory.path())?;
-    let mut saved: Value = serde_json::from_slice(&std::fs::read(&catalog)?)?;
-    let draft = saved["drafts"]
-        .as_object_mut()
-        .and_then(|drafts| drafts.values_mut().next())
-        .and_then(Value::as_object_mut)
-        .ok_or("saved draft")?;
-    for (field, value) in [
-        ("terminal", json!(false)),
-        ("prompt", json!("Fix the flaky test")),
-        (
-            "attachments",
-            json!([{"path": "/missing.png", "size_bytes": 1, "prompt_ranges": [[0, 1]]}]),
-        ),
-        (
-            "applications",
-            json!([{"id": "app", "prompt_range": [0, 3]}]),
-        ),
-        ("provider_mentions", json!([])),
-        ("goal", json!("Ship it")),
-        ("provider", json!("codex")),
-        ("profiles", json!({"codex": ""})),
-        (
-            "model_selection",
-            json!({"model": "gpt-5", "reasoning_effort": "high"}),
-        ),
-        ("permissions", json!("full-access")),
-        (
-            "fan_out",
-            json!([{"provider": "claude", "model": "opus", "name": "Opus"}]),
-        ),
-        ("start_ref", json!("main")),
-    ] {
-        draft.insert(field.to_owned(), value);
-    }
-    std::fs::write(&catalog, serde_json::to_vec(&saved)?)?;
-
-    let (mut state, wakes) = host(config)?;
-    let target = binding(&mut state, &wakes)?;
-    let drafts = wait_for_drafts(&mut state, &wakes, &target, 1)?;
-    assert_eq!(
-        (drafts[0]["cwd"].as_str(), drafts[0]["branch"].as_str()),
-        (Some(cwd.as_str()), Some("main"))
-    );
-    let mut open = CommandInvocation::new(
-        "session.draft.open",
-        vec![
-            drafts[0]["identity"]
-                .as_str()
-                .ok_or("draft identity")?
-                .to_owned(),
-        ],
-        Caller::Socket,
-    );
-    open.target = Some(target);
-    success(submit(&mut state, &wakes, open)?)?;
-    assert_eq!(shown_prompt(&mut state).as_deref(), Some("make test"));
-    Ok(())
-}
-
-#[rstest]
-fn a_failed_discard_keeps_the_draft_and_its_text() -> TestResult {
+fn a_failed_discard_keeps_the_draft_and_its_branch() -> TestResult {
     let directory = TempDir::new()?;
     let (mut state, wakes) = host(config(directory.path()))?;
     let target = binding(&mut state, &wakes)?;
     let scope = state.mux_scope();
     state.open_new_session_dialog_in(scope, directory.path().to_string_lossy().into_owned());
-    type_prompt(&mut state, "Keep this unfinished work");
+    set_branch(&mut state, "Keep this unfinished work");
     let drafts = wait_for_drafts(&mut state, &wakes, &target, 1)?;
     let identity = drafts[0]["identity"]
         .as_str()
@@ -367,7 +308,7 @@ fn a_failed_discard_keeps_the_draft_and_its_text() -> TestResult {
     }
     assert_eq!(list(&mut state, &wakes, &target)?[0]["identity"], identity);
     assert_eq!(
-        shown_prompt(&mut state).as_deref(),
+        shown_branch(&state).as_deref(),
         Some("Keep this unfinished work")
     );
     std::fs::remove_dir(&catalog)?;
@@ -398,7 +339,7 @@ fn automatic_terminal_restore_keeps_the_open_draft() -> TestResult {
     _ = success(submit(&mut state, &wakes, create)?)?;
     let scope = state.mux_scope();
     state.open_new_session_dialog_in(scope, directory.path().to_string_lossy().into_owned());
-    type_prompt(&mut state, "Do not replace this unfinished prompt");
+    set_branch(&mut state, "Do not replace this unfinished prompt");
     let mut reopen = CommandInvocation::new(
         "session.reopen",
         vec!["restore-before-draft".into(), "preserve".into()],
@@ -407,7 +348,7 @@ fn automatic_terminal_restore_keeps_the_open_draft() -> TestResult {
     reopen.target = Some(target);
     success(submit(&mut state, &wakes, reopen)?)?;
     assert_eq!(
-        shown_prompt(&mut state).as_deref(),
+        shown_branch(&state).as_deref(),
         Some("Do not replace this unfinished prompt")
     );
     let spaces = success(submit(

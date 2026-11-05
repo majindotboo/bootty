@@ -4,9 +4,6 @@ use super::{Connection, HashSet, Transaction, WORKSPACE_SNAPSHOT_REVISION};
 pub(super) enum WorkspaceSchemaKind {
     Fresh,
     Current,
-    SavedIdentities,
-    Lifecycle,
-    TaskLifecycle,
 }
 
 pub(super) fn classify_schema(
@@ -17,7 +14,7 @@ pub(super) fn classify_schema(
     if revision == 0 && tables.is_empty() {
         return Ok(WorkspaceSchemaKind::Fresh);
     }
-    if revision != WORKSPACE_SNAPSHOT_REVISION && revision != 6 && revision != 5 {
+    if revision != WORKSPACE_SNAPSHOT_REVISION {
         return Err(rusqlite::Error::InvalidQuery);
     }
     for (table, columns) in [
@@ -31,9 +28,7 @@ pub(super) fn classify_schema(
                 "color",
                 "tint_sidebar",
                 "position",
-                "backend",
                 "remote",
-                "hide_tmux_status",
                 "unavailable",
                 "selected_session_id",
                 "selected_window_id",
@@ -79,24 +74,7 @@ pub(super) fn classify_schema(
             return Err(rusqlite::Error::InvalidQuery);
         }
     }
-    if revision == 5 {
-        // Only the supported saved-identity schema gains lifecycle fields. Legacy membership
-        // formats remain unsupported; validation above must succeed before any write.
-        if table_columns(conn, "workspace_sessions")?.contains("session_state") {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        Ok(WorkspaceSchemaKind::SavedIdentities)
-    } else if revision == 6
-        && table_has_columns(conn, "workspace_sessions", &["task_lifecycle"])?
-        && !table_columns(conn, "workspace_sessions")?.contains("session_state")
-    {
-        Ok(WorkspaceSchemaKind::TaskLifecycle)
-    } else if revision == 6 && table_has_columns(conn, "workspace_sessions", &["session_state"])? {
-        if table_columns(conn, "workspace_sessions")?.contains("terminal_snapshot") {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-        Ok(WorkspaceSchemaKind::Lifecycle)
-    } else if table_has_columns(
+    if table_has_columns(
         conn,
         "workspace_sessions",
         &["session_state", "terminal_snapshot"],
@@ -106,23 +84,6 @@ pub(super) fn classify_schema(
     } else {
         Err(rusqlite::Error::InvalidQuery)
     }
-}
-
-pub(super) fn migrate_task_lifecycle(tx: &Transaction<'_>) -> rusqlite::Result<()> {
-    let invalid: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM workspace_sessions WHERE task_lifecycle NOT IN ('active', 'settled', 'archived'))",
-        [],
-        |row| row.get(0),
-    )?;
-    if invalid {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    tx.execute_batch(
-        "ALTER TABLE workspace_sessions ADD COLUMN session_state TEXT NOT NULL DEFAULT '{}';
-         UPDATE workspace_sessions SET session_state = CASE task_lifecycle
-             WHEN 'archived' THEN '{\"archived\":true}'
-             ELSE '{}' END;",
-    )
 }
 
 pub(super) fn user_tables(conn: &Connection) -> rusqlite::Result<HashSet<String>> {
@@ -161,9 +122,7 @@ pub(super) fn create_workspace_schema(tx: &Transaction<'_>) -> rusqlite::Result<
             color TEXT NOT NULL DEFAULT '#7AA2F7',
             tint_sidebar INTEGER NOT NULL DEFAULT 0,
             position INTEGER NOT NULL UNIQUE,
-            backend TEXT NOT NULL DEFAULT 'inherit',
             remote TEXT,
-            hide_tmux_status INTEGER NOT NULL DEFAULT 0,
             unavailable INTEGER NOT NULL DEFAULT 0,
             selected_session_id TEXT,
             selected_session_identity TEXT,

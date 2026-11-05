@@ -109,69 +109,13 @@ fn save_layout(path: &std::path::Path, key: &str, state: SavedLayout) -> anyhow:
 }
 
 impl SavedLayout {
-    pub fn load(path: &std::path::Path, state_key: &str, legacy_key: &str) -> Option<Self> {
+    pub fn load(path: &std::path::Path, state_key: &str) -> Option<Self> {
         std::fs::read(path)
             .ok()
             .and_then(|bytes| {
                 serde_json::from_slice::<BTreeMap<String, serde_json::Value>>(&bytes).ok()
             })
-            .and_then(|mut states| {
-                states
-                    .remove(state_key)
-                    .or_else(|| states.remove(legacy_key))
-                    .or_else(|| {
-                        let prefix = format!("{legacy_key}:directory:");
-                        states
-                            .into_iter()
-                            .find(|(key, _)| key.starts_with(&prefix))
-                            .map(|(_, state)| state)
-                    })
-            })
-            .and_then(|mut state| {
-                migrate_tiles(&mut state);
-                serde_json::from_value(state).ok()
-            })
-    }
-}
-
-// GPUI Kit 0.6.2 removed freeform tiles. Keep every leaf from an older save and show
-// its frontmost tile as the selected tab when that layout is next opened.
-fn migrate_tiles(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(object) => {
-            if object.get("panel_name").and_then(serde_json::Value::as_str) == Some("Tiles")
-                && let Some(info) = object.get("info")
-                && let Some(metas) = info.get("tiles").and_then(|tiles| tiles.get("metas"))
-            {
-                let selected = metas
-                    .as_array()
-                    .and_then(|metas| {
-                        metas
-                            .iter()
-                            .enumerate()
-                            .max_by_key(|(_, meta)| {
-                                meta.get("z_index")
-                                    .and_then(serde_json::Value::as_u64)
-                                    .unwrap_or_default()
-                            })
-                            .map(|(index, _)| index)
-                    })
-                    .unwrap_or_default();
-                object.insert("panel_name".to_owned(), serde_json::json!("TabPanel"));
-                object.insert(
-                    "info".to_owned(),
-                    serde_json::json!({"tabs":{"active_index":selected}}),
-                );
-            }
-            for child in object.values_mut() {
-                migrate_tiles(child);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for child in values {
-                migrate_tiles(child);
-            }
-        }
-        _ => {}
+            .and_then(|mut states| states.remove(state_key))
+            .and_then(|state| serde_json::from_value(state).ok())
     }
 }

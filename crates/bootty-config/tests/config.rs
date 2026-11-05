@@ -483,7 +483,6 @@ fn config_resolves_sidebar_and_status_chrome_colors() {
         pane-focus-border-color = "#9e75c780"
 
         [sidebar]
-        position = "right"
         background = "#11131a"
         foreground = "#cdd6f4"
         selected = "#2a2f3d"
@@ -492,7 +491,6 @@ fn config_resolves_sidebar_and_status_chrome_colors() {
     "##})
     .expect("valid config");
 
-    assert_eq!(config.sidebar.position, SidebarPosition::Right);
     assert_eq!(
         config.chrome.pane_focus_border_color,
         Some(Color::from_hex("#9e75c780").unwrap())
@@ -518,19 +516,6 @@ fn config_resolves_sidebar_and_status_chrome_colors() {
         config.sidebar.border,
         Some(Color::from_hex("#313244").unwrap())
     );
-}
-
-#[test]
-fn legacy_sidebar_fullscreen_colors_are_accepted_but_ignored() {
-    let config = load_config_source(indoc! {r##"
-        [sidebar]
-        fullscreen-background = "#000000"
-        fullscreen-hover = "#111111"
-    "##})
-    .expect("valid config");
-
-    assert_eq!(config.sidebar.background, None);
-    assert_eq!(config.sidebar.hover, None);
 }
 
 #[test]
@@ -724,37 +709,6 @@ fn key_file_profile_requires_an_identity_file() {
 }
 
 #[test]
-fn raw_extension_settings_are_preserved_in_their_module_table() {
-    // The retired native script host leaves this user data available for display and migration.
-    let sandbox = ConfigSandbox::with_config(indoc! {r#"
-        [extensions.greeter]
-        greeting = "hello"
-        loud = true
-        repeats = 3
-    "#})
-    .expect("config fixture");
-
-    let config = sandbox
-        .load()
-        .expect("config with extension settings loads");
-
-    let greeter = config.extensions.get("greeter").expect("module table");
-    assert_eq!(
-        greeter.get("greeting"),
-        Some(&ExtensionSettingValue::Text("hello".to_owned()))
-    );
-    assert_eq!(
-        greeter.get("loud"),
-        Some(&ExtensionSettingValue::Bool(true))
-    );
-    assert_eq!(
-        greeter.get("repeats"),
-        Some(&ExtensionSettingValue::Number(3.0))
-    );
-    assert!(!config.extensions.contains_key("someone-else"));
-}
-
-#[test]
 fn theme_catalog_combines_builtin_and_user_themes() {
     let sandbox = ConfigSandbox::new().expect("config fixture");
     sandbox
@@ -870,25 +824,6 @@ fn chrome_regions_are_flush_and_terminal_surfaces_match_by_default() {
     assert_eq!((chrome.gap, chrome.unfocused_terminal_dim), (0.0, 0.0));
 }
 
-/// Chrome keys an earlier version read still load, and change nothing: the status bar has one
-/// layout now.
-#[rstest]
-#[case("window-tabs = true")]
-#[case("top-bar = false")]
-#[case("status-bar = false")]
-#[case("bottom-bar = true")]
-#[case("status-height = 40")]
-#[case("status-background = '#090909'")]
-#[case(
-    "status-segment = [{ align = 'left', module = 'session' }, { align = 'right', module = 'clock' }]"
-)]
-#[case("top-segment = [{ module = 'clock', fg = '#ffffff', icon = 'clock' }]")]
-#[case("bottom-segment = [{ align = 'center', module = 'sysinfo' }]")]
-fn obsolete_chrome_keys_are_ignored(#[case] key: &str) {
-    let config = load_config_source(&format!("[chrome]\n{key}\n")).expect("valid config");
-    assert_eq!(config.chrome, BoottyConfig::default().chrome);
-}
-
 #[test]
 fn keybind_clear_directive_replaces_existing_bindings() {
     let config = load_config_source(indoc! {r#"
@@ -982,7 +917,6 @@ fn sidebar_keybind_clear_directive_replaces_existing_bindings() {
 fn ssh_remote_defaults_and_all_fields_are_preserved() {
     let defaults = load_config_source(indoc! {r#"
         [multiplexer]
-        backend = "tmux"
 
         [multiplexer.remote]
         host = "devbox"
@@ -995,7 +929,6 @@ fn ssh_remote_defaults_and_all_fields_are_preserved() {
 
     let explicit = load_config_source(indoc! {r#"
         [multiplexer]
-        backend = "tmux"
 
         [multiplexer.remote]
         host = "10.0.0.4"
@@ -1295,10 +1228,9 @@ fn empty_prefix_falls_back_to_preset_default() {
 
 #[rstest]
 fn wsl_remote_loads_through_the_toml_configuration_boundary() {
-    let config = load_config_source(
-        "[multiplexer]\nbackend = \"rmux\"\n[multiplexer.remote]\ndistribution = \"Ubuntu 開発\"\n",
-    )
-    .expect("valid config");
+    let config =
+        load_config_source("[multiplexer]\n[multiplexer.remote]\ndistribution = \"Ubuntu 開発\"\n")
+            .expect("valid config");
     let Some(RemoteConfig::Wsl(remote)) = config.multiplexer.remote else {
         panic!("WSL host");
     };

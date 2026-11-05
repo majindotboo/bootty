@@ -382,8 +382,6 @@ binding_actions! {
     ToggleSessionsPanel => "toggle_sessions_panel" [unit],
     ToggleLeftDock => "toggle_left_dock" [unit],
     ShowSpaces => "show_spaces" [unit],
-    ToggleHiddenTabs => "toggle_hidden_tabs" [unit],
-    ToggleTabBar => "toggle_tab_bar" [unit],
     EditTheme => "edit_theme" [unit],
     ExportTerminal => "export_terminal" [unit],
     OpenSetting(value: String) => "open_setting" [required_string],

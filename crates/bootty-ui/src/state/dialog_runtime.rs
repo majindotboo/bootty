@@ -110,9 +110,7 @@ impl DialogRuntime {
                 if let ModalDialog::NewSession(dialog) = dialog {
                     dialog
                         .draft()
-                        .filter(|draft| {
-                            !self.automatic_creation || !draft.command.trim().is_empty()
-                        })
+                        .filter(|_| !self.automatic_creation)
                         .map(|draft| draft.identity.as_str())
                 } else {
                     None

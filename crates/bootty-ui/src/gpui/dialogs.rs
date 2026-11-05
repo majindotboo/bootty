@@ -9,7 +9,7 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants as _},
     command::{Command, CommandEntry, CommandGroup, CommandItem, CommandState},
     h_flex,
-    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
     v_flex,
 };
@@ -370,9 +370,6 @@ pub struct DialogSpec {
     pub selected_project: Option<String>,
     pub busy: bool,
     pub progress: Vec<DialogProgressStep>,
-    /// The new-session form: a multiline command editor where Enter starts the session and
-    /// Shift+Enter inserts a newline.
-    pub multiline: bool,
     pub rows: Vec<DialogRow>,
     pub empty_text: String,
     pub placement: DialogPlacement,
@@ -404,7 +401,6 @@ impl DialogSpec {
             selected_project: None,
             busy: false,
             progress: Vec::new(),
-            multiline: false,
             text_hint: Some("filter…".to_owned()),
             rows,
             empty_text: "no matching items".to_owned(),
@@ -434,7 +430,6 @@ impl DialogSpec {
             selected_project: None,
             busy: false,
             progress: Vec::new(),
-            multiline: false,
             text_hint: Some(value_hint.into()),
             hint: Some("Enter confirm   Esc close".to_owned()),
             icon: None,
@@ -453,8 +448,6 @@ pub struct DialogView {
     /// Prompts own a real editor instead of focusing a hidden `CommandState` query.
     prompt_input: Entity<InputState>,
     prompt_input_focus: FocusHandle,
-    prompt_textarea: Entity<TextareaState>,
-    _prompt_textarea_subscription: Subscription,
     fields: std::collections::HashMap<String, (Entity<InputState>, Subscription)>,
     project_picker: Option<project_picker::NewProjectPicker>,
     worktree_ref_picker: Option<worktree::WorktreeRefPicker>,
@@ -546,9 +539,6 @@ impl DialogView {
                 InputEvent::PressEnter { .. } | InputEvent::Focus | InputEvent::Blur => {}
             },
         );
-        let prompt_textarea = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 10));
-        let prompt_textarea_subscription =
-            Self::subscribe_prompt_content(&prompt_textarea, window, cx);
         let command_interceptor = Self::command_interceptor(cx);
         Self {
             spec: None,
@@ -568,27 +558,9 @@ impl DialogView {
             suppress_initial_selection: false,
             _find_input_subscription: find_input_subscription,
             _prompt_input_subscription: prompt_input_subscription,
-            prompt_textarea,
-            _prompt_textarea_subscription: prompt_textarea_subscription,
             _command_interceptor: command_interceptor,
             _new_session_interceptor: Self::new_session_interceptor(cx),
         }
-    }
-
-    fn subscribe_prompt_content(
-        prompt_textarea: &Entity<TextareaState>,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> Subscription {
-        cx.subscribe_in(
-            prompt_textarea,
-            window,
-            |this, input, event: &InputEvent, _, cx| match event {
-                InputEvent::Change => this.change_text(input.read(cx).value().to_string(), cx),
-                InputEvent::Focus | InputEvent::Blur => cx.notify(),
-                InputEvent::PressEnter { .. } => {}
-            },
-        )
     }
 
     fn new_session_interceptor(cx: &mut Context<Self>) -> Subscription {
@@ -598,15 +570,10 @@ impl DialogView {
                 && !event.keystroke.modifiers.shift
                 && !event.keystroke.modifiers.alt
                 && owner
-                    .read_with(cx, |this, app| {
+                    .read_with(cx, |this, _app| {
                         this.spec.as_ref().is_some_and(|spec| {
                             spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID
-                                && spec.multiline
-                        }) && this
-                            .prompt_textarea
-                            .read(app)
-                            .focus_handle(app)
-                            .is_focused(window)
+                        }) && this.confirm_focus.is_focused(window)
                     })
                     .unwrap_or(false);
             if new_session_enter {
@@ -872,7 +839,9 @@ impl DialogView {
                 }
                 self.command
                     .update(cx, |state, cx| state.set_query(query, window, cx));
-            } else if spec.role == DialogRole::Prompt && !spec.multiline {
+            } else if spec.role == DialogRole::Prompt
+                && spec.id.0 != crate::presentation::dialogs::NEW_SESSION_ID
+            {
                 let value = spec.text.clone().unwrap_or_default();
                 let sync_value = self.prompt_input.read(cx).value().as_ref() != value;
                 if sync_value {
@@ -890,28 +859,10 @@ impl DialogView {
                 });
             }
         }
-        self.sync_prompt_textarea(window, cx);
         self.sync_fields(window, cx);
         self.sync_new_project_picker(window, cx);
         self.sync_worktree_ref_picker(window, cx);
         cx.notify();
-    }
-
-    fn sync_prompt_textarea(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(spec) = &self.spec
-            && spec.role == DialogRole::Prompt
-            && spec.multiline
-        {
-            let value = spec.text.clone().unwrap_or_default();
-            if self.prompt_textarea.read(cx).value().as_ref() != value {
-                self.suppress_query = Some(value.clone());
-                self.prompt_textarea
-                    .update(cx, |input, cx| input.set_value(value, window, cx));
-            }
-            self.prompt_textarea.update(cx, |input, cx| {
-                input.set_placeholder(spec.text_hint.clone().unwrap_or_default(), window, cx);
-            });
-        }
     }
 
     fn sync_fields(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1113,7 +1064,7 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
-        if spec.multiline && spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID {
+        if spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID {
             return self.new_session_panel(spec, window, cx);
         }
         let colors = gpui_kit::component::Theme::global(cx).colors;
@@ -1141,7 +1092,7 @@ impl DialogView {
             });
         let input = self.prompt_text_control(spec, invalid, cx);
         let cancel_button = Button::new("dialog-prompt-cancel")
-            .disabled(spec.multiline && spec.busy)
+            .disabled(spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.busy)
             .ghost()
             .label("Cancel")
             .on_click(cx.listener(move |_, _, _, cx| {
@@ -1241,16 +1192,6 @@ impl DialogView {
                         },
                     ),
             )
-            .child(public_selector(
-                "dialog-prompt-input",
-                Textarea::new(&self.prompt_textarea)
-                    .context_menu(crate::gpui::text_menu(&self.prompt_textarea))
-                    .disabled(spec.busy)
-                    .w_full()
-                    .when(error.is_some(), |input| {
-                        input.border_color(cx.theme().danger)
-                    }),
-            ))
             .child(
                 h_flex()
                     .id("dialog-prompt-fields")
@@ -1483,23 +1424,15 @@ impl DialogView {
             .semantic_tokens()
             .colors
             .destructive;
-        if spec.multiline {
-            Textarea::new(&self.prompt_textarea)
-                .context_menu(crate::gpui::text_menu(&self.prompt_textarea))
+        crate::gpui::focus_input(
+            &self.prompt_input,
+            Input::new(&self.prompt_input)
+                .context_menu(crate::gpui::text_menu(&self.prompt_input))
                 .disabled(spec.busy)
                 .w_full()
-                .into_any_element()
-        } else {
-            crate::gpui::focus_input(
-                &self.prompt_input,
-                Input::new(&self.prompt_input)
-                    .context_menu(crate::gpui::text_menu(&self.prompt_input))
-                    .disabled(spec.busy)
-                    .w_full()
-                    .when(invalid, |input| input.border_color(destructive)),
-            )
-            .into_any_element()
-        }
+                .when(invalid, |input| input.border_color(destructive)),
+        )
+        .into_any_element()
     }
 
     fn prompt_extra_actions(spec: &DialogSpec, cx: &Context<Self>) -> Vec<Button> {
@@ -2382,8 +2315,12 @@ impl Focusable for DialogView {
     fn focus_handle(&self, cx: &App) -> FocusHandle {
         match self.spec.as_ref().map(|spec| spec.role) {
             Some(DialogRole::TerminalFind) => self.find_input.read(cx).focus_handle(cx),
-            Some(DialogRole::Prompt) if self.spec.as_ref().is_some_and(|spec| spec.multiline) => {
-                self.prompt_textarea.read(cx).focus_handle(cx)
+            Some(DialogRole::Prompt)
+                if self.spec.as_ref().is_some_and(|spec| {
+                    spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID
+                }) =>
+            {
+                self.confirm_focus.clone()
             }
             Some(DialogRole::Prompt) => self.prompt_input_focus.clone(),
             Some(DialogRole::Confirm) => self.confirm_focus.clone(),
@@ -2406,8 +2343,8 @@ impl Render for DialogView {
             return div().into_any_element();
         };
         let command_focus = self.command_focus.clone();
-        let prompt_input_focus = if spec.multiline {
-            self.prompt_textarea.read(cx).focus_handle(cx)
+        let prompt_input_focus = if spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID {
+            self.confirm_focus.clone()
         } else {
             self.prompt_input_focus.clone()
         };
@@ -2439,9 +2376,7 @@ impl Render for DialogView {
                     .on_action(cx.listener(Self::on_cancel_action))
                     .on_action(
                         cx.listener(|this, _: &gpui_kit::base::actions::Confirm, _, cx| {
-                            if !this.spec.as_ref().is_some_and(|spec| spec.multiline) {
-                                this.prompt_submit(cx);
-                            }
+                            this.prompt_submit(cx);
                             cx.stop_propagation();
                         }),
                     )

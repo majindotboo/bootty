@@ -107,8 +107,6 @@ fn custom(
 /// Every accepted compatibility spelling that is not itself a settings-surface control.
 pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] {
     &[
-        &["chrome", "panel-tab-style"],
-        &["chrome", "panel-tabs"],
         &["chrome", "dock-tabs", "appearance"],
         &["chrome", "dock-tabs", "close-position"],
         &["chrome", "dock-tabs", "close-button"],
@@ -116,21 +114,8 @@ pub(super) const fn compatibility_paths() -> &'static [&'static [&'static str]] 
         &["chrome", "terminal-tabs", "close-position"],
         &["chrome", "terminal-tabs", "close-button"],
         &["font-feature"],
-        &["chrome", "status-bar"],
-        &["chrome", "status-segment"],
-        &["chrome", "top-bar"],
-        &["chrome", "bottom-bar"],
-        &["chrome", "status-height"],
-        &["chrome", "status-background"],
-        &["chrome", "top-segment"],
-        &["chrome", "bottom-segment"],
-        &["chrome", "window-tabs"],
         &["chrome", "sidebar"],
         &["chrome", "sidebar-width"],
-        &["sidebar", "position"],
-        &["sidebar", "fullscreen-background"],
-        &["sidebar", "fullscreen-hover"],
-        &["auto_update"],
     ]
 }
 
@@ -1489,7 +1474,7 @@ fn input_specs() -> impl Iterator<Item = SettingSpec> {
     )
 }
 
-fn custom_runtime_specs() -> [SettingSpec; 4] {
+fn custom_runtime_specs() -> [SettingSpec; 3] {
     [
         custom(
             &["session", "env"],
@@ -1508,12 +1493,6 @@ fn custom_runtime_specs() -> [SettingSpec; 4] {
             "window",
             "FULLSCREEN NOTCH",
             SettingEditor::Window,
-        ),
-        custom(
-            &["extensions", "*"],
-            "extensions",
-            "EXTENSIONS",
-            SettingEditor::Extensions,
         ),
     ]
 }

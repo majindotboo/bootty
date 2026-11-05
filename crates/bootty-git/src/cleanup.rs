@@ -14,26 +14,11 @@ use crate::{runner::CommandRunner, worktree::Git};
 /// being created in it can't lose it. Raise it if session creation can take longer.
 const ORPHAN_GRACE_SECONDS: i64 = 60 * 60;
 
-/// Legacy wire values accepted from existing cleanup clients. Session references always protect a checkout.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
-pub enum Retention {
-    /// Archived work is the first to go when there are too many checkouts.
-    Archived,
-    /// Active work is never removed.
-    Active,
-}
-
 /// One saved session, as the cleanup on its host sees it.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct SessionCheckout {
     pub cwd: String,
-    pub retention: Retention,
-    /// Unix seconds.
-    pub last_activity: i64,
-    /// A terminal is open in the session; its checkout stays.
-    pub open: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -43,8 +28,6 @@ pub struct CleanupRequest {
     /// default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directory: Option<String>,
-    /// Retired wire field, retained for existing daemon clients.
-    pub limit: u16,
     /// Every saved session on this host, from every Space.
     pub sessions: Vec<SessionCheckout>,
     /// Unix seconds.

@@ -620,7 +620,6 @@ impl AppState {
                 self.create_picked_worktree(repo, request);
             }
             NewSessionPickerEvent::CreateSession { cwd } => {
-                // Compatibility with directory-picker callers: they still use the one command path.
                 let bootty_mux::command::MuxCommand::CreateProjectSession {
                     session_id, cwd, ..
                 } = self.workspace.project_session_command(&cwd)
@@ -905,7 +904,6 @@ impl AppState {
             scope: destination.scope,
             cwd: destination.cwd.clone(),
             projectless: false,
-            command: String::new(),
             isolated: self.dialogs.new_session_isolated,
             isolation_preference: self.dialogs.new_session_isolated,
             branch: String::new(),

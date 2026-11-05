@@ -122,10 +122,7 @@ impl DialogView {
                 // Select restores its trigger after Confirm; transfer focus after that.
                 cx.defer_in(window, move |this, window, cx| {
                     if this.spec.as_ref().is_some_and(|spec| spec.id == dialog) {
-                        this.prompt_textarea
-                            .read(cx)
-                            .focus_handle(cx)
-                            .focus(window, cx);
+                        this.confirm_focus.focus(window, cx);
                     }
                 });
             }

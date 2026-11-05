@@ -2368,3 +2368,70 @@ fn cleared_server_progress_clears_the_host_indicator() -> Result<()> {
     drop(viewer);
     Ok(())
 }
+
+#[rstest]
+fn native_wheel_moves_scrollback_viewport(fixture: Result<Fixture>) {
+    use bootty_terminal::terminal_input_model::{
+        KeyMods, MouseAction, MouseButton, MouseEncoderSize, MouseInput,
+    };
+    let fixture = fixture.unwrap();
+    let mut output = b"history\r\n".repeat(100);
+    output.extend_from_slice(b"row-99");
+    emit(&fixture, output).unwrap();
+    let mut stream = attach_frames(&fixture).unwrap();
+    let mut decoder = bootty_terminal::frame_wire::FrameDecoder::default();
+    let bottom = loop {
+        let (_, frame) = next_frame(&mut stream, &mut decoder).unwrap();
+        if frame.text_rows().iter().any(|row| row.contains("row-99")) {
+            break frame;
+        }
+    };
+    fixture
+        .backend
+        .request(&Request::PaneCommand {
+            pane: fixture.pane.clone(),
+            request_id: 1,
+            command: protocol::PaneCommand::MouseWheel {
+                input: MouseInput {
+                    action: MouseAction::Press,
+                    button: Some(MouseButton::Four),
+                    mods: KeyMods::default(),
+                    x: 0.,
+                    y: 0.,
+                    pixel_x: 0.,
+                    pixel_y: 0.,
+                    size: MouseEncoderSize {
+                        screen_width: 800,
+                        screen_height: 480,
+                        cell_width: 10,
+                        cell_height: 20,
+                        padding_top: 0,
+                        padding_bottom: 0,
+                        padding_left: 0,
+                        padding_right: 0,
+                    },
+                },
+                delta: 3,
+            },
+        })
+        .unwrap();
+    // A following request observes the completed frame publication.
+    fixture
+        .backend
+        .request(&Request::Capture {
+            pane: fixture.pane.clone(),
+            options: CaptureOptions::default(),
+        })
+        .unwrap();
+    let mut reattached = attach_frames(&fixture).unwrap();
+    let (_, scrolled) = next_frame(
+        &mut reattached,
+        &mut bootty_terminal::frame_wire::FrameDecoder::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        scrolled.scrollbar.unwrap().offset,
+        bottom.scrollbar.unwrap().offset.saturating_sub(3)
+    );
+    assert_ne!(scrolled.text_rows(), bottom.text_rows());
+}

@@ -9,7 +9,7 @@ use crate::support::seed;
 
 use assert_fs::TempDir;
 use bootty_git::{
-    CleanupRequest, KeptWorktree, Retention, SessionCheckout,
+    CleanupRequest, KeptWorktree, SessionCheckout,
     cleanup::{Claim, OwnedWorktree, removal_order},
 };
 use pretty_assertions::assert_eq;
@@ -108,10 +108,9 @@ impl Host {
         path.to_string_lossy().into_owned()
     }
 
-    fn request(&self, limit: u16, sessions: Vec<SessionCheckout>) -> CleanupRequest {
+    fn request(&self, sessions: Vec<SessionCheckout>) -> CleanupRequest {
         CleanupRequest {
             directory: Some(self.directory().to_string_lossy().into_owned()),
-            limit,
             sessions,
             // Every checkout is past its first hour.
             now: chrono_now().saturating_add(2 * 60 * 60),
@@ -137,15 +136,6 @@ fn chrono_now() -> i64 {
     .unwrap()
 }
 
-fn session(cwd: &str, retention: Retention, last_activity: i64, open: bool) -> SessionCheckout {
-    SessionCheckout {
-        cwd: cwd.to_owned(),
-        retention,
-        last_activity,
-        open,
-    }
-}
-
 /// A checkout no session uses goes, with its branch, unless it holds work no remote has.
 #[rstest]
 #[case::clean(false, false, None)]
@@ -162,7 +152,7 @@ fn orphaned_checkouts_go_unless_they_hold_unsaved_work(
         fs::write(Path::new(&path).join("README"), "edited").unwrap();
     }
     let report = runner::git()
-        .clean_worktrees(&host.request(10, Vec::new()))
+        .clean_worktrees(&host.request(Vec::new()))
         .unwrap();
     match kept {
         None => {
@@ -203,7 +193,7 @@ fn teardown_runs_before_a_checkout_goes(#[case] command: &str, #[case] kept: Opt
     } else {
         command
     };
-    let mut request = host.request(10, Vec::new());
+    let mut request = host.request(Vec::new());
     request.teardown.insert(
         host.main().to_string_lossy().into_owned(),
         command.to_owned(),
@@ -232,7 +222,7 @@ fn teardown_runs_before_a_checkout_goes(#[case] command: &str, #[case] kept: Opt
 fn a_new_checkout_waits_for_its_session() {
     let host = Host::new();
     let path = host.checkout("fresh", false);
-    let mut request = host.request(10, Vec::new());
+    let mut request = host.request(Vec::new());
     request.now = chrono_now();
     let report = runner::git().clean_worktrees(&request).unwrap();
     assert_eq!((report.removed.len(), report.remaining), (0, 1));
@@ -279,14 +269,11 @@ proptest! {
 }
 
 #[rstest]
-#[case(Retention::Active, false)]
-#[case(Retention::Archived, false)]
-#[case(Retention::Archived, true)]
-fn every_session_reference_protects_its_checkout(#[case] retention: Retention, #[case] open: bool) {
+fn every_session_reference_protects_its_checkout() {
     let host = Host::new();
     let path = host.checkout("claimed", false);
     let report = runner::git()
-        .clean_worktrees(&host.request(1, vec![session(&path, retention, 0, open)]))
+        .clean_worktrees(&host.request(vec![SessionCheckout { cwd: path }]))
         .unwrap();
     assert_eq!((report.removed, report.remaining), (vec![], 1));
 }

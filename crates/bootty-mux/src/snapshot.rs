@@ -58,7 +58,7 @@ pub enum MuxPaneSplitDirection {
 }
 
 /// Canonical native split tree. Splits have at least two children, positive unit-sum
-/// weights, and no child split with the same direction. Legacy binary saves normalize on load.
+/// weights, and no child split with the same direction.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub enum MuxPaneLayout {
     Pane(String),

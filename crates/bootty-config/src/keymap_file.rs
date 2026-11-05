@@ -51,9 +51,7 @@ impl FromStr for KeymapContext {
             "" | "Global" | "global" | "Workspace" | "workspace" => Ok(Self::Global),
             "Sidebar" | "sidebar" => Ok(Self::Sidebar),
             "Command" | "command" => Ok(Self::Command),
-            "Terminal" | "terminal" | "Native" | "native" | "Terminal && backend == native" => {
-                Ok(Self::Terminal)
-            }
+            "Terminal" | "terminal" => Ok(Self::Terminal),
             value => Ok(Self::Expression(value.to_owned())),
         }
     }

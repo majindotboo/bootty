@@ -294,7 +294,8 @@ impl WorkspaceDialogs {
 
 /// The new-session form renders in the workspace; its pickers and every other dialog are modal.
 fn is_creation_form(spec: &DialogSpec) -> bool {
-    spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID && spec.multiline
+    spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID
+        && spec.role == crate::gpui::DialogRole::Prompt
 }
 
 const fn space_editor_colors(colors: Colors) -> SpaceEditorColors {

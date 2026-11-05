@@ -415,16 +415,9 @@ impl AppState {
         events: Option<ControlEventSender>,
     ) -> Result<Self> {
         let config_runtime = AppConfigRuntime::new(config)?;
-        let legacy_draft = (window_state_key == "main").then(|| {
-            config_runtime
-                .current()
-                .config_path
-                .with_file_name("new-session-draft.json")
-        });
         let (creation_drafts, saved_drafts, selected_draft) =
             creation_draft::CreationDraftStore::open(
                 drafts_path(&config_runtime.current().config_path, &window_state_key),
-                legacy_draft.as_deref(),
                 repaint.clone(),
             )?;
         let commands = CommandRuntime::new(repaint.clone(), events);

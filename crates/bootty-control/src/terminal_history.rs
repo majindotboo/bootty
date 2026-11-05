@@ -1,4 +1,4 @@
-//! Bounded terminal presentation: text and SGR styles, never terminal commands.
+//! Bounded terminal presentation: text, SGR styles and forward gaps.
 
 use anyhow::{Result, bail, ensure};
 
@@ -24,14 +24,14 @@ impl std::error::Error for HistorySizeLimit {}
 
 /// Validate persisted history without accepting terminal queries, modes or side effects.
 /// # Errors
-/// Rejects oversized text, non-style escapes and malformed or unsupported SGR parameters.
+/// Rejects oversized text, non-presentation escapes and malformed or unsupported SGR parameters.
 pub fn validate_history(text: &str) -> Result<()> {
     walk_history(text, false, true, |_| {})
 }
 
 /// Normalize saved rows for an output-only renderer, isolating styles from fresh output.
 /// # Errors
-/// Rejects oversized history and controls other than text, whitespace and SGR styles.
+/// Rejects oversized history and controls other than text, whitespace, forward gaps and SGR styles.
 pub fn styled_history_bytes(text: &str) -> Result<Vec<u8>> {
     validate_history(text)?;
     let normalized = text
@@ -55,7 +55,7 @@ pub fn styled_history_bytes(text: &str) -> Result<Vec<u8>> {
 
 /// Keep displayed text and styles from a fresh formatter capture, discarding OSC metadata.
 /// # Errors
-/// Rejects incomplete controls, non-style commands and captures beyond the history budget.
+/// Rejects incomplete controls, non-presentation commands and captures beyond the history budget.
 pub fn sanitize_history(text: &str) -> Result<String> {
     check_size(text.len(), MAX_HISTORY_BYTES)?;
     let palette = capture_palette(text);
@@ -140,6 +140,13 @@ fn walk_history(
     mut push: impl FnMut(&str),
 ) -> Result<()> {
     check_size(text.len(), MAX_HISTORY_BYTES)?;
+    let mut output_bytes = 0_usize;
+    let mut push = |part: &str| -> Result<()> {
+        output_bytes = output_bytes.saturating_add(part.len());
+        check_size(output_bytes, MAX_HISTORY_BYTES)?;
+        push(part);
+        Ok(())
+    };
     let mut rest = text;
     while !rest.is_empty() {
         let plain_end = rest.find('\x1b').unwrap_or(rest.len());
@@ -152,7 +159,7 @@ fn walk_history(
                 .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t')),
             "saved terminal history contains non-presentation controls"
         );
-        push(plain);
+        push(plain)?;
         rest = controls;
         if rest.is_empty() {
             break;
@@ -179,6 +186,24 @@ fn walk_history(
         let (parameters, terminator) = parameters
             .split_at_checked(end)
             .ok_or_else(|| anyhow::anyhow!("invalid saved terminal style boundary"))?;
+        if let Some(after) = terminator.strip_prefix('C') {
+            ensure!(
+                !parameters.is_empty() && parameters.bytes().all(|byte| byte.is_ascii_digit()),
+                "invalid saved terminal gap"
+            );
+            let count = parameters.parse::<u16>()?;
+            ensure!(count > 0, "invalid saved terminal gap");
+            if keep_styles {
+                push(
+                    rest.strip_suffix(after)
+                        .ok_or_else(|| anyhow::anyhow!("invalid saved terminal gap suffix"))?,
+                )?;
+            } else {
+                push(&" ".repeat(usize::from(count)))?;
+            }
+            rest = after;
+            continue;
+        }
         let after = terminator.strip_prefix('m').ok_or_else(|| {
             anyhow::anyhow!("saved terminal history contains a non-style command")
         })?;
@@ -187,7 +212,7 @@ fn walk_history(
             let style = rest
                 .strip_suffix(after)
                 .ok_or_else(|| anyhow::anyhow!("invalid saved terminal style suffix"))?;
-            push(style);
+            push(style)?;
         }
         rest = after;
     }

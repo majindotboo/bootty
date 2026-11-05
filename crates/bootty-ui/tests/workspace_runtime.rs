@@ -900,10 +900,11 @@ fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
         bootty_ui::keymap_runtime::KeymapFocus::Other
     );
     state.apply_dialog_intent(
-        &bootty_ui::gpui::DialogIntent::TextChanged {
+        &bootty_ui::gpui::DialogIntent::FieldChanged {
             dialog: bootty_ui::gpui::DialogId::new(
                 bootty_ui::presentation::dialogs::NEW_SESSION_ID,
             ),
+            field: "branch".into(),
             value: "Keep the creation draft".to_owned(),
         },
         &mut Vec::new(),
@@ -971,7 +972,7 @@ fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
         panic!("creation form reopened");
     };
     assert_eq!(
-        dialog.draft().expect("draft").command,
+        dialog.draft().expect("draft").branch,
         "Keep the creation draft"
     );
 }

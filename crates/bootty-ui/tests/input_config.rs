@@ -87,7 +87,7 @@ fn a_failed_modifier_remap_sequence_publishes_no_partial_set() {
     "invalid keybind \"broken\""
 )]
 #[case(
-    "[multiplexer]\nbackend = \"native\"\n\n[input.backend-keybind]\nnative = [\"clear\", \"broken\"]\n",
+    "[multiplexer]\n\n[input.backend-keybind]\nnative = [\"clear\", \"broken\"]\n",
     "invalid keybind \"broken\""
 )]
 fn invalid_input_config_stops_startup_before_the_workspace_opens(

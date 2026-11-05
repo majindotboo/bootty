@@ -81,7 +81,6 @@ impl ConfigResolver<'_> {
         apply_partial_sidebar(&mut config.sidebar, raw.sidebar);
         apply_partial_multiplexer(&mut config.multiplexer, raw.multiplexer)?;
         config.ssh_profiles = raw.ssh_profiles;
-        config.extensions = raw.extensions;
         for (id, profile) in &config.ssh_profiles {
             profile.validate(id)?;
         }
@@ -186,8 +185,6 @@ fn apply_font_features(font: &mut FontConfig, features: Vec<String>) -> ConfigRe
 fn apply_partial_chrome(chrome: &mut ChromeConfig, partial: ChromePatch) {
     apply_fields!(chrome, partial;
         left_dock_toggle,
-        panel_tab_style,
-        panel_tabs,
         tabs_use_session_color,
     );
     for patch in [partial.dock_tabs, partial.terminal_tabs, partial.tabs]
@@ -221,7 +218,6 @@ fn apply_partial_sidebar(sidebar: &mut SidebarConfig, partial: SidebarPatch) {
     apply_fields!(sidebar, partial;
         group_by_project,
         sort_order,
-        position,
         background,
         foreground,
         selected,

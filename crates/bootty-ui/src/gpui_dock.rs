@@ -90,7 +90,6 @@ impl WorkspaceDock {
     pub(crate) fn new(
         context: DockContext,
         hosts: DockHosts,
-        scope: bootty_mux::controller::SpaceId,
         storage: DockStorage<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -104,14 +103,9 @@ impl WorkspaceDock {
             config_path,
             state_key,
         } = storage;
-        let legacy_key = format!(
-            "{state_key}:space:{}:host:{}",
-            scope.persistence_value(),
-            context.host_identity
-        );
         let motion = Rc::<RefCell<motion::DockMotion>>::default();
         let (area, navigation, titlebar) = Self::skinned_area(&chrome, &motion, window, cx);
-        // Legacy sidebar values seed unsaved layouts; saved docks own their live geometry.
+        // Saved docks own their geometry.
         let sidebar_defaults = chrome.read(cx).sidebar_defaults();
         let sessions = Self::sessions_panel(&area, &chrome, cx);
         let target = context.target.clone();
@@ -123,7 +117,7 @@ impl WorkspaceDock {
         if let Some(owner) = owner.upgrade() {
             subscriptions.push(cx.observe(&owner, |_, _, cx| cx.notify()));
         }
-        Self::restore_layout(path, state_key, legacy_key, window, cx);
+        Self::restore_layout(path, state_key, window, cx);
         Self {
             owner,
             context,
@@ -159,11 +153,11 @@ impl WorkspaceDock {
         let sessions =
             cx.new(|cx| crate::gpui_sidebar_panel::SessionsPanel::new(chrome.clone(), cx));
         register(area, sessions.clone(), cx);
-        let legacy_sessions = panel_handle(sessions.clone());
+        let sessions_panel = panel_handle(sessions.clone());
         register_factory(
             area,
             "bootty.sidebar",
-            Rc::new(move |_, _, _| Some(legacy_sessions.clone())),
+            Rc::new(move |_, _, _| Some(sessions_panel.clone())),
             cx,
         );
         sessions
@@ -276,17 +270,11 @@ impl WorkspaceDock {
         (focus, vec![subscription, focus_in, focus_out])
     }
 
-    fn restore_layout(
-        path: PathBuf,
-        state_key: String,
-        legacy_key: String,
-        window: &Window,
-        cx: &Context<Self>,
-    ) {
+    fn restore_layout(path: PathBuf, state_key: String, window: &Window, cx: &Context<Self>) {
         cx.spawn_in(window, async move |weak, cx| {
             let saved = cx
                 .background_executor()
-                .spawn(async move { SavedLayout::load(&path, &state_key, &legacy_key) })
+                .spawn(async move { SavedLayout::load(&path, &state_key) })
                 .await;
             _ = weak.update_in(cx, |this, window, cx| {
                 if let Some(saved) = saved {
@@ -663,11 +651,6 @@ impl WorkspaceDock {
             }
             DockAction::ToggleSessions | DockAction::Sidebar | DockAction::Spaces => {
                 self.show_sidebar(window, cx);
-            }
-            DockAction::ToggleTabBar | DockAction::ToggleHiddenTabs => {
-                return bootty_control::CommandOutcome::Unavailable {
-                    message: "Tool tabs always remain visible.".into(),
-                };
             }
         }
         bootty_control::CommandOutcome::success()

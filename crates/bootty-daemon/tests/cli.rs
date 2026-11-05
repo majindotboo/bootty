@@ -260,7 +260,7 @@ fn remote_worktree_clean_runs_on_the_daemon_host() {
             .unwrap(),
     );
     let request = serde_json::json!({
-        "directory": "~/worktrees", "limit": 10, "sessions": [], "now": i64::MAX / 2,
+        "directory": "~/worktrees", "sessions": [], "now": i64::MAX / 2,
     });
     let output = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))
         .env("HOME", host_home.path())

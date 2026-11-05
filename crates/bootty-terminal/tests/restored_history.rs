@@ -416,3 +416,58 @@ proptest::proptest! {
         proptest::prop_assert!(visible.iter().all(|cell| cell.fg == Some(bootty_terminal::RgbColor { r, g, b })), "restored foreground differs from saved RGB");
     }
 }
+
+#[rstest]
+#[case(b"a\tb".as_slice())]
+#[case(b"a\x1b[9Gb".as_slice())]
+#[case(b"aXXXXXXX\x1b[7D\x1b[7X\x1b[7Cb".as_slice())]
+fn formatter_gaps_round_trip_through_saved_history(#[case] input: &[u8]) {
+    let geometry = TerminalGeometry {
+        cols: 40,
+        rows: 4,
+        cell_width: 8,
+        cell_height: 16,
+    };
+    let mut engine = TerminalEngine::new(geometry).unwrap();
+    engine.write_vt(input);
+    let capture = engine
+        .capture(CaptureOptions {
+            scope: CaptureScope::History,
+            format: CaptureFormat::Ansi,
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(capture.text.contains("\x1b["));
+    let saved = sanitize_history(&capture.text).expect("formatter gaps are safe history");
+    assert_eq!(history_plain_text(&saved).unwrap().trim_end(), "a       b");
+    let mut restored = TerminalEngine::new(geometry).unwrap();
+    restored.import_history(&styled_history_bytes(&saved).unwrap());
+    assert_eq!(
+        restored.extract_frame().unwrap().text_rows()[0].trim_end(),
+        "a       b"
+    );
+}
+
+#[rstest]
+#[case("\x1b[C")]
+#[case("\x1b[0C")]
+#[case("\x1b[65536C")]
+#[case("\x1b[999999999999999999999C")]
+#[case("\x1b[1;2C")]
+#[case("\x1b[1:2C")]
+#[case("\x1b[1D")]
+#[case("\x1b[1A")]
+#[case("\x1b[1G")]
+#[case("\x1b[2J")]
+#[case("\x1b[6n")]
+fn saved_history_rejects_invalid_gaps_and_other_commands(#[case] text: &str) {
+    assert!(sanitize_history(text).is_err());
+    assert!(validate_history(text).is_err());
+    assert!(styled_history_bytes(text).is_err());
+    assert!(history_plain_text(text).is_err());
+}
+
+#[rstest]
+fn saved_history_plain_gaps_respect_output_budget() {
+    assert!(history_plain_text(&"\x1b[65535C".repeat(5)).is_err());
+}

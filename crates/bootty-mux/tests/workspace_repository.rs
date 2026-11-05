@@ -168,28 +168,6 @@ fn name_keyed_storage_is_rejected_without_importing_or_deleting_records() -> any
     Ok(())
 }
 
-/// Spaces saved on the retired external backends keep loading, now on the native backend.
-#[rstest]
-fn spaces_saved_on_retired_backends_load_as_native(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-    #[values("native", "rmux", "tmux", "herdr", "future-backend")] stored: &str,
-) {
-    let (directory, repository) = repository.expect("workspace fixture");
-    drop(repository);
-    Connection::open(directory.path().join("session-order.sqlite3"))
-        .expect("open workspace database")
-        .execute(
-            "UPDATE workspace_spaces SET backend = ?1 WHERE name = 'Default Space'",
-            [stored],
-        )
-        .expect("store retired backend");
-
-    let (_, snapshot) = WorkspaceRepository::open(&directory.path().join("config.toml"))
-        .expect("workspace with a retired backend loads");
-    assert_eq!(snapshot.spaces().len(), 1);
-    assert_eq!(snapshot.spaces()[0].name(), "Default Space");
-}
-
 #[rstest]
 fn a_space_update_that_fails_leaves_every_field_as_it_was(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
@@ -205,7 +183,7 @@ fn a_space_update_that_fails_leaves_every_field_as_it_was(
     trigger_connection
         .execute_batch(
             "CREATE TRIGGER fail_space_binding_update
-             BEFORE UPDATE OF backend, remote ON workspace_spaces
+             BEFORE UPDATE OF remote ON workspace_spaces
              BEGIN
                  SELECT RAISE(ABORT, 'forced binding update failure');
              END;",
@@ -520,64 +498,7 @@ fn wsl_space_placement_survives_repository_reopen(
 }
 
 #[rstest]
-fn supported_saved_identity_schema_gains_state_without_losing_session_data(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-) -> anyhow::Result<()> {
-    let (directory, mut repository) = repository?;
-    let scope = repository.default_space().expect("Space");
-    let expected = SessionMembership::from_sessions(vec![session("saved", "backend")]);
-    repository.commit_binding_state(scope, &expected)?;
-    drop(repository);
-    let database = Connection::open(directory.path().join("session-order.sqlite3"))?;
-    database.execute_batch("ALTER TABLE workspace_sessions DROP COLUMN session_state; ALTER TABLE workspace_sessions DROP COLUMN terminal_snapshot; ALTER TABLE workspace_spaces DROP COLUMN selected_session_identity;")?;
-    database.pragma_update(None, "user_version", 5)?;
-    let (_, reopened) = WorkspaceRepository::open(&directory.path().join("config.toml"))?;
-    assert_eq!(reopened.spaces()[0].binding().sessions(), &expected);
-    assert_eq!(
-        database.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-        7
-    );
-    Ok(())
-}
-
-#[rstest]
-#[case(None, SessionState::default())]
-#[case(Some("active"), SessionState::default())]
-#[case(Some("settled"), SessionState::default())]
-fn prototype_task_lifecycle_preserves_saved_work(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-    #[case] lifecycle: Option<&str>,
-    #[case] state: SessionState,
-) -> anyhow::Result<()> {
-    let (directory, mut repository) = repository?;
-    let scope = repository.default_space().expect("Space");
-    let mut saved = session("saved", "backend");
-    saved.display_name = "Saved purpose".into();
-    saved.explicit = true;
-    repository.commit_binding_state(
-        scope,
-        &SessionMembership::from_sessions(vec![saved.clone()]),
-    )?;
-    drop(repository);
-    let database = Connection::open(directory.path().join("session-order.sqlite3"))?;
-    database.execute_batch("ALTER TABLE workspace_sessions DROP COLUMN session_state; ALTER TABLE workspace_sessions DROP COLUMN terminal_snapshot; ALTER TABLE workspace_spaces DROP COLUMN selected_session_identity; ALTER TABLE workspace_sessions ADD COLUMN task_lifecycle TEXT;")?;
-    database.execute(
-        "UPDATE workspace_sessions SET task_lifecycle = ?1",
-        [lifecycle],
-    )?;
-    database.pragma_update(None, "user_version", 6)?;
-    let (_, reopened) = WorkspaceRepository::open(&directory.path().join("config.toml"))?;
-    saved.state = state;
-    assert_eq!(
-        reopened.spaces()[0].binding().sessions().get("saved"),
-        Some(&saved)
-    );
-    Ok(())
-}
-
-#[rstest]
 #[case::negative_activity("{\"last_activity_at\":-1}")]
-#[case::unknown_field("{\"unknown\":true}")]
 fn malformed_session_state_is_reported_without_rewriting_the_record(
     repository: anyhow::Result<(TempDir, LoadedRepository)>,
     #[case] malformed: &str,
@@ -791,56 +712,4 @@ fn native_server_identity_is_atomic_stable_and_never_replaces_corruption() {
         std::fs::read_to_string(directory.path().join("mux-server-id")).unwrap(),
         ""
     );
-}
-
-#[test]
-fn legacy_session_state_ignores_retired_fields() {
-    let state: SessionState = serde_json::from_value(serde_json::json!({
-        "lifecycle": "settled",
-        "snoozed_until": 4_102_444_800_i64,
-        "auto_settle_disabled": true
-    }))
-    .unwrap();
-    assert_eq!(state, SessionState::default());
-}
-
-#[rstest]
-#[case("archived")]
-#[case("deleted")]
-#[case("hidden")]
-fn retired_saved_sessions_are_dropped(
-    repository: anyhow::Result<(TempDir, LoadedRepository)>,
-    #[case] flag: &str,
-) -> anyhow::Result<()> {
-    let (directory, mut repository) = repository?;
-    let scope = repository.default_space().unwrap();
-    repository.commit_binding_state(
-        scope,
-        &SessionMembership::from_sessions(vec![session("old", "old"), session("live", "live")]),
-    )?;
-    drop(repository);
-    let database = Connection::open(directory.path().join("session-order.sqlite3"))?;
-    database.execute(
-        "UPDATE workspace_sessions SET session_state = ?1 WHERE identity = 'old'",
-        [format!("{{\"{flag}\":true,\"last_activity_at\":123}}")],
-    )?;
-    let (_, reopened) = WorkspaceRepository::open(&directory.path().join("config.toml"))?;
-    let sessions = reopened.spaces()[0].binding().sessions();
-    assert_eq!(
-        sessions
-            .sessions()
-            .iter()
-            .map(|session| session.identity.as_str())
-            .collect::<Vec<_>>(),
-        vec!["live"]
-    );
-    assert_eq!(
-        database.query_row(
-            "SELECT count(*) FROM workspace_sessions WHERE identity = 'old'",
-            [],
-            |row| row.get::<_, i64>(0)
-        )?,
-        0
-    );
-    Ok(())
 }

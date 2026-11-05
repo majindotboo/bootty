@@ -2,8 +2,7 @@
 //!
 //! A [`SettingSpec`] names one config key once: its TOML path, the value it holds, how it is
 //! labelled, and what it falls back to. The settings UI renders specs instead of hand-writing a
-//! read/widget/write block per key. The native registry contains built-in settings; raw extension
-//! tables remain a compatibility path and are not interpreted as executable declarations.
+//! read/widget/write block per key. The native registry contains built-in settings.
 //!
 //! This lives in `bootty-config`, not `bootty-ui`: a spec names [`BoottyConfig`] and config paths,
 //! both product types. `bootty-ui` stays a widget library.
@@ -40,7 +39,7 @@ pub struct SettingSpec {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettingDeclaration {
     /// TOML path. A `*` segment matches one dynamic table key; a trailing `*` matches the rest of
-    /// a path, which is used for compatibility tables such as raw extension settings.
+    /// a path.
     pub path: Vec<Cow<'static, str>>,
     /// Settings page that owns the editor for this value.
     pub page: Cow<'static, str>,
@@ -179,7 +178,6 @@ pub enum SettingEditor {
     Keys,
     Shell,
     Window,
-    Extensions,
 }
 
 impl SettingEditor {
@@ -196,7 +194,6 @@ impl SettingEditor {
             Self::Keys => "keys",
             Self::Shell => "shell",
             Self::Window => "window",
-            Self::Extensions => "extensions",
         }
     }
 }

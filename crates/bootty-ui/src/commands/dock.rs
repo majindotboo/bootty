@@ -6,18 +6,14 @@ pub enum DockAction {
     ToggleLeft,
     ToggleSessions,
     Spaces,
-    ToggleHiddenTabs,
-    ToggleTabBar,
     Sidebar,
 }
 
 impl DockAction {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 4] = [
         Self::ToggleLeft,
         Self::ToggleSessions,
         Self::Spaces,
-        Self::ToggleHiddenTabs,
-        Self::ToggleTabBar,
         Self::Sidebar,
     ];
 
@@ -27,8 +23,6 @@ impl DockAction {
             Self::ToggleLeft => Command::ToggleLeftDock,
             Self::ToggleSessions => Command::ToggleSessionsPanel,
             Self::Spaces => Command::ShowSpaces,
-            Self::ToggleHiddenTabs => Command::ToggleHiddenTabs,
-            Self::ToggleTabBar => Command::ToggleTabBar,
             Self::Sidebar => Command::ShowSidebar,
         }
     }

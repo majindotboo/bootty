@@ -8,7 +8,7 @@ pub mod remote;
 pub mod runner;
 pub mod worktree;
 
-pub use cleanup::{CleanupReport, CleanupRequest, KeptWorktree, Retention, SessionCheckout};
+pub use cleanup::{CleanupReport, CleanupRequest, KeptWorktree, SessionCheckout};
 pub use facts::{
     BranchStatus, GitFacts, GitFactsCache, GitSessionFacts, GitSessionFactsInput,
     WorktreeRevisionCache,

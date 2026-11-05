@@ -85,15 +85,6 @@ fn checkpoint_cwd_accepts_absolute_paths_without_shell_expansion(
     assert_eq!(checkpoint.validate().is_ok(), accepted);
 }
 
-/// Checkpoints saved while panes could hold native conversations keep loading.
-#[rstest]
-fn checkpoints_with_retired_native_agent_metadata_still_load(checkpoint: SavedTerminalSession) {
-    let mut value = serde_json::to_value(&checkpoint).unwrap();
-    value["windows"][0]["panes"][0]["native_agent"] = "native:codex:captured".into();
-    let loaded: SavedTerminalSession = serde_json::from_value(value).unwrap();
-    assert_eq!(loaded, checkpoint);
-}
-
 #[rstest]
 fn native_restoration_preserves_saved_topology_and_rejects_adoption(
     checkpoint: SavedTerminalSession,
@@ -279,56 +270,6 @@ fn failed_selection_write_preserves_both_saved_and_backend_selection(
     );
 }
 
-#[rstest]
-fn supported_lifecycle_schema_evolves_without_losing_saved_work() {
-    let directory = TempDir::new().expect("create isolated workspace");
-    let config = directory.path().join("config.toml");
-    let (mut repository, snapshot) =
-        WorkspaceRepository::open(&config).expect("open workspace repository");
-    let scope = snapshot.spaces().first().unwrap().id();
-    let saved = WorkspaceSession {
-        identity: "logical".into(),
-        backend_name: "original".into(),
-        display_name: "Purpose".into(),
-        explicit: true,
-        cwd: "/tmp".into(),
-        state: SessionState {
-            pinned: true,
-            ..SessionState::default()
-        },
-        terminal_snapshot: None,
-    };
-    repository
-        .commit_binding_state(
-            scope,
-            &SessionMembership::from_sessions(vec![saved.clone()]),
-        )
-        .expect("commit saved workspace state");
-    let database = rusqlite::Connection::open(directory.path().join("session-order.sqlite3"))
-        .expect("open checkpoint database");
-    database.execute_batch("ALTER TABLE workspace_sessions DROP COLUMN terminal_snapshot; ALTER TABLE workspace_spaces DROP COLUMN selected_session_identity;").expect("construct supported version six schema");
-    database
-        .pragma_update(None, "user_version", 6)
-        .expect("mark supported version six schema");
-    let (_, restored) = WorkspaceRepository::open(&config).expect("open workspace repository");
-    assert_eq!(
-        restored
-            .spaces()
-            .first()
-            .unwrap()
-            .binding()
-            .sessions()
-            .get("logical"),
-        Some(&saved)
-    );
-    assert_eq!(
-        database
-            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-            .expect("read evolved schema revision"),
-        7
-    );
-}
-
 #[fixture]
 fn live_workspace() -> anyhow::Result<(
     TempDir,
@@ -467,52 +408,6 @@ fn reopening_a_window_before_its_first_frame_reattaches_the_existing_native_sess
             .unwrap()
             .session_attachment("logical"),
         before.sessions.first()
-    );
-}
-
-/// A checkpoint stored with since-retired pane metadata is still the prior state the next save
-/// replaces, so saving keeps working after an upgrade.
-#[rstest]
-fn checkpoints_replace_stored_state_with_retired_native_agent_metadata(
-    live_workspace: anyhow::Result<(
-        TempDir,
-        bootty_mux::workspace::WorkspaceRuntime,
-        bootty_mux::controller::SpaceId,
-        String,
-    )>,
-) {
-    let (directory, mut workspace, scope, pane) =
-        live_workspace.expect("create live exact-tagged workspace");
-    let generation = workspace.binding(scope).unwrap().mux().binding_generation();
-    let receipt = workspace
-        .prepare_session_checkpoint(scope, "logical", generation, 10)
-        .expect("prepare first checkpoint")
-        .save(vec![pane_capture(&pane, None, "first history")])
-        .expect("persist first checkpoint");
-    assert!(workspace.publish_session_checkpoint(receipt).unwrap());
-    let database = rusqlite::Connection::open(directory.path().join("session-order.sqlite3"))
-        .expect("open checkpoint database");
-    database
-        .execute(
-            "UPDATE workspace_sessions SET terminal_snapshot = json_set(terminal_snapshot, '$.windows[0].panes[0].native_agent', 'native:codex:old') WHERE identity = 'logical'",
-            [],
-        )
-        .expect("store retired pane metadata");
-    workspace
-        .prepare_session_checkpoint(scope, "logical", generation, 11)
-        .expect("prepare next checkpoint")
-        .save(vec![pane_capture(&pane, None, "next history")])
-        .expect("replace the stored checkpoint");
-    let stored: String = database
-        .query_row(
-            "SELECT terminal_snapshot FROM workspace_sessions WHERE identity = 'logical'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert!(
-        stored.contains("next history") && !stored.contains("native_agent"),
-        "{stored}"
     );
 }
 

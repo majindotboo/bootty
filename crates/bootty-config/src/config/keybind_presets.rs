@@ -270,9 +270,7 @@ pub(super) fn prefixed_keybinds(prefix: &str, entries: &[(&str, &str)]) -> Vec<S
         .collect()
 }
 
-// Tab and pane navigation, handled directly by bootty's mux layer on every backend (tmux included,
-// now that the tmux backend implements every command). Shared so the bindings don't depend on a
-// per-backend relay to an external config.
+// Shared tab and pane navigation through the native multiplexer.
 pub(super) const fn navigation_keybinds() -> &'static [&'static str] {
     &[
         "left_alt+shift+n=next_tab",

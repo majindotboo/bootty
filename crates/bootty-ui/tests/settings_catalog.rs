@@ -286,7 +286,6 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
             ("input.keybind".to_owned(), "keymap editor"),
             ("input.sidebar-keybind".to_owned(), "keymap editor"),
             ("input.backend-keybind.native".to_owned(), "keymap editor"),
-            ("extensions.*".to_owned(), "stored configuration"),
         ]
     );
 }
@@ -295,7 +294,6 @@ fn aggregate_and_replacement_surfaces_are_deliberate_and_named() {
 #[case("input.keybind")]
 #[case("input.sidebar-keybind")]
 #[case("input.backend-keybind.native")]
-#[case("extensions.*")]
 fn compatibility_only_inputs_stay_out_of_settings(#[case] id: &str) {
     assert!(!setting_is_visible_in_native_settings(id));
 }

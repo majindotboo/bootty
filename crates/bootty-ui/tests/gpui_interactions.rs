@@ -1592,7 +1592,6 @@ fn failed_session_creation_shows_progress_and_offers_copy_and_retry(cx: &TestApp
         "Prompt",
         DialogAction::new("start-session"),
     );
-    spec.multiline = true;
     spec.footer = Some("/worktrees/arc/topic".into());
     spec.hint = Some("Checkout created. Retry uses this checkout to start the session.".into());
     spec.fields.push(bootty_gpui::DialogField {
@@ -1637,7 +1636,7 @@ fn failed_session_creation_shows_progress_and_offers_copy_and_retry(cx: &TestApp
 }
 
 #[gpui_kit::test]
-fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppContext) {
+fn worktree_options_emit_edits_without_a_command_input(cx: &mut TestAppContext) {
     use bootty_gpui::{DialogField, DialogFieldKind};
 
     let mut spec = DialogSpec::prompt(
@@ -1647,7 +1646,6 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
         "Prompt",
         DialogAction::new("start-session"),
     );
-    spec.multiline = true;
     spec.fields = [
         (
             "isolation",
@@ -1675,7 +1673,7 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
     .collect();
     let (probe, cx) = embedded_dialog_window(cx, spec);
     draw_chrome(cx);
-    let composer = cx.debug_bounds("dialog-prompt-input").expect("composer");
+    assert!(cx.debug_bounds("dialog-prompt-input").is_none());
     assert!(
         cx.debug_bounds("dialog-field-choice-control-start-ref")
             .is_none()
@@ -1690,10 +1688,6 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
     let mode = cx
         .debug_bounds("dialog-checkout-picker")
         .expect("checkout mode");
-    assert!(
-        mode.top() >= composer.bottom(),
-        "the checkout choice sits below the composer"
-    );
     assert!(
         base.top() >= mode.bottom(),
         "worktree details follow the checkout choice"
@@ -1710,7 +1704,7 @@ fn worktree_options_keep_the_composer_fixed_and_emit_edits(cx: &mut TestAppConte
         ))));
     }
     assert!(cx.debug_bounds("dialog-worktree-base-branch").is_some());
-    assert_eq!(cx.debug_bounds("dialog-prompt-input"), Some(composer));
+    assert!(cx.debug_bounds("dialog-prompt-input").is_none());
     cx.simulate_keystrokes("escape");
     draw_chrome(cx);
     probe.update(cx, |probe, _| {
@@ -1734,7 +1728,6 @@ fn branch_picker_tracks_worktree_owners_and_rejected_selection(cx: &mut TestAppC
         "Prompt",
         DialogAction::new("start-session"),
     );
-    spec.multiline = true;
     spec.fields = [
         ("provider", "Provider", "Codex", vec!["Codex".into()]),
         (
@@ -1827,26 +1820,16 @@ fn branch_picker_tracks_worktree_owners_and_rejected_selection(cx: &mut TestAppC
 }
 
 #[gpui_kit::test]
-fn new_session_composer_routes_start_keys_and_preserves_shift_enter(cx: &mut TestAppContext) {
-    let mut spec = DialogSpec::prompt(
+fn new_session_form_routes_start_keys(cx: &mut TestAppContext) {
+    let spec = DialogSpec::prompt(
         bootty_ui::presentation::dialogs::NEW_SESSION_ID,
         "New session",
         "draft",
         "Prompt",
         DialogAction::new("start-session"),
     );
-    spec.multiline = true;
     let (probe, cx) = dialog_window(cx, DialogRole::Prompt, spec);
     focus_dialog(&probe, cx);
-    cx.simulate_keystrokes("shift-enter");
-    cx.simulate_input("second line");
-    probe.update(cx, |probe, _| {
-        let intents = probe.intents.borrow();
-        assert!(intents.iter().any(|intent| matches!(intent,
-            DialogIntent::TextChanged { value, .. } if value.contains('\n') && value.contains("second line")
-        )));
-        assert!(!intents.iter().any(|intent| matches!(intent, DialogIntent::Activate { .. })));
-    });
     cx.simulate_keystrokes("enter cmd-enter");
     probe.update(cx, |probe, _| {
         let actions = probe
@@ -1910,7 +1893,6 @@ fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
         selected_project: None,
         busy: false,
         progress: Vec::new(),
-        multiline: false,
         text_hint: None,
         rows: vec![
             DialogRow {
@@ -1958,7 +1940,6 @@ fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppCo
         selected_project: None,
         busy: false,
         progress: Vec::new(),
-        multiline: false,
         text_hint: Some("find".to_owned()),
         rows: vec![
             DialogRow::action("previous", "Previous", DialogAction::new("previous")),
@@ -1998,7 +1979,6 @@ fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
         selected_project: None,
         busy: false,
         progress: Vec::new(),
-        multiline: false,
         text_hint: Some("filter".to_owned()),
         rows: vec![DialogRow::action("one", "One", DialogAction::new("one"))],
         empty_text: "none".to_owned(),

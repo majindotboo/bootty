@@ -94,9 +94,6 @@ pub struct BoottyConfig {
     pub sidebar: SidebarConfig,
     pub multiplexer: MultiplexerConfig,
     pub ssh_profiles: BTreeMap<String, SshProfileConfig>,
-    /// Raw extension settings retained for compatibility and unsupported-source display, keyed by
-    /// module stem then setting key. The native host does not interpret or execute this table.
-    pub extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
     pub input: InputConfig,
     pub session: SessionConfig,
     pub diagnostics: DiagnosticsConfig,
@@ -203,15 +200,6 @@ pub enum BackgroundMaterial {
     Blurred,
     Mica,
     MicaAlt,
-}
-
-/// A raw value retained in an extension's settings table.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(untagged)]
-pub enum ExtensionSettingValue {
-    Bool(bool),
-    Number(f64),
-    Text(String),
 }
 
 /// The TOML token for a config enum value, taken from its own `Serialize` derive.

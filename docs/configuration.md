@@ -319,9 +319,7 @@ Each section accepts only `context`, `use_key_equivalents`,
 `use_builtin_defaults`, `unbind`, and `bindings`:
 
 - `context` defaults to `Global`. Supported contexts are `Global`, `Sidebar`,
-  `Command`, and `Terminal`. The old `Native` context and
-  `Terminal && backend == native` load as `Terminal`. Any other value is used as
-  a Zed-style key-context expression.
+  `Command`, and `Terminal`. Other values are Zed-style key-context expressions.
   `Command` applies to the active command palette or picker; underlying workspace
   shortcuts are inactive while that modal surface is open.
 - `use_key_equivalents` is optional, defaults to `false`, and is preserved as
@@ -556,14 +554,10 @@ Connection tests report results for both saved profiles and unsaved drafts.
 
 ## Compatibility notes
 
-- The status bar has one layout: the session's tabs at the left, and keep-awake, CPU,
-  memory, power, date and time at the right, a tab bar tall. `top-bar`, `bottom-bar`,
-  `status-bar`, `status-height`, `status-background`, `top-segment`, `status-segment`
-  and `bottom-segment` still load and have no effect.
+- The status bar shows session tabs at the left and keep-awake, CPU, memory, power, date and time at the right.
 - Sidebar modules are native implementations. `sidebar.modules` defaults to
   `["sessions"]`, and `sidebar.session-modules` to `["diffs", "process",
-  "directory", "branch", "ports", "progress"]`. Existing Lua/Luau files under the
-  config tree and raw `[extensions]` values are preserved, but are not executed.
+  "directory", "branch", "ports", "progress"]`.
 - `BOOTTY_SHELL` remains a compatibility override in the session launcher.
   Configured `[session].shell` is passed as the explicit shell setting, then the
   runtime preserves its existing shell precedence.
@@ -681,12 +675,8 @@ Bootty and tmux presets invoke `toggle_left_dock`.
 
 `chrome.left-dock-toggle` controls the header button; its command remains
 available. The sidebar's visibility and width persist per window in
-`native-panels.json`, shared across Spaces; drag its edge to resize. Saved layouts
-from versions with a right dock still load. The legacy `chrome.sidebar` and
-`chrome.sidebar-width` keys seed an unsaved layout. `sidebar.position` no longer
-moves the sidebar. The legacy `chrome.panel-tab-style` and `chrome.panel-tabs`
-keys still load and have no effect, as do the hidden `toggle_tab_bar` and
-`toggle_hidden_tabs` commands.
+`native-panels.json`, shared across Spaces; drag its edge to resize.
+`chrome.sidebar` and `chrome.sidebar-width` seed an unsaved layout.
 
 The **Tabs** settings (`[chrome.tabs]`) select classic, underline, pill, outline,
 or segmented tabs; close-button side (left/right); and close-button visibility

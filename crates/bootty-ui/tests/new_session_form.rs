@@ -8,7 +8,6 @@ use bootty_ui::presentation::new_session_form::{
     NewSessionDraft, NewSessionForm, SessionDestination,
 };
 use pretty_assertions::{assert_eq, assert_ne};
-use proptest::test_runner::{Config, TestRunner};
 use rstest::{fixture, rstest};
 
 #[fixture]
@@ -33,7 +32,6 @@ fn form() -> NewSessionForm {
             projectless: false,
             scope: local,
             cwd: "/project/current".to_owned(),
-            command: String::new(),
             isolated: false,
             isolation_preference: false,
             branch: String::new(),
@@ -163,7 +161,6 @@ fn existing_branch_selection_waits_for_git_and_preserves_failed_drafts(
         presentation::dialogs::{NEW_SESSION_ID, NewSessionDialog, NewSessionPickerEvent},
     };
     form.change_field("host", host);
-    form.change_text("Keep this command");
     load_checkout_branches(&mut form).expect("branch catalog");
     let target = form.destination().unwrap().target.clone();
     let cwd = form.draft.cwd.clone();
@@ -220,7 +217,6 @@ fn existing_branch_selection_waits_for_git_and_preserves_failed_drafts(
         selection(&dialog),
         if succeeds { "feature/existing" } else { "main" }
     );
-    assert_eq!(dialog.draft().unwrap().command, "Keep this command");
     assert_eq!(dialog.draft().unwrap().cwd, cwd);
     if !succeeds {
         assert!(
@@ -239,7 +235,6 @@ fn selecting_a_checked_out_branch_reuses_its_directory(
     #[values("Current host", "Another host")] host: &str,
 ) {
     form.change_field("host", host);
-    form.change_text("Keep this draft");
     load_checkout_branches(&mut form).expect("branch catalog");
     let project = form.project_path().to_owned();
     assert_eq!(form.select_checkout_branch("topic/linked"), Ok(None));
@@ -271,14 +266,12 @@ fn selecting_a_checked_out_branch_reuses_its_directory(
     assert_eq!(selection(&form, "checkout-branch"), "main");
     assert_eq!(form.select_checkout_branch("topic/linked"), Ok(None));
     assert_eq!(form.draft.cwd, "/worktrees/project/linked");
-    assert_eq!(form.draft.command, "Keep this draft");
 }
 
 #[rstest]
 fn explicit_worktree_branch_has_a_known_destination(mut form: NewSessionForm) {
     form.set_worktree_available(true);
     form.change_field("isolation", "New worktree");
-    form.change_text("Fix startup");
     form.change_field("branch", "feature/fix-startup");
     assert!(
         form.spec(false)
@@ -349,51 +342,6 @@ fn creation_progress_keeps_the_checkout_and_explains_a_start_failure(form: NewSe
             .unwrap()
             .contains("Permission denied")
     );
-}
-
-#[rstest]
-fn command_survives_host_switches(form: NewSessionForm) {
-    let form = std::cell::RefCell::new(form);
-    let strategy = "[^\\x00]{0,256}";
-    TestRunner::new(Config {
-        cases: 32,
-        ..Config::default()
-    })
-    .run(&strategy, |command| {
-        let mut form = form.borrow_mut();
-        form.change_text(&command);
-        assert!(form.change_field("host", "Another host"));
-        form.set_directory("/project/another/selected".to_owned());
-        assert!(form.change_field("host", "Current host"));
-        assert_eq!(form.draft.cwd, "/project/current");
-        assert_eq!(&form.draft.command, &command);
-        assert_eq!(form.draft.identity, "0123456789abcdef0123456789abcdef");
-        assert!(form.change_field("host", "Another host"));
-        assert_eq!(form.draft.cwd, "/project/another/selected");
-        form.change_field("host", "Current host");
-        Ok(())
-    })
-    .expect("draft preservation property");
-}
-
-#[rstest]
-#[case("")]
-#[case("  \n\t")]
-#[case("printf 'one\\ntwo'\necho '$HOME'")]
-fn terminal_text_distinguishes_shell_from_command(mut form: NewSessionForm, #[case] text: &str) {
-    form.change_text(text);
-    let invocation = form.invocation(&form.draft.cwd).expect("terminal launch");
-    assert_eq!(invocation.command, "session.create");
-    assert_eq!(invocation.arguments[3], form.draft.identity);
-    assert_eq!(invocation.arguments[4], form.title());
-    let argv: Vec<String> = serde_json::from_str(&invocation.arguments[2]).expect("argv");
-    if text.trim().is_empty() {
-        assert!(argv.is_empty(), "empty Terminal opens its shell");
-        assert_eq!(form.spec(false).text_label.as_deref(), Some("Terminal"));
-    } else {
-        assert_eq!(argv.last().map(String::as_str), Some(text));
-        assert_eq!(form.spec(false).text_label.as_deref(), Some("Command"));
-    }
 }
 
 #[rstest]
@@ -508,34 +456,6 @@ fn worktree_is_optional_generated_editable_and_capability_bounded(mut form: NewS
     assert_eq!(form.worktree_request(), Ok(None));
 }
 
-#[rstest]
-#[case("")]
-#[case("printf '%s' '$HOME'")]
-fn remote_host_runs_terminal_commands_through_its_login_shell(
-    form: NewSessionForm,
-    #[case] command: &str,
-) {
-    let mut destination = form.destination().expect("destination").clone();
-    destination.remote =
-        Some(bootty_config::config::SshRemoteConfig::for_host("remote-host").into());
-    let mut form = NewSessionForm::new(form.draft, vec![destination.clone()]);
-    form.change_text(command);
-    let invocation = form
-        .invocation(&form.draft.cwd)
-        .expect("remote terminal launch");
-    assert!(form.spec(false).rows[0].enabled);
-    assert_eq!(invocation.command, "session.create");
-    assert_eq!(invocation.target, Some(destination.target));
-    let argv: Vec<String> =
-        serde_json::from_str(&invocation.arguments[2]).expect("literal terminal argv");
-    if command.is_empty() {
-        assert_eq!(argv, Vec::<String>::new());
-    } else {
-        assert_eq!(argv, ["/bin/sh", "-lc", command]);
-    }
-    assert_eq!(form.draft.command, command);
-}
-
 fn ready_dialog(
     form: NewSessionForm,
 ) -> anyhow::Result<bootty_ui::presentation::dialogs::NewSessionDialog> {
@@ -572,9 +492,8 @@ fn start_intent(action: &str) -> bootty_ui::gpui::DialogIntent {
 }
 
 #[rstest]
-fn start_submits_once_until_its_outcome_is_observed(mut form: NewSessionForm) {
+fn start_submits_once_until_its_outcome_is_observed(form: NewSessionForm) {
     use bootty_ui::presentation::dialogs::NewSessionPickerEvent;
-    form.change_text("cargo test");
     let original_target = form.destination().expect("destination").target.clone();
     let mut dialog = ready_dialog(form).expect("project discovery");
     let Some(NewSessionPickerEvent::Submit(invocation)) =
@@ -582,7 +501,7 @@ fn start_submits_once_until_its_outcome_is_observed(mut form: NewSessionForm) {
     else {
         panic!("creation submits immediately");
     };
-    assert_eq!(invocation.arguments[4], "cargo test");
+    assert!(invocation.arguments[4].starts_with("Terminal in "));
     assert_eq!(
         dialog.apply(&start_intent("start-session"), &[]),
         None,
@@ -668,7 +587,6 @@ fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessio
         .register_project(form.draft.scope, &second)
         .unwrap();
     form.set_directory(first.clone());
-    form.change_text("Keep the draft when changing projects");
     let (sender, wakes) = mpsc::channel();
     let repaint: bootty_mux::RepaintHandle = Arc::new(move || {
         let _ = sender.send(());
@@ -696,10 +614,6 @@ fn registered_project_selection_preserves_the_creation_draft(mut form: NewSessio
     dialog.apply(&select(&second), &[]);
     assert_eq!(dialog.spec().role, DialogRole::Prompt);
     assert_eq!(dialog.draft().unwrap().cwd, second);
-    assert_eq!(
-        dialog.draft().unwrap().command,
-        "Keep the draft when changing projects"
-    );
 }
 
 #[rstest]
@@ -776,10 +690,9 @@ fn project_discovery_waits_for_the_prior_picker(
 #[case(bootty_control::CommandOutcome::deadline_exceeded())]
 #[case(bootty_control::CommandOutcome::Failed { code: "launch".into(), message: "Backend failed".into() })]
 fn failed_creation_keeps_the_draft_without_reusing_the_failed_task(
-    mut form: NewSessionForm,
+    form: NewSessionForm,
     #[case] outcome: bootty_control::CommandOutcome,
 ) {
-    form.change_text("Keep this command");
     let original = form.draft.identity.clone();
     let mut dialog = ready_dialog(form).expect("discovery");
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -788,7 +701,6 @@ fn failed_creation_keeps_the_draft_without_reusing_the_failed_task(
     assert_eq!(dialog.poll(), None);
     let draft = dialog.draft().expect("draft");
     assert_ne!(draft.identity, original);
-    assert_eq!(draft.command, "Keep this command");
     assert!(!dialog.spec().busy);
 }
 

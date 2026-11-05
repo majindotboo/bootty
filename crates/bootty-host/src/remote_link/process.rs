@@ -152,7 +152,7 @@ fn spawn_terminal(
     });
     let reader = pair.master.try_clone_reader()?;
     // Dropping portable-pty's Unix writer injects newline + Ctrl+D. A disconnected
-    // tmux attachment must never send those bytes to its backend shell.
+    // PTY must not send those bytes to its shell on disconnect.
     #[cfg(unix)]
     let mut writer: Box<dyn Write + Send> = Box::new(filedescriptor::FileDescriptor::dup(
         &pair.master.as_raw_fd().context("remote PTY descriptor")?,

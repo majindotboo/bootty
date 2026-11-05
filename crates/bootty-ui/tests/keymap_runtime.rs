@@ -184,7 +184,7 @@ fn disabling_one_backend_context_keeps_global_defaults() {
     let config_path = directory.path().join("config.toml");
     directory
         .child("keymap.json")
-        .write_str(r#"[{ "context": "Native", "use_builtin_defaults": false }]"#)
+        .write_str(r#"[{ "context": "Terminal", "use_builtin_defaults": false }]"#)
         .expect("write keymap");
     let mut config = BoottyConfig {
         config_path,
@@ -224,7 +224,7 @@ fn later_user_sections_win_and_backend_contexts_are_active_in_the_terminal() {
         "ctrl+k=open_settings",
         r#"[
           { "bindings": { "ctrl-k": "open_settings" } },
-          { "context": "Terminal && backend == native", "bindings": {
+          { "context": "Terminal", "bindings": {
               "ctrl-k": "new_window"
           } }
         ]"#,

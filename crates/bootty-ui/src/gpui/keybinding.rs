@@ -34,10 +34,6 @@ pub fn keybinding_contexts_overlap(left: &str, right: &str) -> bool {
             "terminal" => "Terminal",
             "sidebar" => "Sidebar",
             "command" => "Command",
-            "herdr" => "Terminal && backend == herdr",
-            "native" => "Terminal && backend == native",
-            "rmux" => "Terminal && backend == rmux",
-            "tmux" => "Terminal && backend == tmux",
             _ => source,
         };
         gpui_kit::KeyBindingContextPredicate::parse(alias).ok()

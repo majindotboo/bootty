@@ -91,22 +91,6 @@ proptest! {
     }
 }
 #[rstest]
-fn legacy_binary_splits_load_as_scaled_nary_weights() {
-    let layout: MuxPaneLayout = serde_json::from_value(serde_json::json!({"Split": {"direction":"Right","ratio_millis":250,
-        "first":{"Pane":"a"},"second":{"Split":{"direction":"Right","ratio_millis":400,"first":{"Pane":"b"},"second":{"Pane":"c"}}}}})).unwrap();
-    assert_eq!(
-        layout,
-        MuxPaneLayout::Split {
-            direction: MuxPaneSplitDirection::Right,
-            weights: vec![0.25, 0.3, 0.450_000_02],
-            children: ["a", "b", "c"]
-                .map(|id| MuxPaneLayout::Pane(id.into()))
-                .into()
-        }
-    );
-    assert!(normalized(&layout, None));
-}
-#[rstest]
 fn resize_cannot_replace_topology_and_invalid_mutations_are_atomic() {
     let mut layout = PaneLayout::single("a".into());
     layout.split_focused("b".into(), SplitDirection::Right);

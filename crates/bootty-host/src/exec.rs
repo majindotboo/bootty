@@ -11,7 +11,6 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 pub const REMOTE_DAEMON_PROGRAM: &str = "bootty-daemon";
-// Older daemons accept restore requests but omit tmux's saved output rows.
 pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "23";
 #[must_use]
 pub fn remote_exec_program() -> &'static str {

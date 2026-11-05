@@ -143,7 +143,7 @@ fn remote_settings() -> anyhow::Result<RemoteSettings> {
     let path = directory.path().join("config.toml");
     std::fs::write(
         &path,
-        "[multiplexer]\nbackend = 'native'\n[multiplexer.remote]\nhost = 'accepted.test'\n",
+        "[multiplexer]\n[multiplexer.remote]\nhost = 'accepted.test'\n",
     )?;
     let accepted = AcceptedSettings {
         config: Arc::new(load_config_from_path(&path)?),
