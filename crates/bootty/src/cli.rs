@@ -59,10 +59,10 @@ pub enum Command {
     /// Create, poll, or remove one bounded event subscription.
     #[command(name = "events", subcommand)]
     Events(EventCommand),
-    /// Legacy remote command transport retained while daemon installations roll out.
+    /// Execute a command through the typed remote relay.
     #[command(name = "remote-exec", hide = true)]
     RemoteExec { payload: String },
-    /// Legacy remote availability probe retained while daemon installations roll out.
+    /// Probe the typed remote relay.
     #[command(name = "remote-ping", hide = true)]
     RemotePing,
     /// Invoke a command discovered from a running Bootty instance.

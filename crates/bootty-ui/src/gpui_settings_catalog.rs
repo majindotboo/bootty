@@ -1,6 +1,6 @@
 //! Zed-shaped settings taxonomy for the native settings projection.
 //!
-//! The configuration schema still owns each setting's TOML path and legacy page metadata. This
+//! The configuration schema owns each setting's TOML path and page metadata. This
 //! catalog only decides where that setting appears in the native settings window.
 
 use std::{collections::HashSet, path::Path};
@@ -288,9 +288,7 @@ pub fn settings_dependency_for(parent: &str) -> Option<&'static SettingsDependen
 
 /// Whether a schema setting belongs on the native Zed-shaped settings surface.
 ///
-/// The legacy TOML keybinding arrays remain supported as an input layer, but the native UI edits
-/// bindings through `keymap.json` and the dedicated keymap editor. Projecting both editors would
-/// expose two competing sources of truth and reintroduce the old overflowing summary rows.
+/// Native keybinding edits use the dedicated keymap editor.
 #[must_use]
 pub fn setting_is_visible_in_native_settings(id: &str) -> bool {
     !matches!(
@@ -300,14 +298,12 @@ pub fn setting_is_visible_in_native_settings(id: &str) -> bool {
             | "input.backend-keybind.native"
             | "sidebar.session-modules"
             | "sidebar.modules"
-            | "extensions.*"
     )
 }
 
 /// Select the native settings page for one schema setting.
 ///
-/// `legacy_page` is the schema page that still supplies the setting's default section and
-/// writeback behavior. The native window deliberately does not expose that legacy taxonomy.
+/// The schema page supplies the setting's default section and writeback behavior.
 #[must_use]
 pub fn settings_category_for(id: &str, legacy_page: &str) -> SettingsCategory {
     match id {

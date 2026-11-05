@@ -2,7 +2,7 @@
 use super::AppState;
 use bootty_config::config::RemoteConfig;
 use bootty_control::{CommandOutcome, CommandWarning};
-use bootty_git::{CleanupReport, CleanupRequest, Retention, SessionCheckout};
+use bootty_git::{CleanupReport, CleanupRequest, SessionCheckout};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, PoisonError, mpsc},
@@ -199,7 +199,7 @@ impl AppState {
         for binding in self.workspace.all_bindings() {
             let remote = binding.multiplexer().remote.clone();
             let ready = binding.mux().has_session_snapshot();
-            let checkouts = binding_checkouts(binding, now);
+            let checkouts = binding_checkouts(binding);
             // Projects say what to run in their checkouts before they go.
             let teardown = self
                 .workspace
@@ -223,7 +223,6 @@ impl AppState {
                     remote,
                     request: CleanupRequest {
                         directory: directory.clone(),
-                        limit: 0,
                         sessions: checkouts.collect(),
                         now,
                         teardown: teardown.into_iter().collect(),
@@ -277,7 +276,6 @@ impl AppState {
 /// host-side record of Bootty's sessions if two apps with one identity share hosts.
 fn binding_checkouts(
     binding: &bootty_mux::workspace::BindingRuntime,
-    now: i64,
 ) -> impl Iterator<Item = SessionCheckout> {
     let saved = binding
         .sessions()
@@ -285,11 +283,7 @@ fn binding_checkouts(
         .iter()
         .map(|saved| SessionCheckout {
             cwd: saved.cwd.clone(),
-            retention: Retention::Active,
-            last_activity: saved.state.last_activity_at.unwrap_or_default(),
-            open: binding.session_attachment(&saved.identity).is_some(),
-        })
-        .collect::<Vec<_>>();
+        });
     let live = binding
         .mux()
         .all_sessions()
@@ -299,14 +293,8 @@ fn binding_checkouts(
                 .chain(session.windows.iter().flat_map(|window| &window.panes))
         })
         .filter_map(|pane| pane.cwd.clone())
-        .map(move |cwd| SessionCheckout {
-            cwd,
-            retention: Retention::Active,
-            last_activity: now,
-            open: true,
-        })
-        .collect::<Vec<_>>();
-    saved.into_iter().chain(live)
+        .map(move |cwd| SessionCheckout { cwd });
+    saved.chain(live)
 }
 
 fn clean_hosts(hosts: Vec<HostCleanup>, exclusive: &Mutex<()>) -> HostResults {

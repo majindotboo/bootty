@@ -1,7 +1,6 @@
 use super::model::{
-    AppearanceMode, CursorStyleConfig, ExtensionSettingValue, KeybindPreset,
-    MacosOptionAsAltConfig, MacosTitlebarStyle, OnLastWindowClosed, OpenBehavior, PanelTabStyle,
-    PanelTabs, RestoreOnStartup, SidebarPosition, SidebarSortOrder, SshProfileConfig,
+    AppearanceMode, CursorStyleConfig, KeybindPreset, MacosOptionAsAltConfig, MacosTitlebarStyle,
+    OnLastWindowClosed, OpenBehavior, RestoreOnStartup, SidebarSortOrder, SshProfileConfig,
     WhenClosingWithNoTabs, WindowDecoration, WindowFullscreen,
 };
 use crate::color::Color;
@@ -22,8 +21,6 @@ pub(super) struct RawConfig {
     pub(super) when_closing_with_no_tabs: Option<WhenClosingWithNoTabs>,
     #[serde(rename = "on_last_window_closed")]
     pub(super) on_last_window_closed: Option<OnLastWindowClosed>,
-    #[serde(rename = "auto_update")]
-    pub(super) _auto_update: Option<bool>,
     pub(super) theme: Option<String>,
     pub(super) colors: ColorPatch,
     pub(super) appearance: AppearancePatch,
@@ -34,7 +31,6 @@ pub(super) struct RawConfig {
     pub(super) sidebar: SidebarPatch,
     pub(super) multiplexer: MultiplexerPatch,
     pub(super) ssh_profiles: BTreeMap<String, SshProfileConfig>,
-    pub(super) extensions: BTreeMap<String, BTreeMap<String, ExtensionSettingValue>>,
     pub(super) input: InputPatch,
     pub(super) session: SessionPatch,
     pub(super) diagnostics: DiagnosticsPatch,
@@ -94,26 +90,13 @@ pub(super) struct TabPatch {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct ChromePatch {
     pub(super) left_dock_toggle: Option<bool>,
-    pub(super) panel_tab_style: Option<PanelTabStyle>,
-    pub(super) panel_tabs: Option<PanelTabs>,
     pub(super) tabs_use_session_color: Option<bool>,
     pub(super) tabs: Option<TabPatch>,
-    // Legacy input is normalized into the single shared tab appearance.
+    // Normalize tab appearance at the config boundary.
     pub(super) dock_tabs: Option<TabPatch>,
     pub(super) terminal_tabs: Option<TabPatch>,
     pub(super) sidebar: Option<bool>,
-    // The status bar has one layout now; its old layout keys still load and do nothing.
-    #[serde(rename = "top-bar", alias = "status-bar")]
-    pub(super) _top_bar: Option<bool>,
-    #[serde(rename = "bottom-bar")]
-    pub(super) _bottom_bar: Option<bool>,
-    #[serde(rename = "window-tabs")]
-    pub(super) _window_tabs: Option<bool>,
     pub(super) sidebar_width: Option<f32>,
-    #[serde(rename = "status-height")]
-    pub(super) _status_height: Option<f32>,
-    #[serde(rename = "status-background")]
-    pub(super) _status_background: Option<Color>,
     pub(super) gap: Option<f32>,
     pub(super) pane_divider_width: Option<f32>,
     pub(super) pane_divider_color: Option<Color>,
@@ -123,10 +106,6 @@ pub(super) struct ChromePatch {
     pub(super) pane_corner_radius: Option<f32>,
     pub(super) unfocused_sidebar_dim: Option<f32>,
     pub(super) unfocused_terminal_dim: Option<f32>,
-    #[serde(rename = "top-segment", alias = "status-segment")]
-    pub(super) _top_segment: Option<serde::de::IgnoredAny>,
-    #[serde(rename = "bottom-segment")]
-    pub(super) _bottom_segment: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -134,15 +113,10 @@ pub(super) struct ChromePatch {
 pub(super) struct SidebarPatch {
     pub(super) group_by_project: Option<bool>,
     pub(super) sort_order: Option<SidebarSortOrder>,
-    pub(super) position: Option<SidebarPosition>,
     pub(super) background: Option<Color>,
-    #[serde(rename = "fullscreen-background")]
-    pub(super) _fullscreen_background: Option<Color>,
     pub(super) foreground: Option<Color>,
     pub(super) selected: Option<Color>,
     pub(super) hover: Option<Color>,
-    #[serde(rename = "fullscreen-hover")]
-    pub(super) _fullscreen_hover: Option<Color>,
     pub(super) border: Option<Color>,
     pub(super) session_modules: Option<Vec<String>>,
     pub(super) modules: Option<Vec<String>>,
@@ -167,8 +141,7 @@ pub(super) struct InputPatch {
     pub(super) backend_keybind: Option<BackendKeybindPatch>,
 }
 
-/// `input.backend-keybind`: only the native table remains. The retired backends' tables are
-/// stripped with a warning before parsing.
+/// Native multiplexer keybindings.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(super) struct BackendKeybindPatch {

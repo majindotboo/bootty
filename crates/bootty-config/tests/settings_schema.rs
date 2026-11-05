@@ -1,7 +1,7 @@
 //! Every built-in setting spec must describe a key the loader actually reads.
 //!
-//! Paths used to be bare string literals at the call site with nothing checking them. These tests
-//! are what replaces that: a wrong path, a kebab/underscore typo, a fallback that drifted from
+//! Validate setting paths against the loader and editor schema.
+//! A wrong path, a kebab/underscore typo, a fallback that drifted from
 //! `defaults.rs`, or a choice token the parser rejects all fail here.
 use assert_fs::prelude::*;
 use bootty_config::config::{BoottyConfig, load_config_from_path};
@@ -264,117 +264,6 @@ fn builtin_schema_keeps_the_hand_written_declarations() {
     );
 }
 
-/// Files written for removed features keep loading: each retired key is dropped with a warning,
-/// and naming the native backend is not a retired choice.
-#[rstest::rstest]
-#[case::agents("[agents.codex]\nenabled = true\n", Some("agents"))]
-#[case::browser("[browser]\nsearch-engine = \"google\"\n", Some("browser"))]
-#[case::computer("[computer]\nenabled = true\n", Some("computer"))]
-#[case::tray("[tray]\nvisibility = \"always\"\n", Some("tray"))]
-#[case::panels("[panels.files]\ndock = \"right\"\n", Some("panels"))]
-#[case::right_dock(
-    "[chrome]\nright-dock-toggle = false\n",
-    Some("chrome.right-dock-toggle")
-)]
-#[case::agent_notifications(
-    "[session]\nagent-notifications = \"always\"\n",
-    Some("session.agent-notifications")
-)]
-#[case::external_backend("[multiplexer]\nbackend = \"rmux\"\n", Some("multiplexer.backend"))]
-#[case::tmux_status(
-    "[multiplexer]\nhide-tmux-status = true\n",
-    Some("multiplexer.hide-tmux-status")
-)]
-#[case::backend_keybind(
-    "[input.backend-keybind]\ntmux = [\"ctrl+a=new_tab\"]\n",
-    Some("input.backend-keybind.tmux")
-)]
-#[case::working_animation(
-    "[sidebar]\nanimate-working = false\n",
-    Some("sidebar.animate-working")
-)]
-#[case::native_backend("[multiplexer]\nbackend = \"native\"\n", None)]
-fn retired_settings_load_with_a_warning(#[case] source: &str, #[case] retired: Option<&str>) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let file = directory.child("config.toml");
-    file.write_str(source).unwrap();
-    let config = load_config_from_path(file.path()).unwrap();
-    assert_eq!(
-        config.compatibility_warnings,
-        retired
-            .map(|path| format!("retired setting ignored: {path}"))
-            .into_iter()
-            .collect::<Vec<_>>()
-    );
-}
-
-/// A TOML binding to a removed action would reject the whole config; it is dropped with a
-/// warning and the other bindings keep working.
-#[rstest::rstest]
-#[case::keybind("keybind")]
-#[case::sidebar("sidebar-keybind")]
-fn retired_keybind_actions_load_with_a_warning(#[case] key: &str) {
-    let directory = assert_fs::TempDir::new().unwrap();
-    let file = directory.child("config.toml");
-    file.write_str(&format!(
-        "[input]\n{key} = [\"cmd+1=toggle_right_dock\", \"cmd+2=show_files:1\", \"cmd+3=new_tab\"]\n"
-    ))
-    .unwrap();
-    let config = load_config_from_path(file.path()).unwrap();
-    assert_eq!(
-        config.compatibility_warnings,
-        [
-            format!("retired keybind action ignored in input.{key}: toggle_right_dock"),
-            format!("retired keybind action ignored in input.{key}: show_files"),
-        ]
-    );
-    let entries = if key == "keybind" {
-        &config.input.keybind
-    } else {
-        &config.input.sidebar_keybind
-    };
-    assert!(
-        entries.iter().any(|entry| entry == "cmd+3=new_tab"),
-        "{entries:?}"
-    );
-    assert!(
-        !entries
-            .iter()
-            .any(|entry| entry.contains("toggle_right_dock") || entry.contains("show_files")),
-        "{entries:?}"
-    );
-}
-
-#[rstest::rstest]
-fn legacy_sidebar_configuration_remains_loadable_for_layout_migration() {
-    let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
-    file.write_str(
-        "[chrome]\nsidebar = false\nsidebar-width = 410\n[sidebar]\nposition = \"right\"\n",
-    )
-    .unwrap();
-    let config = load_config_from_path(file.path()).unwrap();
-    assert!(!config.chrome.sidebar);
-    assert!((config.chrome.sidebar_width - 410.0).abs() < f32::EPSILON);
-    assert_eq!(
-        config.sidebar.position,
-        bootty_config::config::SidebarPosition::Right
-    );
-    let schema = SettingsSchema::builtin();
-    for path in [
-        ["chrome", "sidebar"],
-        ["chrome", "sidebar-width"],
-        ["sidebar", "position"],
-    ] {
-        assert!(schema.allows_path(&path));
-        assert!(
-            !schema
-                .specs()
-                .iter()
-                .any(|spec| spec.id() == path.join("."))
-        );
-    }
-}
-
 #[rstest::rstest]
 #[case("tabs")]
 #[case("dock-tabs")]
@@ -397,15 +286,6 @@ fn partial_tab_settings_preserve_defaults(#[case] section: &str) {
         config.chrome.tabs.close_button,
         defaults.chrome.tabs.close_button
     );
-}
-
-#[rstest::rstest]
-#[case("chrome.panel-tab-style")]
-#[case("chrome.panel-tabs")]
-fn retired_placement_and_tab_preferences_do_not_offer_settings_controls(#[case] path: &str) {
-    let schema = SettingsSchema::builtin();
-    assert!(schema.allows_path(&path.split('.').collect::<Vec<_>>()));
-    assert!(schema.get(path).is_none());
 }
 
 #[rstest::rstest]
@@ -455,4 +335,19 @@ fn help_text_keeps_placeholders_in_code_spans() {
             spec.id()
         );
     }
+}
+
+#[rstest::rstest]
+#[case("[agents]\nenabled = true")]
+#[case("[extensions.greeter]\ngreeting = \"hello\"")]
+#[case("[chrome]\ntop-bar = true")]
+#[case("[multiplexer]\nbackend = \"tmux\"")]
+fn unknown_settings_are_rejected(#[case] source: &str) {
+    let file = assert_fs::NamedTempFile::new("config.toml").unwrap();
+    file.write_str(source).unwrap();
+    let error = load_config_from_path(file.path()).unwrap_err();
+    assert!(
+        error.to_string().contains("unsupported config setting"),
+        "{error}"
+    );
 }

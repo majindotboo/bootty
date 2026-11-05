@@ -20,33 +20,23 @@ pub enum Direction {
     Down,
 }
 
-// Only the read boundary knows the retired binary representation.
 #[derive(Deserialize)]
 enum SavedLayout {
     Pane(String),
     Split(SavedSplit),
 }
 #[derive(Deserialize)]
-#[serde(untagged)]
-enum SavedSplit {
-    Children {
-        direction: MuxPaneSplitDirection,
-        weights: Vec<f32>,
-        children: Vec<MuxPaneLayout>,
-    },
-    Binary {
-        direction: MuxPaneSplitDirection,
-        ratio_millis: u16,
-        first: Box<MuxPaneLayout>,
-        second: Box<MuxPaneLayout>,
-    },
+struct SavedSplit {
+    direction: MuxPaneSplitDirection,
+    weights: Vec<f32>,
+    children: Vec<MuxPaneLayout>,
 }
 
 impl<'de> Deserialize<'de> for MuxPaneLayout {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let layout = match SavedLayout::deserialize(deserializer)? {
             SavedLayout::Pane(id) => Self::Pane(id),
-            SavedLayout::Split(SavedSplit::Children {
+            SavedLayout::Split(SavedSplit {
                 direction,
                 weights,
                 children,
@@ -55,22 +45,6 @@ impl<'de> Deserialize<'de> for MuxPaneLayout {
                 weights,
                 children,
             },
-            SavedLayout::Split(SavedSplit::Binary {
-                direction,
-                ratio_millis,
-                first,
-                second,
-            }) => {
-                if !(1..=999).contains(&ratio_millis) {
-                    return Err(serde::de::Error::custom("invalid split ratio"));
-                }
-                let ratio = f32::from(ratio_millis) / 1000.;
-                Self::Split {
-                    direction,
-                    weights: vec![ratio, 1. - ratio],
-                    children: vec![*first, *second],
-                }
-            }
         };
         normalize(layout)
             .ok_or_else(|| serde::de::Error::custom("invalid split weights or children"))

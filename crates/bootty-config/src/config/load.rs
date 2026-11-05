@@ -363,9 +363,7 @@ impl ConfigGraphTraversal {
 }
 
 fn resolve_loaded_document(document: &mut DocumentMut, path: &Path) -> ConfigResult<BoottyConfig> {
-    let mut compatibility_warnings = take_ghostty_compatibility_warnings(document);
-    compatibility_warnings.extend(take_retired_settings(document));
-    compatibility_warnings.extend(take_retired_keybinds(document));
+    let compatibility_warnings = take_ghostty_compatibility_warnings(document);
     document.as_table_mut().remove("include");
     validate_setting_paths(document, path)?;
     let raw = parse_raw_config_document(document.clone(), path)?;
@@ -454,128 +452,6 @@ fn take_ghostty_compatibility_warnings(document: &mut DocumentMut) -> Vec<String
         })
         .collect()
 }
-/// Settings of features Bootty no longer has: native agents, the browser, computer use, the
-/// tray, the right dock and its panels, and the external multiplexers. Old files keep loading;
-/// each retired key found is dropped from the parsed document with a warning. The file on disk
-/// keeps it.
-const RETIRED_SETTINGS: &[&[&str]] = &[
-    &["session", "worktree-limit"],
-    &["sidebar", "settled-collapsed"],
-    &["sidebar", "auto-settle-after-days"],
-    &["agents"],
-    &["browser"],
-    &["computer"],
-    &["tray"],
-    &["panels"],
-    &["chrome", "right-dock-toggle"],
-    &["session", "agent-notifications"],
-    &["sidebar", "animate-working"],
-    &["multiplexer", "backend"],
-    &["multiplexer", "hide-tmux-status"],
-    &["multiplexer", "herdr-session"],
-    &["input", "backend-keybind", "herdr"],
-    &["input", "backend-keybind", "rmux"],
-    &["input", "backend-keybind", "tmux"],
-];
-
-fn take_retired_settings(document: &mut DocumentMut) -> Vec<String> {
-    RETIRED_SETTINGS
-        .iter()
-        .filter_map(|path| {
-            let removed = remove_document_path(document.as_table_mut(), path)?;
-            // Native is the only backend, so naming it is not a retired choice.
-            let names_native =
-                *path == ["multiplexer", "backend"] && removed.as_str() == Some("native");
-            (!names_native).then(|| format!("retired setting ignored: {}", path.join(".")))
-        })
-        .collect()
-}
-
-/// Keybind actions of the removed agent UI and right dock. A TOML binding to one would reject the
-/// whole config, so each is dropped with a warning instead; `keymap.json` reports them as
-/// binding diagnostics.
-const RETIRED_KEYBIND_ACTIONS: &[&str] = &[
-    "archive_session",
-    "delete_session",
-    "restore_session",
-    "unarchive_session",
-    "session.archive",
-    "session.unarchive",
-    "session.delete",
-    "session.restore",
-    "settle_session",
-    "toggle_pane_zoom",
-    "add_selection_to_conversation",
-    "agent_history",
-    "agents.native.open",
-    "interrupt_agent",
-    "resume_claude_session",
-    "resume_codex_session",
-    "resume_pi_session",
-    "show_agents",
-    "show_changes",
-    "show_diff",
-    "show_files",
-    "show_subagents",
-    "toggle_agents_panel",
-    "toggle_changes_panel",
-    "toggle_diff_panel",
-    "toggle_files_panel",
-    "toggle_panel_full_view",
-    "toggle_right_dock",
-];
-
-const KEYBIND_PATHS: &[&[&str]] = &[
-    &["input", "keybind"],
-    &["input", "sidebar-keybind"],
-    &["input", "backend-keybind", "native"],
-];
-
-fn take_retired_keybinds(document: &mut DocumentMut) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for path in KEYBIND_PATHS {
-        let Some(entries) = document_array_mut(document.as_table_mut(), path) else {
-            continue;
-        };
-        entries.retain(|entry| {
-            let retired = entry
-                .as_str()
-                .and_then(super::split_keybind_entry)
-                .map(|(_, action)| action.split_once(':').map_or(action, |(name, _)| name))
-                .filter(|action| RETIRED_KEYBIND_ACTIONS.contains(action));
-            if let Some(action) = retired {
-                warnings.push(format!(
-                    "retired keybind action ignored in {}: {action}",
-                    path.join(".")
-                ));
-            }
-            retired.is_none()
-        });
-    }
-    warnings
-}
-
-fn document_array_mut<'a>(
-    table: &'a mut dyn TableLike,
-    path: &[&str],
-) -> Option<&'a mut toml_edit::Array> {
-    let (leaf, parents) = path.split_last()?;
-    let mut table = table;
-    for key in parents {
-        table = table.get_mut(key)?.as_table_like_mut()?;
-    }
-    table.get_mut(leaf)?.as_array_mut()
-}
-
-fn remove_document_path(table: &mut dyn TableLike, path: &[&str]) -> Option<Item> {
-    let (leaf, parents) = path.split_last()?;
-    let mut table = table;
-    for key in parents {
-        table = table.get_mut(key)?.as_table_like_mut()?;
-    }
-    table.remove(leaf)
-}
-
 fn parse_raw_config_document(document: DocumentMut, path: &Path) -> ConfigResult<RawConfig> {
     toml_edit::de::from_document(document).map_err(|error| {
         ConfigLoadError::new(format!(

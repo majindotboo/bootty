@@ -9,7 +9,7 @@ fn label_group(label: &str) -> &str {
 
 /// Durable state for a running session.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(default, deny_unknown_fields, from = "SavedSessionState")]
+#[serde(default)]
 pub struct SessionState {
     pub pinned: bool,
     /// Absolute UTC seconds of accepted input; absent for work with no recorded activity.
@@ -18,39 +18,6 @@ pub struct SessionState {
     pub projectless: bool,
     /// Native server process on which this session was last observed attached.
     pub server_generation: Option<u64>,
-}
-
-/// Saved presentation state, accepting retired fields from older versions.
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct SavedSessionState {
-    #[serde(rename = "lifecycle")]
-    _lifecycle: Option<serde::de::IgnoredAny>,
-    pinned: bool,
-    #[serde(rename = "archived")]
-    _archived: Option<serde::de::IgnoredAny>,
-    #[serde(rename = "deleted")]
-    _deleted: Option<serde::de::IgnoredAny>,
-    #[serde(rename = "hidden")]
-    _hidden: Option<serde::de::IgnoredAny>,
-    #[serde(rename = "snoozed_until")]
-    _snoozed_until: Option<serde::de::IgnoredAny>,
-    last_activity_at: Option<i64>,
-    #[serde(rename = "auto_settle_disabled")]
-    _auto_settle_disabled: Option<serde::de::IgnoredAny>,
-    projectless: bool,
-    server_generation: Option<u64>,
-}
-
-impl From<SavedSessionState> for SessionState {
-    fn from(saved: SavedSessionState) -> Self {
-        Self {
-            pinned: saved.pinned,
-            last_activity_at: saved.last_activity_at,
-            projectless: saved.projectless,
-            server_generation: saved.server_generation,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

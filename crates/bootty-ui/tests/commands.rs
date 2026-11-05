@@ -226,7 +226,7 @@ fn empty_terminal_form_starts_one_shell_only_after_explicit_start(
         let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
             panic!("new session form");
         };
-        assert_eq!(dialog.spec().text_label.as_deref(), Some("Terminal"));
+        assert_eq!(dialog.spec().text_label, None);
     }
     let deadline = Instant::now()
         .checked_add(Duration::from_secs(1))
@@ -242,7 +242,7 @@ fn empty_terminal_form_starts_one_shell_only_after_explicit_start(
             panic!("retained terminal form");
         };
         let spec = dialog.spec();
-        assert_eq!(spec.text_label.as_deref(), Some("Terminal"));
+        assert_eq!(spec.text_label, None);
         assert_eq!(spec.text.as_deref(), Some(""));
         if spec.rows[0].enabled {
             break spec;
@@ -1460,7 +1460,7 @@ fn named_theme_restore_preserves_accepted_theme_and_unrelated_settings(
         "{preview:?}"
     );
     let accepted_source = format!(
-        "[multiplexer]\nbackend='native'\n[font]\nsize=22\n[chrome]\nsidebar-width=333\n[appearance]\nmode='{mode}'\n[appearance.light.colors]\nbackground='#abcdef'\n[appearance.dark.colors]\nbackground='#fedcba'\n"
+        "[multiplexer]\n[font]\nsize=22\n[chrome]\nsidebar-width=333\n[appearance]\nmode='{mode}'\n[appearance.light.colors]\nbackground='#abcdef'\n[appearance.dark.colors]\nbackground='#fedcba'\n"
     );
     let path = directory.path().join("config.toml");
     fs::write(&path, &accepted_source).unwrap();
@@ -1820,8 +1820,6 @@ fn file_transfers_use_the_captured_binding_and_report_completion() {
 #[rstest]
 #[case("toggle_sessions_panel", true)]
 #[case("toggle_left_dock", true)]
-#[case("toggle_tab_bar", false)]
-#[case("toggle_hidden_tabs", false)]
 #[case("show_spaces", true)]
 #[case("show_sidebar", true)]
 fn dock_commands_share_palette_bindings_and_window_completion(
@@ -2920,8 +2918,9 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
     };
     let dialog_id = dialog.spec().id;
     state.apply_dialog_intent(
-        &bootty_gpui::DialogIntent::TextChanged {
+        &bootty_gpui::DialogIntent::FieldChanged {
             dialog: dialog_id.clone(),
+            field: "branch".into(),
             value: "Keep this draft".to_owned(),
         },
         &mut Vec::new(),
@@ -2953,7 +2952,7 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
         panic!("registration must preserve the draft");
     };
     assert_eq!(dialog.spec().id, dialog_id);
-    assert_eq!(dialog.draft().unwrap().command, "Keep this draft");
+    assert_eq!(dialog.draft().unwrap().branch, "Keep this draft");
     assert_eq!(dialog.spec().projects[0].path, "/work/empty");
     let result = submit_command(
         &mut state,
@@ -3154,4 +3153,24 @@ fn close_surface_on_creation_preserves_the_underlying_workspace(
         !has_session
     );
     assert_eq!(state.last_error(), None);
+}
+
+#[rstest]
+fn session_close_ends_session_when_checkpoint_storage_fails() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let mut state = metadata_state(directory.path());
+    let started = Instant::now();
+    open_native_session(&mut state, directory.path(), started);
+    let space = spaces_listing(&mut state).remove(0);
+    let connection = Connection::open(directory.path().join("session-order.sqlite3")).unwrap();
+    connection.execute_batch("CREATE TRIGGER reject_checkpoint BEFORE UPDATE OF terminal_snapshot ON workspace_sessions BEGIN SELECT RAISE(ABORT, 'injected checkpoint failure'); END;").unwrap();
+    let mut close = session_request(
+        "session.close",
+        Vec::new(),
+        space["sessions"][0]["target"].clone(),
+    );
+    close.confirmation = Some(close.confirmation());
+    let outcome = submit_command(&mut state, close, started);
+    assert_eq!(failure_kind(&outcome), "success", "{outcome:?}");
+    assert_eq!(state.mux().all_sessions(), []);
 }

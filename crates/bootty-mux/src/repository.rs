@@ -283,8 +283,6 @@ impl WorkspaceRepository {
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| self.database_error("begin terminal checkpoint", &error))?;
-        // Compare decoded values, not text: a checkpoint written with since-retired fields (such
-        // as a pane's `native_agent`) re-encodes differently but is the same prior state.
         let stored = tx
             .query_row(
                 "SELECT terminal_snapshot FROM workspace_sessions WHERE identity = ?1 AND space_id = ?2",
@@ -293,14 +291,8 @@ impl WorkspaceRepository {
             )
             .optional()
             .map_err(|error| self.database_error("read terminal checkpoint", &error))?;
-        let unchanged = stored.is_some_and(|stored| {
-            stored
-                .map(|text| {
-                    serde_json::from_str::<crate::session_snapshot::SavedTerminalSession>(&text)
-                })
-                .transpose()
-                .is_ok_and(|stored| stored.as_ref() == previous)
-        });
+        let previous = previous.map(encode).transpose()?;
+        let unchanged = stored.is_some_and(|stored| stored == previous);
         if !unchanged {
             return Err(WorkspacePersistenceError::operation(
                 "terminal checkpoint owner or prior state changed",
@@ -370,9 +362,8 @@ impl WorkspaceRepository {
         )?;
         tx.execute(
             "INSERT INTO workspace_spaces
-                (remote_id, name, icon, color, tint_sidebar, position,
-                 backend, remote)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                (remote_id, name, icon, color, tint_sidebar, position, remote)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 remote_id,
                 name,
@@ -380,7 +371,6 @@ impl WorkspaceRepository {
                 color_to_hex(color),
                 i64::from(tint_sidebar),
                 position,
-                "native",
                 remote,
             ],
         )?;
@@ -439,19 +429,17 @@ impl WorkspaceRepository {
             return Ok(false);
         };
         let color = color_to_hex(color);
-        let backend = "native";
         let remote = remote_to_storage(&mux.remote)?;
         let conn = open_db(&self.path)?;
         let updated = conn.execute(
             "UPDATE workspace_spaces
-             SET name = ?1, icon = ?2, color = ?3, tint_sidebar = ?4, backend = ?5, remote = ?6
-             WHERE id = ?7",
+             SET name = ?1, icon = ?2, color = ?3, tint_sidebar = ?4, remote = ?5
+             WHERE id = ?6",
             params![
                 name,
                 icon,
                 color,
                 i64::from(tint_sidebar),
-                backend,
                 remote,
                 scope.persistence_value()
             ],
@@ -806,22 +794,6 @@ impl WorkspaceRepository {
             if seed_projects {
                 tx.execute_batch("INSERT OR IGNORE INTO workspace_projects (space_id, cwd) SELECT space_id, cwd FROM workspace_sessions WHERE cwd != '';")?;
             }
-            if schema == WorkspaceSchemaKind::SavedIdentities {
-                tx.execute_batch(
-                    "ALTER TABLE workspace_sessions ADD COLUMN session_state TEXT NOT NULL DEFAULT '{}';",
-                )?;
-            }
-            if schema == WorkspaceSchemaKind::TaskLifecycle {
-                schema::migrate_task_lifecycle(&tx)?;
-            }
-            if matches!(
-                schema,
-                WorkspaceSchemaKind::SavedIdentities
-                    | WorkspaceSchemaKind::Lifecycle
-                    | WorkspaceSchemaKind::TaskLifecycle
-            ) {
-                tx.execute_batch("ALTER TABLE workspace_sessions ADD COLUMN terminal_snapshot TEXT; ALTER TABLE workspace_spaces ADD COLUMN selected_session_identity TEXT;")?;
-            }
             let space_count = tx.query_row("SELECT COUNT(*) FROM workspace_spaces", [], |row| {
                 row.get::<_, i64>(0)
             })?;
@@ -831,15 +803,7 @@ impl WorkspaceRepository {
                 }
                 create_default_binding(&tx)?;
             }
-            // Retired saved work must never become a live session again. Compact order in
-            // the same transaction before validating membership.
-            tx.execute_batch("DELETE FROM workspace_sessions WHERE json_extract(session_state, '$.archived') = 1 OR json_extract(session_state, '$.deleted') = 1 OR json_extract(session_state, '$.hidden') = 1;
-                UPDATE workspace_sessions SET position = -position - 1;
-                WITH ordered AS (SELECT identity, ROW_NUMBER() OVER (PARTITION BY space_id ORDER BY position DESC) - 1 AS ordinal FROM workspace_sessions)
-                UPDATE workspace_sessions SET position = (SELECT ordinal FROM ordered WHERE ordered.identity = workspace_sessions.identity);")?;
             let spaces = load_spaces(&tx)?;
-            // Limit: legacy backend journals remain in schema until its next revision; native
-            // sessions do not survive this process and cannot have partial external mutations.
             let space_ids = spaces
                 .iter()
                 .map(|space| space.id.persistence_value())
@@ -982,15 +946,14 @@ fn create_default_binding(tx: &Transaction<'_>) -> rusqlite::Result<WorkspaceBin
     let remote_id = new_remote_space_id(tx)?;
     tx.execute(
         "INSERT INTO workspace_spaces
-            (remote_id, name, icon, color, tint_sidebar, position, backend)
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+            (remote_id, name, icon, color, tint_sidebar, position)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0)",
         params![
             remote_id,
             DEFAULT_SPACE_NAME,
             DEFAULT_SPACE_ICON,
             color_to_hex(DEFAULT_SPACE_COLOR),
             i64::from(DEFAULT_TINT_SIDEBAR),
-            "native",
         ],
     )?;
     let space_id = tx.last_insert_rowid();

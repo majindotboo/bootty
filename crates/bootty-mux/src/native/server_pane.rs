@@ -9,7 +9,8 @@ use bootty_terminal::{
     geometry::TerminalGeometry,
     terminal_capture::{CaptureOptions, TerminalCapture},
     terminal_engine::TerminalEngine,
-    terminal_input_model::{KeyInput, KeyMods, TerminalKey},
+    terminal_input::TerminalInputCommand,
+    terminal_input_model::{KeyInput, KeyMods, MouseButton, MouseInput, TerminalKey},
     terminal_transport::{TerminalControl, TerminalSize, TerminalTransport},
 };
 use std::{
@@ -678,8 +679,7 @@ impl PaneWorker {
                 R::Ok
             }
             C::MouseWheel { input, delta } => {
-                self.engine
-                    .encode_mouse_wheel_to_vec(input, delta, &mut bytes)?;
+                mouse_wheel_input(input, delta).apply(&mut self.engine, &mut bytes)?;
                 R::Ok
             }
             C::ScrollDelta(delta) => {
@@ -903,5 +903,17 @@ impl PaneWorker {
         }
         self.size = size;
         Ok(())
+    }
+}
+
+fn mouse_wheel_input(input: MouseInput, delta: usize) -> TerminalInputCommand {
+    let delta = isize::try_from(delta).unwrap_or(isize::MAX);
+    let scroll_delta = match input.button {
+        Some(MouseButton::Four) => delta.saturating_neg(),
+        _ => delta,
+    };
+    TerminalInputCommand::MouseWheel {
+        input,
+        scroll_delta,
     }
 }

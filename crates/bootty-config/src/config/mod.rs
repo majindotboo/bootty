@@ -22,14 +22,13 @@ pub use load::{
 pub use model::{
     AppearanceBranchConfig, AppearanceConfig, AppearanceMode, AppearanceVariant,
     BackgroundMaterial, BellMode, BoottyConfig, ChromeConfig, ColorConfig, CursorConfig,
-    CursorStyleConfig, DiagnosticsConfig, ExtensionSettingValue, FontConfig, InputConfig,
-    KeybindPreset, MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerConfig,
-    MultiplexerConfigError, NotificationPolicy, OnLastWindowClosed, OpenBehavior, PanelTabStyle,
-    PanelTabs, ResolvedTheme, RestoreOnStartup, SessionConfig, SidebarConfig, SidebarPosition,
-    SidebarSortOrder, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
-    SshRemoteConfig, TabAppearance, TabCloseButton, TabClosePosition, TabConfig, TerminalScrollbar,
-    ThemeInfo, WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen,
-    config_token,
+    CursorStyleConfig, DiagnosticsConfig, FontConfig, InputConfig, KeybindPreset,
+    MacosOptionAsAltConfig, MacosTitlebarStyle, MultiplexerConfig, MultiplexerConfigError,
+    NotificationPolicy, OnLastWindowClosed, OpenBehavior, PanelTabStyle, PanelTabs, ResolvedTheme,
+    RestoreOnStartup, SessionConfig, SidebarConfig, SidebarPosition, SidebarSortOrder,
+    SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig, SshRemoteConfig,
+    TabAppearance, TabCloseButton, TabClosePosition, TabConfig, TerminalScrollbar, ThemeInfo,
+    WhenClosingWithNoTabs, WindowConfig, WindowDecoration, WindowFullscreen, config_token,
 };
 pub use resolve::{available_theme_names, resolve_theme};
 pub use theme_catalog::{

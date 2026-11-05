@@ -827,10 +827,13 @@ fn option_side_reaches_terminal_encoding(
         None,
         "#!/bin/sh\nprintf 'ready\\r\\n'\nwhile IFS= read -r line; do\n  printf '%s' \"$line\" | od -An -tx1\ndone\n",
     );
-    directory.child("config.toml").write_str(&format!(
-        "[input]\nmacos-option-as-alt = \"{option}\"\n[multiplexer]\nbackend = \"native\"\n[session]\nshell = {:?}\n",
-        state.config().session.shell.as_ref().unwrap(),
-    )).unwrap();
+    directory
+        .child("config.toml")
+        .write_str(&format!(
+            "[input]\nmacos-option-as-alt = \"{option}\"\n[multiplexer]\n[session]\nshell = {:?}\n",
+            state.config().session.shell.as_ref().unwrap(),
+        ))
+        .unwrap();
     assert!(state.reload_config(&mut Vec::new()));
     let pane = start_terminal_pane(&mut state);
     wait_for_pane_text(&mut state, &pane, "ready");
@@ -1074,7 +1077,7 @@ fn native_terminal_progress_updates_active_binding_presentation() {
 
     let config_file = directory.child("config.toml");
     config_file
-        .write_str("[multiplexer]\nbackend = \"native\"\n")
+        .write_str("[multiplexer]\n")
         .expect("write config");
     bootty_test_support::native_mux::local(config_file.path()).unwrap();
     let mut config = load_config_from_path(config_file.path()).expect("load config");

@@ -915,7 +915,6 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
         selected_project: None,
         busy: false,
         progress: Vec::new(),
-        multiline: false,
         text_hint: None,
         rows: vec![
             DialogRow {

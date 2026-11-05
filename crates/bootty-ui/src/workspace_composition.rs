@@ -172,7 +172,7 @@ pub fn pane_layout_matches(a: &MuxPaneLayout, b: &MuxPaneLayout) -> bool {
     }
 }
 
-/// Pane splits are never stored in native-panels.json. Legacy center saves are discarded.
+/// Persist only fixed panels in native-panels.json.
 #[must_use]
 pub fn fixed_panel_layout(mut layout: DockAreaState) -> DockAreaState {
     fn sessions(state: &PanelState) -> bool {

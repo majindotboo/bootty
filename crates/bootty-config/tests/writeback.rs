@@ -8,9 +8,9 @@ use std::{
 };
 
 use bootty_config::config::{
-    ExtensionSettingValue, SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig,
-    commit_config_document, load_config_document, load_config_from_path,
-    load_or_create_config_document, update_config_document,
+    SshAuthenticationConfig, SshHostKeyPolicyConfig, SshProfileConfig, commit_config_document,
+    load_config_document, load_config_from_path, load_or_create_config_document,
+    update_config_document,
 };
 use pretty_assertions::assert_eq;
 use rstest::rstest;
@@ -119,36 +119,6 @@ fn atomic_writeback_preserves_structure_and_unix_mode() {
             0o640
         );
     }
-}
-
-#[test]
-fn writeback_preserves_raw_extension_settings() {
-    let directory = assert_fs::TempDir::new().expect("temporary config directory");
-    let path = directory.path().join("config.toml");
-    fs::write(
-        &path,
-        "[extensions.greeter]\ngreeting = \"hello\"\nloud = true\nrepeats = 3\n\n[window]\ntitle = \"Before\"\n",
-    )
-    .expect("write initial config");
-
-    update_config_document(&path, |document| {
-        document.set_str(&["window", "title"], "After")
-    })
-    .expect("write known setting");
-
-    let written = fs::read_to_string(&path).expect("read replaced config");
-    assert!(written.contains("[extensions.greeter]"));
-    assert!(written.contains("greeting = \"hello\""));
-    assert!(written.contains("loud = true"));
-    assert!(written.contains("repeats = 3"));
-    assert_eq!(
-        load_config_from_path(&path)
-            .expect("reload config")
-            .extensions
-            .get("greeter")
-            .and_then(|values| values.get("greeting")),
-        Some(&ExtensionSettingValue::Text("hello".to_owned()))
-    );
 }
 
 #[test]

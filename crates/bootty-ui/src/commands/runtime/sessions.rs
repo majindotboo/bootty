@@ -102,7 +102,7 @@ impl AppState {
             return self.reject_command(failed("The terminal's session is no longer available"));
         };
         for command in &scripts {
-            let argv = crate::presentation::new_session_form::shell_argv(command, remote);
+            let argv = shell_argv(command, remote);
             let Ok(argv) = serde_json::to_string(&argv) else {
                 continue;
             };
@@ -258,29 +258,6 @@ impl AppState {
         })
     }
 
-    /// Whether the session runs on process-local panes, none of which ever started a process.
-    fn native_session_never_started(&mut self, scope: SpaceId, identity: &str) -> bool {
-        let native_panes = self
-            .workspace
-            .binding(scope)
-            .and_then(|binding| binding.session_attachment(identity))
-            .map(|session| {
-                session
-                    .windows
-                    .iter()
-                    .flat_map(|window| std::iter::once(&window.anchor).chain(&window.panes))
-                    .filter_map(|pane| pane.pane_id.clone())
-                    .collect::<Vec<_>>()
-            });
-        native_panes.is_some_and(|panes| {
-            !panes.iter().any(|pane| {
-                self.workspace
-                    .space_terminal_runtime(scope, pane)
-                    .is_some_and(|runtime| matches!(runtime.started(), Ok(true)))
-            })
-        })
-    }
-
     /// Create or close a session in the target's Space, leaving selection, focus and the active
     /// Space alone, or list the Spaces.
     pub(super) fn dispatch_session_command(
@@ -335,53 +312,10 @@ impl AppState {
             };
             return self.dispatch_project_command(action, scope, arguments, execution);
         }
-        if action == SessionAction::Close
-            && let Some(ExactMuxTarget::Session(scope, session)) = &exact_target
-            && let Some(identity) = self.workspace.session_identity(*scope, session)
-            && self.workspace.binding(*scope).is_some_and(|binding| {
-                binding.sessions().get(&identity).is_some()
-                    && binding
-                        .session_attachment(&identity)
-                        .is_some_and(|session| !session.windows.is_empty())
-            })
-        {
-            if self.native_session_never_started(*scope, &identity) {
-                // A failed or unstarted native process has no output state to checkpoint.
-                return self.dispatch_session_command_after_checkpoint(
-                    action,
-                    arguments,
-                    exact_target,
-                    execution,
-                );
-            }
-            let Some(target) =
-                self.mux_resource_target(*scope, ResourceKind::Session, session, None)
-            else {
-                return self.reject_command(CommandOutcome::StaleTarget {
-                    message: "The session was replaced before checkpoint capture".to_owned(),
-                });
-            };
-            if self.mux_command_pending(
-                *scope,
-                &MuxCommand::DitchSession {
-                    session_id: session.clone(),
-                },
-            ) {
-                return self.reject_command(CommandOutcome::Unavailable {
-                    message: "This session is already being closed".to_owned(),
-                });
-            }
-            let captured = self.checkpoint_session(*scope, &identity);
-            return CommandDispatch::Pending(PendingCommandResult::SessionCheckpointClose {
-                target,
-                identity,
-                captured,
-            });
-        }
-        self.dispatch_session_command_after_checkpoint(action, arguments, exact_target, execution)
+        self.dispatch_session_topology_command(action, arguments, exact_target, execution)
     }
 
-    fn dispatch_session_command_after_checkpoint(
+    fn dispatch_session_topology_command(
         &mut self,
         action: SessionAction,
         arguments: &[String],
@@ -438,7 +372,7 @@ impl AppState {
                 SessionAction::ClosePane,
                 Some(ExactMuxTarget::Pane(scope, session, window, pane)),
             ) => {
-                // Capture the whole task before its final backend pane disappears.
+                // Closing the final pane closes its session.
                 if self.is_last_session_pane(scope, &session, &pane) {
                     return self.dispatch_session_command(
                         SessionAction::Close,
@@ -581,61 +515,6 @@ impl AppState {
         }
         CommandDispatch::Complete(serialized_command_outcome(
             serde_json::json!({"terminals":terminals,"truncated":false}),
-        ))
-    }
-
-    pub(super) fn poll_session_checkpoint_close(
-        &mut self,
-        target: &bootty_control::CommandTarget,
-        identity: &str,
-        captured: &mut Option<crate::state::SessionCheckpointTicket>,
-        execution: (Instant, CommandCancellation),
-    ) -> Poll<CommandDispatch> {
-        let (scope, session) = match self.resolve_command_target(
-            "session.close",
-            Some(ResourceKind::Session),
-            Some(target),
-        ) {
-            Ok((_, Some(ExactMuxTarget::Session(scope, session)))) => (scope, session),
-            Ok(_) => {
-                return Poll::Ready(self.reject_command(CommandOutcome::StaleTarget {
-                    message: "The closing session is no longer available".to_owned(),
-                }));
-            }
-            Err(outcome) => return Poll::Ready(self.reject_command(outcome)),
-        };
-        if self.workspace.session_identity(scope, &session).as_deref() != Some(identity) {
-            return Poll::Ready(self.reject_command(CommandOutcome::StaleTarget {
-                message: "The closing session changed saved identity".to_owned(),
-            }));
-        }
-        self.poll_session_checkpoints();
-        if captured.is_none() {
-            *captured = self.checkpoint_session(scope, identity);
-            return Poll::Pending;
-        }
-        let Some(accepted) = captured
-            .as_ref()
-            .and_then(crate::state::SessionCheckpointTicket::accepted)
-        else {
-            return Poll::Pending;
-        };
-        if !accepted {
-            return Poll::Ready(
-                self.reject_command(CommandOutcome::Failed {
-                    code: "session_checkpoint_failed".to_owned(),
-                    message: captured.as_ref().and_then(crate::state::SessionCheckpointTicket::failure).map_or_else(
-                        || "The session remains open because its current state could not be saved".to_owned(),
-                        |reason| format!("The session remains open because its current state could not be saved: {reason}"),
-                    ),
-                }),
-            );
-        }
-        Poll::Ready(self.dispatch_session_command_after_checkpoint(
-            SessionAction::Close,
-            &[],
-            Some(ExactMuxTarget::Session(scope, session)),
-            Some(execution),
         ))
     }
 
@@ -1117,8 +996,7 @@ impl AppState {
             };
             // Startup failure removes only its exact fresh topology. Capturing a partially
             // started restore would replace the last complete saved session with incomplete state.
-            let closed =
-                self.dispatch_session_command_after_checkpoint(action, &[], Some(target), None);
+            let closed = self.dispatch_session_command(action, &[], Some(target), None);
             match closed {
                 CommandDispatch::Complete(CommandOutcome::Success { .. }) => {
                     "; the new terminal was closed".to_owned()
@@ -1436,5 +1314,20 @@ fn session_creation_checkpoint_failed(reason: Option<String>) -> CommandOutcome 
             || "The terminal was created, but its current session state could not be saved; it remains open".to_owned(),
             |reason| format!("The terminal was created, but its current session state could not be saved; it remains open: {reason}"),
         ),
+    }
+}
+
+/// The argv that runs a shell `command` on a host: PowerShell on this Windows computer, a login
+/// shell elsewhere.
+fn shell_argv(command: &str, remote: bool) -> Vec<String> {
+    if cfg!(windows) && !remote {
+        vec![
+            "powershell.exe".to_owned(),
+            "-NoProfile".to_owned(),
+            "-Command".to_owned(),
+            command.to_owned(),
+        ]
+    } else {
+        vec!["/bin/sh".to_owned(), "-lc".to_owned(), command.to_owned()]
     }
 }

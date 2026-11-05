@@ -14,8 +14,6 @@ use std::{
 pub const MAX_ARCHIVES: usize = 32;
 pub const MAX_TEXT: usize = 256 * 1024;
 const MAX_FILE: u64 = 512 * 1024;
-/// Unknown keys are ignored so archives saved with the retired `agent` resume metadata still
-/// load.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct OutputArchive {
     pub id: String,

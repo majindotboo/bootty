@@ -119,11 +119,6 @@ struct ResolvedCommandContext {
 }
 
 pub enum PendingCommandResult {
-    SessionCheckpointClose {
-        target: CommandTarget,
-        identity: String,
-        captured: Option<crate::state::SessionCheckpointTicket>,
-    },
     SessionCheckpointCompletion {
         target: CommandTarget,
         identity: String,
@@ -337,8 +332,7 @@ impl AppState {
             PendingCommandResult::SessionStart { starting, .. } => {
                 scopes.insert(starting.scope());
             }
-            PendingCommandResult::SessionCheckpointClose { target, .. }
-            | PendingCommandResult::SessionCheckpointCompletion { target, .. } => {
+            PendingCommandResult::SessionCheckpointCompletion { target, .. } => {
                 if let Ok((_, Some(exact))) = self.resolve_command_target(
                     "session.close",
                     Some(ResourceKind::Session),
@@ -551,26 +545,6 @@ impl AppState {
         if let Some(outcome) = pending.cancellation_outcome(now) {
             return Poll::Ready(Some(self.cancel_pending(pending, outcome, effects)));
         }
-        if let PendingCommandResult::SessionCheckpointClose {
-            target,
-            identity,
-            captured,
-        } = &mut pending.result
-        {
-            let dispatch = ready!(self.poll_session_checkpoint_close(
-                target,
-                identity,
-                captured,
-                (pending.deadline, pending.cancellation.clone())
-            ));
-            match dispatch {
-                CommandDispatch::Complete(outcome) => return Poll::Ready(Some(outcome)),
-                CommandDispatch::Pending(result) => {
-                    pending.result = result;
-                    return self.poll_pending_app_command(pending, now, effects);
-                }
-            }
-        }
         if let PendingCommandResult::SessionStart {
             starting,
             name,
@@ -645,8 +619,7 @@ impl AppState {
         effects: &mut Vec<AppEffect>,
     ) -> Poll<Option<CommandOutcome>> {
         let outcome = match &mut pending.result {
-            PendingCommandResult::SessionCheckpointClose { .. }
-            | PendingCommandResult::SessionStart { .. }
+            PendingCommandResult::SessionStart { .. }
             | PendingCommandResult::SessionCheckpointCompletion { .. } => {
                 return self.poll_pending_app_command(pending, now, effects);
             }

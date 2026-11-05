@@ -164,7 +164,7 @@ fn selecting_a_missing_space_is_a_noop() {
 #[test]
 fn a_failed_app_write_keeps_the_error_visible() {
     let (_directory, config_file, mut state) =
-        state_from_config("[chrome]\nsidebar-width = 320\n\n[multiplexer]\nbackend = \"rmux\"\n");
+        state_from_config("[chrome]\nsidebar-width = 320\n\n[multiplexer]\n");
     std::fs::remove_file(config_file.path()).expect("remove config file");
     std::fs::create_dir(config_file.path()).expect("replace config with directory");
 

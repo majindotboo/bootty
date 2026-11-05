@@ -6,7 +6,7 @@ use super::{
 pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<Vec<WorkspaceSpace>> {
     let mut statement = tx.prepare(
         "SELECT id, remote_id, name, icon, color, tint_sidebar, position,
-                backend, unavailable,
+                unavailable,
                 selected_session_id, selected_window_id, remote, selected_session_identity
          FROM workspace_spaces
          ORDER BY position, id",
@@ -16,13 +16,13 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<Vec<Workspac
         if space_id <= 0 {
             return Err(rusqlite::Error::InvalidQuery);
         }
-        let remote = remote_from_storage(row.get::<_, Option<String>>(11)?.as_deref())?;
+        let remote = remote_from_storage(row.get::<_, Option<String>>(10)?.as_deref())?;
         let color = color_from_hex(&row.get::<_, String>(4)?)
             .ok_or_else(|| rusqlite::Error::InvalidQuery)?;
         let tint_sidebar = bool_from_storage(row.get::<_, i64>(5)?)?;
-        let unavailable = bool_from_storage(row.get::<_, i64>(8)?)?;
-        let session_id = row.get::<_, Option<String>>(9)?;
-        let window_id = row.get::<_, Option<String>>(10)?;
+        let unavailable = bool_from_storage(row.get::<_, i64>(7)?)?;
+        let session_id = row.get::<_, Option<String>>(8)?;
+        let window_id = row.get::<_, Option<String>>(9)?;
         if session_id.as_deref().is_some_and(str::is_empty)
             || (session_id.is_none() && window_id.is_some())
         {
@@ -44,7 +44,7 @@ pub(super) fn load_spaces(tx: &Transaction<'_>) -> rusqlite::Result<Vec<Workspac
                     session_id,
                     window_id,
                 }),
-                selected_session_identity: row.get(12)?,
+                selected_session_identity: row.get(11)?,
                 sessions: SessionMembership::default(),
             },
         })

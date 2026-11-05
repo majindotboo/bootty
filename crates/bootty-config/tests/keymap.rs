@@ -172,7 +172,7 @@ fn program_preserves_precedence_named_unbind_case_fold_and_consume() {
 fn effective_file_layers_disable_exact_context_defaults_and_keep_user_entries() {
     let keymap = KeymapFile::parse(
         r#"[
-            { "context": "Native", "use_builtin_defaults": false,
+            { "context": "Terminal", "use_builtin_defaults": false,
               "bindings": { "ctrl-j": "new_window" } }
         ]"#,
     )

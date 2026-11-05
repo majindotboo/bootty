@@ -117,11 +117,10 @@ impl AppState {
         self.commands
             .pending
             .iter()
-            .any(|pending| self.pending_mux_command_matches(&pending.result, scope, command))
+            .any(|pending| Self::pending_mux_command_matches(&pending.result, scope, command))
     }
 
     fn pending_mux_command_matches(
-        &self,
         pending: &PendingCommandResult,
         scope: SpaceId,
         command: &MuxCommand,
@@ -132,17 +131,9 @@ impl AppState {
                 command: pending_command,
                 ..
             } => *pending_scope == scope && pending_command.as_ref() == command,
-            PendingCommandResult::SessionCheckpointClose { target, .. } => {
-                let MuxCommand::DitchSession { session_id } = command else {
-                    return false;
-                };
-                self.mux_resource_target(scope, ResourceKind::Session, session_id, None)
-                    .as_ref()
-                    == Some(target)
-            }
             PendingCommandResult::SurfaceCreation {
                 command: pending, ..
-            } => self.pending_mux_command_matches(&pending.result, scope, command),
+            } => Self::pending_mux_command_matches(&pending.result, scope, command),
             // These states have no direct mux command to match.
             PendingCommandResult::SessionStart { .. }
             | PendingCommandResult::SessionCheckpointCompletion { .. }

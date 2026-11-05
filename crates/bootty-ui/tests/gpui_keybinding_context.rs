@@ -7,8 +7,6 @@ use rstest::rstest;
 #[rstest]
 #[case("Global", "Command", true)]
 #[case("Workspace", "Sidebar", true)]
-#[case("Terminal", "Native", true)]
-#[case("terminal", "rmux", true)]
 #[case("Terminal", "Terminal && backend == tmux", true)]
 #[case("Command", "Command && mode == picker", true)]
 #[case("rmux", "tmux", false)]

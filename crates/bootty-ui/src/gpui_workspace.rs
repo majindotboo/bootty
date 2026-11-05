@@ -954,7 +954,6 @@ impl GpuiWorkspace {
     fn ensure_tools(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tools_match_binding(cx) {
             let binding = &self.state.workspace.active.binding;
-            let scope = binding.scope();
             if !binding.mux().has_session_snapshot() {
                 return;
             }
@@ -981,14 +980,13 @@ impl GpuiWorkspace {
                 target,
                 host_identity,
             };
-            self.set_workspace_context(scope, context, window, cx);
+            self.set_workspace_context(context, window, cx);
         }
         cx.notify();
     }
 
     fn set_workspace_context(
         &mut self,
-        scope: bootty_mux::controller::SpaceId,
         context: crate::gpui_dock::DockContext,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1009,7 +1007,6 @@ impl GpuiWorkspace {
                     chrome: self.chrome_view.clone(),
                     sender,
                 },
-                scope,
                 crate::gpui_dock::DockStorage {
                     config_path: &path,
                     state_key: key,
@@ -2666,8 +2663,7 @@ impl GpuiWorkspace {
         if !dock_matches_binding {
             cx.defer_in(window, Self::ensure_tools);
         }
-        // Context changes retarget the existing dock; unmounting it briefly resizes
-        // the attached terminal through the legacy tools-overlay layout.
+        // Retarget the dock without briefly resizing the attached terminal.
         let docked_terminals = self.tools.is_some();
         let mut chrome_snapshot = chrome_frame::snapshot(
             &self.state,
@@ -2753,10 +2749,7 @@ impl GpuiWorkspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if window.has_active_dialog(cx)
-            && !action.invocation().command.starts_with("ui.command.")
-            && !action.invocation().command.starts_with("ui.composer.")
-        {
+        if window.has_active_dialog(cx) && !action.invocation().command.starts_with("ui.command.") {
             cx.stop_propagation();
             return;
         }

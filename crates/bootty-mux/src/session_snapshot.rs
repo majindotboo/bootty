@@ -30,8 +30,6 @@ pub struct SavedTerminalWindow {
     pub panes: Vec<SavedTerminalPane>,
 }
 
-/// Unknown keys are ignored so panes saved with retired metadata, such as the `native_agent`
-/// conversation identity, still load.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SavedTerminalPane {
     pub id: String,

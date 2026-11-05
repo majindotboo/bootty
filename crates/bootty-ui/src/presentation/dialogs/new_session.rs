@@ -880,13 +880,6 @@ impl NewSessionDialog {
     fn apply_form(&mut self, intent: &DialogIntent) -> Option<NewSessionPickerEvent> {
         match intent {
             DialogIntent::Dismiss { .. } => Some(NewSessionPickerEvent::Close),
-            DialogIntent::TextChanged { value, .. } => {
-                let form = self.form.as_mut()?;
-                if &form.draft.command != value {
-                    form.change_text(value);
-                }
-                None
-            }
             DialogIntent::FieldChanged { field, value, .. } => self.change_form_field(field, value),
             DialogIntent::Activate { action, .. }
                 if !self.worker_busy() && action.0 == "start-session" =>

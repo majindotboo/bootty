@@ -26,8 +26,6 @@ pub struct NewSessionDraft {
     pub scope: SpaceId,
     pub cwd: String,
     pub projectless: bool,
-    /// The shell command the terminal runs. Empty opens the host's shell.
-    pub command: String,
     pub isolated: bool,
     pub isolation_preference: bool,
     pub branch: String,
@@ -337,11 +335,6 @@ impl NewSessionForm {
         false
     }
 
-    pub fn change_text(&mut self, value: &str) {
-        value.clone_into(&mut self.draft.command);
-        self.error = None;
-    }
-
     /// The new worktree's branch and folder. Empty fields fall back to a name from the draft's
     /// unique suffix, so a worktree never needs typed names.
     fn worktree_names(&self) -> (String, String) {
@@ -387,17 +380,12 @@ impl NewSessionForm {
         if cwd.trim().is_empty() {
             return Err("Choose a project directory".to_owned());
         }
-        let argv = if self.draft.command.trim().is_empty() {
-            Vec::new()
-        } else {
-            shell_argv(&self.draft.command, destination.remote.is_some())
-        };
         let mut invocation = CommandInvocation::new(
             "session.create",
             vec![
                 format!("task-{}", self.draft.suffix),
                 cwd.to_owned(),
-                serde_json::to_string(&argv).map_err(|error| error.to_string())?,
+                "[]".to_owned(),
                 self.draft.identity.clone(),
                 self.title(),
                 self.draft.projectless.to_string(),
@@ -410,21 +398,7 @@ impl NewSessionForm {
 
     #[must_use]
     pub fn title(&self) -> String {
-        let title = self
-            .draft
-            .command
-            .lines()
-            .map(|line| {
-                line.split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .chars()
-                    .filter(|character| !character.is_control())
-                    .collect::<String>()
-            })
-            .find(|line| !line.is_empty())
-            .unwrap_or_else(|| format!("Terminal in {}", directory_name(&self.draft.cwd)));
-        bounded_title(&title)
+        bounded_title(&format!("Terminal in {}", directory_name(&self.draft.cwd)))
     }
 
     fn branch_prefix(&self) -> &str {
@@ -455,8 +429,8 @@ impl NewSessionForm {
         let mut spec = DialogSpec::prompt(
             NEW_SESSION_ID,
             "New session",
-            &self.draft.command,
-            "Leave empty to open a shell",
+            "",
+            "",
             DialogAction::new("start-session"),
         );
         spec.branches.clone_from(&self.branches);
@@ -466,16 +440,7 @@ impl NewSessionForm {
         } else {
             self.project_path().to_owned()
         });
-        spec.multiline = true;
         spec.hint = self.worktree_hint();
-        spec.text_label = Some(
-            if self.draft.command.trim().is_empty() {
-                "Terminal"
-            } else {
-                "Command"
-            }
-            .to_owned(),
-        );
         spec.busy = busy;
         if let Some(destination) = self.destination() {
             spec.fields.push(choice(
@@ -663,20 +628,4 @@ fn directory_name(path: &str) -> &str {
         .next()
         .filter(|name| !name.is_empty())
         .unwrap_or("project")
-}
-
-/// The argv that runs a shell `command` on a host: PowerShell on this Windows computer, a login
-/// shell elsewhere.
-#[must_use]
-pub fn shell_argv(command: &str, remote: bool) -> Vec<String> {
-    if cfg!(windows) && !remote {
-        vec![
-            "powershell.exe".to_owned(),
-            "-NoProfile".to_owned(),
-            "-Command".to_owned(),
-            command.to_owned(),
-        ]
-    } else {
-        vec!["/bin/sh".to_owned(), "-lc".to_owned(), command.to_owned()]
-    }
 }
