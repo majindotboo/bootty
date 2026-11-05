@@ -444,8 +444,15 @@ impl AppState {
             worktree_cleanup: worktree_cleanup::WorktreeCleanup::default(),
             workspace,
             repaint_scheduler: RepaintScheduler::default(),
-            last_error: keymap_diagnostic
-                .map(|error| ErrorNotice::failed("Some key bindings could not be used", error)),
+            last_error: config
+                .load_error
+                .as_ref()
+                .map(|error| ErrorNotice::failed("Could not load settings", error))
+                .or_else(|| {
+                    keymap_diagnostic.map(|error| {
+                        ErrorNotice::failed("Some key bindings could not be used", error)
+                    })
+                }),
             undo_offer: None,
             last_drain: DrainStats::default(),
             recovery: recovery::RecoveryState::new(&window_state_key, repaint.clone())?,

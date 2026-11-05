@@ -225,3 +225,47 @@ proptest! {
         assert_eq!(config.font.features, expected);
     }
 }
+
+#[rstest]
+#[case::unknown("[computer]\nenabled = true\n")]
+#[case::malformed("[window\n")]
+#[case::invalid_value("[window]\nwidth = 'invalid'\n")]
+#[case::missing_include("include = ['missing.toml']\n")]
+fn gui_startup_recovers_from_invalid_config(config_dir: TempDir, #[case] source: &str) {
+    let file = config_dir.child("config.toml");
+    file.write_str(source).unwrap();
+    let cli = Cli::try_parse_from([
+        OsString::from("bootty"),
+        OsString::from("app"),
+        OsString::from("--config"),
+        file.path().into(),
+    ])
+    .unwrap();
+    let error = cli
+        .load_config()
+        .expect_err("strict loading must reject invalid config");
+    let config = cli
+        .load_gui_config()
+        .expect("GUI uses defaults for invalid config");
+    assert_eq!(
+        config,
+        BoottyConfig {
+            config_path: file.path().to_path_buf(),
+            load_error: Some(error.to_string()),
+            ..BoottyConfig::default()
+        }
+    );
+    bootty_test_support::native_mux::local(file.path()).unwrap();
+    let mut state =
+        bootty_ui::AppState::new(config, std::sync::Arc::new(|| {}), None, None).unwrap();
+    let notice = state
+        .last_error_notice()
+        .expect("load failure must be visible");
+    assert_eq!(notice.to_string(), "Could not load settings.");
+    assert_eq!(notice.details(), Some(error.to_string().trim()));
+    assert_eq!(std::fs::read_to_string(file.path()).unwrap(), source);
+    file.write_str("[font]\nsize = 19\n").unwrap();
+    assert!(state.reload_config(&mut Vec::new()));
+    assert_eq!(state.config().font.size.to_bits(), 19.0_f32.to_bits());
+    assert!(state.last_error_notice().is_none());
+}

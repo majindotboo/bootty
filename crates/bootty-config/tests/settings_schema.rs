@@ -239,12 +239,13 @@ fn an_unregistered_toml_leaf_fails_at_the_schema_boundary() {
         .expect("write config");
 
     let error = load_config_from_path(config_path.path()).expect_err("unknown setting must fail");
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported config setting window.setting-that-has-no-editor")
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "unknown config setting window.setting-that-has-no-editor in {}",
+            config_path.path().display()
+        )
     );
-    assert!(error.to_string().contains("declare it in SettingsSchema"));
 }
 
 #[test]
@@ -347,7 +348,7 @@ fn unknown_settings_are_rejected(#[case] source: &str) {
     file.write_str(source).unwrap();
     let error = load_config_from_path(file.path()).unwrap_err();
     assert!(
-        error.to_string().contains("unsupported config setting"),
+        error.to_string().contains("unknown config setting"),
         "{error}"
     );
 }

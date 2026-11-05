@@ -114,7 +114,7 @@ fn launch_app(cli: &Cli) -> Result<ExitCode> {
     if open_running_instance(cli)? {
         return Ok(ExitCode::SUCCESS);
     }
-    let config = cli.load_config()?;
+    let config = cli.load_gui_config()?;
     let window_state_key = cli.window_state_key().to_owned();
 
     bootty_ui::native_host::run(config, window_state_key).map(|()| ExitCode::SUCCESS)
@@ -124,7 +124,7 @@ fn open_running_instance(cli: &Cli) -> Result<bool> {
     if control::running_instance()?.is_none() {
         return Ok(false);
     }
-    let config = cli.load_config()?;
+    let config = cli.load_gui_config()?;
     if config.cli_default_open_behavior.opens_new_window() {
         cli_runtime::invoke_control_command(
             cli,

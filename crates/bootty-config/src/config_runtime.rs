@@ -59,9 +59,15 @@ pub struct ConfigRuntime {
 impl ConfigRuntime {
     ///
     /// # Errors
-    /// Returns an error if the editable config document cannot be read or parsed.
+    /// Returns an error if the editable document cannot be read or parsed, unless the config
+    /// already carries a startup load failure for the window to display.
     pub fn new(config: BoottyConfig) -> ConfigResult<Self> {
-        let document = load_or_create_config_document(&config.config_path)?;
+        let document = match load_or_create_config_document(&config.config_path) {
+            Ok(document) => document,
+            // An empty draft cannot overwrite an existing invalid file: writeback checks its source.
+            Err(_) if config.load_error.is_some() => ConfigDocument::default(),
+            Err(error) => return Err(error),
+        };
         let hot_reload = ConfigHotReload::new(&config.config_path);
         Ok(Self {
             configured_font_size: config.font.size,

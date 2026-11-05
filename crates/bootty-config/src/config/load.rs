@@ -69,7 +69,7 @@ impl ConfigFileStamp {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ConfigDocument {
     pub(super) document: DocumentMut,
     // Keep the exact loaded bytes, including comments, shared by editable draft clones.
@@ -401,7 +401,7 @@ fn validate_table<'a>(
             validate_table(child, prefix, schema, file)?;
         } else {
             return Err(ConfigLoadError::new(format!(
-                "unsupported config setting {} in {}: declare it in SettingsSchema before adding it",
+                "unknown config setting {} in {}",
                 prefix.join("."),
                 file.display()
             )));

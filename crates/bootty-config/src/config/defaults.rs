@@ -233,6 +233,7 @@ impl Default for BoottyConfig {
                 macos_titlebar_style: MacosTitlebarStyle::default(),
             },
             config_path: default_config_path(),
+            load_error: None,
             compatibility_warnings: Vec::new(),
         }
     }

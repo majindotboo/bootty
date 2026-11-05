@@ -99,6 +99,8 @@ pub struct BoottyConfig {
     pub diagnostics: DiagnosticsConfig,
     pub window: WindowConfig,
     pub config_path: PathBuf,
+    /// Startup load failure retained for the window notice; never persisted.
+    pub load_error: Option<String>,
     pub compatibility_warnings: Vec<String>,
 }
 

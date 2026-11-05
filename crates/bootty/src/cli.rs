@@ -179,6 +179,25 @@ impl Cli {
         self.app_args().load_config()
     }
 
+    /// Load GUI settings, retaining a file error for display while starting with defaults.
+    ///
+    /// # Errors
+    /// Returns an error if the isolated defaults directory cannot be created or overrides are invalid.
+    pub fn load_gui_config(&self) -> Result<BoottyConfig> {
+        let args = self.app_args();
+        let path = args.selected_config_path();
+        if args.defaults {
+            create_parent_dir_for_defaults(&path)?;
+        }
+        let mut config = load_config_from_path(&path).unwrap_or_else(|error| BoottyConfig {
+            config_path: path,
+            load_error: Some(error.to_string()),
+            ..BoottyConfig::default()
+        });
+        args.overrides.apply(&mut config)?;
+        Ok(config)
+    }
+
     #[must_use]
     pub fn window_state_key(&self) -> &str {
         match self.command.as_ref() {
