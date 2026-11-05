@@ -190,6 +190,94 @@ fn checkpoint_reload_and_lifecycle_write_preserve_committed_history(
     assert_eq!(current.display_name, saved.display_name);
 }
 
+enum CheckpointCorruption {
+    OldLayout,
+    MalformedJson,
+    WrongIdentity,
+    InvalidSnapshot,
+}
+
+#[rstest]
+#[case::old_layout(CheckpointCorruption::OldLayout)]
+#[case::malformed_json(CheckpointCorruption::MalformedJson)]
+#[case::wrong_identity(CheckpointCorruption::WrongIdentity)]
+#[case::invalid_snapshot(CheckpointCorruption::InvalidSnapshot)]
+fn unreadable_checkpoint_is_cleared_without_losing_membership(
+    checkpoint: SavedTerminalSession,
+    #[case] corruption: CheckpointCorruption,
+) {
+    let directory = TempDir::new().expect("create isolated workspace");
+    let config = directory.path().join("config.toml");
+    let (mut repository, snapshot) = WorkspaceRepository::open(&config).unwrap();
+    let scope = snapshot.spaces().first().unwrap().id();
+    let mut saved = WorkspaceSession {
+        identity: checkpoint.session_id.clone(),
+        backend_name: checkpoint.backend_id.clone(),
+        display_name: "Purpose".into(),
+        explicit: true,
+        cwd: "/tmp".into(),
+        state: SessionState::default(),
+        terminal_snapshot: Some(Arc::new(checkpoint.clone())),
+    };
+    repository
+        .commit_binding_state(
+            scope,
+            &SessionMembership::from_sessions(vec![saved.clone()]),
+        )
+        .unwrap();
+    let mut encoded = serde_json::to_value(&checkpoint).unwrap();
+    let corrupted = match corruption {
+        CheckpointCorruption::OldLayout => {
+            encoded["windows"][0]["layout"] = serde_json::json!({
+                "Split": {
+                    "direction": "Down", "ratio_millis": 522,
+                    "first": {"Pane": "pane"}, "second": {"Pane": "other-pane"}
+                }
+            });
+            encoded.to_string()
+        }
+        CheckpointCorruption::MalformedJson => "{unreadable".into(),
+        CheckpointCorruption::WrongIdentity => {
+            encoded["session_id"] = serde_json::json!("another-session");
+            encoded.to_string()
+        }
+        CheckpointCorruption::InvalidSnapshot => {
+            encoded["captured_at"] = serde_json::json!(-1);
+            encoded.to_string()
+        }
+    };
+    let database =
+        rusqlite::Connection::open(directory.path().join("session-order.sqlite3")).unwrap();
+    database
+        .execute(
+            "UPDATE workspace_sessions SET terminal_snapshot = ?1 WHERE identity = ?2",
+            rusqlite::params![corrupted, saved.identity],
+        )
+        .unwrap();
+
+    let (_, reloaded) = WorkspaceRepository::open(&config).expect("discard unreadable checkpoint");
+    saved.terminal_snapshot = None;
+    assert_eq!(
+        reloaded
+            .spaces()
+            .first()
+            .unwrap()
+            .binding()
+            .sessions()
+            .sessions(),
+        &[saved]
+    );
+    let stored: Option<String> = database
+        .query_row(
+            "SELECT terminal_snapshot FROM workspace_sessions WHERE identity = ?1",
+            [&checkpoint.session_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    // Checkpoint commits are crate-private; NULL is their required prior state after recovery.
+    assert_eq!(stored, None);
+}
+
 proptest! {
     #[test]
     fn checkpoint_plain_history_rejects_every_terminal_control(control in prop_oneof![0u8..9,11u8..13,14u8..32,Just(127u8)]) {
