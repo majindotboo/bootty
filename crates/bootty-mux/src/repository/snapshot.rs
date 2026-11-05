@@ -82,21 +82,28 @@ fn load_session_membership(
                 display_name: row.get(3)?,
                 explicit: bool_from_storage(row.get::<_, i64>(4)?)?,
                 cwd: row.get(5)?,
-                terminal_snapshot: row
-                    .get::<_, Option<String>>(8)?
-                    .map(|text| serde_json::from_str(&text).map(std::sync::Arc::new))
-                    .transpose()
-                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
+                terminal_snapshot: None,
                 state: serde_json::from_str(&row.get::<_, String>(7)?)
                     .map_err(|_| rusqlite::Error::InvalidQuery)?,
             },
+            row.get::<_, Option<String>>(8)?,
         ))
     })? {
-        let (space_id, position, session) = row?;
-        if session.terminal_snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.validate().is_err() || snapshot.session_id != session.identity
-        }) {
-            return Err(rusqlite::Error::InvalidQuery);
+        let (space_id, position, mut session, stored_snapshot) = row?;
+        session.terminal_snapshot = stored_snapshot.as_deref().and_then(|text| {
+            serde_json::from_str::<crate::session_snapshot::SavedTerminalSession>(text)
+                .ok()
+                .filter(|snapshot| {
+                    snapshot.validate().is_ok() && snapshot.session_id == session.identity
+                })
+                .map(std::sync::Arc::new)
+        });
+        if stored_snapshot.is_some() && session.terminal_snapshot.is_none() {
+            // Presentation can be discarded, but storage must match the next checkpoint's prior state.
+            tx.execute(
+                "UPDATE workspace_sessions SET terminal_snapshot = NULL WHERE identity = ?1",
+                [&session.identity],
+            )?;
         }
         if session.identity.is_empty()
             || session.backend_name.is_empty()
