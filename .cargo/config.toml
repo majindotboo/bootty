@@ -1,7 +1,4 @@
 [env]
-# Mise sets RUSTC_WRAPPER=kache; this points Kache at the repository policy.
-KACHE_CONFIG = { value = ".kache.toml", relative = true, force = false }
-
 # Use Ghostty's minimal release panic path: Zig's Windows ARM64 debug-stack
 # reader fails to compile in ReleaseSafe.
 LIBGHOSTTY_VT_SYS_OPTIMIZE = "ReleaseFast"
