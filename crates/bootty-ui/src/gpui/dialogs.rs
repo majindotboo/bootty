@@ -1164,13 +1164,17 @@ impl DialogView {
     ) -> gpui_kit::AnyElement {
         let submit = spec.rows.iter().find(|row| row.id.0 == "submit");
         let error = submit.and_then(|row| row.detail.clone());
+        // The current checkout's branch is one more choice; worktree names need their own row.
+        let branch = spec
+            .fields
+            .iter()
+            .find(|field| field.id == "checkout-branch")
+            .and_then(|field| self.render_worktree_ref_picker(spec, field))
+            .map(|control| div().w(rems(12.0)).child(control));
         let details = spec
             .fields
             .iter()
-            .filter(|field| {
-                matches!(field.kind, DialogFieldKind::Text)
-                    || matches!(field.id.as_str(), "start-ref" | "checkout-branch")
-            })
+            .filter(|field| matches!(field.kind, DialogFieldKind::Text) || field.id == "start-ref")
             .filter_map(|field| self.prompt_field(spec, field, window, cx))
             .map(|control| div().flex_1().min_w(rems(8.0)).child(control))
             .collect::<Vec<_>>();
@@ -1178,31 +1182,32 @@ impl DialogView {
             .id("dialog-prompt-panel")
             .debug_selector(|| "dialog-prompt-panel".to_owned())
             .w_full()
-            .gap_3()
+            .gap_4()
             .child(
                 h_flex()
                     .w_full()
                     .min_w_0()
+                    .items_center()
                     .gap_2()
-                    .child(div().text_xl().child(spec.title.clone()))
+                    .child(div().text_lg().child(spec.title.clone()))
                     .when_some(
                         spec.rows.iter().find(|row| row.id.0 == "choose-project"),
-                        |row, project| {
-                            row.child(self.render_new_project_picker(spec, project, window, cx))
-                        },
+                        |row, project| row.child(self.render_new_project_picker(spec, project)),
                     ),
             )
             .child(
                 h_flex()
                     .id("dialog-prompt-fields")
                     .w_full()
-                    .gap_1()
+                    .items_center()
+                    .gap_2()
                     .flex_wrap()
                     .children(
                         spec.fields
                             .iter()
                             .filter_map(|field| Self::new_session_choice(spec, field, cx)),
-                    ),
+                    )
+                    .children(branch),
             )
             .when(!details.is_empty(), |this| {
                 this.child(
@@ -1214,20 +1219,6 @@ impl DialogView {
                         .children(details),
                 )
             })
-            .when_some(
-                spec.footer.clone().filter(|path| !path.is_empty()),
-                |this, path| {
-                    this.child(
-                        div()
-                            .id("dialog-session-directory")
-                            .debug_selector(|| "dialog-session-directory".into())
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .text_ellipsis()
-                            .child(path),
-                    )
-                },
-            )
             .child(Self::new_session_footer(spec, submit, error, cx))
             .into_any_element()
     }
@@ -1239,6 +1230,7 @@ impl DialogView {
         cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let creating = !spec.progress.is_empty();
+        let dialog = spec.id.clone();
         v_flex()
             .w_full()
             .gap_2()
@@ -1262,11 +1254,35 @@ impl DialogView {
                         .child(hint),
                 )
             })
-            .when(!creating, |view| {
-                view.child(
-                    h_flex()
-                        .w_full()
-                        .justify_end()
+            .child(
+                h_flex()
+                    .w_full()
+                    .min_w_0()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id("dialog-session-directory")
+                            .debug_selector(|| "dialog-session-directory".into())
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .text_ellipsis()
+                            .children(spec.footer.clone().filter(|path| !path.is_empty())),
+                    )
+                    .when(!creating, |row| {
+                        row.child(
+                            Button::new("dialog-prompt-cancel")
+                                .ghost()
+                                .label("Cancel")
+                                .disabled(spec.busy)
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(DialogIntent::Dismiss {
+                                        dialog: dialog.clone(),
+                                    });
+                                })),
+                        )
                         .when_some(submit, |row, submit| {
                             row.child(Self::new_session_start(
                                 spec,
@@ -1274,9 +1290,9 @@ impl DialogView {
                                 "dialog-prompt-submit",
                                 cx,
                             ))
-                        }),
-                )
-            })
+                        })
+                    }),
+            )
             .into_any_element()
     }
 
@@ -1320,7 +1336,7 @@ impl DialogView {
                 "dialog-field-choice-{}",
                 field.id
             )))
-            .ghost()
+            .outline()
             .small()
             .min_w_0()
             .max_w(rems(16.0))

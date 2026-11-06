@@ -282,7 +282,7 @@ impl DialogView {
                 })
                 .menu_width(rems(24.))
                 .menu_max_h(rems(18.))
-                .when(checkout, |select| select.small().appearance(false))
+                .when(checkout, gpui_kit::component::Sizable::small)
                 .disabled(spec.busy),
         );
         if checkout {

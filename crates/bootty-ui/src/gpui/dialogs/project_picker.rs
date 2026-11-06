@@ -138,8 +138,6 @@ impl DialogView {
         &self,
         spec: &DialogSpec,
         choice: &DialogRow,
-        _window: &mut Window,
-        cx: &Context<Self>,
     ) -> gpui_kit::AnyElement {
         let Some(picker) = &self.project_picker else {
             return div().child(choice.label.clone()).into_any_element();
@@ -151,12 +149,9 @@ impl DialogView {
             .debug_selector(move || debug_selector)
             .flex()
             .flex_none()
-            .self_center()
-            .rounded(cx.theme().radius)
-            .hover(|style| style.bg(cx.theme().list_hover))
             .child(
                 Select::new(&picker.state)
-                    .appearance(false)
+                    .small()
                     .placeholder(choice.label.trim_end_matches('…').to_owned())
                     .search_placeholder("Find project…")
                     .accessibility_label(format!("Project: {}", choice.label))
