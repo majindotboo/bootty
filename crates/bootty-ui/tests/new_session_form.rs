@@ -775,3 +775,31 @@ fn no_project_keeps_launch_directory_separate_from_assignment(mut form: NewSessi
     form.set_directory("/registered/project".into());
     assert!(!form.draft.projectless);
 }
+
+#[rstest]
+#[case::local(None, true)]
+#[case::remote(Some(bootty_config::config::SshRemoteConfig::for_host("devbox").into()), false)]
+fn footer_abbreviates_only_this_machines_home(
+    form: NewSessionForm,
+    #[case] remote: Option<bootty_config::config::RemoteConfig>,
+    #[case] abbreviated: bool,
+) {
+    let home = bootty_ui::strings::home_dir().expect("tests run with a home directory");
+    let cwd = home.join("dotfiles").display().to_string();
+    let mut destination = form.destination().unwrap().clone();
+    destination.remote = remote;
+    let form = NewSessionForm::new(
+        NewSessionDraft {
+            cwd: cwd.clone(),
+            ..form.draft
+        },
+        vec![destination],
+    );
+    let expected = if abbreviated {
+        "~/dotfiles".to_owned()
+    } else {
+        cwd
+    };
+    assert_eq!(form.spec(false).footer, Some(expected.clone()));
+    assert_eq!(form.display_cwd(), expected);
+}

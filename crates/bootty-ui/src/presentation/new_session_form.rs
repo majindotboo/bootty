@@ -463,7 +463,7 @@ impl NewSessionForm {
             })
             .collect();
         spec.fields.extend(self.worktree_fields());
-        spec.footer = Some(self.destination_path());
+        spec.footer = Some(self.display_path(&self.destination_path()));
         if let Some(row) = spec.rows.first_mut() {
             (if busy { "Starting…" } else { "Start" }).clone_into(&mut row.label);
             row.detail = self.submission_error();
@@ -503,6 +503,23 @@ impl NewSessionForm {
         );
         project.enabled = !busy;
         project
+    }
+
+    /// Dialog text for the session directory.
+    #[must_use]
+    pub fn display_cwd(&self) -> String {
+        self.display_path(&self.draft.cwd)
+    }
+
+    /// Local paths abbreviate this machine's home; a remote home is unknown here.
+    fn display_path(&self, path: &str) -> String {
+        if self
+            .destination()
+            .is_some_and(|destination| destination.remote.is_some())
+        {
+            return path.to_owned();
+        }
+        bootty_git::project::display_path(path, crate::strings::home_dir().as_deref())
     }
 
     fn destination_path(&self) -> String {

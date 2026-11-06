@@ -302,7 +302,10 @@ impl NewSessionDialog {
     }
 
     pub fn started(&mut self, launch: std::sync::mpsc::Receiver<bootty_control::CommandOutcome>) {
-        let detail = self.form.as_ref().map(|form| form.draft.cwd.clone());
+        let detail = self
+            .form
+            .as_ref()
+            .map(crate::presentation::new_session_form::NewSessionForm::display_cwd);
         self.start_stage("session", "Start session".to_owned(), detail);
         self.starting = false;
         self.launch = Some(PendingCreation {
@@ -385,7 +388,10 @@ impl NewSessionDialog {
             self.progress.push(DialogProgressStep {
                 id: "preparation".into(),
                 label: "Prepare session".into(),
-                detail: self.form.as_ref().map(|form| form.draft.cwd.clone()),
+                detail: self
+                    .form
+                    .as_ref()
+                    .map(crate::presentation::new_session_form::NewSessionForm::display_cwd),
                 state: DialogProgressState::Failed,
             });
         }
