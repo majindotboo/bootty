@@ -2242,8 +2242,8 @@ fn session_requests_leave_selection_and_the_active_space_alone() {
     );
 }
 
-/// A project's script opens in a new tab of the session that asks, in its directory; asking for
-/// setup opens every setup script; an unknown name says so.
+/// A project's script opens in a new tab of the session that asks, in its directory; an unknown
+/// name says so.
 #[cfg(unix)]
 #[rstest]
 fn project_scripts_open_in_new_tabs() {
@@ -2263,8 +2263,7 @@ fn project_scripts_open_in_new_tabs() {
     open_native_session(&mut state, directory.path(), started);
     let cwd = directory.path().to_string_lossy().into_owned();
     let settings = serde_json::json!({"scripts": [
-        {"name": "Mark", "command": "printf ran > marked; printf 'script-ready\n'; exec cat", "setup": false},
-        {"name": "Install", "command": "printf done > installed; printf 'script-ready\n'; exec cat", "setup": true},
+        {"name": "Mark", "command": "printf ran > marked; printf 'script-ready\n'; exec cat"},
     ]});
     let configured = submit_command(
         &mut state,
@@ -2314,8 +2313,6 @@ fn project_scripts_open_in_new_tabs() {
     };
     let marked = run("project.script", &[&cwd, "Mark"], "marked");
     assert_eq!(failure_kind(&marked), "success", "{marked:?}");
-    let set_up = run("project.setup", &[&cwd], "installed");
-    assert_eq!(failure_kind(&set_up), "success", "{set_up:?}");
     let unknown = run("project.script", &[&cwd, "Deploy"], "");
     assert!(
         format!("{unknown:?}").contains("The project has no script with that name"),
@@ -2917,14 +2914,7 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
         panic!("new session prompt");
     };
     let dialog_id = dialog.spec().id;
-    state.apply_dialog_intent(
-        &bootty_gpui::DialogIntent::FieldChanged {
-            dialog: dialog_id.clone(),
-            field: "branch".into(),
-            value: "Keep this draft".to_owned(),
-        },
-        &mut Vec::new(),
-    );
+    let identity = dialog.draft().unwrap().identity.clone();
     let current = submit_command(
         &mut state,
         CommandInvocation::new("resource.current", owned(&["binding"]), Caller::Socket),
@@ -2949,10 +2939,10 @@ fn project_commands_register_empty_groups_without_creating_sessions_and_reject_o
     ));
     state.dialog_projection();
     let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
-        panic!("registration must preserve the draft");
+        panic!("registration must keep the open form");
     };
     assert_eq!(dialog.spec().id, dialog_id);
-    assert_eq!(dialog.draft().unwrap().branch, "Keep this draft");
+    assert_eq!(dialog.draft().unwrap().identity, identity);
     assert_eq!(dialog.spec().projects[0].path, "/work/empty");
     let result = submit_command(
         &mut state,

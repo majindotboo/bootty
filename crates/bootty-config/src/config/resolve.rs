@@ -303,8 +303,6 @@ fn apply_partial_session(session: &mut SessionConfig, partial: SessionPatch) {
         shell_integration,
         shell,
         working_directory,
-        worktree_directory,
-        branch_prefix,
     );
     if let Some(value) = partial.env {
         session.env = value

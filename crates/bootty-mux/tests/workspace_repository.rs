@@ -595,15 +595,10 @@ fn project_customization_survives_restart_and_failed_validation(
         icon: "terminal".to_owned(),
         icon_path: Some("/local/project.png".to_owned()),
         provider: "claude".to_owned(),
-        isolated: true,
-        branch_prefix: "team/".to_owned(),
-        start_ref: "main".to_owned(),
         scripts: vec![bootty_mux::repository::ProjectScript {
             name: "Install".to_owned(),
             command: "pnpm install\npnpm build".to_owned(),
-            setup: true,
         }],
-        teardown: "docker compose down".to_owned(),
     };
     repository
         .configure_project(scope, "/project", &settings)
@@ -613,7 +608,7 @@ fn project_customization_survives_restart_and_failed_validation(
         .unwrap();
     let invalid = [
         bootty_mux::repository::ProjectSettings {
-            start_ref: "--bad".to_owned(),
+            provider: "unknown".to_owned(),
             ..settings.clone()
         },
         // Two scripts can't share a name, and a script needs a command.

@@ -2,8 +2,7 @@ use std::ffi::OsString;
 
 use assert_fs::{TempDir, prelude::*};
 use bootty_git::project::{
-    WorktreePickerEntry, add_favorite_project_path, discover_project_picker_entries,
-    discover_worktree_picker_entries, home_dir_from, mark_occupied_worktrees,
+    add_favorite_project_path, discover_project_picker_entries, home_dir_from,
     toggle_favorite_project_path,
 };
 use pretty_assertions::assert_eq;
@@ -176,55 +175,6 @@ fn adding_a_project_preserves_spaces_and_quotes_in_absolute_paths(
     assert!(add_favorite_project_path(Some(home.path()), &path).expect("add project"));
     home.child(".config/tmux/.session-favorites")
         .assert(format!("{path}\n").as_str());
-}
-
-#[rstest]
-fn canonical_path_aliases_mark_the_same_worktree_occupied(
-    home: Result<TempDir, assert_fs::fixture::FixtureError>,
-) {
-    let home = home.expect("home fixture");
-    let project = home.child("project");
-    project.create_dir_all().expect("project");
-    let path = project.path().to_string_lossy().into_owned();
-    let alias = project
-        .path()
-        .join("..")
-        .join("project")
-        .to_string_lossy()
-        .into_owned();
-    let mut entries = vec![WorktreePickerEntry {
-        label: "project (main)".to_owned(),
-        path: Some(path),
-        is_new: false,
-        occupied: false,
-    }];
-
-    mark_occupied_worktrees(&mut entries, &[alias]);
-
-    assert!(entries[0].occupied, "{entries:#?}");
-}
-
-#[rstest]
-fn non_git_directory_offers_only_its_main_entry(
-    home: Result<TempDir, assert_fs::fixture::FixtureError>,
-) {
-    let home = home.expect("home fixture");
-    let path = home.path().to_string_lossy().into_owned();
-    let directory_name = home
-        .path()
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("directory name");
-
-    assert_eq!(
-        discover_worktree_picker_entries(&path),
-        vec![WorktreePickerEntry {
-            label: format!("{directory_name} (main)"),
-            path: Some(path),
-            is_new: false,
-            occupied: false,
-        }]
-    );
 }
 
 #[cfg(unix)]

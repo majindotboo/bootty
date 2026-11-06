@@ -11,8 +11,8 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::{
     github::PullRequestStatus,
+    repository::Git,
     runner::{CommandRunner, SystemCommandRunner},
-    worktree::Git,
 };
 
 pub const MAX_WATCHED_WORKTREES: usize = 64;
@@ -417,7 +417,7 @@ where
             if retired.load(Ordering::Acquire) {
                 return;
             }
-            let project = resolve_project.then(|| git.linked_worktree_project(&cwd));
+            let project = resolve_project.then(|| git.linked_checkout_project(&cwd));
             let branch = git.head_branch(&cwd);
             if retired.load(Ordering::Acquire) {
                 return;

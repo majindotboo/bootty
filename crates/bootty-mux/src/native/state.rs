@@ -997,13 +997,6 @@ impl NativeMuxState {
                 tag,
                 snapshot,
             } => self.restore_session(&session_id, tag, &snapshot)?,
-            MuxCommand::CreateWorktreeSession {
-                session_id,
-                cwd,
-                tag,
-            } => {
-                self.ensure_session(&session_id, cwd, tag)?;
-            }
             MuxCommand::RenameSession { session_id, name } => {
                 self.rename_session(&session_id, name);
             }

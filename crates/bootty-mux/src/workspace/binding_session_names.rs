@@ -19,7 +19,7 @@ fn suggested_session_name(cwd: &str, remote: bool) -> String {
 }
 
 impl BindingRuntime {
-    /// Where a session lives, as bootty records it: the worktree root for a local session, and
+    /// Where a session lives, as bootty records it: the checkout root for a local session, and
     /// whatever the far side reported for a remote one.
     ///
     /// Memoised, because this is on the frame path and resolving a local one forks `git`.
@@ -54,7 +54,7 @@ impl BindingRuntime {
 }
 
 fn session_root(cwd: &str) -> String {
-    let cwd = bootty_git::worktree_root(cwd).unwrap_or_else(|| cwd.to_owned());
+    let cwd = bootty_git::checkout_root(cwd).unwrap_or_else(|| cwd.to_owned());
     std::fs::canonicalize(&cwd)
         .unwrap_or_else(|_| cwd.into())
         .to_string_lossy()

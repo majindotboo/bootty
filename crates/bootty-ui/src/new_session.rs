@@ -5,7 +5,7 @@ use std::sync::{
 };
 
 use bootty_config::config::RemoteConfig;
-use bootty_git::{self as project, ProjectPickerEntry, WorktreePickerEntry};
+use bootty_git::{self as project, ProjectPickerEntry};
 use bootty_host::{CancellableCommandRunner, CommandCancellation};
 use bootty_mux::controller::RepaintHandle;
 
@@ -14,7 +14,6 @@ use crate::error_catalog::ErrorNotice;
 pub enum NewSessionEffect {
     ResolveHome,
     ListProjects,
-    ListWorktrees(String, Vec<String>),
     ToggleFavorite(String),
     AddFavorite(String),
 }
@@ -22,7 +21,6 @@ pub enum NewSessionEffect {
 pub enum NewSessionOutcome {
     HomeDirectory(String),
     Projects(Vec<ProjectPickerEntry>),
-    Worktrees(Vec<WorktreePickerEntry>),
     Favorite { path: String, favorite: bool },
     ProjectAdded(String),
 }
@@ -253,12 +251,6 @@ fn run_effect(
         (NewSessionTarget::Local { home }, NewSessionEffect::ListProjects) => {
             NewSessionOutcome::Projects(project::discover_project_picker_entries(home.as_deref()))
         }
-        (NewSessionTarget::Local { .. }, NewSessionEffect::ListWorktrees(project, open_cwds)) => {
-            let mut worktrees = project::Git::with_runner(runner.clone())
-                .discover_worktree_picker_entries(&project);
-            project::mark_occupied_worktrees(&mut worktrees, &open_cwds);
-            NewSessionOutcome::Worktrees(worktrees)
-        }
         (NewSessionTarget::Local { home }, NewSessionEffect::ToggleFavorite(path)) => {
             let favorite = project::toggle_favorite_project_path(home.as_deref(), &path)?;
             NewSessionOutcome::Favorite { path, favorite }
@@ -273,12 +265,6 @@ fn run_effect(
         (NewSessionTarget::Remote(remote), NewSessionEffect::ListProjects) => {
             NewSessionOutcome::Projects(
                 bootty_git::remote::list_projects(remote, runner).map_err(anyhow::Error::msg)?,
-            )
-        }
-        (NewSessionTarget::Remote(remote), NewSessionEffect::ListWorktrees(project, open_cwds)) => {
-            NewSessionOutcome::Worktrees(
-                bootty_git::remote::list_worktrees(remote, &project, &open_cwds, runner)
-                    .map_err(anyhow::Error::msg)?,
             )
         }
         (NewSessionTarget::Remote(remote), NewSessionEffect::ToggleFavorite(path)) => {

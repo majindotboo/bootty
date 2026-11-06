@@ -1,11 +1,8 @@
 mod clipboard;
 mod recovery;
 pub use recovery::SessionCheckpointTicket;
-mod worktree_cleanup;
-pub use worktree_cleanup::HostResults;
 mod themes;
 use std::{
-    path::{Path, PathBuf},
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -37,7 +34,6 @@ use bootty_terminal::{
     terminal_session::DrainStats,
 };
 
-pub mod creation_draft;
 mod dialog_runtime;
 mod dialogs;
 mod input;
@@ -264,7 +260,6 @@ pub struct AppState {
     pub(super) window_state_key: String,
     pub(super) commands: CommandRuntime,
     pub(super) session_activity_receipt: std::cell::RefCell<Option<(CommandTarget, String, i64)>>,
-    worktree_cleanup: worktree_cleanup::WorktreeCleanup,
     pub(super) workspace: WorkspaceRuntime,
     repaint_scheduler: RepaintScheduler,
     pub(super) last_error: Option<ErrorNotice>,
@@ -303,7 +298,6 @@ pub struct AppState {
     mouse_pointer_hidden_while_typing: bool,
     last_mouse_hover_pos: Option<Point>,
     dialogs: DialogRuntime,
-    creation_drafts: creation_draft::CreationDraftStore,
     sidebar_hovered_session: Option<ScopedSessionTarget>,
     navigation: navigation::NavHistory,
     displayed_sessions: Option<Vec<ScopedSessionTarget>>,
@@ -415,11 +409,6 @@ impl AppState {
         events: Option<ControlEventSender>,
     ) -> Result<Self> {
         let config_runtime = AppConfigRuntime::new(config)?;
-        let (creation_drafts, saved_drafts, selected_draft) =
-            creation_draft::CreationDraftStore::open(
-                drafts_path(&config_runtime.current().config_path, &window_state_key),
-                repaint.clone(),
-            )?;
         let commands = CommandRuntime::new(repaint.clone(), events);
         let keymap_runtime = KeymapRuntime::new(config_runtime.current(), commands.catalog());
         let keymap_diagnostic = keymap_runtime.snapshot().diagnostic_summary();
@@ -441,7 +430,6 @@ impl AppState {
             localizer: crate::i18n::Localizer::new(&config.locale)?,
             commands,
             session_activity_receipt: std::cell::RefCell::new(None),
-            worktree_cleanup: worktree_cleanup::WorktreeCleanup::default(),
             workspace,
             repaint_scheduler: RepaintScheduler::default(),
             last_error: config
@@ -479,8 +467,7 @@ impl AppState {
             terminal_cursor_icon: CursorIcon::Text,
             mouse_pointer_hidden_while_typing: false,
             last_mouse_hover_pos: None,
-            dialogs: DialogRuntime::with_creation_drafts(saved_drafts, selected_draft),
-            creation_drafts,
+            dialogs: DialogRuntime::default(),
             sidebar_hovered_session: None,
             navigation: navigation::NavHistory::default(),
             displayed_sessions: None,
@@ -837,56 +824,6 @@ impl AppState {
     pub(crate) fn record_notice(&mut self, notice: ErrorNotice) {
         self.last_error = Some(notice);
     }
-    fn keep_creation_draft(&mut self, now: Instant) {
-        if let Err(error) = self.save_creation_drafts(now, false) {
-            self.record_error("Could not save session drafts", &error);
-        }
-    }
-
-    pub(crate) fn save_creation_drafts(
-        &mut self,
-        now: Instant,
-        force: bool,
-    ) -> Result<bool, String> {
-        for identity in self.creation_drafts.take_discarded() {
-            self.dialogs.remove_creation_draft(&identity);
-        }
-        self.dialogs.remember_creation();
-        let selected = self
-            .dialogs
-            .active_creation_identity()
-            .map(str::to_owned)
-            .or_else(|| self.dialogs.restore_creation.clone());
-        self.creation_drafts.observe(
-            &self.dialogs.creation_drafts,
-            selected,
-            self.dialogs.creation_revision,
-            now,
-            force,
-        )
-    }
-
-    pub(crate) fn creation_draft_summaries(
-        &self,
-    ) -> impl Iterator<Item = creation_draft::DraftSummary> + '_ {
-        self.creation_drafts.summaries()
-    }
-
-    pub(crate) fn discard_creation_draft(
-        &mut self,
-        scope: SpaceId,
-        identity: &str,
-    ) -> Result<mpsc::Receiver<bootty_control::CommandOutcome>, String> {
-        self.creation_drafts.discard(scope, identity)
-    }
-
-    pub(crate) fn selected_creation_draft(&self) -> Option<String> {
-        self.dialogs
-            .active_creation_identity()
-            .map(str::to_owned)
-            .or_else(|| self.dialogs.restore_creation.clone())
-    }
-
     /// The reversible change to offer, taken once so it is offered once.
     pub const fn take_undo_offer(&mut self) -> Option<UndoOffer> {
         self.undo_offer.take()
@@ -1628,7 +1565,6 @@ impl AppState {
         let mut effects = Vec::new();
 
         self.process_frame_commands(viewport, &mut effects);
-        self.keep_creation_draft(now);
 
         self.sync_macos_non_native_fullscreen_presentation(&mut effects);
         self.update_terminal_metrics(
@@ -1673,7 +1609,6 @@ impl AppState {
             terminal_scale_factor,
         );
         let workspace_frame = self.advance_workspace_frame(now, window_focused);
-        self.poll_worktree_cleanup(now);
         if let Some(after) = workspace_frame.next_wake {
             effects.push(AppEffect::RepaintAfter(after));
         }
@@ -1923,25 +1858,4 @@ impl AppState {
         self.keymap_runtime
             .split_events(events, self.modifier_sides, focus)
     }
-}
-
-/// Where one window's reported agent state survives restarts: beside the workspace database,
-/// named for the window so two windows never overwrite each other.
-/// Unstarted session drafts for one window. The file keeps the `agent-state-` name it had while
-/// it sat beside native agent state, so existing drafts still load.
-fn drafts_path(config_path: &Path, window_state_key: &str) -> PathBuf {
-    let key = window_state_key
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '_'
-            }
-        })
-        .collect::<String>();
-    config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(format!("agent-state-{key}.drafts.json"))
 }

@@ -53,21 +53,7 @@ impl DialogView {
             .filter(|step| step.state == DialogProgressState::Complete)
             .count();
         let title = if failed {
-            match spec
-                .progress
-                .iter()
-                .find(|step| step.state == DialogProgressState::Failed)
-                .map(|step| step.id.as_str())
-            {
-                Some("worktree") => "Worktree setup failed",
-                _ => "Session could not start",
-            }
-        } else if spec
-            .progress
-            .iter()
-            .any(|step| step.id == "worktree" && step.state != DialogProgressState::Complete)
-        {
-            "Setting up worktree…"
+            "Session could not start"
         } else {
             "Starting session…"
         };

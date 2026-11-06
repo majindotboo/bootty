@@ -1,6 +1,5 @@
 #![cfg(test)]
 use bootty_mux::workspace::ScopedSessionTarget;
-use bootty_os::spawn::CommandSpawn as _;
 
 use bootty_config::config::BoottyConfig;
 use pretty_assertions::assert_eq;
@@ -19,7 +18,7 @@ use bootty_mux::repository::{
     SpaceMuxOverride, SpaceRemoteOverride, WorkspaceRepository, WorkspaceSpace,
 };
 use bootty_mux::{command::MuxCommand, snapshot::MuxSessionTag};
-use bootty_ui::{AppState, ModalDialog};
+use bootty_ui::AppState;
 use rusqlite::Connection;
 
 use crate::support::close_transport;
@@ -846,7 +845,7 @@ fn closing_releases_session_membership(directory: assert_fs::TempDir, #[case] co
 #[case(false, false)]
 #[case(true, false)]
 #[case(false, true)]
-fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
+fn selecting_existing_content_dismisses_creation(
     directory: assert_fs::TempDir,
     #[case] select_tab: bool,
     #[case] current_tab_binding: bool,
@@ -899,20 +898,6 @@ fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
         state.keymap_focus(),
         bootty_ui::keymap_runtime::KeymapFocus::Other
     );
-    state.apply_dialog_intent(
-        &bootty_ui::gpui::DialogIntent::FieldChanged {
-            dialog: bootty_ui::gpui::DialogId::new(
-                bootty_ui::presentation::dialogs::NEW_SESSION_ID,
-            ),
-            field: "branch".into(),
-            value: "Keep the creation draft".to_owned(),
-        },
-        &mut Vec::new(),
-    );
-    let identity = match state.modal_dialog() {
-        Some(ModalDialog::NewSession(dialog)) => dialog.draft().expect("draft").identity.clone(),
-        _ => panic!("creation form"),
-    };
     if current_tab_binding {
         let mut frame = frames::idle_frame(Instant::now());
         frame.input.events.push(bootty_ui::gpui::InputEvent::Key {
@@ -958,23 +943,6 @@ fn selecting_existing_content_dismisses_creation_and_preserves_the_draft(
         );
     }
     assert!(state.modal_dialog().is_none(), "{:?}", state.last_error());
-    let binding = listed_spaces(&mut state)[0].2.clone();
-    let outcome = submit_command(
-        &mut state,
-        targeted("session.draft.open", vec![identity], binding),
-        Instant::now(),
-    );
-    assert!(
-        matches!(outcome, CommandOutcome::Success { .. }),
-        "{outcome:?}"
-    );
-    let Some(ModalDialog::NewSession(dialog)) = state.modal_dialog() else {
-        panic!("creation form reopened");
-    };
-    assert_eq!(
-        dialog.draft().expect("draft").branch,
-        "Keep the creation draft"
-    );
 }
 
 #[rstest]
@@ -1105,143 +1073,4 @@ fn closing_active_space_selects_the_neighbor_and_preserves_the_last_space(
     let (_, reopened) = WorkspaceRepository::open(&config_path).unwrap();
     assert_eq!(reopened.selected_space("close-test"), Some(last));
     assert_eq!(reopened.spaces().len(), 1);
-}
-
-fn git(cwd: &Path, args: &[&str]) {
-    let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .bootty_output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// A pushed repository and Bootty's worktree directory beside it.
-fn pushed_repository(root: &Path) -> std::path::PathBuf {
-    let project = root.join("project");
-    std::fs::create_dir_all(&project).expect("project directory");
-    git(root, &["init", "-q", "--bare", "-b", "main", "origin.git"]);
-    git(&project, &["init", "-q", "-b", "main"]);
-    for (key, value) in [
-        ("user.email", "test@bootty.dev"),
-        ("user.name", "Bootty Test"),
-        ("commit.gpgsign", "false"),
-        ("core.hooksPath", "/dev/null"),
-    ] {
-        git(&project, &["config", key, value]);
-    }
-    std::fs::write(project.join("README"), "hello").expect("write README");
-    git(&project, &["add", "."]);
-    git(&project, &["commit", "-q", "-m", "init"]);
-    let origin = root.join("origin.git");
-    git(
-        &project,
-        &[
-            "remote",
-            "add",
-            "origin",
-            origin.to_str().expect("origin path"),
-        ],
-    );
-    git(&project, &["push", "-q", "-u", "origin", "main"]);
-    project
-}
-
-/// A pushed checkout in Bootty's worktree directory, made before the last hour. `unpushed` adds a
-/// commit no remote has.
-fn old_checkout(project: &Path, worktrees: &Path, name: &str, unpushed: bool) -> String {
-    let path = worktrees.join("project").join(name);
-    let text = path.to_str().expect("checkout path").to_owned();
-    git(project, &["worktree", "add", "-q", "-b", name, &text]);
-    git(&path, &["push", "-q", "-u", "origin", name]);
-    if unpushed {
-        std::fs::write(path.join("work"), "work").expect("write work");
-        git(&path, &["add", "."]);
-        git(&path, &["commit", "-q", "-m", "unpushed"]);
-    }
-    std::fs::File::options()
-        .write(true)
-        .open(path.join(".git"))
-        .and_then(|marker| {
-            marker.set_modified(
-                std::time::SystemTime::now()
-                    .checked_sub(Duration::from_hours(2))
-                    .expect("two hours ago"),
-            )
-        })
-        .expect("age the checkout");
-    text
-}
-
-/// Bootty's worktrees go when nothing needs them: a checkout no session uses goes on the first
-/// pass, one with unpushed work stays and is reported, and deleting a session frees its checkout.
-#[rstest]
-fn worktree_cleanup_removes_checkouts_only_when_nothing_needs_them(directory: assert_fs::TempDir) {
-    let project = pushed_repository(directory.path());
-    let worktrees = directory.path().join("worktrees");
-    let unused = old_checkout(&project, &worktrees, "unused", false);
-    let unpushed = old_checkout(&project, &worktrees, "unpushed", true);
-    let used = old_checkout(&project, &worktrees, "used", false);
-    let config_path = directory.path().join("settings/config.toml");
-    std::fs::create_dir_all(config_path.parent().expect("settings")).expect("settings directory");
-    drop(claim_first_space(&config_path, "used-id", "used", &used));
-    let mut config = test_config::config(config_path);
-    config.session.worktree_directory = Some(worktrees.to_string_lossy().into_owned());
-    let mut state = app_state(config);
-
-    wait_until(
-        &mut state,
-        "the first pass removes the unused checkout",
-        |_| (!Path::new(&unused).exists()).then_some(()),
-    );
-    let kept = format!("Kept {unpushed}. It has 1 commit no remote has.");
-    wait_until(
-        &mut state,
-        "the first pass reports unpushed work",
-        |state| {
-            state
-                .last_error()
-                .is_some_and(|notice| notice.contains(&kept))
-                .then_some(())
-        },
-    );
-    let mut clean = CommandInvocation::new("worktrees.clean", Vec::new(), Caller::Socket);
-    let CommandOutcome::ConfirmationRequired { confirmation } =
-        submit_and_wait(&mut state, clean.clone())
-    else {
-        panic!("removing worktrees asks first");
-    };
-    clean.confirmation = Some(*confirmation);
-    let outcome = submit_and_wait(&mut state, clean.clone());
-    let CommandOutcome::Success { value, warnings } = outcome else {
-        panic!("worktrees.clean failed: {outcome:?}");
-    };
-    assert_eq!(
-        (value, warnings),
-        (
-            serde_json::json!({"hosts": [{
-                "host": "Local",
-                "removed": [],
-                "kept": [{"path": unpushed, "reason": "It has 1 commit no remote has"}],
-                "remaining": 1,
-            }]}),
-            Vec::new()
-        )
-    );
-
-    // The checkout disappears before branch deletion finishes. A subsequent
-    // serialized pass must complete before this test drops its host/process.
-    let completed = submit_and_wait(&mut state, clean);
-    let CommandOutcome::Success { value, warnings } = completed else {
-        panic!("final cleanup failed: {completed:?}");
-    };
-    assert_eq!(warnings, []);
-    assert_eq!(value["hosts"][0]["remaining"], 1);
-    assert_eq!(value["hosts"][0]["removed"], serde_json::json!([]));
-    assert!(Path::new(&unpushed).exists());
 }

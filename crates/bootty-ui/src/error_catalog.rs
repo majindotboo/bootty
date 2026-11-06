@@ -51,8 +51,6 @@ pub enum ErrorNotice {
     SshProfileUnavailable(String),
     #[error("the terminal configuration could not be applied")]
     TerminalConfigPublicationFailed(String),
-    #[error("the worktree operation failed")]
-    Worktree(String),
     /// Bootty's own wording, shown as written.
     #[error("{0}")]
     Message(String),
@@ -91,8 +89,7 @@ impl ErrorNotice {
             | Self::FileHandoffRejected(message)
             | Self::SessionNotHeldBySpace(message)
             | Self::SshProfileUnavailable(message)
-            | Self::TerminalConfigPublicationFailed(message)
-            | Self::Worktree(message) => Some(message),
+            | Self::TerminalConfigPublicationFailed(message) => Some(message),
             Self::Technical { summary, details } if summary != details => Some(details),
             _ => None,
         }

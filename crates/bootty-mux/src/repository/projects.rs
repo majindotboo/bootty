@@ -3,34 +3,29 @@ use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 /// Defaults for new work in a project; `icon_path` is a local presentation asset.
+// Unknown keys are ignored: saved rows may still hold retired worktree settings.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct ProjectSettings {
     pub name: String,
     pub icon: String,
     pub icon_path: Option<String>,
     pub provider: String,
-    pub isolated: bool,
-    pub branch_prefix: String,
-    pub start_ref: String,
     /// Named commands to run in the project's sessions, each in a new terminal tab.
     pub scripts: Vec<ProjectScript>,
-    /// A command run in a worktree before Bootty removes it, like stopping its services.
-    pub teardown: String,
 }
 
 /// A named command for a project's sessions.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(default, deny_unknown_fields)]
+// Saved scripts may still hold the retired `setup` flag.
+#[serde(default)]
 pub struct ProjectScript {
     pub name: String,
     pub command: String,
-    /// Runs in each new worktree's session as it starts, like installing dependencies.
-    pub setup: bool,
 }
 
 /// Scripts a project keeps at most.
-// Enough for setup, checks and services; raise it if projects outgrow a short list.
+// Enough for checks and services; raise it if projects outgrow a short list.
 pub const MAX_PROJECT_SCRIPTS: usize = 32;
 
 /// Whether `command` is a shell command a project can keep: some text, bounded, with lines and
@@ -46,15 +41,9 @@ impl ProjectSettings {
     /// # Errors
     /// Rejects unbounded labels, unsupported providers and malformed Git defaults.
     pub fn validate(&self) -> WorkspaceResult<()> {
-        if [
-            &self.name,
-            &self.icon,
-            &self.provider,
-            &self.branch_prefix,
-            &self.start_ref,
-        ]
-        .into_iter()
-        .any(|value| value.len() > 256 || value.chars().any(char::is_control))
+        if [&self.name, &self.icon, &self.provider]
+            .into_iter()
+            .any(|value| value.len() > 256 || value.chars().any(char::is_control))
             || !matches!(self.provider.as_str(), "" | "codex" | "claude" | "pi")
             || !matches!(
                 self.icon.as_str(),
@@ -68,18 +57,9 @@ impl ProjectSettings {
                     | "server"
                     | "gamepad"
             )
-            || self.start_ref.starts_with('-')
-            || self.branch_prefix.starts_with('-')
-            || [&self.branch_prefix, &self.start_ref]
-                .into_iter()
-                .any(|value| {
-                    value.contains([' ', '~', '^', ':', '?', '*', '[', '\\'])
-                        || value.contains("..")
-                        || value.contains("@{")
-                })
         {
             return Err(super::WorkspacePersistenceError::operation(
-                "Choose valid project labels, provider and Git defaults",
+                "Choose valid project labels and provider",
             ));
         }
         if let Some(path) = &self.icon_path {
@@ -87,7 +67,6 @@ impl ProjectSettings {
         }
         let mut names = std::collections::BTreeSet::new();
         if self.scripts.len() > MAX_PROJECT_SCRIPTS
-            || !valid_command(&self.teardown)
             || self.scripts.iter().any(|script| {
                 script.name.trim().is_empty()
                     || script.name.chars().count() > 64

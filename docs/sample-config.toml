@@ -249,13 +249,6 @@ clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 # override the account login shell, inherited working directory, or environment.
 # shell = "/opt/homebrew/bin/fish"
 # working-directory = "/Users/alice/src/project"
-# New worktrees go in <worktree-directory>/<repository>/<name> on the
-# repository's host; ~ is that host's home. Unset uses
-# ~/.local/share/bootty/worktrees, or %LOCALAPPDATA%\bootty\worktrees on Windows;
-# Development builds use their own namespace in place of bootty.
-# worktree-directory = "~/src/worktrees"
-# What a new worktree's branch name starts with. A project's own prefix wins.
-# branch-prefix = "bootty/"
 # env = [
 #   { name = "EDITOR", value = "nvim" },
 # ]

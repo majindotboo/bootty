@@ -138,7 +138,6 @@ impl AppState {
             PendingCommandResult::SessionStart { .. }
             | PendingCommandResult::SessionCheckpointCompletion { .. }
             | PendingCommandResult::Outcome(_)
-            | PendingCommandResult::WorktreeCleanup { .. }
             | PendingCommandResult::Forward { .. }
             | PendingCommandResult::Clipboard { .. }
             | PendingCommandResult::Link { .. } => false,
@@ -175,9 +174,6 @@ impl AppState {
         }
         match completion {
             Ok(completion) => {
-                if matches!(command, MuxCommand::DitchSession { .. }) {
-                    self.request_worktree_cleanup();
-                }
                 let Some(value) = self.mux_command_completion_value(scope, command, &completion)
                 else {
                     let outcome = CommandOutcome::StaleTarget {
@@ -306,7 +302,6 @@ impl AppState {
         }
         if let Some(session_id) = match command {
             MuxCommand::CreateProjectSession { session_id, .. }
-            | MuxCommand::CreateWorktreeSession { session_id, .. }
             | MuxCommand::RestoreSession { session_id, .. } => Some(session_id.as_str()),
             _ => None,
         } {

@@ -139,13 +139,6 @@ impl AppState {
             AppAction::RenameSession => {
                 self.then_repaint(effects, Self::open_rename_session_dialog);
             }
-            AppAction::CleanWorktrees => {
-                self.commands
-                    .queue(bootty_control::CommandInvocation::from_action(
-                        "worktrees.clean",
-                        bootty_control::Caller::Internal,
-                    ));
-            }
             AppAction::MoveSessionToSpace => {
                 self.then_repaint(effects, Self::open_space_picker_for_current_session);
             }

@@ -43,11 +43,10 @@ impl AppState {
         true
     }
 
-    /// Opens a terminal tab in `session` for each script `action` picks from the project at
-    /// `arguments[0]`: the one named by `arguments[1]`, or every setup script.
-    fn run_project_scripts(
+    /// Opens a terminal tab in `session` for the script of the project at `arguments[0]` named by
+    /// `arguments[1]`.
+    fn dispatch_project_script(
         &mut self,
-        action: SessionAction,
         scope: SpaceId,
         session: &str,
         arguments: &[String],
@@ -65,25 +64,16 @@ impl AppState {
                 .registered_projects(scope)
                 .find(|project| project.cwd == *cwd)
         }) else {
-            // A worktree of a directory that was never registered has nothing to set up.
-            if action == SessionAction::RunSetup {
-                return CommandDispatch::Complete(serialized_command_outcome(
-                    serde_json::json!({"tabs": 0}),
-                ));
-            }
             return self.reject_command(failed("That project isn't registered in this Space"));
         };
         let scripts = project
             .settings
             .scripts
             .iter()
-            .filter(|script| match action {
-                SessionAction::RunScript => arguments.get(1) == Some(&script.name),
-                _ => script.setup,
-            })
+            .filter(|script| arguments.get(1) == Some(&script.name))
             .map(|script| script.command.clone())
             .collect::<Vec<_>>();
-        if action == SessionAction::RunScript && scripts.is_empty() {
+        if scripts.is_empty() {
             return self.reject_command(failed("The project has no script with that name"));
         }
         let Some(binding) = self.workspace.binding(scope) else {
@@ -211,53 +201,6 @@ impl AppState {
         ))
     }
 
-    /// List, open or discard the saved creation drafts of the target's Space.
-    fn dispatch_draft_command(
-        &mut self,
-        action: SessionAction,
-        arguments: &[String],
-        exact_target: Option<&ExactMuxTarget>,
-        execution: Option<(Instant, CommandCancellation)>,
-    ) -> CommandDispatch {
-        let Some(&ExactMuxTarget::Binding(scope)) = exact_target else {
-            return CommandDispatch::Complete(CommandOutcome::StaleTarget {
-                message: "The draft's Space is no longer available".into(),
-            });
-        };
-        if let Err(error) = executor::begin_synchronous_command(execution) {
-            return CommandDispatch::Complete(command_outcome_for_mux_error(error));
-        }
-        if action == SessionAction::ListDrafts {
-            return CommandDispatch::Complete(serialized_command_outcome(
-                self.creation_draft_summaries()
-                    .filter(|draft| draft.scope == scope)
-                    .collect::<Vec<_>>(),
-            ));
-        }
-        let Some(identity) = arguments.first() else {
-            return CommandDispatch::Complete(CommandOutcome::Failed {
-                code: "invalid_arguments".into(),
-                message: "A draft identity is required".into(),
-            });
-        };
-        if action == SessionAction::DiscardDraft {
-            return match self.discard_creation_draft(scope, identity) {
-                Ok(reply) => CommandDispatch::Pending(PendingCommandResult::Outcome(reply)),
-                Err(message) => CommandDispatch::Complete(CommandOutcome::Failed {
-                    code: "draft_unavailable".into(),
-                    message,
-                }),
-            };
-        }
-        CommandDispatch::Complete(match self.open_creation_draft(scope, identity) {
-            Ok(()) => CommandOutcome::success(),
-            Err(message) => CommandOutcome::Failed {
-                code: "draft_unavailable".into(),
-                message,
-            },
-        })
-    }
-
     /// Create or close a session in the target's Space, leaving selection, focus and the active
     /// Space alone, or list the Spaces.
     pub(super) fn dispatch_session_command(
@@ -267,17 +210,6 @@ impl AppState {
         exact_target: Option<ExactMuxTarget>,
         execution: Option<(Instant, CommandCancellation)>,
     ) -> CommandDispatch {
-        if matches!(
-            action,
-            SessionAction::ListDrafts | SessionAction::OpenDraft | SessionAction::DiscardDraft
-        ) {
-            return self.dispatch_draft_command(
-                action,
-                arguments,
-                exact_target.as_ref(),
-                execution,
-            );
-        }
         if action == SessionAction::InspectSpace
             && let Some(ExactMuxTarget::Binding(scope)) = exact_target
         {
@@ -288,13 +220,13 @@ impl AppState {
         {
             return self.list_terminals_command(scope, execution);
         }
-        if matches!(action, SessionAction::RunScript | SessionAction::RunSetup) {
+        if action == SessionAction::RunScript {
             let Some(ExactMuxTarget::Pane(scope, session, _, _)) = exact_target else {
                 return self.reject_command(CommandOutcome::StaleTarget {
                     message: "The terminal is no longer available".to_owned(),
                 });
             };
-            return self.run_project_scripts(action, scope, &session, arguments, execution);
+            return self.dispatch_project_script(scope, &session, arguments, execution);
         }
         if matches!(
             action,
@@ -861,7 +793,6 @@ impl AppState {
         outcome: CommandOutcome,
     ) -> CommandDispatch {
         let (MuxCommand::CreateProjectSession { session_id, .. }
-        | MuxCommand::CreateWorktreeSession { session_id, .. }
         | MuxCommand::RestoreSession { session_id, .. }
         | MuxCommand::NewWindow { session_id, .. }
         | MuxCommand::SplitPane { session_id, .. }

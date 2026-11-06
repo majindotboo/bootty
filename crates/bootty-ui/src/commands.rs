@@ -34,7 +34,6 @@ macro_rules! command_actions {
 
 mod dock;
 mod files;
-mod git;
 mod jobs;
 mod panes;
 pub(crate) mod runtime;
@@ -43,7 +42,6 @@ mod themes;
 
 pub use dock::{DockAction, DockRequest};
 pub use files::{FileAction, reveal_label};
-pub use git::GitAction;
 pub use jobs::JobAction;
 pub use panes::PaneAction;
 pub use sessions::SessionAction;
@@ -73,10 +71,8 @@ pub enum CoreCommandExecutor {
     Job(JobAction, Vec<String>),
     Recovery(&'static str, Vec<String>),
     WslList,
-    WorktreeCleanup,
     CaptureTerminal(Vec<String>, bool),
     ShellPrompt(&'static str, Vec<String>),
-    Git(GitAction, Vec<String>),
     Theme(ThemeAction, Vec<String>),
     File(FileAction, Vec<String>),
     Pane(PaneAction, Vec<String>),
@@ -118,13 +114,11 @@ enum CommandExecutorResolver {
     Recovery(&'static str),
     ShellIntegration,
     WslList,
-    WorktreeCleanup,
     CaptureTerminal(bool),
     ShellPrompt(&'static str),
     ReadTerminal,
     SubmitTerminal,
     WriteTerminal,
-    Git(GitAction),
     Theme(ThemeAction),
     File(FileAction),
     Pane(PaneAction),
@@ -222,7 +216,6 @@ impl CommandRegistry {
             CommandExecutorResolver::Theme(action) => {
                 CoreCommandExecutor::Theme(action, arguments())
             }
-            CommandExecutorResolver::Git(action) => CoreCommandExecutor::Git(action, arguments()),
             CommandExecutorResolver::ShellPrompt(action) => {
                 CoreCommandExecutor::ShellPrompt(action, arguments())
             }
@@ -241,7 +234,6 @@ impl CommandRegistry {
                 SynchronousCommand::ShellIntegration(first_argument()?.clone()),
             ),
             CommandExecutorResolver::WslList => CoreCommandExecutor::WslList,
-            CommandExecutorResolver::WorktreeCleanup => CoreCommandExecutor::WorktreeCleanup,
             CommandExecutorResolver::CaptureTerminal(export) => {
                 CoreCommandExecutor::CaptureTerminal(arguments(), export)
             }
@@ -292,7 +284,6 @@ impl CommandRegistry {
         register_forward_commands(&mut commands);
         register_feature_commands(&mut commands);
         register_host_commands(&mut commands);
-        register_worktree_commands(&mut commands);
         Self { commands }
     }
 }
@@ -641,16 +632,6 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             },
         );
     }
-    for action in GitAction::ALL {
-        let descriptor = action.descriptor();
-        commands.insert(
-            descriptor.id.clone(),
-            RegisteredCommand {
-                descriptor,
-                executor: CommandExecutorResolver::Git(action),
-            },
-        );
-    }
     for action in FileAction::ALL {
         let descriptor = action.descriptor();
         commands.insert(
@@ -691,19 +672,6 @@ fn register_feature_commands(commands: &mut BTreeMap<String, RegisteredCommand>)
             },
         );
     }
-}
-
-/// The catalog gives `worktrees.clean` its palette row and key; every caller gets what each host
-/// did.
-fn register_worktree_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {
-    let descriptor = Command::CleanWorktrees.descriptor();
-    commands.insert(
-        descriptor.id.clone(),
-        RegisteredCommand {
-            descriptor,
-            executor: CommandExecutorResolver::WorktreeCleanup,
-        },
-    );
 }
 
 fn register_host_commands(commands: &mut BTreeMap<String, RegisteredCommand>) {

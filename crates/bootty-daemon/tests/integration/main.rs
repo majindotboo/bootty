@@ -1,8 +1,5 @@
 #![cfg(test)]
 
-#[path = "../support/mod.rs"]
-mod support;
-
 #[path = "../cli.rs"]
 mod cli;
 

@@ -908,7 +908,6 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
         text: None,
         text_label: None,
         fields: Vec::new(),
-        branches: Vec::new(),
         spaces: Vec::new(),
         projects: Vec::new(),
         project_labels: std::collections::BTreeMap::new(),
@@ -918,7 +917,7 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
         text_hint: None,
         rows: vec![
             DialogRow {
-                detail: Some("This removes the worktree.".to_owned()),
+                detail: Some("This removes the session.".to_owned()),
                 destructive: true,
                 ..DialogRow::action("delete", "Delete", DialogAction::new("delete"))
             },
@@ -960,8 +959,8 @@ fn confirm_shows_details_uses_first_enabled_action_and_closes_once(cx: &TestAppC
 #[gpui_kit::test]
 fn prompt_fields_edit_without_resetting_sibling_values(cx: &TestAppContext) {
     let mut spec = DialogSpec::prompt(
-        "worktree",
-        "New Worktree",
+        "rename",
+        "Rename",
         "topic",
         "Branch",
         DialogAction::new("create"),
@@ -997,7 +996,7 @@ fn prompt_fields_edit_without_resetting_sibling_values(cx: &TestAppContext) {
                 .intents
                 .borrow()
                 .contains(&DialogIntent::FieldChanged {
-                    dialog: DialogId::new("worktree"),
+                    dialog: DialogId::new("rename"),
                     field: "folder".to_owned(),
                     value: "checkout".to_owned(),
                 }),
@@ -1018,7 +1017,7 @@ fn prompt_fields_edit_without_resetting_sibling_values(cx: &TestAppContext) {
                 .intents
                 .borrow()
                 .contains(&DialogIntent::FieldChanged {
-                    dialog: DialogId::new("worktree"),
+                    dialog: DialogId::new("rename"),
                     field: "folder".to_owned(),
                     value: "checkout-two".to_owned(),
                 })

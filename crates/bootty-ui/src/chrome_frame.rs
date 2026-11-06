@@ -660,9 +660,6 @@ fn sidebar_snapshot(
         }
     }
     rows.extend(unclaimed_rows(state, palette));
-    if sidebar_config.modules.iter().any(|name| name == "sessions") {
-        append_creation_drafts(state, &mut rows, palette);
-    }
     apply_project_settings(state, native, &mut rows);
     let sidebar_background = if black_notch_chrome {
         Rgba::rgb(0, 0, 0)
@@ -711,91 +708,6 @@ fn sidebar_snapshot(
         border: sidebar_config
             .border
             .map_or(palette.border_variant, crate::theme::config_rgba),
-    }
-}
-
-fn append_creation_drafts(state: &AppState, rows: &mut Vec<SidebarRow>, palette: ChromePalette) {
-    let selected = state.selected_creation_draft();
-    if selected.is_some() {
-        for row in rows.iter_mut().filter(|row| row.kind.is_session()) {
-            row.current = false;
-            row.active = false;
-        }
-    }
-    let scope = state.mux_scope();
-    let Some(binding) = state
-        .saved_session_invocation(scope, "session.saved", Vec::new())
-        .and_then(|invocation| invocation.target)
-    else {
-        return;
-    };
-    for draft in state
-        .creation_draft_summaries()
-        .filter(|draft| draft.scope == scope)
-    {
-        if rows.iter().any(|row| {
-            row.task
-                .as_ref()
-                .is_some_and(|task| task.identity == draft.identity)
-        }) {
-            continue;
-        }
-        let project = project_name(draft.project.as_deref()).to_owned();
-        let row = SidebarRow {
-            key: format!("draft:{}", draft.identity),
-            text: draft.title,
-            secondary: None,
-            project: Some(SidebarProject {
-                name: project.clone(),
-                artwork: None,
-            }),
-            project_path: draft.project.clone(),
-            cwd: Some(draft.cwd.clone()),
-            host: None,
-            branch: draft.branch,
-            trailing: Some("Draft".into()),
-            trailing_icon: None,
-            trailing_color: None,
-            number: None,
-            indent: 0,
-            tree: None,
-            artwork: None,
-            icon: Some("pencil".into()),
-            diff: None,
-            pull_request: None,
-            worktree: false,
-            scripts: Vec::new(),
-            color: palette.text,
-            dim_color: palette.muted,
-            kind: SidebarRowKind::Draft {
-                identity: draft.identity.clone(),
-                binding: binding.clone(),
-            },
-            active: selected.as_deref() == Some(&draft.identity),
-            current: selected.as_deref() == Some(&draft.identity),
-            selectable: true,
-            target: None,
-            reorder_anchor: None,
-            context: None,
-            task: None,
-        };
-        if state.config().sidebar.group_by_project {
-            if let Some(group) = rows.iter().position(|row| {
-                row.kind == SidebarRowKind::Group && row.project_path == draft.project
-            }) {
-                rows.insert(group.saturating_add(1), row);
-            } else {
-                let key = format!(
-                    "project:{}:{}",
-                    scope.persistence_value(),
-                    draft.project.as_deref().unwrap_or("")
-                );
-                rows.push(project_row(&row, key, &project, None, palette));
-                rows.push(row);
-            }
-        } else {
-            rows.push(row);
-        }
     }
 }
 
@@ -880,7 +792,6 @@ fn empty_project_row(
         icon: Some("folder".to_owned()),
         diff: None,
         pull_request: None,
-        worktree: false,
         scripts: Vec::new(),
         color: palette.text,
         dim_color: palette.muted,
@@ -923,7 +834,6 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
             icon: Some("circle-dashed".to_owned()),
             diff: None,
             pull_request: None,
-            worktree: false,
             scripts: Vec::new(),
             color: palette.text,
             dim_color: palette.muted,
@@ -960,7 +870,6 @@ fn unclaimed_rows(state: &AppState, palette: ChromePalette) -> Vec<SidebarRow> {
                 icon: Some("bootty".to_owned()),
                 diff: None,
                 pull_request: None,
-                worktree: false,
                 scripts: Vec::new(),
                 color: palette.text,
                 dim_color: palette.muted,
@@ -987,7 +896,7 @@ fn session_title<'a>(name: &'a str, project: &str, explicit: bool) -> &'a str {
     }
     let title = name.strip_prefix(&format!("{project}/")).unwrap_or(name);
     // A session named after its project or a path has no name of its own; one named after its
-    // branch keeps the branch, which tells worktree sessions apart.
+    // branch keeps the branch, which tells a project's checkouts apart.
     if title == project || std::path::Path::new(title).is_absolute() {
         "Terminal"
     } else {
@@ -1103,7 +1012,6 @@ fn session_row(
             facts.diff_removed,
             state.ui_theme().palette,
         ),
-        worktree: facts.project.is_some(),
         icon: Some("terminal".to_owned()),
         kind: SidebarRowKind::Session,
         selectable: true,
@@ -1157,7 +1065,7 @@ fn project_row(
     }
 }
 
-/// A linked worktree belongs to its main checkout's project; other sessions to their cwd.
+/// A linked checkout belongs to its main checkout's project; other sessions to their cwd.
 fn session_project_path<'a>(
     projection: &'a ChromeProjection,
     session: &'a SessionView,
@@ -1215,7 +1123,6 @@ fn sidebar_session_base(
         icon: None,
         diff: None,
         pull_request: None,
-        worktree: false,
         scripts: Vec::new(),
         color,
         dim_color,
@@ -1573,7 +1480,6 @@ pub fn apply(state: &mut AppState, intent: ChromeIntent) -> Vec<AppEffect> {
         intent @ (ChromeIntent::CopyText(_)
         | ChromeIntent::RevealPath { .. }
         | ChromeIntent::OpenInEditor { .. }
-        | ChromeIntent::NewSessionOnBranch { .. }
         | ChromeIntent::NewSessionInProject { .. }) => apply_place(state, intent, &mut effects),
         ChromeIntent::ReorderSession { source, before } => {
             state.reorder_session_before(&source, before.as_deref())
@@ -1694,9 +1600,6 @@ fn apply_place(state: &mut AppState, intent: ChromeIntent, effects: &mut Vec<App
         ),
         ChromeIntent::NewSessionInProject { scope, path } => {
             state.open_new_session_dialog_in(id(scope), path)
-        }
-        ChromeIntent::NewSessionOnBranch { scope, path } => {
-            state.open_new_session_on_branch(id(scope), path)
         }
         _ => false,
     }

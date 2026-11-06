@@ -158,8 +158,6 @@ pub(super) struct SessionPatch {
     pub(super) shell_integration: Option<bool>,
     pub(super) shell: Option<String>,
     pub(super) working_directory: Option<PathBuf>,
-    pub(super) worktree_directory: Option<String>,
-    pub(super) branch_prefix: Option<String>,
     pub(super) env: Option<Vec<EnvConfigEntry>>,
     pub(super) term: Option<String>,
     pub(super) colorterm: Option<String>,

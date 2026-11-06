@@ -5,7 +5,6 @@ use bootty_mux::repository::{MAX_PROJECT_SCRIPTS, ProjectScript, ProjectSettings
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Sizable as _,
     button::{Button, ButtonVariants as _},
-    checkbox::Checkbox,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu as _, PopupMenuItem},
 };
@@ -69,10 +68,7 @@ pub(super) struct ProjectSettingsView {
     model: ProjectSettingsEditor,
     baseline: ProjectSettings,
     name: Entity<InputState>,
-    branch_prefix: Entity<InputState>,
-    start_ref: Entity<InputState>,
     scripts: Vec<ScriptFields>,
-    teardown: Entity<InputState>,
     sender: BoundAppCommandSender,
     saving: bool,
 }
@@ -85,11 +81,10 @@ pub(super) enum ProjectSettingsEvent {
 
 impl EventEmitter<ProjectSettingsEvent> for ProjectSettingsView {}
 
-/// One script's name, command and whether new worktrees run it, as they're being edited.
+/// One script's name and command, as they're being edited.
 struct ScriptFields {
     name: Entity<InputState>,
     command: Entity<InputState>,
-    setup: bool,
 }
 
 /// A text field whose edits repaint the page, so the save button follows them.
@@ -125,11 +120,6 @@ impl ProjectSettingsView {
                 .default_value(model.settings.name.clone())
                 .placeholder(model.name().to_owned())
         });
-        let branch_prefix = cx.new(|cx| {
-            InputState::new(window, cx).default_value(model.settings.branch_prefix.clone())
-        });
-        let start_ref = cx
-            .new(|cx| InputState::new(window, cx).default_value(model.settings.start_ref.clone()));
         let scripts = model
             .settings
             .scripts
@@ -137,44 +127,33 @@ impl ProjectSettingsView {
             .map(|script| ScriptFields {
                 name: field(&script.name, "Name", window, cx),
                 command: field(&script.command, "Command", window, cx),
-                setup: script.setup,
             })
             .collect();
-        let teardown = field(&model.settings.teardown, "docker compose down", window, cx);
-        for input in [&name, &branch_prefix, &start_ref] {
-            cx.subscribe(input, |_, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    cx.notify();
-                }
-            })
-            .detach();
-        }
+        cx.subscribe(&name, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             baseline: model.settings.clone(),
             model,
             name,
-            branch_prefix,
-            start_ref,
             scripts,
-            teardown,
             sender,
             saving: false,
         }
     }
 
-    /// The scripts and teardown as the fields now say.
-    fn edited_scripts(&self, cx: &App) -> (Vec<ProjectScript>, String) {
-        (
-            self.scripts
-                .iter()
-                .map(|script| ProjectScript {
-                    name: script.name.read(cx).value().trim().to_owned(),
-                    command: script.command.read(cx).value().to_string(),
-                    setup: script.setup,
-                })
-                .collect(),
-            self.teardown.read(cx).value().to_string(),
-        )
+    /// The scripts as the fields now say.
+    fn edited_scripts(&self, cx: &App) -> Vec<ProjectScript> {
+        self.scripts
+            .iter()
+            .map(|script| ProjectScript {
+                name: script.name.read(cx).value().trim().to_owned(),
+                command: script.command.read(cx).value().to_string(),
+            })
+            .collect()
     }
 
     pub(super) fn name(&self) -> &str {
@@ -192,13 +171,7 @@ impl ProjectSettingsView {
     pub(super) fn is_dirty(&self, cx: &App) -> bool {
         self.model.settings != self.baseline
             || self.name.read(cx).value().as_str() != self.baseline.name
-            || self.branch_prefix.read(cx).value().as_str() != self.baseline.branch_prefix
-            || self.start_ref.read(cx).value().as_str() != self.baseline.start_ref
-            || self.edited_scripts(cx)
-                != (
-                    self.baseline.scripts.clone(),
-                    self.baseline.teardown.clone(),
-                )
+            || self.edited_scripts(cx) != self.baseline.scripts
     }
 
     /// Shows a failure the settings window observed for this page's project.
@@ -213,9 +186,7 @@ impl ProjectSettingsView {
 
     fn save(&mut self, window: &Window, cx: &mut Context<Self>) {
         self.model.settings.name = self.name.read(cx).value().to_string();
-        self.model.settings.branch_prefix = self.branch_prefix.read(cx).value().to_string();
-        self.model.settings.start_ref = self.start_ref.read(cx).value().to_string();
-        (self.model.settings.scripts, self.model.settings.teardown) = self.edited_scripts(cx);
+        self.model.settings.scripts = self.edited_scripts(cx);
         let result = self.model.configure().and_then(|invocation| {
             let now = Instant::now();
             self.sender
@@ -272,7 +243,6 @@ impl ProjectSettingsView {
         let content = Self::choice_content(id, selected, &label, cx);
         let field = match id {
             "project-icon" => "Icon",
-            "project-isolation" => "New sessions",
             _ => id,
         };
         let selected = selected.to_owned();
@@ -315,21 +285,10 @@ impl ProjectSettingsView {
     }
 
     fn choice_content(id: &str, value: &str, label: &str, cx: &App) -> gpui_kit::AnyElement {
-        let icon = match id {
-            "project-icon" => {
-                if value.is_empty() {
-                    "folder"
-                } else {
-                    value
-                }
-            }
-            _ => {
-                if value == "worktree" {
-                    "git-branch"
-                } else {
-                    "folder"
-                }
-            }
+        let icon = if id == "project-icon" && !value.is_empty() {
+            value
+        } else {
+            "folder"
         };
         div()
             .flex()
@@ -395,8 +354,8 @@ impl ProjectSettingsView {
             })
     }
 
-    fn project_choices(&self, cx: &Context<Self>) -> [gpui_kit::AnyElement; 2] {
-        let icon = self.choice(
+    fn icon_choice(&self, cx: &Context<Self>) -> gpui_kit::AnyElement {
+        self.choice(
             "project-icon",
             &[
                 ("", "Automatic"),
@@ -416,22 +375,7 @@ impl ProjectSettingsView {
                 settings.icon_path = None;
             },
             cx,
-        );
-        let isolation = self.choice(
-            "project-isolation",
-            &[
-                ("current", "Current checkout"),
-                ("worktree", "New worktree"),
-            ],
-            if self.model.settings.isolated {
-                "worktree"
-            } else {
-                "current"
-            },
-            |settings, value| settings.isolated = value == "worktree",
-            cx,
-        );
-        [icon, isolation]
+        )
     }
 
     fn row(
@@ -472,8 +416,7 @@ impl ProjectSettingsView {
             .child(div().flex_1().min_w_0().child(control))
     }
 
-    /// The project's scripts, each with its name, command, and whether new worktrees run it,
-    /// then adding another.
+    /// The project's scripts, each with its name and command, then adding another.
     fn render_scripts(&self, cx: &Context<Self>) -> gpui_kit::Div {
         div()
             .flex()
@@ -500,21 +443,6 @@ impl ProjectSettingsView {
                                 .disabled(self.saving)
                                 .aria_label("Script command"),
                         ),
-                    )
-                    .child(
-                        Checkbox::new(gpui_kit::SharedString::from(format!(
-                            "project-script-setup-{index}"
-                        )))
-                        .label("Setup")
-                        .checked(script.setup)
-                        .disabled(self.saving)
-                        .tooltip("Run it in each new worktree's session as it starts")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(script) = this.scripts.get_mut(index) {
-                                script.setup = !script.setup;
-                                cx.notify();
-                            }
-                        })),
                     )
                     .child(
                         Button::new(gpui_kit::SharedString::from(format!(
@@ -545,7 +473,6 @@ impl ProjectSettingsView {
                             let script = ScriptFields {
                                 name: field("", "Name", window, cx),
                                 command: field("", "Command", window, cx),
-                                setup: false,
                             };
                             this.scripts.push(script);
                             cx.notify();
@@ -562,8 +489,8 @@ impl ProjectSettingsView {
             .aria_label(label)
     }
 
-    /// The scripts a session's menu runs, and the one that runs before a worktree is removed.
-    fn scripts_section(&self, cx: &Context<Self>) -> [gpui_kit::AnyElement; 4] {
+    /// The scripts a session's menu runs.
+    fn scripts_section(&self, cx: &Context<Self>) -> [gpui_kit::AnyElement; 3] {
         [
             Self::section("Scripts", cx).into_any_element(),
             div()
@@ -572,13 +499,6 @@ impl ProjectSettingsView {
                 .child("Run from a session's menu in a new tab.")
                 .into_any_element(),
             self.render_scripts(cx).into_any_element(),
-            Self::row(
-                "Before removing a worktree",
-                "If it fails, the worktree stays.",
-                self.text_input(&self.teardown, "Before removing a worktree"),
-                cx,
-            )
-            .into_any_element(),
         ]
     }
 
@@ -637,7 +557,7 @@ impl ProjectSettingsView {
 
 impl Render for ProjectSettingsView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let [icon, isolation] = self.project_choices(cx);
+        let icon = self.icon_choice(cx);
         let dirty = self.is_dirty(cx);
         div()
             .id("project-settings-page")
@@ -662,25 +582,6 @@ impl Render for ProjectSettingsView {
                     ))
                     .child(Self::row("Icon", "", icon, cx))
                     .child(Self::row("Custom image", "", self.image_control(cx), cx))
-                    .child(Self::section("Workspace", cx))
-                    .child(Self::row(
-                        "New sessions",
-                        "Worktrees give each new session a separate checkout.",
-                        isolation,
-                        cx,
-                    ))
-                    .child(Self::row(
-                        "Branch prefix",
-                        "Empty uses bootty/.",
-                        self.text_input(&self.branch_prefix, "Branch prefix"),
-                        cx,
-                    ))
-                    .child(Self::row(
-                        "Starting ref",
-                        "Branch, tag or commit. Empty uses HEAD.",
-                        self.text_input(&self.start_ref, "Starting ref"),
-                        cx,
-                    ))
                     .children(self.scripts_section(cx))
                     .child(Self::section("Registration", cx))
                     .child(Self::row(

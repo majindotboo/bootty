@@ -926,7 +926,7 @@ fn notifications_specs() -> [SettingSpec; 3] {
     ]
 }
 
-fn terminal_environment_specs() -> [SettingSpec; 6] {
+fn terminal_environment_specs() -> [SettingSpec; 4] {
     [
         spec(
             &["session", "working-directory"],
@@ -943,34 +943,6 @@ fn terminal_environment_specs() -> [SettingSpec; 6] {
                         .as_ref()
                         .map_or_else(String::new, |path| path.display().to_string()),
                 )
-            }),
-        ),
-        spec(
-            &["session", "worktree-directory"],
-            "Worktree directory",
-            "New worktrees go in `<directory>/<repository>/<name>` on the repository's host. `~` is that host's home.",
-            "shell",
-            "SHELL",
-            text("~/.local/share/bootty/worktrees", true),
-            SettingDefault::Field(|config| {
-                SettingValue::Text(
-                    config
-                        .session
-                        .worktree_directory
-                        .clone()
-                        .unwrap_or_default(),
-                )
-            }),
-        ),
-        spec(
-            &["session", "branch-prefix"],
-            "Branch prefix",
-            "What a new worktree's branch name starts with. A project's own prefix wins.",
-            "shell",
-            "SHELL",
-            text("bootty/", true),
-            SettingDefault::Field(|config| {
-                SettingValue::Text(config.session.branch_prefix.clone())
             }),
         ),
         spec(

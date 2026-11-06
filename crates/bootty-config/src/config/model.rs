@@ -605,10 +605,6 @@ pub struct SessionConfig {
     pub shell_integration: bool,
     pub shell: Option<String>,
     pub working_directory: Option<PathBuf>,
-    /// Parent of new worktrees, resolved on the repository's host. `None` uses the host default.
-    pub worktree_directory: Option<String>,
-    /// What a new worktree's branch name starts with, unless its project sets its own.
-    pub branch_prefix: String,
     pub env: Vec<(String, String)>,
     pub term: String,
     pub colorterm: String,

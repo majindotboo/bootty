@@ -476,9 +476,6 @@ pub fn settings_row_order(category: SettingsCategory, id: &str) -> u16 {
         SettingsCategory::Terminal => match id {
             "session.shell" => 0,
             "session.working-directory" => 1,
-            "session.worktree-directory" => 2,
-            "session.branch-prefix" => 3,
-            "session.worktree-limit" => 4,
             "session.env" => 5,
             "session.term" => 10,
             "session.colorterm" => 11,

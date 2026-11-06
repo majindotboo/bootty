@@ -25,83 +25,10 @@ pub(super) struct DialogRuntime {
     pub empty_creation_scope: Option<bootty_mux::controller::SpaceId>,
     pub project_settings: Option<crate::presentation::project_editor::ProjectSettingsEditor>,
     pub creation_replies: Vec<std::sync::mpsc::Receiver<bootty_control::CommandOutcome>>,
-    pub(super) creation_drafts:
-        std::collections::BTreeMap<String, super::creation_draft::CreationDraft>,
-    pub(super) restore_creation: Option<String>,
     pub(super) automatic_creation: bool,
-    pub(super) creation_revision: u64,
-    pub(super) new_session_isolated: bool,
 }
 
 impl DialogRuntime {
-    pub(super) fn with_creation_drafts(
-        drafts: Vec<super::creation_draft::CreationDraft>,
-        selected: Option<String>,
-    ) -> Self {
-        let drafts = drafts
-            .into_iter()
-            .map(|record| (record.draft.identity.clone(), record))
-            .collect::<std::collections::BTreeMap<_, _>>();
-        Self {
-            new_session_isolated: selected
-                .as_ref()
-                .and_then(|id| drafts.get(id))
-                .is_some_and(|record| record.draft.isolation_preference),
-            creation_drafts: drafts,
-            restore_creation: selected,
-            ..Self::default()
-        }
-    }
-
-    pub(super) fn remember_creation(&mut self) {
-        let record = match self.modal.as_deref() {
-            Some(ModalDialog::NewSession(dialog)) => dialog.retained_draft(),
-            _ => None,
-        };
-        if let Some(record) = record {
-            self.new_session_isolated = record.draft.isolation_preference;
-            if record.has_content() {
-                if self.creation_drafts.get(&record.draft.identity) != Some(&record) {
-                    self.creation_drafts
-                        .insert(record.draft.identity.clone(), record);
-                    self.creation_revision = self.creation_revision.wrapping_add(1);
-                }
-            } else if self
-                .creation_drafts
-                .remove(&record.draft.identity)
-                .is_some()
-            {
-                self.creation_revision = self.creation_revision.wrapping_add(1);
-            }
-        }
-    }
-
-    pub(super) fn creation_snapshot(
-        &self,
-    ) -> (
-        std::collections::BTreeMap<String, super::creation_draft::CreationDraft>,
-        Option<String>,
-    ) {
-        let mut records = self.creation_drafts.clone();
-        let mut selected = None;
-        for dialog in [self.creation.as_deref(), self.modal.as_deref()]
-            .into_iter()
-            .flatten()
-        {
-            if let ModalDialog::NewSession(dialog) = dialog
-                && let Some(record) = dialog.retained_draft()
-            {
-                if record.has_content() {
-                    selected = Some(record.draft.identity.clone());
-                    records.insert(record.draft.identity.clone(), record);
-                } else {
-                    records.remove(&record.draft.identity);
-                }
-            }
-        }
-        (records, selected)
-    }
-
     pub(super) fn active_creation_identity(&self) -> Option<&str> {
         [self.modal.as_deref(), self.creation.as_deref()]
             .into_iter()
@@ -118,26 +45,7 @@ impl DialogRuntime {
             })
     }
 
-    pub(super) fn remove_creation_draft(&mut self, identity: &str) {
-        let visible = self.modal.as_deref().is_some_and(|dialog| match dialog {
-            ModalDialog::NewSession(dialog) => dialog
-                .draft()
-                .is_some_and(|draft| draft.identity == identity),
-            _ => false,
-        });
-        if visible {
-            self.clear();
-        }
-        if self.creation_drafts.remove(identity).is_some() {
-            self.creation_revision = self.creation_revision.wrapping_add(1);
-        }
-        if self.restore_creation.as_deref() == Some(identity) {
-            self.restore_creation = None;
-        }
-    }
-
     pub(super) fn open(&mut self, dialog: ModalDialog) {
-        self.remember_creation();
         let overlays_creation = !matches!(dialog, ModalDialog::NewSession(_))
             && matches!(self.modal.as_deref(), Some(ModalDialog::NewSession(_)));
         if !self.is_dismissible() && !overlays_creation {
@@ -153,7 +61,6 @@ impl DialogRuntime {
         if !self.is_dismissible() {
             return;
         }
-        self.remember_creation();
         self.automatic_creation = false;
         self.modal = self.creation.take();
     }

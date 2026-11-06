@@ -469,9 +469,7 @@ impl WorkspaceRuntime {
             window_id,
             created_session: matches!(
                 command,
-                MuxCommand::CreateProjectSession { .. }
-                    | MuxCommand::CreateWorktreeSession { .. }
-                    | MuxCommand::RestoreSession { .. }
+                MuxCommand::CreateProjectSession { .. } | MuxCommand::RestoreSession { .. }
             ),
             scope,
             generation: binding.mux.binding_generation(),
@@ -537,7 +535,6 @@ impl WorkspaceRuntime {
             MuxCommand::CreatePane {
                 session_id, argv, ..
             } => (session_id, argv.as_slice(), true),
-            MuxCommand::CreateWorktreeSession { session_id, .. } => (session_id, &[][..], false),
             MuxCommand::SplitPane { session_id, .. }
             | MuxCommand::RestoreSession { session_id, .. } => (session_id, &[][..], true),
             _ => return Ok(None),

@@ -1121,28 +1121,18 @@ impl GpuiWorkspace {
             let deadline = Instant::now().checked_add(Duration::from_secs(5));
             let mut captured = false;
             loop {
-                let pending = weak.update(cx, |this, _| {
-                    let drafts = this.state.save_creation_drafts(Instant::now(), true)?;
+                let Ok(sessions) = weak.update(cx, |this, _| {
                     this.state.poll_session_checkpoints();
                     if !captured && !this.state.session_checkpoint_pending() {
                         this.state
                             .checkpoint_sessions(crate::clock::ClockSnapshot::now().epoch);
                         captured = true;
                     }
-                    Ok::<_, String>((this.state.session_checkpoint_pending(), drafts))
-                });
-                let (sessions, drafts) = match pending {
-                    Ok(Ok(pending)) => pending,
-                    Ok(Err(error)) => {
-                        _ = weak.update(cx, |this, _| {
-                            this.state
-                                .record_error("Could not save session drafts", &error);
-                        });
-                        return false;
-                    }
-                    Err(_) => return false,
+                    this.state.session_checkpoint_pending()
+                }) else {
+                    return false;
                 };
-                if !sessions && !drafts {
+                if !sessions {
                     break;
                 }
                 if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
@@ -1150,9 +1140,6 @@ impl GpuiWorkspace {
                         this.state
                             .record_message("Session saving did not finish before closing");
                     });
-                    if drafts {
-                        return false;
-                    }
                     break;
                 }
                 timer.timer(Duration::from_millis(1)).await;
@@ -2677,9 +2664,7 @@ impl GpuiWorkspace {
         if self.new_session_surface(cx).is_some() {
             if let Some(sidebar) = &mut chrome_snapshot.sidebar {
                 for row in &mut sidebar.rows {
-                    if row.kind.is_session()
-                        && !matches!(row.kind, crate::gpui::SidebarRowKind::Draft { .. })
-                    {
+                    if row.kind.is_session() {
                         row.active = false;
                         row.current = false;
                     }

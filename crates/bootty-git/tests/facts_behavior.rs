@@ -122,7 +122,7 @@ fn injected_runner_keeps_git_paths_on_the_target_host() {
     let git = Git::with_runner(runner.clone());
 
     assert_eq!(
-        git.worktree_root("/remote/repo"),
+        git.checkout_root("/remote/repo"),
         Some("/remote/repo".to_owned())
     );
     let calls = runner

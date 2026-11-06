@@ -192,7 +192,7 @@ command_catalog! {
         "add_project", "folder-plus", Sessions, shown, Write, Binding, None;
     NewSession:
         "New Session",
-        "Pick a directory or worktree and start a session",
+        "Pick a project and start a session",
         "new_mux_session", "square-plus", Sessions, shown, Write, ApplicationWindow, None;
     SwitchSession:
         "Switch Session", "Fuzzy-find and jump to an open session",
@@ -206,9 +206,6 @@ command_catalog! {
     RenameSession:
         "Rename Session", "Rename the current session",
         "rename_session", "pencil", Sessions, shown, Write, Session, None;
-    CleanWorktrees:
-        "Clean Up Worktrees", "Remove worktrees no session needs, and the oldest past the worktree limit",
-        "worktrees.clean", "trash-2", Sessions, shown, Destructive, ApplicationWindow, None;
     MoveSessionToSpace:
         "Move Session to Space", "Hand the current session to another space, or to no space",
         "move_session_to_space", "shapes", Sessions, shown, Write, Session, None;

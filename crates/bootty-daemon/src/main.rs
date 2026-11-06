@@ -95,9 +95,6 @@ fn run() -> Result<ExitCode> {
         "remote-project" => {
             command_runtime::run_remote_project(arguments).map(|()| ExitCode::SUCCESS)
         }
-        "remote-worktree" => {
-            command_runtime::run_remote_worktree(arguments).map(|()| ExitCode::SUCCESS)
-        }
         command => bail!("unknown command {command:?}"),
     }
 }

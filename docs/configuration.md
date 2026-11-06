@@ -117,8 +117,6 @@ output-archives = false # private bounded previous-session snapshots
 clipboard-write-hosts = "" # opt-in host keys: local ssh:user@host:22 wsl:Ubuntu
 shell = "/bin/zsh"
 working-directory = "/Users/example/src"
-worktree-directory = "~/.local/share/bootty/worktrees"
-branch-prefix = "bootty/" # start of new worktree branch names; a project's prefix wins
 env = [{ name = "EDITOR", value = "vim" }]
 term = "xterm-bootty"
 colorterm = "truecolor"
@@ -598,39 +596,13 @@ A project header's actions menu starts a session in the project, reveals or
 copies its path, and opens **Project settings…**, the same page in a named,
 closeable settings tab. Switching tabs preserves drafts; closing an unsaved draft asks
 before discarding it.
-The page edits its name, icon or local image, and defaults for new sessions:
-current checkout or a new worktree, branch prefix and starting ref.
+The page edits its name and icon or local image.
 It also keeps the project's scripts: named shell commands that a session's menu runs in
-a new terminal tab, in that session's directory (`project.script CWD NAME`). Scripts
-marked **Setup** also run, each in its own tab, in every session that starts in a new
-worktree of the project (`project.setup CWD`), such as installing dependencies.
-**Before removing a worktree** runs in a project's worktree when worktree cleanup is about
-to remove it; if it fails, the worktree stays and the cleanup report says what it said.
+a new terminal tab, in that session's directory (`project.script CWD NAME`).
 Project settings live in the workspace database and apply to new sessions.
 
-The New Session form starts a terminal. It takes an optional command, the project,
-the Space, and the checkout: the current one, where a searchable branch picker can
-switch branches, or a new worktree with its own branch, base and folder. Unstarted
-forms are kept as drafts in the sidebar.
-
-New worktrees go in `<session.worktree-directory>/<repository>/<name>` on the
-repository's host. Unset, the directory is `~/.local/share/bootty/worktrees` on
-macOS and Linux and `%LOCALAPPDATA%\bootty\worktrees` on Windows; Development
-builds use their own namespace in place of `bootty`. A leading `~` is that host's
-home. Generated names use the task's short slug, and branches start with
-`session.branch-prefix` (default `bootty/`) unless the project sets its own. The sidebar groups a linked
-worktree's sessions under its main checkout's project.
-
-Bootty cleans up the worktrees in that directory on each host: hourly, soon after
-a session closes, and when the worktree settings change.
-A worktree no live session uses goes after its first hour.
-A worktree with uncommitted changes or unpushed commits stays.
-The unset directory is only cleaned by the identity's default configuration; another
-configuration path must set `session.worktree-directory`.
-
-`worktrees.clean` (**Clean Up Worktrees** in the palette) runs the cleanup now on
-every host and reports what each removed and kept. It asks for confirmation from
-the CLI and socket.
+The New Session form starts a terminal in a project's directory on a Space. A linked
+checkout's sessions group under its main checkout's project in the sidebar.
 
 `toggle_session_pin` pins the current saved session, or unpins it when already pinned.
 `close_session` closes it and releases its saved membership and checkpoint. Both are in the palette. Every preset binds:
@@ -756,7 +728,7 @@ or unregisters distributions.
 
 ### SSH transport
 
-Host commands on an SSH host, such as listing its projects and worktrees for New
+Host commands on an SSH host, such as listing its projects for New
 Session, run through Bootty's daemon on that host. Bootty uploads the daemon
 bundled with the app, or downloads and checksum-verifies the release daemon when
 the bundle has no matching target; the full Bootty app is not required there.

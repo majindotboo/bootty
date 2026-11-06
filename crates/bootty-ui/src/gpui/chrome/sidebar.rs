@@ -1714,19 +1714,6 @@ impl SidebarRows {
     }
 
     fn row_menu(&self, row: &SidebarRow) -> Option<ContextMenu> {
-        if let SidebarRowKind::Draft { identity, binding } = &row.kind {
-            return Some(ContextMenu::Draft {
-                identity: identity.clone(),
-                binding: binding.clone(),
-                place: super::view::SessionPlace {
-                    project: row.project_path.clone(),
-                    project_name: row.project.as_ref().map(|project| project.name.clone()),
-                    cwd: row.cwd.clone(),
-                    branch: row.branch.clone(),
-                    ..Default::default()
-                },
-            });
-        }
         if row.task.as_ref().is_some_and(|task| task.pending) {
             return None;
         }
@@ -1763,7 +1750,7 @@ impl SidebarRows {
             target,
             options,
             task,
-            place,
+            place: Box::new(place),
         })
     }
 
@@ -1832,15 +1819,7 @@ impl SidebarRows {
                     return;
                 }
                 _ = owner.update(app, |_, cx| {
-                    if let SidebarRowKind::Draft { identity, binding } = &activation_kind {
-                        let mut invocation = bootty_control::CommandInvocation::new(
-                            "session.draft.open",
-                            vec![identity.clone()],
-                            bootty_control::Caller::Internal,
-                        );
-                        invocation.target = Some(binding.clone());
-                        cx.emit(ChromeIntent::Command(invocation));
-                    } else if let Some(target) = activation_target.clone() {
+                    if let Some(target) = activation_target.clone() {
                         let intent = if matches!(
                             &activation_kind,
                             SidebarRowKind::Other(kind) if kind == "unassigned"
@@ -1888,7 +1867,7 @@ impl SidebarRows {
         let snapshot = &self.snapshot;
         let row_height = match row.kind {
             SidebarRowKind::Group => GROUP_ROW_HEIGHT,
-            SidebarRowKind::Session | SidebarRowKind::Draft { .. } => {
+            SidebarRowKind::Session => {
                 if self.snapshot.group_by_project {
                     GROUPED_SESSION_ROW_HEIGHT
                 } else {
@@ -2037,7 +2016,7 @@ pub(super) fn place_menu(scope: SpaceKey, place: &super::view::SessionPlace) -> 
         rows.push(row(
             &format!("New session on {branch}"),
             false,
-            ChromeIntent::NewSessionOnBranch {
+            ChromeIntent::NewSessionInProject {
                 scope,
                 path: path.clone(),
             },

@@ -325,8 +325,6 @@ pub struct SidebarRow {
     pub icon: Option<String>,
     pub diff: Option<SidebarDiffSummary>,
     pub pull_request: Option<SidebarPullRequest>,
-    /// The session works in a linked worktree of its project.
-    pub worktree: bool,
     /// The names of its project's scripts, to run from its menu.
     pub scripts: Vec<String>,
     pub color: Rgba,
@@ -364,10 +362,6 @@ pub struct SidebarProject {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SidebarRowKind {
     Group,
-    Draft {
-        identity: String,
-        binding: bootty_control::CommandTarget,
-    },
     Session,
     Detail,
     Progress {
@@ -381,7 +375,7 @@ pub enum SidebarRowKind {
 impl SidebarRowKind {
     #[must_use]
     pub const fn is_session(&self) -> bool {
-        matches!(self, Self::Session | Self::Draft { .. })
+        matches!(self, Self::Session)
     }
 }
 
@@ -536,10 +530,6 @@ pub enum ChromeIntent {
     },
     /// Start a new session in a session's project.
     NewSessionInProject {
-        scope: SpaceKey,
-        path: String,
-    },
-    NewSessionOnBranch {
         scope: SpaceKey,
         path: String,
     },

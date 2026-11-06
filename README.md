@@ -1,13 +1,13 @@
 # Bootty
 
 Bootty is a native, GPU-rendered terminal workspace. It keeps your terminals,
-sessions, and Git worktrees together in one desktop app.
+sessions, and projects together in one desktop app.
 
 - **Spaces** save your workspace: its sessions, tabs, and splits. Bootty's
   native mux server owns processes locally or on an SSH host. Shells and full-screen programs
   survive quitting, crashing, or updating the desktop app.
 - **Sessions** sit in the left sidebar with their project, branch, pull request,
-  and diff counts. Start a session on a new worktree from the New Session form.
+  and diff counts.
 - **Remote Spaces** run the same native mux server on the SSH host over QUIC,
   with TCP/TLS and SSH fallback. Panes survive connection loss and app restarts.
   File transfers, forwarded ports, and remote Git use the host daemon too.
@@ -41,7 +41,6 @@ Production state; use `mise run launch` for development and UI checks.
 | Task | Guide |
 | --- | --- |
 | Configure the app and keybindings | [Configuration](docs/configuration.md) · [Sample config](docs/sample-config.toml) |
-| Work with projects, branches, and worktrees | [Git workflows](docs/git-workflows.md) |
 | Automate Bootty | [Commands, targets, and events](docs/automation.md) |
 | Move files and forward ports | [Transfers and forwards](docs/transfers.md) |
 | Use multiline editing and host history | [Shell assistance](docs/shell-assistance.md) |

@@ -149,11 +149,6 @@ pub enum MuxCommand {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         argv: Option<Vec<String>>,
     },
-    CreateWorktreeSession {
-        session_id: String,
-        cwd: String,
-        tag: MuxSessionTag,
-    },
     RenameSession {
         session_id: String,
         name: String,
@@ -211,7 +206,6 @@ impl MuxCommand {
             | Self::KillPane { session_id, .. }
             | Self::ClosePane { session_id, .. }
             | Self::CreateProjectSession { session_id, .. }
-            | Self::CreateWorktreeSession { session_id, .. }
             | Self::RenameSession { session_id, .. }
             | Self::DitchSession { session_id }
             | Self::StampSession { session_id, .. } => session_id,

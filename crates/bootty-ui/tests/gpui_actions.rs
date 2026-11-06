@@ -1,6 +1,5 @@
 #![cfg(test)]
 
-use bootty_ui::gpui as bootty_gpui;
 use std::{cell::RefCell, rc::Rc};
 
 use bootty_config::config::{AppearanceMode, InputConfig};
@@ -26,7 +25,7 @@ use pretty_assertions::assert_eq;
 use rstest::rstest;
 
 #[rstest]
-fn new_session_worktree_step_does_not_inherit_the_directory_filter() {
+fn directory_picker_starts_a_session_in_the_chosen_directory() {
     use bootty_ui::presentation::dialogs::{NewSessionDialog, NewSessionPickerEvent};
 
     let directory = assert_fs::TempDir::new().expect("temporary session directory");
@@ -36,35 +35,26 @@ fn new_session_worktree_step_does_not_inherit_the_directory_filter() {
         .expect("canonical session directory")
         .to_string_lossy()
         .into_owned();
-    let occupied = vec![path.clone()];
     let mut dialog = NewSessionDialog::open();
     let id = dialog.spec().id;
-    dialog.apply(
-        &DialogIntent::TextChanged {
-            dialog: id,
-            value: path.clone(),
-        },
-        &occupied,
-    );
-    let activate = |spec: bootty_gpui::DialogSpec| {
-        let row = spec
-            .rows
-            .iter()
-            .find(|row| row.action.is_some())
-            .expect("selectable choice");
-        let action = row.action.as_ref().expect("choice action");
-        DialogIntent::Activate {
-            dialog: spec.id,
+    dialog.apply(&DialogIntent::TextChanged {
+        dialog: id,
+        value: path.clone(),
+    });
+    let spec = dialog.spec();
+    let row = spec
+        .rows
+        .iter()
+        .find(|row| row.action.is_some())
+        .expect("selectable choice");
+    let action = row.action.as_ref().expect("choice action");
+    assert!(matches!(
+        dialog.apply(&DialogIntent::Activate {
+            dialog: spec.id.clone(),
             row: row.id.clone(),
             action: action.id.clone(),
             payload: action.payload.clone(),
-        }
-    };
-    assert!(dialog.apply(&activate(dialog.spec()), &occupied).is_none());
-    let worktrees = dialog.spec();
-    assert_eq!(worktrees.text.as_deref(), Some(""));
-    assert!(matches!(
-        dialog.apply(&activate(worktrees), &occupied),
+        }),
         Some(NewSessionPickerEvent::CreateSession { cwd }) if cwd == path
     ));
 }

@@ -460,7 +460,6 @@ binding_actions! {
     SelectSession(value: u32) => "select_session" [positive_index],
     MoveSession(value: i32) => "move_session" [number(parse_i32)],
     RenameSession => "rename_session" [unit],
-    CleanWorktrees => "worktrees.clean" [unit],
     TogglePinSession => "toggle_session_pin" [unit],
     CloseSession => "close_session" [unit],
     MoveSessionToSpace => "move_session_to_space" [unit],

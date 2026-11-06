@@ -65,16 +65,11 @@ pub(super) type TabBounds = Rc<RefCell<HashMap<String, Bounds<Pixels>>>>;
 
 #[derive(Clone)]
 pub(super) enum ContextMenu {
-    Draft {
-        identity: String,
-        binding: bootty_control::CommandTarget,
-        place: SessionPlace,
-    },
     Session {
         target: SessionTarget,
         options: SessionContextSnapshot,
         task: Option<SidebarTask>,
-        place: SessionPlace,
+        place: Box<SessionPlace>,
     },
     /// Several saved sessions chosen together, each with whether its terminal is live.
     Sessions {
@@ -449,24 +444,6 @@ impl GpuiChrome {
 
     fn menu_rows(menu: &ContextMenu) -> Vec<MenuRow> {
         match menu {
-            ContextMenu::Draft {
-                identity, binding, ..
-            } => {
-                let mut invocation = bootty_control::CommandInvocation::new(
-                    "session.draft.discard",
-                    vec![identity.clone()],
-                    bootty_control::Caller::Internal,
-                );
-                invocation.target = Some(binding.clone());
-                vec![MenuRow {
-                    label: "Discard draft".into(),
-                    enabled: true,
-                    destructive: true,
-                    starts_group: false,
-                    confirm: None,
-                    intent: ChromeIntent::Command(invocation),
-                }]
-            }
             ContextMenu::Session {
                 target,
                 options,
@@ -971,7 +948,7 @@ impl SessionMenuRows {
         let mut rows = Self::default();
         for row in GpuiChrome::menu_rows(context) {
             match &row.intent {
-                ChromeIntent::NewSessionOnBranch { .. } => rows.start.push(row),
+                ChromeIntent::NewSessionInProject { .. } => rows.start.push(row),
                 ChromeIntent::CopyText(_) => rows.copy.push(row),
                 ChromeIntent::RenameSavedSession(_)
                 | ChromeIntent::SessionContext {
@@ -1006,11 +983,8 @@ pub(super) fn popup_session_menu(
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     menu = popup_focus_context(menu, owner, cx);
-    if let ContextMenu::Draft { binding, place, .. } = context {
-        return popup_draft_menu(menu, context, binding, place, owner, window, cx);
-    }
     let (task, place) = match context {
-        ContextMenu::Session { task, place, .. } => (task.as_ref(), Some(place)),
+        ContextMenu::Session { task, place, .. } => (task.as_ref(), Some(&**place)),
         ContextMenu::Sessions { .. } => (None, None),
         _ => return popup_menu(menu, context, owner),
     };
@@ -1099,35 +1073,6 @@ fn popup_project_filter(
                 });
             }),
     )
-}
-
-fn popup_draft_menu(
-    menu: PopupMenu,
-    context: &ContextMenu,
-    binding: &bootty_control::CommandTarget,
-    place: &SessionPlace,
-    owner: &gpui_kit::WeakEntity<GpuiChrome>,
-    window: &mut Window,
-    cx: &mut Context<PopupMenu>,
-) -> PopupMenu {
-    let copy: Vec<_> = sidebar::place_copy_menu(place);
-    let mut menu = menu;
-    if !copy.is_empty() {
-        let owner = owner.clone();
-        menu = menu.submenu("Copy", window, cx, move |menu, _, _| {
-            append_menu_rows(menu, &copy, &owner)
-        });
-    }
-    if let Some(project) = &place.project {
-        menu = append_menu_row(menu, sidebar::project_settings_row(project, binding), owner);
-    }
-    for row in GpuiChrome::menu_rows(context)
-        .into_iter()
-        .filter(|row| row.destructive)
-    {
-        menu = append_menu_row(menu.separator(), row, owner);
-    }
-    menu
 }
 
 fn append_menu_rows(
@@ -1256,7 +1201,7 @@ fn menu_icon(intent: &ChromeIntent) -> Option<gpui_kit::assets::IconName> {
             action: super::SessionContextAction::MoveToSpace,
             ..
         } => Some(I::FolderInput),
-        ChromeIntent::NewSessionOnBranch { .. } => Some(I::MessageSquarePlus),
+        ChromeIntent::NewSessionInProject { .. } => Some(I::MessageSquarePlus),
         ChromeIntent::CopyText(_) => Some(I::Copy),
         ChromeIntent::Command(invocation) => command_icon(&invocation.command),
         ChromeIntent::Commands(invocations) => command_icon(&invocations.first()?.command),

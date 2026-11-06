@@ -59,68 +59,6 @@ pub fn run_remote_project(args: &[String]) -> Result<()> {
 
 /// # Errors
 /// Returns argument, host, or command execution errors.
-pub fn run_remote_worktree(args: &[String]) -> Result<()> {
-    let Some((command, arguments)) = args.split_first() else {
-        bail!("remote-worktree requires a command")
-    };
-    match command.as_str() {
-        "list" => {
-            let project = required_option(arguments, "--project")?;
-            let open_cwds = option_values(arguments, "--open-cwd")?;
-            let mut entries = bootty_git::discover_worktree_picker_entries(&project);
-            bootty_git::mark_occupied_worktrees(&mut entries, &open_cwds);
-            println!("{}", serde_json::to_string(&entries)?);
-        }
-        "create" => {
-            let project = required_option(arguments, "--project")?;
-            let request = if arguments
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .any(|pair| pair[0] == "--request")
-            {
-                serde_json::from_str::<bootty_git::WorktreeRequest>(&required_option(
-                    arguments,
-                    "--request",
-                )?)?
-            } else {
-                bootty_git::WorktreeRequest {
-                    branch: required_option(arguments, "--branch")?,
-                    name: None,
-                    start_ref: None,
-                    directory: None,
-                }
-            };
-            println!(
-                "{}",
-                serde_json::to_string(
-                    &bootty_git::Git::new()
-                        .create_worktree(&project, &request)
-                        .map_err(anyhow::Error::msg)?
-                )?
-            );
-        }
-        "clean" => {
-            let request = serde_json::from_str::<bootty_git::CleanupRequest>(&required_option(
-                arguments,
-                "--request",
-            )?)?;
-            println!(
-                "{}",
-                serde_json::to_string(
-                    &bootty_git::Git::new()
-                        .clean_worktrees(&request)
-                        .map_err(anyhow::Error::msg)?
-                )?
-            );
-        }
-        _ => bail!("unknown remote-worktree command {command:?}"),
-    }
-    Ok(())
-}
-
-/// # Errors
-/// Returns argument, host, or command execution errors.
 pub fn parse_application_identity(
     mut args: Vec<String>,
 ) -> Result<(ApplicationIdentity, Vec<String>)> {
@@ -157,19 +95,6 @@ fn required_option(args: &[String], name: &str) -> Result<String> {
         bail!("options require values")
     }
     value.with_context(|| format!("missing option {name}"))
-}
-
-fn option_values(args: &[String], name: &str) -> Result<Vec<String>> {
-    let (chunks, remainder) = args.as_chunks::<2>();
-    let values = chunks
-        .iter()
-        .filter(|chunk| chunk[0] == name)
-        .map(|chunk| chunk[1].clone())
-        .collect();
-    if !remainder.is_empty() {
-        bail!("options require values")
-    }
-    Ok(values)
 }
 
 fn reject_extra<'a>(mut args: impl Iterator<Item = &'a String>) -> Result<()> {

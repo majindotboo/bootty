@@ -24,9 +24,6 @@ mod commands;
 #[path = "../config_editor.rs"]
 mod config_editor;
 
-#[path = "../creation_drafts.rs"]
-mod creation_drafts;
-
 #[path = "../error_notices.rs"]
 mod error_notices;
 

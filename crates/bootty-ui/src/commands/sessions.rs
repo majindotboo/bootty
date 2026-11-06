@@ -3,9 +3,6 @@ use bootty_mux::workspace::{SESSION_ARGV_MAX_ELEMENTS, SESSION_NAME_MAX_BYTES};
 
 command_actions! {
     SessionAction {
-        ListDrafts => ("session.drafts", "List session drafts", [], Read),
-        OpenDraft => ("session.draft.open", "Open session draft", ["identity"], Write),
-        DiscardDraft => ("session.draft.discard", "Discard session draft", ["identity"], Destructive),
         ListProjects => ("project.list", "List registered projects", [], Read),
         RemoveProject => ("project.remove", "Remove project registration", ["cwd"], Write),
         RegisterProject => ("project.register", "Register project", ["cwd"], Write),
@@ -13,7 +10,6 @@ command_actions! {
         ConfigureProject => ("project.configure", "Configure project", ["cwd", "settings"], Write),
         ToggleProjectCollapsed => ("project.toggle_collapsed", "Toggle project disclosure", ["cwd"], Write),
         RunScript => ("project.script", "Run Project Script", ["cwd", "name"], Write),
-        RunSetup => ("project.setup", "Run Project Setup Scripts", ["cwd"], Write),
         ListSaved => ("session.saved", "List saved sessions", [], Read),
         SetTitle => ("session.set_title", "Edit session title", ["identity", "title", "expected_title"], Write),
         Pin => ("session.pin", "Pin session", ["identity"], Write),
@@ -68,18 +64,13 @@ impl SessionAction {
         let (id, title, names, mutation) = self.metadata();
         let arguments = self.argument_schema(names);
         let (description, target) = match self {
-            Self::ListDrafts | Self::OpenDraft | Self::DiscardDraft => (
-                "Read, open or discard an unfinished session in the captured Space, without starting a provider or terminal.".to_owned(),
-                Some(ResourceKind::Binding),
-            ),
             Self::ListProjects => ("List projects registered on the exact Space's host, including empty projects.".to_owned(), Some(ResourceKind::Binding)),
             Self::RemoveProject => ("Remove registration and project defaults from the exact Space, preserving files and saved sessions.".to_owned(), Some(ResourceKind::Binding)),
             Self::RegisterProject => ("Register an absolute project path on the exact Space's host without starting a session.".to_owned(), Some(ResourceKind::Binding)),
             Self::EditProject => ("Edit the registered project's name, icon and new-session defaults.".to_owned(), Some(ResourceKind::Binding)),
-            Self::ConfigureProject => ("Commit project settings JSON on the exact Space; applies to new sessions and worktrees.".to_owned(), Some(ResourceKind::Binding)),
+            Self::ConfigureProject => ("Commit project settings JSON on the exact Space; applies to new sessions.".to_owned(), Some(ResourceKind::Binding)),
             Self::ToggleProjectCollapsed => ("Toggle the registered project's sidebar disclosure without changing its sessions.".to_owned(), Some(ResourceKind::Binding)),
             Self::RunScript => ("Run the registered project's script with this name in a new terminal tab of the target terminal's session, in that session's directory.".to_owned(), Some(ResourceKind::Terminal)),
-            Self::RunSetup => ("Run each of the registered project's setup scripts in a new terminal tab of the target terminal's session, in that session's directory, as a new worktree's session does when it starts.".to_owned(), Some(ResourceKind::Terminal)),
             Self::ListSaved => ("List saved identities, purpose titles, project directories and observed attachments in the exact Space. Attachment is not agent or process status.".to_owned(), Some(ResourceKind::Binding)),
             Self::SetTitle => ("Edit the saved purpose title without changing the backend name or starting/stopping any terminal. The title must be 1–256 bytes without control characters. An optional expected_title prevents a delayed generated title from replacing a newer edit.".to_owned(), Some(ResourceKind::Binding)),
             Self::Pin => ("Pin saved work. Preserve its identity, order and terminal attachment.".to_owned(), Some(ResourceKind::Binding)),

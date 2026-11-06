@@ -9,26 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::favorite_paths;
 
-pub use crate::worktree::{
-    Git, WorktreeStatus, delete_branch, detach_head, diff_counts, discover_worktree_picker_entries,
-    head_branch, main_worktree, mark_occupied_worktrees, remove_worktree, status,
-    suggested_session_name, trunk_branch, worktree_count, worktree_directory,
-    worktree_directory_from, worktree_root,
-};
-
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProjectPickerEntry {
     pub path: String,
     pub favorite: bool,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct WorktreePickerEntry {
-    pub label: String,
-    pub path: Option<String>,
-    pub is_new: bool,
-    #[serde(default)]
-    pub occupied: bool,
 }
 
 #[must_use]
@@ -126,13 +110,13 @@ fn push_project_children(entries: &mut Vec<ProjectPickerEntry>, parent: &Path) {
     };
     for child in children.flatten() {
         let child_path = child.path();
-        if child_path.is_dir() && !is_hidden_path(&child_path) && !is_linked_worktree(&child_path) {
+        if child_path.is_dir() && !is_hidden_path(&child_path) && !is_linked_checkout(&child_path) {
             push_project_entry(entries, &child_path, false);
         }
     }
 }
 
-fn is_linked_worktree(dir: &Path) -> bool {
+fn is_linked_checkout(dir: &Path) -> bool {
     dir.join(".git").is_file()
 }
 
@@ -164,14 +148,6 @@ fn expand_home_path(home: Option<&Path>, path: &str) -> PathBuf {
         .or_else(|| path.strip_prefix(r"~\"))
         .and_then(|path| home.map(|home| home.join(path)))
         .unwrap_or_else(|| PathBuf::from(path))
-}
-
-pub(crate) fn main_worktree_entry(project_path: &str) -> WorktreePickerEntry {
-    WorktreePickerEntry {
-        label: format!("{} (main)", session_name_for_path(project_path)),
-        path: Some(project_path.to_owned()),
-        ..WorktreePickerEntry::default()
-    }
 }
 
 pub(crate) fn session_name_for_path(path: &str) -> &str {

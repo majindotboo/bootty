@@ -212,8 +212,8 @@ pub struct BindingRuntime {
     pub(super) pending_generated_names: HashMap<String, PendingGeneratedName>,
     /// Session roots already resolved, keyed by the raw directory the backend reported.
     ///
-    /// Resolving one forks `git` to find the worktree root, and the frame path asks for every
-    /// session's directory on every frame. A directory's worktree root only changes when its
+    /// Resolving one forks `git` to find the checkout root, and the frame path asks for every
+    /// session's directory on every frame. A directory's checkout root only changes when its
     /// repository layout does, so each one is resolved once per run; restart bootty if a path's
     /// layout changes underneath it.
     session_roots: RefCell<HashMap<String, String>>,
@@ -1558,11 +1558,6 @@ impl WorkspaceRuntime {
                 cwd,
                 tag,
                 ..
-            }
-            | MuxCommand::CreateWorktreeSession {
-                session_id,
-                cwd,
-                tag,
             } => tag
                 .identity
                 .clone()

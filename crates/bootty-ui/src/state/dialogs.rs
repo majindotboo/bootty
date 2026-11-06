@@ -145,19 +145,11 @@ impl AppState {
             Space(SpacePickerEvent),
             Theme(ThemePickerEvent),
         }
-        let groups = self.session_finder_groups();
-        let open_cwds = groups
-            .iter()
-            .flat_map(|group| &group.sessions)
-            .filter_map(|session| session.anchor.cwd.clone())
-            .collect::<Vec<_>>();
         let Some(mut dialog) = self.dialogs.take() else {
             return;
         };
         let event = match dialog.as_mut() {
-            ModalDialog::NewSession(dialog) => {
-                dialog.apply(intent, &open_cwds).map(Event::NewSession)
-            }
+            ModalDialog::NewSession(dialog) => dialog.apply(intent).map(Event::NewSession),
             ModalDialog::SpaceEditor(_) => None,
             ModalDialog::Capture(dialog) => dialog.apply(intent).map(Event::Capture),
             ModalDialog::ThemeEditor(dialog) => dialog.apply(intent).map(Event::ThemeEditor),
@@ -510,29 +502,16 @@ impl AppState {
         ));
     }
 
-    /// Accepted creation owns removal of its chooser and draft; this is not cancellation.
+    /// Accepted creation owns removal of its chooser; this is not cancellation.
     fn complete_creation(&mut self) {
-        let identity = match self.dialogs.current() {
-            Some(ModalDialog::NewSession(dialog)) => {
-                dialog.draft().map(|draft| draft.identity.clone())
-            }
-            _ => None,
-        };
         self.dialogs.clear();
-        if let Some(identity) = identity {
-            self.dialogs.remove_creation_draft(&identity);
-        }
     }
 
     fn session_started(
         &mut self,
         value: &serde_json::Value,
         warnings: Vec<bootty_control::CommandWarning>,
-        setup: Option<String>,
     ) {
-        if let Some(repository) = setup {
-            self.run_setup_scripts(value, repository);
-        }
         // The new session becomes the selected one, as a new tab does.
         if let Some(Err(outcome)) = value
             .get("terminal")
@@ -561,22 +540,6 @@ impl AppState {
 
     pub fn apply_picker_event(&mut self, event: NewSessionPickerEvent) {
         match event {
-            NewSessionPickerEvent::Branches(invocation) => self.request_branches(invocation),
-            NewSessionPickerEvent::CheckoutBranch(invocation) => {
-                let now = std::time::Instant::now();
-                let result = self.app_command_sender(Caller::Internal).submit(
-                    invocation.clone(),
-                    now.checked_add(std::time::Duration::from_secs(30))
-                        .unwrap_or(now),
-                    bootty_control::CommandCancellation::new(),
-                );
-                if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
-                    match result {
-                        Ok(receiver) => dialog.checkout_started(invocation, receiver),
-                        Err(error) => dialog.checkout_failed(&invocation, &format!("{error:?}")),
-                    }
-                }
-            }
             NewSessionPickerEvent::Submit(invocation) => {
                 let cancellation = bootty_control::CommandCancellation::new();
                 let now = std::time::Instant::now();
@@ -593,11 +556,9 @@ impl AppState {
                     }
                 }
             }
-            NewSessionPickerEvent::Started {
-                value,
-                warnings,
-                setup,
-            } => self.session_started(&value, warnings, setup),
+            NewSessionPickerEvent::Started { value, warnings } => {
+                self.session_started(&value, warnings);
+            }
             NewSessionPickerEvent::Close => {
                 self.dismiss_modal_dialog();
             }
@@ -615,9 +576,6 @@ impl AppState {
             }
             NewSessionPickerEvent::Error(error) => {
                 self.record_error("Could not start the session", &error);
-            }
-            NewSessionPickerEvent::CreateWorktree { repo, request } => {
-                self.create_picked_worktree(repo, request);
             }
             NewSessionPickerEvent::CreateSession { cwd } => {
                 let bootty_mux::command::MuxCommand::CreateProjectSession {
@@ -647,32 +605,6 @@ impl AppState {
         }
     }
 
-    fn create_picked_worktree(&mut self, repo: String, request: bootty_git::WorktreeRequest) {
-        let Some(prepared) = self.dialogs.current_mut().and_then(|dialog| match dialog {
-            ModalDialog::NewSession(dialog) => Some(dialog.start_create_worktree(repo, request)),
-            _ => None,
-        }) else {
-            return;
-        };
-        let result = prepared.and_then(|invocation| {
-            let now = std::time::Instant::now();
-            self.app_command_sender(Caller::Internal)
-                .submit(
-                    invocation,
-                    now.checked_add(std::time::Duration::from_secs(120))
-                        .unwrap_or(now),
-                    bootty_control::CommandCancellation::new(),
-                )
-                .map_err(|error| format!("Worktree creation could not start: {error:?}"))
-        });
-        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
-            match result {
-                Ok(reply) => dialog.worktree_started(reply),
-                Err(error) => dialog.failed(error),
-            }
-        }
-    }
-
     fn register_picked_project(&mut self, path: String) {
         let target = match self.dialogs.current() {
             Some(ModalDialog::NewSession(dialog)) => dialog.registration_target(),
@@ -695,43 +627,6 @@ impl AppState {
         if matches!(outcome, bootty_control::CommandOutcome::Success { .. }) {
             self.dismiss_modal_dialog();
         }
-    }
-
-    fn request_branches(&mut self, invocation: bootty_control::CommandInvocation) {
-        let now = std::time::Instant::now();
-        let result = self.app_command_sender(Caller::Internal).submit(
-            invocation.clone(),
-            now.checked_add(std::time::Duration::from_secs(30))
-                .unwrap_or(now),
-            bootty_control::CommandCancellation::new(),
-        );
-        if let Some(ModalDialog::NewSession(dialog)) = self.dialogs.current_mut() {
-            match result {
-                Ok(receiver) => dialog.branches_started(invocation, receiver),
-                Err(error) => dialog.branches_failed(
-                    &invocation,
-                    format!("The branch catalog is unavailable: {error:?}"),
-                ),
-            }
-        }
-    }
-
-    /// Runs the project's setup scripts in the session that just started in a new worktree of
-    /// `repository`, each in its own tab.
-    fn run_setup_scripts(&mut self, value: &serde_json::Value, repository: String) {
-        let Some(terminal) = value
-            .get("terminal")
-            .and_then(|terminal| serde_json::from_value(terminal.clone()).ok())
-        else {
-            return;
-        };
-        let mut setup = bootty_control::CommandInvocation::new(
-            "project.setup",
-            vec![repository],
-            Caller::Internal,
-        );
-        setup.target = Some(terminal);
-        self.commands.queue(setup);
     }
 
     pub(crate) fn modal_dialog_dismissible(&self) -> bool {
@@ -761,18 +656,9 @@ impl AppState {
         restored_preview
     }
     pub(super) fn open_new_mux_session_dialog(&mut self) {
-        self.open_session_creation_dialog(None, None);
+        self.open_session_creation_dialog(None);
     }
     pub(crate) fn show_creation_for_empty_workspace(&mut self) {
-        if let Some(identity) = self.dialogs.restore_creation.take()
-            && let Some(record) = self.dialogs.creation_drafts.get(&identity)
-        {
-            let scope = record.draft.scope;
-            if let Err(error) = self.open_creation_draft(scope, &identity) {
-                self.record_error("Could not restore the session draft", &error);
-            }
-            return;
-        }
         let binding = &self.workspace.active.binding;
         if !binding.member_sessions().is_empty() {
             self.dialogs.empty_creation_scope = None;
@@ -789,62 +675,16 @@ impl AppState {
             && binding.mux().unavailable_reason().is_none()
         {
             self.dialogs.empty_creation_scope = Some(scope);
-            self.open_session_creation_dialog(None, None);
+            self.open_session_creation_dialog(None);
             self.dialogs.automatic_creation = true;
         }
     }
     /// Opens the new-session form in a Space's directory, such as a session's project.
     pub fn open_new_session_dialog_in(&mut self, scope: SpaceId, cwd: String) -> bool {
-        self.open_session_creation_dialog(Some((scope, cwd)), None);
+        self.open_session_creation_dialog(Some((scope, cwd)));
         true
     }
-    pub(crate) fn open_new_session_on_branch(&mut self, scope: SpaceId, cwd: String) -> bool {
-        self.open_new_session_dialog_in(scope, cwd);
-        self.apply_dialog_intent(
-            &DialogIntent::FieldChanged {
-                dialog: crate::gpui::DialogId::new(crate::presentation::dialogs::NEW_SESSION_ID),
-                field: "isolation".into(),
-                value: "Current checkout".into(),
-            },
-            &mut Vec::new(),
-        );
-        true
-    }
-    pub(crate) fn open_creation_draft(
-        &mut self,
-        scope: SpaceId,
-        identity: &str,
-    ) -> Result<(), String> {
-        let (records, _) = self.dialogs.creation_snapshot();
-        let record = records
-            .get(identity)
-            .filter(|record| record.draft.scope == scope)
-            .cloned()
-            .ok_or("This draft is no longer available in this Space")?;
-        if self
-            .workspace
-            .binding(scope)
-            .and_then(|binding| binding.sessions().get(identity))
-            .is_some_and(|saved| saved.terminal_snapshot.is_some())
-            && let Some(invocation) =
-                self.saved_session_invocation(scope, "session.reopen", vec![identity.to_owned()])
-        {
-            self.commands.queue(invocation);
-            return Ok(());
-        }
-        if scope != self.mux_scope() && !self.activate_space_from_ui(scope) {
-            return Err("The draft's Space could not be opened; the draft is still saved".into());
-        }
-        let place = Some((scope, record.draft.cwd.clone()));
-        self.open_session_creation_dialog(place, Some(record));
-        Ok(())
-    }
-
-    fn open_session_creation_dialog(
-        &mut self,
-        place: Option<(SpaceId, String)>,
-        retained: Option<super::creation_draft::CreationDraft>,
-    ) {
+    fn open_session_creation_dialog(&mut self, place: Option<(SpaceId, String)>) {
         use crate::presentation::new_session_form::NewSessionForm;
         self.close_overlay_dialogs();
         self.dialogs.automatic_creation = false;
@@ -869,16 +709,8 @@ impl AppState {
             self.record_message("The current host cannot create a session");
             return;
         };
-        let draft = retained.as_ref().map_or_else(
-            || self.session_creation_draft(destination),
-            |record| record.draft.clone(),
-        );
+        let draft = Self::session_creation_draft(destination);
         let mut form = NewSessionForm::new(draft, destinations);
-        if let Some(record) = retained {
-            form.set_project_path(record.project);
-        }
-        form.set_worktree_directory(self.config().session.worktree_directory.clone());
-        form.set_branch_prefix(self.config().session.branch_prefix.clone());
         form.set_project_defaults(
             self.workspace
                 .spaces()
@@ -893,7 +725,6 @@ impl AppState {
         self.show_overlay(ModalDialog::NewSession(Box::new(dialog)));
     }
     fn session_creation_draft(
-        &self,
         destination: &crate::presentation::new_session_form::SessionDestination,
     ) -> crate::presentation::new_session_form::NewSessionDraft {
         use crate::presentation::new_session_form::NewSessionDraft;
@@ -904,11 +735,6 @@ impl AppState {
             scope: destination.scope,
             cwd: destination.cwd.clone(),
             projectless: false,
-            isolated: self.dialogs.new_session_isolated,
-            isolation_preference: self.dialogs.new_session_isolated,
-            branch: String::new(),
-            folder: String::new(),
-            start_ref: String::new(),
             suffix: format!("{suffix:x}"),
             identity: bootty_mux::snapshot::new_session_identity(),
             directories: std::collections::HashMap::new(),

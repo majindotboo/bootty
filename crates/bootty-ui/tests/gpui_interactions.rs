@@ -137,7 +137,6 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 icon: None,
                 diff: None,
                 pull_request: None,
-                worktree: false,
                 scripts: Vec::new(),
                 color: color(220, 220, 230),
                 dim_color: color(150, 150, 160),
@@ -176,7 +175,6 @@ fn sidebar_snapshot(target: SessionTarget) -> SidebarSnapshot {
                 icon: Some("folder".to_owned()),
                 diff: None,
                 pull_request: None,
-                worktree: false,
                 scripts: Vec::new(),
                 color: color(180, 180, 190),
                 dim_color: color(130, 130, 140),
@@ -342,75 +340,6 @@ fn sidebar_tab_space_and_status_clicks_emit_their_typed_actions(cx: &mut TestApp
             ]
         );
     });
-}
-
-#[gpui_kit::test]
-fn draft_sidebar_rows_open_without_a_backend_session_target(cx: &mut TestAppContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let mut snapshot = chrome_snapshot();
-    let sidebar = snapshot.sidebar.as_mut().expect("sidebar");
-    let binding = bootty_control::CommandTarget {
-        kind: bootty_control::ResourceKind::Binding,
-        handle: "captured-binding".into(),
-        generation: 7,
-    };
-    let mut row = sidebar.rows[0].clone();
-    row.key = "draft-idea".into();
-    row.text = "Unfinished idea".into();
-    row.kind = SidebarRowKind::Draft {
-        identity: "draft-identity".into(),
-        binding: binding.clone(),
-    };
-    row.target = None;
-    row.task = None;
-    row.context = None;
-    row.reorder_anchor = None;
-    row.trailing = Some("Draft".into());
-    row.cwd = Some("/tmp/worktrees/draft".into());
-    row.project_path = Some("/tmp/project".into());
-    row.branch = Some("topic/draft".into());
-    row.selectable = true;
-    sidebar.rows = vec![row];
-    let (probe, cx) =
-        cx.add_window_view(move |window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
-    draw_chrome(cx);
-    let bounds = cx
-        .debug_bounds("sidebar-row-hitbox-draft-idea")
-        .expect("draft navigation row");
-    cx.simulate_click(bounds.center(), Modifiers::none());
-    draw_chrome(cx);
-    probe.update(cx, |probe, _| {
-        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-            ChromeIntent::Command(invocation) if invocation.command == "session.draft.open"
-                && invocation.arguments == ["draft-identity"] && invocation.target.as_ref() == Some(&binding)
-        )));
-    });
-    let mut settings = bootty_control::CommandInvocation::new(
-        "project.edit",
-        vec!["/tmp/project".into()],
-        bootty_control::Caller::Internal,
-    );
-    settings.target = Some(binding.clone());
-    for (keys, expected) in [
-        (
-            "down right enter",
-            ChromeIntent::CopyText("/tmp/worktrees/draft".into()),
-        ),
-        (
-            "down right down enter",
-            ChromeIntent::CopyText("topic/draft".into()),
-        ),
-        ("down down enter", ChromeIntent::Command(settings)),
-    ] {
-        probe.update(cx, |probe, _| probe.intents.borrow_mut().clear());
-        cx.simulate_mouse_down(bounds.center(), MouseButton::Right, Modifiers::none());
-        draw_chrome(cx);
-        cx.simulate_keystrokes(keys);
-        draw_chrome(cx);
-        probe.update(cx, |probe, _| {
-            assert_eq!(probe.intents.borrow().as_slice(), [expected]);
-        });
-    }
 }
 
 fn fill_sidebar_sessions(sidebar: &mut SidebarSnapshot) {
@@ -791,7 +720,7 @@ fn task_row_snapshot(grouped: bool) -> ChromeSnapshot {
         artwork: None,
     });
     template.project_path = Some("/projects/bootty".to_owned());
-    template.branch = Some("session-specific-long-worktree-branch".to_owned());
+    template.branch = Some("session-specific-long-branch-name".to_owned());
     sidebar.rows = [
         ("Working 7s", "circle-dashed"),
         ("Input", "message-circle-question-mark"),
@@ -1213,7 +1142,7 @@ fn session_menus_offer_the_sessions_place(cx: &mut TestAppContext) {
     let row = &mut snapshot.sidebar.as_mut().expect("sidebar").rows[0];
     row.project_path = Some("/tmp/project".to_owned());
     row.branch = Some("feature/rail".to_owned());
-    row.cwd = Some("/tmp/worktrees/feature".into());
+    row.cwd = Some("/tmp/checkouts/feature".into());
     row.host = None;
     let (probe, cx) =
         cx.add_window_view(|window, cx| ChromeProbe::with_snapshot(snapshot, window, cx));
@@ -1222,21 +1151,21 @@ fn session_menus_offer_the_sessions_place(cx: &mut TestAppContext) {
     for (keys, expected) in [
         (
             "down enter",
-            ChromeIntent::NewSessionOnBranch {
+            ChromeIntent::NewSessionInProject {
                 scope: target().scope,
-                path: "/tmp/worktrees/feature".to_owned(),
+                path: "/tmp/checkouts/feature".to_owned(),
             },
         ),
         (
             "down down down down down down down right down enter",
             ChromeIntent::RevealPath {
                 scope: target().scope,
-                path: "/tmp/worktrees/feature".to_owned(),
+                path: "/tmp/checkouts/feature".to_owned(),
             },
         ),
         (
             "down down down down down right enter",
-            ChromeIntent::CopyText("/tmp/worktrees/feature".to_owned()),
+            ChromeIntent::CopyText("/tmp/checkouts/feature".to_owned()),
         ),
         (
             "down down down down down right down enter",
@@ -1555,25 +1484,6 @@ fn dialog_window(
     })
 }
 
-fn embedded_dialog_window(
-    cx: &mut TestAppContext,
-    spec: DialogSpec,
-) -> (Entity<DialogProbe>, &mut VisualTestContext) {
-    cx.update(|cx| init_theme(UiPalette::default(), cx));
-    let slot = Rc::new(RefCell::new(None));
-    let opened = Rc::clone(&slot);
-    let (_, visual) = cx.add_window_view(move |window, cx| {
-        let probe = cx.new(|cx| DialogProbe::new(window, cx));
-        probe.read(cx).dialog.clone().update(cx, |dialog, cx| {
-            dialog.present(Some(spec), window, cx);
-        });
-        opened.replace(Some(probe.clone()));
-        Root::new(probe, window, cx)
-    });
-    let probe = slot.borrow_mut().take().expect("embedded dialog");
-    (probe, visual)
-}
-
 fn focus_dialog(probe: &Entity<DialogProbe>, cx: &mut VisualTestContext) {
     let focus = cx.update(|_, app| {
         let dialog = probe.read(app).dialog.clone();
@@ -1632,190 +1542,6 @@ fn failed_session_creation_shows_progress_and_offers_copy_and_retry(cx: &TestApp
     visual.run_until_parked();
     probe.update(&mut visual, |probe, _| {
         assert!(probe.intents.borrow().iter().any(|intent| matches!(intent, DialogIntent::Activate { action, .. } if action.0 == "start-session")));
-    });
-}
-
-#[gpui_kit::test]
-fn worktree_options_emit_edits_without_a_command_input(cx: &mut TestAppContext) {
-    use bootty_gpui::{DialogField, DialogFieldKind};
-
-    let mut spec = DialogSpec::prompt(
-        bootty_ui::presentation::dialogs::NEW_SESSION_ID,
-        "New session",
-        "Keep the draft",
-        "Prompt",
-        DialogAction::new("start-session"),
-    );
-    spec.fields = [
-        (
-            "isolation",
-            "Checkout",
-            "New worktree",
-            DialogFieldKind::Choice(vec!["Current checkout".into(), "New worktree".into()]),
-        ),
-        (
-            "start-ref",
-            "Base branch",
-            "main",
-            DialogFieldKind::Choice(vec!["main".into(), "baseline".into()]),
-        ),
-        ("branch", "Branch", "", DialogFieldKind::Text),
-        ("folder", "Folder", "", DialogFieldKind::Text),
-    ]
-    .into_iter()
-    .map(|(id, label, value, kind)| DialogField {
-        id: id.into(),
-        label: label.into(),
-        value: value.into(),
-        placeholder: String::new(),
-        kind,
-    })
-    .collect();
-    let (probe, cx) = embedded_dialog_window(cx, spec);
-    draw_chrome(cx);
-    assert!(cx.debug_bounds("dialog-prompt-input").is_none());
-    assert!(
-        cx.debug_bounds("dialog-field-choice-control-start-ref")
-            .is_none()
-    );
-    assert!(
-        cx.debug_bounds("dialog-worktree-base-branch").is_some(),
-        "worktree controls are visible without opening a popover"
-    );
-    let base = cx
-        .debug_bounds("dialog-worktree-base-branch")
-        .expect("base branch");
-    let mode = cx
-        .debug_bounds("dialog-checkout-picker")
-        .expect("checkout mode");
-    assert!(
-        base.top() >= mode.bottom(),
-        "worktree details follow the checkout choice"
-    );
-    for chosen in ["baseline", "refs/tags/v1.2.3"] {
-        let base = cx.debug_bounds("dialog-worktree-base-branch").unwrap();
-        cx.simulate_click(base.center(), Modifiers::none());
-        cx.simulate_input(chosen);
-        draw_chrome(cx);
-        cx.simulate_keystrokes("enter");
-        draw_chrome(cx);
-        probe.update(cx, |probe, _| assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-            DialogIntent::FieldChanged { field, value, .. } if field == "start-ref" && value == chosen
-        ))));
-    }
-    assert!(cx.debug_bounds("dialog-worktree-base-branch").is_some());
-    assert!(cx.debug_bounds("dialog-prompt-input").is_none());
-    cx.simulate_keystrokes("escape");
-    draw_chrome(cx);
-    probe.update(cx, |probe, _| {
-        assert!(
-            probe
-                .intents
-                .borrow()
-                .iter()
-                .any(|intent| matches!(intent, DialogIntent::Dismiss { .. }))
-        );
-    });
-}
-
-#[gpui_kit::test]
-fn branch_picker_tracks_worktree_owners_and_rejected_selection(cx: &mut TestAppContext) {
-    use bootty_gpui::{DialogField, DialogFieldKind};
-    let mut spec = DialogSpec::prompt(
-        bootty_ui::presentation::dialogs::NEW_SESSION_ID,
-        "New session",
-        "Keep the draft",
-        "Prompt",
-        DialogAction::new("start-session"),
-    );
-    spec.fields = [
-        ("provider", "Provider", "Codex", vec!["Codex".into()]),
-        (
-            "isolation",
-            "Checkout",
-            "Current checkout",
-            vec!["Current checkout".into(), "New worktree".into()],
-        ),
-        (
-            "checkout-branch",
-            "Branch",
-            "main",
-            vec![
-                "main".into(),
-                "feature/existing".into(),
-                "topic/linked".into(),
-            ],
-        ),
-    ]
-    .into_iter()
-    .map(|(id, label, value, options)| DialogField {
-        id: id.into(),
-        label: label.into(),
-        value: value.into(),
-        placeholder: String::new(),
-        kind: DialogFieldKind::Choice(options),
-    })
-    .collect();
-    spec.selected_project = Some("/project".into());
-    spec.branches = serde_json::from_value(serde_json::json!([
-        {"name":"main", "commit":"abc", "upstream":null, "current":true, "worktree_path":"/project"},
-        {"name":"feature/existing", "commit":"abc", "upstream":null, "current":false},
-        {"name":"topic/linked", "commit":"abc", "upstream":null, "current":false, "worktree_path":"/worktrees/linked"}
-    ])).unwrap();
-    let (probe, cx) = embedded_dialog_window(cx, spec.clone());
-    draw_chrome(cx);
-    let branch = cx
-        .debug_bounds("dialog-checkout-branch")
-        .expect("branch picker");
-    cx.simulate_click(branch.center(), Modifiers::none());
-    draw_chrome(cx);
-    assert!(cx.debug_bounds("branch-badge-main-current").is_some());
-    assert!(
-        cx.debug_bounds("branch-badge-topic/linked-worktree")
-            .is_some()
-    );
-    assert_eq!(
-        cx.debug_bounds("branch-badge-main-current")
-            .unwrap()
-            .right(),
-        cx.debug_bounds("branch-badge-topic/linked-worktree")
-            .unwrap()
-            .right(),
-        "branch state labels share the trailing edge",
-    );
-    cx.simulate_input("feature/existing");
-    draw_chrome(cx);
-    cx.simulate_keystrokes("enter");
-    draw_chrome(cx);
-    probe.update(cx, |probe, _| {
-        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-            DialogIntent::FieldChanged { field, value, .. }
-                if field == "checkout-branch" && value == "feature/existing"
-        )));
-        probe.intents.borrow_mut().clear();
-    });
-    spec.hint = Some("Commit or stash your changes".into());
-    spec.branches[2].worktree_path = None;
-    cx.update(|window, cx| {
-        probe.read(cx).dialog.clone().update(cx, |dialog, cx| {
-            dialog.present(Some(spec), window, cx);
-        });
-    });
-    draw_chrome(cx);
-    cx.simulate_click(branch.center(), Modifiers::none());
-    draw_chrome(cx);
-    assert!(cx.debug_bounds("branch-badge-main-current").is_some());
-    assert!(
-        cx.debug_bounds("branch-badge-topic/linked-worktree")
-            .is_none()
-    );
-    cx.simulate_keystrokes("enter");
-    draw_chrome(cx);
-    probe.update(cx, |probe, _| {
-        assert!(probe.intents.borrow().iter().any(|intent| matches!(intent,
-            DialogIntent::FieldChanged { field, value, .. }
-                if field == "checkout-branch" && value == "main"
-        )));
     });
 }
 
@@ -1886,7 +1612,6 @@ fn confirm_dialog_activates_only_the_enabled_row(cx: &mut TestAppContext) {
         text: None,
         text_label: None,
         fields: Vec::new(),
-        branches: Vec::new(),
         spaces: Vec::new(),
         projects: Vec::new(),
         project_labels: std::collections::BTreeMap::new(),
@@ -1933,7 +1658,6 @@ fn terminal_find_buttons_and_shift_enter_keep_direction_typed(cx: &mut TestAppCo
         text: Some("needle".to_owned()),
         text_label: None,
         fields: Vec::new(),
-        branches: Vec::new(),
         spaces: Vec::new(),
         projects: Vec::new(),
         project_labels: std::collections::BTreeMap::new(),
@@ -1972,7 +1696,6 @@ fn theme_picker_scope_toggle_and_tab_emit_cycle_scope(cx: &TestAppContext) {
         text: Some(String::new()),
         text_label: None,
         fields: Vec::new(),
-        branches: Vec::new(),
         spaces: Vec::new(),
         projects: Vec::new(),
         project_labels: std::collections::BTreeMap::new(),

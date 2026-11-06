@@ -1,12 +1,10 @@
-//! Project and worktree operations on a remote host, run by the host's installed daemon.
+//! Project operations on a remote host, run by the host's installed daemon.
 
 use bootty_config::config::RemoteConfig;
 use bootty_host::remote::{RemoteHost, remote_daemon_failure};
 
+use crate::ProjectPickerEntry;
 use crate::runner::CommandRunner;
-use crate::{
-    CleanupReport, CleanupRequest, ProjectPickerEntry, WorktreePickerEntry, WorktreeRequest,
-};
 
 /// # Errors
 /// Returns remote command failures or invalid project responses.
@@ -41,61 +39,6 @@ pub fn add_project_favorite(
     parse(&run(
         remote,
         &["remote-project", "add", "--path", path],
-        runner,
-    )?)
-}
-
-/// # Errors
-/// Returns remote command failures or invalid worktree responses.
-pub fn list_worktrees(
-    remote: &RemoteConfig,
-    project: &str,
-    open_cwds: &[String],
-    runner: &impl CommandRunner,
-) -> Result<Vec<WorktreePickerEntry>, String> {
-    let mut args = vec!["remote-worktree", "list", "--project", project];
-    for cwd in open_cwds {
-        args.extend(["--open-cwd", cwd]);
-    }
-    parse(&run(remote, &args, runner)?)
-}
-
-/// # Errors
-/// Returns remote command, worktree creation, or invalid response errors.
-pub fn create_worktree(
-    remote: &RemoteConfig,
-    project: &str,
-    request: &WorktreeRequest,
-    runner: &impl CommandRunner,
-) -> Result<String, String> {
-    request.validate()?;
-    let payload = serde_json::to_string(request).map_err(|error| error.to_string())?;
-    parse(&run(
-        remote,
-        &[
-            "remote-worktree",
-            "create",
-            "--project",
-            project,
-            "--request",
-            &payload,
-        ],
-        runner,
-    )?)
-}
-
-/// Run Bootty's worktree cleanup on the remote host that holds the checkouts.
-/// # Errors
-/// Returns remote command failures or an invalid cleanup report.
-pub fn clean_worktrees(
-    remote: &RemoteConfig,
-    request: &CleanupRequest,
-    runner: &impl CommandRunner,
-) -> Result<CleanupReport, String> {
-    let payload = serde_json::to_string(request).map_err(|error| error.to_string())?;
-    parse(&run(
-        remote,
-        &["remote-worktree", "clean", "--request", &payload],
         runner,
     )?)
 }

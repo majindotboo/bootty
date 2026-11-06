@@ -22,7 +22,6 @@ use std::{cell::RefCell, rc::Rc};
 
 mod creation;
 mod project_picker;
-mod worktree;
 
 /// A themed confirmation. Answers retain their caller order; dismissing cancels the receiver.
 pub fn prompt(
@@ -363,7 +362,6 @@ pub struct DialogSpec {
     pub text_hint: Option<String>,
     pub text_label: Option<String>,
     pub fields: Vec<DialogField>,
-    pub branches: Vec<bootty_git::changes::GitBranch>,
     pub spaces: Vec<DialogSpaceChoice>,
     pub projects: Vec<bootty_git::ProjectPickerEntry>,
     pub project_labels: std::collections::BTreeMap<String, String>,
@@ -394,7 +392,6 @@ impl DialogSpec {
             text: Some(text.into()),
             text_label: None,
             fields: Vec::new(),
-            branches: Vec::new(),
             spaces: Vec::new(),
             projects: Vec::new(),
             project_labels: std::collections::BTreeMap::new(),
@@ -423,7 +420,6 @@ impl DialogSpec {
             text: Some(value.into()),
             text_label: None,
             fields: Vec::new(),
-            branches: Vec::new(),
             spaces: Vec::new(),
             projects: Vec::new(),
             project_labels: std::collections::BTreeMap::new(),
@@ -450,7 +446,6 @@ pub struct DialogView {
     prompt_input_focus: FocusHandle,
     fields: std::collections::HashMap<String, (Entity<InputState>, Subscription)>,
     project_picker: Option<project_picker::NewProjectPicker>,
-    worktree_ref_picker: Option<worktree::WorktreeRefPicker>,
     /// Stable focus target for a confirm surface before its buttons render.
     confirm_focus: FocusHandle,
     command_keybindings: Option<Vec<(CommandAction, String)>>,
@@ -548,7 +543,6 @@ impl DialogView {
             prompt_input,
             fields: std::collections::HashMap::new(),
             project_picker: None,
-            worktree_ref_picker: None,
             confirm_focus: cx.focus_handle().tab_stop(true),
             command_keybindings: None,
             find_input,
@@ -861,7 +855,6 @@ impl DialogView {
         }
         self.sync_fields(window, cx);
         self.sync_new_project_picker(window, cx);
-        self.sync_worktree_ref_picker(window, cx);
         cx.notify();
     }
 
@@ -1065,7 +1058,7 @@ impl DialogView {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         if spec.id.0 == crate::presentation::dialogs::NEW_SESSION_ID {
-            return self.new_session_panel(spec, window, cx);
+            return self.new_session_panel(spec, cx);
         }
         let colors = gpui_kit::component::Theme::global(cx).colors;
         let destructive = gpui_kit::component::Theme::global(cx)
@@ -1156,28 +1149,9 @@ impl DialogView {
             .into_any_element()
     }
 
-    fn new_session_panel(
-        &self,
-        spec: &DialogSpec,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> gpui_kit::AnyElement {
+    fn new_session_panel(&self, spec: &DialogSpec, cx: &Context<Self>) -> gpui_kit::AnyElement {
         let submit = spec.rows.iter().find(|row| row.id.0 == "submit");
         let error = submit.and_then(|row| row.detail.clone());
-        // The current checkout's branch is one more choice; worktree names need their own row.
-        let branch = spec
-            .fields
-            .iter()
-            .find(|field| field.id == "checkout-branch")
-            .and_then(|field| self.render_worktree_ref_picker(spec, field))
-            .map(|control| div().w(rems(12.0)).child(control));
-        let details = spec
-            .fields
-            .iter()
-            .filter(|field| matches!(field.kind, DialogFieldKind::Text) || field.id == "start-ref")
-            .filter_map(|field| self.prompt_field(spec, field, window, cx))
-            .map(|control| div().flex_1().min_w(rems(8.0)).child(control))
-            .collect::<Vec<_>>();
         v_flex()
             .id("dialog-prompt-panel")
             .debug_selector(|| "dialog-prompt-panel".to_owned())
@@ -1206,19 +1180,8 @@ impl DialogView {
                         spec.fields
                             .iter()
                             .filter_map(|field| Self::new_session_choice(spec, field, cx)),
-                    )
-                    .children(branch),
+                    ),
             )
-            .when(!details.is_empty(), |this| {
-                this.child(
-                    h_flex()
-                        .w_full()
-                        .items_start()
-                        .gap_2()
-                        .flex_wrap()
-                        .children(details),
-                )
-            })
             .child(Self::new_session_footer(spec, submit, error, cx))
             .into_any_element()
     }
@@ -1323,9 +1286,6 @@ impl DialogView {
         let DialogFieldKind::Choice(options) = &field.kind else {
             return None;
         };
-        if matches!(field.id.as_str(), "start-ref" | "checkout-branch") {
-            return None;
-        }
         let owner = cx.weak_entity();
         let dialog = spec.id.clone();
         let field = field.clone();
@@ -1341,9 +1301,6 @@ impl DialogView {
             .min_w_0()
             .max_w(rems(16.0))
             .dropdown_caret(true)
-            .when(field.id == "isolation", |button| {
-                button.debug_selector(|| "dialog-checkout-picker".into())
-            })
             .disabled(spec.busy)
             .accessibility_label(format!("{}: {}", field.label, field.value))
             .child(Self::new_session_choice_content(
@@ -1401,9 +1358,6 @@ impl DialogView {
             .flatten();
         let icon = match (field, value) {
             ("host", _) => space.map_or("folder", |space| space.icon.as_str()),
-            ("isolation", "New worktree") => "folder-git-2",
-            ("isolation", "Current worktree") => "folder-git",
-            ("isolation", _) => "folder",
             _ => "settings-2",
         };
         let tint = cx.theme().foreground;
@@ -1475,9 +1429,6 @@ impl DialogView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<gpui_kit::AnyElement> {
-        if matches!(field.id.as_str(), "start-ref" | "checkout-branch") {
-            return self.render_worktree_ref_picker(spec, field);
-        }
         let control = match &field.kind {
             DialogFieldKind::Text => {
                 let (input, _) = self.fields.get(&field.id)?;

@@ -4,7 +4,6 @@ mod capture;
 mod clipboard;
 mod files;
 mod forwards;
-mod git;
 mod jobs;
 mod links;
 mod mux;
@@ -142,10 +141,6 @@ pub enum PendingCommandResult {
         target: CommandTarget,
         result: mpsc::Receiver<Result<String, String>>,
     },
-    WorktreeCleanup {
-        result: mpsc::Receiver<crate::state::HostResults>,
-        warnings: Vec<bootty_control::CommandWarning>,
-    },
     Mux {
         scope: SpaceId,
         command: Box<MuxCommand>,
@@ -177,10 +172,6 @@ pub struct PendingAppCommand {
 
 impl PendingAppCommand {
     fn cancellation_outcome(&self, now: Instant) -> Option<CommandOutcome> {
-        // Git can't be stopped mid-removal, so the caller hears what the cleanup did.
-        if matches!(self.result, PendingCommandResult::WorktreeCleanup { .. }) {
-            return None;
-        }
         if self.cancellation.is_cancelled() {
             Some(CommandOutcome::cancelled())
         } else if now >= self.deadline && self.cancellation.cancel() {
@@ -347,8 +338,7 @@ impl AppState {
             PendingCommandResult::Forward { .. }
             | PendingCommandResult::Link { .. }
             | PendingCommandResult::Clipboard { .. }
-            | PendingCommandResult::Outcome(_)
-            | PendingCommandResult::WorktreeCleanup { .. } => {}
+            | PendingCommandResult::Outcome(_) => {}
         }
     }
 
@@ -625,15 +615,6 @@ impl AppState {
             }
             PendingCommandResult::SurfaceCreation { .. } => {
                 return self.poll_surface_creation(pending, now, effects);
-            }
-            PendingCommandResult::WorktreeCleanup { result, warnings } => {
-                match ready!(poll_command_result(result)) {
-                    Ok(results) => self.finish_worktree_cleanup(results, std::mem::take(warnings)),
-                    Err(mpsc::RecvError) => CommandOutcome::Failed {
-                        code: "worktree_cleanup_failed".to_owned(),
-                        message: "Worktree cleanup stopped".to_owned(),
-                    },
-                }
             }
             PendingCommandResult::Forward { result } => {
                 let forward = ready!(poll_command_result(result));
@@ -938,7 +919,6 @@ impl AppState {
                 self.dispatch_captured_terminal(context, &arguments, export, execution)
             }
             CoreCommandExecutor::WslList => self.dispatch_wsl_list(execution),
-            CoreCommandExecutor::WorktreeCleanup => self.dispatch_worktree_cleanup(execution),
             CoreCommandExecutor::OpenLink(arguments) => {
                 self.dispatch_attached_link(context, &arguments, execution)
             }
@@ -953,12 +933,6 @@ impl AppState {
                 action,
                 &arguments,
                 effects,
-                execution,
-            ),
-            CoreCommandExecutor::Git(action, arguments) => self.dispatch_git_action(
-                target_scope.unwrap_or_else(|| self.mux_scope()),
-                action,
-                arguments,
                 execution,
             ),
             CoreCommandExecutor::Synchronous(executor) => {
