@@ -182,38 +182,32 @@ fn validate_layout<'a>(
     Ok(())
 }
 
-/// Decode a pane's reported directory for a local cold checkpoint.
-/// # Errors
-/// Rejects foreign hosts, non-file URIs and paths that are not UTF-8.
-pub(crate) fn checkpoint_cwd(reported: &str) -> anyhow::Result<Option<String>> {
+/// Decode a pane's reported directory as a path on this host.
+///
+/// The directory comes from terminal output (OSC 7), which any program, including a shell on
+/// another host over SSH, can write. A foreign host, a non-file URI or a non-UTF-8 path is not a
+/// local directory, so it yields `None` rather than an error that could fail the pane.
+pub(crate) fn checkpoint_cwd(reported: &str) -> Option<String> {
     if reported.is_empty() {
-        return Ok(None);
+        return None;
     }
     if Path::new(reported).is_absolute() {
-        return Ok(Some(reported.to_owned()));
+        return Some(reported.to_owned());
     }
-    let mut uri = url::Url::parse(reported)
-        .map_err(|_| anyhow::anyhow!("Terminal directory is not a valid file URI"))?;
-    anyhow::ensure!(
-        uri.scheme() == "file",
-        "Terminal directory is not a file URI"
-    );
+    let mut uri = url::Url::parse(reported).ok()?;
+    if uri.scheme() != "file" {
+        return None;
+    }
     if let Some(host) = uri.host_str() {
         let local = sysinfo::System::host_name();
-        anyhow::ensure!(
-            host.eq_ignore_ascii_case("localhost")
-                || local
-                    .as_deref()
-                    .is_ok_and(|local| host.eq_ignore_ascii_case(local)),
-            "Terminal directory URI does not name this host"
-        );
-        uri.set_host(Some("localhost"))
-            .map_err(|_| anyhow::anyhow!("Terminal directory URI host is invalid"))?;
+        let this_host = host.eq_ignore_ascii_case("localhost")
+            || local
+                .as_deref()
+                .is_ok_and(|local| host.eq_ignore_ascii_case(local));
+        if !this_host {
+            return None;
+        }
+        uri.set_host(Some("localhost")).ok()?;
     }
-    let path = uri
-        .to_file_path()
-        .map_err(|()| anyhow::anyhow!("Terminal directory URI does not name a local host path"))?;
-    Ok(Some(path.into_os_string().into_string().map_err(|_| {
-        anyhow::anyhow!("Terminal directory is not valid UTF-8")
-    })?))
+    uri.to_file_path().ok()?.into_os_string().into_string().ok()
 }

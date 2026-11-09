@@ -534,17 +534,15 @@ impl PaneWorker {
     ) -> std::result::Result<crate::session_snapshot::SessionPaneCapture, String> {
         self.engine
             .capture_checkpoint(options)
-            .and_then(|capture| {
-                Ok(crate::session_snapshot::SessionPaneCapture {
-                    pane_id: pane,
-                    cwd: crate::session_snapshot::checkpoint_cwd(
-                        self.engine.current_working_directory(),
-                    )?,
-                    cols: capture.cols,
-                    rows: capture.rows,
-                    text: capture.text,
-                    omitted_lines: capture.omitted_lines,
-                })
+            .map(|capture| crate::session_snapshot::SessionPaneCapture {
+                pane_id: pane,
+                cwd: crate::session_snapshot::checkpoint_cwd(
+                    self.engine.current_working_directory(),
+                ),
+                cols: capture.cols,
+                rows: capture.rows,
+                text: capture.text,
+                omitted_lines: capture.omitted_lines,
             })
             .map_err(|e| format!("{e:#}"))
     }
@@ -560,9 +558,9 @@ impl PaneWorker {
         let cwd = self
             .process_cwd
             .clone()
-            .or(crate::session_snapshot::checkpoint_cwd(
-                self.engine.current_working_directory(),
-            )?)
+            .or_else(|| {
+                crate::session_snapshot::checkpoint_cwd(self.engine.current_working_directory())
+            })
             .or_else(|| {
                 self.stored_cwd
                     .as_ref()
@@ -760,8 +758,6 @@ impl PaneWorker {
         self.process_directory()
             .or_else(|| {
                 crate::session_snapshot::checkpoint_cwd(self.engine.current_working_directory())
-                    .ok()
-                    .flatten()
             })
             .or_else(|| {
                 self.stored_cwd

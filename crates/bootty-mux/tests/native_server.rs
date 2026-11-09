@@ -853,6 +853,40 @@ fn next_frame(
         }
     }
 }
+// A shell over SSH reports the remote host's directory; terminal output never fails the pane.
+#[rstest]
+#[case::foreign_host(b"\x1b]7;file://another-host/home/developer\x07".as_slice())]
+#[case::not_a_file_uri(b"\x1b]7;https://example.com/work\x07".as_slice())]
+#[case::not_utf8(b"\x1b]7;file:///work/%FF\x07".as_slice())]
+fn unusable_reported_directories_keep_the_pane_and_its_local_directory(
+    fixture: Result<Fixture>,
+    #[case] report: &[u8],
+) {
+    let fixture = fixture.unwrap();
+    let mut stream = attach_frames(&fixture).unwrap();
+    let mut decoder = bootty_terminal::frame_wire::FrameDecoder::default();
+    next_frame(&mut stream, &mut decoder).unwrap();
+    emit(&fixture, [report, b"still here"].concat()).unwrap();
+    let frame = loop {
+        let (_, frame) = next_frame(&mut stream, &mut decoder).unwrap();
+        if frame
+            .text_rows()
+            .iter()
+            .any(|row| row.contains("still here"))
+        {
+            break frame;
+        }
+    };
+    assert_eq!(frame.current_working_directory.as_deref(), Some("/"));
+    let response = fixture
+        .backend
+        .request(&Request::Capture {
+            pane: fixture.pane,
+            options: CaptureOptions::default(),
+        })
+        .unwrap();
+    assert!(matches!(response, Response::Captured(capture) if capture.text == "still here"));
+}
 #[rstest]
 fn frames_decode_wide_text_and_reconnect_full(fixture: Result<Fixture>) {
     let fixture = fixture.unwrap();
