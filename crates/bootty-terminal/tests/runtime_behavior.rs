@@ -1052,7 +1052,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
     let output_path = directory.path().join("launch.txt");
     let script = vec![
         "-c".to_owned(),
-        "temporary_output=${BOOTTY_TEST_OUTPUT}.tmp.$$; printf '%s' \"$TERM|$COLORTERM|$TERM_PROGRAM|$TERM_PROGRAM_VERSION|${TERMINFO-unset}|${REMOVE_ME-unset}|$PWD|$1|$BOOTTY_PANE|${NO_COLOR-unset}\" > \"$temporary_output\" && mv \"$temporary_output\" \"$BOOTTY_TEST_OUTPUT\""
+        "temporary_output=${BOOTTY_TEST_OUTPUT}.tmp.$$; printf '%s' \"$TERM|$COLORTERM|$TERM_PROGRAM|$TERM_PROGRAM_VERSION|${TERMINFO-unset}|${REMOVE_ME-unset}|$PWD|$1|$BOOTTY_PANE|${NO_COLOR-unset}|${SHLVL-unset}\" > \"$temporary_output\" && mv \"$temporary_output\" \"$BOOTTY_TEST_OUTPUT\""
             .to_owned(),
         "bootty-runtime-test".to_owned(),
         "argument".to_owned(),
@@ -1075,7 +1075,12 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
             command_is_argv: false,
             working_directory: Some(working_directory.clone()),
             pane_id: Some("%7".to_owned()),
-            base_environment: None,
+            // Bootty launched from a shell, e.g. `open -a Bootty`, carries that shell's level.
+            base_environment: Some(
+                std::env::vars_os()
+                    .chain([("SHLVL".into(), "4".into())])
+                    .collect(),
+            ),
             env: vec![
                 (
                     "BOOTTY_TEST_OUTPUT".to_owned(),
@@ -1102,7 +1107,7 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
 
     let output = wait_for_file(&output_path).expect("child fixture ready");
     let fields = output.split('|').collect::<Vec<_>>();
-    assert_eq!(fields.len(), 10, "launch output: {output}");
+    assert_eq!(fields.len(), 11, "launch output: {output}");
     assert_eq!(fields[0], "bootty-runtime-term");
     assert_eq!(fields[1], "bootty-runtime-color");
     assert_eq!(fields[2], "Ghostty");
@@ -1119,6 +1124,8 @@ fn terminal_launch_applies_one_managed_environment_and_process_policy(#[case] as
     assert_eq!(fields[7], "argument");
     assert_eq!(fields[8], "%7");
     assert_eq!(fields[9], "explicit");
+    // bash starts a top-level shell at 1; dash leaves SHLVL unset.
+    assert!(matches!(fields[10], "1" | "unset"), "SHLVL: {}", fields[10]);
 }
 
 #[cfg(unix)]

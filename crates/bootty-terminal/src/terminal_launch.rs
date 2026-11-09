@@ -226,8 +226,10 @@ fn apply_base_environment(command: &mut CommandBuilder, config: &SessionLaunchCo
             command.env(name, value);
         }
     }
-    // Parent automation color preferences do not describe this interactive PTY.
+    // Parent automation color preferences do not describe this interactive PTY, and a pane's shell
+    // is top-level whatever shell launched Bootty, so it must not inherit that shell's nesting level.
     command.env_remove("NO_COLOR");
+    command.env_remove("SHLVL");
     if config.base_environment.is_none() {
         for (name, value) in locale_env_entries() {
             command.env(name, value);
