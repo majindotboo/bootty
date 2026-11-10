@@ -108,11 +108,7 @@ impl WorkspaceRuntime {
         }
         if let Some(cwd) = cwd {
             validate_cwd(cwd)?;
-            if !Path::new(cwd).is_dir() {
-                return Err(SessionRequestError::Invalid(format!(
-                    "cwd {cwd:?} is not a directory"
-                )));
-            }
+            binding.validate_directory(cwd)?;
         }
         let command = MuxCommand::NewWindow {
             session_id: session.id.clone(),
@@ -209,13 +205,7 @@ impl WorkspaceRuntime {
             .map(|saved| self.saved_create_metadata(scope, name, cwd, saved))
             .transpose()?;
         let binding = self.live_binding(scope)?;
-        // Bootty spawns a native pane itself, and its PTY layer starts in the home directory when
-        // the cwd is not one. Validate it before publishing topology.
-        if !Path::new(cwd).is_dir() {
-            return Err(SessionRequestError::Invalid(format!(
-                "cwd {cwd:?} is not a directory"
-            )));
-        }
+        binding.validate_directory(cwd)?;
         let taken = binding
             .mux
             .all_sessions()
@@ -372,7 +362,7 @@ impl WorkspaceRuntime {
                 },
             );
         };
-        validate_restore_snapshot(&saved_snapshot)?;
+        validate_restore_snapshot(binding, &saved_snapshot)?;
         let snapshot = (*saved_snapshot).clone();
         let command = MuxCommand::RestoreSession {
             session_id: name,
@@ -620,6 +610,18 @@ impl BindingRuntime {
             .collect()
     }
 
+    /// Bootty spawns a native pane itself, and its PTY layer starts in the home directory when the
+    /// cwd is not one, so reject it before publishing topology. A remote binding's path names the
+    /// far host's filesystem, which this host cannot check.
+    fn validate_directory(&self, cwd: &str) -> Result<(), SessionRequestError> {
+        if self.multiplexer.remote.is_none() && !Path::new(cwd).is_dir() {
+            return Err(SessionRequestError::Invalid(format!(
+                "cwd {cwd:?} is not a directory"
+            )));
+        }
+        Ok(())
+    }
+
     fn holds(&self, session: &MuxSession) -> bool {
         session
             .tag
@@ -630,18 +632,12 @@ impl BindingRuntime {
 }
 
 fn validate_restore_snapshot(
+    binding: &BindingRuntime,
     snapshot: &crate::session_snapshot::SavedTerminalSession,
 ) -> Result<(), SessionRequestError> {
     snapshot.validate().map_err(SessionRequestError::Invalid)?;
-    {
-        for pane in snapshot.windows.iter().flat_map(|window| &window.panes) {
-            if !Path::new(&pane.cwd).is_dir() {
-                return Err(SessionRequestError::Invalid(format!(
-                    "saved cwd {:?} is not a directory",
-                    pane.cwd
-                )));
-            }
-        }
+    for pane in snapshot.windows.iter().flat_map(|window| &window.panes) {
+        binding.validate_directory(&pane.cwd)?;
     }
     Ok(())
 }
