@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::{
     io::{BufRead as _, Read as _, Write as _},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV6},
     process::{Command, Stdio},
     time::Duration,
 };
@@ -22,6 +22,32 @@ pub(super) struct Bootstrap {
     pub certificate: Vec<u8>,
     #[serde(default)]
     pub tcp_port: u16,
+    /// This client's address as the remote SSH server saw it. It names the local interface
+    /// that reaches a link-local `address`.
+    #[serde(default)]
+    pub client_address: Option<IpAddr>,
+}
+
+impl Bootstrap {
+    pub fn quic_address(&self) -> SocketAddr {
+        self.dial_address(self.address.port())
+    }
+
+    pub fn tcp_address(&self) -> SocketAddr {
+        self.dial_address(self.tcp_port)
+    }
+
+    /// A link-local address is reachable only with this host's index for the interface on that
+    /// link: the one holding the address the server saw this client connect from.
+    fn dial_address(&self, port: u16) -> SocketAddr {
+        match (self.address.ip(), self.client_address) {
+            (IpAddr::V6(address), Some(IpAddr::V6(client))) if address.is_unicast_link_local() => {
+                let scope = bootty_os::interface::ipv6_scope_holding(client).unwrap_or(0);
+                SocketAddr::V6(SocketAddrV6::new(address, port, 0, scope))
+            }
+            (address, _) => SocketAddr::new(address, port),
+        }
+    }
 }
 
 /// One SSH-authorized client certificate; unknown clients cannot open process streams.
@@ -351,21 +377,25 @@ pub fn run_server(mux_connector: super::mux::MuxConnector) -> Result<()> {
     }
     let connection =
         std::env::var("SSH_CONNECTION").context("SSH connection metadata is missing")?;
-    let address: IpAddr = connection
-        .split_whitespace()
-        .nth(2)
-        .context("SSH server address is missing")?
-        .parse()?;
+    let (client_address, address) = ssh_connection_addresses(&connection)?;
+    // A link-local address binds only with this host's interface index; listen on every
+    // interface instead, as the TCP listener does, and announce the address the client reached.
+    let bind = if matches!(address, IpAddr::V6(ip) if ip.is_unicast_link_local()) {
+        IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+    } else {
+        address
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;
     runtime.block_on(async {
-        let server = RemoteLinkServer::bind(SocketAddr::new(address, 0), certificate.into())?
+        let server = RemoteLinkServer::bind(SocketAddr::new(bind, 0), certificate.into())?
             .with_mux_connector(mux_connector);
         let response = Bootstrap {
-            address: server.address()?,
+            address: SocketAddr::new(address, server.address()?.port()),
             certificate: server.certificate().to_vec(),
             tcp_port: server.tcp_address()?.port(),
+            client_address: Some(client_address),
         };
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
@@ -373,4 +403,21 @@ pub fn run_server(mux_connector: super::mux::MuxConnector) -> Result<()> {
         drop(stdout);
         server.serve_reconnecting().await
     })
+}
+
+/// The client and server addresses from `SSH_CONNECTION`. sshd writes a link-local address with
+/// its zone (`fe80::1%en0`), which `IpAddr` does not parse; the zone names this host's interface
+/// and means nothing to the client, so it is dropped.
+fn ssh_connection_addresses(connection: &str) -> Result<(IpAddr, IpAddr)> {
+    let address = |field: Option<&str>, name: &str| -> Result<IpAddr> {
+        let field = field.with_context(|| format!("SSH {name} address is missing"))?;
+        let unzoned = field.split_once('%').map_or(field, |(address, _)| address);
+        unzoned
+            .parse()
+            .with_context(|| format!("invalid SSH {name} address {field:?}"))
+    };
+    let mut fields = connection.split_whitespace();
+    let client = address(fields.next(), "client")?;
+    let server = address(fields.nth(1), "server")?;
+    Ok((client, server))
 }

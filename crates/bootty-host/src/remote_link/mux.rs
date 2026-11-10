@@ -127,15 +127,10 @@ impl RemoteMux {
         let certificate = response.certificate.clone().into();
         let link = match route {
             Route::Quic => {
-                RemoteLink::connect(&self.identity, certificate, response.address).await?
+                RemoteLink::connect(&self.identity, certificate, response.quic_address()).await?
             }
             Route::Tls => {
-                RemoteLink::connect_tcp(
-                    &self.identity,
-                    certificate,
-                    std::net::SocketAddr::new(response.address.ip(), response.tcp_port),
-                )
-                .await?
+                RemoteLink::connect_tcp(&self.identity, certificate, response.tcp_address()).await?
             }
             Route::Ssh => anyhow::bail!("SSH route is not a direct link"),
         };

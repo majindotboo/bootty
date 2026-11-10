@@ -12,6 +12,7 @@ tokio = { workspace = true, features = ["net", "io-util", "rt", "sync", "time"] 
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.6", features = ["event", "fs", "net", "process"] }
+nix = { version = "0.31.3", default-features = false, features = ["net"] }
 
 # Linux reads peer credentials through rustix instead.
 [target.'cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))'.dependencies]
@@ -28,6 +29,10 @@ windows-sys = { version = "0.61.2", features = [
   "Win32_System_Pipes",
   "Win32_System_Threading",
 ] }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+rstest.workspace = true
 
 [lints]
 workspace = true

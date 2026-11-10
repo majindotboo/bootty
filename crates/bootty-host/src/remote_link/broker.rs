@@ -282,7 +282,7 @@ pub(super) async fn bootstrap(remote: &SshRemote, identity: &Identity) -> Result
     let direct = RemoteLink::connect(
         identity,
         response.certificate.clone().into(),
-        response.address,
+        response.quic_address(),
     );
     let tunneled = async {
         // Give a reachable direct host a head start, without waiting out a blocked UDP dial.

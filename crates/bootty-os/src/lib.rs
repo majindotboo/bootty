@@ -8,6 +8,7 @@
 
 pub mod daemon;
 pub mod identity;
+pub mod interface;
 pub mod ipc;
 pub mod process_tree;
 pub mod spawn;

@@ -1015,6 +1015,8 @@ name = "bootty-os"
 version = "0.8.1"
 dependencies = [
  "nix 0.31.3",
+ "pretty_assertions",
+ "rstest",
  "rustix",
  "tokio",
  "windows-sys 0.61.2",
