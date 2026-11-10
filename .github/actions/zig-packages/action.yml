@@ -1,0 +1,18 @@
+name: Cache Zig packages
+description: >
+  Keep the Zig package store across runs. libghostty's build fetches its Zig dependencies over
+  the network, and a dropped connection there failed builds that had nothing to do with it.
+runs:
+  using: composite
+  steps:
+    - name: Point Zig at the cached store
+      shell: bash
+      run: echo "ZIG_GLOBAL_CACHE_DIR=$RUNNER_TEMP/zig-global-cache" >> "$GITHUB_ENV"
+
+    # Only fetched packages (`p/`); build outputs stay with Kache.
+    - name: Restore Zig packages
+      uses: actions/cache@v6
+      with:
+        path: ${{ runner.temp }}/zig-global-cache/p
+        key: zig-packages-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: zig-packages-${{ runner.os }}-

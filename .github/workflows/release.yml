@@ -90,6 +90,9 @@ jobs:
             libxrandr-dev \
             pkg-config
 
+      - name: Cache Zig packages
+        uses: ./.github/actions/zig-packages
+
       # Kache caches rustc outputs by content; only main pushes publish the store.
       - name: Set up Kache
         uses: kunobi-ninja/kache-action@ad7317540dcdd71c904f7a60a87b620a0c0e67ed
