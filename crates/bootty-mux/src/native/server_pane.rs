@@ -167,8 +167,6 @@ impl Pane {
                 epoch: 1,
                 title: published_title,
                 changed,
-                cwd_lookup: None,
-                process_cwd: None,
             };
             staged.disarm();
             let _ = ready_tx.send(Ok(()));
@@ -301,8 +299,6 @@ fn start_writer(mut writer: Box<dyn Write + Send>) -> InputWriter {
 }
 struct PaneWorker {
     clock: Arc<dyn Fn() -> std::time::Instant + Send + Sync>,
-    cwd_lookup: Option<std::time::Instant>,
-    process_cwd: Option<String>,
     stored_cwd: Option<std::path::PathBuf>,
     frames: tokio::sync::watch::Sender<Option<Arc<bootty_terminal::terminal_frame::RenderFrame>>>,
     latest_client: Option<Subscriber>,
@@ -489,7 +485,6 @@ impl PaneWorker {
                     .and_then(|()| self.encode_input(input))
                 {
                     Ok(bytes) => {
-                        self.cwd_lookup = None;
                         let _ = self.writer.send(bytes, reply, false);
                     }
                     Err(error) => {
@@ -547,17 +542,11 @@ impl PaneWorker {
             .map_err(|e| format!("{e:#}"))
     }
     fn publish_frame(&mut self) -> Result<()> {
-        let now = (self.clock)();
-        if self
-            .cwd_lookup
-            .is_none_or(|last| now.duration_since(last) >= std::time::Duration::from_millis(250))
-        {
-            self.process_cwd = self.process_directory();
-            self.cwd_lookup = Some(now);
-        }
+        // Look the directory up on every publish: a cached lookup goes stale when the shell
+        // changes directory right after output, and no later frame corrects it. Publishes are
+        // paced, and the lookup is one syscall.
         let cwd = self
-            .process_cwd
-            .clone()
+            .process_directory()
             .or_else(|| {
                 crate::session_snapshot::checkpoint_cwd(self.engine.current_working_directory())
             })
@@ -716,7 +705,6 @@ impl PaneWorker {
             C::FormatSelection(format) => R::Selection(self.engine.format_selection(format)?),
         };
         if !bytes.is_empty() {
-            self.cwd_lookup = None;
             // Encoded commands acknowledge FIFO acceptance; the actor must keep draining output.
             let (reply, _) = oneshot::channel();
             self.writer.send(bytes, reply, false)?;
@@ -842,8 +830,6 @@ impl PaneWorker {
         self.control = transport.control;
         staged.disarm();
         self.stored_cwd.clone_from(&launch.working_directory);
-        self.cwd_lookup = None;
-        self.process_cwd = None;
         self.writer = start_writer(transport.writer);
         self.engine = engine;
         self.progress = None;

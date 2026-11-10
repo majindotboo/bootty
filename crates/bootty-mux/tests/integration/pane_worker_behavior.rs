@@ -114,14 +114,18 @@ fn split_launches_in_osc7_directory_when_process_is_unavailable(
     );
 }
 
+/// The shell prints, then changes directory only after the test has seen that output's frame, so
+/// the directory change lands right after a published frame. The next frame must still name it.
 #[cfg(unix)]
 #[rstest]
 fn split_launches_in_shell_process_directory() {
     let directory = assert_fs::TempDir::new().unwrap();
     let expected = directory.path().canonicalize().unwrap();
+    let release = expected.join("release");
     let launches = Arc::new(Mutex::new(Vec::new()));
     let recorded = Arc::clone(&launches);
     let target = expected.clone();
+    let barrier = release.clone();
     let base = launcher(Outputs::default(), Arc::new(AtomicUsize::new(0)));
     let connector = native::memory::connector(Arc::new(move |size, config| {
         let mut launches = recorded.lock().unwrap();
@@ -134,9 +138,12 @@ fn split_launches_in_shell_process_directory() {
             shell: Some("/bin/sh".into()),
             args: vec![
                 "-c".into(),
-                "printf READY && read line && cd \"$1\" && printf CHANGED && read line".into(),
+                "printf READY && read line && printf ECHOED && \
+                 while [ ! -e \"$2\" ]; do :; done && cd \"$1\" && printf CHANGED && read line"
+                    .into(),
                 "sh".into(),
                 target.to_string_lossy().into_owned(),
+                barrier.to_string_lossy().into_owned(),
             ],
             shell_integration: false,
             ..config.clone()
@@ -186,6 +193,9 @@ fn split_launches_in_shell_process_directory() {
             input: PaneInput::Write(b"\n".to_vec()),
         })
         .unwrap();
+    let (_, echoed) = next_frame(&mut stream, &mut decoder).unwrap();
+    assert_eq!(echoed.current_working_directory.as_deref(), Some("/"));
+    std::fs::write(&release, "").unwrap();
     loop {
         let (_, frame) = next_frame(&mut stream, &mut decoder).unwrap();
         if frame.current_working_directory.as_deref() == expected.to_str() {
