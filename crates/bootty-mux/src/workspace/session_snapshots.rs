@@ -594,10 +594,13 @@ impl WorkspaceRuntime {
                         MuxCommandError::Failed("restored pane history is unavailable".into())
                     })?;
                 self.space_terminal_owner(scope)
-                    .and_then(|owner| {
-                        owner
-                            .terminal
-                            .start_scoped_restored_native(scope, pane.clone(), &text)
+                    .and_then(|(owner, backend)| {
+                        owner.terminal.start_scoped_restored_native(
+                            scope,
+                            &backend,
+                            pane.clone(),
+                            &text,
+                        )
                     })
                     .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))?;
                 let _ = self.take_restored_terminal_history(scope, id);

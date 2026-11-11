@@ -24,7 +24,7 @@ use bootty_terminal::{
     terminal_input_model::{KeyInput, MouseInput},
 };
 
-use crate::{controller::SpaceId, snapshot::MuxPaneAnchor};
+use crate::{controller::SpaceId, native::NativeBackend, snapshot::MuxPaneAnchor};
 
 #[derive(Clone, Copy)]
 pub(super) struct PaneStartRequest<'a> {
@@ -39,7 +39,6 @@ pub(super) struct PaneStartRequest<'a> {
 
 #[derive(Deref, DerefMut)]
 pub struct ActiveTerminal {
-    backend: crate::native::NativeBackend,
     active_target: Option<ScopedMuxPaneTarget>,
     geometry: TerminalGeometry,
     display_scale: f32,
@@ -440,7 +439,6 @@ impl ActiveTerminal {
         repaint_wakeup: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Result<Self> {
         Ok(Self {
-            backend: crate::native::NativeBackend::new(),
             active_target: None,
             geometry,
             display_scale: 1.0,
@@ -461,22 +459,15 @@ impl ActiveTerminal {
         Arc::clone(&self.repaint_wakeup)
     }
 
-    pub(crate) fn native_backend(&self) -> crate::native::NativeBackend {
-        self.backend.clone()
-    }
-
-    pub fn set_native_backend(&mut self, backend: crate::native::NativeBackend) {
-        self.backend = backend;
-    }
-
     /// # Errors
     /// Returns target resolution, terminal startup, or backend synchronization errors.
     pub fn sync_mux_anchor(
         &mut self,
+        backend: &NativeBackend,
         config: &MuxBindingConfig,
         anchor: Option<&MuxPaneAnchor>,
     ) -> Result<()> {
-        self.sync_mux_anchor_in_scope(None, config, anchor)
+        self.sync_mux_anchor_in_scope(None, backend, config, anchor)
     }
 
     /// # Errors
@@ -484,15 +475,17 @@ impl ActiveTerminal {
     pub fn sync_scoped_mux_anchor(
         &mut self,
         scope: SpaceId,
+        backend: &NativeBackend,
         config: &MuxBindingConfig,
         anchor: Option<&MuxPaneAnchor>,
     ) -> Result<()> {
-        self.sync_mux_anchor_in_scope(Some(scope), config, anchor)
+        self.sync_mux_anchor_in_scope(Some(scope), backend, config, anchor)
     }
 
     fn sync_mux_anchor_in_scope(
         &mut self,
         scope: Option<SpaceId>,
+        backend: &NativeBackend,
         config: &MuxBindingConfig,
         anchor: Option<&MuxPaneAnchor>,
     ) -> Result<()> {
@@ -511,7 +504,7 @@ impl ActiveTerminal {
 
         self.park_cached_terminal();
         let phase = bootty_terminal::latency::start();
-        let terminal = self.start_terminal(target.as_ref());
+        let terminal = self.start_terminal(backend, target.as_ref());
         bootty_terminal::latency::trace_slow("attach.start_terminal", phase, 2.0);
 
         self.active_target = terminal.as_ref().and(target);
@@ -534,10 +527,11 @@ impl ActiveTerminal {
     pub fn start_scoped_native_command(
         &mut self,
         scope: SpaceId,
+        backend: &NativeBackend,
         pane: MuxPaneAnchor,
         command: Vec<String>,
     ) -> Result<()> {
-        self.start_scoped_native_pane(scope, pane, command, None)
+        self.start_scoped_native_pane(scope, backend, pane, command, None)
     }
 
     /// Start a restored shell with styled history present before its first output.
@@ -546,15 +540,23 @@ impl ActiveTerminal {
     pub fn start_scoped_restored_native(
         &mut self,
         scope: SpaceId,
+        backend: &NativeBackend,
         pane: MuxPaneAnchor,
         history: &str,
     ) -> Result<()> {
-        self.start_scoped_native_pane(scope, pane, Vec::new(), Some(std::sync::Arc::from(history)))
+        self.start_scoped_native_pane(
+            scope,
+            backend,
+            pane,
+            Vec::new(),
+            Some(std::sync::Arc::from(history)),
+        )
     }
 
     fn start_scoped_native_pane(
         &mut self,
         scope: SpaceId,
+        backend: &NativeBackend,
         pane: MuxPaneAnchor,
         _command: Vec<String>,
         _history: Option<std::sync::Arc<str>>,
@@ -567,7 +569,7 @@ impl ActiveTerminal {
             return Ok(());
         }
         let runtime = super::startup::start_native_terminal(PaneStartRequest {
-            backend: &self.backend,
+            backend,
             target: &target,
             spawn_geometry: self.geometry,
             display_scale: self.display_scale,
@@ -611,13 +613,17 @@ impl ActiveTerminal {
 
     fn start_terminal(
         &mut self,
+        backend: &NativeBackend,
         target: Option<&ScopedMuxPaneTarget>,
     ) -> Option<Box<dyn TerminalRuntime>> {
-        self.start_terminal_at(target, self.geometry)
+        self.start_terminal_at(backend, target, self.geometry)
     }
 
+    /// Reuse the pane's parked runtime, or start one on `backend`: the server of the Space that
+    /// owns the pane. This terminal holds panes from every Space, so it has no backend of its own.
     fn start_terminal_at(
         &mut self,
+        backend: &NativeBackend,
         target: Option<&ScopedMuxPaneTarget>,
         spawn_geometry: TerminalGeometry,
     ) -> Option<Box<dyn TerminalRuntime>> {
@@ -628,7 +634,7 @@ impl ActiveTerminal {
         }
 
         let request = PaneStartRequest {
-            backend: &self.backend,
+            backend,
             target,
             spawn_geometry,
             display_scale: self.display_scale,
@@ -655,11 +661,12 @@ impl ActiveTerminal {
     /// Returns target resolution, terminal startup, or backend synchronization errors.
     pub fn sync_native_window(
         &mut self,
+        backend: &NativeBackend,
         window_panes: &[MuxPaneAnchor],
         focused: Option<&MuxPaneAnchor>,
         window_id: Option<&str>,
     ) {
-        self.sync_native_window_in_scope(None, window_panes, focused, window_id);
+        self.sync_native_window_in_scope(None, backend, window_panes, focused, window_id);
     }
 
     /// # Errors
@@ -667,11 +674,12 @@ impl ActiveTerminal {
     pub fn sync_scoped_native_window(
         &mut self,
         scope: SpaceId,
+        backend: &NativeBackend,
         window_panes: &[MuxPaneAnchor],
         focused: Option<&MuxPaneAnchor>,
         window_id: Option<&str>,
     ) {
-        self.sync_native_window_in_scope(Some(scope), window_panes, focused, window_id);
+        self.sync_native_window_in_scope(Some(scope), backend, window_panes, focused, window_id);
     }
 
     /// Attach visible panes without changing the terminal that receives keyboard input.
@@ -681,6 +689,7 @@ impl ActiveTerminal {
     pub fn prepare_scoped_native_panes(
         &mut self,
         scope: SpaceId,
+        backend: &NativeBackend,
         panes: &[MuxPaneAnchor],
         geometry: TerminalGeometry,
     ) {
@@ -689,11 +698,12 @@ impl ActiveTerminal {
             .cloned()
             .filter_map(|anchor| ScopedMuxPaneTarget::from_anchor(Some(scope), anchor))
             .collect::<Vec<_>>();
-        self.prepare_native_targets(&targets, geometry);
+        self.prepare_native_targets(backend, &targets, geometry);
     }
 
     fn prepare_native_targets(
         &mut self,
+        backend: &NativeBackend,
         targets: &[ScopedMuxPaneTarget],
         geometry: TerminalGeometry,
     ) {
@@ -703,7 +713,7 @@ impl ActiveTerminal {
             {
                 continue;
             }
-            if let Some(runtime) = self.start_terminal_at(Some(target), geometry) {
+            if let Some(runtime) = self.start_terminal_at(backend, Some(target), geometry) {
                 self.native_terminals.insert(target.clone(), runtime);
             }
         }
@@ -731,6 +741,7 @@ impl ActiveTerminal {
     fn sync_native_window_in_scope(
         &mut self,
         scope: Option<SpaceId>,
+        backend: &NativeBackend,
         window_panes: &[MuxPaneAnchor],
         focused: Option<&MuxPaneAnchor>,
         window_id: Option<&str>,
@@ -747,12 +758,12 @@ impl ActiveTerminal {
 
         if self.active_target.as_ref() != focused_target.as_ref() {
             self.park_cached_terminal();
-            let terminal = self.start_terminal(focused_target.as_ref());
+            let terminal = self.start_terminal(backend, focused_target.as_ref());
             self.active_target = terminal.as_ref().and(focused_target);
             self.set_active_terminal(terminal.unwrap_or_else(idle_terminal));
         }
 
-        self.prepare_native_targets(&targets, self.geometry);
+        self.prepare_native_targets(backend, &targets, self.geometry);
         let window_id = window_id.map(str::to_owned);
         if self.native_window_scope != scope || self.native_window_id != window_id {
             self.native_window_scope = scope;

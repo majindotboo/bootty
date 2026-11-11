@@ -173,23 +173,22 @@ impl NativeTerminalOwner {
         })
     }
 
+    /// `backend` is the server of the binding whose config this is: the owner itself moves between
+    /// Spaces with the active one.
     fn publish_config(
         &mut self,
+        backend: &crate::native::NativeBackend,
         config: &BoottyConfig,
         variant: AppearanceVariant,
         live_config: Option<&TerminalLiveConfig>,
     ) -> Result<()> {
-        self.terminal
-            .native_backend()
-            .configure_vt(crate::terminal_config::terminal_vt_policy(config, variant));
+        backend.configure_vt(crate::terminal_config::terminal_vt_policy(config, variant));
         let session = terminal_session_config_with_side_effects(
             config,
             variant,
             &self.terminal_side_effect_tx,
         );
-        self.terminal
-            .native_backend()
-            .configure_launch(session.launch.clone());
+        backend.configure_launch(session.launch.clone());
         self.terminal.set_terminal_config(session);
         if let Some(config) = live_config {
             self.terminal.apply_live_config(config.clone())?;
@@ -278,7 +277,7 @@ impl BindingRuntime {
         let remote_error = realized.availability_error.clone();
         let mut binding_config = config.clone();
         binding_config.multiplexer = realized.config.clone();
-        let mut terminal_owner = NativeTerminalOwner::new(&binding_config, variant, repaint)?;
+        let terminal_owner = NativeTerminalOwner::new(&binding_config, variant, repaint)?;
         // A config path names one server workspace across all of its windows and Spaces.
         let workspace = config.config_path.as_path();
         let backend = realized
@@ -311,9 +310,6 @@ impl BindingRuntime {
                 &binding_config,
                 variant,
             ));
-        terminal_owner
-            .terminal
-            .set_native_backend(mux.native_backend());
         let mut binding = Self {
             label: String::new(),
             placement,
@@ -804,11 +800,13 @@ impl WorkspaceRuntime {
         for binding in self.bindings_mut() {
             let mut binding_config = config.clone();
             binding_config.multiplexer = binding.multiplexer.clone();
-            if let Err(error) =
-                binding
-                    .terminal_owner
-                    .publish_config(&binding_config, variant, live_config)
-            {
+            let backend = binding.mux.native_backend();
+            if let Err(error) = binding.terminal_owner.publish_config(
+                &backend,
+                &binding_config,
+                variant,
+                live_config,
+            ) {
                 warnings.push(format!(
                     "terminal config publication failed for {:?}: {error}",
                     binding.scope
@@ -1030,9 +1028,17 @@ impl WorkspaceRuntime {
         });
     }
 
-    fn space_terminal_owner(&mut self, scope: SpaceId) -> Result<&mut NativeTerminalOwner> {
-        anyhow::ensure!(self.binding(scope).is_some(), "the target Space was closed");
-        Ok(&mut self.active.binding.terminal_owner)
+    /// The shared terminal owner, with the server of the Space `scope` names. The owner moves with
+    /// the active Space, so a pane must start on its own Space's server, never the owner's.
+    fn space_terminal_owner(
+        &mut self,
+        scope: SpaceId,
+    ) -> Result<(&mut NativeTerminalOwner, crate::native::NativeBackend)> {
+        let backend = self
+            .binding(scope)
+            .map(|binding| binding.mux.native_backend())
+            .ok_or_else(|| anyhow::anyhow!("the target Space was closed"))?;
+        Ok((&mut self.active.binding.terminal_owner, backend))
     }
 
     fn current_space_terminal_owner(&mut self, scope: SpaceId) -> Option<&mut NativeTerminalOwner> {

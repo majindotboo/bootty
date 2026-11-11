@@ -66,6 +66,7 @@ impl BindingRuntime {
         if pane_ids.is_empty() {
             return self.terminal_owner.terminal.sync_scoped_mux_anchor(
                 self.scope,
+                &self.mux.native_backend(),
                 &config,
                 self.mux.selected_session_anchor(),
             );
@@ -96,6 +97,7 @@ impl BindingRuntime {
             .cloned();
         self.terminal_owner.terminal.sync_scoped_native_window(
             self.scope,
+            &self.mux.native_backend(),
             &panes,
             focused_anchor.as_ref(),
             window_id.as_deref(),
@@ -162,6 +164,7 @@ impl BindingRuntime {
         )?;
         self.terminal_owner.terminal.prepare_scoped_native_panes(
             self.scope,
+            &self.mux.native_backend(),
             &window.panes,
             geometry,
         );

@@ -421,10 +421,10 @@ impl WorkspaceRuntime {
             return Ok(());
         };
         self.space_terminal_owner(scope)
-            .and_then(|owner| {
+            .and_then(|(owner, backend)| {
                 owner
                     .terminal
-                    .start_scoped_native_command(scope, pane, argv.to_vec())
+                    .start_scoped_native_command(scope, &backend, pane, argv.to_vec())
             })
             .map_err(|error| MuxCommandError::Failed(format!("{error:#}")))
     }

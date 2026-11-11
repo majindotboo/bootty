@@ -67,8 +67,11 @@ fn native_pane_publishes_real_frames_through_gpui() -> Result<()> {
         config,
         repaint_wakeup,
     )?);
-    terminal.set_native_backend(backend);
-    terminal.sync_mux_anchor(&bootty_mux::MuxBindingConfig::default(), Some(&anchor))?;
+    terminal.sync_mux_anchor(
+        &backend,
+        &bootty_mux::MuxBindingConfig::default(),
+        Some(&anchor),
+    )?;
     let initial = wait_for_frame(&mut *terminal, &repaint_rx, PANE_MARKER)?;
     let initial_rows = initial.text_rows();
     anyhow::ensure!(
