@@ -406,7 +406,7 @@ fn register_resource_commands(commands: &mut BTreeMap<String, RegisteredCommand>
         (
             "terminal.read",
             "Read Terminal",
-            "Read the active terminal screen.",
+            "Read the active terminal screen, or the target terminal's when one is named.",
             MutationClass::Read,
             vec![],
             CommandExecutorResolver::ReadTerminal,

@@ -862,6 +862,15 @@ impl AppState {
         {
             return self.dispatch_pane_input(exact, &input, execution);
         }
+        if target_supplied
+            && matches!(
+                resolved.executor,
+                CoreCommandExecutor::Synchronous(SynchronousCommand::ReadTerminal)
+            )
+            && let Some(exact) = exact_target.as_ref()
+        {
+            return self.dispatch_targeted_terminal_read(exact, execution);
+        }
         let planned_mux_command =
             match self.preflight_resolved_invocation(&resolved, exact_target.as_ref(), effects) {
                 Ok(command) => command,

@@ -426,6 +426,7 @@ fn terminal_command_crosses(command: &str) -> bool {
         "link.open"
             | "agents.focus"
             | "agents.spawn"
+            | "terminal.read"
             | "terminal.write"
             | "terminal.paste"
             | "terminal.submit"

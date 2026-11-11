@@ -318,6 +318,20 @@ fn a_native_session_command_starts_at_once_and_is_the_process_shown_later(
     };
     // Before anything shows it, even in an inactive Space, the pane is readable and takes input.
     wait_until(&mut state, "the hidden pane is readable", shows_token);
+    let read = submit_command(
+        &mut state,
+        targeted("terminal.read", Vec::new(), terminal.clone()),
+        Instant::now(),
+    );
+    let CommandOutcome::Success { value, .. } = read else {
+        panic!("terminal.read failed: {read:?}");
+    };
+    assert!(
+        value["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("eager-token")),
+        "terminal.read named the hidden pane but read {value}"
+    );
     for (command, arguments) in [
         ("terminal.paste", vec!["hidden-input".to_owned()]),
         ("terminal.submit", Vec::new()),

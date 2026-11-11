@@ -54,13 +54,11 @@ impl AppState {
         let (sender, result) = mpsc::channel();
         let repaint = self.repaint.clone();
         std::thread::spawn(move || {
-            let result = backend.request(&bootty_mux::native::protocol::Request::Capture { pane, options }).and_then(|response| match response {
-                bootty_mux::native::protocol::Response::Captured(capture) => Ok(capture),
-                _ => anyhow::bail!("Native mux returned no capture"),
-            }).and_then(|mut capture| {
+            let result = server_capture(&backend, pane, options).and_then(|mut capture| {
                 // Capture itself is read-only. Claim the mutation only when ready to publish,
                 // allowing a dismissed form or timed-out caller to cancel while formatting.
-                executor::begin_synchronous_command(Some((deadline, cancellation))).map_err(|error| anyhow::anyhow!("Capture stopped before export: {error:?}"))?;
+                executor::begin_synchronous_command(Some((deadline, cancellation)))
+                    .map_err(|error| anyhow::anyhow!("Capture stopped before export: {error:?}"))?;
                 let bytes = capture.text.len();
                 if let Some(path) = &destination {
                     write_capture(Path::new(path), capture.text.as_bytes())?;
@@ -127,4 +125,62 @@ fn write_capture(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
         .persist_noclobber(path)
         .map_err(|error| error.error)?;
     Ok(())
+}
+
+impl AppState {
+    /// `terminal.read` for a named pane, in any Space. That pane may have no viewer here, so the
+    /// screen comes from the server, which tracks no cursor for a reader.
+    pub(super) fn dispatch_targeted_terminal_read(
+        &self,
+        exact: &ExactMuxTarget,
+        execution: Option<(Instant, CommandCancellation)>,
+    ) -> CommandDispatch {
+        let (deadline, cancellation) = executor::command_execution(execution);
+        let read_failure = |message: String| CommandOutcome::Failed {
+            code: "terminal_read_failed".to_owned(),
+            message,
+        };
+        let (Some(binding), (_, _, Some(pane))) =
+            (self.workspace.binding(exact.scope()), exact.ids())
+        else {
+            return CommandDispatch::Complete(read_failure("The terminal was closed".to_owned()));
+        };
+        let backend = binding.mux().native_backend();
+        let pane = pane.to_owned();
+        let (sender, result) = mpsc::channel();
+        let repaint = self.repaint.clone();
+        std::thread::spawn(move || {
+            let outcome = server_capture(&backend, pane, capture_options(&[], false)).map_or_else(
+                |error| read_failure(error.to_string()),
+                |capture| {
+                    if cancellation.is_cancelled() || Instant::now() >= deadline {
+                        return CommandOutcome::cancelled();
+                    }
+                    CommandOutcome::Success {
+                        value: serde_json::json!({
+                            "cols": capture.cols,
+                            "rows": capture.rows,
+                            "text": capture.text,
+                            "cursor": null,
+                        }),
+                        warnings: Vec::new(),
+                    }
+                },
+            );
+            let _ = sender.send(outcome);
+            repaint();
+        });
+        CommandDispatch::Pending(PendingCommandResult::Outcome(result))
+    }
+}
+
+fn server_capture(
+    backend: &bootty_mux::native::NativeBackend,
+    pane: String,
+    options: CaptureOptions,
+) -> anyhow::Result<bootty_terminal::terminal_capture::TerminalCapture> {
+    match backend.request(&bootty_mux::native::protocol::Request::Capture { pane, options })? {
+        bootty_mux::native::protocol::Response::Captured(capture) => Ok(capture),
+        _ => anyhow::bail!("Native mux returned no capture"),
+    }
 }
