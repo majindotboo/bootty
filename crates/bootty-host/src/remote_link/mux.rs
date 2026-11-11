@@ -8,11 +8,9 @@ use super::{
 };
 use crate::ssh::SshRemote;
 use anyhow::{Context as _, Result};
-use bootty_os::process_tree::{ConsoleWindowBehavior, ProcessTreeChild};
 use std::{
     io,
     pin::Pin,
-    process::{Command, Stdio},
     sync::Arc,
     task::{Context, Poll},
     time::{Duration, Instant},
@@ -36,13 +34,11 @@ pub type MuxPreflight = Arc<
 
 pub struct MuxStream {
     stream: Box<dyn Stream>,
-    process: Option<ProcessTreeChild>,
 }
 impl MuxStream {
     pub fn new(stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static) -> Self {
         Self {
             stream: Box::new(stream),
-            process: None,
         }
     }
 }
@@ -119,10 +115,7 @@ impl RemoteMux {
         &self,
         announcement: Option<&Bootstrap>,
         route: Route,
-    ) -> Result<Option<Arc<RemoteLink>>> {
-        if route == Route::Ssh {
-            return Ok(None);
-        }
+    ) -> Result<Arc<RemoteLink>> {
         let response = announcement.context("remote route announcement missing")?;
         let certificate = response.certificate.clone().into();
         let link = match route {
@@ -132,21 +125,25 @@ impl RemoteMux {
             Route::Tls => {
                 RemoteLink::connect_tcp(&self.identity, certificate, response.tcp_address()).await?
             }
-            Route::Ssh => anyhow::bail!("SSH route is not a direct link"),
+            // One SSH channel carries every stream. A process per stream outgrew sshd's session
+            // limit, and each refused stream reconnected until sshd refused the host.
+            Route::Ssh => {
+                super::tunnel::connect(&self.remote, &self.identity, certificate, response.tcp_port)
+                    .await?
+            }
         };
         // The SSH-authenticated pinned certificate proves this route before any
         // launch environment or application credential is sent. No TLS early data.
         (self.preflight)(link.open_mux(&self.namespace).await?).await?;
-        Ok(Some(Arc::new(link)))
+        Ok(Arc::new(link))
     }
     async fn promote(&self, state: &mut State) -> Result<()> {
         let candidates: Vec<_> = state.routes.candidates(Instant::now()).collect();
         for route in candidates {
-            let result = tokio::time::timeout(
-                Duration::from_secs(4),
-                self.dial(state.announcement.as_ref(), route),
-            )
-            .await;
+            // The SSH tunnel spends its own handshake before TLS; direct routes fail fast.
+            let budget = Duration::from_secs(if route == Route::Ssh { 10 } else { 4 });
+            let result =
+                tokio::time::timeout(budget, self.dial(state.announcement.as_ref(), route)).await;
             if let Ok(Ok(link)) = result {
                 self.install(state, route, link);
                 return Ok(());
@@ -155,11 +152,10 @@ impl RemoteMux {
         state.routes.defer(Instant::now());
         anyhow::bail!("preferred remote routes unavailable")
     }
-    fn install(&self, state: &mut State, route: Route, link: Option<Arc<RemoteLink>>) {
-        if let Some(old) = state.link.take() {
+    fn install(&self, state: &mut State, route: Route, link: Arc<RemoteLink>) {
+        if let Some(old) = state.link.replace(link) {
             old.close();
         }
-        state.link = link;
         state.routes.connected(route, Instant::now());
         self.changed
             .send_modify(|generation| *generation = generation.wrapping_add(1));
@@ -208,39 +204,6 @@ impl RemoteMux {
             }
         }
     }
-    fn ssh(&self) -> Result<MuxStream> {
-        let (program, args) = self.remote.raw_command(&crate::exec::remote_program_line(&[
-            "--native-mux-bridge".into(),
-            self.namespace.clone(),
-        ]));
-        let mut command = Command::new(program);
-        command
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        let mut process = ProcessTreeChild::spawn_with_console_window(
-            &mut command,
-            ConsoleWindowBehavior::Suppress,
-        )?;
-        let input = tokio::process::ChildStdin::from_std(
-            process
-                .child_mut()
-                .stdin
-                .take()
-                .context("mux bridge stdin")?,
-        )?;
-        let output = tokio::process::ChildStdout::from_std(
-            process
-                .child_mut()
-                .stdout
-                .take()
-                .context("mux bridge stdout")?,
-        )?;
-        let mut stream = MuxStream::new(tokio::io::join(output, input));
-        stream.process = Some(process);
-        Ok(stream)
-    }
     /// # Errors
     /// Returns installation, authenticated route, or stream establishment failures.
     pub async fn open(&self) -> Result<MuxStream> {
@@ -258,24 +221,24 @@ impl RemoteMux {
             }
             self.promote(&mut state).await?;
         }
-        let stream = match &state.link {
-            Some(link) => {
-                match tokio::time::timeout(Duration::from_secs(10), link.open_mux(&self.namespace))
-                    .await
-                    .unwrap_or_else(|error| Err(error.into()))
-                {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        link.close();
-                        state.link = None;
-                        state.announcement = None;
-                        state.routes.disconnected(Instant::now());
-                        return Err(error);
-                    }
+        let link = state
+            .link
+            .as_ref()
+            .context("no remote route is connected")?;
+        let stream =
+            match tokio::time::timeout(Duration::from_secs(10), link.open_mux(&self.namespace))
+                .await
+                .unwrap_or_else(|error| Err(error.into()))
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    link.close();
+                    state.link = None;
+                    state.announcement = None;
+                    state.routes.disconnected(Instant::now());
+                    return Err(error);
                 }
-            }
-            None => self.ssh()?,
-        };
+            };
         let mut changed = self.changed.subscribe();
         let link = state.link.clone();
         drop(state);
