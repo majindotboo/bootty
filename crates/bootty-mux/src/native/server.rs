@@ -906,8 +906,11 @@ pub fn run(identity: bootty_config::ApplicationIdentity) -> Result<()> {
         let initial_idle = tokio::time::sleep(std::time::Duration::from_secs(5));
         tokio::pin!(initial_idle);
         let mut awaiting_first_client = true;
+        let mut lease_refresh = tokio::time::interval(super::local::LEASE_REFRESH);
+        lease_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
+                _ = lease_refresh.tick() => { let _ = listener.refresh_lease(); }
                 accepted = listener.accept() => {
                     let (stream, peer) = accepted?;
                     if peer.is_current_user() { awaiting_first_client = false; let server = Arc::clone(&server); tokio::spawn(async move { let _ = server.serve(stream).await; }); }

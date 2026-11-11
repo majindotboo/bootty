@@ -24,9 +24,21 @@ fn endpoint_for_namespace(namespace: &str) -> Result<LocalEndpoint> {
 pub struct Binding {
     pub listener: LocalListener,
     #[cfg(unix)]
-    _lease: File,
+    lease: File,
 }
+/// How often a live server marks its lease in use. Age-based temp cleaners delete files untouched
+/// for days even while locked (macOS `tmp_cleaner` after 3), so this stays well under that.
+pub const LEASE_REFRESH: Duration = Duration::from_hours(1);
 impl Binding {
+    /// Mark the lease file in use. A cleaner that deleted it would let the next server start take
+    /// this endpoint and orphan every live pane.
+    /// # Errors
+    /// Returns the timestamp write failure.
+    pub fn refresh_lease(&self) -> std::io::Result<()> {
+        #[cfg(unix)]
+        self.lease.set_modified(std::time::SystemTime::now())?;
+        Ok(())
+    }
     /// # Errors
     /// Returns an accept or peer credential failure.
     pub async fn accept(
@@ -94,7 +106,7 @@ pub fn bind(endpoint: &LocalEndpoint) -> Result<Option<Binding>> {
     Ok(Some(Binding {
         listener,
         #[cfg(unix)]
-        _lease: lease,
+        lease,
     }))
 }
 fn sidecar_supports_mux(binary: &std::path::Path) -> bool {

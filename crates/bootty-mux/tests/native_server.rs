@@ -303,6 +303,44 @@ fn concurrent_local_binds_choose_one_server() {
 
 #[cfg(unix)]
 #[rstest]
+fn a_live_server_keeps_its_lease_newer_than_temp_cleaners_delete() {
+    let directory = assert_fs::TempDir::new().unwrap();
+    let endpoint = bootty_os::ipc::LocalEndpoint::from_path(directory.path().join("mux"));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let binding = {
+        let _entered = runtime.enter();
+        native::local::bind(&endpoint).unwrap().unwrap()
+    };
+    let lease = endpoint.as_path().with_extension("lock");
+    let days_ago = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_hours(96))
+        .unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&lease)
+        .unwrap()
+        .set_modified(days_ago)
+        .unwrap();
+
+    binding.refresh_lease().unwrap();
+
+    let age = std::fs::metadata(&lease)
+        .unwrap()
+        .modified()
+        .unwrap()
+        .elapsed()
+        .unwrap_or_default();
+    assert!(
+        age < native::local::LEASE_REFRESH,
+        "a held lease still looks {age:?} old"
+    );
+}
+
+#[cfg(unix)]
+#[rstest]
 fn a_client_gone_before_accept_does_not_stop_the_listener() {
     let directory = assert_fs::TempDir::new().unwrap();
     let endpoint = bootty_os::ipc::LocalEndpoint::from_path(directory.path().join("mux"));
