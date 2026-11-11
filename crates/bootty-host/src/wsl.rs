@@ -16,7 +16,7 @@ pub const WSL_PROGRAM: &str = "wsl.exe";
 #[derive(Clone, Debug)]
 pub struct WslRemote {
     config: WslRemoteConfig,
-    ready: Arc<Mutex<bool>>,
+    ready: Arc<Mutex<crate::remote::DaemonReadiness>>,
 }
 impl PartialEq for WslRemote {
     fn eq(&self, other: &Self) -> bool {
@@ -69,13 +69,13 @@ impl WslRemote {
             .ready
             .lock()
             .map_err(|_| anyhow::anyhow!("WSL daemon installer lock is poisoned"))?;
-        if *ready {
+        if ready.current() {
             return Ok(());
         }
         let (program, args) =
             self.command(remote_exec_program(), &[REMOTE_PING_SUBCOMMAND.to_owned()]);
         if daemon_matches(&runner.run(&program, &args)?) {
-            *ready = true;
+            ready.confirm();
             return Ok(());
         }
         let (program, args) = self.command("uname", &["-m".to_owned()]);
@@ -88,7 +88,7 @@ impl WslRemote {
         }
         let daemon = linux_daemon(&architecture.stdout)?;
         self.install_daemon(&daemon, runner)?;
-        *ready = true;
+        ready.confirm();
         drop(ready);
         Ok(())
     }

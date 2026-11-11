@@ -31,7 +31,7 @@ const SERVER_ALIVE_COUNT_MAX: u32 = 3;
 #[derive(Clone, Debug)]
 pub struct SshRemote {
     config: SshTarget,
-    daemon_ready: Arc<Mutex<bool>>,
+    daemon_ready: Arc<Mutex<crate::remote::DaemonReadiness>>,
 }
 
 impl PartialEq for SshRemote {
@@ -85,11 +85,11 @@ impl SshRemote {
             .daemon_ready
             .lock()
             .map_err(|_| anyhow::anyhow!("remote daemon installer lock is poisoned"))?;
-        if *ready {
+        if ready.current() {
             return Ok(());
         }
         crate::install::ensure(self, runner)?;
-        *ready = true;
+        ready.confirm();
         drop(ready);
         Ok(())
     }

@@ -17,6 +17,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<ExitCode> {
+    command_runtime::mark_in_use();
     if bootty_mux::native::local::run_embedded()? {
         return Ok(ExitCode::SUCCESS);
     }

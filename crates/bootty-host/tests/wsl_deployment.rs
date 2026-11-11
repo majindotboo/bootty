@@ -87,11 +87,7 @@ fn installer_publishes_only_verified_complete_candidates(
         )
         .unwrap();
     }
-    let installed = home.child(format!(
-        ".bootty/bin/bootty-daemon-{}-{}.exe",
-        bootty_host::REMOTE_DAEMON_PROTOCOL_VERSION,
-        env!("CARGO_PKG_VERSION")
-    ));
+    let installed = home.child(bootty_host::remote_exec_program().trim_start_matches("./"));
     installed.write_str("prior daemon").unwrap();
     let asset = home.child("asset");
     let version = if compatible {

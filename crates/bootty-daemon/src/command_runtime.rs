@@ -3,6 +3,16 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use bootty_config::ApplicationIdentity;
 
+/// Mark this daemon's file as in use. Clients remove daemon files no build has run for 30 days.
+pub fn mark_in_use() {
+    if let Ok(executable) = std::env::current_exe()
+        && let Ok(file) = std::fs::File::open(executable)
+    {
+        // Best effort: a daemon that cannot mark itself is only removed after a month unused.
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
 pub fn run_remote_ping() {
     println!(
         "{}:{}",

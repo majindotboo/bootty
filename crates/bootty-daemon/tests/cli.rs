@@ -21,6 +21,34 @@ fn assert_success(output: &std::process::Output) {
     );
 }
 
+/// Clients retire daemon files nothing has run for a month, so a daemon marks its file when it runs.
+#[test]
+fn running_a_daemon_marks_its_file_in_use() {
+    let home = assert_fs::TempDir::new().expect("create remote home");
+    let daemon = home.child("bootty-daemon-copy.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_bootty-daemon"), daemon.path()).expect("install daemon");
+    let month_ago = std::time::SystemTime::now() - std::time::Duration::from_hours(31 * 24);
+    std::fs::File::options()
+        .write(true)
+        .open(daemon.path())
+        .and_then(|file| file.set_modified(month_ago))
+        .expect("age daemon");
+
+    let output = Command::new(daemon.path())
+        .arg("remote-ping")
+        .bootty_output()
+        .expect("ping daemon");
+
+    assert_success(&output);
+    let modified = std::fs::metadata(daemon.path())
+        .and_then(|metadata| metadata.modified())
+        .expect("read daemon age");
+    assert!(
+        modified.elapsed().unwrap_or_default() < std::time::Duration::from_secs(3600),
+        "daemon still looks unused: {modified:?}"
+    );
+}
+
 #[test]
 fn ping_reports_the_compatible_protocol_and_release() {
     let output = Command::new(env!("CARGO_BIN_EXE_bootty-daemon"))

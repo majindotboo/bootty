@@ -12,12 +12,14 @@ use serde::{Deserialize, Serialize};
 
 pub const REMOTE_DAEMON_PROGRAM: &str = "bootty-daemon";
 pub const REMOTE_DAEMON_PROTOCOL_VERSION: &str = "24";
+/// The remote daemon path for the daemon this client ships. Each shipped daemon has its own path,
+/// so a new build installs itself on first use and builds sharing a host never replace each other.
 #[must_use]
 pub fn remote_exec_program() -> &'static str {
     static PROGRAM: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
         format!(
             "./.bootty/bin/bootty-daemon-{REMOTE_DAEMON_PROTOCOL_VERSION}-{}.exe",
-            env!("CARGO_PKG_VERSION")
+            crate::install::shipped_daemon_build()
         )
     });
     &PROGRAM

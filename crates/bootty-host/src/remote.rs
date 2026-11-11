@@ -5,17 +5,34 @@ use crate::{
 };
 use anyhow::Result;
 use bootty_config::config::RemoteConfig;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::{
+    sync::{Arc, Mutex, OnceLock, PoisonError},
+    time::{Duration, Instant},
+};
 
 /// Each remote host's daemon readiness, by host, for every handle to it in this process.
-pub(crate) type Readiness<C> = OnceLock<Mutex<Vec<(C, Arc<Mutex<bool>>)>>>;
+pub(crate) type Readiness<C> = OnceLock<Mutex<Vec<(C, Arc<Mutex<DaemonReadiness>>)>>>;
 
-/// The readiness flag every handle to `config`'s host shares, so the first operation on a host
-/// checks its daemon and later handles, fresh or not, skip the check.
+/// When a host's daemon last answered as the one this client ships. It is rechecked daily, because
+/// another build's install removes daemon files nothing has run for 30 days.
+#[derive(Debug, Default)]
+pub(crate) struct DaemonReadiness(Option<Instant>);
+impl DaemonReadiness {
+    const RECHECK: Duration = Duration::from_hours(24);
+    pub(crate) fn current(&self) -> bool {
+        self.0.is_some_and(|at| at.elapsed() < Self::RECHECK)
+    }
+    pub(crate) fn confirm(&mut self) {
+        self.0 = Some(Instant::now());
+    }
+}
+
+/// The readiness every handle to `config`'s host shares, so the first operation on a host checks
+/// its daemon and later handles, fresh or not, skip the check.
 pub(crate) fn shared_readiness<C: PartialEq + Clone>(
     registry: &Readiness<C>,
     config: &C,
-) -> Arc<Mutex<bool>> {
+) -> Arc<Mutex<DaemonReadiness>> {
     let mut hosts = registry
         .get_or_init(Mutex::default)
         .lock()
@@ -23,7 +40,7 @@ pub(crate) fn shared_readiness<C: PartialEq + Clone>(
     if let Some((_, ready)) = hosts.iter().find(|(host, _)| host == config) {
         return Arc::clone(ready);
     }
-    let ready = Arc::new(Mutex::new(false));
+    let ready = Arc::new(Mutex::new(DaemonReadiness::default()));
     hosts.push((config.clone(), Arc::clone(&ready)));
     ready
 }

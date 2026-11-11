@@ -20,10 +20,16 @@ Remote Spaces first use a matching target daemon bundled with the installed
 app. Local macOS installs cross-build all supported targets so development
 does not depend on a published release. When no bundled target exists, Bootty
 downloads the release daemon, verifies it against `SHA256SUMS`, and installs it
-under a versioned `.bootty/bin/bootty-daemon-<protocol>-<version>.exe` path in
-the remote user's home directory. The `.exe` suffix is intentional on every
-platform. It gives Bootty one shell-neutral remote path while Unix still
-executes the file normally.
+under `.bootty/bin/bootty-daemon-<protocol>-<build>.exe` in the remote user's
+home directory. `<build>` is a digest of the host daemon the app bundles, or
+the package version for an app without one. Every build that ships a different
+daemon installs it on first use, beside the daemons of other builds. The `.exe`
+suffix is intentional on every platform. It gives Bootty one shell-neutral
+remote path while Unix still executes the file normally.
+
+A daemon refreshes its file's modification time whenever it runs. After a Unix
+install, Bootty removes the daemons in `.bootty/bin` that nothing has run for 30
+days, and clients recheck a host's daemon daily, so a daemon in use stays.
 
 On Unix, Bootty uploads a unique candidate beside the installed path. It makes
 the candidate executable and verifies its exact protocol and package version.

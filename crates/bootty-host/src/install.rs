@@ -105,6 +105,20 @@ fn release_daemon(target: RemoteTarget) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Identify the daemon this client ships: a digest of its bundled host daemon, or the package version
+/// for a client run without one, such as a test binary. Hashes the daemon once per process; only
+/// host operations ask, and they run off the UI thread.
+pub fn shipped_daemon_build() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|executable| bundled_daemon(&executable, RemoteTarget::current()?))
+        .and_then(|daemon| fs::read(daemon).ok())
+        .map_or_else(
+            || env!("CARGO_PKG_VERSION").to_owned(),
+            |bytes| checksum(&bytes).chars().take(16).collect(),
+        )
+}
+
 fn bundled_daemon(executable: &std::path::Path, target: RemoteTarget) -> Option<PathBuf> {
     let directory = executable.parent()?;
     let asset = target.asset_name();
@@ -316,7 +330,23 @@ pub fn ensure<R: CommandRunner>(remote: &SshRemote, runner: &R) -> Result<()> {
             ping_failure(&output)
         )
     }
+    if target.is_unix() {
+        let (program, args) = remote.raw_command(&unix_retire_command(installed));
+        // Best effort: a daemon left behind costs disk, not correctness.
+        let _ = runner.run(&program, &args);
+    }
     Ok(())
+}
+
+/// Remove daemons no build has run for 30 days. A daemon refreshes its file's modification time
+/// whenever it runs, and clients recheck readiness daily, so a daemon still in use is never removed.
+/// Limit: Windows remotes keep every daemon; add a cleanup there when they see frequent builds.
+fn unix_retire_command(installed: &str) -> String {
+    let name = installed.rsplit('/').next().unwrap_or(installed);
+    format!(
+        "find {REMOTE_DAEMON_DIRECTORY} -maxdepth 1 -name 'bootty-daemon-*.exe' ! -name {} -mtime +30 -exec rm -f '{{}}' ';'",
+        shell_quote(name)
+    )
 }
 
 fn unix_publish_command(temporary: &str, installed: &str) -> String {
