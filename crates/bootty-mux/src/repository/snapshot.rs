@@ -90,14 +90,15 @@ fn load_session_membership(
         ))
     })? {
         let (space_id, position, mut session, stored_snapshot) = row?;
-        session.terminal_snapshot = stored_snapshot.as_deref().and_then(|text| {
-            serde_json::from_str::<crate::session_snapshot::SavedTerminalSession>(text)
-                .ok()
-                .filter(|snapshot| {
-                    snapshot.validate().is_ok() && snapshot.session_id == session.identity
-                })
-                .map(std::sync::Arc::new)
-        });
+        session.terminal_snapshot = stored_snapshot
+            .as_deref()
+            .and_then(|text| {
+                crate::session_snapshot::SavedTerminalSession::decode_stored(
+                    text,
+                    &session.identity,
+                )
+            })
+            .map(std::sync::Arc::new);
         if stored_snapshot.is_some() && session.terminal_snapshot.is_none() {
             // Presentation can be discarded, but storage must match the next checkpoint's prior state.
             tx.execute(

@@ -55,6 +55,14 @@ pub struct SessionPaneCapture {
 }
 
 impl SavedTerminalSession {
+    /// Decode a stored checkpoint for `identity`; unreadable, invalid or foreign text is no checkpoint.
+    /// Text written by an older build decodes to the same value as its re-encoding, so compare
+    /// stored checkpoints by this value, never by text.
+    pub(crate) fn decode_stored(text: &str, identity: &str) -> Option<Self> {
+        serde_json::from_str::<Self>(text)
+            .ok()
+            .filter(|snapshot| snapshot.validate().is_ok() && snapshot.session_id == identity)
+    }
     /// # Errors
     /// Rejects malformed topology, unsafe metadata and snapshots beyond the bounded history budget.
     pub fn validate(&self) -> Result<(), String> {

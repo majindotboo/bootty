@@ -291,8 +291,15 @@ impl WorkspaceRepository {
             )
             .optional()
             .map_err(|error| self.database_error("read terminal checkpoint", &error))?;
-        let previous = previous.map(encode).transpose()?;
-        let unchanged = stored.is_some_and(|stored| stored == previous);
+        let unchanged = stored.is_some_and(|stored| {
+            stored
+                .as_deref()
+                .and_then(|text| {
+                    crate::session_snapshot::SavedTerminalSession::decode_stored(text, identity)
+                })
+                .as_ref()
+                == previous
+        });
         if !unchanged {
             return Err(WorkspacePersistenceError::operation(
                 "terminal checkpoint owner or prior state changed",

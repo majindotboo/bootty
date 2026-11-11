@@ -593,6 +593,42 @@ fn stale_captures_and_closed_bindings_cannot_overwrite_a_committed_checkpoint(
     assert_eq!(captured_pane.cwd, "/var/tmp");
 }
 
+/// Checkpoints written before a pane field was removed still decode to the live prior state, so the
+/// next checkpoint's compare-and-swap must compare decoded values, not stored text.
+#[rstest]
+fn a_checkpoint_stored_with_a_removed_field_still_advances(
+    live_workspace: anyhow::Result<(
+        TempDir,
+        bootty_mux::workspace::WorkspaceRuntime,
+        bootty_mux::controller::SpaceId,
+        String,
+    )>,
+) {
+    let (directory, mut workspace, scope, pane) =
+        live_workspace.expect("create live exact-tagged workspace");
+    let generation = workspace.binding(scope).unwrap().mux().binding_generation();
+    let receipt = workspace
+        .prepare_session_checkpoint(scope, "logical", generation, 10)
+        .expect("prepare first checkpoint")
+        .save(vec![pane_capture(&pane, None, "first history")])
+        .expect("persist first checkpoint");
+    assert!(workspace.publish_session_checkpoint(receipt).unwrap());
+    let database = rusqlite::Connection::open(directory.path().join("session-order.sqlite3"))
+        .expect("open checkpoint database");
+    database
+        .execute(
+            "UPDATE workspace_sessions SET terminal_snapshot = json_set(terminal_snapshot, '$.windows[0].panes[0].native_agent', 'native:codex:13') WHERE identity = 'logical'",
+            [],
+        )
+        .expect("store the checkpoint as an older build wrote it");
+
+    workspace
+        .prepare_session_checkpoint(scope, "logical", generation, 11)
+        .expect("prepare next checkpoint")
+        .save(vec![pane_capture(&pane, None, "next history")])
+        .expect("advance past the older encoding");
+}
+
 #[rstest]
 fn native_restore_with_missing_saved_cwd_keeps_checkpoint_and_creates_nothing(
     live_workspace: anyhow::Result<(
