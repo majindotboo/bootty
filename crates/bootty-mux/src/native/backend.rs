@@ -280,12 +280,6 @@ impl NativeBackend {
         clients.insert(key, Arc::downgrade(&backend.client));
         backend
     }
-    pub(super) fn check_generation(&self, expected: Option<u64>) -> Result<()> {
-        if expected.is_some_and(|expected| Some(expected) != self.peer_generation()) {
-            return Err(ServerChanged.into());
-        }
-        Ok(())
-    }
     pub(crate) fn peer_generation(&self) -> Option<u64> {
         self.client
             .connected
@@ -322,6 +316,13 @@ impl NativeBackend {
     /// # Errors
     /// Returns transport or handshake failures.
     pub fn connect(&self) -> Result<Box<dyn Duplex>> {
+        Ok(self.open()?.0)
+    }
+    /// Connect and return the server generation this stream reached. Read it from here, not from
+    /// [`Self::peer_generation`]: the topology watcher rewrites that from its own connection.
+    /// # Errors
+    /// Returns transport or handshake failures.
+    pub(crate) fn open(&self) -> Result<(Box<dyn Duplex>, u64)> {
         let mut stream = (self.client.connector)()?;
         protocol::write_blocking(
             &mut stream,
@@ -375,7 +376,7 @@ impl NativeBackend {
                 .map_err(|_| anyhow::anyhow!("native snapshot lock poisoned"))? = None;
         }
         self.client.connected.store(true, Ordering::Release);
-        Ok(stream)
+        Ok((stream, welcome.generation))
     }
     /// # Errors
     /// Returns the server's typed wire error or a transport failure. Mutations are never retried.
@@ -438,9 +439,9 @@ impl NativeBackend {
                 launch.base_environment = None;
             }
         }
-        let mut stream = self.connect()?;
+        let (mut stream, generation) = self.open()?;
         if request.mutates() {
-            self.check_generation(expected)?;
+            check_generation(expected, generation)?;
         }
         protocol::write_blocking(&mut stream, &Frame::json(&request)?)?;
         let response = Self::response(&mut stream)?;
@@ -597,8 +598,8 @@ impl NativeBackend {
         persist: impl FnOnce() -> Result<()>,
         expected: Option<u64>,
     ) -> Result<TopologySnapshot> {
-        let mut stream = self.connect()?;
-        self.check_generation(expected)?;
+        let (mut stream, generation) = self.open()?;
+        check_generation(expected, generation)?;
         protocol::write_blocking(&mut stream, &Frame::json(&Request::Prepare(command))?)?;
         match Self::response(&mut stream) {
             Ok(Response::Ok) => {}
@@ -625,6 +626,12 @@ impl NativeBackend {
             _ => anyhow::bail!("native mux commit returned no snapshot"),
         }
     }
+}
+fn check_generation(expected: Option<u64>, reached: u64) -> Result<()> {
+    if expected.is_some_and(|expected| expected != reached) {
+        return Err(ServerChanged.into());
+    }
+    Ok(())
 }
 impl Default for NativeBackend {
     fn default() -> Self {

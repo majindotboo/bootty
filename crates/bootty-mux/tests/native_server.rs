@@ -1382,9 +1382,28 @@ fn native_terminal_viewer_shell_output_and_exit() -> Result<()> {
     Ok(())
 }
 
+/// Runs once, on the first write through a split writer: a viewer attaching its pane.
+type AttachHook = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 struct ViewerFaultStream {
     stream: Box<dyn Duplex>,
     drop_read: Arc<AtomicBool>,
+    attach_hook: AttachHook,
+}
+struct HookedWriter {
+    writer: Box<dyn Write + Send>,
+    attach_hook: AttachHook,
+}
+impl Write for HookedWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let hook = self.attach_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        self.writer.write(bytes)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
 }
 impl Read for ViewerFaultStream {
     fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
@@ -1423,7 +1442,10 @@ impl Duplex for ViewerFaultStream {
                 stream: reader,
                 drop_read: self.drop_read,
             }),
-            writer,
+            Box::new(HookedWriter {
+                writer,
+                attach_hook: self.attach_hook,
+            }),
             close,
         ))
     }
@@ -1455,6 +1477,7 @@ fn native_terminal_viewer_reconnect_restores_screen() -> Result<()> {
             Ok(Box::new(ViewerFaultStream {
                 stream: connector()?,
                 drop_read: Arc::clone(&read_fault),
+                attach_hook: AttachHook::default(),
             }))
         }),
     );
@@ -1551,6 +1574,109 @@ fn native_terminal_viewer_reconnect_restores_screen() -> Result<()> {
             .join("")
             .contains("reconnect-screen")
     );
+    Ok(())
+}
+
+/// The topology watcher shares the backend with every viewer. Its disconnect landing between a
+/// viewer's connect and that viewer reading its generation once made the viewer give up on its next
+/// reconnect and leave the pane black.
+#[rstest]
+fn native_terminal_viewer_reconnects_after_the_watcher_drops_mid_attach() -> Result<()> {
+    use bootty_mux::terminal::NativeTerminal;
+    use bootty_terminal::frame_source::TerminalFrameSource as _;
+    let outputs = Outputs::default();
+    let connector = native::memory::connector(launcher(
+        Arc::clone(&outputs),
+        Arc::new(AtomicUsize::new(0)),
+    ))?;
+    let drop_read = Arc::new(AtomicBool::new(false));
+    let attach_hook = AttachHook::default();
+    let (read_fault, hook) = (Arc::clone(&drop_read), Arc::clone(&attach_hook));
+    let (watcher_down_tx, watcher_down) = mpsc::channel();
+    let (release_watcher, watcher_released) = mpsc::channel::<()>();
+    let watcher_released = Mutex::new(watcher_released);
+    let backend = NativeBackend::with_reconnect_schedule(
+        Path::new("viewer-watcher-race"),
+        Arc::new(move || {
+            Ok(Box::new(ViewerFaultStream {
+                stream: connector()?,
+                drop_read: Arc::clone(&read_fault),
+                attach_hook: Arc::clone(&hook),
+            }))
+        }),
+        None,
+        native::ReconnectSchedule {
+            wait: Arc::new(move |_| {
+                let _ = watcher_down_tx.send(());
+                let _ = watcher_released.lock().unwrap().recv();
+            }),
+            ..Default::default()
+        },
+    );
+    backend.execute(MuxCommand::CreateProjectSession {
+        session_id: "session".into(),
+        cwd: "/".into(),
+        tag: MuxSessionTag::default(),
+        argv: None,
+    })?;
+    let pane = backend
+        .snapshot()?
+        .sessions
+        .first()
+        .context("session")?
+        .anchor
+        .pane_id
+        .clone()
+        .context("pane")?;
+    let watcher_fault = Arc::clone(&drop_read);
+    *attach_hook.lock().unwrap() = Some(Box::new(move || {
+        // Only the watcher is reading now, so it takes the fault and holds in its retry wait.
+        watcher_fault.store(true, Ordering::Release);
+        watcher_down
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("watcher disconnects");
+    }));
+    let (tx, rx) = mpsc::channel();
+    let mut viewer = NativeTerminal::connect_with_schedule(
+        backend,
+        pane.clone(),
+        bootty_terminal::geometry::TerminalGeometry {
+            cols: 80,
+            rows: 24,
+            cell_width: 10,
+            cell_height: 20,
+        },
+        bootty_terminal::TerminalSessionConfig::default(),
+        Arc::new(move || {
+            let _ = tx.send(());
+        }),
+        native::ReconnectSchedule {
+            wait: Arc::new(|_| {}),
+            ..Default::default()
+        },
+    )?;
+    let send = |bytes: &[u8]| -> Result<()> {
+        outputs
+            .lock()
+            .unwrap()
+            .get(&pane)
+            .context("pane")?
+            .send(bytes.to_vec())?;
+        Ok(())
+    };
+    let shows = |viewer: &mut NativeTerminal, text: &str| -> Result<()> {
+        while !viewer.extract_frame()?.text_rows().join("").contains(text) {
+            rx.recv_timeout(std::time::Duration::from_secs(5))
+                .with_context(|| format!("viewer never showed {text:?}"))?;
+        }
+        Ok(())
+    };
+    send(b"before-drop")?;
+    shows(&mut viewer, "before-drop")?;
+    drop_read.store(true, Ordering::Release);
+    send(b" after-reconnect")?;
+    shows(&mut viewer, "after-reconnect")?;
+    drop(release_watcher);
     Ok(())
 }
 

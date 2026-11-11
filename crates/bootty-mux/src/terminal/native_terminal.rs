@@ -97,7 +97,7 @@ impl NativeTerminal {
         wakeup: Arc<dyn Fn() + Send + Sync>,
         retry: ReconnectSchedule,
     ) -> Result<Self> {
-        let stream = backend.connect()?;
+        let (stream, generation) = backend.open()?;
         let (tx, rx) = mpsc::sync_channel::<Queued>(256);
         let published = Arc::new(Mutex::new(Published {
             frame: super::startup::startup_placeholder_frame(geometry),
@@ -132,6 +132,7 @@ impl NativeTerminal {
                 reader,
                 ViewerConnection {
                     backend: &backend,
+                    generation,
                     pane: &target,
                     shared: &shared,
                     published: &state,
@@ -261,6 +262,8 @@ fn write_commands(
 }
 struct ViewerConnection<'a> {
     backend: &'a NativeBackend,
+    /// The server generation this viewer's pane lives in, from its own first connection.
+    generation: u64,
     pane: &'a str,
     shared: &'a ConnectionState,
     published: &'a Mutex<Published>,
@@ -348,14 +351,12 @@ fn reconnect(
     backend: &NativeBackend,
     stopped: &AtomicBool,
     retry: &ReconnectSchedule,
-    generation: Option<u64>,
+    generation: u64,
 ) -> Option<Box<dyn crate::native::Duplex>> {
     while !stopped.load(Ordering::Acquire) {
-        if let Ok(stream) = backend.connect() {
-            if backend.peer_generation() == generation {
-                return Some(stream);
-            }
-            return None;
+        if let Ok((stream, reached)) = backend.open() {
+            // Pane ids belong to one server generation; a restarted server no longer has this pane.
+            return (reached == generation).then_some(stream);
         }
         (retry.wait)(retry.deadline);
     }
@@ -467,6 +468,7 @@ fn publish_progress(
 fn run(mut stream: Box<dyn std::io::Read + Send>, connection: ViewerConnection<'_>) {
     let ViewerConnection {
         backend,
+        generation,
         pane,
         shared,
         published,
@@ -475,7 +477,6 @@ fn run(mut stream: Box<dyn std::io::Read + Send>, connection: ViewerConnection<'
         stopped,
         retry,
     } = connection;
-    let generation = backend.peer_generation();
     let mut attached = true;
     loop {
         let mut delivered_frame = false;
